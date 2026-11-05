@@ -42,7 +42,8 @@ Decision prompts, chosen options marked ✅:
 
 - Checks in the first version: ✅ cache TTL, ✅ compaction window, ✅ Bash
   and wait caps (rejected: review efforts, which moq-dev/quest's model check
-  owns). The skills catalog check is the agent's addition.
+  owns). The skills catalog check is the agent's addition, and the keepalive
+  check follows the maintainer's question about pinging idle sessions.
 - Applying: ✅ recommend only (rejected: `--fix`). The maintainer's dotfiles
   rewrite the agent settings every hour, so a direct edit would be
   overwritten; the output names the owner instead.
@@ -75,3 +76,4 @@ Recommendations for every check:
 - [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
 - [Skills catalog check](/quest/m0/skills-catalog.md) - flags duplicate entries and a Codex skills catalog over its budget
+- [Keepalive check](/quest/m0/keepalive.md) - whether pinging idle sessions under the cache TTL would have cost less than their misses

@@ -15,8 +15,15 @@ checks. Tests run on small synthetic transcripts.
 
 The check replays each session's request gaps: under 5m, a gap of 5 to 60
 minutes rewrites the cached prefix at the 5m write price instead of reading
-it; under 1h, every write costs the 1h price. Codex exposes no cache TTL, so
-the check covers Claude Code only.
+it; under 1h, every write costs the 1h price. Unset, Claude Code uses 1h for
+the main conversation on a subscription within its plan and 5m otherwise,
+and 5m for sub-agents everywhere; `CLAUDE_CODE_PROMPT_CACHE_TTL`,
+`CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL`, `ENABLE_PROMPT_CACHING_1H`, and
+`FORCE_PROMPT_CACHING_5M` override the settings
+([prompt caching](https://code.claude.com/docs/en/prompt-caching), checked
+2026-11-05). Codex exposes no cache TTL setting: gpt-6.1-sol's cache lives at
+least 30 minutes and every read renews it, so the check covers Claude Code
+only.
 
 The maintainer's 2026-11-05 audit did this replay by hand over 10-30 to
 11-05 at Opus 5.5's models.dev prices ($5 per million for a 5m write, $8

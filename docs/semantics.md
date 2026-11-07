@@ -11,6 +11,8 @@ final-line sizes. Metadata storage grows with requests/events, not transcript te
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
 separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence.
+`scan.since` records the billing selection; checks inherit it, and a comparison
+cannot expand an already filtered scan to an earlier billing window.
 Invalid pre-window usage becomes an unknown cache state, never a billed estimate or
 silently discarded attempt; it does not fail selected billing validation. Selected
 usage errors fail the scan. Requests linked across the window use their recorded
@@ -96,7 +98,9 @@ and 1h. In 5-to-60-minute gaps, a 1h prefix would need rewriting at 5m; a 5m rew
 can read the surviving prefix at 1h. Reuse is limited to the preceding cached
 prefix; newly appended tokens still need writing. Recorded 5m reads in such a gap
 are preserved as evidence of an externally warmed prefix. First visible requests
-keep observed reads. Cache histories are separate by model, speed, provider,
+keep observed reads. Borrowed TTL splits on estimated attempts never establish
+observed warmth; replay applies the chosen lifetime to their estimated geometry.
+Cache histories are separate by model, speed, provider,
 conversation, agent and part kind; compaction boundaries reset them, including copied
 boundary origins. The lower aggregate estimate decides the winner,
 even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
@@ -109,7 +113,8 @@ estimates establish estimated prefixes. Unsupported attempts preserve the previo
 state and add an unknown possible touch, rather than silently clearing or renewing
 it. Missing model/provider/speed/kind/agent spans every compatible cohort. All parts
 inform cache state before the selected bucket is charged; unknown attribution
-can affect either bucket. Selected parts with unresolved bucket attribution remain
+can affect either bucket when its role is unresolved. A known subagent remains in
+the outside-main bucket even if its iteration kind is unknown. Selected parts with unresolved bucket attribution remain
 unpriced in both conditional comparisons, whose request counts/fixed costs must
 not be added. A later touch in a fully resolved cohort supersedes earlier alternatives
 in that cohort, while a zero-cache
@@ -201,7 +206,9 @@ can receive labelled sequence attribution. Linked usage is already in request
 costs and is never added again. An unmatched Claude boundary gets one separate
 estimate using `preTokens` as ordinary summary input and `postTokens` as an output
 proxy, with the preceding model/tier/provider assumption from that file's
-metadata, even before `--since`. Stable boundary identities deduplicate copied
+metadata, even before `--since`. Pre-window boundaries consume their summary
+claims and update attribution limits in the same order as a full scan; only selected
+boundary charges are emitted. Stable boundary identities deduplicate copied
 boundaries across changed session metadata; their observed conversation/location
 aliases remain available for attribution and cache invalidation. Warm reads can cost less;
 cold writes can reach 2x input, before unknown system/tool/instruction overhead.

@@ -223,6 +223,8 @@ export interface CheckResult {
 export interface Scan {
   snapshotStartedAt: string;
   snapshotFinishedAt: string;
+  /** Explicit billing selection bound, inherited by checks and never expanded. */
+  since: number | null;
   roots: RootStatus[];
   profiles: Profile[];
   snapshots: Snapshot[];

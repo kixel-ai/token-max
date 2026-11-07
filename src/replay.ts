@@ -25,13 +25,14 @@ import {
 } from "./prices.js";
 import { estimateUsage } from "./estimates.js";
 import { CacheChain, observedTtl } from "./cache.js";
-import { identity } from "./safe.js";
+import { identity, ScanError } from "./safe.js";
 
 const TTL_SOURCE =
   "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 const MINUTE = 60_000;
 
 function bucket(r: Request, p: BillingPart): "main" | "subagent" | "unknown" {
+  if (r.agent === "subagent") return "subagent";
   if (p.kind === "unknown") return "unknown";
   if (p.kind === "compaction" || p.kind === "advisor") return "subagent";
   return r.agent;
@@ -125,7 +126,11 @@ export function compactionCharges(
   const byId = new Map(
     [...scan.cacheContext.requests, ...scan.requests].map((r) => [r.id, r]),
   );
-  for (const e of scan.events.filter((e) => e.kind === "compaction")) {
+  const selected = new Set(scan.events.map((e) => e.id));
+  const boundaries = [...scan.cacheContext.boundaries, ...scan.events]
+    .filter((e) => e.kind === "compaction")
+    .sort((a, b) => a.time - b.time);
+  for (const e of boundaries) {
     const aliases = [...new Set(e.origins.map((o) => o.session))];
     const session = [
       ...new Map(
@@ -201,7 +206,7 @@ export function compactionCharges(
       ],
     });
   }
-  return result;
+  return result.filter((charge) => selected.has(charge.event));
 }
 
 function defaultSince(
@@ -559,6 +564,15 @@ export function analyze(options: {
 }): Report {
   const { scan, catalog } = options;
   const now = options.now ?? Date.now();
+  if (
+    scan.since !== null &&
+    options.since !== undefined &&
+    options.since < scan.since
+  )
+    throw new ScanError(
+      "comparison window predates the scanned billing window",
+    );
+  const since = options.since ?? scan.since ?? undefined;
   const compactions = compactionCharges(scan, catalog);
   const estimates = estimateUsage(scan);
   const groups = new Map<string, Request[]>();
@@ -587,7 +601,7 @@ export function analyze(options: {
         selectedBucket,
         summaries: compactions,
         estimates,
-        since: options.since,
+        since,
         now,
       });
       if (result) checks.push(result);

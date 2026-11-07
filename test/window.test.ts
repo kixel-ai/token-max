@@ -103,6 +103,23 @@ test("explicit reader windows retain known, unsupported and estimated pre-window
       );
       assert.equal(selected.requests.length, 1);
       assert.equal(selected.coverage.requests, 1);
+      assert.equal(selected.since, since);
+      const inherited = analyze({
+        scan: selected,
+        catalog: await prices(),
+        now: 21 * 60000,
+      });
+      assert.deepEqual(
+        inherited.checks[0]!.comparisonCost,
+        check.comparisonCost,
+      );
+      assert.equal(inherited.checks[0]!.since, since);
+      const catalog = await prices();
+      assert.throws(
+        () => analyze({ scan: selected, catalog, since: since - 1 }),
+        /predates the scanned billing window/,
+      );
+
       assert.equal(
         selected.cacheContext.requests.length,
         mode === "known" ? 1 : 2,
@@ -236,5 +253,78 @@ test("a request linked across the explicit window retains its recorded start and
     assert.equal(report.historical.length, 0);
   } finally {
     await w.dispose();
+  }
+});
+
+test("pre-window boundaries retain summary claims and explicit links before selected attribution", async () => {
+  for (const explicit of [false, true]) {
+    const first = assistant(0, "old-summary", 0, 0);
+    const oldUsage = first.message.usage;
+    const summary = {
+      ...first,
+      querySource: explicit ? "sdk" : "compact",
+      message: {
+        ...first.message,
+        usage: {
+          ...oldUsage,
+          iterations: [
+            { ...oldUsage, type: explicit ? "message" : "compaction" },
+          ],
+        },
+      },
+    };
+    const boundary = (minute: number) => ({
+      ...common,
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: `boundary-${minute}`,
+      timestamp: time(minute),
+      compactMetadata: {
+        preTokens: 1000,
+        postTokens: 100,
+        ...(explicit && minute === 1 ? { requestId: "old-summary" } : {}),
+      },
+    });
+    const w = await profile([
+      summary,
+      boundary(1),
+      assistant(2, "middle", 0, 1000),
+      boundary(15),
+      assistant(20, "last", 0, 1000),
+    ]);
+    try {
+      const since = 10 * 60000;
+      const complete = analyze({
+        scan: await scan(w.options),
+        catalog: await prices(),
+        since,
+      });
+      const selected = await scan({ ...w.options, since });
+      const report = analyze({
+        scan: selected,
+        catalog: await prices(),
+        since,
+      });
+      const ids = new Set(selected.events.map((e) => e.id));
+      assert.deepEqual(
+        report.compactions,
+        complete.compactions.filter((c) => ids.has(c.event)),
+      );
+      assert.equal(report.compactions[0]!.evidence, "estimated");
+      assert.equal(report.compactions[0]!.request, null);
+      const fullSub = complete.checks.find((c) => c.bucket === "subagent")!;
+      const sub = report.checks.find((c) => c.bucket === "subagent")!;
+      assert.equal(sub.summaryCost["5m"].totalUsd, 0.006);
+      assert.deepEqual(sub.summaryCost, fullSub.summaryCost);
+      assert.deepEqual(sub.fixedCost, fullSub.fixedCost);
+      assert.deepEqual(sub.cost, fullSub.cost);
+      if (explicit)
+        assert.equal(
+          selected.cacheContext.requests[0]!.parts[0]!.kind,
+          "compaction",
+        );
+    } finally {
+      await w.dispose();
+    }
   }
 });

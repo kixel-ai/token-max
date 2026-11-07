@@ -908,6 +908,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     ...discovery,
     snapshotStartedAt,
     snapshotFinishedAt,
+    since: options.since ?? null,
     requests: sortedRequests,
     events: sortedEvents,
     cacheContext: {

@@ -40,6 +40,7 @@ function data(requests: Request[], events: StructuralEvent[] = []): Scan {
   return {
     snapshotStartedAt: new Date(0).toISOString(),
     snapshotFinishedAt: new Date(0).toISOString(),
+    since: null,
     requests,
     events,
     cacheContext: { requests: [], boundaries: [] },
@@ -1089,5 +1090,78 @@ test("estimated prefix provenance remains explicit when its cohort is incomplete
           /estimated/.test(p.reason),
       ),
     ),
+  );
+});
+
+test("borrowed TTL splits never establish observed warmth for estimated attempts", async () => {
+  for (const ttl of ["5m", "1h"] as const) {
+    const results = [];
+    for (const split of [true, false]) {
+      const { first, attempt, after } = bracketedAttempt();
+      for (const r of [first, after]) {
+        r.parts[0]!.usage = claudeUsage({ read: 100000, write: 1000, ttl });
+        if (!split) {
+          r.parts[0]!.usage.write5m = null;
+          r.parts[0]!.usage.write1h = null;
+        }
+      }
+      attempt.time = attempt.endTime = 30 * 60000;
+      after.time = after.endTime = 31 * 60000;
+      const check = analyze({
+        scan: data([first, attempt, after]),
+        catalog: await prices(),
+        now: 32 * 60000,
+      }).checks[0]!;
+      assert.equal(check.usageEstimates[0]!.evidence, "estimated");
+      results.push(check.comparisonCost);
+      assert.equal(check.recommended, "1h");
+    }
+    assert.deepEqual(results[0], results[1], ttl);
+  }
+});
+
+test("unknown subagent iteration kinds cannot affect the known main bucket", async () => {
+  const first = makeRequest({
+    id: "main-first",
+    parts: [
+      { ...makeRequest().parts[0]!, usage: claudeUsage({ write: 50000 }) },
+    ],
+  });
+  const after = makeRequest({
+    id: "main-after",
+    time: 20 * 60000,
+    endTime: 20 * 60000,
+    parts: [
+      { ...first.parts[0]!, usage: claudeUsage({ read: 50000, write: 1000 }) },
+    ],
+  });
+  const child = makeRequest({
+    id: "child",
+    agent: "subagent",
+    time: 60000,
+    endTime: 60000,
+    parts: [
+      {
+        ...first.parts[0]!,
+        kind: "unknown",
+        usage: claudeUsage({ write: 20000 }),
+      },
+    ],
+  });
+  const baseline = analyze({
+    scan: data([first, after]),
+    catalog: await prices(),
+  }).checks[0]!;
+  const report = analyze({
+    scan: data([first, child, after]),
+    catalog: await prices(),
+  });
+  const main = report.checks.find((c) => c.bucket === "main")!;
+  assert.equal(main.requests, 2);
+  assert.deepEqual(main.comparisonCost, baseline.comparisonCost);
+  assert.equal(main.recommended, "5m");
+  assert.equal(
+    report.checks.find((c) => c.bucket === "subagent")!.recommended,
+    null,
   );
 });

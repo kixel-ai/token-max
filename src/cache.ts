@@ -117,12 +117,14 @@ function apply(options: {
   previous: { time: number; prefix: number } | undefined;
   time: number;
   cold: boolean;
+  estimated: boolean;
 }): BillingPart {
   const { p, ttl, previous, time, cold } = options;
   const u = { ...p.usage };
   if (u.read === null || u.write === null) return { ...p, usage: u };
   const gap = previous ? time - previous.time : null;
-  const observed = observedTtl(p);
+  // A copied bracket split cannot prove an estimated attempt was externally warmed.
+  const observed = options.estimated ? null : observedTtl(p);
   if (gap !== null && gap >= 5 * MINUTE && gap < 60 * MINUTE) {
     if (ttl === "5m" && observed !== "5m") {
       u.write += u.read;
@@ -223,7 +225,14 @@ export class CacheChain {
       const states = [...candidates.values()];
       const versions: BillingPart[] = [];
       const replay = (previous: { time: number; prefix: number } | undefined) =>
-        apply({ p, ttl, previous, time: r.time, cold: options.cold });
+        apply({
+          p,
+          ttl,
+          previous,
+          time: r.time,
+          cold: options.cold,
+          estimated: options.estimated,
+        });
       if (!anchor) versions.push(replay(undefined));
       for (const state of states)
         for (const prefix of state.prefix === null

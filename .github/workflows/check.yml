@@ -67,7 +67,9 @@ jobs:
   check:
     name: Check
     needs: [source, package]
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.draft == false)
+    # Draft source jobs are skipped, so fail this gate until real validation passes.
+    # A prior skipped Check must not satisfy protection while a ready run is pending.
+    if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Require source and every package matrix cell

@@ -27,7 +27,9 @@ privacy, and read-only histories/settings. The Bun-only PATH contains no Node.
 The read-only `Check` workflow builds once, uploads that tarball, and tests the
 same bytes across Linux/macOS/Windows with Node 22/24/26 LTS and Bun 1.4.4.
 The required `Check` job aggregates source validation and the entire matrix;
-failed, cancelled, or skipped dependencies fail it. PR jobs have no publication
+failed, cancelled, or skipped dependencies fail it. Draft validation jobs stay
+skipped, but their aggregate fails so an old skipped result cannot satisfy the
+required gate while the ready run is pending. PR jobs have no publication
 credentials or OIDC permission. Local Linux results do not establish macOS or
 Windows success; the matrix must pass before landing and before publishing.
 

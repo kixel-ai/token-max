@@ -52,6 +52,7 @@ export interface Invocation {
   group: string | null;
   kind:
     | "skill-request"
+    | "skill-reference"
     | "skill-call"
     | "skill-load"
     | "mcp-call"
@@ -61,6 +62,8 @@ export interface Invocation {
   status: "requested" | "called" | "completed" | "failed" | "reference";
   via: "typed" | "mention" | "wrapper" | "tool" | "completion" | "script";
   session: string;
+  sessions: string[];
+  identityBasis: "recorded" | "content-occurrence";
   harness: Harness;
   client: string | null;
   version: string | null;
@@ -221,10 +224,13 @@ export class ExposureCollector {
   private wire: Omit<Exposure, "request"> | null = null;
   private deferred = new Set<string>();
   private digests = new Map<string, string[]>();
+  private views = new Map<string, Omit<Exposure, "request">>();
+  private knownSkills = new Set<string>();
+  private userAliases = new Map<string, Map<string, number>>();
+  private invalidated = false;
   private pendingTools = new Map<
     string,
     {
-      key: string;
       target: string;
       group: string | null;
       kind: Invocation["kind"];
@@ -252,14 +258,17 @@ export class ExposureCollector {
       size.fingerprint = identity(JSON.stringify(input.content));
     const revision = identity(`${key}:${size.fingerprint}`);
     const prior = this.active.get(key);
-    if (prior && prior !== revision) this.pendingRemoved.add(prior);
+    if (!input.deferred && !input.member && prior && prior !== revision)
+      this.pendingRemoved.add(prior);
     if (input.member) {
       /* Entry spans are owned by their aggregate, never additive exposure. */
     } else if (input.deferred) this.deferred.add(revision);
     else this.active.set(key, revision);
     const existing = this.components.get(revision);
-    if (existing) existing.locations.push(input.location);
-    else
+    if (existing) {
+      existing.locations.push(input.location);
+      existing.firstSeen = Math.min(existing.firstSeen, input.time);
+    } else
       this.components.set(revision, {
         ...size,
         id: revision,
@@ -312,13 +321,15 @@ export class ExposureCollector {
     call: string;
     time: number;
     location: Location;
+    identityBasis?: Invocation["identityBasis"];
   }) {
     const invocationId = identity(
-      `${this.file!.harness}:${this.session}:${input.call}:${input.kind}`,
+      `${this.file!.harness}:${input.call}:${input.kind}`,
     );
     const prior = this.invocations.get(invocationId);
     if (prior) {
       prior.locations.push(input.location);
+      prior.sessions = [...new Set([...prior.sessions, this.session])];
       prior.profiles = [
         ...new Set([...prior.profiles, ...this.file!.profiles]),
       ];
@@ -334,6 +345,8 @@ export class ExposureCollector {
       via: input.via,
       status: input.status,
       session: this.session,
+      sessions: [this.session],
+      identityBasis: input.identityBasis ?? "recorded",
       harness: this.file!.harness,
       client: this.client,
       version: this.version,
@@ -341,6 +354,27 @@ export class ExposureCollector {
       profiles: [...this.file!.profiles],
       locations: [input.location],
     });
+  }
+
+  private view(value: Omit<Exposure, "request">): Omit<Exposure, "request"> {
+    const key = identity(JSON.stringify(value));
+    const previous = this.views.get(key);
+    if (previous) return previous;
+    this.views.set(key, value);
+    return value;
+  }
+
+  /** Invalidate context after tolerated corrupt pre-window metadata, without inventing removals. */
+  invalidate() {
+    this.active.clear();
+    this.pendingRemoved.clear();
+    this.deferred.clear();
+    this.digests.clear();
+    this.pendingTools.clear();
+    this.knownSkills.clear();
+    this.wire = null;
+    this.uncertain = true;
+    this.invalidated = true;
   }
 
   /** Observe one raw record transiently, retaining no raw object or content strings. */
@@ -362,6 +396,9 @@ export class ExposureCollector {
       this.deferred = new Set();
       this.digests = new Map();
       this.pendingTools = new Map();
+      this.knownSkills = new Set();
+      this.userAliases = new Map();
+      this.invalidated = false;
     }
     const p = object(raw.payload);
     if (snapshot.harness === "claude" && typeof raw.sessionId === "string")
@@ -402,6 +439,7 @@ export class ExposureCollector {
       const members: string[] = [];
       const matches = [...body.matchAll(/^- ([a-zA-Z0-9_.:-]+):[^\n]*$/gm)];
       matches.forEach((match) => {
+        this.knownSkills.add(target("skill", match[1]!));
         members.push(
           this.component({
             category: "skill-listing",
@@ -418,7 +456,6 @@ export class ExposureCollector {
       this.components.get(aggregate)!.members = members;
       return aggregate;
     };
-    const before = [...this.active.values()];
     if (
       raw.type === "compacted" ||
       (raw.type === "system" && raw.subtype === "compact_boundary")
@@ -488,6 +525,8 @@ export class ExposureCollector {
       const a = record(raw.attachment);
       const kind = a.type;
       if (kind === "skill_listing") {
+        for (const name of array(a.names))
+          this.knownSkills.add(target("skill", text(name)));
         this.clear("skill-listing");
         listing("listing", text(a.content), "rendered-skill-listing");
       } else if (kind === "instructions") {
@@ -680,7 +719,7 @@ export class ExposureCollector {
             ],
       };
       this.observations.set(`${snapshot.file}:ref:${id(raw.id)}`, {
-        exposure: structuredClone(this.wire),
+        exposure: this.view(this.wire),
         session: this.session,
       });
     }
@@ -706,10 +745,12 @@ export class ExposureCollector {
       status: Invocation["status"],
       call: string,
       attribution: string | null = group(name),
+      identityBasis: Invocation["identityBasis"] = "recorded",
     ) => {
       if (time === null) throw new ScanError("missing invocation timestamp");
       this.invocation({
         target: target(kind.startsWith("skill") ? "skill" : "mcp", name),
+        identityBasis,
         group: attribution,
         kind,
         via,
@@ -724,25 +765,56 @@ export class ExposureCollector {
       : array(contents)
     ).entries()) {
       const b = object(v);
-      const call =
-        String(raw.uuid ?? item.id ?? `${this.session}:${time}`) + `:${index}`;
-      if (b.type === "skill")
+      let call =
+        String(raw.uuid ?? item.id ?? `${snapshot.file}:${location.line}`) +
+        `:${index}`;
+      let identityBasis: Invocation["identityBasis"] = "recorded";
+      if (user && snapshot.harness === "codex" && typeof b.text === "string") {
+        // Native aliases lack a shared message id. Match their nth equal text occurrence,
+        // keeping repeated messages in each source separate and disclosing the inference.
+        const signature = identity(`${this.session}:${b.text}`);
+        const source = `${String(raw.type)}:${String(p.type)}`;
+        const sources =
+          this.userAliases.get(signature) ?? new Map<string, number>();
+        const occurrence = (sources.get(source) ?? 0) + 1;
+        sources.set(source, occurrence);
+        this.userAliases.set(signature, sources);
+        call = `user:${signature}:${occurrence}`;
+        identityBasis = "content-occurrence";
+      }
+      if (user && b.type === "skill") {
+        this.knownSkills.add(target("skill", text(b.name)));
         invoke(text(b.name), "skill-request", "typed", "requested", call);
-      if (user && typeof b.text === "string") {
+      }
+      if (user && raw.isMeta !== true && typeof b.text === "string") {
         for (const match of b.text.matchAll(
           /(?:^|\s)\$([a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)?)/g,
-        ))
+        )) {
+          const known = this.knownSkills.has(target("skill", match[1]!));
           invoke(
             match[1]!,
-            "skill-request",
+            known ? "skill-request" : "skill-reference",
             "mention",
-            "requested",
+            known ? "requested" : "reference",
             `${call}:${match.index}`,
+            group(match[1]!),
+            identityBasis,
           );
+        }
         const command =
           /<command-name>\/?([a-zA-Z0-9_:-]+)<\/command-name>/.exec(b.text);
-        if (command)
-          invoke(command[1]!, "skill-request", "wrapper", "requested", call);
+        if (command) {
+          const known = this.knownSkills.has(target("skill", command[1]!));
+          invoke(
+            command[1]!,
+            known ? "skill-request" : "skill-reference",
+            "wrapper",
+            known ? "requested" : "reference",
+            call,
+            group(command[1]!),
+            identityBasis,
+          );
+        }
       }
       if (b.type === "tool_use") {
         const name = text(b.name);
@@ -751,7 +823,6 @@ export class ExposureCollector {
           const skill = text(args.skill);
           invoke(skill, "skill-call", "tool", "called", text(b.id));
           this.pendingTools.set(id(b.id), {
-            key: identity(skill),
             target: target("skill", skill),
             group: group(skill),
             kind: "skill-call",
@@ -759,7 +830,6 @@ export class ExposureCollector {
         } else if (name.startsWith("mcp__")) {
           invoke(name, "mcp-call", "tool", "called", text(b.id));
           this.pendingTools.set(id(b.id), {
-            key: identity(name),
             target: target("mcp", name),
             group: group(name),
             kind: "mcp-call",
@@ -771,7 +841,6 @@ export class ExposureCollector {
         ) {
           invoke(args.file_path, "skill-load", "tool", "called", text(b.id));
           this.pendingTools.set(id(b.id), {
-            key: identity(args.file_path),
             target: target("skill", args.file_path),
             group: group(args.file_path),
             kind: "skill-load",
@@ -798,7 +867,7 @@ export class ExposureCollector {
               category: tool.kind.startsWith("skill")
                 ? "skill-body"
                 : "mcp-result",
-              key: tool.key,
+              key: id(b.tool_use_id),
               targets: [tool.target],
               group: tool.group,
               content:
@@ -919,7 +988,7 @@ export class ExposureCollector {
       components: [],
       candidates: current,
       removed: [...this.pendingRemoved],
-      inherited: current.filter((v) => before.includes(v)),
+      inherited: [],
       deferred: [...this.deferred],
       linkage: current.length ? "chronological" : "unknown",
       coverage: current.length ? "partial" : "unknown",
@@ -928,6 +997,11 @@ export class ExposureCollector {
       wireModel: null,
       reasons: [
         "chronological state is not proof of exact request exposure",
+        ...(this.invalidated
+          ? [
+              "invalid pre-window component metadata; exposure cannot be reconstructed completely",
+            ]
+          : []),
         ...(this.uncertain
           ? ["initial/inherited or post-compaction exposure is incomplete"]
           : []),
@@ -939,7 +1013,7 @@ export class ExposureCollector {
       (raw.type === "event_msg" && p.type === "token_count")
     )
       this.observations.set(`${snapshot.file}:${location.line}`, {
-        exposure: structuredClone(derived),
+        exposure: this.view(derived),
         session: this.session,
       });
     if (
@@ -953,6 +1027,7 @@ export class ExposureCollector {
 
   /** Link derived views to deduplicated requests, retaining conflicts instead of choosing a copy. */
   finish(requests: Request[], since: number | null): ExposureScan {
+    const requestsById = new Map(requests.map((r) => [r.id, r]));
     const exposures: Exposure[] = [];
     const visibility: Visibility[] = [];
     for (const r of requests) {
@@ -1024,7 +1099,7 @@ export class ExposureCollector {
       }
     >();
     for (const e of exposures) {
-      const r = requests.find((r) => r.id === e.request)!;
+      const r = requestsById.get(e.request)!;
       for (const component of [...e.components, ...e.candidates].length
         ? [...e.components, ...e.candidates]
         : [null]) {
@@ -1052,7 +1127,7 @@ export class ExposureCollector {
       const { r, component } = w;
       const calls = selectedCalls.filter(
         (i) =>
-          w.sessions.has(i.session) &&
+          i.sessions.some((session) => w.sessions.has(session)) &&
           i.harness === r.harness &&
           i.client === r.client &&
           i.version === r.version,
@@ -1116,8 +1191,9 @@ export function calibrate(
   requests: Request[],
 ): Calibration[] {
   const result = new Map<string, Calibration>();
+  const requestsById = new Map(requests.map((r) => [r.id, r]));
   for (const exposure of scan.requests) {
-    const r = requests.find((r) => r.id === exposure.request);
+    const r = requestsById.get(exposure.request);
     if (
       !r ||
       !r.model ||
@@ -1328,18 +1404,24 @@ export function analyzeExposure(
   catalog: Catalog,
 ) {
   const calibration = calibrate(scan, requests);
+  const requestsById = new Map(requests.map((r) => [r.id, r]));
+  const componentsById = new Map(scan.components.map((c) => [c.id, c]));
+  const calibrationByCohort = new Map(calibration.map((c) => [c.cohort, c]));
   return {
     calibration,
     requests: scan.requests.map((e) => {
-      const r = requests.find((r) => r.id === e.request)!;
-      const c = calibration.find((c) => c.cohort === cohort(r));
+      const r = requestsById.get(e.request)!;
+      const c = calibrationByCohort.get(cohort(r));
       return {
         request: r.id,
         components: [...e.components, ...e.candidates].map((id) => {
-          const component = scan.components.find((v) => v.id === id)!;
+          const component = componentsById.get(id)!;
           const tokens = estimateTokens(component, c);
           const priced =
-            tokens.estimate === null || !e.components.includes(id)
+            tokens.estimate === null ||
+            !e.components.includes(id) ||
+            (r.parts[0]?.usage.input !== null &&
+              tokens.estimate > (r.parts[0]?.usage.input ?? 0))
               ? null
               : priceExposureChange({
                   catalog,
@@ -1351,7 +1433,14 @@ export function analyzeExposure(
             component: id,
             exposure: e.components.includes(id) ? "wire" : "candidate",
             tokens,
-            gross: priced?.gross ?? unknownCost(tokens.basis),
+            gross:
+              priced?.gross ??
+              unknownCost(
+                tokens.estimate !== null &&
+                  tokens.estimate > (r.parts[0]?.usage.input ?? Infinity)
+                  ? "calibrated component estimate exceeds observed request input; comparison unsupported"
+                  : tokens.basis,
+              ),
             grossRangeUsd: priced?.range ?? null,
             fixedBehaviorNet: unknownCost(
               "replacement exposure/backfill and behavior not established; gross removal is not net savings",

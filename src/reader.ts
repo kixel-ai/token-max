@@ -420,7 +420,15 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
       const time = timestamp(raw.timestamp);
       const selected =
         time === null || options.since === undefined || time >= options.since;
-      exposure.observe({ raw, snapshot, location });
+      try {
+        exposure.observe({ raw, snapshot, location });
+      } catch (error) {
+        if (selected || !(error instanceof ScanError)) throw error;
+        exposure.invalidate();
+        issues.add(
+          "invalid pre-window component metadata; subsequent exposure is incomplete",
+        );
+      }
       const p = object(raw.payload);
       if (snapshot.harness === "claude") {
         if (typeof raw.cwd === "string" && isAbsolute(raw.cwd))

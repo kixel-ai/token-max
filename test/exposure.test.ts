@@ -687,3 +687,252 @@ test("provided schemas, listing member ownership and identified command file rea
   );
   assert.doesNotMatch(JSON.stringify(e), /SYNTHETIC_PRIVATE/);
 });
+
+test("invalid pre-window exposure records invalidate context without aborting selected billing", async () => {
+  const data = await transcript(
+    "claude",
+    [
+      attachment(0, {
+        type: "skill_listing",
+        content: "old listing",
+        names: ["old"],
+      }),
+      {
+        type: "api-request",
+        timestamp: at(1),
+        sessionId: "session",
+        tail: ["digest"],
+        params: {},
+      },
+      attachment(2, { type: "skill_listing", content: { invalid: true } }),
+      {
+        type: "api-request",
+        id: "old",
+        timestamp: at(3),
+        sessionId: "session",
+        tail: [{ invalid: true }],
+        params: {},
+      },
+      assistant(5),
+    ],
+    Date.parse(at(4)),
+  );
+  assert.equal(data.requests.length, 1);
+  assert.equal(data.exposure.requests[0]!.coverage, "unknown");
+  assert.match(data.coverage.issues.join(), /invalid pre-window component/);
+  assert.match(data.exposure.requests[0]!.reasons.join(), /invalid pre-window/);
+});
+
+test("cohort calibration outside measured request support leaves that comparison unknown", async () => {
+  const wire = (second: number) => ({
+    type: "api-request",
+    id: `api-${second}`,
+    timestamp: at(second - 1),
+    sessionId: "session",
+    params: {
+      model: "claude-opus-5-5",
+      system: "SYNTHETIC_PRIVATE_".repeat(100),
+      messages: [{ role: "user", content: "synthetic" }],
+      tools: [],
+    },
+  });
+  const low = assistant(1);
+  low.message.usage.input_tokens = 10;
+  const high = assistant(3);
+  high.message.usage.input_tokens = 10000;
+  const data = await transcript("claude", [wire(1), low, wire(3), high]);
+  const report = analyze({ scan: data, catalog: await prices() });
+  const unsupported = report.exposure.requests[0]!.components[0]!;
+  assert.ok(unsupported.tokens.estimate! > 10);
+  assert.equal(unsupported.gross.totalUsd, null);
+  assert.match(unsupported.gross.unknown.join(), /exceeds observed/);
+  assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
+});
+
+test("deferred definitions do not remove active revisions and repeated results remain in history", async () => {
+  const userResult = (second: number, call: string) => ({
+    type: "user",
+    timestamp: at(second),
+    sessionId: "session",
+    message: {
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: call,
+          content: `SYNTHETIC_PRIVATE_${second}`,
+        },
+      ],
+    },
+  });
+  const data = await transcript("claude", [
+    attachment(0, {
+      type: "prompt_snapshot",
+      systemPrompt: ["synthetic"],
+      tools: [
+        {
+          name: "mcp__example__search",
+          description: "active",
+          schema: { type: "object" },
+        },
+      ],
+    }),
+    assistant(1, [
+      { type: "tool_use", id: "one", name: "mcp__example__search", input: {} },
+    ]),
+    userResult(2, "one"),
+    attachment(3, {
+      type: "deferred_tools_record",
+      entries: [
+        {
+          name: "mcp__example__search",
+          defer_loading: true,
+          description: "deferred",
+          input_schema: { type: "object" },
+        },
+      ],
+    }),
+    assistant(4, [
+      { type: "tool_use", id: "two", name: "mcp__example__search", input: {} },
+    ]),
+    userResult(5, "two"),
+    assistant(6),
+  ]);
+  const e = data.exposure;
+  const active = e.components.find(
+    (c) => c.provenance === "prompt-snapshot-tool",
+  )!;
+  assert.ok(e.requests[1]!.candidates.includes(active.id));
+  assert.ok(!e.requests[1]!.removed.includes(active.id));
+  const results = e.components.filter((c) => c.category === "mcp-result");
+  assert.equal(results.length, 2);
+  assert.ok(
+    results.every(
+      (c) =>
+        e.requests[2]!.candidates.includes(c.id) &&
+        !e.requests[2]!.removed.includes(c.id),
+    ),
+  );
+});
+
+test("skill references need a known catalog and native user aliases keep repeated messages separate", async () => {
+  const records = [
+    codexMeta,
+    turn,
+    world(
+      0,
+      { host_skills: { body: "- known-skill: synthetic description" } },
+      true,
+    ),
+  ];
+  const content = "Use $known-skill, inspect $HOME, costs $20";
+  const response = {
+    type: "response_item",
+    timestamp: at(1),
+    payload: {
+      type: "message",
+      role: "user",
+      content: [{ type: "input_text", text: content }],
+    },
+  };
+  const event = {
+    type: "event_msg",
+    timestamp: at(1),
+    payload: { type: "user_message", message: content },
+  };
+  const data = await transcript("codex", [
+    ...records,
+    response,
+    event,
+    response,
+    event,
+    billed(2),
+  ]);
+  const requests = data.exposure.invocations.filter(
+    (i) => i.kind === "skill-request",
+  );
+  assert.equal(requests.length, 2);
+  assert.ok(
+    requests.every(
+      (i) =>
+        i.identityBasis === "content-occurrence" && i.locations.length === 2,
+    ),
+  );
+  assert.equal(
+    data.exposure.invocations.filter((i) => i.kind === "skill-reference")
+      .length,
+    4,
+  );
+  const claude = await transcript("claude", [
+    attachment(0, {
+      type: "skill_listing",
+      names: ["known-skill"],
+      content: "synthetic",
+    }),
+    {
+      type: "user",
+      timestamp: at(1),
+      sessionId: "session",
+      isMeta: true,
+      message: { content: "$known-skill $ARGUMENTS" },
+    },
+    {
+      type: "user",
+      timestamp: at(2),
+      sessionId: "session",
+      message: { content: "<command-name>/compact</command-name>" },
+    },
+    assistant(3),
+  ]);
+  assert.equal(
+    claude.exposure.invocations.filter((i) => i.kind === "skill-request")
+      .length,
+    0,
+  );
+});
+
+test("copied MCP calls deduplicate across inherited session aliases", async () => {
+  const w = await workspace();
+  try {
+    const records = [
+      codexMeta,
+      turn,
+      {
+        type: "event_msg",
+        timestamp: at(1),
+        payload: {
+          type: "item_completed",
+          item: {
+            type: "McpToolCall",
+            id: "shared-call",
+            server: "example",
+            tool: "search",
+            status: "completed",
+            result: { content: [] },
+          },
+        },
+      },
+      billed(2),
+    ];
+    await writeFile(
+      join(w.codex, "sessions/a.jsonl"),
+      records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+    await writeFile(
+      join(w.codex, "sessions/b.jsonl"),
+      records
+        .map((r, i) =>
+          JSON.stringify(
+            i === 0
+              ? { ...codexMeta, payload: { ...codexMeta.payload, id: "fork" } }
+              : r,
+          ),
+        )
+        .join("\n") + "\n",
+    );
+    const data = await scan(w.options);
+    assert.equal(data.exposure.invocations.length, 1);
+    assert.equal(data.exposure.invocations[0]!.sessions.length, 2);
+  } finally {
+    await w.dispose();
+  }
+});

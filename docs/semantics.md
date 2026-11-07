@@ -230,8 +230,8 @@ failure location is not a claim that repairing one file would enable a full audi
 `scan.exposure` adds historical component revisions, request views, invocation
 evidence, and client/version/window visibility. Components retain Unicode
 character counts, opaque identities and fingerprints, source locations, one
-owner (`skills` or `context`), and a shared plugin attribution key when the
-record identifies it. Listing entry spans are members of their aggregate;
+owner (`skills` or `context`), and a server/namespace attribution key, or a plugin key where the record explicitly
+identifies it. Listing entry spans are members of their aggregate;
 member sizes must not be added to the aggregate. Listing replacement captures
 backfill and description expansion as a new aggregate revision. It does not
 assume removing one entry shrinks the next listing by that entry's size.
@@ -277,11 +277,20 @@ Automatic report measurements leave net savings unknown until replacement
 exposure/backfill is established. Independent component savings are not additive.
 
 Invocation evidence separates typed and mentioned skill requests, command
-wrappers, Skill calls, identified SKILL.md reads, direct MCP calls, actual
+wrappers, unresolved references, Skill calls, identified SKILL.md reads, direct MCP calls, actual
 `item_completed.McpToolCall` completions, resource/prompt calls, and weak script
 references. Body/result text is sized transiently and discarded. A request for a
-skill is not proof of successful execution. Observed nested completions establish
-positive evidence, never complete nested visibility. No supported client/version
+skill is not proof of successful execution. A textual mention or command wrapper
+needs a known historical catalog entry to count as a skill request; otherwise it
+remains a weak reference. Meta user-role attachments are excluded from mention
+inference. Codex user aliases without a shared message identity are matched by
+their corresponding equal-text occurrence, with that identity basis disclosed. Observed nested completions establish
+positive evidence, never complete nested visibility. Corrupt pre-window exposure metadata invalidates subsequent candidate state and
+adds a coverage issue, preserving the reader's existing billing-window semantics.
+Complete malformed selected records still fail the entire scan. Calibration
+estimates outside the request's measured input support stay unpriced.
+
+No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so automatic
 unused findings remain blocked. This layer adds no skills-catalog or context
 recommendation check and changes no local agent settings.

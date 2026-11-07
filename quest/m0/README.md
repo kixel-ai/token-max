@@ -79,15 +79,21 @@ Recommendations for every check:
   estimated prevent a priced recommendation; uncertainty alone does not.
 - Distinguish measured token usage, estimated attribution or replay, and
   guidance without dollars in both text and JSON. Missing attribution is
-  unknown, never zero. An error fails the run. Otherwise emit a change and
-  nonzero exit only when an applicable effective setting differs from a
-  priced net winner, fast mode is enabled, or guidance identifies a
-  documented budget violation, duplicate listing, or a skill/MCP with
-  positive recurring overhead and no observed use under complete exposure
-  and invocation visibility for the window. Rare-use rankings, incomplete
-  visibility, unknown costs alone, and conditional suggestions are advisory
-  and exit zero unless another check emits a change. Cite the applicable
-  provider/version guidance; no invented size or rarity cutoffs.
+  unknown, never zero. Exit 2 on a failed scan, 1 when a change is
+  recommended, and 0 otherwise. Emit a change when an applicable effective
+  setting differs from a priced net winner, fast mode is enabled, the Bash
+  foreground cap is at or above its effective cache TTL, or a keepalive cap
+  beats both no keepalive and idle compaction under its labelled estimate.
+  Guidance also emits a change for a documented budget violation, duplicate
+  listing, or a skill/MCP with positive recurring overhead and no observed
+  use under complete exposure and invocation visibility across the window.
+  Every automatic finding must still apply to the profile's current
+  effective configuration; historical-only or unresolved current state is
+  advisory. Unused findings for components introduced during the window
+  stay advisory. Rare-use rankings, incomplete visibility, unknown costs
+  alone, and conditional suggestions are advisory and exit zero unless
+  another check emits a change. Cite the
+  applicable provider/version guidance; no invented size or rarity cutoffs.
 - Cost attribution is not automatically removable waste: a skill, tool, or
   check-in can avoid other work. State the fixed-behavior assumption and
   account for observable extra reads or requests. Name each comparison's

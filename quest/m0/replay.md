@@ -63,8 +63,11 @@ Recommendations for the implementer:
   public model for internal models such as `codex-auto-review`. OpenAI
   cached input is part of total input, reasoning output is part of output,
   and cache writes are a separate subset of total input where the model
-  supports them. For GPT-5.6 and later, price recorded 30m/12h writes at
-  their total write rates, not ordinary input plus that rate. Earlier models
+  supports them. For GPT-5.6 and later, the 30m total write rate is 1.25x
+  ordinary input and Responses API 12h is 2.5x, from the dated official
+  guide below. The catalog's single write field is not a 12h rate. Price
+  recorded writes at those total rates, not ordinary input plus that rate;
+  retain the documented model/API conditions in the adapter. Earlier models
   have no additional write charge. Missing write counters on newer models
   leave that portion unknown; do not treat all uncached input as writes or
   ignore the catalog field unconditionally
@@ -104,9 +107,9 @@ Recommendations for the implementer:
   `response_id`; its turn/thread usage fields are cumulative. Do not add
   overlapping `event_msg.token_count` accounting again. Support older
   formats with verified cumulative/delta semantics, including repeated
-  totals, resets, and inherited session history. Freeze file lengths at run
-  start; defer an unterminated final line as in progress and report the
-  snapshot boundary. Exclude data provably outside the selected window
+  totals, resets, and inherited session history.
+- For both harnesses, freeze file lengths at run start; defer an
+  unterminated final line as in progress and report the snapshot boundary. Exclude data provably outside the selected window
   before validation when safe; a file's start date alone is insufficient.
   Complete malformed selected records fail the run with location
   diagnostics containing no transcript text. Keep the workspace's strict

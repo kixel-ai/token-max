@@ -35,7 +35,10 @@ those findings instead of adding their costs again.
   or success. With incomplete call visibility, say "no observed use", not
   "unused". Incomplete visibility and rare use only produce advisory
   rankings; an automatic unused finding requires complete exposure/call
-  visibility and positive recurring overhead, per the milestone rules.
+  visibility across the window, positive recurring overhead, and a finding
+  that still applies to the current effective configuration. Unused
+  findings for components introduced during the window stay advisory, per
+  the milestone rules.
 - Recommend scoped disabling of unused MCP servers/tools and restoring
   deferred loading where appropriate. Claude exposes `ENABLE_TOOL_SEARCH`
   and per-server `alwaysLoad`; check supported models/provider conditions
@@ -44,7 +47,10 @@ those findings instead of adding their costs again.
   cheaper upfront once discovery overhead is included.
   Claude server disabling uses `/mcp`; per-tool deny rules restrict calls
   but must not be assumed to remove schema/listing costs. Codex has
-  server/tool enablement lists. Name the supported control for each finding.
+  server/tool enablement lists and `mcp_servers.<id>.omit_tools_from` for
+  `direct`, `deferred`, or `code_mode` surfaces; the equivalent app setting
+  combines with server omissions. Omission changes exposure, while
+  `disabled_tools` blocks calls. Name the supported control for each finding.
 - Use applicable provider guidance to warn about oversized always-loaded
   instructions, duplicate content, or catalogs over documented budgets.
   Suggest concise descriptions, project/path scoping, and moving detailed

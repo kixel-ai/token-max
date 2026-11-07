@@ -44,12 +44,15 @@ is recorded and validate those shapes before adding synthetic fixtures.
 - If calls or their cache refreshes are not logged, report that baseline
   coverage gap for every affected replay, not just this feature's total.
 - Compare the lower aggregate estimated net cost, including observable
-  follow-on work and any cache warming lost when requests disappear. Goal
-  check-ins may advance work; suggestion acceptance or whether a person
-  read a recap may be unobservable. Attributed spend alone does not prove
-  a feature should be disabled. With no priced comparison, give a
-  conditional suggestion to disable unused UI generation and explain the
-  tradeoff; do not infer that the person never uses it.
+  follow-on work and any cache warming lost when requests disappear. For
+  suggestions and recaps, a priced fixed-behavior net estimate decides the
+  recommendation; unobservable acceptance or whether a person read a recap
+  is a caveat, not a veto. Attributed gross spend alone is insufficient.
+  Removing goal check-ins can remove autonomous work, so keep that
+  recommendation conditional unless follow-on work supports a net
+  comparison. Without a priced comparison, give a conditional suggestion
+  to disable unused UI generation and explain the tradeoff; do not infer
+  that the person never uses it.
 - Idle compaction belongs to its existing check. Do not charge it here or
   conflate goal check-ins with scheduled tasks, explicit user requests,
   guardian approval reviews, or every subagent request.

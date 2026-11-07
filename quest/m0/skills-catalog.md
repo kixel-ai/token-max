@@ -40,8 +40,10 @@ Recommendations for the implementer:
   separate labels. A useful rare skill may belong in a project or remain
   manually invocable instead of being disabled everywhere.
   Automatic unused recommendations require complete exposure and invocation
-  visibility and positive recurring overhead; all other low-use findings
-  are advisory under the milestone's exit-code rules.
+  visibility across the window, positive recurring overhead, and a finding
+  that still applies to the current effective configuration. Unused
+  findings for components introduced during the window and all other
+  low-use rankings are advisory under the milestone's exit-code rules.
 - Price the listing actually sent, including name, description, and path
   where present, across its request exposures. Skill bodies and references
   loaded on use are a separate attributed cost. Use marginal before/after

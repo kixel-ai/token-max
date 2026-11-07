@@ -48,7 +48,10 @@ measurement for the maintainer's confirmed skills/MCP cost goal.
   hook context, and plugin/app/managed instructions feed the context check.
   Attribute shared plugin overhead once and link its skill/MCP findings.
   Installed metadata or current file sizes cannot establish historical
-  exposure. Verify record shapes before writing synthetic fixtures.
+  exposure; historical exposure cannot prove current enablement either.
+  Resolve current effective components separately, and expose when
+  components entered the window where observable. Verify record shapes
+  before writing synthetic fixtures.
 
 ## Required
 

@@ -9,7 +9,9 @@ runs its first check: Claude Code's prompt cache TTL, 5m or 1h, separately
 for main sessions (`promptCacheTtl`) and sub-agents
 (`subagentPromptCacheTtl`). The report format, `--since`, `--json`, and the
 nonzero exit when a change is recommended are in place for the later
-checks. Tests run on small synthetic transcripts.
+checks. The reader also exposes available structural compaction, turn, and
+client metadata for those checks, separately from model requests. Tests
+run on small synthetic transcripts.
 
 ## Plan
 
@@ -40,13 +42,11 @@ Recommendations for the implementer:
   1h write.
 - Each Claude request records its cache writes by TTL, which dates the last
   TTL change for the default window.
-- Keep the reader to the fields above, so the transcript text never reaches
-  memory longer than one line's parse.
-- For the compaction checks, also retain available context sizes,
-  compaction markers and reasons, summary token counts, request/turn
-  completion and session lifecycle times, and client/version metadata.
-  Separate interactive idle from an active tool wait, including final idle
-  periods where the client lifetime is unknown. Read effective idle
-  compaction settings and their owners; preserve historical settings when
-  recorded instead of applying today's values to every session. Missing
-  metadata stays unknown, and summary text is never retained or printed.
+- Keep the reader to request fields and structural metadata, so transcript
+  text never stays in memory longer than one line's parse. Expose available
+  context sizes, `compact_boundary` metadata (`trigger`, `precomputed`,
+  `preTokens`, `postTokens`, `durationMs`), turn timing/tool-wait state, and
+  client/version fields without treating a boundary as a billed model
+  request. Missing metadata stays unknown; summary text is never retained
+  or printed. The consuming check interprets eligibility and reads the
+  settings it needs.

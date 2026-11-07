@@ -66,14 +66,17 @@ Recommendations for every check:
   that uncertainty.
 - Default to a window since the setting last changed, read from the
   transcripts, so old behavior does not argue against a setting already in
-  place.
+  place. If no change history exists, use explicit `--since` or the available
+  transcript window and label the replay as applying current settings to
+  historical sessions.
 - Read sessions where each CLI keeps them, honoring `CLAUDE_CONFIG_DIR` and
   `CODEX_HOME`, and never print prompt or reply text.
 
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - the transcript reader, prices, report, and the first check, which reproduces the audit's cache figures
-- [Compaction checks](/quest/m0/compaction.md) - recommends auto-compact thresholds and whether Claude Code's idle compaction should be on or off from estimated net savings
+- [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
+- [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
 - [Skills catalog check](/quest/m0/skills-catalog.md) - flags duplicate entries and a Codex skills catalog over its budget
 - [Keepalive check](/quest/m0/keepalive.md) - whether pinging idle sessions under the cache TTL would have cost less than their misses

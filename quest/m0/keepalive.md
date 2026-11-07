@@ -33,11 +33,16 @@ Recommendations for the implementer:
   and reply, and count the pings on a session's final idle period, which
   never resumes.
 - Report the best cap and its net, not only whether any cap wins.
-- Account for effective idle compaction in the baseline. A session already
-  summarized before cache expiry does not pay to rebuild its full original
-  context when it resumes. Keep the keepalive and idle-compaction savings
-  separate; they are alternatives for the same idle period, not additive.
+- Compare no keepalive, idle compaction, and each keepalive cap at the same
+  recommended TTL and compaction window, using the idle check's client
+  lifetime bounds for final periods rather than assuming every final
+  period stays open. Pings reset the last-request clock and may prevent
+  idle compaction; replay that timing rather than charging both policies
+  independently. Recommend the better supported net saving and report
+  conditional results when uncertainty changes the winner. Do not add the
+  two policies' savings for the same idle period.
 
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - the reader, prices, and report it adds to
+- [Idle compaction check](/quest/m0/idle-compaction.md) - the compaction alternative and client lifetime bounds used in the comparison

@@ -86,13 +86,13 @@ export async function parseCatalog(
     if (provider && model)
       models.set(`${provider}:${model}`, modelPrice(value));
   };
-  try {
-    for await (const chunk of chunks) parser.write(chunk);
-    if (!parser.isEnded) parser.end();
-  } catch (error) {
+  parser.onError = (error) => {
     if (error instanceof ScanError) throw error;
     throw new ScanError("invalid public price catalog");
-  }
+  };
+  // Stream failures belong to the file/fetch diagnostic, not JSON validation.
+  for await (const chunk of chunks) parser.write(chunk);
+  if (!parser.isEnded) parser.end();
   if (!models.size)
     throw new ScanError("public price catalog contains no models");
   return { models, source: PRICE_URL, fetchedAt: null, offline: true };
@@ -100,17 +100,21 @@ export async function parseCatalog(
 
 /** Explicit offline and fixture modes never make network requests. */
 export interface PriceOptions {
+  signal?: AbortSignal;
   file?: string;
   cache: string;
   offline?: boolean;
 }
 /** Fetch only public prices, caching atomically after the complete catalog validates. */
 export async function loadPrices(options: PriceOptions): Promise<Catalog> {
+  options.signal?.throwIfAborted();
   if (options.file || options.offline) {
     const file = options.file ?? options.cache;
     let result: Catalog;
     try {
-      result = await parseCatalog(createReadStream(file));
+      result = await parseCatalog(
+        createReadStream(file, { signal: options.signal }),
+      );
       result.fetchedAt = (await stat(file)).mtime.toISOString();
     } catch (error) {
       if (error instanceof ScanError) throw error;
@@ -123,7 +127,10 @@ export async function loadPrices(options: PriceOptions): Promise<Catalog> {
   }
   const temporary = options.cache + "." + randomUUID() + ".tmp";
   try {
-    const response = await fetch(PRICE_URL, { redirect: "error" });
+    const response = await fetch(PRICE_URL, {
+      redirect: "error",
+      signal: options.signal ?? null,
+    });
     if (!response.ok || !response.body)
       throw new ScanError(
         "public price fetch failed; use --offline with an existing cache",

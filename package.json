@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@streamparser/json": "^0.0.26",
-    "smol-toml": "^1.9.1"
+    "smol-toml": "^1.9.1",
+    "wrap-ansi": "^10.0.2"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

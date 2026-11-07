@@ -144,7 +144,6 @@ Recommendations for every check:
 
 ## Required
 
-- [Polished terminal report](/quest/m0/cli.md) - clear recommendations, cost evidence, progress, and plain/JSON output
 - [One-command npm distribution](/quest/m0/npm.md) - built JavaScript launched with npx or Bun, without a Rust install
 - [Fast-mode check](/quest/m0/fast-mode.md) - recommends standard speed and reports the observed premium where the billed tier and price are known
 - [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate

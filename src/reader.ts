@@ -25,7 +25,7 @@ import {
   timestamp,
 } from "./safe.js";
 
-/** Scan options accept only an explicit time window and local configuration roots. */
+/** Select a time window and local roots, with optional cooperative cancellation. */
 export interface ScanOptions extends DiscoveryOptions {
   since?: number;
 }
@@ -242,6 +242,7 @@ function numericTools(raw: unknown): Record<string, number> | null {
 export async function readSnapshot(
   snapshot: Snapshot,
   consume: (record: Record<string, unknown>, location: Location) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   let handle;
   try {
@@ -276,6 +277,7 @@ export async function readSnapshot(
     let pending = 0;
     const buffer = Buffer.alloc(64 * 1024);
     while (position < snapshot.bytes) {
+      signal?.throwIfAborted();
       let bytesRead: number;
       try {
         ({ bytesRead } = await handle.read(
@@ -416,7 +418,8 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
       pricing: null,
     };
     let previousTotal: Usage | null = null;
-    await readSnapshot(snapshot, (raw, location) => {
+    const consume = (raw: Record<string, unknown>, location: Location) => {
+      options.signal?.throwIfAborted();
       const time = timestamp(raw.timestamp);
       const selected =
         time === null || options.since === undefined || time >= options.since;
@@ -839,7 +842,8 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           addEvent(e);
         }
       }
-    });
+    };
+    await readSnapshot(snapshot, consume, options.signal);
   }
   for (const { request: r, totalKey } of legacy)
     if (!totalKey || !modernTotals.has(totalKey)) add(r);

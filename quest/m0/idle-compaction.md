@@ -149,5 +149,4 @@ their charges on final periods without double-counting client lifetime.
 
 ## Required
 
-- [Replay and the cache TTL check](/quest/m0/replay.md) - request metadata, prices, report, and recommended TTL
 - [Compaction window check](/quest/m0/compaction.md) - context and compaction costs, and recommended windows

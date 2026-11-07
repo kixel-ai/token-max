@@ -19,7 +19,3 @@ TTL.
 Codex's `background_terminal_max_timeout` (default 5 minutes) bounds one
 poll of a background terminal. Each poll reads the cached context, which is
 cheaper than a miss, so the check does not recommend raising it.
-
-## Required
-
-- [Replay and the cache TTL check](/quest/m0/replay.md) - the reader, prices, and report it adds to

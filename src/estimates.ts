@@ -35,6 +35,16 @@ function sameInput(a: BillingPart, b: BillingPart): boolean {
 /** Estimate only isolated unlinked attempts bracketed by matching recorded input geometry. */
 export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
   const result = new Map<string, UsageEstimate>();
+  const boundaries = new Map<string, number[]>();
+  for (const event of scan.events) {
+    if (!["compaction", "settings", "client"].includes(event.kind)) continue;
+    for (const origin of event.origins) {
+      const times = boundaries.get(origin.session) ?? [];
+      times.push(event.time);
+      boundaries.set(origin.session, times);
+    }
+  }
+  for (const times of boundaries.values()) times.sort((a, b) => a - b);
   const sessions = new Map<string, Request[]>();
   for (const r of scan.requests.filter((r) => r.harness === "claude")) {
     const group = sessions.get(r.session) ?? [];
@@ -73,19 +83,25 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
         !p ||
         !next ||
         !pending ||
+        before.parts.length !== 1 ||
+        after.parts.length !== 1 ||
+        r.parts.length !== 1 ||
+        before.evidence !== "measured" ||
+        after.evidence !== "measured" ||
         pending.usage.input !== null ||
         pending.usage.read !== null ||
-        pending.usage.write !== null ||
+        pending.usage.write !== null
+      ) {
+        e.reason =
+          "adjacent requests do not supply matching measured single-part input evidence";
+        continue;
+      }
+      if (
         !commonFile ||
         !r.reference ||
         !r.source ||
         !r.model ||
         !r.provider ||
-        before.evidence !== "measured" ||
-        after.evidence !== "measured" ||
-        before.parts.length !== 1 ||
-        after.parts.length !== 1 ||
-        r.parts.length !== 1 ||
         before.endTime >= r.time ||
         after.time <= r.time ||
         [before, after].some(
@@ -96,26 +112,38 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
             n.agent !== r.agent ||
             n.version !== r.version ||
             [...n.profiles].sort().join(":") !== profiles,
-        ) ||
+        )
+      ) {
+        e.reason =
+          "no matching source/model/provider/version/profile provenance and nonoverlapping file-local brackets";
+        continue;
+      }
+      if (
         p.kind === "unknown" ||
         p.kind !== pending.kind ||
         p.model !== r.model ||
         !sameInput(p, next) ||
-        ["tier", "speed", "geo"].some(
-          (k) =>
-            pending[k as "tier" | "speed" | "geo"] !== null &&
-            pending[k as "tier" | "speed" | "geo"] !==
-              p[k as "tier" | "speed" | "geo"],
-        ) ||
-        scan.events.some(
-          (event) =>
-            ["compaction", "settings", "client"].includes(event.kind) &&
-            event.time > before.time &&
-            event.time <= after.time &&
-            event.origins.some((o) => o.session === r.session),
+        (["tier", "speed", "geo"] as const).some(
+          (k) => pending[k] !== null && pending[k] !== p[k],
         )
-      )
+      ) {
+        e.reason =
+          "brackets lack matching recorded input/cache/pricing metadata or contradict the request";
         continue;
+      }
+      const times = boundaries.get(r.session) ?? [];
+      let low = 0;
+      let high = times.length;
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        if (times[middle]! <= before.time) low = middle + 1;
+        else high = middle;
+      }
+      if (low < times.length && times[low]! <= after.time) {
+        e.reason =
+          "matching brackets are interrupted by a compaction/settings/client boundary";
+        continue;
+      }
       e.evidence = "estimated";
       e.part = { ...p, usage: { ...p.usage, output: null, reasoning: null } };
       e.reason =

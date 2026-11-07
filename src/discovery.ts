@@ -8,6 +8,7 @@ import { compactionControls } from "./controls.js";
 
 /** Explicit roots limit the entire scan; otherwise discover host-local profiles. */
 export interface DiscoveryOptions {
+  signal?: AbortSignal;
   home?: string;
   env?: NodeJS.ProcessEnv;
   claudeDirs?: string[];
@@ -159,6 +160,7 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
   profiles: Profile[];
   snapshots: Snapshot[];
 }> {
+  options.signal?.throwIfAborted();
   const home = options.home ?? homedir();
   const env = options.env ?? process.env;
   const explicit = !!(options.claudeDirs?.length || options.codexDirs?.length);
@@ -216,6 +218,7 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
     a.path.localeCompare(b.path),
   );
   for (const root of roots) {
+    options.signal?.throwIfAborted();
     if (root.status === "excluded") continue;
     let canonical: string;
     try {
@@ -316,6 +319,7 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
   const files = new Map<string, Snapshot>();
   const visited = new Map<string, string[]>();
   async function walk(path: string, profile: Profile): Promise<void> {
+    options.signal?.throwIfAborted();
     let canonical: string;
     try {
       canonical = await realpath(path);

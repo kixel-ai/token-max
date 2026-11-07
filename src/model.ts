@@ -303,7 +303,7 @@ export interface Scan {
     issues: string[];
   };
 }
-/** Versioned machine output for the minimal report and later presentation work. */
+/** Stable versioned machine output, independent of terminal presentation. */
 export interface Report {
   schemaVersion: 1;
   generatedAt: string;

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
 import type { Profile, Request, Scan, StructuralEvent } from "../src/model.js";
-import { formatReport } from "../src/cli.js";
+import { formatReport } from "../src/report.js";
 import { analyze as analyzeReport } from "../src/replay.js";
 import { scan, usage } from "../src/reader.js";
 import {
@@ -358,7 +358,7 @@ test("scenario-invariant unknown server fees do not veto a priced TTL difference
     catalog: await prices(),
     now: 1200000,
   });
-  assert.match(formatReport(report), /identical fixed costs remain unknown/);
+  assert.match(formatReport(report), /identical fixed costs remain unknown/i);
   // Unknown request usage is not scenario-invariant and must still block a winner.
   next.parts[0]!.usage = { ...next.parts[0]!.usage, write: null, read: null };
   assert.equal(

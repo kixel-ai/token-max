@@ -8,7 +8,8 @@ pinging. It recommends a keepalive only when it beats no keepalive and,
 where supported, idle compaction, after their costs and unknown client
 lifetimes are accounted for. The priced winner is actionable only with a
 supported mechanism and known current ping configuration; otherwise it is
-a priced advisory.
+a priced advisory. Recommend stopping known active pings when no keepalive
+or, where supported, idle compaction has the lower estimated net cost.
 
 ## Plan
 
@@ -41,6 +42,11 @@ design and include Codex gaps beyond 30 minutes (rejected: scope m0
 keepalive to Claude). A short-gap hit rate is not grounds to exclude longer
 idle periods.
 
+Decided 2026-11-07 (maintainer, review checkpoint): ✅ keep actionable
+recommendations in both directions, including stopping known active costly
+pings (rejected: make all keepalive results advisory). Finish this clarification
+and its recheck, then start replay with quest-spawn.
+
 Recommendations for the implementer:
 
 - Price a ping as a read of the session's last context plus a short prompt
@@ -64,9 +70,11 @@ Recommendations for the implementer:
   provenance makes the affected estimate conditional. Report current
   scheduler/cap state only when observable read-only metadata establishes
   it, including whether an old task still exists. Absence of ping records
-  alone does not prove it is off. A matching active cap clears the change;
-  an actionable differing cap names the mechanism and owner. Unknown
-  current ping state stays advisory under the shared current-state guard.
+  alone does not prove it is off. A current ping policy matching the winner
+  clears the change. Known active pings that differ from the winning policy
+  emit a change, including stopping them when no keepalive or supported idle
+  compaction wins; name the mechanism and owner. Unknown current ping state
+  stays advisory under the shared current-state guard.
 - Claude's `/loop` and `asyncRewake` are candidate mechanisms, not a
   built-in keepalive setting. Name the supported mechanism and current
   state before emitting an actionable change. No supported Codex keepalive

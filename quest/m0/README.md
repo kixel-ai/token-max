@@ -99,10 +99,12 @@ Recommendations for every check:
   unknown, never zero. Exit 2 on a failed scan, 1 when a change is
   recommended, and 0 otherwise. Emit a change when an applicable effective
   setting differs from a priced net winner, fast mode is enabled, the Bash
-  foreground cap is at or above its effective cache TTL, or a keepalive cap
-  beats no keepalive and, where the harness supports it, idle compaction
-  under its labelled estimate, with a supported mechanism and known current
-  ping configuration that needs the change.
+  foreground cap is at or above its effective cache TTL, or the known
+  current ping policy differs from the estimated net winner among no
+  keepalive, the caps, and idle compaction where supported. With a supported
+  mechanism, this includes starting or changing a winning cap and stopping
+  active pings when another policy wins. Unknown ping state or an unsupported
+  mechanism stays advisory.
   Guidance also emits a change for a documented budget violation, duplicate
   listing, or a skill/MCP with positive recurring overhead and no observed
   use under complete exposure and invocation visibility across the window.

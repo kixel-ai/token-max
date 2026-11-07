@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.tmp/
+bun.lock
+flake.lock
+quest/
+.agents/
+.claude/

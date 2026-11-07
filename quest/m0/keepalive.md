@@ -90,7 +90,3 @@ Recommendations for the implementer:
   duration. Do not extend the idle check's one-hour activation fraction to
   multi-hour ping lifetimes. Choose the aggregate estimate's winner, not a
   requirement to win across every lifetime bound.
-
-## Required
-
-- [Idle compaction check](/quest/m0/idle-compaction.md) - the compaction alternative and client lifetime bounds used in the comparison

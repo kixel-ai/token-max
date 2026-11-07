@@ -216,8 +216,9 @@ The proxy is included once in each outside-main TTL scenario, separately from
 subagent request totals. Unknown timing and missing write splits prevent inventing
 a TTL-dependent summary split. Missing proxy sizes remain unknown.
 
-The local metadata scan found auto/manual boundaries, and no verified idle notice
-discriminator. `precomputed` remains an undocumented candidate. Boundary time and
+The earlier local metadata scan found auto/manual boundaries but no idle notices.
+The native v2.1.316 informational-notice shape is now verified from the installed
+provider binary and recognized as described below. `precomputed` remains an undocumented candidate. Boundary time and
 duration cannot establish generation time; absence of a boundary in a final idle
 period does not prove that no summary was generated or charged. Later checks must
 keep these limits when interpreting eligibility and final periods. No observed
@@ -293,7 +294,107 @@ not vetoes or guaranteed bounds. Extra work from lost detail, file re-reads, too
 calls and changed reasoning is unmeasured. The report gives the extra dollar cost
 that would erase the modeled saving. Window savings are incremental to their named
 TTL baseline; separate model/check savings overlap and must not be summed. The idle
-compaction on/off policy remains a separate downstream check.
+compaction on/off policy is evaluated afterward as described below.
+
+## Native idle compaction
+
+`idle-compaction` compares on/off at current TTL/window settings and again after
+applicable TTL/window changes. Each owning idle toggle gets an aggregate delta,
+on cost minus off cost, across request gaps and final observation periods.
+Negative favors on, positive favors off, and exact zero retains the current
+value. Only the latter configuration decides the toggle. Independent savings
+are not additive. API-price equivalents do not compare subscription bills.
+
+Current idle controls resolve user, project, local and managed settings, with
+the active profile's environment applied to environment controls. Project files
+use the nearest current Git root, or the recorded working directory for a
+non-Git project. Absent directories or working-directory metadata leave ownership
+unresolved. Project TTL/window owners are preserved when a profile-level change
+would not override them; a conversation with changing effective policies stays
+conditional. Unrecorded launch overrides and historical file contents are not
+reconstructed. A historical setting event is evidence for that time, never a
+current owning file. Without a recorded toggle transition, the window is explicit
+`--since` or available history, labelled as replay under today's controls.
+
+The [native settings reference](https://code.claude.com/docs/en/settings-reference#idlecompaction)
+and [cache behavior](https://code.claude.com/docs/en/prompt-caching#compacting-the-conversation),
+checked 2026-11-07, establish the true default, v2.1.290 toggle support,
+pre-v2.1.314 feature-flag prerequisite, enabled auto-compaction, 1h main TTL and
+200k default idle threshold with a 100k environment floor. Threshold tuning is
+outside this check. A 5m main TTL or window at/below the threshold removes the
+eligible band. SDK/headless/subagent/hosted-remote runs and active tool waits do
+not become interactive opportunities. `cli` needs `repl_main_thread` provenance;
+`claude-vscode` and `ssh-remote` identify supported native hosts. A Desktop label
+alone does not prove local execution. Unknown versions and pre-314 flag state
+stay unknown. T3 and SSH adapters are not introduced.
+
+The installed Anthropic v2.1.316 binary was inspected without opening transcript
+content. Its native notice constructor emits `type: system`, `subtype:
+informational`, `level: notice`, and either documented idle notice followed by
+the exact toggle suffix. Only that shape attributes the preceding same-session
+boundary as an applied idle; raw notice text is discarded. `precomputed` also
+appears on non-idle background compaction and cannot attribute idle generation.
+No new native historical-settings or feature-flag record shape is invented.
+The normalized analyzer can consume explicit historical settings evidence; absent
+such evidence, native histories use the documented-trigger fallback rather than
+reporting today's settings as measured past on/off outcomes.
+
+The public trigger is about one hour, before expiry, with an open session and
+awake host. Native v2.1.316 arms at 90% of the cache lifetime and refuses late
+execution. Replay uses that inspected timing as its labelled point estimate and
+one hour as timing sensitivity, not a configurable or documented 55-minute
+policy. Request start controls cache age; active requests spanning the trigger
+are excluded. Near-expiry returns retain a timing range. Boundary time and
+`durationMs` never establish generation time. A recent final period is censored;
+no session-end marker or closure is inferred.
+
+Recorded applied returns use their actual summary usage/proxy and resumed reads
+and writes. Known-on returned nonapplications are applied-outcome evidence,
+not proof of no discarded generation. Their first request remains the baseline;
+a merely long gap does not create an observed on charge. For unobserved
+activation, comparable known-on returned applied fractions transfer only within
+identical version/client/flag state. Finals use the same fraction, charged once
+without multiplying by a second unknown stayed-open probability. Without a
+comparable cohort, one open-and-awake activation is the deciding assumption.
+Unlogged/discarded summary charges remain explicitly unobserved and can change
+the conditional estimate; no missing boundary establishes a known zero charge.
+
+Hypothetical summaries require linked billed output and first resumed-prefix
+samples in the same model/provider/agent/tier/speed/geography/client/version cohort.
+Median output and full prefix, plus measured subsequent growth, form the point
+estimate; cohort maxima form size sensitivity. The full prefix includes
+system/project context, retained items and new input. `postTokens` remains only
+an unmatched observed summary-output proxy and cannot calibrate that full prefix.
+Summary instruction overhead uses observed summary-input excess over preTokens;
+unknown framing/changed behavior remains a limitation. Summary input reads the
+warm preceding cache prefix and writes new context at the outside-main TTL.
+A different summary cache cohort must write cold input. New summary text is
+not assumed already cached on the first resume.
+
+Actual resumed cache evidence takes precedence over gap-only expiry inference,
+including possible same-directory warming. On an altered prefix, calibration
+estimates the unchanged leading system/project footprint from post-compaction
+reads, capped below summary output; observed reads can establish warmth for
+that unchanged footprint. Other replacement context reuses only after a modeled
+request has written/read it within its lifetime. Timing is estimated from the
+trigger and outside-main TTL, never the applied boundary. Context reductions
+and retained off-history carry through later requests, repricing context tiers
+and later summary input until an observed compaction converges the paths.
+Multipart/cohort changes or unexplained input decreases leave affected costs
+unpriced. Each linked or unmatched observed summary is charged once.
+
+Uncertain activations branch weighted context states, merging equal states after
+replacement or convergence; the expected cost does not compact a fractional
+number of tokens across price tiers. Final summaries receive their activation
+weight with no return savings. Full on/off totals retain common unknown charges;
+unchanged unknown components may cancel in the comparison only. Closed/open,
+maximum-summary and late-trigger scenarios explain uncertainty without vetoing
+the aggregate point winner. When closed/open endpoints bracket a crossing,
+a common uncertain activation fraction is replayed to find a break-even, including
+sequential effects. No bracket is not proof that no internal crossing exists.
+Extra re-read cost per expected resumed summary would erase on's saving; it is a
+fixed-behavior caveat, not an unbounded recommendation input. Context-size totals
+include summary-only final periods.
 
 ## Shared component measurements
 

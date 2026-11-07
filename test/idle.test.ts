@@ -14,7 +14,7 @@ import { idleControls, compactionControls } from "../src/controls.js";
 import { idleChecks } from "../src/idle.js";
 import { analyze, compactionCharges } from "../src/replay.js";
 import { scan } from "../src/reader.js";
-import { formatReport } from "../src/cli.js";
+import { formatReport } from "../src/report.js";
 import { claudeUsage, makeRequest, prices, workspace } from "./helpers.js";
 
 const MINUTE = 60000;
@@ -83,7 +83,7 @@ function data(target: Request[], boundaries: StructuralEvent[] = []): Scan {
   });
   const resumed = request("sample-resume", 3, 15000, {
     session: "sample",
-    client: "sdk-ts",
+    client: "cli",
   });
   resumed.parts[0]!.usage = claudeUsage({
     read: 5000,
@@ -469,6 +469,35 @@ test("same-cohort applied fraction charges finals exactly once and never transfe
       }),
     );
   s.events.sort((a, b) => a.time - b.time);
+  const duplicate = {
+    ...s.requests.find((r) => r.id === "sample-resume")!,
+    id: "different-version-sample",
+    session: "different-sample",
+    version: "2.1.315",
+  };
+  const summaryCopy = {
+    ...s.requests.find((r) => r.id === "summary")!,
+    id: "different-summary",
+    session: "different-sample",
+    version: "2.1.315",
+  };
+  s.requests.push(summaryCopy, duplicate);
+  s.requests.sort((a, b) => a.time - b.time);
+  s.events.push(
+    event({
+      id: "different-boundary",
+      session: "different-sample",
+      origins: [
+        {
+          session: "different-sample",
+          location: { file: "synthetic", line: 7 },
+        },
+      ],
+      request: "different-summary",
+      version: "2.1.315",
+    }),
+  );
+  s.events.sort((a, b) => a.time - b.time);
   const c = await check(s);
   const a = c.afterRecommendations;
   assert.equal(a.activationCohorts[0]!.fraction, 0.5);
@@ -580,7 +609,7 @@ test("native informational notices are the only parsed idle attribution; project
       now: 100 * MINUTE,
     });
     assert.doesNotMatch(JSON.stringify(report), /Compacted while idle/);
-    assert.match(formatReport(report), /Idle compaction/);
+    assert.match(formatReport(report), /idle-compaction/);
     await writeFile(
       file,
       rows
@@ -616,6 +645,7 @@ test("a net-zero tie retains either current toggle", async () => {
       ttl: "1h",
     });
     s.events[0]!.preTokens = 312500;
+    s.since = 100 * MINUTE;
     s.profiles[0]!.idle!.value = current;
     const c = await check(s);
     near(c.afterRecommendations.deltaUsd, 0);
@@ -659,5 +689,62 @@ test("later observed compaction reprices carried summary input once and converge
     c.afterRecommendations.cost.on.totalUsd! -
       c.afterRecommendations.cost.off.totalUsd!,
     -2.252,
+  );
+});
+
+test("recorded final idle summaries are charged without needing a resumed-prefix estimate", async () => {
+  const summary = request("idle-summary", 154, 0);
+  summary.parts[0]!.kind = "compaction";
+  summary.parts[0]!.usage = claudeUsage({
+    read: 300000,
+    write: 0,
+    output: 2000,
+  });
+  const b = event({
+    id: "applied-final",
+    session: "target",
+    origins: [{ session: "target", location: { file: "synthetic", line: 8 } }],
+    time: 155 * MINUTE,
+    request: summary.id,
+    idleAttribution: "notice",
+  });
+  const c = await check(data([request("final", 100), summary], [b]), 200);
+  near(c.afterRecommendations.deltaUsd, 0.1);
+  assert.equal(c.recommended, false);
+  assert.equal(
+    c.afterRecommendations.periods.find((p) => p.request === "final")!.outcome,
+    "applied",
+  );
+});
+
+test("context/cohort changes after a hypothetical summary stay unpriced, and active requests are ineligible", async () => {
+  for (const mode of ["decrease", "model", "active"] as const) {
+    const before = request("before", 100);
+    const back = request("return", 200, mode === "decrease" ? 150000 : 301000);
+    if (mode === "model") back.parts[0]!.model = "claude-haiku-5-5";
+    if (mode === "active") before.endTime = 170 * MINUTE;
+    const c = await check(data([before, back]));
+    if (mode === "active") {
+      near(c.afterRecommendations.deltaUsd, 0);
+      assert.equal(
+        c.afterRecommendations.periods.find((p) => p.request === "before")!
+          .status,
+        "ineligible",
+      );
+    } else {
+      assert.equal(c.afterRecommendations.deltaUsd, null);
+      assert.equal(c.action, "advisory");
+    }
+  }
+});
+
+test("selected windows do not charge pre-window trigger estimates or generation", async () => {
+  const s = data([request("before", 100), request("return", 200, 301000)]);
+  s.since = 160 * MINUTE;
+  const c = await check(s);
+  near(c.afterRecommendations.deltaUsd, 0);
+  assert.equal(
+    c.afterRecommendations.periods.some((p) => p.request === "before"),
+    false,
   );
 });

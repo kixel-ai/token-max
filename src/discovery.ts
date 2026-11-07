@@ -178,6 +178,7 @@ export async function discoverIdleOwners(
   profiles: Profile[],
   requests: Request[],
 ): Promise<void> {
+  options.signal?.throwIfAborted();
   const env = options.env ?? process.env;
   const home = options.home ?? homedir();
   const active = await realpath(
@@ -185,6 +186,7 @@ export async function discoverIdleOwners(
   ).catch(() => "");
   const managedFile = options.managedSettingsFile ?? managedSettingsPath();
   for (const profile of profiles.filter((p) => p.harness === "claude")) {
+    options.signal?.throwIfAborted();
     const user = await settings(profile.settingsFile, "claude");
     const managed = await settings(managedFile, "claude");
     const localEnv = active === profile.root ? env : {};
@@ -202,8 +204,10 @@ export async function discoverIdleOwners(
     for (const cwd of new Set(
       relevant.flatMap((r) => (r.cwd ? [r.cwd] : [])),
     )) {
+      options.signal?.throwIfAborted();
       let root = cwd;
       for (let path = cwd; ; path = dirname(path)) {
+        options.signal?.throwIfAborted();
         try {
           await stat(join(path, ".git"));
           root = path;

@@ -125,6 +125,10 @@ function cohort(r: Request, p: BillingPart, s: CompactionSample): boolean {
     r.provider !== null &&
     p.model !== null &&
     r.provider === s.request.provider &&
+    r.version !== null &&
+    r.version === s.request.version &&
+    r.client !== null &&
+    r.client === s.request.client &&
     p.model === s.p.model &&
     r.agent === s.request.agent &&
     p.tier === s.p.tier &&
@@ -208,7 +212,7 @@ function periods(options: {
         end <= r.endTime
       )
         continue;
-      const gapMs = end - r.endTime;
+      const gapMs = end - r.time;
       const p = r.parts.find(
         (p) => p.kind === "message" || p.kind === "unknown",
       )!;
@@ -230,11 +234,16 @@ function periods(options: {
         p.usage.input === null || p.usage.output === null
           ? null
           : p.usage.input + p.usage.output;
-      const windowOwner = scopedWindow(options.profile, r, p.model).owner;
-      const window =
-        options.windows.find(
-          (w) => w.owner === windowOwner && w.models.includes(p.model),
-        )?.value ?? null;
+      const nativeWindow = scopedWindow(options.profile, r, p.model);
+      const windowOwner = nativeWindow.owner;
+      const window = !supported(
+        r.version,
+        nativeWindow.minimumClaudePatch ?? 288,
+      )
+        ? null
+        : (options.windows.find(
+            (w) => w.owner === windowOwner && w.models.includes(p.model),
+          )?.value ?? null);
       const ttls = scopedTtls(options.profile, r, options.ttls);
       const during = options.events.filter(
         (e) =>
@@ -268,6 +277,7 @@ function periods(options: {
         client(r) === "unsupported" ||
         pending.size > 0 ||
         interrupted ||
+        r.endTime >= r.time + EARLY ||
         (contextTokens !== null &&
           c.threshold !== null &&
           contextTokens < c.threshold) ||
@@ -281,7 +291,7 @@ function periods(options: {
               ? "automatic compaction is disabled"
               : client(r) === "unsupported"
                 ? "SDK/headless/remote/subagent client is outside the confirmed interactive policy"
-                : pending.size > 0 || interrupted
+                : pending.size > 0 || interrupted || r.endTime >= r.time + EARLY
                   ? "tool wait or active turn interrupts the idle interval"
                   : contextTokens !== null &&
                       c.threshold !== null &&
@@ -404,6 +414,8 @@ interface State {
   lifetime: number;
   retained: number;
   active: string | null;
+  input: number | null;
+  cohort: string | null;
 }
 interface Run {
   adjustment: Cost;
@@ -421,6 +433,8 @@ function mergeStates(states: State[]): State[] {
       state.lifetime,
       state.retained,
       state.active,
+      state.input,
+      state.cohort,
     ]);
     const prior = grouped.get(key);
     if (prior) prior.weight += state.weight;
@@ -502,7 +516,8 @@ function run(options: {
   catalog: Catalog;
   since: number;
   ttls: IdleScenario["ttls"];
-  mode: "point" | "closed" | "open" | "larger" | "late";
+  mode: "point" | "closed" | "open" | "larger" | "late" | "fraction";
+  activationFraction?: number;
   profile: Profile;
 }): Run {
   const costs: Cost[] = [];
@@ -517,6 +532,7 @@ function run(options: {
   const summaryRequests = new Set(
     options.summaries.flatMap((s) => (s.request ? [s.request] : [])),
   );
+  const chargedBoundaries = new Set<string>();
   const sessions = new Set(options.prepared.map((p) => p.previous.session));
   for (const session of sessions) {
     const ps = options.prepared.filter((p) => p.previous.session === session);
@@ -539,8 +555,7 @@ function run(options: {
         .filter((p) => !p.boundary && p.period.status === "eligible")
         .map((item) => ({
           kind: "idle" as const,
-          time:
-            item.previous.endTime + (options.mode === "late" ? HOUR : EARLY),
+          time: item.previous.time + (options.mode === "late" ? HOUR : EARLY),
           item,
         })),
     ];
@@ -558,6 +573,8 @@ function run(options: {
         lifetime: HOUR,
         retained: 0,
         active: null,
+        input: null,
+        cohort: null,
       },
     ];
     for (const tick of ticks) {
@@ -571,14 +588,16 @@ function run(options: {
           threshold,
           ttls,
         } = tick.item;
-        if (tick.time > previous.endTime + p.gapMs || tick.time < options.since)
+        if (tick.time > previous.time + p.gapMs || tick.time < options.since)
           continue;
         const activation =
-          options.mode === "closed" && p.outcome === "unobserved"
-            ? 0
-            : options.mode === "open" && p.outcome === "unobserved"
-              ? 1
-              : p.activation!;
+          options.mode === "fraction" && p.outcome === "unobserved"
+            ? options.activationFraction!
+            : options.mode === "closed" && p.outcome === "unobserved"
+              ? 0
+              : options.mode === "open" && p.outcome === "unobserved"
+                ? 1
+                : p.activation!;
         if (activation === 0) continue;
         const part = previous.parts.find((p) => p.kind === "message")!;
         const matches = options.samples.filter((s) =>
@@ -609,6 +628,8 @@ function run(options: {
             window === null ||
             part.kind !== "message"
           ) {
+            if (options.mode === "point")
+              p.summaryCost = unknownCost("summary calibration is unresolved");
             charge(
               p.request,
               unknownCost(
@@ -645,10 +666,15 @@ function run(options: {
             branched.push(state);
             continue;
           }
-          const read = Math.min(
-            input,
-            Math.max(0, prefix(part)! + state.offset),
-          );
+          const sameCache =
+            sample.summary.model === part.model &&
+            sample.summaryRequest.provider === previous.provider &&
+            sample.summary.speed === part.speed &&
+            sample.summary.geo === part.geo;
+          const read =
+            sameCache && tick.time - state.time < HOUR
+              ? Math.min(input, Math.max(0, prefix(part)! + state.offset))
+              : 0;
           const write = input - read;
           const overhead = size(
             matches.map((s) =>
@@ -689,11 +715,16 @@ function run(options: {
             weight: state.weight * activation,
             offset: replacement - p.contextTokens!,
             prefix: retained,
-            time: tick.time,
-            lifetime:
-              ttls.subagent === null ? 0 : TTL_MILLISECONDS[ttls.subagent],
+            time: sameCache ? tick.time : state.time,
+            lifetime: sameCache
+              ? ttls.subagent === null
+                ? 0
+                : TTL_MILLISECONDS[ttls.subagent]
+              : state.lifetime,
             retained,
             active: p.request,
+            input: state.input,
+            cohort: state.cohort,
           });
         }
         states = mergeStates(branched);
@@ -709,12 +740,18 @@ function run(options: {
         const linked = requestsById.get(summary?.request ?? "");
         const billed =
           linked?.parts.filter((p) => p.kind === "compaction") ?? [];
+        const allocated =
+          !chargedBoundaries.has(e.id) &&
+          (!summary?.request || summary.cost.totalUsd !== 0);
+        chargedBoundaries.add(e.id);
         if (idle) {
           const resumedPart = idle.next?.parts.find(
             (p) => p.kind === "message",
           );
           const full = resumedPart ? prefix(resumedPart) : null;
           for (const state of states) {
+            state.input = null;
+            state.cohort = null;
             if (options.on) {
               const base =
                 summary?.request && linked
@@ -740,7 +777,7 @@ function run(options: {
                     : unknownCost(
                         "changed input to an unmatched observed summary cannot be priced",
                       );
-              const cost = addCosts([base, extra]);
+              const cost = allocated ? addCosts([base, extra]) : zeroCost();
               if ((linked?.time ?? e.time) >= options.since)
                 charge(idle.period.request, cost, state.weight);
               if (options.mode === "point")
@@ -752,6 +789,10 @@ function run(options: {
               state.offset = 0;
               state.active = null;
             } else {
+              if (!idle.next) {
+                state.active = null;
+                continue;
+              }
               if (e.preTokens === null || full === null)
                 charge(
                   idle.period.request,
@@ -763,7 +804,11 @@ function run(options: {
               else state.offset += e.preTokens - full;
               state.retained = Math.min(
                 resumedPart?.usage.read ?? 0,
-                Math.max(0, full ?? 0),
+                Math.max(
+                  0,
+                  (full ?? 0) -
+                    (billed[0]?.usage.output ?? e.postTokens ?? full ?? 0),
+                ),
               );
               state.active = idle.period.request;
             }
@@ -772,7 +817,7 @@ function run(options: {
           // Later observed compactions converge the paths. Charge their changed
           // summary input before dropping the carried context difference.
           for (const state of states) {
-            if (state.offset !== 0 && e.time >= options.since) {
+            if (allocated && state.offset !== 0 && e.time >= options.since) {
               const extra =
                 linked && billed.length
                   ? addCosts(
@@ -794,6 +839,8 @@ function run(options: {
             state.prefix = null;
             state.active = null;
             state.retained = 0;
+            state.input = null;
+            state.cohort = null;
           }
         }
         states = mergeStates(states);
@@ -807,8 +854,23 @@ function run(options: {
           for (const p of r.parts) {
             if (p.kind === "compaction" && summaryRequests.has(r.id)) continue;
             if (r.agent === "subagent" || p.kind === "advisor") continue;
-            const next =
-              messages.length === 1
+            const currentCohort = JSON.stringify([
+              r.provider,
+              p.model,
+              r.agent,
+              p.speed,
+              p.geo,
+            ]);
+            const invalid =
+              state.offset !== 0 &&
+              (p.kind === "message" || p.kind === "unknown") &&
+              (messages.length !== 1 ||
+                (state.cohort !== null && state.cohort !== currentCohort) ||
+                (state.input !== null &&
+                  (p.usage.input === null || p.usage.input < state.input)));
+            const next = invalid
+              ? null
+              : messages.length === 1
                 ? adjusted(
                     p,
                     state,
@@ -826,6 +888,8 @@ function run(options: {
               );
             if (p.kind === "message" || p.kind === "unknown") {
               state.prefix = next ? prefix(next) : null;
+              state.input = p.usage.input;
+              state.cohort = currentCohort;
               state.time = r.time;
               state.lifetime =
                 ttls.main === null ? 0 : TTL_MILLISECONDS[ttls.main];
@@ -837,7 +901,10 @@ function run(options: {
     }
     if (options.on)
       for (const { period: p } of ps)
-        if (p.status === "unknown") charge(p.request, unknownCost(p.reason), 1);
+        if (p.status === "unknown") {
+          if (options.mode === "point") p.summaryCost = unknownCost(p.reason);
+          charge(p.request, unknownCost(p.reason), 1);
+        }
   }
   return { adjustment: addCosts(costs), byPeriod, resumed };
 }
@@ -1024,7 +1091,9 @@ export function idleChecks(options: {
         );
         const idleSummaryRequests = new Set(
           options.summaries
-            .filter((s) => idleSummaryEvents.has(s.event))
+            .filter(
+              (s) => idleSummaryEvents.has(s.event) && s.cost.totalUsd !== 0,
+            )
             .flatMap((s) => (s.request ? [s.request] : [])),
         );
         const common = addCosts([
@@ -1066,6 +1135,37 @@ export function idleChecks(options: {
           difference(r.adjustment, off.adjustment).totalUsd;
         const closed = delta(run({ ...args, on: true, mode: "closed" }));
         const open = delta(run({ ...args, on: true, mode: "open" }));
+        let lifetimeBreakEvenFraction: number | null = null;
+        if (closed !== null && open !== null) {
+          if (closed === 0) lifetimeBreakEvenFraction = 0;
+          else if (open === 0) lifetimeBreakEvenFraction = 1;
+          else if (Math.sign(closed) !== Math.sign(open)) {
+            let low = 0;
+            let high = 1;
+            while (true) {
+              const middle = (low + high) / 2;
+              if (middle === low || middle === high) {
+                lifetimeBreakEvenFraction = middle;
+                break;
+              }
+              const value = delta(
+                run({
+                  ...args,
+                  on: true,
+                  mode: "fraction",
+                  activationFraction: middle,
+                }),
+              );
+              if (value === null) break;
+              if (value === 0) {
+                lifetimeBreakEvenFraction = middle;
+                break;
+              }
+              if (Math.sign(value) === Math.sign(closed)) low = middle;
+              else high = middle;
+            }
+          }
+        }
         const unknown = [
           ...new Set([
             ...windowed.errors,
@@ -1158,10 +1258,7 @@ export function idleChecks(options: {
             lateTriggerDeltaUsd: delta(
               run({ ...args, on: true, mode: "late" }),
             ),
-            lifetimeBreakEvenFraction:
-              closed !== null && open !== null && open !== closed
-                ? -closed / (open - closed)
-                : null,
+            lifetimeBreakEvenFraction,
             rereadBreakEvenUsdPerResumedSummary:
               deltaUsd !== null && deltaUsd < 0 && on.resumed > 0
                 ? -deltaUsd / on.resumed
@@ -1237,7 +1334,7 @@ export function idleChecks(options: {
         breakEven:
           afterRecommendations.sensitivity.lifetimeBreakEvenFraction === null
             ? null
-            : `uncertain-period open/awake fraction ${afterRecommendations.sensitivity.lifetimeBreakEvenFraction}; outside [0,1] means no crossing between the stated closure/open endpoints`,
+            : `uncertain-period open/awake activation fraction ${afterRecommendations.sensitivity.lifetimeBreakEvenFraction} is a modeled break-even between the stated closure/open endpoints`,
         assumptions: [
           c.reason,
           `effective idle threshold ${c.threshold ?? "unknown"}; owner ${c.thresholdOwner}; threshold tuning is outside this check`,
@@ -1248,7 +1345,7 @@ export function idleChecks(options: {
           "unchanged system/project prefix is estimated from post-compaction reads; actual resumed usage takes precedence for an applied idle; altered prefixes reuse only within their chosen lifetime and cannot inherit external warming beyond the unchanged prefix",
           "context changes carry forward through later requests and reprice context tiers and later summaries until an observed compaction converges the paths; observed summary usage and unmatched proxies are charged once",
           "activation transfers only within the same known version/client/flag cohort; without comparable recorded known-on outcomes the deciding fallback leaves the client open and awake; final periods incur one expected summary with no assumed return benefit",
-          "closed/open sensitivity changes unobserved activation once, without a second lifetime probability; its linear break-even interpolates those aggregate endpoints and is conditional when sequential activations interact",
+          "closed/open sensitivity changes unobserved activation once, without a second lifetime probability; a bracketed break-even replays a common uncertain activation fraction, including sequential context changes; no bracket is not proof that no internal crossing exists",
           "fixed transcript behavior holds outputs, tools and incremental growth constant; lost detail can cause extra re-reads, whose per-resumed-summary break-even is a caveat, not an unbounded veto",
         ],
         uncertainty: [

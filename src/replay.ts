@@ -32,8 +32,13 @@ const TTL_SOURCE =
 const MINUTE = 60_000;
 
 function bucket(r: Request, p: BillingPart): "main" | "subagent" | "unknown" {
+  if (p.kind === "unknown") return "unknown";
   if (p.kind === "compaction" || p.kind === "advisor") return "subagent";
   return r.agent;
+}
+
+function inBucket(r: Request, p: BillingPart, selected: "main" | "subagent") {
+  return bucket(r, p) === selected || bucket(r, p) === "unknown";
 }
 
 function versionSupported(version: string | null): boolean {
@@ -112,12 +117,14 @@ export function compactionCharges(
   const claimed = new Set<string>();
   const lastBoundary = new Map<string, number>();
   const sessions = new Map<string, Request[]>();
-  for (const r of scan.requests) {
+  for (const r of [...scan.cacheContext.requests, ...scan.requests]) {
     const group = sessions.get(r.session) ?? [];
     group.push(r);
     sessions.set(r.session, group);
   }
-  const byId = new Map(scan.requests.map((r) => [r.id, r]));
+  const byId = new Map(
+    [...scan.cacheContext.requests, ...scan.requests].map((r) => [r.id, r]),
+  );
   for (const e of scan.events.filter((e) => e.kind === "compaction")) {
     const aliases = [...new Set(e.origins.map((o) => o.session))];
     const session = [
@@ -246,7 +253,10 @@ function replayCost(options: {
   evidence: CacheReplayEvidence[];
 } {
   const { requests, scan, catalog, selectedBucket, ttl, since } = options;
-  const chain = new CacheChain(scan.events);
+  const chain = new CacheChain([
+    ...scan.cacheContext.boundaries,
+    ...scan.events,
+  ]);
   const predecessors = new Set<string>();
   const evidence: CacheReplayEvidence[] = [];
   const parts: Cost[] = [];
@@ -256,7 +266,6 @@ function replayCost(options: {
     if (estimate?.part && options.attemptScenario === "none") continue;
     const billing = estimate?.part ? [estimate.part] : r.parts;
     for (const [part, p] of billing.entries()) {
-      if (bucket(r, p) !== selectedBucket) continue;
       const replayed = chain.replay({
         request: r,
         p,
@@ -264,7 +273,7 @@ function replayCost(options: {
         estimated: !!estimate?.part || r.evidence === "estimated",
         ttl,
         cold: options.coldPrefixes ?? false,
-        selected: r.time >= since,
+        selected: r.time >= since && inBucket(r, p, selectedBucket),
       });
       if (!replayed) continue;
       if (replayed.evidence) {
@@ -281,9 +290,12 @@ function replayCost(options: {
       }
       const components = priceComponents(catalog, r, replayed.p);
       parts.push(
-        replayed.unknown
-          ? unknownCost(replayed.evidence!.reason)
-          : components.cache,
+        bucket(r, p) === "unknown" &&
+          (p.usage.read !== 0 || p.usage.write !== 0)
+          ? unknownCost("cache TTL bucket is not established for this part")
+          : replayed.unknown
+            ? unknownCost(replayed.evidence!.reason)
+            : components.cache,
       );
       fixed.push(components.ordinary, components.output);
     }
@@ -307,11 +319,11 @@ function check(options: {
   now: number;
 }): CheckResult | null {
   const { scan, catalog, profile, selectedBucket, summaries, now } = options;
-  const requests = scan.requests
+  const requests = [...scan.cacheContext.requests, ...scan.requests]
     .filter((r) => r.harness === "claude" && r.profiles.includes(profile.id))
     .sort((a, b) => a.time - b.time);
   const relevant = requests.filter((r) =>
-    r.parts.some((p) => bucket(r, p) === selectedBucket),
+    r.parts.some((p) => inBucket(r, p, selectedBucket)),
   );
   const boundaries =
     selectedBucket === "subagent"
@@ -335,6 +347,11 @@ function check(options: {
       (n, r) => Math.min(n, r.time),
       boundaries.reduce((n, e) => Math.min(n, e.time), Infinity),
     );
+  if (
+    !relevant.some((r) => r.time >= since) &&
+    !boundaries.some((e) => e.time >= since)
+  )
+    return null;
   const summaryIds = new Set(
     boundaries.filter((e) => e.time >= since).map((e) => e.id),
   );
@@ -378,10 +395,11 @@ function check(options: {
   };
   const coldComparison = replay("1h", { coldPrefixes: true }).comparison;
   const cold = addCosts([coldComparison, fixedCost]);
-  const usageEstimates = relevant
+  const usageEstimates = requests
     .filter(
       (r) =>
-        r.time >= since ||
+        (r.time >= since &&
+          r.parts.some((p) => inBucket(r, p, selectedBucket))) ||
         short.predecessors.has(r.id) ||
         long.predecessors.has(r.id),
     )
@@ -447,6 +465,7 @@ function check(options: {
   const uncertainty = [
     "gap replay assumes the same requests, stable prefixes, and no extra work; shared caches and invalidations can change the outcome",
     "unknown source identifiers are never inferred from idle time",
+    "unknown part/agent attribution is conditional in both possible buckets; per-check request counts and fixed costs are not additive",
     "current profile settings are applied to history; project/CLI settings and agent frontmatter may override user defaults",
     "unknown client lifetime and unlogged discarded summaries are not measured zero",
   ];
@@ -463,6 +482,11 @@ function check(options: {
     uncertainty.push(estimate.reason, ...estimate.assumptions);
   uncertainty.push(
     ...relevant.filter((r) => r.time >= since).flatMap((r) => r.issues),
+    ...requests
+      .filter(
+        (r) => short.predecessors.has(r.id) || long.predecessors.has(r.id),
+      )
+      .flatMap((r) => r.issues),
     ...short.evidence.map((e) => e.reason),
     ...long.evidence.map((e) => e.reason),
     ...cost["5m"].unknown,

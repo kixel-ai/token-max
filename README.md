@@ -53,7 +53,8 @@ file lengths and deferred byte counts in JSON. There is no skip-malformed mode.
 
 The minimal report and `--json` share the same analysis. JSON schema version 1
 includes profile aliases, snapshots, deduplicated requests, structural events,
-usage coverage, partially known costs, summary estimates, and check results.
+usage coverage, pre-window cache context, partially known costs, summary estimates,
+and check results.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.

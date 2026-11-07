@@ -200,6 +200,7 @@ export class CacheChain {
       r.provider,
       p.speed,
       p.kind === "unknown" ? null : p.kind,
+      r.agent === "unknown" ? null : r.agent,
     ];
     const key = JSON.stringify(cohort);
     const complete = cohort.every((value) => value !== null);
@@ -249,7 +250,9 @@ export class CacheChain {
             ? "cache predecessor evidence cannot establish TTL-dependent reads/writes"
             : state === "unknown"
               ? "cache geometry is invariant across the possible recorded predecessor histories"
-              : "cache geometry uses the recorded predecessor prefix under the fixed-behavior replay";
+              : state === "estimated"
+                ? "cache geometry uses an estimated predecessor prefix under the fixed-behavior replay"
+                : "cache geometry uses the recorded predecessor prefix under the fixed-behavior replay";
       result = {
         p: unknown ? replay(undefined) : first,
         unknown,
@@ -285,19 +288,29 @@ export class CacheChain {
             ? "estimated"
             : "known"
           : "unknown";
-      const reason =
+      const prefixEvidence =
         prefix === null
+          ? "unknown"
+          : options.estimated
+            ? "estimated"
+            : "measured";
+      const reason = [
+        prefixEvidence === "unknown"
           ? "request cache usage/execution is not established"
-          : !complete
-            ? "cache cohort has unrecorded model/provider/speed/kind"
-            : options.estimated
-              ? "cache prefix estimated from measured request brackets"
-              : "recorded cache prefix";
+          : prefixEvidence === "estimated"
+            ? "cache prefix estimated from measured request brackets"
+            : "recorded cache prefix",
+        ...(!complete
+          ? ["cache cohort has unrecorded model/provider/speed/kind/agent"]
+          : []),
+      ].join("; ");
       const origin: CachePredecessor = {
         request: r.id,
         part: options.part,
         time: r.time,
         state: kind,
+        prefixEvidence,
+        cohortKnown: complete,
         reason,
       };
       const base = { cohort, origin, order: this.order++ };

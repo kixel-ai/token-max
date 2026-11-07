@@ -36,7 +36,7 @@ function sameInput(a: BillingPart, b: BillingPart): boolean {
 export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
   const result = new Map<string, UsageEstimate>();
   const boundaries = new Map<string, number[]>();
-  for (const event of scan.events) {
+  for (const event of [...scan.cacheContext.boundaries, ...scan.events]) {
     if (event.harness !== "claude" || event.kind !== "compaction") continue;
     for (const origin of event.origins) {
       const times = boundaries.get(origin.session) ?? [];
@@ -46,7 +46,9 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
   }
   for (const times of boundaries.values()) times.sort((a, b) => a - b);
   const sessions = new Map<string, Request[]>();
-  for (const r of scan.requests.filter((r) => r.harness === "claude")) {
+  for (const r of [...scan.cacheContext.requests, ...scan.requests].filter(
+    (r) => r.harness === "claude",
+  )) {
     const group = sessions.get(r.session) ?? [];
     group.push(r);
     sessions.set(r.session, group);

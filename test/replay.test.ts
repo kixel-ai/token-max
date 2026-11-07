@@ -42,6 +42,7 @@ function data(requests: Request[], events: StructuralEvent[] = []): Scan {
     snapshotFinishedAt: new Date(0).toISOString(),
     requests,
     events,
+    cacheContext: { requests: [], boundaries: [] },
     profiles: [profile],
     roots: [],
     snapshots: [],
@@ -960,5 +961,133 @@ test("unknown rates for a recorded cache-free part cancel, while an unknown cont
       now: 1200000,
     }).checks[0]!.recommended,
     null,
+  );
+});
+
+test("unknown kinds span both cache buckets while known message agents remain separate", async () => {
+  const first = makeRequest({
+    id: "first",
+    parts: [
+      {
+        ...makeRequest().parts[0]!,
+        kind: "compaction",
+        usage: claudeUsage({ write: 100000, ttl: "1h" }),
+      },
+    ],
+  });
+  const middle = makeRequest({
+    ...first,
+    id: "middle",
+    time: 17 * 60000,
+    endTime: 17 * 60000,
+    parts: [
+      {
+        ...first.parts[0]!,
+        kind: "unknown",
+        usage: claudeUsage({ read: 100000, write: 0, ttl: "1h" }),
+      },
+    ],
+  });
+  const after = makeRequest({
+    ...first,
+    id: "after",
+    time: 20 * 60000,
+    endTime: 20 * 60000,
+    parts: [
+      {
+        ...first.parts[0]!,
+        usage: claudeUsage({ read: 100000, write: 2000, ttl: "1h" }),
+      },
+    ],
+  });
+  const check = analyze({
+    scan: data([first, middle, after]),
+    catalog: await prices(),
+    since: 19 * 60000,
+  }).checks[0]!;
+  assert.equal(check.bucket, "subagent");
+  assert.equal(check.recommended, null);
+  assert.ok(
+    check.cacheEvidence.some((e) =>
+      e.predecessors.some(
+        (p) =>
+          p.request === middle.id &&
+          !p.cohortKnown &&
+          p.prefixEvidence === "measured",
+      ),
+    ),
+  );
+  middle.parts[0]!.kind = "compaction";
+  assert.equal(
+    analyze({
+      scan: data([first, middle, after]),
+      catalog: await prices(),
+      since: 19 * 60000,
+    }).checks[0]!.recommended,
+    "5m",
+  );
+  // Message cohorts in the same conversation cannot renew another agent's cache.
+  for (const r of [first, middle, after]) r.parts[0]!.kind = "message";
+  middle.agent = "subagent";
+  assert.equal(
+    analyze({
+      scan: data([first, middle, after]),
+      catalog: await prices(),
+      since: 19 * 60000,
+    }).checks[0]!.recommended,
+    "1h",
+  );
+  middle.agent = "unknown";
+  assert.equal(
+    analyze({
+      scan: data([first, middle, after]),
+      catalog: await prices(),
+      since: 19 * 60000,
+    }).checks[0]!.recommended,
+    null,
+  );
+});
+
+test("unresolved selected part attribution stays unpriced in each possible bucket", async () => {
+  const request = makeRequest();
+  request.parts[0]!.kind = "unknown";
+  const report = analyze({ scan: data([request]), catalog: await prices() });
+  assert.equal(report.checks.length, 2);
+  for (const check of report.checks) {
+    assert.equal(check.comparisonCost["5m"].totalUsd, null);
+    assert.match(
+      check.comparisonCost["5m"].unknown.join(" "),
+      /bucket is not established/,
+    );
+  }
+  assert.equal(report.historical[0]!.cost.totalUsd, null);
+  assert.match(
+    report.historical[0]!.cost.unknown.join(" "),
+    /iteration semantics/,
+  );
+});
+
+test("estimated prefix provenance remains explicit when its cohort is incomplete", async () => {
+  const { first, attempt, after } = bracketedAttempt();
+  first.parts[0]!.speed = after.parts[0]!.speed = null;
+  attempt.time = attempt.endTime = 60 * 60000;
+  after.time = after.endTime = 65 * 60000;
+  const check = analyze({
+    scan: data([first, attempt, after]),
+    catalog: await prices(),
+    since: 64 * 60000,
+  }).checks[0]!;
+  assert.equal(check.usageEstimates[0]!.evidence, "estimated");
+  assert.ok(
+    check.cacheEvidence.some((e) =>
+      e.predecessors.some(
+        (p) =>
+          p.request === attempt.id &&
+          p.state === "unknown" &&
+          p.prefixEvidence === "estimated" &&
+          !p.cohortKnown &&
+          /estimated/.test(p.reason),
+      ),
+    ),
   );
 });

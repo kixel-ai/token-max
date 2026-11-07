@@ -165,6 +165,8 @@ export interface CachePredecessor {
   part: number;
   time: number;
   state: "known" | "estimated" | "unknown";
+  prefixEvidence: "measured" | "estimated" | "unknown";
+  cohortKnown: boolean;
   reason: string;
 }
 /** Evidence for one selected request's counterfactual cache geometry, independent of prices. */
@@ -226,6 +228,8 @@ export interface Scan {
   snapshots: Snapshot[];
   requests: Request[];
   events: StructuralEvent[];
+  /** Pre-window Claude metadata supplies cache evidence, never selected billing or coverage. */
+  cacheContext: { requests: Request[]; boundaries: StructuralEvent[] };
   coverage: {
     requests: number;
     sourceKnown: number;

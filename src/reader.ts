@@ -384,6 +384,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
         }
       }
       previous.parts = r.parts;
+      previous.evidence = r.evidence;
       previous.serverTools = r.serverTools ?? previous.serverTools;
     }
     previous.reference ??= r.reference;
@@ -428,17 +429,29 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
         context.version = label(raw.version) ?? context.version;
         context.client = label(raw.entrypoint) ?? context.client;
         if (raw.type === "api-request") {
-          if (!selected) return;
           if (time === null) throw new ScanError("missing request timestamp");
-          const ref = id(raw.id);
-          const pending = request(snapshot, location, context, time, raw.id);
-          pending.reference = ref;
+          const recordedId = typeof raw.id === "string" && raw.id.length > 0;
+          const key =
+            !selected && !recordedId
+              ? `${snapshot.file}:${location.line}`
+              : raw.id;
+          const ref = id(key);
+          const pending = request(snapshot, location, context, time, key);
+          pending.reference = recordedId ? ref : null;
           pending.agent =
             raw.isSidechain === true || isSubagent ? "subagent" : "main";
           pending.source = label(raw.querySource);
           const params = object(raw.params);
           pending.model = label(params.model);
-          pending.attempt = { maxOutputTokens: count(params.max_tokens) };
+          pending.attempt = { maxOutputTokens: null };
+          try {
+            pending.attempt.maxOutputTokens = count(params.max_tokens);
+          } catch (error) {
+            if (selected || !(error instanceof ScanError)) throw error;
+            pending.issues.push(
+              "pre-window output budget is invalid; no budget estimate retained",
+            );
+          }
           pending.parts = [
             part(
               {
@@ -477,20 +490,28 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             };
           }
         }
-        if (!selected) return;
+        if (
+          !selected &&
+          raw.type !== "assistant" &&
+          !(raw.type === "system" && raw.subtype === "compact_boundary")
+        )
+          return;
         if (raw.type === "assistant") {
           const m = object(raw.message);
           if (raw.isApiErrorMessage === true || m.model === "<synthetic>")
             return;
           if (time === null) throw new ScanError("missing request timestamp");
-          if (Object.keys(m).length === 0)
+          if (selected && Object.keys(m).length === 0)
             throw new ScanError("missing assistant message");
+          const key = m.id ?? raw.requestId ?? raw.requestRef;
           const r = request(
             snapshot,
             location,
             context,
             time,
-            m.id ?? raw.requestId ?? raw.requestRef,
+            !selected && !(typeof key === "string" && key.length > 0)
+              ? `${snapshot.file}:${location.line}`
+              : key,
           );
           r.model = label(m.model);
           r.reference =
@@ -498,14 +519,25 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           r.source = label(raw.querySource);
           r.agent =
             raw.isSidechain === true || isSubagent ? "subagent" : "main";
-          r.parts = claudeParts(m.usage, r.model);
-          r.serverTools = numericTools(object(m.usage).server_tool_use);
+          try {
+            r.parts = claudeParts(m.usage, r.model);
+          } catch (error) {
+            if (selected || !(error instanceof ScanError)) throw error;
+            r.parts = [part({}, null, "unknown")];
+            r.evidence = "unknown";
+            r.issues.push(
+              "pre-window usage is invalid; cache predecessor remains unknown",
+            );
+          }
+          r.serverTools = selected
+            ? numericTools(object(m.usage).server_tool_use)
+            : null;
           if (!m.usage) {
             r.evidence = "unknown";
             r.issues.push("request usage is absent");
           }
           add(r);
-          if (Array.isArray(m.content))
+          if (selected && Array.isArray(m.content))
             for (const block of m.content) {
               const b = object(block);
               if (b.type === "tool_use") {
@@ -544,9 +576,9 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
               : null;
           e.precomputed =
             typeof meta.precomputed === "boolean" ? meta.precomputed : null;
-          e.preTokens = count(meta.preTokens);
-          e.postTokens = count(meta.postTokens);
-          e.durationMs = count(meta.durationMs);
+          e.preTokens = selected ? count(meta.preTokens) : null;
+          e.postTokens = selected ? count(meta.postTokens) : null;
+          e.durationMs = selected ? count(meta.durationMs) : null;
           e.request =
             typeof raw.requestRef === "string"
               ? `ref:${id(raw.requestRef)}`
@@ -858,10 +890,14 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
         e.pricing.provider = current[0]!.provider ?? "anthropic";
     }
   }
-  const sortedRequests = [...requests.values()].sort(
+  const allRequests = [...requests.values()].sort(
     (a, b) => a.time - b.time || a.id.localeCompare(b.id),
   );
-  const sortedEvents = [...events.values()].sort((a, b) => a.time - b.time);
+  const allEvents = [...events.values()].sort((a, b) => a.time - b.time);
+  const beforeWindow = (value: { time: number }) =>
+    options.since !== undefined && value.time < options.since;
+  const sortedRequests = allRequests.filter((r) => !beforeWindow(r));
+  const sortedEvents = allEvents.filter((e) => !beforeWindow(e));
   for (const r of sortedRequests)
     for (const issue of r.issues) issues.add(issue);
   if (sortedEvents.some((e) => e.kind === "compaction"))
@@ -874,6 +910,12 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     snapshotFinishedAt,
     requests: sortedRequests,
     events: sortedEvents,
+    cacheContext: {
+      requests: allRequests.filter(beforeWindow),
+      boundaries: allEvents.filter(
+        (e) => beforeWindow(e) && e.kind === "compaction",
+      ),
+    },
     coverage: {
       requests: sortedRequests.length,
       sourceKnown: sortedRequests.filter(

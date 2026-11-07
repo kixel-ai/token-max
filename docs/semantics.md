@@ -8,13 +8,19 @@ that changes identity or shrinks fails. Appended bytes are outside the snapshot.
 The JSON result records the discovery interval, each byte boundary, and unfinished
 final-line sizes. Metadata storage grows with requests/events, not transcript text.
 
-Valid records whose timestamp proves they precede `--since` are excluded before
-usage validation. Context records still establish the subsequent model/client.
-File dates and modification times cannot prove that all records precede the
-window. A broken JSON record cannot safely prove its top-level timestamp, so it
-fails even when the file began earlier. Diagnostics never quote JSON parser errors.
-Unexpected normalization exceptions remain internal errors, distinct from malformed
-JSON/UTF-8 and explicit invalid metadata. The CLI sanitizes internal failures.
+Records whose timestamp proves they precede `--since` stay outside selected
+billing and usage coverage. Claude requests and compaction boundaries are retained
+separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence.
+Invalid pre-window usage becomes an unknown cache state, never a billed estimate or
+silently discarded attempt; it does not fail selected billing validation. Selected
+usage errors fail the scan. Requests linked across the window use their recorded
+start time, so a completion after the boundary does not move old work into billing.
+Context records still establish subsequent model/client metadata. File dates and
+modification times cannot prove that all records precede the window. A broken JSON
+record cannot safely prove its top-level timestamp, so it fails even when the file
+began earlier. Diagnostics never quote JSON parser errors. Unexpected normalization
+exceptions remain internal errors, distinct from malformed JSON/UTF-8 and explicit
+invalid metadata. The CLI sanitizes internal failures.
 
 Claude assistant entries sharing a message identity are usage snapshots. They are
 merged, never summed. `api-request.id` links through assistant `requestRef` to
@@ -91,23 +97,29 @@ can read the surviving prefix at 1h. Reuse is limited to the preceding cached
 prefix; newly appended tokens still need writing. Recorded 5m reads in such a gap
 are preserved as evidence of an externally warmed prefix. First visible requests
 keep observed reads. Cache histories are separate by model, speed, provider,
-conversation and part kind; compaction boundaries reset them, including copied
+conversation, agent and part kind; compaction boundaries reset them, including copied
 boundary origins. The lower aggregate estimate decides the winner,
 even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
 reuse break-even accompany the estimate and do not veto it.
 
 The maintainer's [B1 cache-state decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6710296074)
 uses explicit known, estimated and unknown predecessor states. A recorded cache
-touch establishes a known prefix in its fully recorded cohort; supported attempt
+touch establishes a known prefix in its fully resolved cohort; supported attempt
 estimates establish estimated prefixes. Unsupported attempts preserve the previous
 state and add an unknown possible touch, rather than silently clearing or renewing
-it. Missing model/provider/speed/kind spans every compatible cohort. A later fully
-recorded touch resolves earlier alternatives in its own cohort, while a zero-cache
+it. Missing model/provider/speed/kind/agent spans every compatible cohort. All parts
+inform cache state before the selected bucket is charged; unknown attribution
+can affect either bucket. Selected parts with unresolved bucket attribution remain
+unpriced in both conditional comparisons, whose request counts/fixed costs must
+not be added. A later touch in a fully resolved cohort supersedes earlier alternatives
+in that cohort, while a zero-cache
 request cannot renew or erase an older cached prefix. Pre-window states are replayed
 without charging them or adding them to the selected request count.
 
 `cacheEvidence` reports predecessor request/part IDs, times, state and the outcome
-of each uncertain or estimated transition. Witnesses cover the latest possible
+of each uncertain or estimated transition. Each predecessor separately records
+`prefixEvidence` (measured/estimated/unknown) and `cohortKnown`, so an estimated
+prefix with missing cohort metadata retains both facts. Witnesses cover the latest possible
 expired/recent predecessors and the prefix extrema in the 5-to-60-minute range;
 they are not a duplicate inventory of every attempt. Every original attempt stays
 in the scan. Unknown prefix lengths are evaluated at the conversion extrema, not

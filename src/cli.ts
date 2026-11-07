@@ -89,7 +89,7 @@ export function formatReport(report: Report): string {
       lines.push(`  Assumption: ${assumption}`);
     for (const evidence of result.cacheEvidence)
       lines.push(
-        `  Cache evidence ${evidence.request}/${evidence.part} ${evidence.ttl}: ${evidence.state}, ${evidence.outcome}; predecessors ${evidence.predecessors.map((p) => `${p.request}/${p.part} (${p.state}, ${new Date(p.time).toISOString()})`).join(", ") || "unrecorded"}. ${evidence.reason}`,
+        `  Cache evidence ${evidence.request}/${evidence.part} ${evidence.ttl}: ${evidence.state}, ${evidence.outcome}; predecessors ${evidence.predecessors.map((p) => `${p.request}/${p.part} (${p.state}, prefix ${p.prefixEvidence}, cohort ${p.cohortKnown ? "known" : "incomplete"}, ${new Date(p.time).toISOString()})`).join(", ") || "unrecorded"}. ${evidence.reason}`,
       );
     for (const uncertainty of result.uncertainty)
       lines.push(`  Uncertainty: ${uncertainty}`);

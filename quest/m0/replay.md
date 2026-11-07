@@ -38,8 +38,17 @@ The opposite-winner case is corrected: both missing and recorded speed preserve
 the unknown predecessor and leave the affected 5m comparison unpriced. New tests
 cover possible cohorts, lifetime boundaries and prefix extrema, invariant geometry,
 known-state recovery, zero-cache requests and copied compaction boundaries. Full
-checks pass with 53 synthetic tests on Bun and Node 24; built tests also pass on
+checks pass with 59 synthetic tests on Bun and Node 24; built tests also pass on
 Node 22. Main through the protected squash configuration PR is merged locally.
+
+B1 review round 1 (Claude Opus 5.5 high, 7/10 at 80788ff) verified all earlier
+fixes and the core state/compression model. It found explicit `--since` dropping
+pre-window evidence, cross-bucket unknown kinds being filtered before replay, and
+estimated-prefix labels losing their evidence type when the cohort was incomplete.
+These are fixed with separate pre-window cache context, all-part replay with agent
+cohorts, independent prefix/cohort provenance, and unpriced conditional comparisons
+for selected parts whose bucket cannot be established. New end-to-end reader/CLI tests
+cover these paths, invalid unselected usage and requests linked across the window.
 
 Remaining work:
 

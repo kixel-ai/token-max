@@ -99,6 +99,7 @@ function data(count = 4): Scan {
   return {
     snapshotStartedAt: new Date(0).toISOString(),
     snapshotFinishedAt: new Date(0).toISOString(),
+    exposure: { components: [], requests: [], invocations: [], visibility: [] },
     since: null,
     requests,
     events: [boundary],

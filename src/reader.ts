@@ -1,3 +1,4 @@
+import { ExposureCollector } from "./exposure.js";
 import { open } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 import type {
@@ -340,6 +341,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   const snapshotStartedAt = new Date().toISOString();
   const discovery = await discover(options);
   const snapshotFinishedAt = new Date().toISOString();
+  const exposure = new ExposureCollector();
   const requests = new Map<string, Request>();
   const events = new Map<string, StructuralEvent>();
   const refs = new Map<string, Request>();
@@ -418,6 +420,15 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
       const time = timestamp(raw.timestamp);
       const selected =
         time === null || options.since === undefined || time >= options.since;
+      try {
+        exposure.observe({ raw, snapshot, location });
+      } catch (error) {
+        if (selected || !(error instanceof ScanError)) throw error;
+        exposure.invalidate();
+        issues.add(
+          "invalid pre-window component metadata; subsequent exposure is incomplete",
+        );
+      }
       const p = object(raw.payload);
       if (snapshot.harness === "claude") {
         if (typeof raw.cwd === "string" && isAbsolute(raw.cwd))
@@ -911,6 +922,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     since: options.since ?? null,
     requests: sortedRequests,
     events: sortedEvents,
+    exposure: exposure.finish(sortedRequests, options.since ?? null),
     cacheContext: {
       requests: allRequests.filter(beforeWindow),
       boundaries: allEvents.filter(

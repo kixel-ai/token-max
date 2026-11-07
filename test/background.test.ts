@@ -384,7 +384,9 @@ test("built CLI keeps background-only guidance advisory and fails atomically for
     const run = () => spawnSync(process.execPath, args, { encoding: "utf8" });
     const ok = run();
     assert.equal(ok.status, 0, ok.stderr);
-    const c = JSON.parse(ok.stdout).checks[0];
+    const c = JSON.parse(ok.stdout).checks.find(
+      (c: { check: string }) => c.check === "background-generation",
+    );
     assert.equal(c.check, "background-generation");
     assert.equal(c.savingsUsd, null);
     assert.equal(c.action, "advisory");

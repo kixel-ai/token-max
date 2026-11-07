@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { scan } from "../src/reader.js";
-import { analyze } from "../src/replay.js";
+import { analyze as analyzeReport } from "../src/replay.js";
 import { prices, workspace } from "./helpers.js";
 
 const common = {
@@ -14,6 +14,14 @@ const common = {
   querySource: "sdk",
 };
 const time = (minute: number) => new Date(minute * 60000).toISOString();
+function analyze(options: Parameters<typeof analyzeReport>[0]) {
+  const report = analyzeReport(options);
+  return {
+    ...report,
+    checks: report.checks.filter((c) => c.check === "claude-cache-ttl"),
+  };
+}
+
 function assistant(minute: number, id: string, read: number, write: number) {
   return {
     ...common,

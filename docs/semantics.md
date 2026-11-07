@@ -224,3 +224,69 @@ keep these limits when interpreting eligibility and final periods. No observed
 idle fixture or reproducible historical billing total is claimed. The host has
 multiple malformed complete records across several histories; the first safe
 failure location is not a claim that repairing one file would enable a full audit.
+
+## Compaction windows
+
+Window comparisons reuse the TTL check's cache replay, input estimates, price
+components, deduplicated histories and summary attribution. They run after the
+recommended TTLs. Their baseline applies the current explicit window to the same
+selected requests; it does not present savings from an older, larger historical
+window as savings from today's smaller setting. The comparison starts at explicit
+`--since`, or available selected history after any inferred TTL transition.
+Pre-window usage may calibrate geometry and cache evidence but is never charged.
+
+Claude's current environment, user file and managed file resolve to the owning
+window control. Per-model values override a global value within one scope; a
+higher scope's global value beats a lower scope's per-model value. Dated native
+model IDs share the undated row, with exact matches preferred. Unknown tuned
+defaults are not guessed. The latest recorded client version is the applicability
+assumption. Per-model controls require v2.1.288; environment suffixes require
+v2.1.304. Project, launch and per-agent overrides remain an explicit limitation of
+the observed-file analysis. See [Claude model configuration](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)
+and [settings reference](https://code.claude.com/docs/en/settings-reference#modelsettings),
+checked 2026-11-07. Disabled compaction stays advisory.
+
+Codex's explicit `model_auto_compact_token_limit` is a total-context threshold by
+default. An unset limit, unresolved named profile, or `body_after_prefix` scope
+stays advisory; the latter is unpriced because a total-context replay would model
+the wrong control. See [Codex configuration](https://developers.openai.com/codex/config-reference),
+checked 2026-11-07. Compacted output can retain items beyond the summary, so summary
+output tokens are not used as the resumed prefix. See [OpenAI compaction](https://developers.openai.com/api/docs/guides/compaction),
+checked 2026-11-07.
+
+Candidate windows use observed input sizes, catalog tier boundaries and the
+current explicit limit, within provider bounds. Claude also includes its documented
+100k minimum. This finite empirical search does not claim the optimum over every
+integer threshold. It evaluates only earlier compactions; lost historical context
+cannot be reconstructed to price larger windows. Every observed compaction remains
+once, whether linked usage or an unmatched proxy, including when an earlier pass
+might replace it. Those replacement effects are not claimed as observed savings.
+
+Before an affected request, a modeled pass reads the entire estimated context at
+ordinary input rates and writes the median observed summary output in a matching
+model/provider/agent/tier/speed/geography cohort. Its resumed cache prefix uses the
+median first post-boundary prefix, which can contain instructions, retained items
+and new context. Linked summary usage supplies output size where available;
+Claude `postTokens` remains a labelled proxy otherwise. Disagreeing summary-model
+attribution leaves the affected comparison unpriced. JSON gives each supporting
+boundary and resumed request identity. The new prefix is cold on the resumed
+request, whose charge already includes it; `prefixCost` is attribution, not another
+charge to add. Subsequent growing prefixes reuse only within the chosen Claude
+lifetime or the documented default 30m billed Codex lifetime. A new prefix cannot
+inherit external warming of the replaced transcript.
+
+Observed boundaries reset modeled reductions. Ambiguous multipart geometry,
+missing affected usage, model/agent/provider changes, unexplained context decreases
+and unsupported cache retention leave candidates unpriced. Unchanged unknown costs
+may cancel; affected input/cache prices and context tiers are repriced, including
+output when its unit rate changes. Full totals keep unknown charges even when the
+comparison is priced. Bracketed attempt estimates retain their witnesses and never
+turn original missing billing into measured usage.
+
+The largest estimated aggregate net saving selects the recommendation. Cohort
+maximum summary/prefix sizes and cold-summary charges are conditional sensitivities,
+not vetoes or guaranteed bounds. Extra work from lost detail, file re-reads, tool
+calls and changed reasoning is unmeasured. The report gives the extra dollar cost
+that would erase the modeled saving. Window savings are incremental to their named
+TTL baseline; separate model/check savings overlap and must not be summed. The idle
+compaction on/off policy remains a separate downstream check.

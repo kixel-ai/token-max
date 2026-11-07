@@ -2,6 +2,7 @@ import type {
   BillingPart,
   CacheReplayEvidence,
   CheckResult,
+  TtlCheckResult,
   CompactionCharge,
   Cost,
   Profile,
@@ -15,7 +16,6 @@ import type {
 import {
   addCosts,
   pricePart,
-  priceComponents,
   priceRequest,
   PRICE_SOURCES,
   serverCost,
@@ -24,19 +24,14 @@ import {
   type Catalog,
 } from "./prices.js";
 import { estimateUsage } from "./estimates.js";
-import { CacheChain, observedTtl } from "./cache.js";
+import { observedTtl } from "./cache.js";
+import { cacheBucket as bucket, replayParts } from "./scenarios.js";
+import { compactionChecks } from "./compaction.js";
 import { identity, ScanError } from "./safe.js";
 
 const TTL_SOURCE =
   "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 const MINUTE = 60_000;
-
-function bucket(r: Request, p: BillingPart): "main" | "subagent" | "unknown" {
-  if (r.agent === "subagent") return "subagent";
-  if (p.kind === "unknown") return "unknown";
-  if (p.kind === "compaction" || p.kind === "advisor") return "subagent";
-  return r.agent;
-}
 
 function inBucket(r: Request, p: BillingPart, selected: "main" | "subagent") {
   return bucket(r, p) === selected || bucket(r, p) === "unknown";
@@ -258,52 +253,33 @@ function replayCost(options: {
   evidence: CacheReplayEvidence[];
 } {
   const { requests, scan, catalog, selectedBucket, ttl, since } = options;
-  const chain = new CacheChain([
-    ...scan.cacheContext.boundaries,
-    ...scan.events,
-  ]);
   const predecessors = new Set<string>();
   const evidence: CacheReplayEvidence[] = [];
   const parts: Cost[] = [];
   const fixed: Cost[] = [];
-  for (const r of requests) {
-    const estimate = options.estimates.get(r.id);
-    if (estimate?.part && options.attemptScenario === "none") continue;
-    const billing = estimate?.part ? [estimate.part] : r.parts;
-    for (const [part, p] of billing.entries()) {
-      const replayed = chain.replay({
-        request: r,
-        p,
-        part,
-        estimated: !!estimate?.part || r.evidence === "estimated",
-        ttl,
-        cold: options.coldPrefixes ?? false,
-        selected: r.time >= since && inBucket(r, p, selectedBucket),
-      });
-      if (!replayed) continue;
-      if (replayed.evidence) {
-        evidence.push(replayed.evidence);
-        for (const predecessor of replayed.evidence.predecessors)
-          predecessors.add(predecessor.request);
-      }
-      if (estimate?.part && options.attemptScenario === "cold") {
-        const u = replayed.p.usage;
-        u.write = u.write! + u.read!;
-        u.read = 0;
-        u.write5m = ttl === "5m" ? u.write : 0;
-        u.write1h = ttl === "1h" ? u.write : 0;
-      }
-      const components = priceComponents(catalog, r, replayed.p);
-      parts.push(
-        bucket(r, p) === "unknown" &&
-          (p.usage.read !== 0 || p.usage.write !== 0)
-          ? unknownCost("cache TTL bucket is not established for this part")
-          : replayed.unknown
-            ? unknownCost(replayed.evidence!.reason)
-            : components.cache,
-      );
-      fixed.push(components.ordinary, components.output);
+  for (const item of replayParts({
+    requests,
+    events: [...scan.cacheContext.boundaries, ...scan.events],
+    catalog,
+    estimates: options.estimates,
+    ttls: { main: ttl, subagent: ttl },
+    since,
+    ...(options.coldPrefixes === undefined
+      ? {}
+      : { coldPrefixes: options.coldPrefixes }),
+    ...(options.attemptScenario === undefined
+      ? {}
+      : { attemptScenario: options.attemptScenario }),
+  })) {
+    if (!item.selected || !inBucket(item.request, item.p, selectedBucket))
+      continue;
+    if (item.evidence) {
+      evidence.push(item.evidence);
+      for (const predecessor of item.evidence.predecessors)
+        predecessors.add(predecessor.request);
     }
+    parts.push(item.components.cache);
+    fixed.push(item.components.ordinary, item.components.output);
   }
   return {
     comparison: addCosts(parts),
@@ -322,7 +298,7 @@ function check(options: {
   estimates: Map<string, UsageEstimate>;
   since: number | undefined;
   now: number;
-}): CheckResult | null {
+}): TtlCheckResult | null {
   const { scan, catalog, profile, selectedBucket, summaries, now } = options;
   const requests = [...scan.cacheContext.requests, ...scan.requests]
     .filter((r) => r.harness === "claude" && r.profiles.includes(profile.id))
@@ -606,6 +582,17 @@ export function analyze(options: {
       });
       if (result) checks.push(result);
     }
+  checks.push(
+    ...compactionChecks({
+      scan,
+      catalog,
+      summaries: compactions,
+      estimates,
+      ttls: checks.filter((c) => c.check === "claude-cache-ttl"),
+      since,
+      now,
+    }),
+  );
   return {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),

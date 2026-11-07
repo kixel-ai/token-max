@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import type { Harness, Profile, RootStatus, Snapshot, Ttl } from "./model.js";
 import { identity, label, object, ScanError } from "./safe.js";
+import { compactionControls } from "./controls.js";
 
 /** Explicit roots limit the entire scan; otherwise discover host-local profiles. */
 export interface DiscoveryOptions {
@@ -129,10 +130,14 @@ export function structuralSettings(
     "idleCompaction",
     "fastMode",
     "autoCompact",
+    "autoCompactEnabled",
+    "autoCompactWindow",
     "model",
     "model_provider",
     "service_tier",
     "model_auto_compact_token_limit",
+    "model_auto_compact_token_limit_scope",
+    "model_post_turn_compact_threshold_percent",
     "model_context_window",
     "effort",
     "realtime_active",
@@ -234,7 +239,8 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       canonical,
       root.harness === "claude" ? "settings.json" : "config.toml",
     );
-    let config = await settings(settingsFile, root.harness);
+    const user = await settings(settingsFile, root.harness);
+    let config = user;
     const managedFile = options.managedSettingsFile ?? managedSettingsPath();
     const managed =
       root.harness === "claude" ? await settings(managedFile, "claude") : {};
@@ -297,6 +303,14 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       }),
       provider,
       settings: structuralSettings(config),
+      compaction: compactionControls({
+        harness: root.harness,
+        user,
+        managed,
+        env: localEnv,
+        file: settingsFile,
+        managedFile,
+      }),
     });
   }
   const files = new Map<string, Snapshot>();

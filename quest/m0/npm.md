@@ -77,3 +77,7 @@ Sources checked 2026-11-06: [npm exec and npx](https://docs.npmjs.com/cli/v11/co
 [trusted publisher setup and expiry](https://docs.npmjs.com/trusted-publishers),
 [npm naming protections](https://docs.npmjs.com/threats-and-mitigations), and
 [existing tokenmax package](https://registry.npmjs.org/tokenmax/latest).
+
+## Required
+
+- [Replay and the cache TTL check](/quest/m0/replay.md) - TypeScript build, runtime compatibility, and an actual CLI to package

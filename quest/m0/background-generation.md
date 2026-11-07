@@ -63,6 +63,10 @@ usage](https://code.claude.com/docs/en/costs#background-token-usage),
 [goal check-in control](https://code.claude.com/docs/en/env-vars), and
 [Codex recap setting](https://learn.chatgpt.com/docs/config-file/config-reference).
 
+## Required
+
+- [Replay and the cache TTL check](/quest/m0/replay.md) - source attribution, request costs, and coverage-aware reporting
+
 ## Related
 
 - [Idle compaction check](/quest/m0/idle-compaction.md) - owns idle-summary costs and the on/off comparison

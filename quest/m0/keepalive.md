@@ -93,4 +93,5 @@ Recommendations for the implementer:
 
 ## Required
 
+- [Replay and the cache TTL check](/quest/m0/replay.md) - the reader, prices, and report it adds to
 - [Idle compaction check](/quest/m0/idle-compaction.md) - the compaction alternative and client lifetime bounds used in the comparison

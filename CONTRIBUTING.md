@@ -9,7 +9,7 @@ Run local checks and the independent review before requesting landing.
 With maintainer approval, use `quest merge <pr> --squash --land <full-head-sha>`
 to land the reviewed head or arm auto-merge while checks are pending.
 When main advances, merge it into the PR branch and rerun the required
-checks and review. Never bypass the required checks or use `--direct`.
+checks. Never bypass the required checks or use `--direct`.
 
 Workflows use read-only credentials and GitHub-hosted runners. Publication
 credentials belong only to the separate protected release path.

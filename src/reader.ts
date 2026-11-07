@@ -12,6 +12,7 @@ import type {
 } from "./model.js";
 import {
   discover,
+  discoverIdleOwners,
   structuralSettings,
   type DiscoveryOptions,
 } from "./discovery.js";
@@ -346,6 +347,13 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   const exposure = new ExposureCollector();
   const requests = new Map<string, Request>();
   const events = new Map<string, StructuralEvent>();
+  // Only explicit compaction lineage can connect a notice to its boundary.
+  // Ordinary messages stop the walk; a missing parent is not a historical match.
+  const compactParents = new Map<
+    string,
+    { parent: string | null; boundary: string | null } | null
+  >();
+  const noticeParents = new Map<string, Set<string | null>>();
   const refs = new Map<string, Request>();
   const issues = new Set<string>();
   const modernTotals = new Set<string>();
@@ -441,6 +449,35 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             : id(raw.sessionId);
         context.version = label(raw.version) ?? context.version;
         context.client = label(raw.entrypoint) ?? context.client;
+        const recordKey =
+          typeof raw.uuid === "string"
+            ? identity(`${context.session}:${id(raw.uuid)}`)
+            : null;
+        const parentKey =
+          typeof raw.parentUuid === "string"
+            ? identity(`${context.session}:${id(raw.parentUuid)}`)
+            : null;
+        if (
+          recordKey &&
+          (raw.isCompactSummary === true ||
+            raw.type === "attachment" ||
+            (raw.type === "system" && raw.subtype === "compact_boundary"))
+        ) {
+          const link = {
+            parent: parentKey,
+            boundary:
+              raw.type === "system"
+                ? identity(`${snapshot.harness}:compaction:${raw.uuid}`)
+                : null,
+          };
+          if (
+            compactParents.has(recordKey) &&
+            JSON.stringify(compactParents.get(recordKey)) !==
+              JSON.stringify(link)
+          )
+            compactParents.set(recordKey, null);
+          else compactParents.set(recordKey, link);
+        }
         if (raw.type === "api-request") {
           if (time === null) throw new ScanError("missing request timestamp");
           const recordedId = typeof raw.id === "string" && raw.id.length > 0;
@@ -599,6 +636,30 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
                 ? `claude:${id(meta.requestId)}`
                 : null;
           addEvent(e);
+        } else if (
+          raw.type === "system" &&
+          raw.subtype === "informational" &&
+          raw.level === "notice" &&
+          typeof raw.content === "string" &&
+          /^(Compacted while idle, before the prompt cache expired|Compacted using a summary written while you were away) ·(?:\s|\u00a0)*turn off with "idleCompaction": false in settings\.json$/.test(
+            raw.content,
+          )
+        ) {
+          if (time === null)
+            throw new ScanError("missing idle notice timestamp");
+          const e = event(
+            snapshot,
+            location,
+            context,
+            time,
+            "idle-notice",
+            raw.uuid,
+          );
+          e.idleAttribution = "notice";
+          addEvent(e);
+          const parents = noticeParents.get(e.id) ?? new Set<string | null>();
+          parents.add(parentKey);
+          noticeParents.set(e.id, parents);
         } else if (raw.type === "user") {
           if (time === null) return;
           const m = object(raw.message);
@@ -908,15 +969,41 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     (a, b) => a.time - b.time || a.id.localeCompare(b.id),
   );
   const allEvents = [...events.values()].sort((a, b) => a.time - b.time);
+  for (const notice of allEvents.filter((e) => e.kind === "idle-notice")) {
+    const parents = noticeParents.get(notice.id);
+    let key = parents?.size === 1 ? [...parents][0] : null;
+    const visited = new Set<string>();
+    while (key && !visited.has(key)) {
+      visited.add(key);
+      const link = compactParents.get(key);
+      if (!link) break;
+      if (link.boundary) {
+        const boundary = events.get(link.boundary);
+        if (
+          boundary &&
+          boundary.trigger === "auto" &&
+          boundary.time <= notice.time &&
+          boundary.idleAttribution !== "notice" &&
+          boundary.origins.some((o) =>
+            notice.origins.some((n) => n.session === o.session),
+          )
+        )
+          boundary.idleAttribution = "notice";
+        break;
+      }
+      key = link.parent;
+    }
+  }
   const beforeWindow = (value: { time: number }) =>
     options.since !== undefined && value.time < options.since;
   const sortedRequests = allRequests.filter((r) => !beforeWindow(r));
   const sortedEvents = allEvents.filter((e) => !beforeWindow(e));
+  await discoverIdleOwners(options, discovery.profiles, allRequests);
   for (const r of sortedRequests)
     for (const issue of r.issues) issues.add(issue);
   if (sortedEvents.some((e) => e.kind === "compaction"))
     issues.add(
-      "idle notices have no verified transcript discriminator; precomputed is only an undocumented candidate; final missing boundaries do not establish no summary",
+      "only native informational idle notices attribute applied idle compaction; precomputed alone and final missing boundaries do not establish summary generation or absence",
     );
   return {
     ...discovery,

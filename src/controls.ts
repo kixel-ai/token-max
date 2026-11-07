@@ -1,5 +1,72 @@
-import type { Profile, WindowControl } from "./model.js";
+import type { IdleControl, Profile, WindowControl } from "./model.js";
 import { object, ScanError } from "./safe.js";
+
+/** Merge settings environments in precedence order, preserving each effective key's owner. */
+export function scopedEnvironment(options: {
+  scopes: { config: Record<string, unknown>; file: string }[];
+  env: Record<string, unknown>;
+}): { values: Record<string, unknown>; owners: Record<string, string> } {
+  const values: Record<string, unknown> = Object.create(null);
+  const owners: Record<string, string> = Object.create(null);
+  for (const { config, file } of options.scopes)
+    for (const [key, value] of Object.entries(object(config.env))) {
+      values[key] = value;
+      owners[key] = `${file}:env.${key}`;
+    }
+  for (const [key, value] of Object.entries(options.env)) {
+    values[key] = value;
+    owners[key] = key;
+  }
+  return { values, owners };
+}
+
+/** Resolve native idle settings in precedence order, retaining invalid environment values as unknown. */
+export function idleControls(options: {
+  scopes: { config: Record<string, unknown>; file: string }[];
+  env: Record<string, unknown>;
+}): IdleControl {
+  const first = options.scopes[0]?.file ?? "settings.json";
+  let value: boolean | null = true;
+  let owner = `${first}:idleCompaction`;
+  let autoCompact: boolean | null = true;
+  let threshold: number | null = 200000;
+  let thresholdOwner = "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS (default)";
+  const { values: env, owners } = scopedEnvironment(options);
+  for (const { config, file } of options.scopes) {
+    for (const key of ["idleCompaction", "autoCompactEnabled"] as const) {
+      if (!Object.hasOwn(config, key)) continue;
+      if (typeof config[key] !== "boolean")
+        throw new ScanError(`invalid ${key}`, { file, line: 1 });
+      if (key === "idleCompaction") {
+        value = config[key];
+        owner = `${file}:${key}`;
+      } else autoCompact = config[key];
+    }
+  }
+  if (env.DISABLE_AUTO_COMPACT === "1") autoCompact = false;
+  const key = "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS";
+  if (env[key] !== undefined) {
+    thresholdOwner = owners[key]!;
+    const text = String(env[key]);
+    const n = Number(text);
+    threshold =
+      /^\d+$/.test(text) && Number.isSafeInteger(n) && n > 0
+        ? Math.max(100000, n)
+        : null;
+  }
+  return {
+    value,
+    owner,
+    threshold,
+    thresholdOwner,
+    autoCompact,
+    resolved: threshold !== null,
+    reason:
+      threshold === null
+        ? "idle threshold environment value is invalid or unsupported"
+        : "current native files and active-profile environment; unrecorded launch overrides remain outside observed ownership",
+  };
+}
 
 /** Documented Claude settings and environment window bounds. */
 export const CLAUDE_WINDOW_BOUNDS = {
@@ -15,9 +82,17 @@ export function compactionControls(options: {
   env: Record<string, unknown>;
   file: string;
   managedFile: string;
+  scopes?: { config: Record<string, unknown>; file: string }[];
 }): Profile["compaction"] {
   const { harness, user, managed, file, managedFile } = options;
-  const env = { ...object(user.env), ...object(managed.env), ...options.env };
+  const scopes = options.scopes ?? [
+    { config: user, file },
+    { config: managed, file: managedFile },
+  ];
+  const { values: env, owners } = scopedEnvironment({
+    scopes,
+    env: options.env,
+  });
   const models: Record<string, WindowControl> = Object.create(null);
   if (harness === "codex") {
     const value = user.model_auto_compact_token_limit;
@@ -66,20 +141,14 @@ export function compactionControls(options: {
         );
     }
   }
-  const envOwner = (key: string) =>
-    Object.hasOwn(options.env, key)
-      ? key
-      : `${Object.hasOwn(object(managed.env), key) ? managedFile : file}:env.${key}`;
+  const envOwner = (key: string) => owners[key] ?? `${file}:env.${key}`;
   // The caller supplies the effective environment and its explicitly owned keys.
   function resolve(model: string | null): WindowControl {
     let value: unknown;
     let owner = model
       ? `${file}:modelSettings.${model}.autoCompactWindow`
       : `${file}:autoCompactWindow`;
-    for (const [config, source] of [
-      [user, file],
-      [managed, managedFile],
-    ] as const) {
+    for (const { config, file: source } of scopes) {
       const row = model ? object(object(config.modelSettings)[model]) : {};
       if (Object.hasOwn(config, "autoCompactWindow")) {
         value = config.autoCompactWindow;
@@ -109,8 +178,10 @@ export function compactionControls(options: {
     const suffix = override !== null && /[kKmM]$/.test(String(env[envKey]));
     const disabled =
       env.DISABLE_AUTO_COMPACT === "1" ||
-      user.autoCompactEnabled === false ||
-      managed.autoCompactEnabled === false;
+      [...scopes]
+        .reverse()
+        .find((s) => Object.hasOwn(s.config, "autoCompactEnabled"))?.config
+        .autoCompactEnabled === false;
     return {
       value: typeof value === "number" ? value : null,
       owner,
@@ -125,10 +196,7 @@ export function compactionControls(options: {
             : "tuned model default is not established from current files",
     };
   }
-  for (const [config, source] of [
-    [user, file],
-    [managed, managedFile],
-  ] as const) {
+  for (const { config, file: source } of scopes) {
     if (
       config.modelSettings !== undefined &&
       (config.modelSettings === null ||

@@ -1,10 +1,21 @@
 import { readdir, realpath, stat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { parse as parseToml } from "smol-toml";
-import type { Harness, Profile, RootStatus, Snapshot, Ttl } from "./model.js";
+import type {
+  Harness,
+  Profile,
+  Request,
+  RootStatus,
+  Snapshot,
+  Ttl,
+} from "./model.js";
 import { identity, label, object, ScanError } from "./safe.js";
-import { compactionControls } from "./controls.js";
+import {
+  compactionControls,
+  idleControls,
+  scopedEnvironment,
+} from "./controls.js";
 
 /** Explicit roots limit the entire scan; otherwise discover host-local profiles. */
 export interface DiscoveryOptions {
@@ -64,17 +75,20 @@ function controls(options: {
   file: string;
   managed: Record<string, unknown>;
   managedFile: string;
+  scopes?: { config: Record<string, unknown>; file: string }[];
 }): Profile["ttl"] {
   const { config, env, file, managed, managedFile } = options;
+  const scopes = options.scopes ?? [
+    { config, file },
+    { config: managed, file: managedFile },
+  ];
   const settingOwner = (key: string) =>
-    (Object.hasOwn(managed, key) ? managedFile : file) + ":" + key;
-  const envOwner = (key: string) =>
-    Object.hasOwn(env, key)
-      ? key
-      : (Object.hasOwn(object(managed.env), key) ? managedFile : file) +
-        ":env." +
-        key;
-  const values = { ...object(config.env), ...env };
+    ([...scopes].reverse().find((s) => Object.hasOwn(s.config, key))?.file ??
+      file) +
+    ":" +
+    key;
+  const { values, owners } = scopedEnvironment({ scopes, env });
+  const envOwner = (key: string) => owners[key] ?? `${file}:env.${key}`;
   const result = {} as Profile["ttl"];
   for (const bucket of ["main", "subagent"] as const) {
     const variable =
@@ -152,6 +166,95 @@ export function structuralSettings(
     else if (label(value)) result[key] = label(value)!;
   }
   return result;
+}
+
+/** Resolve current project/local controls at recorded directories, preserving every owner. */
+export async function discoverIdleOwners(
+  options: DiscoveryOptions,
+  profiles: Profile[],
+  requests: Request[],
+): Promise<void> {
+  options.signal?.throwIfAborted();
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  const active = await realpath(
+    resolve(env.CLAUDE_CONFIG_DIR ?? join(home, ".claude")),
+  ).catch(() => "");
+  const managedFile = options.managedSettingsFile ?? managedSettingsPath();
+  for (const profile of profiles.filter((p) => p.harness === "claude")) {
+    options.signal?.throwIfAborted();
+    const user = await settings(profile.settingsFile, "claude");
+    const managed = await settings(managedFile, "claude");
+    const localEnv = active === profile.root ? env : {};
+    profile.idleDirectories = Object.create(null) as NonNullable<
+      Profile["idleDirectories"]
+    >;
+    const relevant = requests.filter(
+      (r) => r.profiles.includes(profile.id) && r.agent === "main",
+    );
+    if (relevant.some((r) => r.cwd === null) && profile.idle) {
+      profile.idle.resolved = false;
+      profile.idle.reason =
+        "recorded working directory is absent; current project/local ownership cannot be resolved";
+    }
+    for (const cwd of new Set(
+      relevant.flatMap((r) => (r.cwd ? [r.cwd] : [])),
+    )) {
+      options.signal?.throwIfAborted();
+      let root = cwd;
+      for (let path = cwd; ; path = dirname(path)) {
+        options.signal?.throwIfAborted();
+        try {
+          await stat(join(path, ".git"));
+          root = path;
+          break;
+        } catch (error) {
+          if (!missing(error) && object(error).code !== "ENOTDIR")
+            throw new ScanError("cannot resolve current project ownership", {
+              file: path,
+              line: 0,
+            });
+        }
+        if (dirname(path) === path) break;
+      }
+      const scopes = [{ config: user, file: profile.settingsFile }];
+      for (const file of [
+        join(root, ".claude", "settings.json"),
+        join(root, ".claude", "settings.local.json"),
+      ])
+        scopes.push({ config: await settings(file, "claude"), file });
+      scopes.push({ config: managed, file: managedFile });
+      const c = idleControls({ scopes, env: localEnv });
+      const config = Object.assign({}, ...scopes.map((s) => s.config), {
+        env: Object.assign({}, ...scopes.map((s) => object(s.config.env))),
+      }) as Record<string, unknown>;
+      c.ttl = controls({
+        config,
+        env: localEnv,
+        file: profile.settingsFile,
+        managed,
+        managedFile,
+        scopes,
+      });
+      c.compaction = compactionControls({
+        harness: "claude",
+        user,
+        managed,
+        env: localEnv,
+        file: profile.settingsFile,
+        managedFile,
+        scopes,
+      });
+      try {
+        await stat(cwd);
+      } catch {
+        c.resolved = false;
+        c.reason =
+          "recorded working directory no longer exists; current project/local ownership is unresolved";
+      }
+      profile.idleDirectories[cwd] = c;
+    }
+  }
 }
 
 /** Discover configuration aliases and freeze every selected file's length before parsing. */
@@ -314,6 +417,17 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
         file: settingsFile,
         managedFile,
       }),
+      ...(root.harness === "claude"
+        ? {
+            idle: idleControls({
+              scopes: [
+                { config: user, file: settingsFile },
+                { config: managed, file: managedFile },
+              ],
+              env: localEnv,
+            }),
+          }
+        : {}),
     });
   }
   const files = new Map<string, Snapshot>();

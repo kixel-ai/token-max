@@ -31,12 +31,15 @@ test("release preparation fails closed on unfinished work, refs, versions and en
       GITHUB_REF_PROTECTED: "true",
       GITHUB_REPOSITORY: "kixelated/token-max",
       PROTECTION: JSON.stringify({
+        can_admins_bypass: false,
         protection_rules: [{ type: "required_reviewers", reviewers: [{}] }],
         deployment_branch_policy: { custom_branch_policies: true },
       }),
       POLICIES: JSON.stringify([{ name: "main", type: "branch" }]),
       API_STATUS: "200",
     };
+    const bypass = JSON.parse(good.PROTECTION);
+    bypass.can_admins_bypass = true;
     const run = (changes = {}) =>
       spawnSync("node", ["--import", preload, script], {
         cwd: dir,
@@ -58,6 +61,7 @@ test("release preparation fails closed on unfinished work, refs, versions and en
       { GITHUB_REF_PROTECTED: "false" },
       { GITHUB_REPOSITORY: "other/token-max" },
       { API_STATUS: "404" },
+      { PROTECTION: JSON.stringify(bypass) },
       {
         PROTECTION: JSON.stringify({
           protection_rules: [],
@@ -74,6 +78,15 @@ test("release preparation fails closed on unfinished work, refs, versions and en
       },
     ])
       assert.notEqual(run(changes).status, 0, JSON.stringify(changes));
+    await writeFile(
+      join(dir, "package.json"),
+      JSON.stringify({
+        name: "@kixelated/token-max",
+        version: "0.1.0",
+        private: true,
+      }),
+    );
+    assert.match(run().stderr, /private guard/);
     await version("0.0.0");
     assert.match(
       run({ RELEASE_VERSION: "0.0.0" }).stderr,

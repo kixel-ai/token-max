@@ -8,7 +8,6 @@ import {
   mkdir,
   mkdtemp,
   readFile,
-  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -47,17 +46,6 @@ function executable(name) {
   assert.ok(found, `${file} must be on PATH`);
   return found;
 }
-// On Windows npm is a cmd shim; execute its JavaScript with this test's Node.
-const npm =
-  process.platform === "win32"
-    ? join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js")
-    : await realpath(
-        (process.env.PATH ?? "")
-          .split(delimiter)
-          .map((dir) => join(dir, "npm"))
-          .find(existsSync),
-      );
-const npx = join(dirname(npm), "npx-cli.js");
 const bun = executable("bun");
 await mkdir(".tmp", { recursive: true });
 const scratch = await mkdtemp(resolve(".tmp/packed-"));
@@ -122,7 +110,13 @@ let downloads = 0;
 // Exercise the real scoped launch syntax without publishing an incomplete release.
 // The fixture registry serves only this exact tarball and synthetic metadata.
 const server = createServer((request, response) => {
-  const path = decodeURIComponent(request.url);
+  let path;
+  try {
+    path = decodeURIComponent(request.url);
+  } catch {
+    response.writeHead(400).end();
+    return;
+  }
   if (path === "/token-max.tgz") {
     downloads++;
     response.setHeader("Content-Type", "application/octet-stream");
@@ -153,6 +147,23 @@ env.npm_config_registry = `http://127.0.0.1:${server.address().port}`;
 await writeFile(join(home, ".npmrc"), `registry=${env.npm_config_registry}\n`);
 
 try {
+  // Ask npm for its own CLI path so version-manager shell shims work too.
+  // Windows setup-node installs npm next to node.exe behind a cmd shim.
+  const lookup =
+    process.platform === "win32"
+      ? null
+      : await run(executable("npm"), [
+          "exec",
+          "--offline",
+          "--call",
+          "node -p process.env.npm_execpath",
+        ]);
+  if (lookup) assert.equal(lookup.status, 0, lookup.stderr);
+  const npm = lookup
+    ? lookup.stdout.trim()
+    : join(dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
+  assert.ok(existsSync(npm), "npm must report its installed CLI path");
+  const npx = join(dirname(npm), "npx-cli.js");
   const installed = join(consumer, "installed");
   const install = await run(
     process.execPath,
@@ -173,6 +184,12 @@ try {
     await readFile(join(installedPackage, "package.json"), "utf8"),
   );
   assert.equal(manifest.version, artifact.version);
+  if (artifact.version === "0.0.0")
+    assert.equal(
+      manifest.private,
+      true,
+      "placeholder artifacts must be unpublishable",
+    );
   assert.equal(manifest.dependencies, undefined);
   const cli = join(installedPackage, manifest.bin["token-max"]);
   assert.match(await readFile(cli, "utf8"), /^#!\/usr\/bin\/env node\n/);

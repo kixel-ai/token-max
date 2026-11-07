@@ -2,8 +2,6 @@
 import pkg from "../package.json" with { type: "json" };
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
-import { realpathSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { scan } from "./reader.js";
 import { loadPrices } from "./prices.js";
@@ -50,7 +48,7 @@ Exit 1: change recommended. Exit 2: scan, pricing, argument or cancellation fail
 `;
 
 /** Run one atomic scan: failures emit only a safe diagnostic, never partial findings. */
-export async function main(args = process.argv.slice(2)): Promise<number> {
+async function main(args = process.argv.slice(2)): Promise<number> {
   const json = args.includes("--json");
   const cancellation = new AbortController();
   const cancel = () => {
@@ -205,8 +203,4 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
   }
 }
 
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href
-)
-  process.exitCode = await main();
+process.exitCode = await main();

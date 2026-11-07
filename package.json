@@ -41,5 +41,6 @@
     "url": "git+https://github.com/kixelated/token-max.git"
   },
   "homepage": "https://github.com/kixelated/token-max#readme",
-  "bugs": "https://github.com/kixelated/token-max/issues"
+  "bugs": "https://github.com/kixelated/token-max/issues",
+  "private": true
 }

@@ -6,7 +6,8 @@ No prompt, reply, summary, tool argument, or tool output text is kept in the res
 or printed. This is an API-price equivalent, not a subscription bill.
 
 The first npm release is being prepared; the commands below become available
-when the complete 0.1.0 release is published. See the
+when the complete 0.1.0 release is published. The development package retains
+`private: true` until m0 prepares that release. See the
 [first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
 
 With Node.js 22, 24, or 26 LTS and npm:

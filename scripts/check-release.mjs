@@ -16,6 +16,11 @@ assert.notEqual(
   "0.0.0",
   "never publish the development placeholder",
 );
+assert.notEqual(
+  pkg.private,
+  true,
+  "m0 must remove the private guard for the complete release",
+);
 assert.equal(
   process.env.GITHUB_REF,
   "refs/heads/main",
@@ -55,6 +60,11 @@ const api = async (path) => {
   return response.json();
 };
 const environment = await api("environments/npm");
+assert.equal(
+  environment.can_admins_bypass,
+  false,
+  "npm environment must disable administrator bypass",
+);
 assert.ok(
   environment.protection_rules.some(
     (rule) => rule.type === "required_reviewers" && rule.reviewers.length > 0,

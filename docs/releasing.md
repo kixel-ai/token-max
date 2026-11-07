@@ -3,7 +3,8 @@
 Packaging is ready for a complete first release; nothing is published by a PR,
 tag, or merge. m0 owns the 0.1.0 version change, full end-to-end validation,
 publication after every child merges, and verification of the published first-use
-commands. The development version stays 0.0.0 until that work is complete.
+commands. The development version stays 0.0.0 with `private: true` until that work is complete;
+this also blocks accidental publication outside the workflow.
 Synthetic artifact tests do not validate costs from real host histories.
 
 `package.json` is the only version source. The build inlines its version in
@@ -74,14 +75,14 @@ scope authority still belong to the owner. Do not send credentials in chat.
 
 ## Publish the checked artifact
 
-After all m0 children merge, m0 updates only `package.json` to 0.1.0 through the
+After all m0 children merge, m0 updates the version in `package.json` to 0.1.0 and removes its private guard through the
 protected, reviewed squash path. Validate the complete tool and update README's
 pre-release notice in that change. Recheck the current official authentication
 guidance and scope authority before releasing.
 
 Dispatch **Release** on protected `main` with the exact existing package version.
 Select `bootstrap` only for authenticated first publication; otherwise use the
-default `trusted` mode. Preflight refuses version 0.0.0, mismatched versions,
+default `trusted` mode. Preflight refuses version 0.0.0, a private manifest, mismatched versions,
 unprotected refs, remaining m0 children, and missing environment protection.
 It then runs the complete Check workflow, including every package matrix cell,
 before requesting environment approval. Review the run's source SHA, package
@@ -93,7 +94,8 @@ It neither rebuilds nor repacks after validation. `publishConfig.access` also
 requires public scoped access. Only this environment job can request an npm
 OIDC token or read the bootstrap secret. No publisher is available to PR code.
 
-For a nonpublishing inspection of the checked artifact:
+After m0 removes the private guard for the complete release, inspect the checked
+artifact without publishing:
 
 ```sh
 npm publish .tmp/package/token-max.tgz --access public --ignore-scripts --dry-run

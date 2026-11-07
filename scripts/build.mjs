@@ -24,19 +24,22 @@ await chmod("dist/cli.js", 0o755);
 const metadata = JSON.parse(await readFile(".tmp/bundle.json", "utf8"));
 const packages = new Set();
 for (const input of Object.keys(metadata.inputs)) {
-  const match = /node_modules[/\\]((?:@[^/\\]+[/\\])?[^/\\]+)/.exec(input);
-  if (match) packages.add(match[1].replaceAll("\\", "/"));
+  const match = /^(.*node_modules\/(?:@[^/]+\/)?[^/]+)/.exec(
+    input.replaceAll("\\", "/"),
+  );
+  if (match) packages.add(match[1]);
 }
 const notices = [];
-for (const name of [...packages].sort()) {
-  const dir = join("node_modules", name);
+for (const dir of [...packages].sort()) {
   const pkg = JSON.parse(await readFile(join(dir, "package.json"), "utf8"));
-  const file = (await readdir(dir)).find((name) =>
-    /^license(?:\.md|\.txt)?$/i.test(name),
+  const files = (await readdir(dir))
+    .filter((name) => /^(?:licen[sc]e|copying)(?:[.-].*)?$/i.test(name))
+    .sort();
+  if (!files.length)
+    throw new Error(`Missing license for bundled package ${pkg.name}`);
+  const licenses = await Promise.all(
+    files.map((file) => readFile(join(dir, file), "utf8")),
   );
-  if (!file) throw new Error(`Missing license for bundled package ${name}`);
-  notices.push(
-    `${pkg.name}@${pkg.version}\n\n${await readFile(join(dir, file), "utf8")}`,
-  );
+  notices.push(`${pkg.name}@${pkg.version}\n\n${licenses.join("\n\n")}`);
 }
 await writeFile("dist/THIRD_PARTY_NOTICES.txt", notices.join("\n\n----\n\n"));

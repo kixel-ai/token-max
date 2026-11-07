@@ -331,8 +331,11 @@ stay unknown. T3 and SSH adapters are not introduced.
 The installed Anthropic v2.1.316 binary was inspected without opening transcript
 content. Its native notice constructor emits `type: system`, `subtype:
 informational`, `level: notice`, and either documented idle notice followed by
-the exact toggle suffix. Only that shape attributes the preceding same-session
-boundary as an applied idle; raw notice text is discarded. `precomputed` also
+the exact toggle suffix. The v2.1.319 transcript writer also verifies `parentUuid`
+lineage through compact-summary and attachment records. Only that shape and an
+explicit lineage to an automatic boundary attribute an applied idle. Missing,
+conflicting, cyclic or ordinary-message ancestry stays unattributed, rather than
+tagging an older compaction by timestamp; raw notice text is discarded. `precomputed` also
 appears on non-idle background compaction and cannot attribute idle generation.
 No new native historical-settings or feature-flag record shape is invented.
 The normalized analyzer can consume explicit historical settings evidence; absent

@@ -313,6 +313,77 @@ test("missing full-prefix calibration and unknown eligibility stay unpriced", as
   }
 });
 
+test("idle replay preserves comparison estimates without an explicit window", async () => {
+  const s = data([request("estimated", 100)]);
+  const r = s.requests.at(-1)!;
+  const part = structuredClone(r.parts[0]!);
+  r.parts[0]!.usage.input = null;
+  s.profiles[0]!.compaction.default.value = null;
+  const catalog = await prices();
+  const c = idleChecks({
+    scan: s,
+    catalog,
+    summaries: compactionCharges(s, catalog),
+    estimates: new Map([
+      [
+        r.id,
+        {
+          request: r.id,
+          evidence: "estimated",
+          basis: ["synthetic recorded attempt input"],
+          part,
+          maxOutputTokens: null,
+          reason: "comparison-only input estimate",
+          assumptions: [],
+        },
+      ],
+    ]),
+    ttls: [],
+    windows: [],
+    since: 100 * MINUTE,
+    now: 200 * MINUTE,
+  })[0]!;
+  assert.equal(c.currentSettings.periods[0]!.contextTokens, 300000);
+  near(c.currentSettings.cost.off.knownUsd, 2.4);
+  assert.equal(c.currentSettings.deltaUsd, null);
+});
+
+test("a completed or replaced turn clears abandoned tool waits", async () => {
+  for (const toolId of [null, "abandoned"]) {
+    for (const kind of ["turn-start", "turn-end"] as const) {
+      const s = data([request("final", 100)]);
+      const origin = [
+        { session: "target", location: { file: "synthetic", line: 9 } },
+      ];
+      s.events.push(
+        event({
+          id: "abandoned",
+          kind: "tool-start",
+          toolId,
+          session: "target",
+          origins: origin,
+          time: 50 * MINUTE,
+        }),
+        event({
+          id: "completion",
+          kind,
+          session: "target",
+          origins: origin,
+          time: 90 * MINUTE,
+        }),
+      );
+      s.events.sort((a, b) => a.time - b.time);
+      const c = await check(s, 200);
+      assert.equal(
+        c.afterRecommendations.periods.find((p) => p.request === "final")!
+          .status,
+        "eligible",
+      );
+      near(c.afterRecommendations.deltaUsd, 0.1);
+    }
+  }
+});
+
 test("unsupported clients and prerequisites do not emit an idle toggle", async () => {
   for (const mode of [
     "sdk",
@@ -582,11 +653,12 @@ test("native informational notices are the only parsed idle attribution; project
         subtype: "informational",
         level: "notice",
         uuid: "notice",
+        parentUuid: "boundary",
         timestamp: new Date(2000).toISOString(),
         content:
           'Compacted while idle, before the prompt cache expired · turn off with "idleCompaction": false in settings.json',
       },
-    ];
+    ] as const;
     const file = join(w.claude, "projects", "project", "native.jsonl");
     await writeFile(file, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
     const parsed = await scan(w.options);
@@ -612,6 +684,30 @@ test("native informational notices are the only parsed idle attribution; project
     assert.match(formatReport(report), /idle-compaction/);
     await writeFile(
       file,
+      [
+        rows[0],
+        rows[1],
+        {
+          ...common,
+          type: "user",
+          uuid: "compact-summary",
+          parentUuid: "boundary",
+          timestamp: new Date(1500).toISOString(),
+          isCompactSummary: true,
+          message: { role: "user", content: "SYNTHETIC_PRIVATE_SUMMARY" },
+        },
+        { ...rows[2], parentUuid: "compact-summary" },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join("\n") + "\n",
+    );
+    const linked = await scan(w.options);
+    assert.equal(
+      linked.events.find((e) => e.kind === "compaction")!.idleAttribution,
+      "notice",
+    );
+    await writeFile(
+      file,
       rows
         .slice(0, 2)
         .map((r) => JSON.stringify(r))
@@ -621,6 +717,69 @@ test("native informational notices are the only parsed idle attribution; project
     assert.equal(
       absent.events.find((e) => e.kind === "compaction")!.idleAttribution,
       "unknown",
+    );
+    // A notice on another branch must not relabel an old boundary, even in the same session.
+    for (const trigger of ["auto", "manual"]) {
+      await writeFile(
+        file,
+        [
+          rows[0],
+          {
+            ...rows[1],
+            compactMetadata: { ...rows[1]!.compactMetadata, trigger },
+          },
+          {
+            ...rows[2],
+            parentUuid: "missing-boundary",
+            timestamp: new Date(2 * 3600000).toISOString(),
+          },
+        ]
+          .map((r) => JSON.stringify(r))
+          .join("\n") + "\n",
+      );
+      const orphan = await scan(w.options);
+      assert.equal(
+        orphan.events.find((e) => e.kind === "compaction")!.idleAttribution,
+        "unknown",
+      );
+    }
+    await writeFile(
+      file,
+      JSON.stringify({ ...rows[2], timestamp: undefined }) + "\n",
+    );
+    await assert.rejects(scan(w.options), /missing idle notice timestamp/);
+
+    const nested = join(project, "nested");
+    await mkdir(nested);
+    await writeFile(
+      file,
+      [
+        rows[0],
+        {
+          ...rows[0],
+          cwd: nested,
+          timestamp: new Date(60 * MINUTE).toISOString(),
+          message: { ...rows[0]!.message, id: "selected" },
+        },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join("\n") + "\n",
+    );
+    const selected = await scan({ ...w.options, since: MINUTE });
+    const profile = selected.profiles.find((p) => p.harness === "claude")!;
+    assert.equal(profile.idleDirectories![project]!.ttl!.main.value, "5m");
+    const selectedReport = analyze({
+      scan: selected,
+      catalog: await prices(),
+      now: 200 * MINUTE,
+    });
+    const idle = selectedReport.checks.find(
+      (c) => c.check === "idle-compaction",
+    )!;
+    assert.equal(idle.check, "idle-compaction");
+    assert.doesNotMatch(
+      idle.currentSettings.unknown.join(" "),
+      /policy changes within a conversation/,
     );
   } finally {
     await w.dispose();

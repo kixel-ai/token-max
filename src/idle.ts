@@ -179,6 +179,19 @@ interface PreparedPeriod {
   threshold: number | null;
   ttls: IdleScenario["ttls"];
 }
+function bySession<T>(
+  values: T[],
+  sessions: (value: T) => string[],
+): Map<string, T[]> {
+  const result = new Map<string, T[]>();
+  for (const value of values)
+    for (const session of new Set(sessions(value))) {
+      const group = result.get(session) ?? [];
+      group.push(value);
+      result.set(session, group);
+    }
+  return result;
+}
 function periods(options: {
   requests: Request[];
   events: StructuralEvent[];
@@ -188,7 +201,10 @@ function periods(options: {
   ttls: IdleScenario["ttls"];
   windows: IdleScenario["windows"];
   owner: string;
-}): PreparedPeriod[] {
+}): {
+  prepared: PreparedPeriod[];
+  activationCohorts: IdleScenario["activationCohorts"];
+} {
   const result: PreparedPeriod[] = [];
   const sessions = new Map<string, Request[]>();
   for (const r of options.requests.filter(
@@ -200,7 +216,21 @@ function periods(options: {
     group.push(r);
     sessions.set(r.session, group);
   }
-  for (const group of sessions.values()) {
+  const eventGroups = bySession(options.events, (e) =>
+    e.origins.map((o) => o.session),
+  );
+  for (const [session, group] of sessions) {
+    const events = eventGroups.get(session) ?? [];
+    const boundaries = events.filter(
+      (e) => e.kind === "compaction" && e.idleAttribution === "notice",
+    );
+    let boundaryIndex = 0;
+    let settingsIndex = 0;
+    let activityIndex = 0;
+    let turnStart = -Infinity;
+    let turnEnd = -Infinity;
+    const pending = new Set<string>();
+    const old: Record<string, string | number | boolean> = {};
     for (const [index, r] of group.entries()) {
       const c = control(options.profile, r);
       if (c.owner !== options.owner) continue;
@@ -216,15 +246,22 @@ function periods(options: {
       const p = r.parts.find(
         (p) => p.kind === "message" || p.kind === "unknown",
       )!;
-      const boundary = options.events.find(
-        (e) =>
-          e.kind === "compaction" &&
-          e.idleAttribution === "notice" &&
-          e.origins.some((o) => o.session === r.session) &&
-          e.time > r.time &&
-          e.time <= end,
-      );
-      const old = historical(options.events, r);
+      while (
+        boundaryIndex < boundaries.length &&
+        boundaries[boundaryIndex]!.time <= r.time
+      )
+        boundaryIndex++;
+      const boundary =
+        boundaries[boundaryIndex] && boundaries[boundaryIndex]!.time <= end
+          ? boundaries[boundaryIndex]
+          : undefined;
+      while (
+        settingsIndex < events.length &&
+        events[settingsIndex]!.time <= r.time
+      ) {
+        const e = events[settingsIndex++]!;
+        if (e.kind === "settings") Object.assign(old, e.settings);
+      }
       const flagState = supported(r.version, 314)
         ? "not-required"
         : typeof old.idleCompactionAvailable === "boolean"
@@ -245,24 +282,19 @@ function periods(options: {
             (w) => w.owner === windowOwner && w.models.includes(p.model),
           )?.value ?? null);
       const ttls = scopedTtls(options.profile, r, options.ttls);
-      const during = options.events.filter(
-        (e) =>
-          e.origins.some((o) => o.session === r.session) &&
-          e.time <= r.time + EARLY,
-      );
-      const pending = new Set<string>();
-      for (const e of during) {
+      while (
+        activityIndex < events.length &&
+        events[activityIndex]!.time <= r.time + EARLY
+      ) {
+        const e = events[activityIndex++]!;
+        if (e.kind === "turn-start" || e.kind === "turn-end") pending.clear();
+        if (e.kind === "turn-start") turnStart = e.time;
+        if (e.kind === "turn-end") turnEnd = e.time;
         if (e.kind === "tool-start") pending.add(e.toolId ?? e.id);
         if (e.kind === "tool-end" && e.toolId) pending.delete(e.toolId);
       }
-      const interrupted = options.events.some(
-        (e) =>
-          e.origins.some((o) => o.session === r.session) &&
-          e.time > r.endTime &&
-          e.time < end &&
-          e.kind === "turn-start" &&
-          e.time < r.time + EARLY,
-      );
+      const interrupted =
+        turnStart > r.endTime && turnStart < end && turnStart < r.time + EARLY;
       let status: IdlePeriod["status"] = "eligible";
       let reason =
         "interactive request gap under current native prerequisites; open-and-awake activation is estimated";
@@ -339,13 +371,8 @@ function periods(options: {
           reason,
           confirmed:
             status === "eligible" &&
-            options.events.some(
-              (e) =>
-                e.kind === "turn-end" &&
-                e.origins.some((o) => o.session === r.session) &&
-                e.time >= r.endTime &&
-                e.time < r.time + EARLY,
-            ),
+            turnEnd >= r.endTime &&
+            turnEnd < r.time + EARLY,
           returnTiming: !next
             ? "final"
             : gapMs >= EARLY && gapMs <= HOUR
@@ -369,7 +396,7 @@ function periods(options: {
       });
     }
   }
-  const cohorts = new Map<string, { count: number; applied: number }>();
+  const cohorts = new Map<string, IdleScenario["activationCohorts"][number]>();
   for (const { period: p, knownOn } of result) {
     if (
       p.status !== "eligible" ||
@@ -381,9 +408,17 @@ function periods(options: {
     )
       continue;
     const key = JSON.stringify([p.version, p.client, p.flagState]);
-    const c = cohorts.get(key) ?? { count: 0, applied: 0 };
-    c.count++;
+    const c = cohorts.get(key) ?? {
+      version: p.version,
+      client: p.client,
+      flagState: p.flagState,
+      eligible: 0,
+      applied: 0,
+      fraction: 0,
+    };
+    c.eligible++;
     c.applied += p.outcome === "applied" ? 1 : 0;
+    c.fraction = c.applied / c.eligible;
     cohorts.set(key, c);
   }
   for (const { period: p } of result) {
@@ -398,12 +433,12 @@ function periods(options: {
       continue;
     }
     const c = cohorts.get(JSON.stringify([p.version, p.client, p.flagState]));
-    p.activation = c ? c.applied / c.count : 1;
+    p.activation = c ? c.fraction : 1;
     p.activationBasis = c
-      ? `same version/client/flag known-on returned applied fraction ${c.applied}/${c.count}; final periods use that same fraction with no second liveness factor`
+      ? `same version/client/flag known-on returned applied fraction ${c.applied}/${c.eligible}; final periods use that same fraction with no second liveness factor`
       : "documented-trigger fallback: left open and awake, one summary; final periods have the same assumed activation and no return benefit";
   }
-  return result;
+  return { prepared: result, activationCohorts: [...cohorts.values()] };
 }
 
 interface State {
@@ -533,24 +568,35 @@ function run(options: {
     options.summaries.flatMap((s) => (s.request ? [s.request] : [])),
   );
   const chargedBoundaries = new Set<string>();
-  const sessions = new Set(options.prepared.map((p) => p.previous.session));
-  for (const session of sessions) {
-    const ps = options.prepared.filter((p) => p.previous.session === session);
+  const preparedGroups = bySession(options.prepared, (p) => [
+    p.previous.session,
+  ]);
+  const requestGroups = bySession(options.requests, (r) => [r.session]);
+  const boundaryGroups = bySession(
+    options.events.filter((e) => e.kind === "compaction"),
+    (e) => e.origins.map((o) => o.session),
+  );
+  const summariesByEvent = new Map(options.summaries.map((s) => [s.event, s]));
+  const eventsById = new Map(options.events.map((e) => [e.id, e]));
+  for (const [session, ps] of preparedGroups) {
+    const idleByEvent = new Map(
+      ps.filter((p) => p.boundary).map((p) => [p.boundary!.id, p]),
+    );
     type Tick =
       | { time: number; kind: "request"; r: Request }
       | { time: number; kind: "boundary"; e: StructuralEvent }
       | { time: number; kind: "idle"; item: PreparedPeriod };
     const ticks: Tick[] = [
-      ...options.requests
-        .filter((r) => r.session === session)
-        .map((r) => ({ kind: "request" as const, time: r.time, r })),
-      ...options.events
-        .filter(
-          (e) =>
-            e.kind === "compaction" &&
-            e.origins.some((o) => o.session === session),
-        )
-        .map((e) => ({ kind: "boundary" as const, time: e.time, e })),
+      ...(requestGroups.get(session) ?? []).map((r) => ({
+        kind: "request" as const,
+        time: r.time,
+        r,
+      })),
+      ...(boundaryGroups.get(session) ?? []).map((e) => ({
+        kind: "boundary" as const,
+        time: e.time,
+        e,
+      })),
       ...ps
         .filter((p) => !p.boundary && p.period.status === "eligible")
         .map((item) => ({
@@ -642,7 +688,9 @@ function run(options: {
           }
           const sample = matches[0]!;
           const size = (values: number[]) =>
-            options.mode === "larger" ? Math.max(...values) : median(values);
+            options.mode === "larger"
+              ? values.reduce((max, value) => Math.max(max, value), -Infinity)
+              : median(values);
           const output = size(matches.map((s) => s.output));
           const replacement = size(matches.map((s) => s.prefix));
           if (options.mode === "point")
@@ -681,7 +729,7 @@ function run(options: {
               Math.max(
                 0,
                 (s.summary.usage.input ?? 0) -
-                  (options.events.find((e) => e.id === s.event)?.preTokens ??
+                  (eventsById.get(s.event)?.preTokens ??
                     s.summary.usage.input ??
                     0),
               ),
@@ -731,12 +779,12 @@ function run(options: {
       } else if (tick.kind === "boundary") {
         const e = tick.e;
         const source =
-          ps.find((p) => p.boundary?.id === e.id)?.previous ??
+          idleByEvent.get(e.id)?.previous ??
           requestsById.get(e.request ?? "") ??
-          options.requests.find((r) => r.session === session)!;
+          requestGroups.get(session)![0]!;
         const ttls = scopedTtls(options.profile, source, options.ttls);
-        const idle = ps.find((p) => p.boundary?.id === e.id);
-        const summary = options.summaries.find((s) => s.event === e.id);
+        const idle = idleByEvent.get(e.id);
+        const summary = summariesByEvent.get(e.id);
         const linked = requestsById.get(summary?.request ?? "");
         const billed =
           linked?.parts.filter((p) => p.kind === "compaction") ?? [];
@@ -936,7 +984,9 @@ export function idleChecks(options: {
     const events = [...scan.cacheContext.boundaries, ...scan.events]
       .filter((e) => e.profiles.includes(profile.id))
       .sort((a, b) => a.time - b.time);
-    const since = options.since ?? Math.min(...main.map((r) => r.time));
+    const since =
+      options.since ??
+      main.reduce((first, r) => Math.min(first, r.time), Infinity);
     const calibration = compactionSamples({
       requests,
       events,
@@ -992,91 +1042,108 @@ export function idleChecks(options: {
         return [c.owner, c] as const;
       }),
     );
+    const requestGroups = bySession(requests, (r) => [r.session]);
+    const replay = (
+      ttls: IdleScenario["ttls"],
+      windows: IdleScenario["windows"],
+    ) => {
+      const windowed: ReturnType<typeof replayWindows> = {
+        requests: [],
+        events: [],
+        added: [],
+        errors: [],
+        affected: new Set(),
+        estimatedParts: new Set(),
+      };
+      const replayed: ReturnType<typeof replayParts> = [];
+      const untouchedEstimates = new Set<string>();
+      for (const group of requestGroups.values()) {
+        const source =
+          group.find(
+            (r) =>
+              r.agent === "main" && r.parts.some((p) => p.kind === "message"),
+          ) ?? group[0]!;
+        const policy = scopedTtls(profile, source, ttls);
+        const keys = windows.filter((w) =>
+          w.models.some(
+            (model) => scopedWindow(profile, source, model).owner === w.owner,
+          ),
+        );
+        if (
+          group.some(
+            (r) =>
+              JSON.stringify(scopedTtls(profile, r, ttls)) !==
+                JSON.stringify(policy) ||
+              keys.some((w) =>
+                w.models.some(
+                  (model) => scopedWindow(profile, r, model).owner !== w.owner,
+                ),
+              ),
+          )
+        )
+          windowed.errors.push(
+            "effective project TTL/window policy changes within a conversation; its counterfactual is unresolved",
+          );
+        const part = replayWindows({
+          requests: group,
+          events,
+          estimates: options.estimates,
+          windows: keys,
+          catalog,
+          samples: calibration,
+          since,
+          ttls: policy,
+        });
+        for (const r of part.requests) windowed.requests.push(r);
+        for (const e of part.events) windowed.events.push(e);
+        for (const added of part.added) windowed.added.push(added);
+        for (const error of part.errors) windowed.errors.push(error);
+        if (part.requests === group)
+          for (const r of group) untouchedEstimates.add(r.id);
+        for (const item of replayParts({
+          requests: part.requests,
+          events: [...events, ...part.events],
+          estimates: part.requests === group ? options.estimates : new Map(),
+          catalog,
+          ttls: { ...policy, unknown: null },
+          since,
+          estimatedParts: part.estimatedParts,
+        }))
+          replayed.push(item);
+      }
+      windowed.requests.sort(
+        (a, b) => a.time - b.time || a.id.localeCompare(b.id),
+      );
+      const allEvents = [...events, ...windowed.events].sort(
+        (a, b) => a.time - b.time,
+      );
+      const replayedParts = new Map(
+        replayed.map((i) => [`${i.request.id}:${i.part}`, i.p]),
+      );
+      const rs = windowed.requests.map((r) => {
+        const estimate = untouchedEstimates.has(r.id)
+          ? options.estimates.get(r.id)?.part
+          : null;
+        return {
+          ...r,
+          parts: (estimate ? [estimate] : r.parts).map(
+            (p, part) => replayedParts.get(`${r.id}:${part}`) ?? p,
+          ),
+        };
+      });
+      return { windowed, replayed, allEvents, rs };
+    };
+    const currentReplay = replay(currentTtls, currentWindows);
+    const recommendedReplay = replay(afterTtls, recommendedWindows);
     for (const [owner, c] of controls) {
       const scenario = (
+        base: ReturnType<typeof replay>,
         ttls: IdleScenario["ttls"],
         windows: IdleScenario["windows"],
         baseline: string,
       ): IdleScenario => {
-        const windowed: ReturnType<typeof replayWindows> = {
-          requests: [],
-          events: [],
-          added: [],
-          errors: [],
-          affected: new Set(),
-          estimatedParts: new Set(),
-        };
-        const replayed: ReturnType<typeof replayParts> = [];
-        for (const session of new Set(requests.map((r) => r.session))) {
-          const group = requests.filter((r) => r.session === session);
-          const source =
-            group.find(
-              (r) =>
-                r.agent === "main" && r.parts.some((p) => p.kind === "message"),
-            ) ?? group[0]!;
-          const policy = scopedTtls(profile, source, ttls);
-          const keys = windows.filter((w) =>
-            w.models.some(
-              (model) => scopedWindow(profile, source, model).owner === w.owner,
-            ),
-          );
-          if (
-            group.some(
-              (r) =>
-                JSON.stringify(scopedTtls(profile, r, ttls)) !==
-                  JSON.stringify(policy) ||
-                keys.some((w) =>
-                  w.models.some(
-                    (model) =>
-                      scopedWindow(profile, r, model).owner !== w.owner,
-                  ),
-                ),
-            )
-          )
-            windowed.errors.push(
-              "effective project TTL/window policy changes within a conversation; its counterfactual is unresolved",
-            );
-          const part = replayWindows({
-            requests: group,
-            events,
-            estimates: options.estimates,
-            windows: keys,
-            catalog,
-            samples: calibration,
-            since,
-            ttls: policy,
-          });
-          windowed.requests.push(...part.requests);
-          windowed.events.push(...part.events);
-          windowed.added.push(...part.added);
-          windowed.errors.push(...part.errors);
-          replayed.push(
-            ...replayParts({
-              requests: part.requests,
-              events: [...events, ...part.events],
-              estimates: new Map(),
-              catalog,
-              ttls: { ...policy, unknown: null },
-              since,
-              estimatedParts: part.estimatedParts,
-            }),
-          );
-        }
-        windowed.requests.sort(
-          (a, b) => a.time - b.time || a.id.localeCompare(b.id),
-        );
-        const allEvents = [...events, ...windowed.events].sort(
-          (a, b) => a.time - b.time,
-        );
-        const rs = windowed.requests.map((r) => ({
-          ...r,
-          parts: r.parts.map(
-            (p, part) =>
-              replayed.find((i) => i.request.id === r.id && i.part === part)
-                ?.p ?? p,
-          ),
-        }));
-        const prepared = periods({
+        const { windowed, replayed, allEvents, rs } = base;
+        const { prepared, activationCohorts } = periods({
           requests: rs,
           events: allEvents,
           profile,
@@ -1144,7 +1211,7 @@ export function idleChecks(options: {
             let high = 1;
             while (true) {
               const middle = (low + high) / 2;
-              if (middle === low || middle === high) {
+              if (high - low <= Number.EPSILON) {
                 lifetimeBreakEvenFraction = middle;
                 break;
               }
@@ -1183,34 +1250,6 @@ export function idleChecks(options: {
         );
         const deltaUsd = unknown.length ? null : delta(on);
         const sizes = [...new Set(prepared.map((p) => p.period.contextTokens))];
-        const cohortMap = new Map<
-          string,
-          IdleScenario["activationCohorts"][number]
-        >();
-        for (const { period: p, knownOn } of prepared) {
-          if (
-            !knownOn ||
-            !p.resume ||
-            p.status !== "eligible" ||
-            !p.version ||
-            !p.client ||
-            p.flagState === null
-          )
-            continue;
-          const key = JSON.stringify([p.version, p.client, p.flagState]);
-          const group = cohortMap.get(key) ?? {
-            version: p.version,
-            client: p.client,
-            flagState: p.flagState,
-            applied: 0,
-            eligible: 0,
-            fraction: 0,
-          };
-          group.eligible++;
-          group.applied += p.outcome === "applied" ? 1 : 0;
-          group.fraction = group.applied / group.eligible;
-          cohortMap.set(key, group);
-        }
         return {
           baseline,
           applicable,
@@ -1248,7 +1287,7 @@ export function idleChecks(options: {
               ).totalUsd,
             };
           }),
-          activationCohorts: [...cohortMap.values()],
+          activationCohorts,
           sensitivity: {
             closedDeltaUsd: closed,
             openDeltaUsd: open,
@@ -1268,11 +1307,13 @@ export function idleChecks(options: {
         };
       };
       const currentSettings = scenario(
+        currentReplay,
         currentTtls,
         currentWindows,
         "idle on/off at current TTL and current window controls",
       );
       const afterRecommendations = scenario(
+        recommendedReplay,
         afterTtls,
         recommendedWindows,
         "idle on/off after applicable TTL and compaction-window changes; independent savings are not additive",

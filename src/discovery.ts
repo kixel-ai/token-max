@@ -11,7 +11,11 @@ import type {
   Ttl,
 } from "./model.js";
 import { identity, label, object, ScanError } from "./safe.js";
-import { compactionControls, idleControls } from "./controls.js";
+import {
+  compactionControls,
+  idleControls,
+  scopedEnvironment,
+} from "./controls.js";
 
 /** Explicit roots limit the entire scan; otherwise discover host-local profiles. */
 export interface DiscoveryOptions {
@@ -83,16 +87,8 @@ function controls(options: {
       file) +
     ":" +
     key;
-  const envOwner = (key: string) =>
-    Object.hasOwn(env, key)
-      ? key
-      : ([...scopes]
-          .reverse()
-          .find((s) => Object.hasOwn(object(s.config.env), key))?.file ??
-          file) +
-        ":env." +
-        key;
-  const values = { ...object(config.env), ...env };
+  const { values, owners } = scopedEnvironment({ scopes, env });
+  const envOwner = (key: string) => owners[key] ?? `${file}:env.${key}`;
   const result = {} as Profile["ttl"];
   for (const bucket of ["main", "subagent"] as const) {
     const variable =

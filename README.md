@@ -173,8 +173,13 @@ names that profile and is conditional, not another copy of historical spend.
 Independent check savings must not be summed.
 
 See [billing and replay semantics](docs/semantics.md) for supported accounting,
-assumptions, sources, and limits. Component measurements are shared infrastructure;
-skills/context recommendations and other setting checks remain in the
+assumptions, sources, and limits. The `loaded-context` check attributes exposed
+MCP discovery, schemas, instructions, and results, with scoped controls and
+provider-budget guidance. It reports observed calls and coverage without treating
+enabled servers or script references as loaded schemas or successful use. Gross
+attributed overhead is separate from unknown net savings. Skills costs remain
+owned by the skills check; the context check links shared components. Other
+remaining checks are tracked in the
 [first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from

@@ -1,3 +1,4 @@
+import type { ContextCheckResult, ContextState } from "./context.js";
 import type { ExposureScan, analyzeExposure } from "./exposure.js";
 
 /** The two locally supported transcript formats. */
@@ -152,6 +153,7 @@ export interface Profile {
     models: Record<string, WindowControl>;
   };
   idle?: IdleControl;
+  context?: ContextState[];
   speed?: SpeedControl;
   speedDirectories?: Record<string, SpeedControl>;
   /** Current project controls observed at recorded working directories. */
@@ -306,7 +308,11 @@ export interface CompactionCheckResult extends CheckBase<number> {
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
 export type CheckResult =
-  TtlCheckResult | CompactionCheckResult | IdleCheckResult | SpeedCheckResult;
+  | TtlCheckResult
+  | CompactionCheckResult
+  | IdleCheckResult
+  | SpeedCheckResult
+  | ContextCheckResult;
 /** Rate-only premium comparisons keep current-setting estimates separate from observed response premiums. */
 export interface SpeedCheckResult extends CheckBase<string> {
   check: "fast-mode";

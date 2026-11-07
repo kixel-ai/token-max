@@ -8,7 +8,12 @@ import {
   ScanError,
   timestamp,
 } from "./safe.js";
-import { pricePart, unknownCost, type Catalog } from "./prices.js";
+import {
+  pricePart,
+  unknownCost,
+  writeBilling,
+  type Catalog,
+} from "./prices.js";
 
 /** Each context category has exactly one downstream owner. */
 export type Category =
@@ -17,7 +22,11 @@ export type Category =
   | "mcp-discovery"
   | "mcp-schema"
   | "mcp-result"
+  | "mcp-instructions"
+  | "tool-result"
   | "instructions"
+  | "rules"
+  | "memory"
   | "agents"
   | "hooks"
   | "plugin-instructions"
@@ -38,6 +47,8 @@ export interface Component extends Size {
   owner: "skills" | "context";
   group: string | null;
   provenance: string;
+  name?: string | null;
+  source?: string | null;
   locations: Location[];
   firstSeen: number;
   current: "unresolved";
@@ -49,6 +60,7 @@ export interface Component extends Size {
 export interface Invocation {
   id: string;
   target: string;
+  name?: string | null;
   group: string | null;
   kind:
     | "skill-request"
@@ -56,6 +68,7 @@ export interface Invocation {
     | "skill-call"
     | "skill-load"
     | "mcp-call"
+    | "tool-call"
     | "mcp-resource"
     | "mcp-prompt"
     | "script-reference";
@@ -277,6 +290,16 @@ export class ExposureCollector {
         owner: input.category.startsWith("skill-") ? "skills" : "context",
         group: input.group ?? null,
         provenance: input.provenance,
+        name: ["mcp-schema", "mcp-discovery", "mcp-instructions"].includes(
+          input.category,
+        )
+          ? label(input.key)
+          : null,
+        source:
+          ["instructions", "rules", "memory"].includes(input.category) &&
+          /[/\\]/.test(input.key)
+            ? input.key
+            : null,
         locations: [input.location],
         firstSeen: input.time,
         current: "unresolved",
@@ -314,6 +337,7 @@ export class ExposureCollector {
   }
   private invocation(input: {
     target: string;
+    name?: string | null;
     group: string | null;
     kind: Invocation["kind"];
     via: Invocation["via"];
@@ -340,6 +364,7 @@ export class ExposureCollector {
     this.invocations.set(invocationId, {
       id: invocationId,
       target: input.target,
+      name: input.name ?? null,
       group: input.group,
       kind: input.kind,
       via: input.via,
@@ -533,12 +558,27 @@ export class ExposureCollector {
         for (const v of array(a.files)) {
           const f = record(v);
           add(
-            "instructions",
+            /[/\\]rules[/\\]/.test(text(f.path))
+              ? "rules"
+              : /(?:^|[/\\])MEMORY\.md$/.test(text(f.path))
+                ? "memory"
+                : "instructions",
             text(f.path),
             text(f.content),
             "instruction-attachment",
           );
         }
+      } else if (kind === "hook_additional_context") {
+        add(
+          "hooks",
+          String(raw.uuid ?? location.line),
+          raw.rendered !== undefined
+            ? array(raw.rendered)
+                .map((v) => text(record(v).content))
+                .join("\n")
+            : array(a.content).map(text).join("\n"),
+          "observed-hook-context-not-wire-proof",
+        );
       } else if (kind === "prompt_snapshot") {
         this.clear("other");
         this.clear("mcp-schema");
@@ -551,7 +591,7 @@ export class ExposureCollector {
         for (const v of array(a.tools)) {
           const tool = record(v);
           add(
-            "mcp-schema",
+            text(tool.name).startsWith("mcp__") ? "mcp-schema" : "other",
             text(tool.name),
             JSON.stringify(tool),
             "prompt-snapshot-tool",
@@ -569,7 +609,7 @@ export class ExposureCollector {
             ? "mcp-discovery"
             : kind === "agent_listing_delta"
               ? "agents"
-              : "plugin-instructions";
+              : "mcp-instructions";
         const names = array(
           kind === "agent_listing_delta" ? a.addedTypes : a.addedNames,
         );
@@ -638,7 +678,7 @@ export class ExposureCollector {
       for (const v of array(p.tools)) {
         const tool = record(v);
         add(
-          "mcp-schema",
+          text(tool.name).startsWith("mcp__") ? "mcp-schema" : "other",
           text(tool.name),
           JSON.stringify(tool),
           "provided-additional-tools",
@@ -671,19 +711,82 @@ export class ExposureCollector {
       let components: string[] = [];
       let completeCharacters: number | null = null;
       if (full) {
-        components = [
-          add(
-            "other",
-            "wire-system",
-            JSON.stringify(params.system),
-            "wire-system",
-          ),
-        ];
+        const wireText = (body: string, key: string) => {
+          const fingerprint = identity(body);
+          const matches = [...this.components.values()].filter(
+            (c) =>
+              c.fingerprint === fingerprint &&
+              c.characters !== null &&
+              [...this.active.values()].includes(c.id) &&
+              c.category !== "other" &&
+              c.category !== "mcp-schema",
+          );
+          // Exact whole-block identity can link attribution. Embedded fragments and
+          // overlapping aggregate spans stay unclassified rather than charged twice.
+          return matches.length === 1
+            ? matches[0]!.id
+            : add("other", key, body, "wire-unclassified-text");
+        };
+        const system =
+          typeof params.system === "string"
+            ? [{ text: params.system }]
+            : array(params.system).map(record);
+        components = system.flatMap((block, i) =>
+          typeof block.text === "string"
+            ? [wireText(block.text, `wire-system:${i}`)]
+            : [],
+        );
+        for (const [mi, value] of array(params.messages).entries()) {
+          const message = record(value);
+          for (const [bi, value] of (Array.isArray(message.content)
+            ? message.content
+            : []
+          ).entries()) {
+            const block = record(value);
+            if (block.type === "tool_result") {
+              const tool =
+                typeof block.tool_use_id === "string"
+                  ? this.pendingTools.get(id(block.tool_use_id))
+                  : undefined;
+              components.push(
+                this.component({
+                  category: tool?.kind.startsWith("skill")
+                    ? "skill-body"
+                    : tool?.kind === "mcp-call"
+                      ? "mcp-result"
+                      : "tool-result",
+                  key: `wire-result:${String(block.tool_use_id ?? `${mi}:${bi}`)}`,
+                  content:
+                    typeof block.content === "string"
+                      ? block.content
+                      : JSON.stringify(block.content),
+                  targets: tool ? [tool.target] : [],
+                  group: tool?.group ?? null,
+                  provenance: "wire-tool-result",
+                  location,
+                  time: time ?? 0,
+                }),
+              );
+            } else if (
+              block.type === "text" &&
+              message.role === "user" &&
+              typeof block.text === "string"
+            ) {
+              const matches = [...this.components.values()].filter(
+                (c) =>
+                  [...this.active.values()].includes(c.id) &&
+                  c.category !== "other" &&
+                  c.fingerprint === identity(block.text as string),
+              );
+              if (matches.length === 1) components.push(matches[0]!.id);
+            }
+          }
+        }
         for (const v of array(params.tools)) {
           const tool = record(v);
           components.push(
             add(
-              "mcp-schema",
+              text(tool.name).startsWith("mcp__") ? "mcp-schema" : "other",
               text(tool.name),
               JSON.stringify(tool),
               "wire-tool",
@@ -750,6 +853,7 @@ export class ExposureCollector {
       if (time === null) throw new ScanError("missing invocation timestamp");
       this.invocation({
         target: target(kind.startsWith("skill") ? "skill" : "mcp", name),
+        name: kind.startsWith("skill") ? null : label(name),
         identityBasis,
         group: attribution,
         kind,
@@ -845,6 +949,12 @@ export class ExposureCollector {
             group: group(args.file_path),
             kind: "skill-load",
           });
+        } else {
+          this.pendingTools.set(id(b.id), {
+            target: target("mcp", name),
+            group: null,
+            kind: "tool-call",
+          });
         }
       }
       if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
@@ -862,11 +972,13 @@ export class ExposureCollector {
             time,
             location,
           });
-          if (b.is_error !== true)
+          if (b.is_error !== true || !tool.kind.startsWith("skill"))
             this.component({
               category: tool.kind.startsWith("skill")
                 ? "skill-body"
-                : "mcp-result",
+                : tool.kind === "mcp-call"
+                  ? "mcp-result"
+                  : "tool-result",
               key: id(b.tool_use_id),
               targets: [tool.target],
               group: tool.group,
@@ -874,7 +986,13 @@ export class ExposureCollector {
                 typeof b.content === "string"
                   ? b.content
                   : JSON.stringify(b.content),
-              provenance: "observed-tool-result-not-wire-proof",
+              provenance:
+                tool.kind === "tool-call" &&
+                [target("mcp", "Bash"), target("mcp", "PowerShell")].includes(
+                  tool.target,
+                )
+                  ? "observed-command-output-not-wire-proof"
+                  : "observed-tool-result-not-wire-proof",
               time,
               location,
             });
@@ -900,18 +1018,29 @@ export class ExposureCollector {
           : group(name),
       );
       if (item.result !== undefined)
-        add(
-          "mcp-result",
-          text(item.id),
-          JSON.stringify(item.result),
-          "observed-mcp-result-not-wire-proof",
-        );
+        this.component({
+          category: "mcp-result",
+          key: text(item.id),
+          content: JSON.stringify(item.result),
+          provenance: "observed-mcp-result-not-wire-proof",
+          group: group(name),
+          targets: [target("mcp", name)],
+          time: time ?? 0,
+          location,
+        });
     }
     if (
       raw.type === "event_msg" &&
       p.type === "item_completed" &&
       item.type === "CommandExecution"
     ) {
+      if (typeof item.aggregated_output === "string")
+        add(
+          "tool-result",
+          text(item.id),
+          item.aggregated_output,
+          "observed-command-output-not-wire-proof",
+        );
       const reads = array(item.parsed_cmd)
         .map(object)
         .filter(
@@ -953,20 +1082,44 @@ export class ExposureCollector {
           ? `${p.namespace}__${bare}`
           : `${typeof p.namespace === "string" ? p.namespace + "." : ""}${bare}`;
       const call = text(p.id ?? p.call_id);
-      if (name.startsWith("mcp__"))
+      if (name.startsWith("mcp__")) {
         invoke(name, "mcp-call", "tool", "called", call);
-      else if (
+        const tool = {
+          target: target("mcp", name),
+          group: group(name),
+          kind: "mcp-call" as const,
+        };
+        this.pendingTools.set(id(p.call_id ?? call), tool);
+        this.pendingTools.set(id(call), tool);
+      } else if (
         /^(?:(?:mcp|functions)\.)?(?:read_resource|read_mcp_resource|list_resources|list_mcp_resources|list_mcp_resource_templates|get_prompt)$/.test(
           name,
         )
-      )
+      ) {
+        let args: Record<string, unknown> = {};
+        if (typeof p.arguments === "string") {
+          try {
+            args = object(JSON.parse(p.arguments));
+          } catch {
+            /* Opaque arguments cannot supply server attribution. */
+          }
+        }
+        const server = label(args.server);
         invoke(
           name,
           name.endsWith("get_prompt") ? "mcp-prompt" : "mcp-resource",
           "tool",
           "called",
           call,
+          server ? identity(`mcp-server:${server}`) : null,
         );
+      }
+      if (!this.pendingTools.has(id(p.call_id ?? call)))
+        this.pendingTools.set(id(p.call_id ?? call), {
+          target: target("mcp", name),
+          group: null,
+          kind: "tool-call",
+        });
       // Code mentions do not establish that any nested call executed.
       const code = p.arguments ?? p.input;
       if (typeof code === "string")
@@ -978,6 +1131,31 @@ export class ExposureCollector {
             "reference",
             `${call}:${match.index}`,
           );
+    }
+    if (
+      raw.type === "response_item" &&
+      ["function_call_output", "custom_tool_call_output"].includes(
+        String(p.type),
+      )
+    ) {
+      const tool =
+        typeof p.call_id === "string"
+          ? this.pendingTools.get(id(p.call_id))
+          : undefined;
+      if (tool) {
+        // Output proves execution; without a native status it does not prove success.
+        this.component({
+          category: tool.kind === "mcp-call" ? "mcp-result" : "tool-result",
+          key: text(p.call_id),
+          content:
+            typeof p.output === "string" ? p.output : JSON.stringify(p.output),
+          targets: [tool.target],
+          group: tool.group,
+          provenance: "observed-tool-result-not-wire-proof",
+          time: time ?? 0,
+          location,
+        });
+      }
     }
     const current = [...this.active.values()];
     const derived: Omit<Exposure, "request"> = (raw.type === "assistant" &&
@@ -1271,6 +1449,8 @@ export function priceExposureChange(input: {
     read: number;
     write5m: number;
     write1h: number;
+    write30m?: number;
+    write12h?: number;
     ordinary: number;
   };
 }): {
@@ -1301,9 +1481,18 @@ export function priceExposureChange(input: {
     throw new ScanError("component removal exceeds request input");
   if (u.read === null || u.write === null)
     return unknown("request cache geometry unknown");
-  if (r.harness !== "claude" && u.write !== 0)
+  const billedWrites =
+    r.harness === "claude" || (p.model ? writeBilling(p.model) : null);
+  if (billedWrites === null)
+    return unknown("model write billing rules unknown");
+  if (
+    r.harness === "codex" &&
+    billedWrites &&
+    u.write !== 0 &&
+    (u.write30m === null || u.write12h === null)
+  )
     return unknown(
-      "Codex write lifetime positions unavailable for this context change",
+      "Codex write lifetime allocation unknown; no lifetime inferred from opaque metadata",
     );
   if (
     r.harness === "claude" &&
@@ -1313,19 +1502,28 @@ export function priceExposureChange(input: {
     return unknown("write lifetime allocation unknown");
   const slots = {
     read: u.read,
-    write5m: u.write5m ?? 0,
-    write1h: u.write1h ?? 0,
-    ordinary: u.input! - u.read - u.write,
+    write5m: r.harness === "claude" ? (u.write5m ?? 0) : 0,
+    write1h: r.harness === "claude" ? (u.write1h ?? 0) : 0,
+    write30m: r.harness === "codex" && billedWrites ? (u.write30m ?? 0) : 0,
+    write12h: r.harness === "codex" && billedWrites ? (u.write12h ?? 0) : 0,
+    ordinary: u.input! - u.read - (billedWrites ? u.write : 0),
   };
-  if (r.harness === "codex") slots.ordinary = u.input! - u.read;
   function cost(remove: typeof slots, replacement: number): Cost {
     const next = {
       ...u,
       input: u.input! - removed + replacement,
       read: u.read! - remove.read,
-      write: u.write! - remove.write5m - remove.write1h,
+      write: billedWrites
+        ? u.write! -
+          remove.write5m -
+          remove.write1h -
+          remove.write30m -
+          remove.write12h
+        : u.write,
       write5m: slots.write5m - remove.write5m,
       write1h: slots.write1h - remove.write1h,
+      write30m: slots.write30m - remove.write30m,
+      write12h: slots.write12h - remove.write12h,
     };
     // Replacement is ordinary input unless a caller provides a richer recorded counterfactual.
     return pricePart(catalog, r, { ...p, usage: next });
@@ -1333,7 +1531,7 @@ export function priceExposureChange(input: {
   const baseline = pricePart(catalog, r, p);
   const allocations: (typeof slots)[] = [];
   if (input.position) {
-    const position = input.position;
+    const position = { write30m: 0, write12h: 0, ...input.position };
     if (
       Object.keys(slots).some(
         (k) =>
@@ -1353,7 +1551,14 @@ export function priceExposureChange(input: {
     for (const free of keys) {
       const rest = keys.filter((k) => k !== free);
       for (let mask = 0; mask < 1 << rest.length; mask++) {
-        const a = { read: 0, write5m: 0, write1h: 0, ordinary: 0 };
+        const a = {
+          read: 0,
+          write5m: 0,
+          write1h: 0,
+          write30m: 0,
+          write12h: 0,
+          ordinary: 0,
+        };
         rest.forEach((k, i) => (a[k] = mask & (1 << i) ? slots[k] : 0));
         a[free] = removed - Object.values(a).reduce((n, v) => n + v, 0);
         if (a[free] >= 0 && a[free] <= slots[free]) allocations.push(a);
@@ -1379,7 +1584,7 @@ export function priceExposureChange(input: {
     ],
   });
   const proportional =
-    input.position ??
+    (input.position ? { write30m: 0, write12h: 0, ...input.position } : null) ??
     (Object.fromEntries(
       Object.entries(slots).map(([k, v]) => [
         k,

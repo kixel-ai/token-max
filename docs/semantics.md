@@ -466,8 +466,8 @@ estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so automatic
-unused findings remain blocked. This layer adds no skills-catalog or context
-recommendation check and changes no local agent settings.
+unused findings remain blocked. The measurement layer changes no local agent settings;
+the context check below consumes it, and the separate skills check owns skill findings.
 
 Record shapes were checked on 2026-11-07 using local structural metadata only;
 no real transcript text was printed or copied into fixtures. Claude's existing
@@ -537,3 +537,94 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 [API ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode),
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
+
+## MCP and loaded-context check
+
+The schema-version-1 `loaded-context` check consumes the shared exposure analysis.
+It separates discovery listings, server instructions, schemas, tool results,
+instruction files, rules, memory, agent listings, hooks, plugin/app/managed
+instructions and unclassified context. Exact, unique whole-text block identities
+can link active attachment components to recorded wire system or user blocks.
+Unmapped or overlapping fragments stay unclassified; the report does not add
+candidate spans to a wire aggregate. Native tools are not labeled MCP schemas.
+Claude hook additional-context attachment arrays and recorded rendered previews
+are candidate context; their presence alone does not prove full inline exposure.
+Unknown plugin/app policy flags and schema hashes retain unknown sizes.
+
+Each revision includes wire/candidate request counts, sessions, characters, source
+locations and any known instruction path. Gross marginal charges retain unknown
+coverage for unpriced candidate requests. They are estimated from complete
+model/client calibration and repriced by the shared whole-request pricing path,
+including tier changes to remaining input and output. Cache-allocation sensitivity
+is shown separately. Recorded Codex 30-minute and 12-hour writes are retained;
+missing lifetime splits stay unknown. No token estimate comes from a hash or from
+an arbitrary characters-per-token ratio. The check leaves net savings unknown
+without linked search requests, replacement/backfill footprints, changed cache
+reuse and extra reads. It does not sum independently removed components.
+
+Tool and server/group tables report the selected window, exposed requests and
+sessions, observed calls, completion/failure counts and last use. Native nested
+`McpToolCall` completions are execution evidence. Wrapper source text is only a
+reference, even if a call appears inside executable-looking code. Direct output
+records prove returned context but do not imply success without status evidence.
+Available-history windows include call observations before the first billed
+request. Explicit `--since` still bounds the entire check. No supported native
+history guarantees complete exposure and direct/nested-call visibility throughout
+the window, so no automatic unused recommendation is emitted. Low call counts,
+newly observed components, and missing evidence remain advisory. Configured or
+enabled servers never create historical exposure or dollars.
+
+Current controls and instruction file counts are separate from historical
+measurement. Claude user/project/local/managed settings and active-profile shell
+environment retain their owners. `.mcp.json` supplies project server controls;
+other local/global server catalogs, plugin registrations and remote managed or
+launch overrides remain unresolved, never inferred absent. Codex system/user and
+project layers expose configured server/app omissions and output budgets; trust,
+named-profile and launch selection stay unresolved. Server/app omission controls
+combine. `disabled_tools` and permission deny rules restrict calls, without a
+claim that they remove listings or schemas. No retired Codex tool-search switch
+is recommended. Per-tool output overrides are not resolved from installed schemas.
+
+Provider sources were checked 2026-11-07:
+
+- [Claude MCP controls](https://code.claude.com/docs/en/mcp) distinguish
+  `ENABLE_TOOL_SEARCH`, per-server `alwaysLoad`, `/mcp` disabling, model/provider
+  prerequisites, HIPAA and experimental-beta policy, denied or omitted
+  `ToolSearch`, and gateway/fallback behavior. Sonnet/Opus 4+ and Haiku 4.5+ are
+  supported; Google Agent Platform requires 4.5+, and Foundry loads upfront.
+  `alwaysLoad=false` requires 2.1.287+. A configured upfront setting prompts only
+  conditional advice for a compatible recorded model/provider. A small frequently
+  used toolset can beat deferral after discovery costs.
+- [Claude memory guidance](https://code.claude.com/docs/en/memory) targets under
+  200 lines per CLAUDE.md. A current local instruction chain over this target can
+  emit guidance without invented dollars for a recognized native CLI cohort
+  verified at 2.1.314 or later. Missing directories, other clients or unresolved
+  scope stay advisory. This is a loading-budget warning, not a judgment about
+  instruction quality. Detailed workflows and applicable path scoping are
+  suggested without arbitrary truncation or discarding required instructions.
+  Identical current files produce a consolidation advisory, not summed savings.
+- [Codex instruction loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+  describes the 32-KiB default project chain budget, `project_doc_max_bytes`,
+  overrides and fallback filenames. Counts above a selected cap are advisory
+  while current profile/trust ownership is unresolved. Files omitted by a loading
+  cap are not presumed billed input. Raising a cap or narrowing scope can preserve
+  required guidance.
+- [Claude Bash budgets](https://code.claude.com/docs/en/settings-reference#bashoutputmaxchars)
+  and [MCP output budgets](https://code.claude.com/docs/en/mcp#mcp-output-limits-and-warnings)
+  supply `bashOutputMaxChars` (2.1.261+, clamped 4,000 to 128,000 characters),
+  `MAX_MCP_OUTPUT_TOKENS` and server-specific `anthropic/maxResultSizeChars`.
+  The default 50,000-character MCP persistence threshold is an overflow advisory,
+  not a violation or a claim that raw result text was all inline. Observed command
+  output can be compared with a configured Bash cap. Token-only warnings require
+  recorded tokens; character counts are not converted without calibration.
+- [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference)
+  documents `tool_output_token_limit`, server/tool enablement and
+  `omit_tools_from` for `direct`, `deferred` and `code_mode`, including app
+  omissions. Output advice keeps repeated reads and spill previews unknown;
+  it never recommends the smallest cap as inherently cheapest.
+
+Skill listing/body components are excluded from context attribution and linked
+by component/group identity to their skills owner. Shared plugin context belongs
+to one context component; a group link does not duplicate its charge. Prompt/reply, instruction, schema and secret settings content is neither printed
+nor sent to a counting service. Tests and packaged-consumer checks use synthetic inputs only;
+this check makes no validated full-host spend claim.

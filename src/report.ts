@@ -243,6 +243,28 @@ export function formatReport(
           "Speed limits",
           "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price equivalents, not subscription savings. Work held constant; latency value excluded.",
         );
+      } else if (result.check === "loaded-context") {
+        field(
+          "Context attribution",
+          `${result.attribution.length} revisions; ${result.tools.length} tool identities; ${result.sharedSkills.length} shared skill components (skills-owned)`,
+        );
+        for (const c of result.attribution)
+          field(
+            c.category,
+            `${c.name === null ? c.component.slice(0, 12) : display(c.name)}: ${c.wireRequests} wire, ${c.candidateRequests} candidate requests; ${c.sessions} sessions; ${c.characters ?? "unknown"} characters; recurring tokens ${c.tokens ?? "unknown"}; gross overhead ${money(c.gross)}; net unknown`,
+          );
+        for (const server of result.servers)
+          field(
+            "MCP server/group",
+            `${server.group.slice(0, 12)}: ${server.observedCalls} observed calls; ${server.exposedRequests} wire / ${server.candidateRequests} candidate requests; ${server.exposedSessions} sessions; last use ${instant(server.lastUse)}; visibility incomplete; owners ${server.owners.map(display).join(", ") || "unresolved"}`,
+          );
+        for (const tool of result.tools)
+          field(
+            "MCP usage",
+            `${tool.name === null ? tool.target.slice(0, 12) : display(tool.name)}: ${tool.usage}; ${tool.observedCalls} calls (${tool.completed} completed, ${tool.failed} failed); ${tool.references} script references; ${tool.exposedRequests} wire / ${tool.candidateRequests} candidate requests; ${tool.exposedSessions} exposed sessions; last use ${instant(tool.lastUse)}; visibility incomplete`,
+          );
+        for (const g of result.guidance)
+          field(g.kind, `${display(g.owner)}: ${g.message}`);
       } else {
         field(
           "Models",
@@ -389,6 +411,52 @@ export function formatReport(
             "Current-setting premium estimate",
             result.currentEstimate.premium,
           );
+        } else if (result.check === "loaded-context") {
+          for (const c of result.attribution) {
+            field(
+              "Component",
+              `${c.component}; ${c.category}; source ${c.source === null ? "unresolved" : display(c.source)}; group ${c.group ?? "unknown"}; ${c.locations.map((l) => `${display(l.file)}:${l.line}`).join(", ")}`,
+            );
+            cost("Gross attributed overhead", c.gross);
+            field(
+              "Cache allocation sensitivity",
+              c.grossRangeUsd
+                ? c.grossRangeUsd.map(estimate).join(" to ")
+                : "unknown",
+            );
+            cost("Fixed-behavior net saving", c.net);
+          }
+          for (const state of result.controls) {
+            field(
+              "Context scope",
+              `${state.cwd === null ? "unknown directory" : display(state.cwd)}; ${state.reason}`,
+            );
+            for (const control of state.controls)
+              field(
+                "Current control",
+                `${display(control.owner)} = ${setting(control.value)}`,
+              );
+            for (const server of state.servers)
+              field(
+                "Configured server (not exposure proof)",
+                `${display(server.owner)}; enabled ${setting(server.enabled)}; alwaysLoad ${setting(server.alwaysLoad)}; omissions ${server.omitted.join(", ") || "none recorded"}; ${server.blockedTools} blocked tools`,
+              );
+            for (const app of state.apps)
+              field(
+                "Configured app (not exposure proof)",
+                `${display(app.owner)}; enabled ${app.enabled}; omissions ${app.omitted.join(", ") || "none recorded"}`,
+              );
+            for (const file of state.files)
+              field(
+                "Current instruction file",
+                `${display(file.file)}; ${file.lines} lines; ${file.bytes} bytes; no historical dollars inferred`,
+              );
+          }
+          for (const shared of result.sharedSkills)
+            field(
+              "Skills-owned context link",
+              `${shared.component}; group ${shared.group ?? "unknown"}; cost excluded here`,
+            );
         } else {
           cost("Current-window baseline", result.baselineCost);
           cost("Existing summaries", result.observedSummaryCost);
@@ -434,7 +502,11 @@ export function formatReport(
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        if (result.check !== "idle-compaction" && result.check !== "fast-mode")
+        if (
+          result.check !== "idle-compaction" &&
+          result.check !== "fast-mode" &&
+          result.check !== "loaded-context"
+        )
           witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
@@ -501,7 +573,8 @@ export function formatReport(
 }
 
 function reason(result: CheckResult): string {
-  if (result.check === "fast-mode") return result.reason;
+  if (result.check === "fast-mode" || result.check === "loaded-context")
+    return result.reason;
   if (result.check === "idle-compaction")
     return result.recommended === null
       ? "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."

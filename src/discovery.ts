@@ -651,3 +651,389 @@ export async function discoverCodexSpeedOwners(
     }
   }
 }
+
+/** Resolve current context controls without treating configured tools as historical exposure. */
+export async function discoverContextOwners(
+  options: DiscoveryOptions,
+  profiles: Profile[],
+  requests: Request[],
+): Promise<void> {
+  const env = options.env ?? process.env;
+  const home = options.home ?? homedir();
+  for (const profile of profiles) {
+    const claude = profile.harness === "claude";
+    const active = await realpath(
+      resolve(
+        env[claude ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] ??
+          join(home, claude ? ".claude" : ".codex"),
+      ),
+    ).catch(() => "");
+    const localEnv = active === profile.root ? env : {};
+    const base = [
+      {
+        file: profile.settingsFile,
+        config: await settings(profile.settingsFile, profile.harness),
+      },
+    ];
+    const relevant = requests.filter((r) => r.profiles.includes(profile.id));
+    const directories = new Set(relevant.map((r) => r.cwd));
+    if (!directories.size) directories.add(null);
+    profile.context = [];
+    for (const cwd of directories) {
+      options.signal?.throwIfAborted();
+      const chain: string[] = [];
+      let rootFound = false;
+      let exists = false;
+      if (cwd) {
+        try {
+          exists = (await stat(cwd)).isDirectory();
+        } catch (error) {
+          if (!missing(error))
+            throw new ScanError("cannot inspect current instruction scope", {
+              file: cwd,
+              line: 0,
+            });
+        }
+        for (let path = cwd; ; path = dirname(path)) {
+          chain.unshift(path);
+          try {
+            await stat(join(path, ".git"));
+            rootFound = true;
+            break;
+          } catch (error) {
+            if (!missing(error) && object(error).code !== "ENOTDIR")
+              throw new ScanError("cannot inspect current instruction scope", {
+                file: path,
+                line: 0,
+              });
+          }
+          if (dirname(path) === path) break;
+        }
+      }
+      const scopes = claude
+        ? [...base]
+        : [
+            {
+              file: options.codexSystemConfigFile ?? "/etc/codex/config.toml",
+              config: await settings(
+                options.codexSystemConfigFile ?? "/etc/codex/config.toml",
+                "codex",
+              ),
+            },
+            ...base,
+          ];
+      if (claude && chain.length)
+        for (const file of [
+          join(chain[0]!, ".claude/settings.json"),
+          join(chain[0]!, ".claude/settings.local.json"),
+        ])
+          scopes.push({ file, config: await settings(file, "claude") });
+      if (!claude)
+        for (const path of chain) {
+          const file = join(path, ".codex/config.toml");
+          scopes.push({ file, config: await settings(file, "codex") });
+        }
+      if (claude) {
+        const file = options.managedSettingsFile ?? managedSettingsPath();
+        scopes.push({ file, config: await settings(file, "claude") });
+      }
+      const config = Object.assign(
+        {},
+        ...scopes.map((s) => s.config),
+      ) as Record<string, unknown>;
+      // Session, plugin and remote managed overrides are not inferred from disk.
+      const resolved =
+        claude &&
+        exists &&
+        !Object.hasOwn(config, "claudeMdExcludes") &&
+        relevant
+          .filter((r) => r.cwd === cwd)
+          .every(
+            (r) =>
+              r.harness === "claude" &&
+              r.agent === "main" &&
+              /^2\.1\.(\d+)$/.test(r.version ?? "") &&
+              Number(r.version!.split(".")[2]) >= 314 &&
+              ["cli", "claude-cli"].includes(r.client ?? ""),
+          );
+      const state: NonNullable<Profile["context"]>[number] = {
+        cwd,
+        resolved,
+        reason: resolved
+          ? "current local native CLI instruction chain; unseen launch/remote managed overrides remain possible"
+          : "current project trust, selected profile, launch/managed overrides or native client applicability is unresolved",
+        controls: [],
+        servers: [],
+        apps: [],
+        files: [],
+      };
+      const setting = (key: string, fallback: number | null = null) => {
+        const value = config[key];
+        if (
+          value !== undefined &&
+          (typeof value !== "number" ||
+            !Number.isSafeInteger(value) ||
+            value <= 0)
+        )
+          throw new ScanError("invalid context budget setting", {
+            file: [...scopes].reverse().find((s) => key in s.config)!.file,
+            line: 1,
+          });
+        state.controls.push({
+          key,
+          value: typeof value === "number" ? value : fallback,
+          owner: `${[...scopes].reverse().find((s) => key in s.config)?.file ?? profile.settingsFile}:${key}`,
+        });
+      };
+      if (claude) {
+        setting("bashOutputMaxChars");
+        const environment = scopedEnvironment({ scopes, env: localEnv });
+        for (const key of [
+          "ENABLE_TOOL_SEARCH",
+          "MAX_MCP_OUTPUT_TOKENS",
+          "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        ]) {
+          const value = environment.values[key];
+          let safe: string | number | null = null;
+          if (key === "MAX_MCP_OUTPUT_TOKENS") {
+            if (
+              value !== undefined &&
+              (typeof value !== "string" ||
+                !/^[1-9]\d*$/.test(value) ||
+                !Number.isSafeInteger(Number(value)))
+            )
+              throw new ScanError("invalid context output budget", {
+                file: profile.settingsFile,
+                line: 1,
+              });
+            safe = value === undefined ? null : Number(value);
+          } else if (
+            typeof value === "string" &&
+            /^(true|false|0|1|auto(?::(?:100|\d{1,2}))?)$/.test(value)
+          )
+            safe = value;
+          state.controls.push({
+            key,
+            value: safe,
+            owner:
+              environment.owners[key] ?? `${profile.settingsFile}:env.${key}`,
+          });
+        }
+      } else {
+        setting("tool_output_token_limit");
+        setting("project_doc_max_bytes", 32768);
+      }
+      const serverScopes = claude
+        ? [
+            ...scopes,
+            ...chain.slice(0, 1).map((path) => ({
+              file: join(path, ".mcp.json"),
+              config: {} as Record<string, unknown>,
+            })),
+          ]
+        : scopes;
+      if (claude && chain[0])
+        serverScopes[serverScopes.length - 1]!.config = await settings(
+          join(chain[0], ".mcp.json"),
+          "claude",
+        );
+      const serverMap = new Map<
+        string,
+        { config: Record<string, unknown>; file: string }
+      >();
+      for (const scope of serverScopes) {
+        const field = scope.config[claude ? "mcpServers" : "mcp_servers"];
+        if (
+          field !== undefined &&
+          (field === null || typeof field !== "object" || Array.isArray(field))
+        )
+          throw new ScanError("invalid MCP server configuration", {
+            file: scope.file,
+            line: 1,
+          });
+        for (const [name, value] of Object.entries(object(field))) {
+          if (
+            !label(name) ||
+            !value ||
+            typeof value !== "object" ||
+            Array.isArray(value)
+          )
+            throw new ScanError("invalid MCP server configuration", {
+              file: scope.file,
+              line: 1,
+            });
+          serverMap.set(name, {
+            config: { ...serverMap.get(name)?.config, ...object(value) },
+            file: scope.file,
+          });
+        }
+      }
+      for (const [name, server] of serverMap) {
+        const c = server.config;
+        for (const key of ["enabled", "alwaysLoad"])
+          if (c[key] !== undefined && typeof c[key] !== "boolean")
+            throw new ScanError("invalid MCP enablement setting", {
+              file: server.file,
+              line: 1,
+            });
+        for (const key of ["enabled_tools", "disabled_tools"])
+          if (
+            c[key] !== undefined &&
+            (!Array.isArray(c[key]) ||
+              (c[key] as unknown[]).some((v) => typeof v !== "string"))
+          )
+            throw new ScanError("invalid MCP tool enablement list", {
+              file: server.file,
+              line: 1,
+            });
+        const omitted = c.omit_tools_from;
+        if (
+          omitted !== undefined &&
+          (!Array.isArray(omitted) ||
+            omitted.some(
+              (v) => !["direct", "deferred", "code_mode"].includes(String(v)),
+            ))
+        )
+          throw new ScanError("invalid MCP omission setting", {
+            file: server.file,
+            line: 1,
+          });
+        state.servers.push({
+          name,
+          group: identity(`mcp-server:${name}`),
+          owner: `${server.file}:${claude ? "mcpServers" : "mcp_servers"}.${name}`,
+          enabled: !claude ? c.enabled !== false : null,
+          alwaysLoad: typeof c.alwaysLoad === "boolean" ? c.alwaysLoad : null,
+          omitted: Array.isArray(omitted) ? (omitted as string[]) : [],
+          blockedTools: Array.isArray(c.disabled_tools)
+            ? c.disabled_tools.length
+            : 0,
+        });
+      }
+      if (!claude) {
+        const apps = new Map<
+          string,
+          { config: Record<string, unknown>; file: string }
+        >();
+        for (const scope of scopes) {
+          if (
+            scope.config.apps !== undefined &&
+            (!scope.config.apps ||
+              typeof scope.config.apps !== "object" ||
+              Array.isArray(scope.config.apps))
+          )
+            throw new ScanError("invalid app exposure setting", {
+              file: scope.file,
+              line: 1,
+            });
+          for (const [name, value] of Object.entries(
+            object(scope.config.apps),
+          )) {
+            if (!value || typeof value !== "object" || Array.isArray(value))
+              throw new ScanError("invalid app exposure setting", {
+                file: scope.file,
+                line: 1,
+              });
+            apps.set(name, {
+              config: { ...apps.get(name)?.config, ...object(value) },
+              file: scope.file,
+            });
+          }
+        }
+        for (const [name, { config: app, file }] of apps) {
+          if (
+            !label(name) ||
+            (app.enabled !== undefined && typeof app.enabled !== "boolean") ||
+            (app.omit_tools_from !== undefined &&
+              (!Array.isArray(app.omit_tools_from) ||
+                app.omit_tools_from.some(
+                  (v) =>
+                    !["direct", "deferred", "code_mode"].includes(String(v)),
+                )))
+          )
+            throw new ScanError("invalid app exposure setting", {
+              file,
+              line: 1,
+            });
+          state.apps.push({
+            name,
+            owner: `${file}:apps.${name}`,
+            enabled: app.enabled !== false,
+            omitted: Array.isArray(app.omit_tools_from)
+              ? (app.omit_tools_from as string[])
+              : [],
+          });
+        }
+      }
+      const paths: string[] = [];
+      if (claude) {
+        paths.push(join(profile.root, "CLAUDE.md"));
+        // Claude's instruction hierarchy continues above the Git root.
+        for (
+          let path = cwd;
+          path !== null;
+          path = dirname(path) === path ? null : dirname(path)
+        )
+          paths.push(
+            join(path, "CLAUDE.md"),
+            join(path, "CLAUDE.local.md"),
+            join(path, ".claude/CLAUDE.md"),
+          );
+      } else {
+        // project_doc_max_bytes applies to the project chain, not the global file.
+        for (const path of rootFound ? chain : cwd ? [cwd] : []) {
+          const names = ["AGENTS.override.md", "AGENTS.md"];
+          const fallbacks = config.project_doc_fallback_filenames;
+          if (
+            fallbacks !== undefined &&
+            (!Array.isArray(fallbacks) ||
+              fallbacks.some(
+                (v) =>
+                  typeof v !== "string" || v.includes("/") || v.includes("\\"),
+              ))
+          )
+            throw new ScanError("invalid instruction fallback filenames", {
+              file: profile.settingsFile,
+              line: 1,
+            });
+          if (Array.isArray(fallbacks)) names.push(...(fallbacks as string[]));
+          for (const name of names) {
+            try {
+              if ((await readFile(join(path, name), "utf8")).trim()) {
+                paths.push(join(path, name));
+                break;
+              }
+            } catch (error) {
+              if (!missing(error))
+                throw new ScanError("cannot read current instructions", {
+                  file: join(path, name),
+                  line: 1,
+                });
+            }
+          }
+        }
+      }
+      for (const file of new Set(paths)) {
+        try {
+          const body = await readFile(file, "utf8");
+          state.files.push({
+            file,
+            characters: [...body].length,
+            bytes: Buffer.byteLength(body),
+            lines: body.length
+              ? body.split("\n").length - Number(body.endsWith("\n"))
+              : 0,
+            fingerprint: identity(body),
+          });
+        } catch (error) {
+          if (!missing(error))
+            throw new ScanError("cannot read current instructions", {
+              file,
+              line: 1,
+            });
+        }
+      }
+      profile.context.push(state);
+    }
+  }
+}

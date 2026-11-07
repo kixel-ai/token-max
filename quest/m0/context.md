@@ -78,10 +78,6 @@ guidance](https://code.claude.com/docs/en/costs#reduce-mcp-server-overhead),
 [Codex context guidance](https://learn.chatgpt.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra),
 and [Codex MCP settings](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-## Required
-
-- [Context exposure measurement](/quest/m0/context-exposure.md) - local size estimates, exposure, and invocation coverage on top of replay
-
 ## Related
 
 - [Skills catalog and usage check](/quest/m0/skills-catalog.md) - owns skill listing and usage recommendations

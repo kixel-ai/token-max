@@ -1,3 +1,5 @@
+import type { ExposureScan, analyzeExposure } from "./exposure.js";
+
 /** The two locally supported transcript formats. */
 export type Harness = "claude" | "codex";
 /** A documented Claude cache lifetime. */
@@ -230,6 +232,8 @@ export interface Scan {
   snapshots: Snapshot[];
   requests: Request[];
   events: StructuralEvent[];
+  /** Historical component counts and invocation evidence, without content. */
+  exposure: ExposureScan;
   /** Pre-window Claude metadata supplies cache evidence, never selected billing or coverage. */
   cacheContext: { requests: Request[]; boundaries: StructuralEvent[] };
   coverage: {
@@ -255,6 +259,7 @@ export interface Report {
     cost: Cost;
   }[];
   compactions: CompactionCharge[];
+  exposure: ReturnType<typeof analyzeExposure>;
   checks: CheckResult[];
   assumptions: string[];
 }

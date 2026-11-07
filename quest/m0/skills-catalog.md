@@ -69,7 +69,3 @@ reports](https://code.claude.com/docs/en/skills#find-unused-skills),
 and [Codex metadata guidance](https://learn.chatgpt.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra).
 Claude's `/skill-doctor` already reports unused skills and context cost;
 this check adds cross-harness transcript replay and API-price estimates.
-
-## Required
-
-- [Context exposure measurement](/quest/m0/context-exposure.md) - local size estimates, exposure, and invocation coverage on top of replay

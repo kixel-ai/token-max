@@ -54,6 +54,7 @@ file lengths and deferred byte counts in JSON. There is no skip-malformed mode.
 The minimal report and `--json` share the same analysis. JSON schema version 1
 includes profile aliases, snapshots, deduplicated requests, structural events,
 usage coverage, pre-window cache context, partially known costs, summary estimates,
+component measurements with exposure/invocation coverage, calibration provenance,
 and check results.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
@@ -61,8 +62,8 @@ names that profile and is conditional, not another copy of historical spend.
 Independent check savings must not be summed.
 
 See [billing and replay semantics](docs/semantics.md) for supported accounting,
-assumptions, sources, and limits. Component exposure, other setting checks, terminal
-presentation, and npm releases remain in [the first-release plan](quest/m0/README.md).
+assumptions, sources, and limits. Component measurements are shared infrastructure;
+skills/context recommendations, other setting checks, terminal presentation, and npm releases remain in [the first-release plan](quest/m0/README.md).
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from
 matching adjacent measured requests, including growing-context retry geometry

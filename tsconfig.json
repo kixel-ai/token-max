@@ -12,7 +12,8 @@
     "outDir": "dist",
     "rootDir": ".",
     "types": ["node"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "resolveJsonModule": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]
 }

@@ -82,8 +82,10 @@ usable in scripts and avoid a second analysis implementation.
 The epic's own remaining work is the end-to-end first-release validation,
 publishing the complete 0.1.0 package after every child merges, verifying
 the child's first-use docs against the published package, and clearing
-Quest's release handoff. The npm child writes the docs and prepares/tests
-the artifact and release path; it does not publish ahead of the other checks. Use the scoped package under the delegated distribution choice;
+Quest's release handoff. Packaging preparation supplies the built artifact, packed-consumer tests, and
+[protected release path](../../docs/releasing.md). This epic still owns the
+0.1.0 version change, publication, and published first-use verification after
+all children merge. No package was published during preparation. Use the scoped package under the delegated distribution choice;
 do not infer publishability from a registry 404.
 
 Recommendations for every check:
@@ -140,11 +142,10 @@ Recommendations for every check:
 
 ## Waiting
 
-- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-06, `npm whoami` returned E401; public packages suggest scope ownership but do not establish this session's authority. An agent can prepare and test without credentials, but cannot complete the account owner's login or grant itself rights. Check the authenticated identity and scope permissions up front. Configure trusted publishing near the actual release, respecting its first-publish expiry and whether it supports a new package; otherwise bootstrap by publishing the tested complete tarball with public access, then configure it for later releases. The npm child documents the path. No release is attempted during planning.
+- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-07, `npm whoami` still returned E401, and the GitHub `npm` environment was absent; public packages suggest scope ownership but do not establish this session's authority. An agent can prepare and test without credentials, but cannot complete the account owner's login or grant itself rights. Check the authenticated identity and scope permissions up front. Configure trusted publishing near the actual release, respecting its first-publish expiry and whether it supports a new package; otherwise bootstrap by publishing the tested complete tarball with public access, then configure it for later releases. Follow [release preparation](../../docs/releasing.md): create the main-only, reviewer-protected `npm` environment, bootstrap the tested complete tarball using environment-only authentication if needed, and configure OIDC near a subsequent release within its two-day validation window. An agent can automate protected execution, but cannot sign in as the owner or grant itself scope rights. No release was attempted.
 
 ## Required
 
-- [One-command npm distribution](/quest/m0/npm.md) - built JavaScript launched with npx or Bun, without a Rust install
 - [Fast-mode check](/quest/m0/fast-mode.md) - recommends standard speed and reports the observed premium where the billed tier and price are known
 - [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
 - [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise

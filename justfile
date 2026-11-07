@@ -6,6 +6,8 @@ check:
     bun run build
     bun test ./test
     node --test dist/test/*.test.js
+    bun run pack
+    bun run test:package
     quest check
 
 build:

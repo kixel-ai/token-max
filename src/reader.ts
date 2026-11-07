@@ -1,4 +1,5 @@
 import { ExposureCollector } from "./exposure.js";
+import { terminalArguments } from "./timeouts.js";
 import { open } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
 import type {
@@ -349,6 +350,9 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   const exposure = new ExposureCollector();
   const requests = new Map<string, Request>();
   const events = new Map<string, StructuralEvent>();
+  const terminalConflicts = new Set<string>();
+  const toolParents = new Map<string, string[] | null>();
+  const requestParents = new Map<string, Set<string>>();
   // Only explicit compaction lineage can connect a notice to its boundary.
   // Ordinary messages stop the walk; a missing parent is not a historical match.
   const compactParents = new Map<
@@ -363,6 +367,9 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   function addEvent(e: StructuralEvent) {
     const previous = events.get(e.id);
     if (previous) {
+      if (JSON.stringify(previous.terminal) !== JSON.stringify(e.terminal))
+        terminalConflicts.add(e.id);
+      if (terminalConflicts.has(e.id)) delete previous.terminal;
       previous.profiles = [...new Set([...previous.profiles, ...e.profiles])];
       previous.origins.push(...e.origins);
     } else events.set(e.id, e);
@@ -591,6 +598,11 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             r.evidence = "unknown";
             r.issues.push("request usage is absent");
           }
+          if (parentKey) {
+            const parents = requestParents.get(r.id) ?? new Set<string>();
+            parents.add(parentKey);
+            requestParents.set(r.id, parents);
+          }
           add(r);
           if (selected && Array.isArray(m.content))
             for (const block of m.content) {
@@ -607,6 +619,14 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
                 e.tool = label(b.name);
                 e.toolId = typeof b.id === "string" ? id(b.id) : null;
                 e.request = r.id;
+                const terminal = terminalArguments({
+                  harness: "claude",
+                  tool: e.tool,
+                  input: b.input,
+                  client: context.client,
+                  version: context.version,
+                });
+                if (terminal) e.terminal = terminal;
                 addEvent(e);
               }
             }
@@ -669,6 +689,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           if (time === null) return;
           const m = object(raw.message);
           let toolResult = false;
+          const results: string[] = [];
           if (Array.isArray(m.content))
             for (const block of m.content) {
               const b = object(block);
@@ -683,10 +704,21 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
                 );
                 e.toolId =
                   typeof b.tool_use_id === "string" ? id(b.tool_use_id) : null;
+                if (e.toolId) results.push(e.toolId);
                 addEvent(e);
                 toolResult = true;
               }
             }
+          if (recordKey && results.length) {
+            results.sort();
+            if (
+              toolParents.has(recordKey) &&
+              JSON.stringify(toolParents.get(recordKey)) !==
+                JSON.stringify(results)
+            )
+              toolParents.set(recordKey, null);
+            else toolParents.set(recordKey, results);
+          }
           if (!toolResult && raw.isMeta !== true)
             addEvent(
               event(snapshot, location, context, time, "turn-start", raw.uuid),
@@ -905,6 +937,16 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           );
           e.tool = label(p.name);
           e.toolId = typeof p.call_id === "string" ? id(p.call_id) : null;
+          if (e.kind === "tool-start") {
+            const terminal = terminalArguments({
+              harness: "codex",
+              tool: e.tool,
+              input: p.arguments,
+              client: context.client,
+              version: context.version,
+            });
+            if (terminal) e.terminal = terminal;
+          }
           addEvent(e);
         }
       }
@@ -919,6 +961,11 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   );
   for (const [ref, r] of refs) if (!linkedRefs.has(ref)) add(r);
   for (const r of requests.values()) {
+    const parents = requestParents.get(r.id);
+    if (parents?.size === 1) {
+      const results = toolParents.get([...parents][0]!);
+      if (results) r.toolResults = results;
+    }
     if (r.reference) {
       refToRequest.set(r.reference, r.id);
       const ref = refs.get(r.reference);

@@ -225,6 +225,24 @@ export function formatReport(
           "Extra re-read break-even per resumed summary",
           estimate(s.rereadBreakEvenUsdPerResumedSummary),
         );
+      } else if (result.check === "terminal-timeout") {
+        field(
+          "Terminal applicability",
+          `${result.applicable ? "verified native policy" : "unresolved"}; ${result.control.reason}`,
+        );
+        field(
+          "TTL comparison",
+          `current ${result.currentTtl ?? "unknown"}; evaluation ${result.evaluationTtl ?? "unknown"}; ceiling at/above current ${result.atOrAboveCurrentTtl ?? "unknown"}, evaluation ${result.atOrAboveEvaluationTtl ?? "unknown"}`,
+        );
+        field(
+          "Terminal evidence",
+          `${result.observed.foregroundRequests} foreground requests, ${result.observed.backgroundRequests} background requests; ${result.observed.pollCalls} explicit polls, ${result.observed.repeatedPollCalls} repeated polls; actual cap hits unknown`,
+        );
+        field(
+          "Observed cache-miss/write charges on linked continuations",
+          `${money(result.observed.missCost)}; includes new input/writes, not proven expiry or removable savings`,
+        );
+        field("Cap-hit coverage", result.observed.capHitReason);
       } else if (result.check === "fast-mode") {
         field("Standard-speed replacement", result.replacement);
         field(
@@ -383,6 +401,27 @@ export function formatReport(
               );
             notes("Idle unknown", scenario.unknown);
           }
+        } else if (result.check === "terminal-timeout") {
+          cost(
+            "Observed noncached input/write charges",
+            result.observed.missCost,
+          );
+          if (
+            result.control.maximumMs !== null ||
+            result.control.defaultMs !== null
+          ) {
+            field("Foreground default owner", result.control.defaultOwner);
+            field("Foreground maximum owner", result.control.maximumOwner);
+          }
+          field(
+            "Attribution",
+            `${result.observed.linkedRequests.length} directly linked billed continuations; ${result.observed.callsWithUnknownAttribution} calls without billing linkage`,
+          );
+          for (const call of result.calls)
+            field(
+              "Terminal call",
+              `${call.event}; ${call.tool}; requested timeout ${call.timeoutMs ?? "unknown"} ms; background ${call.background ?? "unknown"}; poll target ${call.poll ?? "none"}; observed result gap ${call.elapsedMs ?? "unknown"} ms (not execution duration or cap proof); linked usage ${call.linkedRequests.join(", ") || "unknown"}`,
+            );
         } else if (result.check === "fast-mode") {
           cost("Observed response-tier premium", result.observed.premium);
           cost(
@@ -434,7 +473,11 @@ export function formatReport(
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        if (result.check !== "idle-compaction" && result.check !== "fast-mode")
+        if (
+          result.check !== "idle-compaction" &&
+          result.check !== "fast-mode" &&
+          result.check !== "terminal-timeout"
+        )
           witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
@@ -501,6 +544,7 @@ export function formatReport(
 }
 
 function reason(result: CheckResult): string {
+  if (result.check === "terminal-timeout") return result.reason;
   if (result.check === "fast-mode") return result.reason;
   if (result.check === "idle-compaction")
     return result.recommended === null

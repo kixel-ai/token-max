@@ -1,4 +1,5 @@
 import { speedChecks } from "./fast.js";
+import { timeoutChecks } from "./timeouts.js";
 import { analyzeExposure } from "./exposure.js";
 import type {
   BillingPart,
@@ -615,6 +616,15 @@ export function analyze(options: {
     }),
   );
   checks.push(...speedChecks({ scan, catalog, since, now }));
+  checks.push(
+    ...timeoutChecks({
+      scan,
+      catalog,
+      since,
+      now,
+      ttls: checks.filter((c) => c.check === "claude-cache-ttl"),
+    }),
+  );
   return {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),

@@ -16,6 +16,7 @@ import {
   idleControls,
   scopedEnvironment,
   speedControls,
+  timeoutControls,
 } from "./controls.js";
 
 /** Explicit roots limit the entire scan; otherwise discover host-local profiles. */
@@ -101,6 +102,7 @@ function controls(options: {
         : "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL";
     const key = bucket === "main" ? "promptCacheTtl" : "subagentPromptCacheTtl";
     let value: Ttl | null = null;
+    let resolved = false;
     let owner = settingOwner(key);
     let reason =
       "billing state is unknown; main default can change from included subscription usage to credits";
@@ -108,17 +110,21 @@ function controls(options: {
       reason = "prompt caching is disabled";
     } else if (values.FORCE_PROMPT_CACHING_5M === "1") {
       value = "5m";
+      resolved = true;
       owner = envOwner("FORCE_PROMPT_CACHING_5M");
       reason = "environment override";
     } else if (ttl(values[variable])) {
       value = ttl(values[variable]);
+      resolved = true;
       owner = envOwner(variable);
       reason = "environment override";
     } else if (ttl(config[key])) {
       value = ttl(config[key]);
+      resolved = true;
       reason = "current user/managed setting";
     } else if (values.ENABLE_PROMPT_CACHING_1H === "1") {
       value = "1h";
+      resolved = bucket === "main";
       owner = envOwner("ENABLE_PROMPT_CACHING_1H");
       reason = "environment override; agent frontmatter may take precedence";
     } else if (bucket === "subagent") {
@@ -132,10 +138,25 @@ function controls(options: {
     ) {
       value = "5m";
       reason = "explicit cloud-provider billing default";
+      resolved = true;
     }
-    result[bucket] = { value, owner, reason };
+    result[bucket] = { value, owner, reason, resolved };
   }
   return result;
+}
+
+function unshadowedEnvironment(options: {
+  env: NodeJS.ProcessEnv;
+  scopes: { config: Record<string, unknown>; file: string }[];
+}): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(options.env).filter(
+      ([key]) =>
+        !options.scopes.some((scope) =>
+          Object.hasOwn(object(scope.config.env), key),
+        ),
+    ),
+  );
 }
 
 /** Retain only settings that current or planned checks consume. */
@@ -192,16 +213,23 @@ export async function discoverIdleOwners(
     const managed = await settings(managedFile, "claude");
     const localEnv = active === profile.root ? env : {};
     profile.speedDirectories = Object.create(null);
+    profile.timeoutDirectories = Object.create(null);
     profile.idleDirectories = Object.create(null) as NonNullable<
       Profile["idleDirectories"]
     >;
-    const relevant = requests.filter(
-      (r) => r.profiles.includes(profile.id) && r.agent === "main",
-    );
-    if (relevant.some((r) => r.cwd === null) && profile.idle) {
+    const relevant = requests.filter((r) => r.profiles.includes(profile.id));
+    if (
+      relevant.some((r) => r.agent === "main" && r.cwd === null) &&
+      profile.idle
+    ) {
       profile.idle.resolved = false;
       profile.idle.reason =
         "recorded working directory is absent; current project/local ownership cannot be resolved";
+    }
+    if (relevant.some((r) => r.cwd === null) && profile.timeout) {
+      profile.timeout.resolved = false;
+      profile.timeout.reason =
+        "recorded working directory is absent; current terminal ownership is unresolved";
     }
     for (const cwd of new Set(
       relevant.flatMap((r) => (r.cwd ? [r.cwd] : [])),
@@ -247,6 +275,20 @@ export async function discoverIdleOwners(
         managedFile,
         scopes,
       });
+      const terminal = timeoutControls({
+        harness: "claude",
+        scopes,
+        env: localEnv,
+      });
+      terminal.ttl = controls({
+        config,
+        env: unshadowedEnvironment({ env: localEnv, scopes }),
+        file: profile.settingsFile,
+        managed,
+        managedFile,
+        scopes,
+      });
+      profile.timeoutDirectories![cwd] = terminal;
       c.compaction = compactionControls({
         harness: "claude",
         user,
@@ -264,6 +306,9 @@ export async function discoverIdleOwners(
         profile.speedDirectories![cwd]!.reason =
           "recorded working directory no longer exists; current ownership unresolved";
         c.resolved = false;
+        terminal.resolved = false;
+        terminal.reason =
+          "recorded working directory no longer exists; current terminal ownership is unresolved";
         c.reason =
           "recorded working directory no longer exists; current project/local ownership is unresolved";
       }
@@ -419,6 +464,20 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       scopes: speedScopes,
       env: localEnv,
     });
+    const timeout = timeoutControls({
+      harness: root.harness,
+      scopes: speedScopes,
+      env: localEnv,
+    });
+    if (root.harness === "claude")
+      timeout.ttl = controls({
+        config,
+        env: unshadowedEnvironment({ env: localEnv, scopes: speedScopes }),
+        file: settingsFile,
+        managed,
+        managedFile,
+        scopes: speedScopes,
+      });
     if (root.harness === "codex") {
       const baseTier = [...speedScopes]
         .reverse()
@@ -452,6 +511,15 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
         user.profile !== undefined ||
         Object.keys(object(user.profiles)).length
       ) {
+        for (const row of Object.values(object(user.profiles)))
+          timeoutControls({
+            harness: "codex",
+            scopes: [{ config: object(row), file: settingsFile }],
+            env: {},
+          });
+        timeout.resolved = false;
+        timeout.reason =
+          "legacy Codex profile selection/version handling is unresolved";
         Object.assign(speed, {
           value: null,
           resolved: false,
@@ -463,6 +531,22 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
         if (!/^[a-zA-Z0-9_-]+\.config\.toml$/.test(entry)) continue;
         const file = join(canonical, entry);
         const config = await settings(file, "codex");
+        timeoutControls({
+          harness: "codex",
+          scopes: [{ config, file }],
+          env: {},
+        });
+        if (
+          [
+            "background_terminal_max_timeout",
+            "background_terminal_timeout",
+          ].some((key) => Object.hasOwn(config, key))
+        ) {
+          timeout.resolved = false;
+          timeout.owner += `; ${file} (--profile selection unresolved)`;
+          timeout.reason =
+            "named profile may override terminal polling; --profile selection is unobserved";
+        }
         possibleTiers.push(config.service_tier ?? baseTier);
         if (
           ["model", "model_provider", "service_tier", "features"].some((key) =>
@@ -534,6 +618,7 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       provider,
       settings: structuralSettings(config),
       speed,
+      timeout,
       compaction: compactionControls({
         harness: root.harness,
         user,
@@ -611,6 +696,14 @@ export async function discoverCodexSpeedOwners(
   requests: Request[],
 ): Promise<void> {
   for (const profile of profiles.filter((p) => p.harness === "codex")) {
+    if (
+      requests.some((r) => r.profiles.includes(profile.id) && r.cwd === null) &&
+      profile.timeout
+    ) {
+      profile.timeout.resolved = false;
+      profile.timeout.reason =
+        "recorded working directory is absent; current terminal ownership is unresolved";
+    }
     for (const cwd of new Set(
       requests
         .filter((r) => r.profiles.includes(profile.id))
@@ -620,6 +713,27 @@ export async function discoverCodexSpeedOwners(
         options.signal?.throwIfAborted();
         const file = join(path, ".codex", "config.toml");
         const config = await settings(file, "codex");
+        timeoutControls({
+          harness: "codex",
+          scopes: [{ config, file }],
+          env: {},
+        });
+        if (
+          [
+            "background_terminal_max_timeout",
+            "background_terminal_timeout",
+          ].some((key) => Object.hasOwn(config, key)) &&
+          !profile.timeoutDirectories?.[cwd]
+        ) {
+          profile.timeoutDirectories ??= Object.create(null);
+          profile.timeoutDirectories![cwd] = {
+            ...profile.timeout!,
+            resolved: false,
+            owner: file,
+            reason:
+              "current project terminal override exists; trust and CLI selection are unresolved",
+          };
+        }
         if (
           ["model", "model_provider", "service_tier", "features"].some((key) =>
             Object.hasOwn(config, key),
@@ -647,6 +761,17 @@ export async function discoverCodexSpeedOwners(
             });
         }
         if (dirname(path) === path) break;
+      }
+      try {
+        await stat(cwd);
+      } catch {
+        profile.timeoutDirectories ??= Object.create(null);
+        profile.timeoutDirectories![cwd] = {
+          ...profile.timeout!,
+          resolved: false,
+          reason:
+            "recorded working directory no longer exists; current terminal ownership is unresolved",
+        };
       }
     }
   }

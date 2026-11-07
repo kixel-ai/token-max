@@ -1,7 +1,7 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings, and flag foreground terminal caps that can outlast the cache. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -265,3 +265,38 @@ Claude's separate fast/standard caches mean cache-switch effects are excluded.
 They hold work constant, do not value latency, and make no subscription-bill,
 credit-multiplier or combined savings claim. Fast mode compares with the current
 profile, independently of the TTL/window/idle recommendations.
+
+## Terminal timeouts
+
+`terminal-timeout` compares Claude's effective foreground ceiling with the
+current TTL and the applicable recommended TTL. The ceiling is the larger of
+`BASH_MAX_TIMEOUT_MS` (default 600000 ms) and `BASH_DEFAULT_TIMEOUT_MS` (default
+120000 ms). At or above the evaluation TTL, an applicable current ceiling causes
+exit 1. The report names both owners and asks for a ceiling strictly below the
+TTL; lowering only the maximum cannot override a larger default. Background
+commands have separate lifetime rules. A foreground timeout may move a command
+to the background rather than kill it.
+
+The check uses current native user/project/local/managed files and the active
+profile's inherited environment. Settings `env` values replace inherited shell
+values for the supported CLI/SDK policy. Recorded CLI/SDK versions at or above
+Claude Code 2.1.319 and Codex CLI 0.167.0 are conservative verified applicability
+floors, not claimed feature introduction versions. Older, unknown or hosted
+clients and unresolved ownership stay advisory. Current files and the historical
+55-minute host example never establish historical caps.
+
+Only structural arguments identify polling: repeated native empty Codex
+`write_stdin` calls for the same opaque terminal ID, or legacy Claude
+`TaskOutput` calls for the same task (removed in 2.1.277). Shell command text,
+output and `Read` paths are not searched for loops. Requested timeouts, result
+gaps and interruption flags never prove actual cap hits, which remain unknown
+without a verified typed marker. Commands and keystrokes are not retained.
+
+Direct native parent/result linkage can price noncached input and cache writes
+on Claude continuations. These observed cache-miss/write charges include new
+input and prefix growth, so they are **not proven expiry costs or removable
+savings**. Shorter waits may add model work, reads and output; net savings remain
+unknown. Missing billing linkage or prices stays unknown. Codex's
+`background_terminal_max_timeout` limits one empty poll (default five minutes),
+not the command's lifetime. The check never recommends raising it and never
+assumes that a poll guarantees a cache hit or that a requested tier was billed.

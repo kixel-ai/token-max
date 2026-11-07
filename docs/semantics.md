@@ -537,3 +537,86 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 [API ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode),
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
+
+## Terminal limits and structural wait evidence
+
+The additive schema-version-1 `terminal-timeout` check uses `Profile.timeout`
+and `timeoutDirectories`, the shared structural event stream and the same
+pricing/report/exit paths. Claude's current foreground ceiling is
+`max(BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS)`, whose documented defaults
+are 600000 and 120000 ms. Owners are retained separately because both values
+must be below the cache lifetime. Equality is a violation. The replacement is
+a strict bound, not an invented safety margin or a claim that command work can
+be removed. Background command lifetimes and subagent stall timers are not
+foreground caps.
+
+`currentTtl` and `evaluationTtl` retain the current and applicable recommended
+TTL separately. A priced, actionable shared TTL recommendation applies only
+to the matching bucket and current value/owner. An advisory or differently owned
+TTL winner is not applied. Observed dollars always use recorded counters and
+write lifetimes, independent of the guidance's evaluation TTL. This check adds
+no combined savings estimate and does not apply window/idle/speed changes.
+The optional `Profile.ttl.*.resolved` flag distinguishes explicit bucket controls
+from defaults that subagent frontmatter can override. Such unresolved defaults
+stay advisory unless an actionable explicit bucket TTL change supersedes them.
+
+Claude settings `env` values override inherited shell variables for the native
+CLI/SDK policy; user, project, local and managed layers keep their owners.
+Shell values apply only to the active profile. Missing/deleted working
+directories, hosted/custom clients and unknown versions keep guidance advisory.
+The verified-policy floors are the installed reference versions, Claude Code
+2.1.319 and Codex CLI 0.167.0, not historical introduction claims. Current files
+are applied to the selected historical window with that assumption disclosed;
+neither the old 3300000-ms host example nor an old request establishes current
+or historical launch overrides. The tool does not execute commands, mutate
+settings or alter the user's processes.
+
+`StructuralEvent.terminal` retains only requested timeout milliseconds, a
+background-request flag and a hashed poll target. Native Claude `Bash` arguments
+establish requests, not actual execution mode, applied timeout or cap hits.
+Legacy `TaskOutput` identifies a task poll only before its documented removal
+in 2.1.277. Native Codex `write_stdin` counts only absent/empty `chars`, keyed by
+the structural numeric terminal ID. Repeated polls require the same target and
+session in the selected window. Nonempty keystrokes, custom tool names,
+command/output text, result-looking strings and ordinary `Read` calls provide
+no polling proof. No command, result or keystroke text is retained for this
+check. Missing or malformed complete JSONL records still fail the whole scan.
+
+`Request.toolResults` contains hashed tool IDs only when the direct native
+Claude `parentUuid` identifies the corresponding user result message. A matching
+tool-end record, session and time order are also required for cost linkage.
+Timing adjacency, shared turns and requested service tiers are insufficient.
+Several calls may share a continuation; its charges count once per finding.
+Copied events/requests use the reader's existing deduplication. Result timestamp
+gaps include scheduling/serialization delays, not verified execution durations.
+Native interruptions and background task IDs do not prove cap hits, so
+`observed.capHits` remains null and `capHitReason` says why. There is no verified
+direct Codex tool-to-billed-continuation association in this reader; its polling
+is observable while associated dollars remain unknown.
+
+`observed.missCost` prices original ordinary input plus cache writes on linked
+continuations, with cache reads excluded and total input preserved for context
+tier selection. It uses each part's recorded model, billed tier/speed,
+geography and write lifetime through `priceComponents`. It includes initial
+content and new-prefix writes and cannot identify expired-prefix causality.
+Missing links or usage keep the total unknown while preserving any priced
+subtotal. Empty evidence is unknown, never a zero-cost claim. Output, server
+fees and original cache reads remain in the unchanged recorded baseline.
+No counterfactual establishes the extra requests/reads/output or subsequent work
+from reducing waits, so `savingsUsd` and `monthlySavingsUsd` remain null even
+with a guidance-backed change. Costs are API-price equivalents, not invoices
+or subscription bills.
+
+Current primary guidance, checked 2026-11-07:
+[Claude environment variables](https://code.claude.com/docs/en/env-vars),
+[foreground/background tools](https://code.claude.com/docs/en/tools-reference),
+[settings environment precedence](https://code.claude.com/docs/en/settings-reference#env),
+[TTL control precedence](https://code.claude.com/docs/en/prompt-caching#choose-the-ttl-yourself),
+[Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [profiles/project layers](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles).
+Codex's `background_terminal_max_timeout` replaces the old
+`background_terminal_timeout` and bounds one empty `write_stdin` poll, default
+300000 ms, not command lifetime. Named/legacy profile selection and project
+trust stay unresolved where not established. The check never recommends raising
+the poll timeout, never guarantees cached polling and never turns requested
+tiers into billing evidence.

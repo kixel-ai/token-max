@@ -2,9 +2,99 @@ import type {
   IdleControl,
   Profile,
   SpeedControl,
+  TimeoutControl,
   WindowControl,
 } from "./model.js";
 import { object, ScanError } from "./safe.js";
+
+/** Resolve native terminal limits without treating a current file as historical execution evidence. */
+export function timeoutControls(options: {
+  harness: Profile["harness"];
+  scopes: { config: Record<string, unknown>; file: string }[];
+  env: Record<string, unknown>;
+}): TimeoutControl {
+  const first = options.scopes[0]?.file ?? "settings";
+  const values: Record<string, unknown> =
+    options.harness === "claude" ? { ...options.env } : {};
+  const owners: Record<string, string> = Object.fromEntries(
+    Object.keys(values).map((key) => [key, key]),
+  );
+  // Native CLI/SDK settings env replaces inherited shell values. Hosted clients
+  // with the opposite precedence are left advisory by the applicability check.
+  for (const { config, file } of options.scopes) {
+    const row = options.harness === "claude" ? object(config.env) : config;
+    for (const key of options.harness === "claude"
+      ? ["BASH_MAX_TIMEOUT_MS", "BASH_DEFAULT_TIMEOUT_MS"]
+      : ["background_terminal_max_timeout", "background_terminal_timeout"]) {
+      if (!Object.hasOwn(row, key)) continue;
+      const value = row[key];
+      if (
+        options.harness === "claude"
+          ? typeof value !== "string" ||
+            !/^\d+$/.test(value) ||
+            !Number.isSafeInteger(Number(value)) ||
+            Number(value) <= 0
+          : typeof value !== "number" ||
+            !Number.isSafeInteger(value) ||
+            value <= 0
+      )
+        throw new ScanError("invalid terminal timeout", { file, line: 1 });
+      values[key] = value;
+      owners[key] =
+        `${file}:${options.harness === "claude" ? "env." : ""}${key}`;
+    }
+  }
+  const read = (key: string, fallback: number) => {
+    if (values[key] === undefined) return fallback;
+    const n = Number(values[key]);
+    return /^\d+$/.test(String(values[key])) && Number.isSafeInteger(n) && n > 0
+      ? n
+      : null;
+  };
+  const owner = (key: string) =>
+    owners[key] ??
+    `${first}:${options.harness === "claude" ? "env." : ""}${key} (documented default)`;
+  const defaultMs =
+    options.harness === "claude"
+      ? read("BASH_DEFAULT_TIMEOUT_MS", 120000)
+      : null;
+  const maximumMs =
+    options.harness === "claude" ? read("BASH_MAX_TIMEOUT_MS", 600000) : null;
+  const pollMs =
+    options.harness === "codex"
+      ? read("background_terminal_max_timeout", 300000)
+      : null;
+  const legacy =
+    options.harness === "codex" &&
+    values.background_terminal_timeout !== undefined;
+  const resolved =
+    options.harness === "claude"
+      ? defaultMs !== null && maximumMs !== null
+      : pollMs !== null && !legacy;
+  const defaultOwner = owner("BASH_DEFAULT_TIMEOUT_MS");
+  const maximumOwner = owner("BASH_MAX_TIMEOUT_MS");
+  return {
+    defaultMs,
+    maximumMs,
+    pollMs,
+    ceilingMs:
+      defaultMs !== null && maximumMs !== null
+        ? Math.max(defaultMs, maximumMs)
+        : null,
+    owner:
+      options.harness === "claude"
+        ? [...new Set([maximumOwner, defaultOwner])].join("; ")
+        : owner("background_terminal_max_timeout"),
+    defaultOwner,
+    maximumOwner,
+    resolved,
+    reason: legacy
+      ? "legacy Codex timeout key present; installed-version handling is unresolved"
+      : resolved
+        ? "current native files and active-profile environment; launch/session overrides are unobserved"
+        : "terminal environment timeout is invalid or unsupported",
+  };
+}
 
 /** Merge settings environments in precedence order, preserving each effective key's owner. */
 export function scopedEnvironment(options: {

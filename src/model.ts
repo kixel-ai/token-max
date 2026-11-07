@@ -60,6 +60,8 @@ export interface Request {
   attempt: { maxOutputTokens: number | null } | null;
   /** Requested controls never establish the billed response tier. */
   requestedSpeed?: { tier: string | null; speed: string | null };
+  /** Direct parent tool results, linked by native message identity, never timing. */
+  toolResults?: string[];
   issues: string[];
 }
 /** Structural context and timing evidence, never a billed boundary request. */
@@ -93,6 +95,12 @@ export interface StructuralEvent {
   durationMs: number | null;
   tool: string | null;
   toolId: string | null;
+  /** Allowlisted tool arguments only; command, output and keystroke text are discarded. */
+  terminal?: {
+    timeoutMs: number | null;
+    background: boolean | null;
+    poll: string | null;
+  };
   settings: Record<string, string | number | boolean>;
   idleAttribution: "unknown" | "notice";
   /** Preceding metadata from this file, retained even before the selected window. */
@@ -133,6 +141,19 @@ export interface SpeedControl {
   resolved: boolean;
   reason: string;
 }
+/** Current native terminal limits and the files or environment keys that own them. */
+export interface TimeoutControl {
+  ceilingMs: number | null;
+  defaultMs: number | null;
+  maximumMs: number | null;
+  pollMs: number | null;
+  owner: string;
+  defaultOwner: string;
+  maximumOwner: string;
+  resolved: boolean;
+  reason: string;
+  ttl?: Profile["ttl"];
+}
 /** A selected profile's current settings and their owning controls. */
 export interface Profile {
   id: string;
@@ -143,7 +164,7 @@ export interface Profile {
   settingsFile: string;
   ttl: Record<
     "main" | "subagent",
-    { value: Ttl | null; owner: string; reason: string }
+    { value: Ttl | null; owner: string; reason: string; resolved?: boolean }
   >;
   provider: string | null;
   settings: Record<string, string | number | boolean>;
@@ -154,6 +175,8 @@ export interface Profile {
   idle?: IdleControl;
   speed?: SpeedControl;
   speedDirectories?: Record<string, SpeedControl>;
+  timeout?: TimeoutControl;
+  timeoutDirectories?: Record<string, TimeoutControl>;
   /** Current project controls observed at recorded working directories. */
   idleDirectories?: Record<string, IdleControl>;
 }
@@ -306,7 +329,46 @@ export interface CompactionCheckResult extends CheckBase<number> {
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
 export type CheckResult =
-  TtlCheckResult | CompactionCheckResult | IdleCheckResult | SpeedCheckResult;
+  | TtlCheckResult
+  | CompactionCheckResult
+  | IdleCheckResult
+  | SpeedCheckResult
+  | TimeoutCheckResult;
+/** Native timeout guidance with observed costs kept separate from removable savings. */
+export interface TimeoutCheckResult extends CheckBase<string> {
+  check: "terminal-timeout";
+  bucket: "main" | "subagent" | "all";
+  control: TimeoutControl;
+  reason: string;
+  applicable: boolean;
+  currentTtl: Ttl | null;
+  evaluationTtl: Ttl | null;
+  atOrAboveCurrentTtl: boolean | null;
+  atOrAboveEvaluationTtl: boolean | null;
+  observed: {
+    calls: number;
+    foregroundRequests: number;
+    backgroundRequests: number;
+    pollCalls: number;
+    repeatedPollCalls: number;
+    capHits: number | null;
+    capHitReason: string;
+    linkedRequests: string[];
+    /** Charges on directly linked continuations, not a causal expiry estimate. */
+    missCost: Cost;
+    callsWithUnknownAttribution: number;
+  };
+  calls: {
+    event: string;
+    tool: string;
+    timeoutMs: number | null;
+    background: boolean | null;
+    poll: string | null;
+    elapsedMs: number | null;
+    linkedRequests: string[];
+  }[];
+  usageEstimates: UsageEstimate[];
+}
 /** Rate-only premium comparisons keep current-setting estimates separate from observed response premiums. */
 export interface SpeedCheckResult extends CheckBase<string> {
   check: "fast-mode";

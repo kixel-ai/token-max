@@ -37,7 +37,7 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
   const result = new Map<string, UsageEstimate>();
   const boundaries = new Map<string, number[]>();
   for (const event of scan.events) {
-    if (!["compaction", "settings", "client"].includes(event.kind)) continue;
+    if (event.harness !== "claude" || event.kind !== "compaction") continue;
     for (const origin of event.origins) {
       const times = boundaries.get(origin.session) ?? [];
       times.push(event.time);
@@ -142,16 +142,19 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
           part.usage.write !== null,
       );
       const previousPrefix = (p.usage.read ?? 0) + (p.usage.write ?? 0);
-      const nextPrefix = (next.usage.read ?? 0) + (next.usage.write ?? 0);
+      const inputBeforeNewWrites =
+        next.usage.input === null || next.usage.write === null
+          ? null
+          : next.usage.input - next.usage.write;
       // Five minutes is the shortest supported cache lifetime, not a retry timeout.
       const growing =
         complete &&
         after.time - before.time < 5 * 60_000 &&
-        next.usage.input! >= p.usage.input! &&
-        nextPrefix >= previousPrefix;
+        inputBeforeNewWrites! >= p.usage.input! &&
+        next.usage.read! >= previousPrefix;
       if (!exact && !growing) {
         e.reason =
-          "no matching geometry or growing-context measured brackets within the five-minute cache lifetime";
+          "no matching geometry or growing-context warm-read evidence within the five-minute cache lifetime";
         continue;
       }
       const times = boundaries.get(r.session) ?? [];
@@ -163,8 +166,7 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
         else high = middle;
       }
       if (low < times.length && times[low]! <= after.time) {
-        e.reason =
-          "matching brackets are interrupted by a compaction/settings/client boundary";
+        e.reason = "matching brackets are interrupted by a compaction boundary";
         continue;
       }
       e.evidence = "estimated";
@@ -176,8 +178,9 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
           reasoning: null,
           ...(!exact
             ? {
+                input: inputBeforeNewWrites,
                 read: previousPrefix,
-                write: nextPrefix - previousPrefix,
+                write: next.usage.read! - previousPrefix,
                 // Replay assigns the chosen TTL, not an invented observed split.
                 write5m: null,
                 write1h: null,
@@ -187,11 +190,12 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
       };
       e.reason = exact
         ? "matching adjacent input geometry and pricing metadata in the same conversation/file"
-        : "growing-context measured brackets within one five-minute cache lifetime, with matching pricing/provenance";
+        : "growing-context downstream cache-read evidence within one five-minute cache lifetime, with matching pricing/provenance";
       e.assumptions = [
         exact
           ? "one billed API attempt with the same input/cache geometry and model/tier/speed/geography as both recorded brackets; this is not measured execution or prefix identity"
-          : "one billed attempt with the next measured request's input/cacheable length and the preceding cached prefix as warm reads; growing context, retry identity and cache hits are assumptions, not measured execution or equal content",
+          : "one billed attempt with the preceding cached prefix as warm reads and any additional next-request reads attributed as its writes; next-request new writes are excluded from its input, and next-request ordinary input is assumed unchanged",
+        "retry/content identity, cache survival and attribution of extra warm reads to this attempt rather than another cache warmer are assumptions, not measured billing",
         "actual usage and historical spend stay unknown; output is not imputed and cancels only under fixed behavior across TTL scenarios",
         "no-billed-attempt and cold-cache sensitivities are conditional scenarios, not guaranteed bounds on hidden work or context changes",
       ];

@@ -111,18 +111,23 @@ An API attempt can receive a comparison-only input estimate from its immediately
 adjacent measured requests in the same conversation/file. Identical input/cache
 geometry supports copying that geometry. Growing input and cacheable lengths also
 support a conditional retry estimate when the entire bracket spans less than the
-shortest documented cache lifetime, five minutes. That estimate uses the next
-request's input/cacheable lengths and the preceding cached prefix as warm reads;
-the remaining cacheable tokens are writes at the TTL being replayed. It does not
-invent an observed write split. The lifetime is a cache constraint, not a claimed
-retry timeout or proof of retry identity.
+shortest documented cache lifetime, five minutes, and the next measured read
+contains at least the preceding cached prefix. That preceding prefix supplies
+warm reads; the additional next-request reads supply estimated writes at the TTL
+being replayed. The next request's own new writes are excluded from the attempt's
+input, with its ordinary-input count assumed unchanged. Thus estimated cacheable
+length equals the next measured read, not its read plus new write. Estimated total
+input must not shrink below the preceding input. It does not invent an observed
+write split. The lifetime is a cache constraint, not a claimed retry timeout or
+proof of retry identity, actual billing or absence of another cache warmer.
 
 Model, source, provider, agent, version, client entrypoint and profile provenance
 must agree, and recorded pricing hints must not contradict the measured requests.
-Recorded compaction/settings/client boundaries interrupt estimation. Claude does
+Recorded compaction boundaries interrupt estimation; entrypoints are compared
+directly. Claude does
 not record a complete settings-change history; matching observed metadata cannot
 prove that unrecorded controls stayed unchanged. Consecutive unlinked attempts,
-missing brackets, shrinking geometry, expired growing-context brackets and
+missing brackets, shrinking geometry, inconsistent warm reads, expired growing-context brackets and
 differing attribution remain unsupported. `usageEstimates` names the bracket
 request IDs, estimated input geometry, recorded output limit when available,
 assumptions, and reasons. Equal counts do not prove equal content or prefix identity.

@@ -570,9 +570,9 @@ test("growing-context retry evidence supports an estimate within the recorded ca
   const estimate = check.usageEstimates[0]!;
   assert.equal(estimate.evidence, "estimated");
   assert.deepEqual(estimate.basis, [before.id, after.id]);
-  assert.equal(estimate.part!.usage.input, 120000);
+  assert.equal(estimate.part!.usage.input, 119000);
   assert.equal(estimate.part!.usage.read, 119000);
-  assert.equal(estimate.part!.usage.write, 1000);
+  assert.equal(estimate.part!.usage.write, 0);
   assert.equal(estimate.part!.usage.output, null);
   assert.equal(check.recommended, "1h");
   assert.ok(check.sensitivity.unlinked);
@@ -587,6 +587,31 @@ test("growing-context retry evidence supports an estimate within the recorded ca
   }).checks[0]!;
   assert.equal(expired.usageEstimates[0]!.evidence, "unknown");
   assert.equal(expired.recommended, null);
+});
+
+test("retry estimates attribute additional downstream reads, never the following request's own writes", async () => {
+  const { first, attempt, after } = bracketedAttempt();
+  attempt.time = attempt.endTime = 300;
+  after.time = after.endTime = 3300;
+  after.parts[0]!.usage = claudeUsage({ read: 1100, write: 100 });
+  const report = analyze({
+    scan: data([first, attempt, after]),
+    catalog: await prices(),
+    now: 60000,
+  });
+  const part = report.checks[0]!.usageEstimates[0]!.part!;
+  assert.equal(part.usage.input, 1100);
+  assert.equal(part.usage.read, 1000);
+  assert.equal(part.usage.write, 100);
+  assert.equal(after.parts[0]!.usage.write, 100);
+  after.parts[0]!.usage = claudeUsage({ read: 900, write: 300 });
+  const invalidated = analyze({
+    scan: data([first, attempt, after]),
+    catalog: await prices(),
+    now: 60000,
+  }).checks[0]!;
+  assert.equal(invalidated.usageEstimates[0]!.evidence, "unknown");
+  assert.equal(invalidated.recommended, null);
 });
 
 test("pre-window estimated cache seeds retain provenance and sensitivity without adding their charges", async () => {

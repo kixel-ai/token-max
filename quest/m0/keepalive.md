@@ -23,9 +23,20 @@ warm for up to 1 extra hour nets about $258 a month; up to 2 hours, $123;
 up to 4 hours, -$171; up to 24 hours, -$4,285. Pings on sessions that never
 resume cost more than the misses they save.
 
-Codex needs no ping on gpt-6.1-sol: its cache lives at least 30 minutes and
-every read renews it, and on the maintainer's sessions cached input stays
-above 95% across gaps up to 30 minutes.
+Codex on gpt-6.1-sol has at least 30 minutes of cache coverage, refreshed
+by reads. The maintainer's cached input above 95% for gaps up to 30 minutes
+does not establish the cost of longer gaps. Include those gaps in the cap
+comparison, pinging below the model's documented refresh interval and
+pricing its actual read/write rates and ping overhead
+([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+checked 2026-11-06). Compare against no keepalive with the same client
+lifetime assumptions; omit idle compaction where the harness has no such
+policy. Longer observed cache retention remains evidence, not a guarantee.
+
+Decided 2026-11-06 (maintainer, review checkpoint): ✅ continue the net-cost
+design and include Codex gaps beyond 30 minutes (rejected: scope m0
+keepalive to Claude). A short-gap hit rate is not grounds to exclude longer
+idle periods.
 
 Recommendations for the implementer:
 

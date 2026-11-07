@@ -176,7 +176,7 @@ export async function skillState(input: {
       value,
       owner: `${owner?.file ?? scopes[0]!.file}:${key}`,
       violation: invalid,
-      recommended: invalid ? (maximum ?? fallback) : null,
+      recommended: invalid ? (fallback ?? maximum) : null,
     });
   }
   if (harness === "claude") {

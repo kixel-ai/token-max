@@ -449,6 +449,12 @@ test("current documented budget violations change without invented dollars, with
       now: time(10),
     });
     assert.equal(checks(report).filter((r) => r.action === "change").length, 3);
+    assert.equal(
+      checks(report).find((r) =>
+        r.owner.endsWith(":skillListingBudgetFraction"),
+      )!.recommended,
+      "0.01",
+    );
     assert.ok(checks(report).every((r) => r.savingsUsd === null));
     await records(join(w.codex, "sessions/a.jsonl"), [
       meta(w.home),

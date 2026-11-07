@@ -1,4 +1,4 @@
-# Everything CI runs.
+# Local validation; CI also exercises the artifact across its OS/runtime matrix.
 check:
     bun install --frozen-lockfile
     bunx --no-install prettier --check .

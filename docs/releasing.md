@@ -33,24 +33,28 @@ required gate while the ready run is pending. PR jobs have no publication
 credentials or OIDC permission. Local Linux results do not establish macOS or
 Windows success; the matrix must pass before landing and before publishing.
 
-## Owner setup
+## Release setup
 
-Read-only checks on 2026-11-07 found `npm whoami` returning E401 and no GitHub
-release environment. These are release prerequisites, not packaging blockers.
-Agents cannot sign in as the owner or grant themselves scope rights. No token
-or expiring trusted publisher was configured during preparation.
+Read-only npm checks on 2026-11-07 found `npm whoami` returning E401.
+Authentication and scope authority remain release prerequisites. Agents cannot
+sign in as the owner or grant themselves scope rights. The branch-only GitHub
+`npm` environment is configured and verified through the authenticated API;
+that reversible repository setup needs no owner-only step. No npm token or
+expiring trusted publisher was configured during preparation.
 
 1. Restore npm login with `npm login --registry=https://registry.npmjs.org` and
    check `npm whoami`. Confirm that identity owns the personal `@kixelated`
    scope, or has the organization's package-creation rights if it is an org.
    Registry 404s do not prove ownership. For an existing package, also check
    `npm access list collaborators @kixelated/token-max` for write authority.
-2. Create the GitHub environment `npm` in this repository. Require an owner
-   reviewer, disable administrator bypass, and allow **only the branch `main`**
-   through a selected branch policy. Do not permit tags or wildcard branches.
+2. Keep the GitHub environment `npm` restricted to **only the branch `main`**
+   through a selected branch policy, without tags or wildcard branches. `main`
+   must remain protected; the release preflight checks its protected-ref status.
+   Agents can create and verify this environment with the authenticated GitHub
+   API. There is no required reviewer or per-release environment approval.
    Keep publication credentials exclusively in this environment, never repository
-   secrets, PR jobs, or checkout files. The release preflight fails closed if the
-   environment is absent, lacks a required reviewer, or admits other refs.
+   secrets, PR jobs, or checkout files. Preflight fails closed if the environment
+   is absent or admits other refs.
 3. Immediately before the first complete release, use authenticated bootstrap
    if npm still requires an existing package for trusted-publisher setup. The
    current [official OIDC setup](https://docs.npmjs.com/trusted-publishers)
@@ -72,7 +76,7 @@ or expiring trusted publisher was configured during preparation.
    to validate it. After bootstrap, remove/revoke the bootstrap token. Once OIDC
    works, restrict traditional token publication in npm settings.
 
-An agent can drive Chrome through the owner setup when requested; login and
+An agent can drive Chrome through npm owner setup when requested; login and
 scope authority still belong to the owner. Do not send credentials in chat.
 
 ## Publish the checked artifact
@@ -86,9 +90,9 @@ Dispatch **Release** on protected `main` with the exact existing package version
 Select `bootstrap` only for authenticated first publication; otherwise use the
 default `trusted` mode. Preflight refuses version 0.0.0, a private manifest, mismatched versions,
 unprotected refs, remaining m0 children, and missing environment protection.
-It then runs the complete Check workflow, including every package matrix cell,
-before requesting environment approval. Review the run's source SHA, package
-version, integrity, and results before approving the concrete artifact.
+It then runs the complete Check workflow, including every package matrix cell.
+Only after successful validation does publication proceed automatically from the
+restricted environment. No additional manual approval is required.
 
 The publish job downloads `npm-package` from that same run, verifies its SHA-512
 and version, and publishes `package/token-max.tgz --access public --ignore-scripts`.

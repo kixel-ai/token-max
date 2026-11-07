@@ -266,6 +266,15 @@ try {
     );
     assert.equal(ttl.action, "change");
     assert.equal(ttl.recommended, "1h");
+    const idle = report.checks.find(
+      (check) => check.check === "idle-compaction",
+    );
+    assert.equal(
+      idle.action,
+      "advisory",
+      "SDK usage must retain the idle check without recommending a native toggle",
+    );
+    assert.match(text.stdout, /ADVISORY.*idle-compaction/);
     assert.doesNotMatch(
       text.stdout + json.stdout + text.stderr + json.stderr,
       /SYNTHETIC_PRIVATE/,

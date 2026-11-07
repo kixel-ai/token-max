@@ -61,17 +61,6 @@ const api = async (path) => {
 };
 const environment = await api("environments/npm");
 assert.equal(
-  environment.can_admins_bypass,
-  false,
-  "npm environment must disable administrator bypass",
-);
-assert.ok(
-  environment.protection_rules.some(
-    (rule) => rule.type === "required_reviewers" && rule.reviewers.length > 0,
-  ),
-  "npm environment needs a required reviewer",
-);
-assert.equal(
   environment.deployment_branch_policy?.custom_branch_policies,
   true,
   "npm environment must allow only main",

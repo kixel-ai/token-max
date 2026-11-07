@@ -17,8 +17,8 @@ const HELP = `token-max: cheaper agent settings from local usage
 Usage: token-max [options]
 
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
-  --ssh HOST             Audit an explicit OpenSSH destination (repeatable)
-  --include-local        Add this host when --ssh is selected
+  --ssh HOST              Audit an explicit OpenSSH destination (repeatable)
+  --include-local         Add this host when --ssh is selected
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --details               Show all check evidence, assumptions, uncertainty and sources
@@ -58,7 +58,11 @@ Exit 1: change recommended. Exit 2: scan, pricing, argument or cancellation fail
 async function main(args = process.argv.slice(2)): Promise<number> {
   const json = args.includes("--json");
   const cancellation = new AbortController();
+  let auditingSsh = false;
   const cancel = () => {
+    // Preserve the local I/O escape hatch after all SSH children are reaped.
+    // A repeated signal must never exit while an audit still owns processes.
+    if (cancellation.signal.aborted && !auditingSsh) process.exit(2);
     cancellation.abort();
   };
   process.on("SIGINT", cancel);
@@ -153,13 +157,19 @@ async function main(args = process.argv.slice(2)): Promise<number> {
         ? "Scanning selected hosts"
         : "Scanning local histories",
     );
-    const data = values.ssh?.length
-      ? await audit({
-          ...options,
-          ssh: values.ssh,
-          includeLocal: !!values["include-local"],
-        })
-      : await scan(options);
+    let data;
+    auditingSsh = !!values.ssh?.length;
+    try {
+      data = values.ssh?.length
+        ? await audit({
+            ...options,
+            ssh: values.ssh,
+            includeLocal: !!values["include-local"],
+          })
+        : await scan(options);
+    } finally {
+      auditingSsh = false;
+    }
     phase("Loading public prices");
     const catalog = await loadPrices({
       signal: cancellation.signal,

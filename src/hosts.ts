@@ -19,20 +19,36 @@ function union<T>(a: T[], b: T[]): T[] {
   return [...new Set([...a, ...b])];
 }
 function signature(value: object, exclude: string[]): string {
+  const ordered = (input: unknown): unknown =>
+    Array.isArray(input)
+      ? input.map(ordered)
+      : input !== null && typeof input === "object"
+        ? Object.fromEntries(
+            Object.entries(input)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([key, child]) => [key, ordered(child)]),
+          )
+        : input;
   return JSON.stringify(
-    Object.fromEntries(
-      Object.entries(value)
-        .filter(([key]) => !exclude.includes(key))
-        .sort(([a], [b]) => a.localeCompare(b)),
+    ordered(
+      Object.fromEntries(
+        Object.entries(value).filter(([key]) => !exclude.includes(key)),
+      ),
     ),
   );
 }
-function owners(value: unknown, host: string): void {
+function owners(
+  value: unknown,
+  host: string,
+  seen = new WeakSet<object>(),
+): void {
   if (value === null || typeof value !== "object") return;
+  if (seen.has(value)) return;
+  seen.add(value);
   for (const [key, child] of Object.entries(value)) {
     if ((key === "owner" || key.endsWith("Owner")) && typeof child === "string")
       Reflect.set(value, key, `${display(host)}: ${child}`);
-    else owners(child, host);
+    else owners(child, host, seen);
   }
 }
 

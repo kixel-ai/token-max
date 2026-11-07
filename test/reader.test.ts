@@ -327,15 +327,25 @@ test("unlinked API attempts expose missing usage instead of disappearing from co
       JSON.stringify({
         type: "api-request",
         id: "orphan",
+        isSidechain: true,
         sessionId: "session",
         timestamp: "2026-11-01T00:00:00Z",
         querySource: "sdk",
-        params: { model: "claude-opus-5-5" },
+        params: {
+          model: "claude-opus-5-5",
+          max_tokens: 1234,
+          service_tier: "standard",
+          messages: [{ content: "SYNTHETIC_PRIVATE_PROMPT" }],
+        },
       }) + "\n",
     );
     const data = await scan(w.options);
     assert.equal(data.requests.length, 1);
     assert.equal(data.coverage.missingUsage, 1);
+    assert.equal(data.requests[0]!.attempt!.maxOutputTokens, 1234);
+    assert.equal(data.requests[0]!.agent, "subagent");
+    assert.equal(data.requests[0]!.parts[0]!.tier, "standard");
+    assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE/);
     assert.equal(data.requests[0]!.evidence, "unknown");
     assert.match(
       data.requests[0]!.issues.join(" "),

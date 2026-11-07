@@ -16,18 +16,26 @@ metadata, minimal text/JSON output, and the TTL check. Billing rules, assumption
 and metadata limits are documented in `docs/semantics.md`. The rest of m0 remains
 in its existing quests; this quest does not publish, change settings, or add SSH.
 
+Settled 2026-11-07: the maintainer chose option 1 in
+[the Design change decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6709040500).
+Estimate unlinked API attempts where recorded evidence supports an estimate, show
+provenance and sensitivity, and keep unsupported cases and their affected
+comparisons unpriced. Never exclude attempts or treat missing usage as zero.
+Unknown fixed costs that demonstrably cancel do not block a known difference.
+The aggregate estimated net winner decides; sensitivity is not an all-scenarios
+veto. This resolves the earlier Waiting item.
+
 Remaining work:
 
-- Settle handling of API request records with no linked assistant usage, then
-  implement the chosen estimate/coverage policy and synthetic tests. Current code
-  keeps them unknown and blocks a priced TTL winner because their token usage can
-  alter the difference. An older attempt is not evidence of zero billing. The
-  independent reviewer retained this concern after the parent goal was cited.
-- After the decision, recheck the committed implementation independently against
+- Implement evidence-backed input estimates and explicit output/fee cancellation,
+  with synthetic coverage of supported, unsupported, and mixed cases. Keep original
+  usage and historical spend unknown; estimate only the comparison inputs supported
+  by the recorded evidence. Show estimate provenance and sensitivity separately.
+- Recheck the committed implementation independently against
   the reviewed plan branch. Round 2 verified all six round-1 fixes but found valid
   empty iteration lists, unavailable-geography sentinels, and diagnostic issues.
   Those fixes pass local checks; their committed head still needs the next
-  independent review once the decision clears. Keep its review record exact and its
+  independent review in a new session after the recorded design change. Keep its review record exact and its
   draft state until the remaining findings settle.
 - Attempt the Claude-only `--since 2026-10-30` audit window and report either the
   result or a safe exact blocker. The exploratory audit quoted 1h main/subagent
@@ -39,16 +47,3 @@ Remaining work:
 - Once complete, delete this quest and its links with `quest rm`, run full checks,
   and finish `/quest-review`. Use the plan PR as the implementation base while it
   remains open; merge updated main after it lands, without rebasing.
-
-## Waiting
-
-- Maintainer: choose how to handle unlinked API attempts. Options: (a) estimate
-  from defensible request/neighbor metadata and expose bounds and sensitivity
-  alongside the aggregate winner; (b) exclude them with incomplete-coverage
-  warnings; (c) retain unknown usage and withhold priced recommendations for the
-  affected bucket. Recommend (a) only with an explicit evidence-backed estimator;
-  age or a missing assistant alone cannot establish billing or a zero count.
-  Exclusion hides unknown spend, and (c) can leave realistic windows advisory.
-  The round-2 reviewer retained this policy disagreement, so the implementation
-  agent cannot settle it by repeating the earlier refutation. Record the user's
-  choice in the PR/plan and verify it with synthetic incomplete-usage cases.

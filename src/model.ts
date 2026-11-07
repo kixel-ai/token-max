@@ -54,6 +54,8 @@ export interface Request {
   profiles: string[];
   locations: Location[];
   accounting: "individual" | "legacy-last" | "legacy-delta";
+  /** Recorded API-attempt budget; this does not establish execution or billing. */
+  attempt: { maxOutputTokens: number | null } | null;
   issues: string[];
 }
 /** Structural context and timing evidence, never a billed boundary request. */
@@ -147,6 +149,16 @@ export interface CompactionCharge {
   ttlCost: Record<Ttl, Cost>;
   assumptions: string[];
 }
+/** A comparison-only input estimate, with original measured coverage left untouched. */
+export interface UsageEstimate {
+  request: string;
+  evidence: "estimated" | "unknown";
+  basis: string[];
+  part: BillingPart | null;
+  maxOutputTokens: number | null;
+  reason: string;
+  assumptions: string[];
+}
 /** A check compares one setting against its named baseline, without additive savings. */
 export interface CheckResult {
   check: string;
@@ -165,10 +177,11 @@ export interface CheckResult {
   requests: number;
   cost: Record<Ttl, Cost>;
   summaryCost: Record<Ttl, Cost>;
-  /** Scenario-dependent request costs used to compare TTLs. */
+  /** Cache charges used to compare TTLs; ordinary input/output are fixed. */
   comparisonCost: Record<Ttl, Cost>;
-  /** Server fees and unmatched summary proxies held identical in both scenarios. */
+  /** Ordinary input, output, server fees and proxies held identical in both scenarios. */
   fixedCost: Cost;
+  usageEstimates: UsageEstimate[];
   savingsUsd: number | null;
   monthlySavingsUsd: number | null;
   breakEven: string | null;
@@ -176,6 +189,10 @@ export interface CheckResult {
     coldPrefix1hUsd: number | null;
     coldPrefix1hComparisonUsd: number | null;
     warmReuseBreakEvenFraction: number | null;
+    unlinked: {
+      noBilledAttempt: Record<Ttl, Cost>;
+      coldCache: Record<Ttl, Cost>;
+    } | null;
   };
   assumptions: string[];
   uncertainty: string[];

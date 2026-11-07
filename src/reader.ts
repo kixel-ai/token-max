@@ -215,6 +215,7 @@ function request(
     profiles: [...snapshot.profiles],
     locations: [location],
     accounting: "individual",
+    attempt: null,
     issues: [],
   };
 }
@@ -432,9 +433,23 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           const ref = id(raw.id);
           const pending = request(snapshot, location, context, time, raw.id);
           pending.reference = ref;
+          pending.agent =
+            raw.isSidechain === true || isSubagent ? "subagent" : "main";
           pending.source = label(raw.querySource);
-          pending.model = label(object(raw.params).model);
-          pending.parts = claudeParts({}, pending.model);
+          const params = object(raw.params);
+          pending.model = label(params.model);
+          pending.attempt = { maxOutputTokens: count(params.max_tokens) };
+          pending.parts = [
+            part(
+              {
+                service_tier: params.service_tier,
+                speed: params.speed,
+                inference_geo: params.inference_geo,
+              },
+              pending.model,
+              "message",
+            ),
+          ];
           pending.evidence = "unknown";
           pending.issues.push(
             "api request has no linked assistant usage; failed/in-flight/hidden request billing is unknown",
@@ -485,7 +500,10 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             raw.isSidechain === true || isSubagent ? "subagent" : "main";
           r.parts = claudeParts(m.usage, r.model);
           r.serverTools = numericTools(object(m.usage).server_tool_use);
-          if (!m.usage) r.issues.push("request usage is absent");
+          if (!m.usage) {
+            r.evidence = "unknown";
+            r.issues.push("request usage is absent");
+          }
           add(r);
           if (Array.isArray(m.content))
             for (const block of m.content) {
@@ -793,6 +811,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
       const ref = refs.get(r.reference);
       if (ref) {
         r.source ??= ref.source;
+        r.attempt = ref.attempt;
         r.time = Math.min(r.time, ref.time);
         r.profiles = [...new Set([...r.profiles, ...ref.profiles])];
       }

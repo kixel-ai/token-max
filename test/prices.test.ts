@@ -32,9 +32,11 @@ test("OpenAI cache reads/writes replace ordinary input and reasoning stays a sub
     ),
   };
   const result = pricePart(catalog, r, p);
-  assert.equal(
-    result.totalUsd,
-    (1000 * 2 + 4000 * 0.1 + 3000 * 2.5 + 4000 * 5 + 100 * 10) / 1e6,
+  assert.ok(
+    Math.abs(
+      result.totalUsd! -
+        (1000 * 2 + 4000 * 0.1 + 3000 * 2.5 + 4000 * 5 + 100 * 10) / 1e6,
+    ) < 1e-10,
   );
   const missing = pricePart(catalog, r, {
     ...p,

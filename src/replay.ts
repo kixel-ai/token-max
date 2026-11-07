@@ -9,10 +9,12 @@ import type {
   Scan,
   StructuralEvent,
   Ttl,
+  UsageEstimate,
 } from "./model.js";
 import {
   addCosts,
   pricePart,
+  priceComponents,
   priceRequest,
   PRICE_SOURCES,
   serverCost,
@@ -20,6 +22,7 @@ import {
   zeroCost,
   type Catalog,
 } from "./prices.js";
+import { estimateUsage } from "./estimates.js";
 import { identity } from "./safe.js";
 
 const TTL_SOURCE =
@@ -112,6 +115,7 @@ function proxyRequest(
     profiles: event.profiles,
     locations: [event.location],
     accounting: "individual",
+    attempt: null,
     serverTools: {},
     parts: [
       {
@@ -273,10 +277,13 @@ function replayCost(options: {
   ttl: Ttl;
   since: number;
   coldPrefixes?: boolean;
-}): Cost {
+  estimates: Map<string, UsageEstimate>;
+  attemptScenario?: "point" | "none" | "cold";
+}): { comparison: Cost; fixed: Cost } {
   const { requests, scan, catalog, selectedBucket, ttl, since } = options;
   const previous = new Map<string, { time: number; prefix: number }>();
   const parts: Cost[] = [];
+  const fixed: Cost[] = [];
   const boundaries = new Map<string, number[]>();
   for (const e of scan.events)
     if (e.kind === "compaction") {
@@ -287,7 +294,9 @@ function replayCost(options: {
       }
     }
   for (const r of requests) {
-    for (const p of r.parts) {
+    const estimate = options.estimates.get(r.id);
+    if (estimate?.part && options.attemptScenario === "none") continue;
+    for (const p of estimate?.part ? [estimate.part] : r.parts) {
       if (bucket(r, p) !== selectedBucket) continue;
       const key = [r.session, p.model, r.provider, p.speed, p.kind].join(":");
       let prior = previous.get(key);
@@ -298,20 +307,25 @@ function replayCost(options: {
           ?.some((time) => time > prior!.time && time <= r.time)
       )
         prior = undefined;
-      if (r.time >= since)
-        parts.push(
-          pricePart(
-            catalog,
-            r,
-            replayPart({
-              p,
-              ttl,
-              previous: prior,
-              time: r.time,
-              coldPrefixes: options.coldPrefixes ?? false,
-            }),
-          ),
-        );
+      if (r.time >= since) {
+        const replayed = replayPart({
+          p,
+          ttl,
+          previous: prior,
+          time: r.time,
+          coldPrefixes: options.coldPrefixes ?? false,
+        });
+        if (estimate?.part && options.attemptScenario === "cold") {
+          const u = replayed.usage;
+          u.write = u.write! + u.read!;
+          u.read = 0;
+          u.write5m = ttl === "5m" ? u.write : 0;
+          u.write1h = ttl === "1h" ? u.write : 0;
+        }
+        const components = priceComponents(catalog, r, replayed);
+        parts.push(components.cache);
+        fixed.push(components.ordinary, components.output);
+      }
       if (p.usage.read !== null && p.usage.write !== null)
         previous.set(key, {
           time: r.time,
@@ -320,7 +334,7 @@ function replayCost(options: {
       else previous.delete(key);
     }
   }
-  return addCosts(parts);
+  return { comparison: addCosts(parts), fixed: addCosts(fixed) };
 }
 
 function check(options: {
@@ -329,6 +343,7 @@ function check(options: {
   profile: Profile;
   selectedBucket: "main" | "subagent";
   summaries: CompactionCharge[];
+  estimates: Map<string, UsageEstimate>;
   since: number | undefined;
   now: number;
 }): CheckResult | null {
@@ -376,25 +391,25 @@ function check(options: {
         .map((s) => s.ttlCost["1h"]),
     ),
   };
-  const comparisonCost = {
-    "5m": replayCost({
+  const replay = (
+    ttl: Ttl,
+    extra: { coldPrefixes?: boolean; attemptScenario?: "none" | "cold" } = {},
+  ) =>
+    replayCost({
       requests,
       scan,
       catalog,
       selectedBucket,
-      ttl: "5m",
+      ttl,
       since,
-    }),
-    "1h": replayCost({
-      requests,
-      scan,
-      catalog,
-      selectedBucket,
-      ttl: "1h",
-      since,
-    }),
-  };
+      estimates: options.estimates,
+      ...extra,
+    });
+  const short = replay("5m");
+  const long = replay("1h");
+  const comparisonCost = { "5m": short.comparison, "1h": long.comparison };
   const fixedCost = addCosts([
+    short.fixed,
     ...relevant.filter((r) => r.time >= since).map(serverCost),
     summaryCost["5m"],
   ]);
@@ -402,16 +417,26 @@ function check(options: {
     "5m": addCosts([comparisonCost["5m"], fixedCost]),
     "1h": addCosts([comparisonCost["1h"], fixedCost]),
   };
-  const coldComparison = replayCost({
-    requests,
-    scan,
-    catalog,
-    selectedBucket,
-    ttl: "1h",
-    since,
-    coldPrefixes: true,
-  });
+  const coldComparison = replay("1h", { coldPrefixes: true }).comparison;
   const cold = addCosts([coldComparison, fixedCost]);
+  const usageEstimates = relevant
+    .filter((r) => r.time >= since)
+    .flatMap((r) =>
+      options.estimates.has(r.id) ? [options.estimates.get(r.id)!] : [],
+    );
+  const estimatedAttempts = usageEstimates.filter((e) => e.part !== null);
+  const unlinked = estimatedAttempts.length
+    ? {
+        noBilledAttempt: {
+          "5m": replay("5m", { attemptScenario: "none" }).comparison,
+          "1h": replay("1h", { attemptScenario: "none" }).comparison,
+        },
+        coldCache: {
+          "5m": replay("5m", { attemptScenario: "cold" }).comparison,
+          "1h": replay("1h", { attemptScenario: "cold" }).comparison,
+        },
+      }
+    : null;
   const benefit =
     coldComparison.totalUsd !== null && comparisonCost["1h"].totalUsd !== null
       ? coldComparison.totalUsd - comparisonCost["1h"].totalUsd
@@ -470,6 +495,8 @@ function check(options: {
     uncertainty.push(
       "shared history has ambiguous profile provenance; this is a conditional replay for the named current profile, not assigned historical spend",
     );
+  for (const estimate of usageEstimates)
+    uncertainty.push(estimate.reason, ...estimate.assumptions);
   uncertainty.push(
     ...relevant.filter((r) => r.time >= since).flatMap((r) => r.issues),
     ...cost["5m"].unknown,
@@ -501,6 +528,7 @@ function check(options: {
     summaryCost,
     comparisonCost,
     fixedCost,
+    usageEstimates,
     savingsUsd: savings,
     monthlySavingsUsd:
       savings !== null && now > since
@@ -514,13 +542,15 @@ function check(options: {
       coldPrefix1hUsd: cold.totalUsd,
       coldPrefix1hComparisonUsd: coldComparison.totalUsd,
       warmReuseBreakEvenFraction: breakEven,
+      unlinked,
     },
     assumptions: [
       current.reason,
       "latest recorded client version is assumed to remain applicable to current profile controls",
       "1h writes use documented 2x input; first visible request keeps observed reads from prefixes warmed before the window",
       "reuse conversions are limited to the previously cached prefix; new input stays a write",
-      "server fees and unmatched summary proxies are held identical in both TTL scenarios and cancel in comparisonCost, even if fixedCost is unknown",
+      "ordinary input, output, server fees and unmatched summary proxies are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
+      "unlinked-attempt estimates are comparison-only; original usage/coverage and historical spend remain unknown, never excluded or assigned zero billing",
       "per-check savings share baselines and must not be summed",
     ],
     uncertainty: [...new Set(uncertainty)],
@@ -538,6 +568,7 @@ export function analyze(options: {
   const { scan, catalog } = options;
   const now = options.now ?? Date.now();
   const compactions = compactionCharges(scan, catalog);
+  const estimates = estimateUsage(scan);
   const groups = new Map<string, Request[]>();
   for (const r of scan.requests) {
     const key = [...r.profiles].sort().join(":");
@@ -563,6 +594,7 @@ export function analyze(options: {
         profile,
         selectedBucket,
         summaries: compactions,
+        estimates,
         since: options.since,
         now,
       });

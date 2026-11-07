@@ -288,16 +288,30 @@ function selectedRates(
   };
 }
 
-/** Price the whole request again for every counterfactual, including context-tier changes. */
-export function pricePart(catalog: Catalog, r: Request, p: BillingPart): Cost {
-  if (p.usage.input === null && p.usage.output === null)
-    return unknownCost("request usage is not recorded");
-  const selected = selectedRates(catalog, r, p);
-  if (!("rates" in selected)) return selected;
-  const result = zeroCost();
-  result.assumptions = selected.assumptions;
-  const rates = selected.rates;
+/** Price cache, ordinary input and output at the whole request's context tier. */
+export function priceComponents(
+  catalog: Catalog,
+  r: Request,
+  p: BillingPart,
+): { cache: Cost; ordinary: Cost; output: Cost } {
   const u = p.usage;
+  const emptyCache = p.kind !== "unknown" && u.read === 0 && u.write === 0;
+  const selected =
+    u.input === null && u.output === null && u.read === null && u.write === null
+      ? unknownCost("request usage is not recorded")
+      : selectedRates(catalog, r, p);
+  if (!("rates" in selected))
+    return {
+      cache: emptyCache ? zeroCost() : selected,
+      ordinary: selected,
+      output: selected,
+    };
+  const result = zeroCost();
+  const ordinaryCost = zeroCost();
+  const output = zeroCost();
+  for (const cost of [result, ordinaryCost, output])
+    cost.assumptions = [...selected.assumptions];
+  const rates = selected.rates;
   function charge(
     tokens: number | null,
     rate: number | null,
@@ -307,14 +321,21 @@ export function pricePart(catalog: Catalog, r: Request, p: BillingPart): Cost {
       result.unknown.push(component);
     else result.knownUsd += (tokens * (rate ?? 0)) / 1e6;
   }
-  charge(u.output, rates.output, "output tokens/rate unknown");
+  if (u.output === null || (u.output > 0 && rates.output === null))
+    output.unknown.push("output tokens/rate unknown");
+  else output.knownUsd = (u.output * (rates.output ?? 0)) / 1e6;
+  function ordinaryCharge(tokens: number | null) {
+    if (tokens === null || (tokens > 0 && rates.input === null))
+      ordinaryCost.unknown.push("ordinary input unknown");
+    else ordinaryCost.knownUsd = (tokens * (rates.input ?? 0)) / 1e6;
+  }
   charge(u.read, rates.read, "cache reads/rate unknown");
   if (r.harness === "claude") {
     const ordinary =
       u.input === null || u.read === null || u.write === null
         ? null
         : u.input - u.read - u.write;
-    charge(ordinary, rates.input, "ordinary input unknown");
+    ordinaryCharge(ordinary);
     const emptyWrites = u.write === 0;
     charge(
       emptyWrites ? 0 : u.write5m,
@@ -335,19 +356,18 @@ export function pricePart(catalog: Catalog, r: Request, p: BillingPart): Cost {
     if (billing === null) {
       result.unknown.push("model cache-write billing rules unknown");
     } else if (!billing) {
-      charge(
+      ordinaryCharge(
         u.input === null || u.read === null ? null : u.input - u.read,
-        rates.input,
-        "ordinary input unknown",
       );
     } else if (u.write === null) {
+      ordinaryCharge(null);
       result.unknown.push(
         "cache writes missing on a model with billed writes; uncached input is not evidence of writes",
       );
     } else {
       const ordinary =
         u.input === null || u.read === null ? null : u.input - u.read - u.write;
-      charge(ordinary, rates.input, "ordinary input unknown");
+      ordinaryCharge(ordinary);
       let short = u.write30m;
       let long = u.write12h;
       if (u.write === 0) {
@@ -377,8 +397,15 @@ export function pricePart(catalog: Catalog, r: Request, p: BillingPart): Cost {
       );
     }
   }
-  result.totalUsd = result.unknown.length ? null : result.knownUsd;
-  return result;
+  for (const cost of [result, ordinaryCost, output])
+    cost.totalUsd = cost.unknown.length ? null : cost.knownUsd;
+  return { cache: result, ordinary: ordinaryCost, output };
+}
+
+/** Price the whole request again for every counterfactual, including context-tier changes. */
+export function pricePart(catalog: Catalog, r: Request, p: BillingPart): Cost {
+  const components = priceComponents(catalog, r, p);
+  return addCosts([components.cache, components.ordinary, components.output]);
 }
 
 /** Price non-token server fees separately from client tools and token iterations. */

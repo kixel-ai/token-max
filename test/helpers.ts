@@ -94,6 +94,7 @@ export function makeRequest(overrides: Partial<Request> = {}): Request {
     profiles: ["profile"],
     locations: [{ file: "synthetic", line: 1 }],
     accounting: "individual",
+    attempt: null,
     issues: [],
     ...overrides,
   };

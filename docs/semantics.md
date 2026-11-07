@@ -93,14 +93,39 @@ are preserved as evidence of an externally warmed prefix. First visible requests
 keep observed reads. Model/speed/provider/conversation changes and compaction
 boundaries break inferred reuse. The lower aggregate estimate decides the winner,
 even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
-reuse break-even accompany the estimate and do not veto it. `comparisonCost`
-contains scenario-dependent request costs; `fixedCost` holds server fees and
-unmatched summary proxies identical in both scenarios. Those fixed terms cancel
-even if their full price is unknown, while the full scenario totals retain null
-and the reason. Unknown request usage can change the TTL difference and still
-blocks a priced winner. Mixed agent/source TTLs preserve the available history;
-a transition is inferred only within a source/agent/model cohort, with no
-conflicting latest cohort TTLs.
+reuse break-even accompany the estimate and do not veto it.
+
+`comparisonCost` contains cache charges. `fixedCost` contains ordinary input,
+output, server fees and unmatched summary proxies. TTL changes preserve total
+input/context tier and output under the fixed-behavior assumption, so these fixed
+terms cancel even when their price or token count is unknown. Full scenario totals
+retain null and the reason. Recorded zero cache reads/writes need no cache price;
+missing cache counters cannot be cancelled as if they were zero. An unsupported
+model/context tier needed for nonzero cache charges keeps the comparison unpriced.
+Mixed agent/source TTLs preserve the available history; a transition is inferred
+only within a source/agent/model cohort, with no conflicting latest cohort TTLs.
+
+The maintainer's [unlinked-attempt policy](https://github.com/kixelated/token-max/pull/3#issuecomment-6709040500)
+allows evidence-backed estimates with sensitivity and preserves unsupported cases.
+An API attempt can receive a comparison-only input estimate when its immediately
+adjacent measured requests in the same conversation/file have identical input,
+cache and pricing metadata. The model, source, provider, agent, version and
+profile provenance must agree, recorded pricing hints must not contradict them,
+and no compaction/settings/client boundary may intervene. Consecutive unlinked
+attempts, missing brackets, differing geometry or attribution remain unsupported.
+No arbitrary age or similarity threshold is used. `usageEstimates` names the
+bracket request IDs, copied input geometry, recorded output limit when available,
+assumptions, and reasons. Equal counts do not prove equal content or prefix identity.
+
+The point estimate conditionally assumes one billed attempt with the bracketed
+input geometry. Output is not imputed; its unknown charge stays fixed. The original
+request usage, missing-usage coverage and historical spend remain unknown. Separate
+no-billed/cache-affecting-attempt and cold-cache-input sensitivities replay the
+whole sequence, including subsequent reuse. They show how billing/cache assumptions
+can change the winner, not guaranteed bounds on hidden work, retries or changed
+context. Sensitivity does not veto the aggregate estimate. Unsupported cache inputs
+remain unknown and block only their affected comparison. No attempt is silently
+excluded or assigned observed zero billing.
 
 Current TTL resolution follows force-5m, bucket environment, bucket setting,
 enable-1h, then defaults. Shell overrides apply only to the active config root;

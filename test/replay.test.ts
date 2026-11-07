@@ -476,3 +476,206 @@ test("unknown TTL comparison reports missing linked usage before missing tier", 
     /usage is not recorded/,
   );
 });
+
+function bracketedAttempt() {
+  const first = makeRequest({ id: "before" });
+  const attempt = makeRequest({
+    id: "attempt",
+    evidence: "unknown",
+    time: 600000,
+    endTime: 600000,
+    reference: "attempt-ref",
+    attempt: { maxOutputTokens: 100 },
+    serverTools: null,
+    parts: [
+      {
+        ...first.parts[0]!,
+        usage: usage({}, "claude"),
+        tier: null,
+        speed: null,
+        geo: null,
+      },
+    ],
+    issues: [
+      "api request has no linked assistant usage; failed/in-flight/hidden request billing is unknown",
+    ],
+  });
+  const after = makeRequest({ id: "after", time: 1200000, endTime: 1200000 });
+  return { first, attempt, after };
+}
+
+test("unlinked attempts use matching bracket evidence without converting observed usage into invented counts", async () => {
+  const { first, attempt, after } = bracketedAttempt();
+  const report = analyze({
+    scan: data([first, attempt, after]),
+    catalog: await prices(),
+    now: 1800000,
+  });
+  const check = report.checks[0]!;
+  assert.equal(check.recommended, "1h");
+  assert.equal(check.action, "change");
+  assert.equal(check.requests, 3);
+  assert.equal(check.usageEstimates.length, 1);
+  assert.deepEqual(check.usageEstimates[0]!.basis, [first.id, after.id]);
+  assert.equal(check.usageEstimates[0]!.part!.usage.input, 1000);
+  assert.equal(check.usageEstimates[0]!.part!.usage.output, null);
+  assert.equal(attempt.parts[0]!.usage.input, null);
+  assert.equal(attempt.evidence, "unknown");
+  assert.equal(report.historical[0]!.cost.totalUsd, null);
+  assert.equal(check.cost["5m"].totalUsd, null);
+  assert.ok(check.savingsUsd! > 0);
+  // A losing cold-cache sensitivity must accompany, not veto, the point estimate.
+  assert.ok(
+    check.sensitivity.unlinked!.coldCache["1h"].totalUsd! >
+      check.sensitivity.unlinked!.coldCache["5m"].totalUsd!,
+  );
+  assert.ok(check.sensitivity.unlinked!.noBilledAttempt["5m"].totalUsd! > 0);
+  assert.match(formatReport(report), /unlinked.*estimated/i);
+});
+
+test("unsupported attempts block only their affected comparison and stay present with reasons", async () => {
+  const { first, attempt, after } = bracketedAttempt();
+  after.parts = [{ ...after.parts[0]!, usage: claudeUsage({ write: 1200 }) }];
+  const sub = makeRequest({
+    id: "sub",
+    agent: "subagent",
+    source: "agent:builtin:general-purpose",
+    session: "child",
+  });
+  const report = analyze({
+    scan: data([first, attempt, after, sub]),
+    catalog: await prices(),
+    now: 1800000,
+  });
+  const main = report.checks.find((c) => c.bucket === "main")!;
+  const outside = report.checks.find((c) => c.bucket === "subagent")!;
+  assert.equal(main.recommended, null);
+  assert.equal(main.requests, 3);
+  assert.equal(main.usageEstimates[0]!.evidence, "unknown");
+  assert.match(main.usageEstimates[0]!.reason, /matching/);
+  assert.equal(outside.recommended, "5m");
+  assert.equal(report.scan.requests.length, 4);
+});
+
+test("bracketing cannot cross changes of source, model, profile provenance, or compaction", async () => {
+  const catalog = await prices();
+  for (const change of ["source", "model", "profiles", "boundary"] as const) {
+    const { first, attempt, after } = bracketedAttempt();
+    const events: StructuralEvent[] = [];
+    if (change === "source") after.source = "different-source";
+    if (change === "model") after.parts[0]!.model = "claude-haiku-5-5";
+    if (change === "profiles") after.profiles = ["profile", "alias"];
+    if (change === "boundary")
+      events.push({
+        id: "boundary",
+        origins: [
+          { session: "session", location: { file: "synthetic", line: 1 } },
+        ],
+        harness: "claude",
+        session: "session",
+        time: 900000,
+        kind: "compaction",
+        profiles: ["profile"],
+        location: { file: "synthetic", line: 1 },
+        request: null,
+        model: null,
+        version: "2.1.314",
+        client: null,
+        cwd: null,
+        trigger: "auto",
+        precomputed: false,
+        preTokens: null,
+        postTokens: null,
+        durationMs: null,
+        tool: null,
+        toolId: null,
+        settings: {},
+        idleAttribution: "unknown",
+        pricing: null,
+      });
+    const check = analyze({
+      scan: data([first, attempt, after], events),
+      catalog,
+      now: 1800000,
+    }).checks.find((c) => c.bucket === "main")!;
+    assert.equal(check.recommended, null, change);
+    assert.equal(check.usageEstimates[0]!.evidence, "unknown", change);
+  }
+});
+
+test("unknown output and ordinary input cancel when cache charges have recorded evidence", async () => {
+  const first = makeRequest();
+  first.parts[0]!.usage.output = null;
+  first.parts[0]!.usage.input = null;
+  const after = makeRequest({ id: "after", time: 600000, endTime: 600000 });
+  const check = analyze({
+    scan: data([first, after]),
+    catalog: await prices(),
+    now: 1200000,
+  }).checks[0]!;
+  assert.equal(check.recommended, "1h");
+  assert.equal(check.fixedCost.totalUsd, null);
+  assert.equal(check.comparisonCost["1h"].totalUsd === null, false);
+});
+
+test("estimation needs both adjacent measured brackets and preserves other unsupported attempts", async () => {
+  const catalog = await prices();
+  for (const layout of ["first", "last", "consecutive", "mixed"] as const) {
+    const { first, attempt, after } = bracketedAttempt();
+    const other = makeRequest({
+      ...attempt,
+      id: "other",
+      session: layout === "mixed" ? "unbracketed-session" : attempt.session,
+      time: 900000,
+      endTime: 900000,
+    });
+    const requests =
+      layout === "first"
+        ? [attempt, after]
+        : layout === "last"
+          ? [first, attempt]
+          : [first, attempt, other, after];
+    const check = analyze({ scan: data(requests), catalog, now: 1800000 })
+      .checks[0]!;
+    assert.equal(check.recommended, null, layout);
+    assert.equal(check.requests, requests.length, layout);
+    assert.equal(
+      check.usageEstimates.filter((e) => e.evidence === "estimated").length,
+      layout === "mixed" ? 1 : 0,
+      layout,
+    );
+  }
+});
+
+test("unknown rates for a recorded cache-free part cancel, while an unknown context tier does not", async () => {
+  const first = makeRequest({ id: "before" });
+  const after = makeRequest({ id: "after", time: 600000, endTime: 600000 });
+  const fixed = makeRequest({
+    id: "fixed",
+    session: "separate",
+    parts: [
+      {
+        ...first.parts[0]!,
+        model: "private-internal",
+        usage: { ...claudeUsage({ write: 0 }), input: null, output: null },
+      },
+    ],
+  });
+  const result = analyze({
+    scan: data([first, after, fixed]),
+    catalog: await prices(),
+    now: 1200000,
+  }).checks[0]!;
+  assert.equal(result.recommended, "1h");
+  assert.equal(result.fixedCost.totalUsd, null);
+  first.parts[0]!.model = "claude-haiku-5-5";
+  first.parts[0]!.usage.input = null;
+  assert.equal(
+    analyze({
+      scan: data([first, after]),
+      catalog: await prices(),
+      now: 1200000,
+    }).checks[0]!.recommended,
+    null,
+  );
+});

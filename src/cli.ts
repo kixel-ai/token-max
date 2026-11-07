@@ -63,6 +63,16 @@ export function formatReport(report: Report): string {
       lines.push(
         `  TTL comparison: 5m ${money(result.comparisonCost["5m"])}; 1h ${money(result.comparisonCost["1h"])}; identical fixed costs remain unknown.`,
       );
+    if (result.usageEstimates.length)
+      lines.push(
+        `  Unlinked attempts: ${result.usageEstimates.filter((e) => e.evidence === "estimated").length} estimated inputs; ${result.usageEstimates.filter((e) => e.evidence === "unknown").length} unsupported. Original usage and historical billing stay unknown.`,
+      );
+    if (result.sensitivity.unlinked) {
+      const scenarios = result.sensitivity.unlinked;
+      lines.push(
+        `  Attempt sensitivity (cache comparison only): no billed/cache-affecting attempt 5m ${money(scenarios.noBilledAttempt["5m"])}, 1h ${money(scenarios.noBilledAttempt["1h"])}; cold estimated input 5m ${money(scenarios.coldCache["5m"])}, 1h ${money(scenarios.coldCache["1h"])}. Conditional scenarios, not guaranteed bounds; the aggregate estimate decides.`,
+      );
+    }
     if (result.savingsUsd !== null)
       lines.push(
         `  Estimated net saving vs current: $${result.savingsUsd.toFixed(2)}${result.monthlySavingsUsd === null ? "" : `; $${result.monthlySavingsUsd.toFixed(2)}/30 days`}`,
@@ -70,6 +80,10 @@ export function formatReport(report: Report): string {
     if (result.breakEven)
       lines.push(
         `  Sensitivity: ${result.breakEven}; cold-prefix 1h comparison $${result.sensitivity.coldPrefix1hComparisonUsd!.toFixed(2)} (fixed costs excluded). The aggregate estimate decides the winner.`,
+      );
+    for (const estimate of result.usageEstimates)
+      lines.push(
+        `  Attempt ${estimate.request}: ${estimate.evidence}; basis ${estimate.basis.join(", ") || "unavailable"}; ${estimate.reason}${estimate.maxOutputTokens === null ? "" : `; recorded output limit ${estimate.maxOutputTokens} (not observed output)`}`,
       );
     for (const assumption of result.assumptions)
       lines.push(`  Assumption: ${assumption}`);

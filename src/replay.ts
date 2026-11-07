@@ -262,7 +262,7 @@ function replayCost(options: {
     events: [...scan.cacheContext.boundaries, ...scan.events],
     catalog,
     estimates: options.estimates,
-    ttls: { main: ttl, subagent: ttl },
+    ttls: { main: ttl, subagent: ttl, unknown: ttl },
     since,
     ...(options.coldPrefixes === undefined
       ? {}
@@ -475,6 +475,12 @@ function check(options: {
   );
   return {
     check: "claude-cache-ttl",
+    windowBasisKind:
+      options.since !== undefined
+        ? "explicit"
+        : change !== null
+          ? "ttl-transition"
+          : "available",
     profile: profile.id,
     historyProfiles: profiles,
     bucket: selectedBucket,

@@ -80,6 +80,12 @@ function data(count = 4): Scan {
     endTime: 1000,
   });
   first.parts[0]!.usage = claudeUsage({ write: 20000 });
+  first.parts.push({
+    ...first.parts[0]!,
+    kind: "compaction",
+    usage: claudeUsage({ input: 300000, write: 0, output: 2000 }),
+  });
+  boundary.request = first.id;
   const requests = [first];
   for (let i = 0; i < count; i++) {
     const r = makeRequest({
@@ -157,6 +163,7 @@ test("summary overhead can lose, sensitivity cannot veto a positive aggregate es
   assert.ok(scenario.sensitivity.coldSummarySavingsUsd! < 0);
   const larger = data(1);
   larger.events[0]!.postTokens = 3000;
+  larger.requests[0]!.parts[1]!.usage.output = 3000;
   const loss = compaction(analyze({ scan: larger, catalog, now: 18000000 }));
   assert.equal(loss.recommended, 400000);
   assert.equal(loss.action, "keep");
@@ -195,6 +202,7 @@ test("unsupported affected usage is unpriced; unknown unchanged output cancels w
   assert.match(unknown.uncertainty.join(" "), /missing input/);
   const noSample = data();
   noSample.events[0]!.postTokens = null;
+  noSample.requests[0]!.parts[1]!.usage.output = null;
   assert.equal(
     compaction(analyze({ scan: noSample, catalog, now: 18000000 }))
       .scenarios[0]!.savingsUsd,
@@ -290,6 +298,7 @@ test("Codex standalone compaction uses linked billed summary and cold prefix at 
     file: "config.toml",
     managedFile: "unused",
   });
+  s.requests[0]!.parts.splice(1);
   for (const r of s.requests) {
     r.harness = "codex";
     r.api = "responses";
@@ -464,6 +473,7 @@ test("pre-window summary linkage calibrates selected work without charging old g
     write: 0,
     output: 2000,
   });
+  s.requests[0]!.parts.splice(1);
   const event = s.events.pop()!;
   event.request = summary.id;
   event.preTokens = null;
@@ -492,4 +502,115 @@ test("an unsupported smaller window does not veto another candidate's positive a
   assert.equal(check.recommended, 150000);
   assert.equal(check.action, "change");
   assert.ok(check.savingsUsd! > 0);
+});
+
+test("shared Claude controls produce one aggregate recommendation for all affected models", async () => {
+  for (const environment of [false, true]) {
+    const s = data();
+    const model = "claude-haiku-5-5";
+    const other = structuredClone(s.requests[0]!);
+    other.id = "haiku-resume";
+    other.session = "haiku-sample";
+    other.model = model;
+    for (const p of other.parts) p.model = model;
+    const event = structuredClone(s.events[0]!);
+    event.id = "haiku-boundary";
+    event.session = other.session;
+    event.origins[0]!.session = other.session;
+    event.model = model;
+    event.request = other.id;
+    event.pricing!.model = model;
+    s.requests.push(other);
+    s.events.push(event);
+    for (let i = 0; i < 3; i++) {
+      const request = makeRequest({
+        id: `haiku-${i}`,
+        session: "haiku",
+        model,
+        time: (i + 1) * 3600000,
+        endTime: (i + 1) * 3600000,
+      });
+      request.parts[0]!.model = model;
+      request.parts[0]!.usage = claudeUsage({ write: 150000 });
+      s.requests.push(request);
+    }
+    s.profiles[0]!.compaction = compactionControls({
+      harness: "claude",
+      user: { autoCompactWindow: 400000 },
+      managed: {},
+      env: environment ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000" } : {},
+      file: "settings.json",
+      managedFile: "managed.json",
+    });
+    const checks = analyze({
+      scan: s,
+      catalog: await prices(),
+      now: 18000000,
+    }).checks.filter((c) => c.check === "compaction-window");
+    assert.equal(checks.length, 1);
+    assert.deepEqual(
+      new Set(checks[0]!.models),
+      new Set(["claude-opus-5-5", model]),
+    );
+    assert.equal(
+      checks[0]!.owner,
+      environment
+        ? "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        : "settings.json:autoCompactWindow",
+    );
+    assert.equal(checks[0]!.recommended, 100000);
+    assert.equal(checks[0]!.action, "change");
+  }
+});
+
+test("small unknown iterations cancel while truly missing input retains unknown eligibility", async () => {
+  const s = data();
+  const small = makeRequest({
+    id: "small-unknown",
+    session: "separate-small",
+    time: 1000,
+    endTime: 1000,
+  });
+  small.parts[0]!.kind = "unknown";
+  small.parts[0]!.usage = claudeUsage({ write: 5000 });
+  s.requests.push(small);
+  const check = compaction(
+    analyze({ scan: s, catalog: await prices(), now: 18000000 }),
+  );
+  assert.equal(check.baselineCost.totalUsd, null);
+  assert.equal(check.action, "change");
+  near(check.savingsUsd, 1.96);
+  small.parts[0]!.usage.input = null;
+  assert.equal(
+    compaction(analyze({ scan: s, catalog: await prices(), now: 18000000 }))
+      .scenarios[0]!.savingsUsd,
+    null,
+  );
+});
+
+test("Claude historical window differences and structured TTL window alignment remain visible", async () => {
+  const s = data();
+  const e = structuredClone(s.events[0]!);
+  e.id = "settings";
+  e.kind = "settings";
+  e.settings = { autoCompactWindow: 1000000 };
+  s.events.push(e);
+  const check = compaction(
+    analyze({ scan: s, catalog: await prices(), now: 18000000 }),
+  );
+  assert.match(
+    check.uncertainty.join(" "),
+    /historical recorded limits differ/,
+  );
+  assert.equal(check.action, "change");
+});
+
+test("added summaries require billed output and do not confuse postTokens with output", async () => {
+  const s = data();
+  s.requests[0]!.parts.splice(1);
+  s.events[0]!.request = null;
+  s.events[0]!.postTokens = 60000;
+  const report = analyze({ scan: s, catalog: await prices(), now: 18000000 });
+  assert.equal(report.compactions[0]!.evidence, "estimated");
+  assert.equal(compaction(report).scenarios[0]!.savingsUsd, null);
 });

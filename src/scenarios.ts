@@ -35,7 +35,7 @@ export function replayParts(options: {
   events: StructuralEvent[];
   estimates: Map<string, UsageEstimate>;
   catalog: Catalog;
-  ttls: Record<"main" | "subagent", Ttl | null>;
+  ttls: Record<"main" | "subagent" | "unknown", Ttl | null>;
   since: number;
   coldPrefixes?: boolean;
   attemptScenario?: "point" | "none" | "cold";
@@ -50,7 +50,7 @@ export function replayParts(options: {
       : r.parts
     ).entries()) {
       const bucket = cacheBucket(r, p);
-      const ttl = bucket === "unknown" ? null : options.ttls[bucket];
+      const ttl = options.ttls[bucket];
       const selected = r.time >= options.since;
       const replayed =
         r.harness === "claude"

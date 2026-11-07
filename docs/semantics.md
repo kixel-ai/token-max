@@ -227,6 +227,8 @@ failure location is not a claim that repairing one file would enable a full audi
 
 ## Compaction windows
 
+Each effective setting key gets one aggregate comparison across its affected
+models, so shared global/environment controls cannot receive conflicting changes.
 Window comparisons reuse the TTL check's cache replay, input estimates, price
 components, deduplicated histories and summary attribution. They run after the
 recommended TTLs. Their baseline applies the current explicit window to the same
@@ -254,9 +256,10 @@ checked 2026-11-07. Compacted output can retain items beyond the summary, so sum
 output tokens are not used as the resumed prefix. See [OpenAI compaction](https://developers.openai.com/api/docs/guides/compaction),
 checked 2026-11-07.
 
-Candidate windows use observed input sizes, catalog tier boundaries and the
-current explicit limit, within provider bounds. Claude also includes its documented
-100k minimum. This finite empirical search does not claim the optimum over every
+Candidate windows use catalog tier boundaries, the current explicit limit,
+and cohort median resumed-prefix sizes plus ordinary input, within provider bounds.
+Claude also includes its documented 100k minimum. Candidate count follows
+pricing/cohort metadata rather than the number of distinct input counts. This finite empirical search does not claim the optimum over every
 integer threshold. It evaluates only earlier compactions; lost historical context
 cannot be reconstructed to price larger windows. Every observed compaction remains
 once, whether linked usage or an unmatched proxy, including when an earlier pass
@@ -266,8 +269,9 @@ Before an affected request, a modeled pass reads the entire estimated context at
 ordinary input rates and writes the median observed summary output in a matching
 model/provider/agent/tier/speed/geography cohort. Its resumed cache prefix uses the
 median first post-boundary prefix, which can contain instructions, retained items
-and new context. Linked summary usage supplies output size where available;
-Claude `postTokens` remains a labelled proxy otherwise. Disagreeing summary-model
+and new context. Added passes require linked billed summary output. Claude `postTokens` remains
+a proxy only for unmatched observed charges in the baseline; it cannot
+establish output size for calibrating additional passes. Disagreeing summary-model
 attribution leaves the affected comparison unpriced. JSON gives each supporting
 boundary and resumed request identity. The new prefix is cold on the resumed
 request, whose charge already includes it; `prefixCost` is attribution, not another

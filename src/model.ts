@@ -215,6 +215,7 @@ export interface CheckBase<Value> {
 /** A TTL comparison preserves cache and fixed costs separately. */
 export interface TtlCheckResult extends CheckBase<Ttl> {
   check: "claude-cache-ttl";
+  windowBasisKind: "explicit" | "ttl-transition" | "available";
   bucket: "main" | "subagent";
   cost: Record<Ttl, Cost>;
   summaryCost: Record<Ttl, Cost>;
@@ -265,6 +266,7 @@ export interface CompactionCheckResult extends CheckBase<number> {
   check: "compaction-window";
   bucket: "all";
   model: string | null;
+  models: (string | null)[];
   baselineCost: Cost;
   observedSummaryCost: Cost;
   ttls: Record<"main" | "subagent", Ttl | null>;

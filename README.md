@@ -87,8 +87,8 @@ Codex uses `model_auto_compact_token_limit`. Unresolved tuned defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
 advisory. No settings are edited.
 
-Candidates come from observed input sizes, price-tier boundaries, and provider
-limits. Added compactions use observed summary and resumed-prefix sizes in matching
+Candidates come from current controls, price-tier boundaries, provider limits,
+and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching
 cohorts; unsupported affected candidates stay unpriced. Observed compactions remain
 charged once, including when earlier hypothetical passes might replace them.
 Summary generation and cold resumed prefixes are included in net savings. Larger

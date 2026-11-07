@@ -58,7 +58,7 @@ export function formatReport(report: Report): string {
     lines.push(`  Owner: ${display(result.owner)}; ${result.windowBasis}`);
     if (result.check === "compaction-window") {
       lines.push(
-        `  Compaction window ${result.model ?? "all models"}; baseline: ${result.baseline}`,
+        `  Compaction window ${result.models.map((m) => m ?? "unknown model").join(", ")}; baseline: ${result.baseline}`,
       );
       lines.push(
         `  Baseline ${money(result.baselineCost)}; retained observed summaries ${money(result.observedSummaryCost)}; TTL main/outside-main ${result.ttls.main ?? "unknown"}/${result.ttls.subagent ?? "unknown"}`,

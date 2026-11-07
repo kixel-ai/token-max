@@ -9,8 +9,10 @@ Synthetic artifact tests do not validate costs from real host histories.
 
 `package.json` is the only version source. The build inlines its version in
 `dist/cli.js`; `--version` reports it. Bun bundles locked dependencies for Node,
-and the build derives dependency notices from the bundle's actual module graph.
-The npm allowlist contains the JavaScript CLI, notices, README, license, billing
+and ships a self-contained `dist/scan-helper.js` for SSH. The CLI verifies the
+helper's exact bytes and shared build fingerprint. Dependency notices cover the
+union of both bundles' actual module graphs.
+The npm allowlist contains the JavaScript CLI and helper, notices, README, license, billing
 semantics, and package metadata. No source histories, tests, source maps, install
 hooks, or consumer dependencies are shipped.
 
@@ -23,6 +25,10 @@ tag, so testing does not require a placeholder publication. Both caches start
 empty. Synthetic prices and transcripts exercise help/version, text and JSON,
 priced recommendations, unchanged settings, exits 0/1/2, malformed input,
 privacy, and read-only histories/settings. The Bun-only PATH contains no Node.
+The actual packed helper also runs from stdin under Node and Bun without sibling
+modules or network access. On POSIX, every launcher audits a synthetic SSH process
+using the checked helper, including Node-free bunx. Native SSH transport tests
+exercise both remote runtimes, quoting, corruption, failures and reaping.
 
 The read-only `Check` workflow builds once, uploads that tarball, and tests the
 same bytes across Linux/macOS/Windows with Node 22/24/26 LTS and Bun 1.4.4.

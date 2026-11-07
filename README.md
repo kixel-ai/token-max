@@ -88,6 +88,39 @@ Repeatable `--claude-dir` and `--codex-dir` flags select only those roots across
 both harnesses. `--details` and JSON show every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
 
+Select remote audits explicitly with repeatable `--ssh HOST`. Existing OpenSSH
+aliases, authentication and host-key policy apply; batch authentication must
+already work. No aliases are automatically connected.
+
+```sh
+npx --yes @kixelated/token-max@latest --ssh nixos --ssh nixos2 --ssh kixtop --details
+bunx --bun @kixelated/token-max@latest --ssh nixos --include-local --json
+```
+
+Without `--ssh`, the local default is unchanged. With it, only selected remote
+hosts are scanned unless `--include-local` is present. Directory flags remain
+local-only and require `--include-local` in an SSH run. Remote discovery honors
+each host's own home, `CLAUDE_CONFIG_DIR` and `CODEX_HOME`. Price-file/cache paths
+always belong to the coordinator.
+
+Destinations need POSIX Linux/macOS and an existing Node >=22 or Bun >=1.4.4
+(1.x) on the noninteractive SSH `PATH`. Preflight chooses Node when supported,
+otherwise supported Bun, before execution; execution never retries another
+runtime. The packaged ESM helper is streamed in memory from the checked build.
+There is no remote installation, runtime download, daemon, temporary file or
+settings change. Content-derived counts and fingerprints are extracted on their
+owning host; only normalized metadata returns. The coordinator loads one price
+catalog and runs the shared checks. No T3 desktop catalog is read or decrypted.
+
+Text/details/JSON name each host, its snapshot/coverage, profile and setting
+owner. Proven copied request identities share one historical bill and retain all
+origins; conflicting copies fail. Cache histories remain namespaced by host,
+and per-setting comparisons remain independent. Remote stderr is discarded
+because it may contain secrets; safe diagnostics distinguish protocol, runtime,
+OpenSSH and scan failures. Use `ssh HOST` directly to resolve authentication or
+host-key issues. Any selected-host failure cancels the requested report with
+exit 2, including malformed complete records. No partial host total is printed.
+
 The first online run fetches only `https://models.dev/api.json`, caching validated
 prices at `~/.cache/token-max/models.json` (or under `XDG_CACHE_HOME`).
 Use `--offline` for that cache, `--price-cache FILE` to choose its location, or

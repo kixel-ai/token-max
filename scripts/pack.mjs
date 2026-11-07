@@ -21,6 +21,7 @@ assert.deepEqual(pack.files.map((file) => file.path).sort(), [
   "README.md",
   "dist/THIRD_PARTY_NOTICES.txt",
   "dist/cli.js",
+  "dist/scan-helper.js",
   "docs/semantics.md",
   "package.json",
 ]);

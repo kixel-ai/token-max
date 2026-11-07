@@ -10,6 +10,7 @@ export type Evidence = "measured" | "estimated" | "guidance" | "unknown";
 export interface Location {
   file: string;
   line: number;
+  host?: string;
 }
 /** Normalized counts: reads and writes are subsets of input, reasoning of output. */
 export interface Usage {
@@ -36,6 +37,15 @@ export interface BillingPart {
 export interface Request {
   evidence: "measured" | "estimated" | "unknown";
   id: string;
+  /** Only recorded native request IDs prove copied bills across hosts. */
+  identityBasis?: "recorded" | "derived" | "location";
+  /** Every observed origin survives billing deduplication. */
+  origins?: {
+    host: string;
+    session: string;
+    profiles: string[];
+    location: Location;
+  }[];
   harness: Harness;
   session: string;
   agent: "main" | "subagent" | "unknown";
@@ -65,6 +75,7 @@ export interface Request {
 /** Structural context and timing evidence, never a billed boundary request. */
 export interface StructuralEvent {
   id: string;
+  identityBasis?: "recorded" | "derived";
   /** All observed conversation aliases and safe locations for a copied event. */
   origins: { session: string; location: Location }[];
   harness: Harness;
@@ -136,6 +147,7 @@ export interface SpeedControl {
 /** A selected profile's current settings and their owning controls. */
 export interface Profile {
   id: string;
+  host?: string;
   harness: Harness;
   root: string;
   aliases: string[];
@@ -160,6 +172,7 @@ export interface Profile {
 /** Discovery includes exclusions and failures so selection cannot imply full-host coverage. */
 export interface RootStatus {
   harness: Harness;
+  host?: string;
   path: string;
   status: "selected" | "excluded" | "missing" | "inaccessible";
   origin: "default" | "environment" | "discovered" | "explicit";
@@ -167,6 +180,7 @@ export interface RootStatus {
 /** File identity and byte boundary frozen before any transcript is parsed. */
 export interface Snapshot {
   file: string;
+  host?: string;
   harness: Harness;
   profiles: string[];
   bytes: number;
@@ -394,6 +408,17 @@ export interface IdleCheckResult extends CheckBase<boolean> {
 }
 /** The reusable parser output for downstream checks. */
 export interface Scan {
+  /** Independent host snapshot boundaries and selected transport capabilities. */
+  hosts?: {
+    id: string;
+    transport: "local" | "ssh";
+    destination: string | null;
+    platform: string;
+    runtime: string;
+    snapshotStartedAt: string;
+    snapshotFinishedAt: string;
+    coverage: Scan["coverage"];
+  }[];
   snapshotStartedAt: string;
   snapshotFinishedAt: string;
   /** Explicit billing selection bound, inherited by checks and never expanded. */

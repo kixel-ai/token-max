@@ -91,7 +91,9 @@ export function formatReport(
   const profiles = new Map(report.scan.profiles.map((p) => [p.id, p]));
   function profileName(id: string): string {
     const p = profiles.get(id);
-    return p ? `${p.harness} ${display(p.root)}` : display(id);
+    return p
+      ? `${p.host ? `${display(p.host)} / ` : ""}${p.harness} ${display(p.root)}`
+      : display(id);
   }
 
   line("token-max", 0, 1);
@@ -103,6 +105,11 @@ export function formatReport(
     `${report.scan.since === null ? "available history" : "explicit --since"}; ${instant(report.scan.since ?? earliest)} ${arrow} ${report.generatedAt}`,
   );
   field("Profiles", `${profiles.size} selected; settings remain read-only`);
+  for (const host of report.scan.hosts ?? [])
+    field(
+      "Host",
+      `${display(host.id)}; ${host.platform}; ${host.runtime}; ${host.coverage.requests} observed requests, ${host.coverage.missingUsage} missing usage; snapshot ${host.snapshotStartedAt} ${arrow} ${host.snapshotFinishedAt}`,
+    );
   for (const p of profiles.values()) {
     field("Profile", profileName(p.id));
     if (options.details) {
@@ -112,6 +119,12 @@ export function formatReport(
     }
   }
   const coverage = report.scan.coverage;
+  if (options.details && report.scan.hosts)
+    for (const root of report.scan.roots)
+      field(
+        "Selection",
+        `${display(root.host ?? "local")}: ${root.harness} ${display(root.path)}; ${root.status} (${root.origin})`,
+      );
   field(
     "Coverage",
     `${coverage.requests} selected requests in ${report.scan.snapshots.length} files; ${requests.filter((r) => r.evidence === "measured").length} with measured usage; ${coverage.missingUsage} missing usage`,

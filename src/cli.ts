@@ -10,12 +10,15 @@ import { display, ScanError } from "./safe.js";
 import { formatReport } from "./report.js";
 import { setImmediate } from "node:timers/promises";
 import { wrapText } from "./terminal.js";
+import { audit } from "./hosts.js";
 
 const HELP = `token-max: cheaper agent settings from local usage
 
 Usage: token-max [options]
 
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
+  --ssh HOST             Audit an explicit OpenSSH destination (repeatable)
+  --include-local        Add this host when --ssh is selected
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --details               Show all check evidence, assumptions, uncertainty and sources
@@ -30,6 +33,10 @@ Usage: token-max [options]
 Without profile flags, discover local Claude/Codex profiles. Explicit profiles
 limit the entire run. Current settings are applied to the selected history;
 checks can use different windows and baselines. Independent savings do not add.
+--ssh selects remote discovery only; --include-local adds local discovery.
+Directory flags apply only locally and require --include-local with --ssh.
+SSH requires existing authentication/host keys and remote Node >=22 or Bun
+>=1.4.4 (1.x) on POSIX Linux/macOS. No remote install or price fetch occurs.
 
 Examples:
   token-max --since 2026-11-01
@@ -52,8 +59,6 @@ async function main(args = process.argv.slice(2)): Promise<number> {
   const json = args.includes("--json");
   const cancellation = new AbortController();
   const cancel = () => {
-    // A repeated signal is the escape hatch when cooperative I/O cannot finish.
-    if (cancellation.signal.aborted) process.exit(2);
     cancellation.abort();
   };
   process.on("SIGINT", cancel);
@@ -65,6 +70,8 @@ async function main(args = process.argv.slice(2)): Promise<number> {
         args,
         options: {
           since: { type: "string" },
+          ssh: { type: "string", multiple: true },
+          "include-local": { type: "boolean" },
           json: { type: "boolean" },
           offline: { type: "boolean" },
           plain: { type: "boolean" },
@@ -131,8 +138,28 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       ...(values["claude-dir"] ? { claudeDirs: values["claude-dir"] } : {}),
       ...(values["codex-dir"] ? { codexDirs: values["codex-dir"] } : {}),
     };
-    phase("Scanning local histories");
-    const data = await scan(options);
+    if (values["include-local"] && !values.ssh?.length)
+      throw new ScanError("--include-local requires --ssh");
+    if (
+      values.ssh?.length &&
+      !values["include-local"] &&
+      (values["claude-dir"] || values["codex-dir"])
+    )
+      throw new ScanError(
+        "directory flags are local-only; add --include-local or omit them",
+      );
+    phase(
+      values.ssh?.length
+        ? "Scanning selected hosts"
+        : "Scanning local histories",
+    );
+    const data = values.ssh?.length
+      ? await audit({
+          ...options,
+          ssh: values.ssh,
+          includeLocal: !!values["include-local"],
+        })
+      : await scan(options);
     phase("Loading public prices");
     const catalog = await loadPrices({
       signal: cancellation.signal,

@@ -29,6 +29,7 @@
   },
   "files": [
     "dist/cli.js",
+    "dist/scan-helper.js",
     "dist/THIRD_PARTY_NOTICES.txt",
     "docs/semantics.md"
   ],

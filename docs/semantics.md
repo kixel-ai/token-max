@@ -8,6 +8,50 @@ that changes identity or shrinks fails. Appended bytes are outside the snapshot.
 The JSON result records the discovery interval, each byte boundary, and unfinished
 final-line sizes. Metadata storage grows with requests/events, not transcript text.
 
+SSH runs the same reader/discovery/exposure modules in a self-contained packaged
+ESM helper. Native snapshots and content-derived extraction stay on their host;
+the coordinator alone loads prices and invokes the existing analyzer. Hosts are
+selected explicitly, with separate discovery intervals and original coverage in
+`scan.hosts`. Every root, snapshot, profile and location carries host ownership.
+Current setting owners are host-qualified; paths used to match recorded project
+directories retain their native meaning. Directory overrides are local-only.
+
+The private metadata protocol is version 1, independently of the report's schema
+version. Its header binds both bundles to a SHA-256 build fingerprint of the
+source, locked dependencies, manifest and build script. The CLI also checks the
+packaged helper's bytes before connecting; development package version 0.0.0
+cannot masquerade as a matching build. An exhaustive, type-checked allowlist
+matches every Scan field, including optional adapter fields. Adding shared
+metadata requires updating that allowlist on both ends of the same build.
+The parser validates header order, fields, enums, required members, types and
+schema-directed depth while receiving the stream, then verifies counts and
+references. It retains the normalized metadata the analyzer needs, without
+buffering serialized stdout. Writes respect pipe backpressure. Remote stderr,
+parser exceptions and unexpected runtime errors never become diagnostics.
+
+Only recorded native request identities deduplicate across hosts. Derived legacy
+and location identities remain host-specific. Conflicting copied billing or
+structural metadata fails the whole report; disagreeing exposure views become
+unknown. All request locations, profile aliases and execution origins survive.
+Historical spend is assigned to their shared bucket once, while each current
+setting gets its own conditional comparison. Cache sessions are namespaced by
+selected execution context even when paths/session aliases match. A deduplicated
+request uses its first selected host origin for replay; partial copies can lose
+predecessor evidence rather than invent warmth across hosts. Component and
+invocation metadata also preserve origins and conservative copied-view semantics.
+
+OpenSSH runs without a PTY, forwarding or local command hooks, retaining existing
+configuration, authentication and host-key checks in batch mode. Only validated
+destinations become argv; commands and runtime paths use POSIX quoting. A
+capability probe selects an installed supported Node/Bun before execution. The
+helper loads from streamed stdin through a data-URL bootstrap, without files or
+module resolution on the destination. Its stdin remains an explicit lifetime
+channel: EOF/cancellation terminates the remote process even during a scan with
+no stdout. Every local SSH child is awaited/reaped. A failed destination, invalid
+record, protocol mismatch, runtime failure or cancellation produces exit 2 and
+no report. No malformed record is repaired/skipped. T3 catalog discovery and
+decryption are outside this transport; future supported adapters share Scan.
+
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
 separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence.

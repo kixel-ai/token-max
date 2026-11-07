@@ -86,12 +86,12 @@ Object.assign(env, {
   BUN_INSTALL: join(home, ".bun"),
   BUN_INSTALL_CACHE_DIR: join(scratch, "bun-cache"),
 });
-const run = (command, args, vars = env) =>
+const run = (command, args, vars = env, input) =>
   new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: consumer,
       env: vars,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     let stdout = "",
       stderr = "";
@@ -102,6 +102,7 @@ const run = (command, args, vars = env) =>
       stderr += data;
     });
     child.once("error", reject);
+    if (input !== undefined) child.stdin.end(input);
     child.once("close", (status, signal) =>
       resolve({ status, signal, stdout, stderr }),
     );
@@ -196,6 +197,11 @@ try {
   // A standalone copy cannot resolve any source tree or installed dependencies.
   const standalone = join(consumer, "standalone.mjs");
   await copyFile(cli, standalone);
+  const helper = await readFile(
+    join(installedPackage, "dist/scan-helper.js"),
+    "utf8",
+  );
+  await writeFile(join(consumer, "scan-helper.js"), helper);
   const direct = (args) => run(process.execPath, [standalone, ...args]);
   const launch = (args) =>
     run(process.execPath, [npx, "--yes", `${pkg.name}@latest`, ...args]);
@@ -234,6 +240,47 @@ try {
   );
   const original = await readFile(transcript);
   const args = ["--claude-dir", "profile", "--prices-file", "prices.json"];
+  // Run the exact packed ESM from stdin, without sibling files or node_modules.
+  // Public prices belong to the coordinator; any helper fetch is a test failure.
+  const noNetwork = `globalThis.fetch = () => { throw new Error('unexpected helper network'); };\n`;
+  for (const [command, flags, vars] of [
+    [process.execPath, ["--input-type=module", "-"], env],
+    [onlyBun, ["run", "-"], bunEnv],
+  ]) {
+    const result = await run(
+      command,
+      flags,
+      { ...vars, CLAUDE_CONFIG_DIR: join(consumer, "profile") },
+      noNetwork + helper,
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const metadata = JSON.parse(result.stdout);
+    assert.equal(metadata.protocol, 1);
+    assert.match(metadata.build, /^[a-f0-9]{64}$/);
+    assert.equal(metadata.complete, true);
+    assert.equal(metadata.scan.requests.length, 2);
+    assert.doesNotMatch(result.stdout + result.stderr, /SYNTHETIC_PRIVATE/);
+  }
+  if (process.platform !== "win32") {
+    // The real packed launchers invoke a synthetic OpenSSH process, which runs
+    // the exact streamed helper under Bun. The bunx PATH still contains no Node.
+    const fake = join(consumer, "synthetic-ssh.mjs");
+    await writeFile(
+      fake,
+      `import {spawn} from 'node:child_process';
+const command=process.argv.at(-1);
+if(command.includes('uname -s')) { process.stdout.write(JSON.stringify({protocol:1,platform:process.platform==='darwin'?'Darwin':'Linux',node:null,bun:{kind:'bun',version:process.versions.bun,path:process.execPath,platform:process.platform}})); }
+else { const child=spawn('/bin/sh',['-c',command],{stdio:'inherit',env:{...process.env,CLAUDE_CONFIG_DIR:${JSON.stringify(join(consumer, "profile"))}}}); child.on('exit',code=>process.exitCode=code??2); }
+`,
+    );
+    const quote = (value) => "'" + value.replaceAll("'", "'\\''") + "'";
+    await writeFile(
+      join(only, "ssh"),
+      `#!/bin/sh\nexec ${quote(onlyBun)} ${quote(fake)} "$@"\n`,
+    );
+    await chmod(join(only, "ssh"), 0o755);
+    env.PATH = only + delimiter + env.PATH;
+  }
   for (const [name, invoke] of [
     ["standalone Node", direct],
     ["npx", launch],
@@ -251,6 +298,22 @@ try {
     const version = await invoke(["--version"]);
     assert.equal(version.status, 0, version.stderr);
     assert.equal(version.stdout, artifact.version + "\n");
+    if (process.platform !== "win32") {
+      const remote = await invoke([
+        "--ssh",
+        "synthetic",
+        "--prices-file",
+        "prices.json",
+        "--json",
+      ]);
+      assert.ok(remote.status === 0 || remote.status === 1, remote.stderr);
+      assert.equal(remote.stderr, "");
+      const metadata = JSON.parse(remote.stdout);
+      assert.equal(metadata.scan.hosts[0].id, "ssh:synthetic");
+      assert.match(metadata.scan.hosts[0].runtime, /^bun /);
+      assert.equal(metadata.scan.requests.length, 2);
+      assert.doesNotMatch(remote.stdout, /SYNTHETIC_PRIVATE/);
+    }
     await writeFile(settings, '{"promptCacheTtl":"5m"}');
     const text = await invoke([...args, "--plain"]);
     assert.equal(text.status, 1, text.stderr);

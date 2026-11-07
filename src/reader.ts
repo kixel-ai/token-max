@@ -163,6 +163,7 @@ function event(
     id: identity(
       `${snapshot.harness}:${kind}:${typeof key === "string" ? key : `${snapshot.file}:${location.line}`}`,
     ),
+    identityBasis: typeof key === "string" ? "recorded" : "derived",
     origins: [{ session: context.session, location }],
     harness: snapshot.harness,
     session: context.session,
@@ -198,6 +199,7 @@ function request(
   return {
     evidence: "measured",
     id: `${snapshot.harness}:${id(key)}`,
+    identityBasis: "recorded",
     harness: snapshot.harness,
     session: context.session,
     agent: context.agent,
@@ -569,6 +571,8 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
               : key,
           );
           r.model = label(m.model);
+          if (!selected && !(typeof key === "string" && key.length > 0))
+            r.identityBasis = "location";
           r.reference =
             typeof raw.requestRef === "string" ? id(raw.requestRef) : null;
           r.source = label(raw.querySource);
@@ -809,6 +813,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           `${context.turn ?? context.session}:${time}:${JSON.stringify(total)}`,
         );
         r.accounting = info.last_token_usage ? "legacy-last" : "legacy-delta";
+        r.identityBasis = "derived";
         r.evidence = info.last_token_usage ? "measured" : "estimated";
         if (!u) {
           u = usage({}, "codex");
@@ -844,6 +849,8 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           typeof p.compaction_response_id === "string"
             ? `codex:${id(p.compaction_response_id)}`
             : null;
+        e.identityBasis =
+          typeof p.compaction_response_id === "string" ? "recorded" : "derived";
         addEvent(e);
       } else if (
         raw.type === "event_msg" &&

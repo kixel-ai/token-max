@@ -1,5 +1,11 @@
 import type { Profile, WindowControl } from "./model.js";
-import { label, object, ScanError } from "./safe.js";
+import { object, ScanError } from "./safe.js";
+
+/** Documented Claude settings and environment window bounds. */
+export const CLAUDE_WINDOW_BOUNDS = {
+  minimum: 100000,
+  maximum: 1000000,
+} as const;
 
 /** Resolve observed current files and environment, preserving each control's owner. */
 export function compactionControls(options: {
@@ -28,6 +34,12 @@ export function compactionControls(options: {
         value: typeof value === "number" ? value : null,
         owner: `${file}:model_auto_compact_token_limit`,
         applicable: typeof value === "number" && supported && !ambiguous,
+        ...(!supported
+          ? {
+              comparisonUnknown:
+                "effective Codex threshold scope is unsupported",
+            }
+          : {}),
         reason: !supported
           ? "body-after-prefix or unknown threshold scope is not a total-context window"
           : ambiguous
@@ -48,7 +60,10 @@ export function compactionControls(options: {
         Number(match[1]) *
         (match[2]?.toLowerCase() === "m" ? 1e6 : match[2] ? 1e3 : 1);
       if (Number.isFinite(value) && value > 0)
-        override = Math.max(100000, Math.min(1000000, Math.floor(value)));
+        override = Math.max(
+          CLAUDE_WINDOW_BOUNDS.minimum,
+          Math.min(CLAUDE_WINDOW_BOUNDS.maximum, Math.floor(value)),
+        );
     }
   }
   const envOwner = (key: string) =>
@@ -80,8 +95,8 @@ export function compactionControls(options: {
       value !== "auto" &&
       (typeof value !== "number" ||
         !Number.isSafeInteger(value) ||
-        value < 100000 ||
-        value > 1000000)
+        value < CLAUDE_WINDOW_BOUNDS.minimum ||
+        value > CLAUDE_WINDOW_BOUNDS.maximum)
     )
       throw new ScanError("invalid auto-compact window", {
         file: owner.startsWith(managedFile + ":") ? managedFile : file,
@@ -122,10 +137,10 @@ export function compactionControls(options: {
     )
       throw new ScanError("invalid model settings", { file: source, line: 1 });
     for (const key of Object.keys(object(config.modelSettings))) {
-      const model = label(key);
+      const model = /^[a-zA-Z0-9_.:/@<>+\[\]-]{1,160}$/.test(key) ? key : null;
       const row = object(config.modelSettings)[key];
       if (
-        !model ||
+        model === null ||
         row === null ||
         typeof row !== "object" ||
         Array.isArray(row)
@@ -145,14 +160,32 @@ export function windowControl(
   profile: Profile,
   model: string | null,
 ): WindowControl {
-  if (model && Object.hasOwn(profile.compaction.models, model))
-    return profile.compaction.models[model]!;
   const canonical = model?.replace(/-\d{8}$/, "");
+  const current =
+    model && Object.hasOwn(profile.compaction.models, model)
+      ? profile.compaction.models[model]!
+      : canonical &&
+          /^claude-(opus|sonnet|haiku|fable|mythos)-\d/.test(canonical) &&
+          Object.hasOwn(profile.compaction.models, canonical)
+        ? profile.compaction.models[canonical]!
+        : profile.compaction.default;
+  const family = /^claude-(opus|sonnet|haiku|fable|mythos)-/.exec(
+    model ?? "",
+  )?.[1];
+  const aliases = family ? [family, `${family}[1m]`, `${canonical}[1m]`] : [];
   if (
-    canonical &&
-    /^claude-(opus|sonnet|haiku|fable|mythos)-\d/.test(canonical) &&
-    Object.hasOwn(profile.compaction.models, canonical)
+    aliases.some(
+      (alias) =>
+        Object.hasOwn(profile.compaction.models, alias) &&
+        profile.compaction.models[alias]!.owner !== current.owner,
+    )
   )
-    return profile.compaction.models[canonical]!;
-  return profile.compaction.default;
+    return {
+      ...current,
+      value: null,
+      applicable: false,
+      reason:
+        "model alias or [1m] setting may own the current window; effective alias selection is unresolved",
+    };
+  return current;
 }

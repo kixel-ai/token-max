@@ -38,6 +38,7 @@ export function replayParts(options: {
   ttls: Record<"main" | "subagent" | "unknown", Ttl | null>;
   since: number;
   coldPrefixes?: boolean;
+  estimatedParts?: Set<string>;
   attemptScenario?: "point" | "none" | "cold";
 }): ReplayedPart[] {
   const chain = new CacheChain(options.events);
@@ -58,7 +59,10 @@ export function replayParts(options: {
               request: r,
               p,
               part,
-              estimated: !!estimate?.part || r.evidence === "estimated",
+              estimated:
+                !!estimate?.part ||
+                r.evidence === "estimated" ||
+                options.estimatedParts?.has(`${r.id}:${part}`) === true,
               ttl: ttl ?? "5m",
               cold: options.coldPrefixes ?? false,
               selected,

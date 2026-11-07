@@ -109,6 +109,7 @@ export interface WindowControl {
   reason: string;
   applicable: boolean;
   minimumClaudePatch?: number;
+  comparisonUnknown?: string;
 }
 /** A selected profile's current settings and their owning controls. */
 export interface Profile {

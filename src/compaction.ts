@@ -13,7 +13,7 @@ import type {
   WindowScenario,
 } from "./model.js";
 import { TTL_MILLISECONDS, CODEX_CACHE_MILLISECONDS } from "./cache.js";
-import { windowControl } from "./controls.js";
+import { CLAUDE_WINDOW_BOUNDS, windowControl } from "./controls.js";
 import { replayParts, type ReplayedPart } from "./scenarios.js";
 import {
   addCosts,
@@ -177,6 +177,7 @@ interface Simulation {
   errors: string[];
   affected: Set<string>;
   events: StructuralEvent[];
+  estimatedParts: Set<string>;
 }
 
 function simulate(options: {
@@ -198,6 +199,7 @@ function simulate(options: {
     errors: [],
     affected: new Set(),
     events: [],
+    estimatedParts: new Set(),
   };
   const states = new Map<
     string,
@@ -415,7 +417,7 @@ function simulate(options: {
           u.write12h = 0;
         }
         state.prefix = remaining;
-        clone.evidence = "estimated";
+        result.estimatedParts.add(`${r.id}:${index}`);
         result.affected.add(r.id);
         if (added) {
           const justPrefix = {
@@ -506,6 +508,7 @@ export function compactionChecks(options: {
       rs: Request[],
       estimates = options.estimates,
       extraEvents: StructuralEvent[] = [],
+      estimatedParts = new Set<string>(),
     ) =>
       replayParts({
         requests: rs,
@@ -513,6 +516,7 @@ export function compactionChecks(options: {
         estimates,
         catalog,
         ttls: { ...ttls, unknown: null },
+        estimatedParts,
         since,
       });
     const baseline = replay(requests).filter((i) => i.selected);
@@ -565,7 +569,8 @@ export function compactionChecks(options: {
         .filter((i) => i.p.kind === "message" || i.p.kind === "unknown")
         .filter((i) => models.includes(i.p.model) || i.p.model === null);
       if (!relevant.length) continue;
-      const minimum = profile.harness === "claude" ? 100000 : 1;
+      const minimum =
+        profile.harness === "claude" ? CLAUDE_WINDOW_BOUNDS.minimum : 1;
       const ceiling =
         control.value ??
         relevant.reduce((n, i) => Math.max(n, i.p.usage.input ?? 0), 0);
@@ -612,7 +617,7 @@ export function compactionChecks(options: {
           (n) =>
             n >= minimum &&
             n <= ceiling &&
-            (profile.harness !== "claude" || n <= 1000000),
+            (profile.harness !== "claude" || n <= CLAUDE_WINDOW_BOUNDS.maximum),
         )
         .sort((a, b) => a - b);
       const raw = (window: number, larger: boolean, cold: boolean) => {
@@ -633,15 +638,10 @@ export function compactionChecks(options: {
           simulation.requests,
           new Map(),
           simulation.events,
+          simulation.estimatedParts,
         ).filter((i) => i.selected);
-        const unsupportedScope =
-          profile.harness === "codex" &&
-          profile.settings.model_auto_compact_token_limit_scope !== undefined &&
-          profile.settings.model_auto_compact_token_limit_scope !== "total";
-        if (unsupportedScope)
-          simulation.errors.push(
-            "effective Codex threshold scope is unsupported",
-          );
+        if (control.comparisonUnknown)
+          simulation.errors.push(control.comparisonUnknown);
         const errors = simulation.errors.length
           ? [unknownCost([...new Set(simulation.errors)].join("; "))]
           : [];
@@ -665,8 +665,11 @@ export function compactionChecks(options: {
         control.value === null ? null : raw(control.value, false, true);
       const baselineCost = current?.cost ?? recordedCost;
       const run = (window: number, larger: boolean, cold: boolean) => {
-        const point = raw(window, larger, cold);
         const before = larger ? largerCurrent : cold ? coldCurrent : current;
+        const point =
+          window === control.value && before
+            ? before
+            : raw(window, larger, cold);
         const previous = before?.after ?? baseline;
         const beforeCosts: Cost[] = before
           ? [
@@ -750,6 +753,8 @@ export function compactionChecks(options: {
       const perModelSupported =
         profile.harness !== "claude" ||
         (!!version &&
+          version.length === 3 &&
+          version.every((v) => Number.isSafeInteger(v) && v >= 0) &&
           (version[0]! > 2 ||
             (version[0] === 2 &&
               (version[1]! > 1 ||

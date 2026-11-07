@@ -277,6 +277,11 @@ test("historical-only or unsupported client controls remain advisory, including 
     compaction(analyze({ scan: old, catalog, now: 18000000 })).action,
     "advisory",
   );
+  for (const r of old.requests) r.version = "3.unverified";
+  assert.equal(
+    compaction(analyze({ scan: old, catalog, now: 18000000 })).action,
+    "advisory",
+  );
   const unsupported = data();
   unsupported.requests[2]!.parts[0]!.model = "unknown-model";
   assert.equal(
@@ -353,13 +358,62 @@ test("Codex standalone compaction uses linked billed summary and cold prefix at 
   near(first.prefixCost.totalUsd, 0.05);
   near(check.scenarios.find((c) => c.window === 20000)!.savingsUsd, 4.5702);
   const unpriced = structuredClone(s);
-  unpriced.profiles[0]!.settings.model_auto_compact_token_limit_scope =
+  const unsupported = unpriced.profiles[0]!;
+  unsupported.settings.model_auto_compact_token_limit_scope =
     "body_after_prefix";
+  unsupported.compaction = compactionControls({
+    harness: "codex",
+    user: unsupported.settings,
+    managed: {},
+    env: {},
+    file: "config.toml",
+    managedFile: "unused",
+  });
   const u = compaction(
     analyze({ scan: unpriced, catalog: await prices(), now: 18000000 }),
   );
   assert.equal(u.action, "advisory");
   assert.equal(u.scenarios[0]!.savingsUsd, null);
+});
+
+test("bracketed Claude model controls scan safely and unresolved aliases stay advisory", async () => {
+  const w = await workspace();
+  try {
+    const user = {
+      autoCompactWindow: 600000,
+      modelSettings: {
+        "opus[1m]": { autoCompactWindow: 400000 },
+        "claude-opus-4-6[1m]": { autoCompactWindow: 300000 },
+      },
+    };
+    await writeFile(join(w.claude, "settings.json"), JSON.stringify(user));
+    const result = await scan(w.options);
+    const p = result.profiles.find((p) => p.harness === "claude")!;
+    assert.equal(windowControl(p, "opus[1m]").value, 400000);
+    assert.equal(windowControl(p, "claude-opus-4-6").value, null);
+    assert.equal(windowControl(p, "claude-opus-4-6").applicable, false);
+    assert.match(windowControl(p, "claude-opus-4-6").reason, /alias/);
+    p.compaction = compactionControls({
+      harness: "claude",
+      user,
+      managed: { autoCompactWindow: 500000 },
+      env: {},
+      file: "user.json",
+      managedFile: "managed.json",
+    });
+    assert.equal(windowControl(p, "claude-opus-4-6").value, 500000);
+    assert.equal(
+      windowControl(p, "claude-opus-4-6").owner,
+      "managed.json:autoCompactWindow",
+    );
+    await writeFile(
+      join(w.claude, "settings.json"),
+      JSON.stringify({ modelSettings: { "opus[1m]": null } }),
+    );
+    await assert.rejects(scan(w.options), /invalid per-model settings/);
+  } finally {
+    await w.dispose();
+  }
 });
 
 test("discovery retains only whitelisted compaction controls and malformed selected limits fail", async () => {
@@ -431,6 +485,28 @@ test("window replay uses TTL recommendations and never inherits old-prefix exter
   // The first new prefix expired: its 20k rewrite costs $0.16, not an inherited old read.
   near(cold.scenarios[0]!.cost.totalUsd! - warm, 0.1602);
   assert.equal(next.parts[0]!.usage.read, 0);
+});
+
+test("changing a message prefix preserves unchanged billed compaction iterations", async () => {
+  const s = data(2);
+  const first = s.requests[1]!;
+  const next = s.requests[2]!;
+  next.time = first.time + 600000;
+  next.endTime = next.time;
+  for (const r of [first, next])
+    r.parts.push({
+      ...r.parts[0]!,
+      kind: "compaction",
+      usage: claudeUsage({ read: 150000, write: 1000, ttl: "1h", output: 100 }),
+    });
+  const before = structuredClone(s.requests);
+  const check = compaction(
+    analyze({ scan: s, catalog: await prices(), now: 18000000 }),
+  );
+  assert.equal(check.ttls.main, "1h");
+  assert.equal(check.ttls.subagent, "1h");
+  near(check.savingsUsd, 0.426);
+  assert.deepEqual(s.requests, before);
 });
 
 test("window estimates reuse bracketed attempt inputs and retain missing historical billing", async () => {

@@ -5,26 +5,81 @@ recommend cheaper cache TTL, compaction-window, native Claude idle-compaction an
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
-The working core uses Node-compatible TypeScript and Bun development tooling.
-The planned npm package is `@kixelated/token-max`, with a `token-max` executable.
-Publishing and npm artifact preparation have a separate quest; this repository
-does not publish a package yet.
+The first npm release is being prepared; the commands below become available
+when the complete 0.1.0 release is published. The development package retains
+`private: true` until m0 prepares that release. See the
+[first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
+
+With Node.js 22, 24, or 26 LTS and npm:
+
+```sh
+npx --yes @kixelated/token-max@latest --help
+npx --yes @kixelated/token-max@latest --since 2026-11-01
+npx --yes @kixelated/token-max@latest --json --claude-dir ~/.claude-work
+```
+
+With Bun 1.4.4 (no Node installation needed):
+
+```sh
+bunx --bun @kixelated/token-max@latest --help
+bunx --bun @kixelated/token-max@latest --offline --plain
+```
+
+Put `--bun` before the package name: Bun otherwise respects the executable's
+Node shebang and tries to start Node. Both launchers download the npm package
+and cache it; first use requires registry access. `@latest` can check the
+registry again. This is separate from the analyzer's public-price fetch, and
+`--offline` controls prices only, not package-manager downloads. See
+[npx caching](https://docs.npmjs.com/cli/v11/commands/npm-exec/#a-note-on-caching)
+and [bunx execution](https://bun.com/docs/pm/bunx).
+
+Pin a published version for repeatable execution (0.1.0 is the planned first
+release, not yet published):
+
+```sh
+npx --yes @kixelated/token-max@0.1.0 --details
+bunx --bun @kixelated/token-max@0.1.0 --details
+```
+
+For frequent use, an optional global install provides the same command:
+
+```sh
+npm install --global @kixelated/token-max@0.1.0
+token-max --version
+token-max --offline --plain
+```
+
+The package contains built JavaScript with its dependencies bundled and their
+licenses included. It requires no consumer compilation, install scripts, native
+binary downloads, or Rust toolchain. The CLI receives the same arguments and
+working directory whether launched directly, with npx, or with bunx. Relative
+paths resolve from that directory. Reports go to stdout; diagnostics go to
+stderr; exit codes remain 0/1/2 as described below. Launchers may also print
+their own download diagnostics to stderr. Ctrl-C cancels the running analysis;
+the CLI handles SIGINT/SIGTERM with exit 2 and no success report. The launcher
+may report its own termination status when it is also interrupted.
+
+The package CI exercises the same tarball on Linux, macOS, and Windows under
+Node 22/24/26 and Bun 1.4.4, including a PATH with Bun alone. Until those matrix
+jobs pass, OS/runtime coverage is pending, not a verified support claim.
+
+For development:
 
 ```sh
 nix develop
 quest gate just check
 just run --since 2026-11-01
-just run --claude-dir ~/.claude-work --details
-just run --offline --plain
-just run --json --claude-dir ~/.claude-work --codex-dir ~/.codex
 just build
-node dist/src/cli.js --help
+node dist/cli.js --help
 ```
 
-`just check` installs the locked Bun dependencies, checks formatting and types,
-builds JavaScript, runs the synthetic tests under Bun and Node, and checks quests.
-Shipped code uses Node APIs and targets maintained Node LTS releases starting at
-Node 22. The Nix shell pins Bun and Node 24. Tests use no real sessions or network.
+`just check` installs locked dependencies, checks formatting and types, builds
+JavaScript, runs synthetic tests under Bun and Node, packs the allowlisted
+artifact, exercises clean consumers, and checks quests. The Nix shell pins Bun
+and Node 24. Analysis tests use synthetic histories and local prices only;
+launcher tests use a local fixture registry without publishing. See
+[release preparation](https://github.com/kixelated/token-max/blob/main/docs/releasing.md)
+for protected publication and remaining owner setup.
 
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and recognizable `~/.claude*` and `~/.codex*`
@@ -119,7 +174,8 @@ Independent check savings must not be summed.
 
 See [billing and replay semantics](docs/semantics.md) for supported accounting,
 assumptions, sources, and limits. Component measurements are shared infrastructure;
-skills/context recommendations, other setting checks, and npm releases remain in [the first-release plan](quest/m0/README.md).
+skills/context recommendations and other setting checks remain in the
+[first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from
 matching adjacent measured requests, including growing-context retry geometry

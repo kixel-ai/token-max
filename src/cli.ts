@@ -1,7 +1,7 @@
 #!/usr/bin/env node
+import pkg from "../package.json" with { type: "json" };
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { scan } from "./reader.js";
 import { loadPrices } from "./prices.js";
@@ -24,6 +24,7 @@ Usage: token-max [options]
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
+  -v, --version           Show the package version
   -h, --help              Show this help
 
 Without profile flags, discover local Claude/Codex profiles. Explicit profiles
@@ -47,7 +48,7 @@ Exit 1: change recommended. Exit 2: scan, pricing, argument or cancellation fail
 `;
 
 /** Run one atomic scan: failures emit only a safe diagnostic, never partial findings. */
-export async function main(args = process.argv.slice(2)): Promise<number> {
+async function main(args = process.argv.slice(2)): Promise<number> {
   const json = args.includes("--json");
   const cancellation = new AbortController();
   const cancel = () => {
@@ -68,6 +69,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
           offline: { type: "boolean" },
           plain: { type: "boolean" },
           details: { type: "boolean" },
+          version: { type: "boolean", short: "v" },
           help: { type: "boolean", short: "h" },
           "claude-dir": { type: "string", multiple: true },
           "codex-dir": { type: "string", multiple: true },
@@ -92,6 +94,10 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
           })
           .join("\n"),
       );
+      return 0;
+    }
+    if (values.version) {
+      process.stdout.write(pkg.version + "\n");
       return 0;
     }
     let since: number | undefined;
@@ -197,5 +203,4 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
-  process.exitCode = await main();
+process.exitCode = await main();

@@ -12,6 +12,7 @@ import type {
 } from "./model.js";
 import {
   discover,
+  discoverIdleOwners,
   structuralSettings,
   type DiscoveryOptions,
 } from "./discovery.js";
@@ -597,6 +598,27 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
                 ? `claude:${id(meta.requestId)}`
                 : null;
           addEvent(e);
+        } else if (
+          raw.type === "system" &&
+          raw.subtype === "informational" &&
+          raw.level === "notice" &&
+          typeof raw.content === "string" &&
+          /^(Compacted while idle, before the prompt cache expired|Compacted using a summary written while you were away) ·(?:\s|\u00a0)*turn off with "idleCompaction": false in settings\.json$/.test(
+            raw.content,
+          )
+        ) {
+          if (time === null)
+            throw new ScanError("missing idle notice timestamp");
+          const e = event(
+            snapshot,
+            location,
+            context,
+            time,
+            "idle-notice",
+            raw.uuid,
+          );
+          e.idleAttribution = "notice";
+          addEvent(e);
         } else if (raw.type === "user") {
           if (time === null) return;
           const m = object(raw.message);
@@ -905,15 +927,29 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     (a, b) => a.time - b.time || a.id.localeCompare(b.id),
   );
   const allEvents = [...events.values()].sort((a, b) => a.time - b.time);
+  for (const notice of allEvents.filter((e) => e.kind === "idle-notice")) {
+    const boundary = allEvents
+      .filter(
+        (e) =>
+          e.kind === "compaction" &&
+          e.time <= notice.time &&
+          e.origins.some((o) =>
+            notice.origins.some((n) => n.session === o.session),
+          ),
+      )
+      .at(-1);
+    if (boundary) boundary.idleAttribution = "notice";
+  }
   const beforeWindow = (value: { time: number }) =>
     options.since !== undefined && value.time < options.since;
   const sortedRequests = allRequests.filter((r) => !beforeWindow(r));
   const sortedEvents = allEvents.filter((e) => !beforeWindow(e));
+  await discoverIdleOwners(options, discovery.profiles, sortedRequests);
   for (const r of sortedRequests)
     for (const issue of r.issues) issues.add(issue);
   if (sortedEvents.some((e) => e.kind === "compaction"))
     issues.add(
-      "idle notices have no verified transcript discriminator; precomputed is only an undocumented candidate; final missing boundaries do not establish no summary",
+      "only native informational idle notices attribute applied idle compaction; precomputed alone and final missing boundaries do not establish summary generation or absence",
     );
   return {
     ...discovery,

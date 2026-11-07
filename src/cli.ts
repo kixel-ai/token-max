@@ -60,6 +60,40 @@ export function formatReport(report: Report): string {
       `${result.action.toUpperCase()} [${result.evidence}] ${display(profile.root)} ${result.bucket}: ${result.current ?? "unknown"} -> ${result.recommended ?? "unknown"}`,
     );
     lines.push(`  Owner: ${display(result.owner)}; ${result.windowBasis}`);
+    if (result.check === "idle-compaction") {
+      lines.push(
+        `  Idle compaction; threshold ${result.threshold ?? "unknown"}; baseline: ${result.baseline}`,
+      );
+      for (const scenario of [
+        result.currentSettings,
+        result.afterRecommendations,
+      ]) {
+        lines.push(
+          `  ${scenario.baseline}: on ${money(scenario.cost.on)}, off ${money(scenario.cost.off)}; on-minus-off ${scenario.deltaUsd === null ? "unpriced" : `$${scenario.deltaUsd.toFixed(4)}`} over window${scenario.monthlyDeltaUsd === null ? "" : `, $${scenario.monthlyDeltaUsd.toFixed(4)}/30 days`}; TTL main/outside-main ${scenario.ttls.main ?? "unknown"}/${scenario.ttls.subagent ?? "unknown"}.`,
+        );
+        lines.push(
+          `    ${scenario.periods.length} request/final periods; ${scenario.periods.filter((p) => p.status === "eligible").length} eligible (${scenario.periods.filter((p) => p.confirmed).length} confirmed); ${scenario.periods.filter((p) => p.status === "censored").length} censored; ${scenario.periods.filter((p) => p.resume === null).length} final periods without observed return.`,
+        );
+        for (const size of scenario.byContext)
+          lines.push(
+            `    Context ${size.tokens ?? "unknown"} tokens: ${size.periods} periods; on-minus-off ${size.deltaUsd === null ? "unpriced" : `$${size.deltaUsd.toFixed(4)}`}.`,
+          );
+        for (const p of scenario.periods)
+          lines.push(
+            `    ${p.request}: ${p.status}; ${p.returnTiming}; ${p.reason}; ${p.outcome}; activation ${p.activation ?? "unknown"} (${p.activationBasis}); summary ${money(p.summaryCost)}.`,
+          );
+        const s = scenario.sensitivity;
+        lines.push(
+          `    Sensitivity on-minus-off: closed ${s.closedDeltaUsd ?? "unpriced"}; open ${s.openDeltaUsd ?? "unpriced"}; larger summary/full prefix ${s.largerSummaryDeltaUsd ?? "unpriced"}; near-expiry timing ${s.lateTriggerDeltaUsd ?? "unpriced"}; re-read break-even per resumed summary ${s.rereadBreakEvenUsdPerResumedSummary ?? "unavailable"}. The aggregate estimate decides.`,
+        );
+      }
+      if (result.breakEven) lines.push(`  Break-even: ${result.breakEven}`);
+      for (const assumption of result.assumptions)
+        lines.push(`  Assumption: ${assumption}`);
+      for (const uncertainty of result.uncertainty)
+        lines.push(`  Uncertainty: ${uncertainty}`);
+      continue;
+    }
     if (result.check === "compaction-window") {
       lines.push(
         `  Compaction window ${result.models.map((m) => m ?? "unknown model").join(", ")}; baseline: ${result.baseline}`,

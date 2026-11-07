@@ -9,6 +9,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -265,6 +266,9 @@ try {
     // The real packed launchers invoke a synthetic OpenSSH process, which runs
     // the exact streamed helper under Bun. The bunx PATH still contains no Node.
     const fake = join(consumer, "synthetic-ssh.mjs");
+    // The synthetic destination has a POSIX shell even when the coordinator's
+    // PATH deliberately excludes Node and every system program.
+    await symlink("/bin/sh", join(only, "sh"));
     await writeFile(
       fake,
       `import {spawn} from 'node:child_process';

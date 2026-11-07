@@ -61,6 +61,12 @@ export interface Request {
   /** Requested controls never establish the billed response tier. */
   requestedSpeed?: { tier: string | null; speed: string | null };
   issues: string[];
+  /** Explicit task/hook provenance from a host adapter; never inferred from message text. */
+  keepalive?: {
+    mechanism: "claude-loop" | "claude-asyncRewake" | "unknown";
+    task: string;
+    attributed: boolean;
+  };
 }
 /** Structural context and timing evidence, never a billed boundary request. */
 export interface StructuralEvent {
@@ -103,6 +109,8 @@ export interface StructuralEvent {
     speed: string | null;
     geo: string | null;
   } | null;
+  /** Explicit host lifecycle observation; a client label alone is not liveness. */
+  liveness?: "awake" | "asleep" | "closed";
 }
 /** A current window control, without inventing a tuned model default. */
 export interface WindowControl {
@@ -154,6 +162,8 @@ export interface Profile {
   idle?: IdleControl;
   speed?: SpeedControl;
   speedDirectories?: Record<string, SpeedControl>;
+  /** Verified current scheduler observations supplied by a host adapter, absent in native histories. */
+  keepalive?: KeepaliveControl;
   /** Current project controls observed at recorded working directories. */
   idleDirectories?: Record<string, IdleControl>;
 }
@@ -306,7 +316,63 @@ export interface CompactionCheckResult extends CheckBase<number> {
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
 export type CheckResult =
-  TtlCheckResult | CompactionCheckResult | IdleCheckResult | SpeedCheckResult;
+  | TtlCheckResult
+  | CompactionCheckResult
+  | IdleCheckResult
+  | SpeedCheckResult
+  | KeepaliveCheckResult;
+
+/** A current ping policy needs a verified mechanism and owner, not merely past wakeups. */
+export interface KeepaliveControl {
+  policy: string | null;
+  mechanism: "claude-loop" | "claude-asyncRewake" | "unknown";
+  /** Verified capped scheduling support; a candidate mechanism name alone is insufficient. */
+  supported: boolean;
+  owner: string;
+  resolved: boolean;
+  intervalMs: number | null;
+  capMs: number | null;
+  reason: string;
+}
+/** A priced policy relative to reconstructed no-ping idle-off behavior. */
+export interface KeepaliveScenario {
+  policy: string;
+  capMs: number | null;
+  estimatedOpenMs: number | null;
+  /** Null means the per-period cadence in the period evidence. */
+  intervalMs: number | null;
+  idle: boolean;
+  comparisonCost: Cost;
+  pingCost: Cost;
+  pings: number;
+  finalPings: number;
+  savingsUsd: number | null;
+  monthlySavingsUsd: number | null;
+  sensitivity: {
+    closedSavingsUsd: number | null;
+    openSavingsUsd: number | null;
+    breakEvenOpenMs: number | null;
+    extraWorkBreakEvenUsdPerPing: number | null;
+  };
+}
+/** Capped keepalive competes with both idle alternatives and preserves lifetime uncertainty. */
+export interface KeepaliveCheckResult extends CheckBase<string> {
+  check: "keepalive";
+  bucket: "main";
+  mechanism: KeepaliveControl["mechanism"];
+  recordedPings: number;
+  recordedPingCost: Cost;
+  scenarios: KeepaliveScenario[];
+  periods: {
+    request: string;
+    resume: string | null;
+    gapMs: number;
+    lifetimeMs: number | null;
+    lifetimeBasis: string;
+    intervalMs: number | null;
+  }[];
+  usageEstimates: UsageEstimate[];
+}
 /** Rate-only premium comparisons keep current-setting estimates separate from observed response premiums. */
 export interface SpeedCheckResult extends CheckBase<string> {
   check: "fast-mode";
@@ -356,6 +422,8 @@ export interface IdleScenario {
   windows: { owner: string; models: (string | null)[]; value: number | null }[];
   periods: IdlePeriod[];
   cost: Record<"on" | "off", Cost>;
+  /** Shared billed replay before this owner's idle adjustment, for joint policy consumers. */
+  recordedBaselineCost: Cost;
   /** Only changed charges, relative to the shared recorded-request baseline. */
   adjustment: Record<"on" | "off", Cost>;
   deltaUsd: number | null;

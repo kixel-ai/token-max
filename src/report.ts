@@ -194,6 +194,16 @@ export function formatReport(
             "Fixed costs",
             "Identical fixed costs remain unknown and cancel in the cache comparison.",
           );
+      } else if (result.check === "keepalive") {
+        field(
+          "Scheduler",
+          `${result.mechanism}; ${result.recordedPings} explicitly attributed pings; recorded ping charge ${money(result.recordedPingCost)}`,
+        );
+        for (const s of result.scenarios)
+          field(
+            "Keepalive comparison",
+            `${s.policy}: ${money(s.comparisonCost)}; net saving vs no keepalive ${estimate(s.savingsUsd)}; ${estimate(s.monthlySavingsUsd)} / 30 days; ${s.pings} pings (${s.finalPings} final); ping charge ${money(s.pingCost)}; estimated open/awake ${s.estimatedOpenMs ?? "not capped"}ms; closed ${estimate(s.sensitivity.closedSavingsUsd)}, open/awake ${estimate(s.sensitivity.openSavingsUsd)}`,
+          );
       } else if (result.check === "idle-compaction") {
         field(
           "Effective idle threshold",
@@ -330,6 +340,25 @@ export function formatReport(
               );
             }
           }
+        } else if (result.check === "keepalive") {
+          for (const p of result.periods)
+            field(
+              "Keepalive lifetime",
+              `${p.request}; return ${p.resume ?? "unobserved"}; gap ${p.gapMs}ms; open/awake ${p.lifetimeMs}ms; cadence ${p.intervalMs ?? "unknown"}ms; ${p.lifetimeBasis}`,
+            );
+          for (const s of result.scenarios) {
+            cost(`${s.policy} full comparison`, s.comparisonCost);
+            field(
+              "Open-duration break-even",
+              s.sensitivity.breakEvenOpenMs === null
+                ? "no bracketed crossing"
+                : `${s.sensitivity.breakEvenOpenMs}ms`,
+            );
+            field(
+              "Extra-work break-even per ping",
+              estimate(s.sensitivity.extraWorkBreakEvenUsdPerPing),
+            );
+          }
         } else if (result.check === "idle-compaction") {
           for (const scenario of [
             result.currentSettings,
@@ -434,7 +463,11 @@ export function formatReport(
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        if (result.check !== "idle-compaction" && result.check !== "fast-mode")
+        if (
+          result.check !== "idle-compaction" &&
+          result.check !== "fast-mode" &&
+          result.check !== "keepalive"
+        )
           witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
@@ -501,6 +534,10 @@ export function formatReport(
 }
 
 function reason(result: CheckResult): string {
+  if (result.check === "keepalive")
+    return result.recommended === null
+      ? "Required cache, ping attribution or joint-policy inputs remain unknown."
+      : "Lowest estimated aggregate net cost across no keepalive, data-derived caps and supported idle compaction; lifetime sensitivity accompanies the estimate.";
   if (result.check === "fast-mode") return result.reason;
   if (result.check === "idle-compaction")
     return result.recommended === null

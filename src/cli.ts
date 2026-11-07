@@ -19,6 +19,7 @@ Usage: token-max [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --details               Show all check evidence, assumptions, uncertainty and sources
+  --keepalive-task ID     Identify a cache-only Claude scheduled task (repeatable)
   --plain                 Plain text without color or decorative Unicode
   --json                  Complete structured report, schema version 1
   --offline               Use cached public prices without network access
@@ -73,6 +74,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
           help: { type: "boolean", short: "h" },
           "claude-dir": { type: "string", multiple: true },
           "codex-dir": { type: "string", multiple: true },
+          "keepalive-task": { type: "string", multiple: true },
           "prices-file": { type: "string" },
           "price-cache": { type: "string" },
         },
@@ -130,6 +132,9 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       ...(since === undefined ? {} : { since }),
       ...(values["claude-dir"] ? { claudeDirs: values["claude-dir"] } : {}),
       ...(values["codex-dir"] ? { codexDirs: values["codex-dir"] } : {}),
+      ...(values["keepalive-task"]
+        ? { keepaliveTasks: values["keepalive-task"] }
+        : {}),
     };
     phase("Scanning local histories");
     const data = await scan(options);

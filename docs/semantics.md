@@ -537,3 +537,87 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 [API ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode),
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
+
+## Capped keepalive
+
+The `keepalive` check compares reconstructed no-ping/idle-off behavior,
+no pings with native Claude idle compaction, and capped pings with either
+idle policy where applicable. It runs after applicable TTL/window changes.
+The aggregate estimated cost decides; closure/sleep sensitivity can disagree.
+Savings are relative to no keepalive unless the current policy is verified,
+when the card's savings compare that current policy with the winner.
+Per-scenario savings always name the reconstructed no-ping baseline. These
+amounts cannot be added to the separate idle, TTL or window checks.
+
+Candidate caps cover every cadence multiple through the last ping required to
+bridge an observed return, plus any verified current cap. This avoids a fixed
+list of arbitrarily chosen hours. The modeled cadences are 4m45s for Claude's
+5m TTL, 55m for its 1h TTL, and 29m30s for supported billed-write Codex models'
+30m refresh. Older/unverified model policies stay unknown. Longer observed
+Codex cache hits are retained as evidence. A read preserves existing 12h
+coverage without restarting that clock; new short-lived tail tokens do not
+inherit long coverage. All charges use the existing whole-request pricing
+path, including context tiers and the billed response tier. Requested Codex
+speed never establishes billed speed.
+
+A ping reads the preceding context and adds a prompt and output, with output
+already including reasoning. Explicitly attributed compatible pings calibrate
+ordinary input/output; otherwise comparable real-turn medians provide a labeled
+full-turn proxy. Missing calibration or rates stay unknown. Added prompt/output
+context carries into subsequent requests and cache tiers. Removing attributed
+pings also removes their estimated appended context and cache warmth. The
+fixed-behavior assumption does not value useful work those turns might perform.
+
+Native Claude `scheduledTaskId` metadata is traced through explicit message
+parent lineage. `--keepalive-task ID` identifies a cache-only task without
+reading its prompt to infer purpose. Without that declaration, the scheduled
+wake is ambiguous and its affected comparison remains unpriced. Short messages,
+message text, elapsed time and an absent task history never establish pings or
+prove they are off. IDs are hashed in output; transcript content is not retained.
+Native histories do not establish current task existence, purpose or cap.
+The normalized host-adapter `Profile.keepalive` contract therefore requires
+verified current policy, owner, cadence/cap, and supported capped mechanism
+before either starting/changing or stopping pings can cause exit 1. A matching
+known policy keeps. A candidate `/loop` or `asyncRewake` name alone is insufficient.
+Native CLI discovery currently leaves this current control unknown; the adapter
+contract is available for the separately planned host/profile integration.
+Codex has no established native keepalive mechanism and stays advisory.
+
+Recorded shutdown/sleep events from a host adapter stop pings until a real
+return. Without lifecycle evidence the deciding fallback leaves the client
+open and awake until the earlier of return and cap, and charges every final
+unresumed period through its full cap. These final charges can extend beyond
+the observation boundary; they are estimated liability attached to the selected
+window, not measured post-window usage. Per-cap estimated open time and ping
+counts are reported separately from unknown measured lifetime. No one-hour
+native idle activation fraction is extrapolated over a longer ping cap.
+Closure sensitivity omits uncertain pings and unobserved idle activation;
+open sensitivity uses the documented open/awake condition. Final ping charges
+supply the first unreturned open-duration crossing that exhausts the saving on
+returned periods, holding those returns fixed. A joint-idle crossing is unknown.
+The extra-work dollars per ping are a budget, not a token allowance.
+
+The native idle replay first reconstructs idle-off request geometry for applied
+idle boundaries, then receives the hypothetical ping timeline with the measured
+summary calibration retained. Pings reset the last-request clock; a summary can
+run before a 55m ping under the inspected 54m trigger, or after a cap stops.
+Summary input, replacement prefixes and subsequent ping/context charges are
+replayed together. They are never independently billed and then summed as
+savings. Unknown reconstruction or summary geometry prevents a priced winner.
+
+The ideal cadence is conditional: active turns, request duration, scheduling
+jitter and sleep can miss expiry. Known generation duration delays pings.
+Claude `/loop` rounds intervals and has no built-in idle-resetting cap;
+59.5m does not establish a sub-hour schedule. `asyncRewake` is a documented
+hook building block, not a native keepalive setting. A host adapter must verify
+the actual capped control before an actionable recommendation.
+
+Primary guidance checked 2026-11-07: [Claude scheduling](https://code.claude.com/docs/en/scheduled-tasks),
+[asyncRewake](https://code.claude.com/docs/en/hooks#asyncRewake),
+[Claude prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching),
+[native idle compaction](https://code.claude.com/docs/en/settings-reference#idlecompaction),
+[OpenAI caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+and [OpenAI prices](https://developers.openai.com/api/docs/pricing).
+Only synthetic fixtures validate this implementation. The quest's earlier
+numeric survey is not a validated current complete-host audit. Real selected
+scans still fail atomically on malformed records, with no repair or skipping.

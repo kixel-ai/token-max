@@ -30,6 +30,7 @@ import { observedTtl } from "./cache.js";
 import { cacheBucket as bucket, replayParts } from "./scenarios.js";
 import { compactionChecks } from "./compaction.js";
 import { idleChecks } from "./idle.js";
+import { keepaliveChecks } from "./keepalive.js";
 import { identity, ScanError } from "./safe.js";
 
 const TTL_SOURCE =
@@ -615,6 +616,18 @@ export function analyze(options: {
     }),
   );
   checks.push(...speedChecks({ scan, catalog, since, now }));
+  checks.push(
+    ...keepaliveChecks({
+      scan,
+      catalog,
+      summaries: compactions,
+      estimates,
+      ttls: checks.filter((c) => c.check === "claude-cache-ttl"),
+      windows: checks.filter((c) => c.check === "compaction-window"),
+      since,
+      now,
+    }),
+  );
   return {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),

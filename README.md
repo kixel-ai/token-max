@@ -1,7 +1,8 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction,
+keepalive and standard-speed policies. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -115,6 +116,14 @@ estimated window/monthly net savings, and evidence. Unknown dollars stay unknown
 a known subtotal is not the total. Measured request usage is distinct from
 estimated replay and unpriced provider guidance. Low-use rankings and unresolved
 current ownership remain advisory; they do not cause exit 1.
+
+Keepalive compares no pings, capped full-turn pings, and native Claude idle
+compaction, including final pings with no observed return. `--keepalive-task ID`
+declares a cache-only Claude scheduled task for attribution through explicit
+transcript lineage. Native histories do not establish the current task/cap state,
+so native keepalive results are advisory. A verified host-adapter control can
+recommend starting, changing or stopping pings. Codex caps are priced with its
+model's cache policy; there is no established native Codex keepalive mechanism.
 
 Use `--details` for every check's assumptions, uncertainty, cost components,
 break-evens, sensitivity scenarios, cache witnesses and sources. Nothing is hidden

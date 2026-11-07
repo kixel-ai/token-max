@@ -295,6 +295,15 @@ function periods(options: {
       }
       const interrupted =
         turnStart > r.endTime && turnStart < end && turnStart < r.time + EARLY;
+      const stopped =
+        !boundary &&
+        events.some(
+          (e) =>
+            e.time > r.time &&
+            e.time <= r.time + EARLY &&
+            e.time < end &&
+            (e.liveness === "closed" || e.liveness === "asleep"),
+        );
       let status: IdlePeriod["status"] = "eligible";
       let reason =
         "interactive request gap under current native prerequisites; open-and-awake activation is estimated";
@@ -307,6 +316,7 @@ function periods(options: {
         ttls.main === "5m" ||
         c.autoCompact === false ||
         client(r) === "unsupported" ||
+        stopped ||
         pending.size > 0 ||
         interrupted ||
         r.endTime >= r.time + EARLY ||
@@ -319,17 +329,21 @@ function periods(options: {
         reason =
           ttls.main === "5m"
             ? "main TTL is 5m"
-            : c.autoCompact === false
-              ? "automatic compaction is disabled"
-              : client(r) === "unsupported"
-                ? "SDK/headless/remote/subagent client is outside the confirmed interactive policy"
-                : pending.size > 0 || interrupted || r.endTime >= r.time + EARLY
-                  ? "tool wait or active turn interrupts the idle interval"
-                  : contextTokens !== null &&
-                      c.threshold !== null &&
-                      contextTokens < c.threshold
-                    ? "context is below the effective idle threshold"
-                    : "auto-compact window removes the eligible size band";
+            : stopped
+              ? "recorded client shutdown/sleep interrupts the open-and-awake interval"
+              : c.autoCompact === false
+                ? "automatic compaction is disabled"
+                : client(r) === "unsupported"
+                  ? "SDK/headless/remote/subagent client is outside the confirmed interactive policy"
+                  : pending.size > 0 ||
+                      interrupted ||
+                      r.endTime >= r.time + EARLY
+                    ? "tool wait or active turn interrupts the idle interval"
+                    : contextTokens !== null &&
+                        c.threshold !== null &&
+                        contextTokens < c.threshold
+                      ? "context is below the effective idle threshold"
+                      : "auto-compact window removes the eligible size band";
       } else if (
         !c.resolved ||
         ttls.main === null ||
@@ -554,6 +568,8 @@ function run(options: {
   mode: "point" | "closed" | "open" | "larger" | "late" | "fraction";
   activationFraction?: number;
   profile: Profile;
+  captureOff?: Map<string, Request>;
+  captureOn?: Map<string, Request>;
 }): Run {
   const costs: Cost[] = [];
   const byPeriod = new Map<string, Cost>();
@@ -894,6 +910,12 @@ function run(options: {
         states = mergeStates(states);
       } else {
         const r = tick.r;
+        const captured = options.on ? options.captureOn : options.captureOff;
+        if (captured && !captured.has(r.id))
+          captured.set(r.id, {
+            ...r,
+            parts: r.parts.map((p) => ({ ...p, usage: { ...p.usage } })),
+          });
         const ttls = scopedTtls(options.profile, r, options.ttls);
         const messages = r.parts.filter(
           (p) => p.kind === "message" || p.kind === "unknown",
@@ -928,6 +950,13 @@ function run(options: {
                 : state.offset === 0
                   ? p
                   : null;
+            if (captured && state.offset !== 0) {
+              const target = captured.get(r.id)!;
+              target.parts[r.parts.indexOf(p)] = next ?? {
+                ...p,
+                usage: { ...p.usage, input: null, read: null, write: null },
+              };
+            }
             if (r.time >= options.since)
               charge(
                 state.active,
@@ -967,6 +996,14 @@ export function idleChecks(options: {
   windows: CompactionCheckResult[];
   since: number | undefined;
   now: number;
+  /** Joint policy consumers use the same open/closed lifetime assumption for every policy. */
+  lifetime?: "open" | "closed";
+  /** Capture the deterministic idle-off request geometry for the joint keepalive replay. */
+  captureOff?: Map<string, Request>;
+  /** Capture deterministic open/awake idle-on geometry for per-request joint costs. */
+  captureOn?: Map<string, Request>;
+  /** Keep measured summary calibration when a joint replay removes observed idle boundaries. */
+  calibrationScan?: Scan;
 }): IdleCheckResult[] {
   const { scan, catalog, now } = options;
   const checks: IdleCheckResult[] = [];
@@ -988,8 +1025,18 @@ export function idleChecks(options: {
       options.since ??
       main.reduce((first, r) => Math.min(first, r.time), Infinity);
     const calibration = compactionSamples({
-      requests,
-      events,
+      requests: options.calibrationScan
+        ? [
+            ...options.calibrationScan.cacheContext.requests,
+            ...options.calibrationScan.requests,
+          ].filter((r) => r.profiles.includes(profile.id))
+        : requests,
+      events: options.calibrationScan
+        ? [
+            ...options.calibrationScan.cacheContext.boundaries,
+            ...options.calibrationScan.events,
+          ].filter((e) => e.profiles.includes(profile.id))
+        : events,
       summaries: options.summaries,
     });
     const models = [
@@ -1163,7 +1210,23 @@ export function idleChecks(options: {
             )
             .flatMap((s) => (s.request ? [s.request] : [])),
         );
+        const recordedBaselineCost = addCosts([
+          ...windowed.errors.map(unknownCost),
+          ...replayed
+            .filter((i) => i.selected)
+            .map((i) => addCosts(Object.values(i.components))),
+          ...options.summaries
+            .filter(
+              (s) =>
+                !s.request &&
+                allEvents.some((e) => e.id === s.event && e.time >= since),
+            )
+            .map((s) => s.cost),
+          ...rs.filter((r) => r.time >= since).map(serverCost),
+          ...windowed.added.map((a) => a.summaryCost),
+        ]);
         const common = addCosts([
+          ...windowed.errors.map(unknownCost),
           ...replayed
             .filter(
               (i) =>
@@ -1196,8 +1259,24 @@ export function idleChecks(options: {
           ttls,
           profile,
         };
-        const off = run({ ...args, on: false, mode: "point" });
-        const on = run({ ...args, on: true, mode: "point" });
+        const off = run({
+          ...args,
+          on: false,
+          mode: "point",
+          ...(base === recommendedReplay && options.captureOff
+            ? { captureOff: options.captureOff }
+            : {}),
+        });
+        const on = run({
+          ...args,
+          on: true,
+          mode: options.lifetime ?? "point",
+          ...(base === recommendedReplay &&
+          options.captureOn &&
+          options.lifetime === "open"
+            ? { captureOn: options.captureOn }
+            : {}),
+        });
         const delta = (r: Run) =>
           difference(r.adjustment, off.adjustment).totalUsd;
         const closed = delta(run({ ...args, on: true, mode: "closed" }));
@@ -1260,6 +1339,7 @@ export function idleChecks(options: {
             off: addCosts([common, off.adjustment]),
             on: addCosts([common, on.adjustment]),
           },
+          recordedBaselineCost,
           adjustment: { off: off.adjustment, on: on.adjustment },
           deltaUsd,
           monthlyDeltaUsd:

@@ -29,6 +29,8 @@ import {
 
 /** Select a time window and local roots, with optional cooperative cancellation. */
 export interface ScanOptions extends DiscoveryOptions {
+  /** Explicitly identify cache-only scheduler tasks, without inspecting their prompts. */
+  keepaliveTasks?: string[];
   since?: number;
 }
 
@@ -356,6 +358,12 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     { parent: string | null; boundary: string | null } | null
   >();
   const noticeParents = new Map<string, Set<string | null>>();
+  const wakeParents = new Map<
+    string,
+    { parent: string | null; user: boolean; wake: Request["keepalive"] | null }
+  >();
+  const scheduledWakes = new Set<string>();
+  const linkedWakes = new Set<string>();
   const refs = new Map<string, Request>();
   const issues = new Set<string>();
   const modernTotals = new Set<string>();
@@ -404,6 +412,16 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     previous.reference ??= r.reference;
     previous.source ??= r.source;
     previous.provider ??= r.provider;
+    if (
+      JSON.stringify(previous.keepalive) !== JSON.stringify(r.keepalive) &&
+      (previous.keepalive || r.keepalive)
+    ) {
+      previous.keepalive = {
+        ...(previous.keepalive ?? r.keepalive!),
+        mechanism: "unknown",
+        attributed: false,
+      };
+    }
     previous.issues = [...new Set([...previous.issues, ...r.issues])];
   }
   for (const snapshot of discovery.snapshots) {
@@ -459,6 +477,32 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           typeof raw.parentUuid === "string"
             ? identity(`${context.session}:${id(raw.parentUuid)}`)
             : null;
+        if (recordKey) {
+          const content = object(raw.message).content;
+          const user =
+            raw.type === "user" &&
+            !(
+              Array.isArray(content) &&
+              content.some((b) => object(b).type === "tool_result")
+            );
+          const wake =
+            user && typeof raw.scheduledTaskId === "string"
+              ? {
+                  mechanism: "claude-loop" as const,
+                  task: id(raw.scheduledTaskId),
+                  attributed:
+                    options.keepaliveTasks?.includes(raw.scheduledTaskId) ===
+                    true,
+                }
+              : null;
+          const value = { parent: parentKey, user, wake };
+          if (wake && selected) scheduledWakes.add(recordKey);
+          const previous = wakeParents.get(recordKey);
+          // Conflicting copied lineage cannot establish cache-only attribution.
+          if (previous && JSON.stringify(previous) !== JSON.stringify(value))
+            value.wake = null;
+          wakeParents.set(recordKey, value);
+        }
         if (
           recordKey &&
           (raw.isCompactSummary === true ||
@@ -568,6 +612,21 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
               ? `${snapshot.file}:${location.line}`
               : key,
           );
+          let wakeKey = parentKey;
+          const visited = new Set<string>();
+          while (wakeKey && !visited.has(wakeKey)) {
+            visited.add(wakeKey);
+            const parent = wakeParents.get(wakeKey);
+            if (!parent) break;
+            if (parent.user) {
+              if (parent.wake) {
+                r.keepalive = { ...parent.wake };
+                linkedWakes.add(wakeKey);
+              }
+              break;
+            }
+            wakeKey = parent.parent;
+          }
           r.model = label(m.model);
           r.reference =
             typeof raw.requestRef === "string" ? id(raw.requestRef) : null;
@@ -976,6 +1035,10 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     (a, b) => a.time - b.time || a.id.localeCompare(b.id),
   );
   const allEvents = [...events.values()].sort((a, b) => a.time - b.time);
+  if ([...scheduledWakes].some((key) => !linkedWakes.has(key)))
+    issues.add(
+      "scheduled wake has no verified parent-linked billed request; keepalive attribution is incomplete",
+    );
   for (const notice of allEvents.filter((e) => e.kind === "idle-notice")) {
     const parents = noticeParents.get(notice.id);
     let key = parents?.size === 1 ? [...parents][0] : null;

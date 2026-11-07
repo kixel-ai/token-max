@@ -658,11 +658,12 @@ test("malformed selectors fail safely even without installed skills", async () =
   }
 });
 
-test("Claude project/local controls outside a Git repository retain their effective owners", async () => {
+test("Claude project/local controls retain their effective owners at the repository boundary", async () => {
   const w = await workspace();
   try {
     const project = join(w.home, "work");
     await mkdir(join(project, ".claude"), { recursive: true });
+    await mkdir(join(project, ".git"));
     const file = await install(join(w.claude, "skills"), "one", "one");
     await writeFile(
       join(project, ".claude/settings.json"),

@@ -158,7 +158,6 @@ Recommendations for every check:
 - [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
 - [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
-- [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds
 - [T3 profiles and settings](/quest/m0/t3.md) - native history discovery, T3 ownership, and T3-specific idle policies without double billing
 - [SSH host audits](/quest/m0/ssh.md) - selected remote audits with the same artifact and a combined privacy-preserving report

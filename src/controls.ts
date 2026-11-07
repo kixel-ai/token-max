@@ -270,8 +270,11 @@ export function speedControls(options: {
   env: Record<string, unknown>;
 }): SpeedControl {
   const first = options.scopes[0]?.file ?? "settings";
-  const effective = (key: string): { value: unknown; owner: string } => {
+  const effective = (
+    key: string,
+  ): { value: unknown; owner: string; file: string } => {
     let value: unknown;
+    let file = first;
     let owner = `${first}:${key} (documented default)`;
     for (const scope of options.scopes) {
       const parts = key.split(".");
@@ -279,16 +282,17 @@ export function speedControls(options: {
       for (const part of parts) row = object(row)[part];
       if (row !== undefined) {
         value = row;
+        file = scope.file;
         owner = `${scope.file}:${key}`;
       }
     }
-    return { value, owner };
+    return { value, owner, file };
   };
   const boolean = (key: string) => {
     const row = effective(key);
     if (row.value !== undefined && typeof row.value !== "boolean")
       throw new ScanError(`invalid ${key}`, {
-        file: row.owner.split(":")[0]!,
+        file: row.file,
         line: 1,
       });
     return row;
@@ -391,7 +395,7 @@ export function speedControls(options: {
   }
   const tier = effective("service_tier");
   if (tier.value !== undefined && typeof tier.value !== "string")
-    throw new ScanError("invalid service_tier", { file: first, line: 1 });
+    throw new ScanError("invalid service_tier", { file: tier.file, line: 1 });
   const fast = boolean("features.fast_mode");
   const ultra = boolean("features.ultrafast_mode");
   const value = tier.value;
@@ -420,7 +424,7 @@ export function speedControls(options: {
       typeof model.value === "string" &&
       (value === "ultrafast"
         ? /^gpt-(?:6-astra|6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/.test(model.value)
-        : /^gpt-(?:6(?:\.1)?-(?:sol|terra|astra|luna)|5\.[456](?:-(?:sol|terra|luna))?)(?:-\d{4}-\d{2}-\d{2})?$/.test(
+        : /^gpt-(?:6-(?:sol|astra|luna)|6\.1-(?:sol|terra)|5\.6(?:-(?:sol|terra|luna))?|5\.[45]|5\.4-mini)(?:-\d{4}-\d{2}-\d{2})?$/.test(
             model.value,
           ));
     return result(

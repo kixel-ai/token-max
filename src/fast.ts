@@ -4,7 +4,6 @@ import type {
   Request,
   Scan,
   SpeedCheckResult,
-  SpeedControl,
 } from "./model.js";
 import {
   addCosts,
@@ -23,6 +22,7 @@ const SOURCES = [
   "https://developers.openai.com/api/docs/guides/fast-mode (2026-11-07)",
   "https://developers.openai.com/api/docs/guides/ultrafast-mode (2026-11-07)",
   "https://developers.openai.com/api/docs/pricing (2026-11-07)",
+  "https://developers.openai.com/api/docs/models/gpt-5.6 (2026-11-07)",
 ];
 
 function premium(r: Request, p: BillingPart): boolean | null {
@@ -81,152 +81,164 @@ export function speedChecks(options: {
         r.profiles.includes(profile.id) &&
         (options.since === undefined || r.time >= options.since),
     );
-    const controls = [
-      ...new Set(requests.flatMap((r) => (r.cwd ? [r.cwd] : []))),
-    ].flatMap((cwd) =>
-      profile.speedDirectories?.[cwd] ? [profile.speedDirectories[cwd]!] : [],
-    );
-    const same = (a: SpeedControl, b: SpeedControl) =>
-      a.value === b.value && a.owner === b.owner && a.resolved === b.resolved;
-    const control =
-      controls.length && controls.some((c) => !same(c, controls[0]!))
-        ? {
-            ...profile.speed,
-            value: null,
-            resolved: false,
-            reason:
-              "current project speed controls differ; no single effective owner",
-            owner: [...new Set(controls.map((c) => c.owner))].join("; "),
-          }
-        : (controls[0] ?? profile.speed);
-    let premiumParts = 0,
-      standardParts = 0,
-      unknownParts = 0;
-    let pricedParts = 0,
-      estimateUnknown = 0;
-    const observed: Cost[] = [];
-    const estimated: Cost[] = [];
+    const groups = new Map<
+      string,
+      { control: NonNullable<typeof profile.speed>; requests: Request[] }
+    >();
     for (const r of requests) {
-      if (!r.parts.length) {
-        unknownParts++;
-        observed.push(unknownCost("request parts are absent"));
-        estimateUnknown++;
-        estimated.push(unknownCost("request parts are absent"));
-      }
-      for (const p of r.parts) {
-        const state = premium(r, p);
-        if (state === true) {
-          premiumParts++;
-          observed.push(difference(catalog, r, p));
-        } else if (state === false) {
-          standardParts++;
-          observed.push(zeroCost());
-        } else {
-          unknownParts++;
-          observed.push(
-            unknownCost(
-              "billed response speed/tier is unknown; requested controls are not billing evidence",
-            ),
-          );
-        }
-        if (control.value === null || !control.resolved) {
-          estimateUnknown++;
-          estimated.push(unknownCost("current speed ownership is unresolved"));
-          continue;
-        }
-        if (control.value === "standard") {
-          estimated.push(zeroCost());
-          continue;
-        }
-        // Claude only enables fast mode on supported Opus; other models stay standard.
-        if (
-          r.harness === "claude" &&
-          /^claude-(?:sonnet|haiku)-/.test(p.model ?? "")
-        ) {
-          estimated.push(zeroCost());
-          continue;
-        }
-        const current =
-          r.harness === "claude"
-            ? { ...p, tier: "standard", speed: "fast" }
-            : { ...p, tier: control.value, speed: null };
-        const delta = difference(catalog, r, current);
-        if (delta.totalUsd === null) estimateUnknown++;
-        else pricedParts++;
-        estimated.push(delta);
-      }
+      const control =
+        (r.cwd ? profile.speedDirectories?.[r.cwd] : undefined) ??
+        profile.speed;
+      const key = JSON.stringify(control);
+      const group = groups.get(key) ?? { control, requests: [] };
+      group.requests.push(r);
+      groups.set(key, group);
     }
-    const start = options.since ?? requests[0]?.time ?? null;
-    const month = (v: number | null) =>
-      v !== null && start !== null && now > start
-        ? (v * 30 * 86400000) / (now - start)
-        : null;
-    const observedCost = observed.length
-      ? addCosts(observed)
-      : unknownCost("no selected billed usage");
-    const currentCost = estimated.length
-      ? addCosts(estimated)
-      : unknownCost("no selected usage for current-setting estimate");
-    const action =
-      !control.resolved || control.value === null
-        ? "advisory"
-        : control.value === "standard"
-          ? "keep"
-          : "change";
-    return [
-      {
-        check: "fast-mode",
-        bucket: "all",
-        profile: profile.id,
-        historyProfiles: [...new Set(requests.flatMap((r) => r.profiles))],
-        evidence: "guidance",
-        action,
-        current: control.value,
-        recommended: control.resolved ? "standard" : null,
-        owner: control.owner,
-        replacement: control.replacement,
-        reason: control.reason,
-        since: start,
-        until: now,
-        windowBasis:
-          options.since === undefined
-            ? "available selected usage; current files applied to history, no current session override inferred"
-            : "explicit --since; current files applied to history",
-        baseline:
-          "current profile speed, holding recorded model, work, tokens, cache categories, geography, context tiers and all other settings constant; independent of TTL/window/idle recommendations",
-        requests: requests.length,
-        savingsUsd: action === "change" ? currentCost.totalUsd : null,
-        monthlySavingsUsd:
-          action === "change" ? month(currentCost.totalUsd) : null,
-        breakEven: null,
-        observed: {
-          premiumParts,
-          standardParts,
-          unknownParts,
-          premium: observedCost,
-          monthlyPremiumUsd: month(observedCost.totalUsd),
-        },
-        currentEstimate: {
-          premium: currentCost,
-          pricedParts,
-          unknownParts: estimateUnknown,
-        },
-        usageEstimates: [],
-        assumptions: [
-          "maintainer cost preference: fast and ultrafast off; setting warning does not require historical billing metadata",
-          "rate-only API-price equivalent at present public prices, not an invoice, subscription bill, purchased-credit or rate-limit multiplier",
-          "recorded cache categories and context tiers held constant; Claude fast/standard have separate caches, so switching cold-cache effects are excluded",
-          "fixed behavior and work; latency value is not modeled; no summed per-check savings",
-          "current local files and active-profile environment supply defaults; historical session overrides never establish current session state",
-        ],
-        uncertainty: [
-          control.reason,
-          "account/server policy, availability, cloud-managed defaults, launch overrides and live session toggles not observed in local files may override these defaults",
-          ...observedCost.unknown,
-          ...currentCost.unknown,
-        ],
-        sources: SOURCES,
+    if (!requests.length)
+      groups.set("default", { control: profile.speed, requests: [] });
+    return [...groups.values()].map(
+      ({ control, requests }): SpeedCheckResult => {
+        let premiumParts = 0,
+          standardParts = 0,
+          unknownParts = 0;
+        let pricedParts = 0,
+          estimateUnknown = 0;
+        const observed: Cost[] = [];
+        const estimated: Cost[] = [];
+        for (const r of requests) {
+          if (!r.parts.length) {
+            unknownParts++;
+            observed.push(unknownCost("request parts are absent"));
+            estimateUnknown++;
+            estimated.push(unknownCost("request parts are absent"));
+          }
+          for (const p of r.parts) {
+            const state = premium(r, p);
+            if (state === true) {
+              premiumParts++;
+              observed.push(difference(catalog, r, p));
+            } else if (state === false) {
+              standardParts++;
+              observed.push(zeroCost());
+            } else {
+              unknownParts++;
+              observed.push(
+                unknownCost(
+                  "billed response speed/tier is unknown; requested controls are not billing evidence",
+                ),
+              );
+            }
+            if (control.value === null || !control.resolved) {
+              estimateUnknown++;
+              estimated.push(
+                unknownCost("current speed ownership is unresolved"),
+              );
+              continue;
+            }
+            if (control.value === "standard") {
+              estimated.push(zeroCost());
+              continue;
+            }
+            // Claude only enables fast mode on supported Opus; other models stay standard.
+            if (
+              r.harness === "claude" &&
+              /^(?:claude-(?:sonnet|haiku)-|claude-opus-4-7(?:-|$))/.test(
+                p.model ?? "",
+              )
+            ) {
+              estimated.push(zeroCost());
+              continue;
+            }
+            if (p.kind === "advisor" || p.kind === "unknown") {
+              estimateUnknown++;
+              estimated.push(
+                unknownCost(
+                  "current speed ownership of advisor/unknown iteration is not established",
+                ),
+              );
+              continue;
+            }
+            const current =
+              r.harness === "claude"
+                ? { ...p, tier: "standard", speed: "fast" }
+                : { ...p, tier: control.value, speed: null };
+            const delta = difference(catalog, r, current);
+            if (delta.totalUsd === null) estimateUnknown++;
+            else pricedParts++;
+            estimated.push(delta);
+          }
+        }
+        const start = options.since ?? requests[0]?.time ?? null;
+        const month = (v: number | null) =>
+          v !== null && start !== null && now > start
+            ? (v * 30 * 86400000) / (now - start)
+            : null;
+        const observedCost = observed.length
+          ? addCosts(observed)
+          : unknownCost("no selected billed usage");
+        const currentCost = estimated.length
+          ? addCosts(estimated)
+          : unknownCost("no selected usage for current-setting estimate");
+        const action =
+          !control.resolved || control.value === null
+            ? "advisory"
+            : control.value === "standard"
+              ? "keep"
+              : "change";
+        return {
+          check: "fast-mode",
+          bucket: "all",
+          profile: profile.id,
+          historyProfiles: [...new Set(requests.flatMap((r) => r.profiles))],
+          evidence: "guidance",
+          action,
+          current: control.value,
+          recommended: control.resolved ? "standard" : null,
+          owner: control.owner,
+          replacement: control.replacement,
+          reason: control.reason,
+          since: start,
+          until: now,
+          windowBasis:
+            options.since === undefined
+              ? "available selected usage; current files applied to history, no current session override inferred"
+              : "explicit --since; current files applied to history",
+          baseline:
+            "current profile speed, holding recorded model, work, tokens, cache categories, geography, context tiers and all other settings constant; independent of TTL/window/idle recommendations",
+          requests: requests.length,
+          savingsUsd: action === "change" ? currentCost.totalUsd : null,
+          monthlySavingsUsd:
+            action === "change" ? month(currentCost.totalUsd) : null,
+          breakEven: null,
+          observed: {
+            premiumParts,
+            standardParts,
+            unknownParts,
+            premium: observedCost,
+            monthlyPremiumUsd: month(observedCost.totalUsd),
+          },
+          currentEstimate: {
+            premium: currentCost,
+            pricedParts,
+            unknownParts: estimateUnknown,
+          },
+          usageEstimates: [],
+          assumptions: [
+            "maintainer cost preference: fast and ultrafast off; setting warning does not require historical billing metadata",
+            "rate-only API-price equivalent at present public prices, not an invoice, subscription bill, purchased-credit or rate-limit multiplier",
+            "recorded cache categories and context tiers held constant; Claude fast/standard have separate caches, so switching cold-cache effects are excluded",
+            "fixed behavior and work; latency value is not modeled; no summed per-check savings",
+            "current local files and active-profile environment supply defaults; historical session overrides never establish current session state",
+          ],
+          uncertainty: [
+            control.reason,
+            "account/server policy, availability, cloud-managed defaults, launch overrides and live session toggles not observed in local files may override these defaults",
+            ...observedCost.unknown,
+            ...currentCost.unknown,
+          ],
+          sources: SOURCES,
+        };
       },
-    ];
+    );
   });
 }

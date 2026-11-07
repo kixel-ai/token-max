@@ -267,7 +267,7 @@ function selectedRates(
         ? /^gpt-(?:6-astra|6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/.test(p.model)
           ? 6
           : null
-        : /^gpt-(?:6(?:\.1)?-(?:sol|terra|astra|luna)|5\.6-(?:sol|terra|luna))(?:-\d{4}-\d{2}-\d{2})?$/.test(
+        : /^gpt-(?:6-(?:sol|astra|luna)|6\.1-(?:sol|terra)|5\.6(?:-(?:sol|terra|luna))?)(?:-\d{4}-\d{2}-\d{2})?$/.test(
               p.model,
             )
           ? 2

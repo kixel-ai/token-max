@@ -591,7 +591,8 @@ export async function discoverCodexSpeedOwners(
         if (
           ["model", "model_provider", "service_tier", "features"].some((key) =>
             Object.hasOwn(config, key),
-          )
+          ) &&
+          !profile.speedDirectories?.[cwd]
         ) {
           profile.speedDirectories ??= Object.create(null);
           profile.speedDirectories![cwd] = {

@@ -481,3 +481,181 @@ test("built CLI warns from current settings alone, remains read-only and fails m
     await w.dispose();
   }
 });
+
+test("unsupported Opus history has no hypothetical premium and unknown iteration ownership stays unpriced", async () => {
+  const w = await workspace();
+  try {
+    await writeFile(
+      join(w.claude, "settings.json"),
+      '{"model":"opus","fastMode":true}',
+    );
+    const s = await scan({ ...w.options, claudeDirs: [w.claude] });
+    const r = makeRequest({ profiles: [s.profiles[0]!.id] });
+    r.parts[0]!.model = "claude-opus-4-7";
+    s.requests = [r];
+    const c = await prices();
+    const result = speedChecks({
+      scan: s,
+      catalog: c,
+      since: undefined,
+      now: 100,
+    })[0]!;
+    assert.equal(result.currentEstimate.premium.totalUsd, 0);
+    assert.equal(result.action, "change");
+    r.parts = [{ ...makeRequest().parts[0]!, kind: "advisor" }];
+    assert.equal(
+      speedChecks({ scan: s, catalog: c, since: undefined, now: 100 })[0]!
+        .currentEstimate.premium.totalUsd,
+      null,
+    );
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("plain GPT-5.6 alias has verified fast rates without substituting catalog model prices", async () => {
+  const c = await prices();
+  const r = makeRequest({
+    harness: "codex",
+    provider: "openai",
+    api: "responses",
+  });
+  const p = {
+    ...r.parts[0]!,
+    model: "gpt-5.6",
+    usage: usage(
+      {
+        input_tokens: 300000,
+        output_tokens: 100,
+        cached_input_tokens: 200000,
+        cache_write_input_tokens: 0,
+      },
+      "codex",
+    ),
+    tier: "default",
+    speed: null,
+  };
+  const standard = pricePart(c, r, p).totalUsd!;
+  assert.ok(standard > 0);
+  assert.equal(pricePart(c, r, { ...p, tier: "fast" }).totalUsd, standard * 2);
+  c.models.delete("openai:gpt-5.6");
+  assert.equal(pricePart(c, r, { ...p, tier: "fast" }).totalUsd, null);
+});
+
+test("known distinct project controls get separate cards and nearest Codex scope remains advisory owner", async () => {
+  const w = await workspace();
+  try {
+    const { mkdir } = await import("node:fs/promises");
+    const root = join(w.home, "repo");
+    const nested = join(root, "nested");
+    for (const path of [
+      join(root, ".git"),
+      join(root, ".codex"),
+      join(nested, ".codex"),
+    ])
+      await mkdir(path, { recursive: true });
+    await writeFile(join(root, ".codex/config.toml"), 'service_tier="fast"');
+    const nearest = join(nested, ".codex/config.toml");
+    await writeFile(nearest, 'service_tier="default"');
+    await writeFile(
+      join(w.codex, "sessions/main.jsonl"),
+      [
+        {
+          type: "session_meta",
+          timestamp: "2026-11-01T00:00:00Z",
+          payload: {
+            id: "thread",
+            source: "cli",
+            model_provider: "openai",
+            cwd: nested,
+          },
+        },
+        {
+          type: "turn_context",
+          timestamp: "2026-11-01T00:00:00Z",
+          payload: { model: "gpt-6.1-sol", service_tier: "fast" },
+        },
+        {
+          type: "token_usage_record",
+          timestamp: "2026-11-01T00:00:01Z",
+          payload: {
+            response_id: "r",
+            usage: {
+              input_tokens: 100,
+              output_tokens: 1,
+              cached_input_tokens: 0,
+              cache_write_input_tokens: 0,
+            },
+          },
+        },
+      ]
+        .map((r) => JSON.stringify(r))
+        .join("\n") + "\n",
+    );
+    const s = await scan({ ...w.options, codexDirs: [w.codex] });
+    assert.equal(s.profiles[0]!.speedDirectories![nested]!.owner, nearest);
+    const c = await prices();
+    assert.equal(
+      speedChecks({
+        scan: s,
+        catalog: c,
+        since: undefined,
+        now: Date.parse("2026-11-02"),
+      })[0]!.action,
+      "advisory",
+    );
+    const p = s.profiles[0]!;
+    p.speedDirectories = {
+      a: control("codex", { model: "gpt-6.1-sol", service_tier: "fast" }),
+      b: control("codex", { service_tier: "default" }),
+    };
+    s.requests = [
+      makeRequest({ id: "a", profiles: [p.id], cwd: "a" }),
+      makeRequest({ id: "b", profiles: [p.id], cwd: "b" }),
+    ];
+    const cards = speedChecks({
+      scan: s,
+      catalog: c,
+      since: undefined,
+      now: 100,
+    });
+    assert.deepEqual(
+      cards.map((card) => [card.action, card.requests]),
+      [
+        ["change", 1],
+        ["keep", 1],
+      ],
+    );
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("invalid speed controls name the effective source file including Windows drive letters", () => {
+  for (const [file, key, config] of [
+    ["user/config.toml", "service_tier", { service_tier: false }],
+    [
+      "C:\\user\\config.toml",
+      "features.fast_mode",
+      { features: { fast_mode: "false" } },
+    ],
+  ] as const) {
+    assert.throws(
+      () =>
+        speedControls({
+          harness: "codex",
+          scopes: [
+            { file: "/etc/codex/config.toml", config: {} },
+            { file, config },
+          ],
+          env: {},
+        }),
+      (error: unknown) => {
+        const e = error as { message: string; location: { file: string } };
+        assert.match(e.message, new RegExp(key));
+        assert.equal(e.location.file, file);
+        return true;
+      },
+    );
+  }
+});

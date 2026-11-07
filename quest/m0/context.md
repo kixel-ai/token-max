@@ -77,7 +77,3 @@ guidance](https://code.claude.com/docs/en/costs#reduce-mcp-server-overhead),
 [Codex instruction loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md),
 [Codex context guidance](https://learn.chatgpt.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra),
 and [Codex MCP settings](https://learn.chatgpt.com/docs/config-file/config-reference).
-
-## Related
-
-- [Skills catalog and usage check](/quest/m0/skills-catalog.md) - owns skill listing and usage recommendations

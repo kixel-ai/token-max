@@ -3,7 +3,8 @@
 ## Goal
 
 `@kixelated/token-max` 0.1.0 is published on npm, and its README shows how to run it
-with npx or bunx, without a global install or Rust toolchain. It replays this host's Claude Code and Codex transcripts
+with npx or bunx, without a global install or Rust toolchain. It replays selected
+local and SSH-host Claude Code and Codex histories, including T3 provider instances,
 against public API prices and reports which agent settings should change.
 For each setting it prints the current value, the recommended one, the file
 or tool that owns it, and the evidence. Where costs can be quantified, it
@@ -86,6 +87,13 @@ Quest's release handoff. The npm child writes the docs and prepares/tests
 the artifact and release path; it does not publish ahead of the other checks. Use the scoped package under the delegated distribution choice;
 do not infer publishability from a registry 404.
 
+Expanded 2026-11-07 (/quest-plan, then "afk spawn and merge whatever you want"):
+✅ include T3-aware Claude/Codex profiles/settings and explicit SSH host audits
+in m0. Reuse the existing analyzers and render one report with host/profile
+ownership and proven cross-source deduplication. T3's own idle modes are
+distinct from native Claude's. Other T3 providers and automatic discovery
+from its encrypted desktop connection catalog are outside this scope.
+
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
@@ -134,7 +142,8 @@ Recommendations for every check:
   and `CODEX_HOME` and explicit directory selection. Resolve settings and
   recommendations per profile, deduplicate shared histories, and never
   print prompt or reply text. Processing and token estimation stay local;
-  analysis network access is limited to public price data; package-manager
+  analysis network access is limited to public price data and explicitly
+  selected SSH audit destinations; package-manager
   installation downloads are separate. Do not upload
   transcript, instruction, skill, or schema content to a counting service.
 
@@ -151,3 +160,5 @@ Recommendations for every check:
 - [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds
+- [T3 profiles and settings](/quest/m0/t3.md) - native history discovery, T3 ownership, and T3-specific idle policies without double billing
+- [SSH host audits](/quest/m0/ssh.md) - selected remote audits with the same artifact and a combined privacy-preserving report

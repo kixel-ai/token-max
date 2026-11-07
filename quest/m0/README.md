@@ -2,7 +2,7 @@
 
 ## Goal
 
-token-max 0.1.0 is published on npm, and its README shows how to run it
+`@kixelated/token-max` 0.1.0 is published on npm, and its README shows how to run it
 with npx or bunx, without a global install or Rust toolchain. It replays this host's Claude Code and Codex transcripts
 against public API prices and reports which agent settings should change.
 For each setting it prints the current value, the recommended one, the file
@@ -75,8 +75,16 @@ outside this expansion.
 
 Also requested 2026-11-06: ✅ a polished terminal report and one-command npm
 distribution in m0. Replay owns the TypeScript/tooling migration; the two
-new quests separately own presentation and packaging. Keep the report
+new quests separately own presentation and packaging. The npm identifier
+is `@kixelated/token-max`; the command remains `token-max`. Keep the report
 usable in scripts and avoid a second analysis implementation.
+
+The epic's own remaining work is the end-to-end first-release validation,
+publishing the complete 0.1.0 package after every child merges, and updating
+first-use documentation and Quest's handoff. The npm child prepares and
+tests the artifact and release path; it does not publish ahead of the other
+checks. Use the scoped package under the delegated distribution choice;
+do not infer publishability from a registry 404.
 
 Recommendations for every check:
 
@@ -92,7 +100,8 @@ Recommendations for every check:
   recommended, and 0 otherwise. Emit a change when an applicable effective
   setting differs from a priced net winner, fast mode is enabled, the Bash
   foreground cap is at or above its effective cache TTL, or a keepalive cap
-  beats both no keepalive and idle compaction under its labelled estimate.
+  beats no keepalive and, where the harness supports it, idle compaction
+  under its labelled estimate.
   Guidance also emits a change for a documented budget violation, duplicate
   listing, or a skill/MCP with positive recurring overhead and no observed
   use under complete exposure and invocation visibility across the window.
@@ -125,6 +134,10 @@ Recommendations for every check:
   analysis network access is limited to public price data; package-manager
   installation downloads are separate. Do not upload
   transcript, instruction, skill, or schema content to a counting service.
+
+## Waiting
+
+- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-06, `npm whoami` returned E401, so this session cannot establish scope ownership or configure first publication. An agent can prepare and test the package without credentials, but cannot complete the account owner's login or grant itself publishing rights. Check an authenticated identity and scope permissions, then configure the protected release path; no release is attempted during planning.
 
 ## Required
 

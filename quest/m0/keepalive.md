@@ -4,8 +4,9 @@
 
 `token-max` compares leaving sessions idle, compacting them while idle,
 and pinging just under the cache TTL for each cap on how long to keep
-pinging. It recommends a keepalive only when it beats both alternatives
-after their costs and unknown client lifetimes are accounted for.
+pinging. It recommends a keepalive only when it beats no keepalive and,
+where supported, idle compaction, after their costs and unknown client
+lifetimes are accounted for.
 
 ## Plan
 
@@ -44,11 +45,14 @@ Recommendations for the implementer:
   and reply, including estimated pings in final periods with no observed
   return under the same client-lifetime assumptions as the other policies.
 - Report the best cap and its net, not only whether any cap wins.
-- Compare no keepalive, idle compaction, and each keepalive cap at the same
-  recommended TTL and compaction window, using the idle check's client
-  lifetime bounds for final periods rather than assuming every final
-  period stays open. Pings reset the last-request clock and may prevent
-  idle compaction; replay that timing rather than charging both policies
+- Compare no keepalive, each cap, and idle compaction where supported. For
+  Claude, use the recommended TTL/window and the idle check's lifetime
+  bounds. For Codex, use the model's documented cache policy, the
+  recommended window if applicable, and the lifetime estimate below; there
+  is no recommended TTL setting or idle-compaction policy to apply. Do not
+  assume every final period stays open. For Claude, pings reset the
+  last-request clock and may prevent idle compaction; replay that timing rather than charging both
+  policies
   independently. Recommend the lower estimated aggregate net cost and
   show uncertainty beside that recommendation; do not require every period
   or sensitivity scenario to favor it. Do not add the two policies'

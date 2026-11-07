@@ -69,3 +69,9 @@ within one five-minute cache lifetime, with their IDs and assumptions reported;
 original usage and historical billing stay unknown. Unsupported inputs leave the
 affected comparison unpriced. Sensitivity scenarios accompany the aggregate
 winner, and unknown fixed charges can cancel without pretending they cost zero.
+
+Cache replay preserves known, estimated and unknown predecessor states, including
+unsupported attempts before the selected window. Missing cohort metadata spans
+compatible histories; JSON and text retain predecessor witnesses. A comparison
+stays unpriced when those histories imply different cache charges, while invariant
+charges can still be compared.

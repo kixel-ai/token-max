@@ -34,11 +34,15 @@ reject the narrow flag-only patch. A comparison is priced only when recorded
 constraints establish its cache geometry, including when all possible histories
 have the same geometry. This resolves the mandatory third-round checkpoint.
 
+The opposite-winner case is corrected: both missing and recorded speed preserve
+the unknown predecessor and leave the affected 5m comparison unpriced. New tests
+cover possible cohorts, lifetime boundaries and prefix extrema, invariant geometry,
+known-state recovery, zero-cache requests and copied compaction boundaries. Full
+checks pass with 53 synthetic tests on Bun and Node 24; built tests also pass on
+Node 22. Main through the protected squash configuration PR is merged locally.
+
 Remaining work:
 
-- Finish the explicit state implementation and reproduce/correct the opposite-winner
-  synthetic case. Verify unknown histories, missing cohort metadata, expiration,
-  boundaries, known-state recovery and scenario-invariant charges.
 - Complete a new independent review session against main after the B1 change.
   Every earlier fix must remain verified: growing-retry writes, client provenance,
   pre-window estimated-seed sensitivity, fixed-cost cancellation, empty iterations,

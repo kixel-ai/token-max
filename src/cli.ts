@@ -9,7 +9,7 @@ import { analyze } from "./replay.js";
 import { display, ScanError } from "./safe.js";
 import { formatReport } from "./report.js";
 import { setImmediate } from "node:timers/promises";
-import wrapAnsi from "wrap-ansi";
+import { wrapText } from "./terminal.js";
 
 const HELP = `token-max: cheaper agent settings from local usage
 
@@ -50,7 +50,11 @@ Exit 1: change recommended. Exit 2: scan, pricing, argument or cancellation fail
 export async function main(args = process.argv.slice(2)): Promise<number> {
   const json = args.includes("--json");
   const cancellation = new AbortController();
-  const cancel = () => cancellation.abort();
+  const cancel = () => {
+    // A repeated signal is the escape hatch when cooperative I/O cannot finish.
+    if (cancellation.signal.aborted) process.exit(2);
+    cancellation.abort();
+  };
   process.on("SIGINT", cancel);
   process.on("SIGTERM", cancel);
   try {
@@ -76,7 +80,10 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     }
     if (values.help) {
       process.stdout.write(
-        wrapAnsi(HELP, process.stdout.columns || 80, { hard: true }),
+        wrapText(
+          HELP,
+          process.stdout.isTTY ? { width: process.stdout.columns || 80 } : {},
+        ),
       );
       return 0;
     }
@@ -135,7 +142,9 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     const output = values.json
       ? JSON.stringify(report) + "\n"
       : formatReport(report, {
-          width: process.stdout.columns || 80,
+          ...(process.stdout.isTTY
+            ? { width: process.stdout.columns || 80 }
+            : {}),
           color:
             !!process.stdout.isTTY &&
             !values.plain &&
@@ -144,7 +153,13 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
           unicode:
             !!process.stdout.isTTY &&
             !values.plain &&
-            process.env.TERM !== "dumb",
+            process.env.TERM !== "dumb" &&
+            /utf-?8/i.test(
+              process.env.LC_ALL ||
+                process.env.LC_CTYPE ||
+                process.env.LANG ||
+                "",
+            ),
           details: !!values.details,
         });
     // Let pending signals run after synchronous analysis/rendering, before the

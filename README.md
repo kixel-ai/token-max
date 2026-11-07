@@ -64,10 +64,12 @@ current ownership remain advisory; they do not cause exit 1.
 Use `--details` for every check's assumptions, uncertainty, cost components,
 break-evens, sensitivity scenarios, cache witnesses and sources. Nothing is hidden
 behind an interactive prompt or a top-N limit. The layout wraps long paths and
-names on narrow terminals. Color supports the labels on terminals; `NO_COLOR`
+names on narrow terminals. Redirected output keeps each field on one line so
+paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode. Redirected output
 is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
-with exit 2 and no success report. Progress has phases, never an invented percent.
+with exit 2 and no success report; a repeated signal forces exit if I/O stalls.
+Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
 
 Illustrative excerpt from **synthetic** usage, with a synthetic owner and prices
 (not a measurement of this host). The comparison spans 30 days, so the window

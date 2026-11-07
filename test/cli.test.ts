@@ -129,6 +129,8 @@ test("built text CLI handles all-clear, empty windows, missing histories, offlin
     assert.match(failure.stderr, /fetch prices once/);
     const help = run(["--help"]);
     assert.equal(help.status, 0, help.stderr);
+    assert.match(help.stdout, /^  --since /m);
+    assert.match(help.stdout, /^  token-max --since /m);
     for (const flag of [
       "--since",
       "--claude-dir",
@@ -192,6 +194,14 @@ process.stdout.columns = 40;`,
     assert.equal(noColor.status, 1, noColor.stderr);
     assert.doesNotMatch(noColor.stdout, /\x1b/);
     assert.ok(noColor.stdout.split("\n").every((line) => line.length <= 40));
+    const utf8 = run([], { ...env, LC_ALL: "en_US.UTF-8" });
+    assert.match(utf8.stdout, /→/);
+    const ascii = run([], { ...env, LC_ALL: "C", LC_CTYPE: "en_US.UTF-8" });
+    assert.doesNotMatch(ascii.stdout, /→/);
+    const help = run(["--help"]);
+    assert.match(help.stdout, /^  --since /m);
+    assert.match(help.stdout, /^  token-max --since /m);
+    assert.ok(help.stdout.split("\n").every((line) => line.length <= 40));
     const plain = run(["--plain", "--details"]);
     assert.equal(plain.status, 1, plain.stderr);
     assert.doesNotMatch(plain.stdout + plain.stderr, /\x1b|→/);
@@ -206,6 +216,14 @@ process.stdout.columns = 40;`,
     const piped = spawnSync("node", args.slice(2), { env, encoding: "utf8" });
     assert.equal(piped.stderr, "");
     assert.doesNotMatch(piped.stdout, /\x1b|→/);
+    assert.ok(
+      piped.stdout
+        .split("\n")
+        .includes(
+          `  Owner: ${JSON.stringify(join(w.claude, "settings.json") + ":promptCacheTtl")}`,
+        ),
+      "piped paths remain on one copyable line",
+    );
     const dumb = run([], { ...env, TERM: "dumb" });
     assert.equal(dumb.stderr, "");
     assert.doesNotMatch(dumb.stdout, /\x1b|→/);
@@ -284,6 +302,46 @@ globalThis.fetch = (_url, {signal}) => new Promise((_resolve, reject) => {
         );
       }
     }
+    const stalled = join(w.home, "stalled-prices.mjs");
+    await writeFile(
+      stalled,
+      `process.on('message', () => {});
+globalThis.fetch = (_url, {signal}) => new Promise(() => {
+  signal.addEventListener('abort', () => process.send('aborted'), {once: true});
+  process.send('fetching');
+});`,
+    );
+    const child = spawn(
+      "node",
+      [
+        "--import",
+        stalled,
+        resolve("dist/src/cli.js"),
+        "--claude-dir",
+        w.claude,
+      ],
+      { env: environment(w.home), stdio: ["ignore", "pipe", "pipe", "ipc"] },
+    );
+    let output = "";
+    child.stdout!.setEncoding("utf8").on("data", (chunk) => {
+      output += chunk;
+    });
+    child.stderr!.setEncoding("utf8").on("data", (chunk) => {
+      output += chunk;
+    });
+    child.on("message", (message) =>
+      child.kill(message === "fetching" ? "SIGINT" : "SIGTERM"),
+    );
+    const status = await new Promise<number | null>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", resolve);
+    });
+    assert.equal(status, 2);
+    assert.equal(
+      output,
+      "",
+      "force cancellation must not report success even if I/O ignores abort",
+    );
   } finally {
     await w.dispose();
   }

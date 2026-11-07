@@ -55,7 +55,7 @@ export function display(value: string): string {
 /** Escape terminal controls and direction overrides without dropping metadata. */
 export function terminalText(value: string): string {
   return value.replace(
-    /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g,
+    /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g,
     (character) =>
       `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );

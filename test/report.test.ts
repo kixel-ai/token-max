@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
 import { stripVTControlCharacters } from "node:util";
+import stringWidth from "string-width";
 import type { Report } from "../src/model.js";
 import { scan } from "../src/reader.js";
 import { analyze } from "../src/replay.js";
@@ -54,7 +55,7 @@ test("recommendations lead advisory/keep findings, with separate baselines and c
   keep.check = "synthetic-keep";
   report.checks = [advisory, keep, change];
   const profile = report.scan.profiles[0]!;
-  profile.root = "/synthetic/東京/" + "long-profile-name-".repeat(8);
+  profile.root = "/synthetic/e\u0301-東京-👩‍💻/" + "long-profile-name-".repeat(8);
   change.owner =
     profile.root + "/settings.json (env.CLAUDE_CODE_PROMPT_CACHE_TTL)";
   const other = {
@@ -73,12 +74,7 @@ test("recommendations lead advisory/keep findings, with separate baselines and c
     assert.ok(
       text.indexOf("Advisory findings") < text.indexOf("Keep current settings"),
     );
-    // The fixture's only wide characters are these two CJK characters.
-    assert.ok(
-      text
-        .split("\n")
-        .every((l) => [...l.replace(/[東京]/g, "xx")].length <= width),
-    );
+    assert.ok(text.split("\n").every((l) => stringWidth(l) <= width));
     const compact = text.replace(/\s/g, "");
     for (const value of [
       profile.root,
@@ -100,6 +96,10 @@ test("recommendations lead advisory/keep findings, with separate baselines and c
       ),
     );
     assert.doesNotMatch(text, /total sav|SYNTHETIC_PRIVATE|\x1b|…/i);
+    assert.ok(
+      text.includes("e\u0301"),
+      "decomposed filename must not be NFC-normalized",
+    );
   }
   assert.deepEqual(report, before, "rendering must not alter JSON or analysis");
 });
@@ -112,6 +112,12 @@ test("details retain every assumption, unknown cost, witness and finding without
     totalUsd: null,
     unknown: ["synthetic unknown fixed charge"],
     assumptions: ["synthetic price assumption"],
+  };
+  result.fixedCost = {
+    knownUsd: 0,
+    totalUsd: null,
+    unknown: ["synthetic unknown fixed charge"],
+    assumptions: [],
   };
   result.assumptions = Array.from(
     { length: 15 },
@@ -176,6 +182,10 @@ test("details retain every assumption, unknown cost, witness and finding without
     );
   assert.ok(text.includes(result.cacheEvidence[0]!.request));
   assert.match(text, /Predecessor:/);
+  assert.equal(
+    (text.match(/Identical fixed costs remain unknown/g) ?? []).length,
+    report.checks.filter((c) => c.fixedCost.totalUsd === null).length,
+  );
   assert.match(formatReport(report), /--details/);
   const styled = formatReport(report, {
     details: true,
@@ -189,7 +199,7 @@ test("details retain every assumption, unknown cost, witness and finding without
 test("terminal controls in all metadata and prose are escaped, while JSON retains exact metadata", async () => {
   const report = await syntheticReport();
   const hostile =
-    "synthetic\x1b]8;;https://invalid\x07\r\n\t\u009b31m\u202ereversed\u2066";
+    "synthetic\x1b]8;;https://invalid\x07\r\n\t\u009b31m\u202ereversed\u2066\u200e\u200f\u061c";
   const result = report.checks[0]!;
   result.owner = hostile;
   result.baseline = hostile;
@@ -198,7 +208,10 @@ test("terminal controls in all metadata and prose are escaped, while JSON retain
   report.scan.profiles[0]!.root = hostile;
   report.prices.source = hostile;
   const text = formatReport(report, { details: true });
-  assert.doesNotMatch(text, /[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e\u2066]/);
+  assert.doesNotMatch(
+    text,
+    /[\x00-\x09\x0b-\x1f\x7f-\x9f\u202e\u2066\u200e\u200f\u061c]/,
+  );
   const compact = text.replace(/\s/g, "");
   assert.ok(compact.includes("\\u009b31m\\u202ereversed\\u2066"));
   assert.equal(JSON.parse(JSON.stringify(report)).checks[0].owner, hostile);

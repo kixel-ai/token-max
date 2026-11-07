@@ -1,4 +1,4 @@
-import wrapAnsi from "wrap-ansi";
+import { wrapText } from "./terminal.js";
 import type { CheckResult, Cost, Report } from "./model.js";
 import { display, terminalText } from "./safe.js";
 
@@ -30,20 +30,18 @@ export function formatReport(
   report: Report,
   options: ReportOptions = {},
 ): string {
-  const width = Math.max(1, Math.floor(options.width ?? 80));
   const lines: string[] = [];
   const arrow = options.unicode ? "→" : "->";
   function line(text = "", indent = 0, style = 0) {
     // Escape metadata before wrapping or adding our own ANSI. Long paths are
     // hard-wrapped, never shortened; wide characters use terminal cell widths.
-    const padding = " ".repeat(Math.min(indent, Math.max(0, width - 2)));
-    const wrapped = wrapAnsi(terminalText(text), width - padding.length, {
-      hard: true,
+    const wrapped = wrapText(terminalText(text), {
+      ...(options.width === undefined ? {} : { width: options.width }),
+      indent,
     });
     for (const part of wrapped.split("\n"))
       lines.push(
-        padding +
-          (options.color && style ? `\x1b[${style}m${part}\x1b[0m` : part),
+        options.color && style ? `\x1b[${style}m${part}\x1b[0m` : part,
       );
   }
   function section(title: string) {
@@ -196,11 +194,6 @@ export function formatReport(
           cost(`${ttl} summary proxies`, result.summaryCost[ttl]);
         }
         cost("Identical fixed costs", result.fixedCost);
-        if (result.fixedCost.totalUsd === null)
-          field(
-            "Comparison",
-            "Identical unknown fixed charges cancel in the cache comparison; their total remains unknown.",
-          );
         field(
           "Cold-prefix 1h replay",
           result.sensitivity.coldPrefix1hUsd === null

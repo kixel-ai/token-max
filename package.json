@@ -21,7 +21,7 @@
   "dependencies": {
     "@streamparser/json": "^0.0.26",
     "smol-toml": "^1.9.1",
-    "wrap-ansi": "^10.0.2"
+    "string-width": "^8.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

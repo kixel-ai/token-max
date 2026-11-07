@@ -419,7 +419,6 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     };
     let previousTotal: Usage | null = null;
     const consume = (raw: Record<string, unknown>, location: Location) => {
-      options.signal?.throwIfAborted();
       const time = timestamp(raw.timestamp);
       const selected =
         time === null || options.since === undefined || time >= options.since;

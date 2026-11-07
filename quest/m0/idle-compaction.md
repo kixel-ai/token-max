@@ -74,7 +74,7 @@ to replacing known returned outcomes with assumed activation.
 
 For the deciding estimate, use recorded on outcomes where available. For
 unobserved eligible periods, use the applied-summary fraction from
-comparable known-on periods with the same version, client, and flag state,
+comparable eligible known-on periods with the same version, client, and flag state,
 when available; otherwise assume the documented trigger fires once with
 the client left open and awake. Apply that activation estimate to both
 hypothetical resumed periods and final periods without an observed

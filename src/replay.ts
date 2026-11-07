@@ -1,3 +1,4 @@
+import { analyzeExposure } from "./exposure.js";
 import type {
   BillingPart,
   CacheReplayEvidence,
@@ -617,6 +618,7 @@ export function analyze(options: {
     },
     historical,
     compactions,
+    exposure: analyzeExposure(scan.exposure, scan.requests, catalog),
     checks,
     assumptions: [
       "host-local read-only analysis; network access is only for public prices",

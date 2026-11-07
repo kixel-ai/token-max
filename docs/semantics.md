@@ -224,3 +224,76 @@ keep these limits when interpreting eligibility and final periods. No observed
 idle fixture or reproducible historical billing total is claimed. The host has
 multiple malformed complete records across several histories; the first safe
 failure location is not a claim that repairing one file would enable a full audit.
+
+## Shared component measurements
+
+`scan.exposure` adds historical component revisions, request views, invocation
+evidence, and client/version/window visibility. Components retain Unicode
+character counts, opaque identities and fingerprints, source locations, one
+owner (`skills` or `context`), and a shared plugin attribution key when the
+record identifies it. Listing entry spans are members of their aggregate;
+member sizes must not be added to the aggregate. Listing replacement captures
+backfill and description expansion as a new aggregate revision. It does not
+assume removing one entry shrinks the next listing by that entry's size.
+
+Codex full/delta `world_state` records supply rendered host skill listings,
+namespace descriptions, instruction text, removals and opaque schema identities.
+Structured skill entries and policy flags retain unknown sizes. In particular,
+`top_level_tools` hashes are never tokenized. `response_item` items of type
+`additional_tools` supply actual provided schemas. Claude attachments supply
+rendered listings, instruction files, prompt/tool snapshots, deferred-tool and
+agent-listing deltas, surfaced schemas, and server instructions. Deferred schema
+records are distinguished from exposed definitions. Unclassified rendered
+attachments stay visible as context evidence with unknown category.
+
+Chronological attachment/world state is candidate exposure, not proof of exact
+request input. Claude request `base`/`keep`/`tail` digest chains reconstruct
+identity sequences where their base is available, without interpreting hashes as
+text or inventing a hash-to-message mapping. Only recorded full Messages API
+`system`/`messages`/`tools` parameters establish wire exposure. Compaction clears
+candidate state until new evidence arrives. Pre-window components are marked
+inherited; conflicting copied histories leave exposure unknown. Current effective
+enablement remains separately unresolved. No installed/current file size is used
+to establish historical exposure.
+
+`report.exposure` publishes empirical calibration samples only for linked,
+measured, single-part, complete text-only inputs with matching request/response
+model, client and version. It uses the observed input tokens per Unicode character
+of serialized system/messages/tools, including framing. Transfer to component
+text is an estimate; sample extrema are sensitivity scenarios, not guaranteed
+bounds. Recorded component token counts take precedence in the shared sizing
+primitive. Without matching calibration, output keeps characters and unknown
+tokens/dollars. Images, opaque blocks, deferred definitions, digest-only requests,
+and multi-iteration totals cannot calibrate partial text.
+
+The shared context-change pricing primitive accepts an observed removed and
+replacement footprint. It reprices the whole request across context tiers,
+including output. Known cache positions take precedence; otherwise proportional
+allocation supplies the estimate and all feasible cache-allocation vertices
+supply sensitivity. Replacement tokens are assumed ordinary input. Remaining
+cache geometry and behavior are held fixed; actual cache-key changes and future
+reuse can differ. Gross overhead and fixed-behavior net effects are separate.
+Automatic report measurements leave net savings unknown until replacement
+exposure/backfill is established. Independent component savings are not additive.
+
+Invocation evidence separates typed and mentioned skill requests, command
+wrappers, Skill calls, identified SKILL.md reads, direct MCP calls, actual
+`item_completed.McpToolCall` completions, resource/prompt calls, and weak script
+references. Body/result text is sized transiently and discarded. A request for a
+skill is not proof of successful execution. Observed nested completions establish
+positive evidence, never complete nested visibility. No supported client/version
+currently guarantees complete typed-skill or nested-call visibility, so automatic
+unused findings remain blocked. This layer adds no skills-catalog or context
+recommendation check and changes no local agent settings.
+
+Record shapes were checked on 2026-11-07 using local structural metadata only;
+no real transcript text was printed or copied into fixtures. Claude's existing
+synthetic request tail was corrected to the verified digest-string shape. Full
+wire parameters follow the public Messages API, and typed skill input follows
+[Codex UserInput](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/user_input.rs).
+Current provider guidance distinguishes skill discovery from body loading:
+[Codex skills](https://learn.chatgpt.com/docs/build-skills),
+[Claude skills](https://code.claude.com/docs/en/skills), and
+[Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
+[OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
+documents provided tool definitions. All guidance was checked on 2026-11-07.

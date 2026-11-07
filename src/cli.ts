@@ -41,6 +41,10 @@ export function formatReport(report: Report): string {
   lines.push(
     `Coverage: source/trigger ${report.scan.coverage.sourceKnown}/${report.scan.coverage.requests}, service tier ${report.scan.coverage.tierKnown}/${report.scan.coverage.requests}, missing usage ${report.scan.coverage.missingUsage}`,
   );
+  const exposure = report.scan.exposure;
+  lines.push(
+    `Component coverage: ${exposure.components.length} revisions; ${exposure.requests.filter((r) => r.linkage === "wire").length}/${exposure.requests.length} requests with wire exposure; ${exposure.invocations.length} invocation observations; ${report.exposure.calibration.length} calibrated model/client cohorts. Candidate exposure stays unpriced; typed/nested visibility is incomplete.`,
+  );
   for (const group of report.historical) {
     const names = group.profiles.map(
       (id) => report.scan.profiles.find((p) => p.id === id)?.root ?? id,

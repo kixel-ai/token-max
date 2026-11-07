@@ -159,6 +159,24 @@ export interface UsageEstimate {
   reason: string;
   assumptions: string[];
 }
+/** Cache-history witnesses distinguish measured prefixes from estimates and unresolved cohorts. */
+export interface CachePredecessor {
+  request: string;
+  part: number;
+  time: number;
+  state: "known" | "estimated" | "unknown";
+  reason: string;
+}
+/** Evidence for one selected request's counterfactual cache geometry, independent of prices. */
+export interface CacheReplayEvidence {
+  request: string;
+  part: number;
+  ttl: Ttl;
+  state: "known" | "estimated" | "unknown";
+  predecessors: CachePredecessor[];
+  outcome: "invariant" | "estimated" | "unknown";
+  reason: string;
+}
 /** A check compares one setting against its named baseline, without additive savings. */
 export interface CheckResult {
   check: string;
@@ -182,6 +200,7 @@ export interface CheckResult {
   /** Ordinary input, output, server fees and proxies held identical in both scenarios. */
   fixedCost: Cost;
   usageEstimates: UsageEstimate[];
+  cacheEvidence: CacheReplayEvidence[];
   savingsUsd: number | null;
   monthlySavingsUsd: number | null;
   breakEven: string | null;

@@ -1,5 +1,6 @@
 import type {
   BillingPart,
+  CacheReplayEvidence,
   CheckResult,
   CompactionCharge,
   Cost,
@@ -23,17 +24,12 @@ import {
   type Catalog,
 } from "./prices.js";
 import { estimateUsage } from "./estimates.js";
+import { CacheChain, observedTtl } from "./cache.js";
 import { identity } from "./safe.js";
 
 const TTL_SOURCE =
   "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 const MINUTE = 60_000;
-
-function observedTtl(p: BillingPart): Ttl | null {
-  if ((p.usage.write5m ?? 0) > 0 && p.usage.write1h === 0) return "5m";
-  if ((p.usage.write1h ?? 0) > 0 && p.usage.write5m === 0) return "1h";
-  return null;
-}
 
 function bucket(r: Request, p: BillingPart): "main" | "subagent" | "unknown" {
   if (p.kind === "compaction" || p.kind === "advisor") return "subagent";
@@ -49,42 +45,6 @@ function versionSupported(version: string | null): boolean {
     parts[0]! > 2 ||
     (parts[0] === 2 && (parts[1]! > 1 || (parts[1] === 1 && parts[2]! >= 242)))
   );
-}
-
-function replayPart(options: {
-  p: BillingPart;
-  ttl: Ttl;
-  previous: { time: number; prefix: number } | undefined;
-  time: number;
-  coldPrefixes: boolean;
-}): BillingPart {
-  const { p, ttl, previous, time, coldPrefixes } = options;
-  const u = { ...p.usage };
-  if (u.read === null || u.write === null) return { ...p, usage: u };
-  const gap = previous ? time - previous.time : null;
-  const observed = observedTtl(p);
-  if (gap !== null && gap >= 5 * MINUTE && gap < 60 * MINUTE) {
-    if (ttl === "5m" && observed !== "5m") {
-      u.write += u.read;
-      u.read = 0;
-    }
-    if (ttl === "1h" && observed !== "1h") {
-      const reusable = Math.min(
-        u.write,
-        Math.max(0, (previous?.prefix ?? 0) - u.read),
-      );
-      u.write -= reusable;
-      u.read += reusable;
-    }
-    if (ttl === "1h" && coldPrefixes) {
-      u.write += u.read;
-      u.read = 0;
-    }
-  }
-  // New prefix tokens remain writes, even when an older prefix survives longer.
-  u.write5m = ttl === "5m" ? u.write : 0;
-  u.write1h = ttl === "1h" ? u.write : 0;
-  return { ...p, usage: u };
 }
 
 function proxyRequest(
@@ -279,69 +239,61 @@ function replayCost(options: {
   coldPrefixes?: boolean;
   estimates: Map<string, UsageEstimate>;
   attemptScenario?: "point" | "none" | "cold";
-}): { comparison: Cost; fixed: Cost; seedEstimates: Set<string> } {
+}): {
+  comparison: Cost;
+  fixed: Cost;
+  predecessors: Set<string>;
+  evidence: CacheReplayEvidence[];
+} {
   const { requests, scan, catalog, selectedBucket, ttl, since } = options;
-  const previous = new Map<
-    string,
-    { time: number; prefix: number; request: string }
-  >();
-  const seedEstimates = new Set<string>();
+  const chain = new CacheChain(scan.events);
+  const predecessors = new Set<string>();
+  const evidence: CacheReplayEvidence[] = [];
   const parts: Cost[] = [];
   const fixed: Cost[] = [];
-  const boundaries = new Map<string, number[]>();
-  for (const e of scan.events)
-    if (e.kind === "compaction") {
-      for (const origin of e.origins) {
-        const times = boundaries.get(origin.session) ?? [];
-        times.push(e.time);
-        boundaries.set(origin.session, times);
-      }
-    }
   for (const r of requests) {
     const estimate = options.estimates.get(r.id);
     if (estimate?.part && options.attemptScenario === "none") continue;
-    for (const p of estimate?.part ? [estimate.part] : r.parts) {
+    const billing = estimate?.part ? [estimate.part] : r.parts;
+    for (const [part, p] of billing.entries()) {
       if (bucket(r, p) !== selectedBucket) continue;
-      const key = [r.session, p.model, r.provider, p.speed, p.kind].join(":");
-      let prior = previous.get(key);
-      if (
-        prior &&
-        boundaries
-          .get(r.session)
-          ?.some((time) => time > prior!.time && time <= r.time)
-      )
-        prior = undefined;
-      if (r.time >= since) {
-        if (prior && options.estimates.get(prior.request)?.part)
-          seedEstimates.add(prior.request);
-        const replayed = replayPart({
-          p,
-          ttl,
-          previous: prior,
-          time: r.time,
-          coldPrefixes: options.coldPrefixes ?? false,
-        });
-        if (estimate?.part && options.attemptScenario === "cold") {
-          const u = replayed.usage;
-          u.write = u.write! + u.read!;
-          u.read = 0;
-          u.write5m = ttl === "5m" ? u.write : 0;
-          u.write1h = ttl === "1h" ? u.write : 0;
-        }
-        const components = priceComponents(catalog, r, replayed);
-        parts.push(components.cache);
-        fixed.push(components.ordinary, components.output);
+      const replayed = chain.replay({
+        request: r,
+        p,
+        part,
+        estimated: !!estimate?.part || r.evidence === "estimated",
+        ttl,
+        cold: options.coldPrefixes ?? false,
+        selected: r.time >= since,
+      });
+      if (!replayed) continue;
+      if (replayed.evidence) {
+        evidence.push(replayed.evidence);
+        for (const predecessor of replayed.evidence.predecessors)
+          predecessors.add(predecessor.request);
       }
-      if (p.usage.read !== null && p.usage.write !== null)
-        previous.set(key, {
-          time: r.time,
-          prefix: p.usage.read + p.usage.write,
-          request: r.id,
-        });
-      else previous.delete(key);
+      if (estimate?.part && options.attemptScenario === "cold") {
+        const u = replayed.p.usage;
+        u.write = u.write! + u.read!;
+        u.read = 0;
+        u.write5m = ttl === "5m" ? u.write : 0;
+        u.write1h = ttl === "1h" ? u.write : 0;
+      }
+      const components = priceComponents(catalog, r, replayed.p);
+      parts.push(
+        replayed.unknown
+          ? unknownCost(replayed.evidence!.reason)
+          : components.cache,
+      );
+      fixed.push(components.ordinary, components.output);
     }
   }
-  return { comparison: addCosts(parts), fixed: addCosts(fixed), seedEstimates };
+  return {
+    comparison: addCosts(parts),
+    fixed: addCosts(fixed),
+    predecessors,
+    evidence,
+  };
 }
 
 function check(options: {
@@ -355,9 +307,9 @@ function check(options: {
   now: number;
 }): CheckResult | null {
   const { scan, catalog, profile, selectedBucket, summaries, now } = options;
-  const requests = scan.requests.filter(
-    (r) => r.harness === "claude" && r.profiles.includes(profile.id),
-  );
+  const requests = scan.requests
+    .filter((r) => r.harness === "claude" && r.profiles.includes(profile.id))
+    .sort((a, b) => a.time - b.time);
   const relevant = requests.filter((r) =>
     r.parts.some((p) => bucket(r, p) === selectedBucket),
   );
@@ -430,8 +382,8 @@ function check(options: {
     .filter(
       (r) =>
         r.time >= since ||
-        short.seedEstimates.has(r.id) ||
-        long.seedEstimates.has(r.id),
+        short.predecessors.has(r.id) ||
+        long.predecessors.has(r.id),
     )
     .flatMap((r) =>
       options.estimates.has(r.id) ? [options.estimates.get(r.id)!] : [],
@@ -511,6 +463,8 @@ function check(options: {
     uncertainty.push(estimate.reason, ...estimate.assumptions);
   uncertainty.push(
     ...relevant.filter((r) => r.time >= since).flatMap((r) => r.issues),
+    ...short.evidence.map((e) => e.reason),
+    ...long.evidence.map((e) => e.reason),
     ...cost["5m"].unknown,
     ...cost["1h"].unknown,
   );
@@ -541,6 +495,7 @@ function check(options: {
     comparisonCost,
     fixedCost,
     usageEstimates,
+    cacheEvidence: [...short.evidence, ...long.evidence],
     savingsUsd: savings,
     monthlySavingsUsd:
       savings !== null && now > since
@@ -563,7 +518,7 @@ function check(options: {
       "reuse conversions are limited to the previously cached prefix; new input stays a write",
       "ordinary input, output, server fees and unmatched summary proxies are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
       "unlinked-attempt estimates are comparison-only; original usage/coverage and historical spend remain unknown, never excluded or assigned zero billing",
-      "provenance and sensitivity include estimated pre-window cache seeds; request counts and charges cover only the selected window",
+      "cache evidence retains known, estimated and unknown predecessor witnesses, including pre-window attempts and possible cohorts with missing metadata; request counts and charges cover only the selected window",
       "per-check savings share baselines and must not be summed",
     ],
     uncertainty: [...new Set(uncertainty)],

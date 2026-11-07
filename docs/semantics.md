@@ -90,10 +90,32 @@ and 1h. In 5-to-60-minute gaps, a 1h prefix would need rewriting at 5m; a 5m rew
 can read the surviving prefix at 1h. Reuse is limited to the preceding cached
 prefix; newly appended tokens still need writing. Recorded 5m reads in such a gap
 are preserved as evidence of an externally warmed prefix. First visible requests
-keep observed reads. Model/speed/provider/conversation changes and compaction
-boundaries break inferred reuse. The lower aggregate estimate decides the winner,
+keep observed reads. Cache histories are separate by model, speed, provider,
+conversation and part kind; compaction boundaries reset them, including copied
+boundary origins. The lower aggregate estimate decides the winner,
 even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
 reuse break-even accompany the estimate and do not veto it.
+
+The maintainer's [B1 cache-state decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6710296074)
+uses explicit known, estimated and unknown predecessor states. A recorded cache
+touch establishes a known prefix in its fully recorded cohort; supported attempt
+estimates establish estimated prefixes. Unsupported attempts preserve the previous
+state and add an unknown possible touch, rather than silently clearing or renewing
+it. Missing model/provider/speed/kind spans every compatible cohort. A later fully
+recorded touch resolves earlier alternatives in its own cohort, while a zero-cache
+request cannot renew or erase an older cached prefix. Pre-window states are replayed
+without charging them or adding them to the selected request count.
+
+`cacheEvidence` reports predecessor request/part IDs, times, state and the outcome
+of each uncertain or estimated transition. Witnesses cover the latest possible
+expired/recent predecessors and the prefix extrema in the 5-to-60-minute range;
+they are not a duplicate inventory of every attempt. Every original attempt stays
+in the scan. Unknown prefix lengths are evaluated at the conversion extrema, not
+assigned a billed point estimate. If possible predecessors imply different cache
+reads/writes, only that affected comparison stays unpriced, with no invented cache
+subtotal for the request. If the geometry is invariant, the comparison can be
+priced while predecessor attribution remains unknown. This is an evidence test,
+not a demand that every sensitivity scenario favor the aggregate winner.
 
 `comparisonCost` contains cache charges. `fixedCost` contains ordinary input,
 output, server fees and unmatched summary proxies. TTL changes preserve total

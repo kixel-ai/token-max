@@ -666,6 +666,149 @@ test("pre-window estimated cache seeds retain provenance and sensitivity without
   assert.match(check.assumptions.join(" "), /pre-window/);
 });
 
+function preWindowAttempt(speed: string | null) {
+  const { first, attempt, after } = bracketedAttempt();
+  first.parts[0]!.usage = claudeUsage({ write: 1000, ttl: "1h" });
+  attempt.time = attempt.endTime = 17 * 60000;
+  attempt.parts[0]!.speed = speed;
+  after.time = after.endTime = 20 * 60000;
+  after.parts[0]!.usage = claudeUsage({ read: 1000, write: 200, ttl: "1h" });
+  const other = makeRequest({
+    id: "other",
+    session: "other",
+    source: "other",
+    time: 60000,
+    endTime: 60000,
+    parts: [{ ...first.parts[0]!, usage: claudeUsage({ write: 10 }) }],
+  });
+  const transition = makeRequest({
+    ...other,
+    id: "transition",
+    time: 18 * 60000,
+    endTime: 18 * 60000,
+    parts: [
+      { ...first.parts[0]!, usage: claudeUsage({ write: 10, ttl: "1h" }) },
+    ],
+  });
+  return { first, attempt, after, other, transition };
+}
+
+test("unsupported pre-window attempts cannot choose opposite winners from missing speed metadata", async () => {
+  for (const speed of [null, "standard"]) {
+    const { first, attempt, after, other, transition } =
+      preWindowAttempt(speed);
+    const check = analyze({
+      scan: data([first, other, attempt, transition, after]),
+      catalog: await prices(),
+      now: 21 * 60000,
+    }).checks[0]!;
+    assert.equal(check.since, 18 * 60000);
+    assert.equal(check.requests, 2);
+    assert.equal(check.recommended, null, String(speed));
+    assert.equal(check.action, "advisory");
+    assert.equal(check.comparisonCost["5m"].totalUsd, null);
+    assert.equal(check.comparisonCost["1h"].totalUsd === null, false);
+    assert.equal(check.usageEstimates[0]!.request, attempt.id);
+    assert.equal(check.usageEstimates[0]!.evidence, "unknown");
+    assert.ok(
+      check.cacheEvidence.some(
+        (e) =>
+          e.request === after.id &&
+          e.ttl === "5m" &&
+          e.outcome === "unknown" &&
+          e.predecessors.some(
+            (p) => p.request === attempt.id && p.state === "unknown",
+          ),
+      ),
+    );
+  }
+});
+
+test("measured missing speed preserves ambiguity across every possible cache cohort", async () => {
+  const { first, attempt, after, other, transition } = preWindowAttempt(null);
+  attempt.evidence = "measured";
+  attempt.attempt = null;
+  attempt.parts[0]!.usage = claudeUsage({ read: 1000, write: 0, ttl: "1h" });
+  const fastBefore = makeRequest({
+    ...first,
+    id: "fast-before",
+    time: 30000,
+    endTime: 30000,
+    parts: [{ ...first.parts[0]!, speed: "fast" }],
+  });
+  const fastAfter = makeRequest({
+    ...after,
+    id: "fast-after",
+    time: 21 * 60000,
+    endTime: 21 * 60000,
+    parts: [{ ...after.parts[0]!, speed: "fast" }],
+  });
+  const check = analyze({
+    scan: data([
+      first,
+      fastBefore,
+      other,
+      attempt,
+      transition,
+      after,
+      fastAfter,
+    ]),
+    catalog: await prices(),
+    now: 22 * 60000,
+  }).checks[0]!;
+  assert.equal(check.recommended, null);
+  for (const request of [after.id, fastAfter.id])
+    assert.ok(
+      check.cacheEvidence.some(
+        (e) =>
+          e.request === request &&
+          e.outcome === "unknown" &&
+          e.predecessors.some((p) => p.request === attempt.id),
+      ),
+    );
+});
+
+test("unknown pre-window state can cancel when cache charges do not depend on its prefix", async () => {
+  const { first, attempt, after, other, transition } = preWindowAttempt(null);
+  after.parts[0]!.usage = claudeUsage({ write: 1500, ttl: "1h" });
+  const check = analyze({
+    scan: data([first, other, attempt, transition, after]),
+    catalog: await prices(),
+    now: 21 * 60000,
+  }).checks[0]!;
+  assert.equal(check.recommended, "5m");
+  assert.equal(check.usageEstimates[0]!.evidence, "unknown");
+  assert.ok(
+    check.cacheEvidence.some(
+      (e) =>
+        e.state === "unknown" &&
+        e.outcome === "invariant" &&
+        e.predecessors.some((p) => p.request === attempt.id),
+    ),
+  );
+});
+
+test("a later known cache touch resolves an earlier unsupported predecessor before the selected window", async () => {
+  const { first, attempt, after, other, transition } = preWindowAttempt(null);
+  const reset = makeRequest({
+    ...after,
+    id: "known-reset",
+    time: 18 * 60000,
+    endTime: 18 * 60000,
+  });
+  transition.time = transition.endTime = 19 * 60000;
+  const report = analyze({
+    scan: data([first, other, attempt, reset, transition, after]),
+    catalog: await prices(),
+    now: 21 * 60000,
+  });
+  const check = report.checks[0]!;
+  assert.equal(check.since, 19 * 60000);
+  assert.equal(check.recommended, "5m");
+  assert.equal(check.usageEstimates.length, 0);
+  assert.equal(report.historical[0]!.cost.totalUsd, null);
+});
+
 test("unsupported attempts block only their affected comparison and stay present with reasons", async () => {
   const { first, attempt, after } = bracketedAttempt();
   after.parts = [{ ...after.parts[0]!, usage: claudeUsage({ write: 1200 }) }];

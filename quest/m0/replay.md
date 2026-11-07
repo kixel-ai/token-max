@@ -42,3 +42,11 @@ Recommendations for the implementer:
   TTL change for the default window.
 - Keep the reader to the fields above, so the transcript text never reaches
   memory longer than one line's parse.
+- For the compaction checks, also retain available context sizes,
+  compaction markers and reasons, summary token counts, request/turn
+  completion and session lifecycle times, and client/version metadata.
+  Separate interactive idle from an active tool wait, including final idle
+  periods where the client lifetime is unknown. Read effective idle
+  compaction settings and their owners; preserve historical settings when
+  recorded instead of applying today's values to every session. Missing
+  metadata stays unknown, and summary text is never retained or printed.

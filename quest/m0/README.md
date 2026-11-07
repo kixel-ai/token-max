@@ -73,7 +73,7 @@ Recommendations for every check:
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - the transcript reader, prices, report, and the first check, which reproduces the audit's cache figures
-- [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
+- [Compaction checks](/quest/m0/compaction.md) - recommends auto-compact thresholds and whether Claude Code's idle compaction should be on or off from estimated net savings
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
 - [Skills catalog check](/quest/m0/skills-catalog.md) - flags duplicate entries and a Codex skills catalog over its budget
 - [Keepalive check](/quest/m0/keepalive.md) - whether pinging idle sessions under the cache TTL would have cost less than their misses

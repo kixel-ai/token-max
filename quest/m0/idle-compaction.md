@@ -115,6 +115,16 @@ sizes, or controls. Include a resumed idle with savings, an unresumed
 summary that only adds cost, a return before original expiry, an expired
 prefix on a post-compaction request, and compactions without double counting.
 
+## Waiting
+
+- Maintainer: choose whether a zero-cost edge caused by no compaction
+  running should block an on/off recommendation. Recommended: allow a
+  recommendation when it is never more expensive across the reported
+  range and sometimes cheaper. The alternative is to keep the strict
+  positive-saving rule above, which makes many useful on/off cases
+  conditional. This needs the maintainer's choice at the required
+  third-round review checkpoint; no implementation can settle that policy.
+
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - request metadata, prices, report, and recommended TTL

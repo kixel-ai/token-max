@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import type { Profile, Scan, StructuralEvent } from "../src/model.js";
 import { compactionControls, windowControl } from "../src/controls.js";
 import { analyze } from "../src/replay.js";
-import { formatReport } from "../src/cli.js";
+import { formatReport } from "../src/report.js";
 import { scan, usage } from "../src/reader.js";
 import { claudeUsage, makeRequest, prices, workspace } from "./helpers.js";
 
@@ -152,6 +152,69 @@ test("net window winner prices summary and new prefix once, retaining observed s
   assert.match(check.breakEven!, /1.9600/);
   near(scenario.sensitivity.rereadBreakEvenUsd, 1.96);
   assert.equal(check.ttls.main, "5m");
+});
+
+test("window presentation keeps conditional baselines, every scenario and geometry evidence reachable", async () => {
+  const report = analyze({
+    scan: data(),
+    catalog: await prices(),
+    now: 18000000,
+  });
+  const check = compaction(report);
+  const text = formatReport(report, { width: 40, details: true });
+  const compact = text.replace(/\s/g, "");
+  for (const value of [
+    check.owner,
+    check.baseline,
+    ...check.models.filter((m) => m !== null),
+    ...check.assumptions,
+    ...check.uncertainty,
+    ...check.sources,
+  ])
+    assert.ok(compact.includes(value.replace(/\s/g, "")), value);
+  assert.ok(compact.includes("Current:400000tokens"));
+  assert.ok(compact.includes("Suggested:100000tokens"));
+  assert.ok(compact.includes("ConditionalTTLbaseline:main5m;subagent5m"));
+  for (const scenario of check.scenarios) {
+    assert.ok(compact.includes(`Candidatewindow:${scenario.window}tokens`));
+    for (const added of scenario.added) {
+      assert.ok(
+        compact.includes(
+          `at${added.request};${added.inputTokens}summaryinputtokens;${added.summaryTokens}summaryoutputtokens;${added.prefixTokens}resumed-prefixtokens`,
+        ),
+      );
+      for (const basis of added.basis)
+        assert.ok(
+          compact.includes(
+            `boundary${basis.event};resumedrequest${basis.request}`,
+          ),
+        );
+    }
+  }
+  const unknown = structuredClone(report);
+  const unresolved = compaction(unknown);
+  unresolved.current = null;
+  unresolved.recommended = null;
+  unresolved.action = "advisory";
+  unresolved.evidence = "unknown";
+  unresolved.savingsUsd = null;
+  unresolved.monthlySavingsUsd = null;
+  unresolved.baselineCost = {
+    knownUsd: 1.23,
+    totalUsd: null,
+    unknown: ["synthetic unknown charge"],
+    assumptions: [],
+  };
+  const plain = formatReport(unknown);
+  assert.match(plain, /ADVISORY  compaction-window/);
+  assert.match(
+    plain,
+    /Current-window baseline cost: unknown \(\$1\.23 known subtotal\)/,
+  );
+  assert.match(
+    plain,
+    /Estimated net saving vs baseline: unknown over window; unknown \/ 30 days/,
+  );
 });
 
 test("summary overhead can lose, sensitivity cannot veto a positive aggregate estimate", async () => {

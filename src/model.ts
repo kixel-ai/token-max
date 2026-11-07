@@ -102,7 +102,16 @@ export interface StructuralEvent {
     geo: string | null;
   } | null;
 }
-/** A selected profile's current user settings and their effective TTL controls. */
+/** A current window control, without inventing a tuned model default. */
+export interface WindowControl {
+  value: number | null;
+  owner: string;
+  reason: string;
+  applicable: boolean;
+  minimumClaudePatch?: number;
+  comparisonUnknown?: string;
+}
+/** A selected profile's current settings and their owning controls. */
 export interface Profile {
   id: string;
   harness: Harness;
@@ -116,6 +125,10 @@ export interface Profile {
   >;
   provider: string | null;
   settings: Record<string, string | number | boolean>;
+  compaction: {
+    default: WindowControl;
+    models: Record<string, WindowControl>;
+  };
 }
 /** Discovery includes exclusions and failures so selection cannot imply full-host coverage. */
 export interface RootStatus {
@@ -181,22 +194,32 @@ export interface CacheReplayEvidence {
   outcome: "invariant" | "estimated" | "unknown";
   reason: string;
 }
-/** A check compares one setting against its named baseline, without additive savings. */
-export interface CheckResult {
-  check: string;
+/** Shared recommendation metadata; savings are relative to the named baseline. */
+export interface CheckBase<Value> {
   profile: string;
   historyProfiles: string[];
-  bucket: "main" | "subagent";
   evidence: Evidence;
   action: "change" | "keep" | "advisory";
-  current: Ttl | null;
-  recommended: Ttl | null;
+  current: Value | null;
+  recommended: Value | null;
   owner: string;
   since: number | null;
   until: number | null;
   windowBasis: string;
   baseline: string;
   requests: number;
+  savingsUsd: number | null;
+  monthlySavingsUsd: number | null;
+  breakEven: string | null;
+  assumptions: string[];
+  uncertainty: string[];
+  sources: string[];
+}
+/** A TTL comparison preserves cache and fixed costs separately. */
+export interface TtlCheckResult extends CheckBase<Ttl> {
+  check: "claude-cache-ttl";
+  windowBasisKind: "explicit" | "ttl-transition" | "available";
+  bucket: "main" | "subagent";
   cost: Record<Ttl, Cost>;
   summaryCost: Record<Ttl, Cost>;
   /** Cache charges used to compare TTLs; ordinary input/output are fixed. */
@@ -205,9 +228,6 @@ export interface CheckResult {
   fixedCost: Cost;
   usageEstimates: UsageEstimate[];
   cacheEvidence: CacheReplayEvidence[];
-  savingsUsd: number | null;
-  monthlySavingsUsd: number | null;
-  breakEven: string | null;
   sensitivity: {
     coldPrefix1hUsd: number | null;
     coldPrefix1hComparisonUsd: number | null;
@@ -217,10 +237,48 @@ export interface CheckResult {
       coldCache: Record<Ttl, Cost>;
     } | null;
   };
-  assumptions: string[];
-  uncertainty: string[];
-  sources: string[];
 }
+/** One extra modeled compaction and the observations supporting its geometry. */
+export interface AddedCompaction {
+  request: string;
+  inputTokens: number;
+  summaryTokens: number;
+  prefixTokens: number;
+  basis: { event: string; request: string }[];
+  summaryCost: Cost;
+  prefixCost: Cost;
+}
+/** One candidate window, net of added summaries and subsequent prefix charges. */
+export interface WindowScenario {
+  window: number;
+  cost: Cost;
+  baselineComparisonCost: Cost;
+  comparisonCost: Cost;
+  savingsUsd: number | null;
+  added: AddedCompaction[];
+  affectedRequests: number;
+  cacheEvidence: CacheReplayEvidence[];
+  sensitivity: {
+    largerSummarySavingsUsd: number | null;
+    coldSummarySavingsUsd: number | null;
+    rereadBreakEvenUsd: number | null;
+  };
+}
+/** A compaction check runs after the TTL choices and retains observed boundaries. */
+export interface CompactionCheckResult extends CheckBase<number> {
+  check: "compaction-window";
+  bucket: "all";
+  model: string | null;
+  models: (string | null)[];
+  baselineCost: Cost;
+  observedSummaryCost: Cost;
+  ttls: Record<"main" | "subagent", Ttl | null>;
+  scenarios: WindowScenario[];
+  usageEstimates: UsageEstimate[];
+  cacheEvidence: CacheReplayEvidence[];
+}
+/** Setting-specific evidence accompanies one common recommendation model. */
+export type CheckResult = TtlCheckResult | CompactionCheckResult;
 /** The reusable parser output for downstream checks. */
 export interface Scan {
   snapshotStartedAt: string;

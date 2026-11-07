@@ -147,7 +147,6 @@ Recommendations for every check:
 - [Polished terminal report](/quest/m0/cli.md) - clear recommendations, cost evidence, progress, and plain/JSON output
 - [One-command npm distribution](/quest/m0/npm.md) - built JavaScript launched with npx or Bun, without a Rust install
 - [Fast-mode check](/quest/m0/fast-mode.md) - recommends standard speed and reports the observed premium where the billed tier and price are known
-- [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
 - [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
 - [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll

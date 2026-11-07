@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { scan } from "./reader.js";
-import { loadPrices } from "./prices.js";
+import { addCosts, loadPrices } from "./prices.js";
 import { analyze } from "./replay.js";
 import { display, ScanError } from "./safe.js";
 import type { Cost, Report } from "./model.js";
@@ -60,6 +60,35 @@ export function formatReport(report: Report): string {
       `${result.action.toUpperCase()} [${result.evidence}] ${display(profile.root)} ${result.bucket}: ${result.current ?? "unknown"} -> ${result.recommended ?? "unknown"}`,
     );
     lines.push(`  Owner: ${display(result.owner)}; ${result.windowBasis}`);
+    if (result.check === "compaction-window") {
+      lines.push(
+        `  Compaction window ${result.models.map((m) => m ?? "unknown model").join(", ")}; baseline: ${result.baseline}`,
+      );
+      lines.push(
+        `  Baseline ${money(result.baselineCost)}; retained observed summaries ${money(result.observedSummaryCost)}; TTL main/outside-main ${result.ttls.main ?? "unknown"}/${result.ttls.subagent ?? "unknown"}`,
+      );
+      for (const scenario of result.scenarios) {
+        lines.push(
+          `  ${scenario.window} tokens: ${money(scenario.cost)}; ${scenario.savingsUsd === null ? "unpriced comparison" : `$${scenario.savingsUsd.toFixed(4)} net saving`}; ${scenario.added.length} added summaries, ${scenario.affectedRequests} affected requests`,
+        );
+        lines.push(
+          `    Added summary charges ${money(addCosts(scenario.added.map((a) => a.summaryCost)))}; new prefixes ${money(addCosts(scenario.added.map((a) => a.prefixCost)))} (prefix charges already in requests).`,
+        );
+        lines.push(
+          `    Sensitivity: larger observed summary/prefix ${scenario.sensitivity.largerSummarySavingsUsd === null ? "unpriced" : `$${scenario.sensitivity.largerSummarySavingsUsd.toFixed(4)} net`}; cold summary ${scenario.sensitivity.coldSummarySavingsUsd === null ? "unpriced" : `$${scenario.sensitivity.coldSummarySavingsUsd.toFixed(4)} net`}. The aggregate estimate decides.`,
+        );
+        for (const added of scenario.added)
+          lines.push(
+            `    Before ${added.request}: ${added.inputTokens} input, ${added.summaryTokens} summary, ${added.prefixTokens} resumed prefix; basis ${added.basis.map((b) => `${b.event}/${b.request}`).join(", ")}`,
+          );
+      }
+      if (result.breakEven) lines.push(`  Break-even: ${result.breakEven}`);
+      for (const assumption of result.assumptions)
+        lines.push(`  Assumption: ${assumption}`);
+      for (const uncertainty of result.uncertainty)
+        lines.push(`  Uncertainty: ${uncertainty}`);
+      continue;
+    }
     lines.push(
       `  5m ${money(result.cost["5m"])}; 1h ${money(result.cost["1h"])} (summary proxies: ${money(result.summaryCost["5m"])}/${money(result.summaryCost["1h"])})`,
     );

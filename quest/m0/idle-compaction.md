@@ -146,7 +146,3 @@ most periods, a sensitivity range crossing zero with an estimable net
 winner, and a net-zero tie that keeps the current setting. Verify the
 same-cohort activation estimate and documented-trigger fallback, including
 their charges on final periods without double-counting client lifetime.
-
-## Required
-
-- [Compaction window check](/quest/m0/compaction.md) - context and compaction costs, and recommended windows

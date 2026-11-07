@@ -62,7 +62,14 @@ Recommendations for the implementer:
   provider. A missing price stays unknown; do not silently substitute a
   public model for internal models such as `codex-auto-review`. OpenAI
   cached input is part of total input, reasoning output is part of output,
-  and its catalog's cache-write field is not an additional OpenAI charge.
+  and cache writes are a separate subset of total input where the model
+  supports them. For GPT-5.6 and later, price recorded 30m/12h writes at
+  their total write rates, not ordinary input plus that rate. Earlier models
+  have no additional write charge. Missing write counters on newer models
+  leave that portion unknown; do not treat all uncached input as writes or
+  ignore the catalog field unconditionally
+  ([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+  checked 2026-11-06).
 - Resolve contradictory catalog fields against the provider's documented
   threshold with a dated source in the price adapter. In particular,
   `tiers[].size` and the legacy `context_over_200k` name must not silently

@@ -311,7 +311,12 @@ else { const child=spawn('/bin/sh',['-c',command],{stdio:'inherit',env:{...proce
         "--json",
       ]);
       assert.ok(remote.status === 0 || remote.status === 1, remote.stderr);
-      assert.equal(remote.stderr, "");
+      assert.match(
+        remote.stderr,
+        name === "bunx without Node"
+          ? /^(?:Resolving dependencies\nResolved, downloaded and extracted \[\d+\]\n)?$/
+          : /^$/,
+      );
       const metadata = JSON.parse(remote.stdout);
       assert.equal(metadata.scan.hosts[0].id, "ssh:synthetic");
       assert.match(metadata.scan.hosts[0].runtime, /^bun /);

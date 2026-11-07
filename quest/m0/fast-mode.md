@@ -41,7 +41,3 @@ mode](https://code.claude.com/docs/en/fast-mode), [Claude
 settings](https://code.claude.com/docs/en/settings-reference#fastmode),
 [Codex speed controls](https://learn.chatgpt.com/docs/agent-configuration/speed),
 and [OpenAI API tier billing](https://developers.openai.com/api/docs/guides/fast-mode).
-
-## Required
-
-- [Replay and the cache TTL check](/quest/m0/replay.md) - request usage, effective tiers, prices, and reporting

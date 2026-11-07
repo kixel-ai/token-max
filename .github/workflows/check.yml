@@ -30,4 +30,5 @@ jobs:
         with:
           determinate: false
 
-      - run: nix develop --command just check
+      - name: Check TypeScript, Bun, and built JavaScript on Node
+        run: nix develop --command quest gate just check

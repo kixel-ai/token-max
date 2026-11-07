@@ -6,9 +6,11 @@ token-max 0.1.0 is published on crates.io, and its README shows how to
 install and run it. It replays this host's Claude Code and Codex transcripts
 against public API prices and reports which agent settings should change.
 For each setting it prints the current value, the recommended one, the file
-or tool that owns it, the evidence, and what the change would have saved
-over the window and per month. It exits nonzero when anything should change
-and never edits settings. moq-dev/quest's `SETUP.md` points to it.
+or tool that owns it, and the evidence. Where costs can be quantified, it
+shows estimated net savings over the window and per month; otherwise it
+gives an applicable provider-guidance warning and says the dollars are
+unknown. It exits nonzero when anything should change and never edits
+settings. moq-dev/quest's `SETUP.md` points to it.
 
 ## Plan
 
@@ -59,6 +61,14 @@ Decision prompts, chosen options marked ✅:
   token-reduction toolkit, is close in name and topic).
 - Quest wrapper: ✅ none (rejected: `quest doctor` calling token-max).
 
+Expanded 2026-11-06 (maintainer, /quest-plan): ✅ include fast-mode,
+background-generation, skills-usage, and MCP/loaded-context checks in m0
+(rejected: m1). The goal is to quantify settings from transcripts where
+possible and warn from Claude/Codex guidance where they cannot be priced.
+Fast mode should be off. Extend the existing skills catalog quest rather
+than create a second owner for it. Model and review effort selection remain
+outside this expansion.
+
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
@@ -66,7 +76,20 @@ Recommendations for every check:
   the setting would add. State the replay assumptions, show uncertainty
   and break-evens beside the estimate, and do not require a win on every
   period or in every sensitivity scenario. Missing inputs that cannot be
-  estimated prevent a recommendation; uncertainty alone does not.
+  estimated prevent a priced recommendation; uncertainty alone does not.
+- Distinguish measured token usage, estimated attribution or replay, and
+  guidance without a dollar estimate in both text and JSON. Missing
+  attribution is unknown, never zero. A guidance warning can recommend a
+  concrete change without priced savings; unknown results and conditional
+  suggestions alone do not make the exit nonzero. Cite the provider and
+  applicable version or client for guidance, and avoid invented size or
+  rarity cutoffs.
+- Cost attribution is not automatically removable waste: a skill, tool, or
+  check-in can avoid other work. State the fixed-behavior assumption and
+  account for observable extra reads or requests. Name each comparison's
+  baseline; combine savings only through a joint replay, since removing
+  context, changing TTL, and removing requests can overlap. API-price
+  equivalents are not a claim about subscription bills.
 - Default to a window since the setting last changed, read from the
   transcripts, so old behavior does not argue against a setting already in
   place. If no change history exists, use explicit `--since` or the available
@@ -78,8 +101,11 @@ Recommendations for every check:
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - the transcript reader, prices, report, and the first check, which reproduces the audit's cache figures
+- [Fast-mode check](/quest/m0/fast-mode.md) - recommends standard speed and reports the observed premium where the billed tier and price are known
 - [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
 - [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
+- [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
-- [Skills catalog check](/quest/m0/skills-catalog.md) - flags duplicate entries and a Codex skills catalog over its budget
+- [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
+- [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat both idle compaction and leaving sessions idle after costs and client lifetime bounds

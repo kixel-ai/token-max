@@ -28,8 +28,7 @@ first-release priority.
 - Target the scoped npm package `@kixelated/token-max`, retaining the
   `token-max` command. Document `npx --yes @kixelated/token-max@latest` and
   `bunx --bun @kixelated/token-max@latest`. `bunx` respects a Node shebang
-  by default, so
-  `bunx --bun` is the supported Bun-only command. Explain that launchers
+  by default, so `bunx --bun` is the supported Bun-only command. Explain that launchers
   download/cache the package, rather than promising an entirely offline
   first run. Also show an exact version for repeatable runs and a global
   npm install for frequent use. Arguments, cwd, stdout/stderr, cancellation,
@@ -52,12 +51,21 @@ first-release priority.
 - Keep a single version and reproducible build. Publish the same artifact
   that passed the package checks; include only runtime files and public
   metadata. Keep release credentials out of PR jobs, use protected release
-  execution, and prefer npm trusted publishing where supported. The m0
-  epic owns first publication after every child merges; this quest only
-  prepares and tests that path. Never publish a placeholder to probe a name.
-- Update first-use docs and the moq-dev/quest token-max handoff to check the
-  scoped npm release instead of crates.io. The related handoff is being
-  aligned by [moq-dev/quest#532](https://github.com/moq-dev/quest/pull/532).
+  execution, and prefer npm trusted publishing where supported. Require
+  public access for the scoped package (`publishConfig.access: public` and
+  the corresponding publish invocation). Document first publication: check
+  authenticated scope rights up front, but configure a trusted publisher
+  near release, within its documented first-publish expiry (currently two
+  days). Verify support for a new package; if bootstrap is required, publish
+  the tested complete tarball through authenticated public publication,
+  then configure trusted publishing for later releases. Do not require a
+  package settings page or expiring configuration before the package can
+  exist. The m0 epic owns first publication after every child merges; this
+  quest only prepares and tests that path. Never publish a placeholder.
+- Write first-use docs for the scoped npm release. The related Quest
+  handoff's release check is owned by
+  [moq-dev/quest#532](https://github.com/moq-dev/quest/pull/532); m0 verifies
+  these docs against the published artifact and clears the release wait.
   The analyzer still only fetches public prices and never uploads content;
   package-manager registry downloads are separate from analysis.
 
@@ -65,6 +73,8 @@ Sources checked 2026-11-06: [npm exec and npx](https://docs.npmjs.com/cli/v11/co
 [npm package executables](https://docs.npmjs.com/cli/v11/configuring-npm/package-json/#bin),
 [Bun package execution and shebangs](https://bun.com/docs/pm/bunx),
 [maintained Node releases](https://nodejs.org/en/about/previous-releases),
+[scoped public publication](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages),
+[trusted publisher setup and expiry](https://docs.npmjs.com/trusted-publishers),
 [npm naming protections](https://docs.npmjs.com/threats-and-mitigations), and
 [existing tokenmax package](https://registry.npmjs.org/tokenmax/latest).
 

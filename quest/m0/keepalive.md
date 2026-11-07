@@ -6,7 +6,9 @@
 and pinging just under the cache TTL for each cap on how long to keep
 pinging. It recommends a keepalive only when it beats no keepalive and,
 where supported, idle compaction, after their costs and unknown client
-lifetimes are accounted for.
+lifetimes are accounted for. The priced winner is actionable only with a
+supported mechanism and known current ping configuration; otherwise it is
+a priced advisory.
 
 ## Plan
 
@@ -51,12 +53,27 @@ Recommendations for the implementer:
   recommended window if applicable, and the lifetime estimate below; there
   is no recommended TTL setting or idle-compaction policy to apply. Do not
   assume every final period stays open. For Claude, pings reset the
-  last-request clock and may prevent idle compaction; replay that timing rather than charging both
-  policies
-  independently. Recommend the lower estimated aggregate net cost and
+  last-request clock and may prevent idle compaction; replay that timing
+  rather than charging both policies independently. Recommend the lower estimated aggregate net cost and
   show uncertainty beside that recommendation; do not require every period
   or sensitivity scenario to favor it. Do not add the two policies'
   savings for the same idle period.
+- Identify recorded pings using explicit scheduler/task/hook provenance,
+  never short-message or text heuristics. Separate their costs and timing
+  from real returns when reconstructing the no-ping alternative; ambiguous
+  provenance makes the affected estimate conditional. Report current
+  scheduler/cap state only when observable read-only metadata establishes
+  it, including whether an old task still exists. Absence of ping records
+  alone does not prove it is off. A matching active cap clears the change;
+  an actionable differing cap names the mechanism and owner. Unknown
+  current ping state stays advisory under the shared current-state guard.
+- Claude's `/loop` and `asyncRewake` are candidate mechanisms, not a
+  built-in keepalive setting. Name the supported mechanism and current
+  state before emitting an actionable change. No supported Codex keepalive
+  mechanism is established for m0, so report its winning cap and dollars
+  as advisory unless official guidance and observed control metadata
+  establish one. This preserves the Codex cost comparison without inventing
+  a setting or a tool owner.
 - Define a deciding lifetime estimate for every cap, not just closed/open
   bounds. Use recorded client liveness/shutdown events when present. Without
   them, model the documented open-and-awake condition through the earlier

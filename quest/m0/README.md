@@ -80,10 +80,10 @@ is `@kixelated/token-max`; the command remains `token-max`. Keep the report
 usable in scripts and avoid a second analysis implementation.
 
 The epic's own remaining work is the end-to-end first-release validation,
-publishing the complete 0.1.0 package after every child merges, and updating
-first-use documentation and Quest's handoff. The npm child prepares and
-tests the artifact and release path; it does not publish ahead of the other
-checks. Use the scoped package under the delegated distribution choice;
+publishing the complete 0.1.0 package after every child merges, verifying
+the child's first-use docs against the published package, and clearing
+Quest's release handoff. The npm child writes the docs and prepares/tests
+the artifact and release path; it does not publish ahead of the other checks. Use the scoped package under the delegated distribution choice;
 do not infer publishability from a registry 404.
 
 Recommendations for every check:
@@ -101,7 +101,8 @@ Recommendations for every check:
   setting differs from a priced net winner, fast mode is enabled, the Bash
   foreground cap is at or above its effective cache TTL, or a keepalive cap
   beats no keepalive and, where the harness supports it, idle compaction
-  under its labelled estimate.
+  under its labelled estimate, with a supported mechanism and known current
+  ping configuration that needs the change.
   Guidance also emits a change for a documented budget violation, duplicate
   listing, or a skill/MCP with positive recurring overhead and no observed
   use under complete exposure and invocation visibility across the window.
@@ -137,7 +138,7 @@ Recommendations for every check:
 
 ## Waiting
 
-- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-06, `npm whoami` returned E401, so this session cannot establish scope ownership or configure first publication. An agent can prepare and test the package without credentials, but cannot complete the account owner's login or grant itself publishing rights. Check an authenticated identity and scope permissions, then configure the protected release path; no release is attempted during planning.
+- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-06, `npm whoami` returned E401; public packages suggest scope ownership but do not establish this session's authority. An agent can prepare and test without credentials, but cannot complete the account owner's login or grant itself rights. Check the authenticated identity and scope permissions up front. Configure trusted publishing near the actual release, respecting its first-publish expiry and whether it supports a new package; otherwise bootstrap by publishing the tested complete tarball with public access, then configure it for later releases. The npm child documents the path. No release is attempted during planning.
 
 ## Required
 
@@ -152,4 +153,4 @@ Recommendations for every check:
 - [Context exposure measurement](/quest/m0/context-exposure.md) - local component estimates and invocation/exposure coverage shared by skills and context checks
 - [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
-- [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat both idle compaction and leaving sessions idle after costs and client lifetime bounds
+- [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds

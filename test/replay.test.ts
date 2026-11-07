@@ -533,6 +533,106 @@ test("unlinked attempts use matching bracket evidence without converting observe
   assert.match(formatReport(report), /unlinked.*estimated/i);
 });
 
+test("growing-context retry evidence supports an estimate within the recorded cache lifetime", async () => {
+  const requests = Array.from({ length: 20 }, (_, index) =>
+    makeRequest({
+      id: `measured-${index}`,
+      time: index * 1200000,
+      endTime: index * 1200000,
+      parts: [
+        {
+          ...makeRequest().parts[0]!,
+          usage: claudeUsage({ write: 100000 + index * 1000 }),
+        },
+      ],
+    }),
+  );
+  const { attempt } = bracketedAttempt();
+  const before = requests.at(-1)!;
+  attempt.time = attempt.endTime = before.time + 300;
+  const after = makeRequest({
+    id: "retry",
+    time: before.time + 3300,
+    endTime: before.time + 3300,
+    parts: [
+      {
+        ...before.parts[0]!,
+        usage: claudeUsage({ read: 119000, write: 1000 }),
+      },
+    ],
+  });
+  const report = analyze({
+    scan: data([...requests, attempt, after]),
+    catalog: await prices(),
+    now: after.time + 1000,
+  });
+  const check = report.checks[0]!;
+  const estimate = check.usageEstimates[0]!;
+  assert.equal(estimate.evidence, "estimated");
+  assert.deepEqual(estimate.basis, [before.id, after.id]);
+  assert.equal(estimate.part!.usage.input, 120000);
+  assert.equal(estimate.part!.usage.read, 119000);
+  assert.equal(estimate.part!.usage.write, 1000);
+  assert.equal(estimate.part!.usage.output, null);
+  assert.equal(check.recommended, "1h");
+  assert.ok(check.sensitivity.unlinked);
+  assert.equal(attempt.evidence, "unknown");
+  assert.equal(attempt.parts[0]!.usage.input, null);
+  assert.equal(report.historical[0]!.cost.totalUsd, null);
+  after.time = after.endTime = before.time + 300000;
+  const expired = analyze({
+    scan: data([...requests, attempt, after]),
+    catalog: await prices(),
+    now: after.time + 1000,
+  }).checks[0]!;
+  assert.equal(expired.usageEstimates[0]!.evidence, "unknown");
+  assert.equal(expired.recommended, null);
+});
+
+test("pre-window estimated cache seeds retain provenance and sensitivity without adding their charges", async () => {
+  const first = makeRequest({
+    id: "first",
+    parts: [
+      {
+        ...makeRequest().parts[0]!,
+        usage: claudeUsage({ read: 1000, write: 0 }),
+      },
+    ],
+  });
+  const { attempt } = bracketedAttempt();
+  attempt.time = attempt.endTime = 240000;
+  const after = { ...first, id: "after", time: 480000, endTime: 480000 };
+  const other = makeRequest({
+    id: "other",
+    session: "other",
+    time: 60000,
+    endTime: 60000,
+    parts: [{ ...first.parts[0]!, usage: claudeUsage({ write: 10 }) }],
+  });
+  const transition = makeRequest({
+    ...other,
+    id: "transition",
+    time: 420000,
+    endTime: 420000,
+    parts: [
+      { ...first.parts[0]!, usage: claudeUsage({ write: 10, ttl: "1h" }) },
+    ],
+  });
+  const check = analyze({
+    scan: data([first, other, attempt, transition, after]),
+    catalog: await prices(),
+    now: 600000,
+  }).checks[0]!;
+  assert.equal(check.since, 420000);
+  assert.equal(check.requests, 2);
+  assert.equal(check.usageEstimates[0]!.request, attempt.id);
+  assert.ok(Math.abs(check.comparisonCost["5m"].totalUsd! - 0.00025) < 1e-10);
+  assert.equal(check.recommended, "5m");
+  const none = check.sensitivity.unlinked!.noBilledAttempt;
+  assert.ok(none["1h"].totalUsd! < none["5m"].totalUsd!);
+  assert.match(check.assumptions.join(" "), /pre-window/);
+});
+
 test("unsupported attempts block only their affected comparison and stay present with reasons", async () => {
   const { first, attempt, after } = bracketedAttempt();
   after.parts = [{ ...after.parts[0]!, usage: claudeUsage({ write: 1200 }) }];
@@ -557,13 +657,20 @@ test("unsupported attempts block only their affected comparison and stay present
   assert.equal(report.scan.requests.length, 4);
 });
 
-test("bracketing cannot cross changes of source, model, profile provenance, or compaction", async () => {
+test("bracketing cannot cross changes of source, model, client, profile provenance, or compaction", async () => {
   const catalog = await prices();
-  for (const change of ["source", "model", "profiles", "boundary"] as const) {
+  for (const change of [
+    "source",
+    "model",
+    "client",
+    "profiles",
+    "boundary",
+  ] as const) {
     const { first, attempt, after } = bracketedAttempt();
     const events: StructuralEvent[] = [];
     if (change === "source") after.source = "different-source";
     if (change === "model") after.parts[0]!.model = "claude-haiku-5-5";
+    if (change === "client") after.client = "changed-entrypoint";
     if (change === "profiles") after.profiles = ["profile", "alias"];
     if (change === "boundary")
       events.push({

@@ -107,14 +107,24 @@ only within a source/agent/model cohort, with no conflicting latest cohort TTLs.
 
 The maintainer's [unlinked-attempt policy](https://github.com/kixelated/token-max/pull/3#issuecomment-6709040500)
 allows evidence-backed estimates with sensitivity and preserves unsupported cases.
-An API attempt can receive a comparison-only input estimate when its immediately
-adjacent measured requests in the same conversation/file have identical input,
-cache and pricing metadata. The model, source, provider, agent, version and
-profile provenance must agree, recorded pricing hints must not contradict them,
-and no compaction/settings/client boundary may intervene. Consecutive unlinked
-attempts, missing brackets, differing geometry or attribution remain unsupported.
-No arbitrary age or similarity threshold is used. `usageEstimates` names the
-bracket request IDs, copied input geometry, recorded output limit when available,
+An API attempt can receive a comparison-only input estimate from its immediately
+adjacent measured requests in the same conversation/file. Identical input/cache
+geometry supports copying that geometry. Growing input and cacheable lengths also
+support a conditional retry estimate when the entire bracket spans less than the
+shortest documented cache lifetime, five minutes. That estimate uses the next
+request's input/cacheable lengths and the preceding cached prefix as warm reads;
+the remaining cacheable tokens are writes at the TTL being replayed. It does not
+invent an observed write split. The lifetime is a cache constraint, not a claimed
+retry timeout or proof of retry identity.
+
+Model, source, provider, agent, version, client entrypoint and profile provenance
+must agree, and recorded pricing hints must not contradict the measured requests.
+Recorded compaction/settings/client boundaries interrupt estimation. Claude does
+not record a complete settings-change history; matching observed metadata cannot
+prove that unrecorded controls stayed unchanged. Consecutive unlinked attempts,
+missing brackets, shrinking geometry, expired growing-context brackets and
+differing attribution remain unsupported. `usageEstimates` names the bracket
+request IDs, estimated input geometry, recorded output limit when available,
 assumptions, and reasons. Equal counts do not prove equal content or prefix identity.
 
 The point estimate conditionally assumes one billed attempt with the bracketed
@@ -123,7 +133,9 @@ request usage, missing-usage coverage and historical spend remain unknown. Separ
 no-billed/cache-affecting-attempt and cold-cache-input sensitivities replay the
 whole sequence, including subsequent reuse. They show how billing/cache assumptions
 can change the winner, not guaranteed bounds on hidden work, retries or changed
-context. Sensitivity does not veto the aggregate estimate. Unsupported cache inputs
+context. Estimated pre-window cache seeds that affect a selected request remain
+in provenance and sensitivity; their own charges and request counts stay outside
+the selected window. Sensitivity does not veto the aggregate estimate. Unsupported cache inputs
 remain unknown and block only their affected comparison. No attempt is silently
 excluded or assigned observed zero billing.
 
@@ -163,4 +175,6 @@ discriminator. `precomputed` remains an undocumented candidate. Boundary time an
 duration cannot establish generation time; absence of a boundary in a final idle
 period does not prove that no summary was generated or charged. Later checks must
 keep these limits when interpreting eligibility and final periods. No observed
-idle fixture or reproducible historical billing total is claimed.
+idle fixture or reproducible historical billing total is claimed. The host has
+multiple malformed complete records across several histories; the first safe
+failure location is not a claim that repairing one file would enable a full audit.

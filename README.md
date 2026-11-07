@@ -64,7 +64,8 @@ assumptions, sources, and limits. Component exposure, other setting checks, term
 presentation, and npm releases remain in [the first-release plan](quest/m0/README.md).
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from
-matching adjacent measured requests, with their IDs and assumptions reported;
+matching adjacent measured requests, including growing-context retry geometry
+within one five-minute cache lifetime, with their IDs and assumptions reported;
 original usage and historical billing stay unknown. Unsupported inputs leave the
 affected comparison unpriced. Sensitivity scenarios accompany the aggregate
 winner, and unknown fixed charges can cancel without pretending they cost zero.

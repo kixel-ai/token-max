@@ -279,9 +279,13 @@ function replayCost(options: {
   coldPrefixes?: boolean;
   estimates: Map<string, UsageEstimate>;
   attemptScenario?: "point" | "none" | "cold";
-}): { comparison: Cost; fixed: Cost } {
+}): { comparison: Cost; fixed: Cost; seedEstimates: Set<string> } {
   const { requests, scan, catalog, selectedBucket, ttl, since } = options;
-  const previous = new Map<string, { time: number; prefix: number }>();
+  const previous = new Map<
+    string,
+    { time: number; prefix: number; request: string }
+  >();
+  const seedEstimates = new Set<string>();
   const parts: Cost[] = [];
   const fixed: Cost[] = [];
   const boundaries = new Map<string, number[]>();
@@ -308,6 +312,8 @@ function replayCost(options: {
       )
         prior = undefined;
       if (r.time >= since) {
+        if (prior && options.estimates.get(prior.request)?.part)
+          seedEstimates.add(prior.request);
         const replayed = replayPart({
           p,
           ttl,
@@ -330,11 +336,12 @@ function replayCost(options: {
         previous.set(key, {
           time: r.time,
           prefix: p.usage.read + p.usage.write,
+          request: r.id,
         });
       else previous.delete(key);
     }
   }
-  return { comparison: addCosts(parts), fixed: addCosts(fixed) };
+  return { comparison: addCosts(parts), fixed: addCosts(fixed), seedEstimates };
 }
 
 function check(options: {
@@ -420,7 +427,12 @@ function check(options: {
   const coldComparison = replay("1h", { coldPrefixes: true }).comparison;
   const cold = addCosts([coldComparison, fixedCost]);
   const usageEstimates = relevant
-    .filter((r) => r.time >= since)
+    .filter(
+      (r) =>
+        r.time >= since ||
+        short.seedEstimates.has(r.id) ||
+        long.seedEstimates.has(r.id),
+    )
     .flatMap((r) =>
       options.estimates.has(r.id) ? [options.estimates.get(r.id)!] : [],
     );
@@ -551,6 +563,7 @@ function check(options: {
       "reuse conversions are limited to the previously cached prefix; new input stays a write",
       "ordinary input, output, server fees and unmatched summary proxies are held identical under fixed behavior and cancel; comparisonCost contains cache charges only, even when fixedCost is unknown",
       "unlinked-attempt estimates are comparison-only; original usage/coverage and historical spend remain unknown, never excluded or assigned zero billing",
+      "provenance and sensitivity include estimated pre-window cache seeds; request counts and charges cover only the selected window",
       "per-check savings share baselines and must not be summed",
     ],
     uncertainty: [...new Set(uncertainty)],

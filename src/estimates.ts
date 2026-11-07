@@ -32,7 +32,7 @@ function sameInput(a: BillingPart, b: BillingPart): boolean {
   );
 }
 
-/** Estimate only isolated unlinked attempts bracketed by matching recorded input geometry. */
+/** Estimate isolated attempts from matching or same-cache-lifetime growing input brackets. */
 export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
   const result = new Map<string, UsageEstimate>();
   const boundaries = new Map<string, number[]>();
@@ -111,24 +111,47 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
             n.provider !== r.provider ||
             n.agent !== r.agent ||
             n.version !== r.version ||
+            n.client !== r.client ||
             [...n.profiles].sort().join(":") !== profiles,
         )
       ) {
         e.reason =
-          "no matching source/model/provider/version/profile provenance and nonoverlapping file-local brackets";
+          "no matching source/model/provider/version/client/profile provenance and nonoverlapping file-local brackets";
         continue;
       }
       if (
         p.kind === "unknown" ||
         p.kind !== pending.kind ||
         p.model !== r.model ||
-        !sameInput(p, next) ||
+        (["kind", "model", "tier", "speed", "geo"] as const).some(
+          (k) => p[k] !== next[k],
+        ) ||
         (["tier", "speed", "geo"] as const).some(
           (k) => pending[k] !== null && pending[k] !== p[k],
         )
       ) {
         e.reason =
           "brackets lack matching recorded input/cache/pricing metadata or contradict the request";
+        continue;
+      }
+      const exact = sameInput(p, next);
+      const complete = [p, next].every(
+        (part) =>
+          part.usage.input !== null &&
+          part.usage.read !== null &&
+          part.usage.write !== null,
+      );
+      const previousPrefix = (p.usage.read ?? 0) + (p.usage.write ?? 0);
+      const nextPrefix = (next.usage.read ?? 0) + (next.usage.write ?? 0);
+      // Five minutes is the shortest supported cache lifetime, not a retry timeout.
+      const growing =
+        complete &&
+        after.time - before.time < 5 * 60_000 &&
+        next.usage.input! >= p.usage.input! &&
+        nextPrefix >= previousPrefix;
+      if (!exact && !growing) {
+        e.reason =
+          "no matching geometry or growing-context measured brackets within the five-minute cache lifetime";
         continue;
       }
       const times = boundaries.get(r.session) ?? [];
@@ -145,11 +168,30 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
         continue;
       }
       e.evidence = "estimated";
-      e.part = { ...p, usage: { ...p.usage, output: null, reasoning: null } };
-      e.reason =
-        "matching adjacent input geometry and pricing metadata in the same conversation/file";
+      e.part = {
+        ...(exact ? p : next),
+        usage: {
+          ...(exact ? p.usage : next.usage),
+          output: null,
+          reasoning: null,
+          ...(!exact
+            ? {
+                read: previousPrefix,
+                write: nextPrefix - previousPrefix,
+                // Replay assigns the chosen TTL, not an invented observed split.
+                write5m: null,
+                write1h: null,
+              }
+            : {}),
+        },
+      };
+      e.reason = exact
+        ? "matching adjacent input geometry and pricing metadata in the same conversation/file"
+        : "growing-context measured brackets within one five-minute cache lifetime, with matching pricing/provenance";
       e.assumptions = [
-        "one billed API attempt with the same input/cache geometry and model/tier/speed/geography as both recorded brackets; this is not measured execution or prefix identity",
+        exact
+          ? "one billed API attempt with the same input/cache geometry and model/tier/speed/geography as both recorded brackets; this is not measured execution or prefix identity"
+          : "one billed attempt with the next measured request's input/cacheable length and the preceding cached prefix as warm reads; growing context, retry identity and cache hits are assumptions, not measured execution or equal content",
         "actual usage and historical spend stay unknown; output is not imputed and cancels only under fixed behavior across TTL scenarios",
         "no-billed-attempt and cold-cache sensitivities are conditional scenarios, not guaranteed bounds on hidden work or context changes",
       ];

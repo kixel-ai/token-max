@@ -556,3 +556,38 @@ test("managed file locations match the supported host platforms", () => {
     "C:\\Program Files\\ClaudeCode\\managed-settings.json",
   );
 });
+
+test("empty Claude iterations retain top-level usage instead of inventing zero iterations", async () => {
+  const w = await workspace();
+  try {
+    await fixture(
+      join(w.claude, "projects/project/main.jsonl"),
+      "claude-empty-iterations.jsonl",
+    );
+    const result = await scan(w.options);
+    assert.equal(result.requests.length, 1);
+    assert.equal(result.requests[0]!.parts[0]!.usage.write5m, 1000);
+    assert.equal(result.requests[0]!.parts[0]!.usage.output, 10);
+    assert.equal(result.requests[0]!.parts[0]!.geo, "global");
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("unexpected normalization failures remain internal errors, never malformed records", async () => {
+  const w = await workspace();
+  try {
+    const file = join(w.claude, "projects/project/main.jsonl");
+    await writeFile(file, "{}\n");
+    const snapshot = (await discover(w.options)).snapshots[0]!;
+    const bug = new TypeError("synthetic normalization bug");
+    await assert.rejects(
+      readSnapshot(snapshot, () => {
+        throw bug;
+      }),
+      (error) => error === bug,
+    );
+  } finally {
+    await w.dispose();
+  }
+});

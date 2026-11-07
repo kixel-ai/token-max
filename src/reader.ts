@@ -104,9 +104,13 @@ function part(
 
 function claudeParts(raw: unknown, model: string | null): BillingPart[] {
   const u = object(raw);
-  if (u.iterations === undefined || u.iterations === null)
+  if (
+    u.iterations === undefined ||
+    u.iterations === null ||
+    (Array.isArray(u.iterations) && u.iterations.length === 0)
+  )
     return [part(u, model, "message")];
-  if (!Array.isArray(u.iterations) || u.iterations.length === 0)
+  if (!Array.isArray(u.iterations))
     throw new ScanError("invalid usage iterations");
   // Top-level totals overlap executor iterations and omit compaction/advisor usage.
   return u.iterations.map((value) => {
@@ -247,7 +251,15 @@ export async function readSnapshot(
     });
   }
   try {
-    const info = await handle.stat();
+    let info;
+    try {
+      info = await handle.stat();
+    } catch {
+      throw new ScanError("cannot inspect snapshotted transcript", {
+        file: snapshot.file,
+        line: 0,
+      });
+    }
     if (
       info.dev !== snapshot.device ||
       info.ino !== snapshot.inode ||
@@ -262,12 +274,20 @@ export async function readSnapshot(
     let pending = 0;
     const buffer = Buffer.alloc(64 * 1024);
     while (position < snapshot.bytes) {
-      const { bytesRead } = await handle.read(
-        buffer,
-        0,
-        Math.min(buffer.length, snapshot.bytes - position),
-        position,
-      );
+      let bytesRead: number;
+      try {
+        ({ bytesRead } = await handle.read(
+          buffer,
+          0,
+          Math.min(buffer.length, snapshot.bytes - position),
+          position,
+        ));
+      } catch {
+        throw new ScanError("cannot read snapshotted transcript", {
+          file: snapshot.file,
+          line: snapshot.lines + 1,
+        });
+      }
       if (!bytesRead)
         throw new ScanError("transcript shrank during scan", {
           file: snapshot.file,
@@ -280,18 +300,23 @@ export async function readSnapshot(
         chunks.push(Buffer.from(buffer.subarray(start, index)));
         snapshot.lines++;
         const location = { file: snapshot.file, line: snapshot.lines };
+        let raw: unknown;
         try {
           const text = new TextDecoder("utf-8", { fatal: true }).decode(
             Buffer.concat(chunks),
           );
-          const raw: unknown = JSON.parse(text);
-          if (raw === null || typeof raw !== "object" || Array.isArray(raw))
-            throw new ScanError("expected a transcript object");
+          raw = JSON.parse(text);
+        } catch {
+          throw new ScanError("invalid complete transcript record", location);
+        }
+        if (raw === null || typeof raw !== "object" || Array.isArray(raw))
+          throw new ScanError("expected a transcript object", location);
+        try {
           consume(object(raw), location);
         } catch (error) {
           if (error instanceof ScanError)
             throw new ScanError(error.message, location);
-          throw new ScanError("invalid complete transcript record", location);
+          throw error;
         }
         chunks = [];
         pending = 0;
@@ -304,12 +329,6 @@ export async function readSnapshot(
       }
     }
     snapshot.deferredBytes = pending;
-  } catch (error) {
-    if (error instanceof ScanError) throw error;
-    throw new ScanError("cannot read snapshotted transcript", {
-      file: snapshot.file,
-      line: snapshot.lines + 1,
-    });
   } finally {
     await handle.close();
   }

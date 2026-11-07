@@ -5,7 +5,7 @@ import { writeFile } from "node:fs/promises";
 import type { Profile, Request, Scan, StructuralEvent } from "../src/model.js";
 import { formatReport } from "../src/cli.js";
 import { analyze } from "../src/replay.js";
-import { scan } from "../src/reader.js";
+import { scan, usage } from "../src/reader.js";
 import {
   claudeUsage,
   fixture,
@@ -452,4 +452,27 @@ test("an unknown unmatched summary proxy cancels without hiding its unknown full
   assert.equal(result.fixedCost.totalUsd, null);
   assert.equal(result.cost["1h"].totalUsd, null);
   assert.ok(result.savingsUsd! > 0);
+});
+
+test("unknown TTL comparison reports missing linked usage before missing tier", async () => {
+  const r = makeRequest({
+    evidence: "unknown",
+    issues: [
+      "api request has no linked assistant usage; failed/in-flight/hidden request billing is unknown",
+    ],
+    parts: [
+      { ...makeRequest().parts[0]!, usage: usage({}, "claude"), tier: null },
+    ],
+  });
+  const check = analyze({
+    scan: data([r]),
+    catalog: await prices(),
+    now: 1200000,
+  }).checks[0]!;
+  assert.equal(check.recommended, null);
+  assert.match(check.uncertainty.join(" "), /no linked assistant usage/);
+  assert.match(
+    check.comparisonCost["5m"].unknown.join(" "),
+    /usage is not recorded/,
+  );
 });

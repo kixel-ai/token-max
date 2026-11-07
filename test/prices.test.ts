@@ -141,3 +141,19 @@ test("Claude TTL, region, speed, server fees and missing prices remain explicit"
     null,
   );
 });
+
+test("unavailable Claude geography uses the labelled global API equivalent", async () => {
+  const r = makeRequest();
+  const c = await prices();
+  const p = { ...r.parts[0]!, geo: "not_available" };
+  const result = pricePart(c, r, p);
+  assert.equal(result.totalUsd, pricePart(c, r, { ...p, geo: null }).totalUsd);
+  assert.match(
+    result.assumptions.join(" "),
+    /unrecorded geography assumed global/,
+  );
+  assert.equal(
+    pricePart(c, r, { ...p, geo: "unexpected_region" }).totalUsd,
+    null,
+  );
+});

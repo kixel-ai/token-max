@@ -268,9 +268,13 @@ function selectedRates(
         );
       factor *= 1.1;
       assumptions.push("documented US inference multiplier 1.1");
-    } else if (p.geo !== null && p.geo !== "global")
+    } else if (
+      p.geo !== null &&
+      p.geo !== "global" &&
+      p.geo !== "not_available"
+    )
       return unknownCost("regional rate is unsupported");
-    if (p.geo === null)
+    if (p.geo === null || p.geo === "not_available")
       assumptions.push("unrecorded geography assumed global API equivalent");
   }
   return {
@@ -286,6 +290,8 @@ function selectedRates(
 
 /** Price the whole request again for every counterfactual, including context-tier changes. */
 export function pricePart(catalog: Catalog, r: Request, p: BillingPart): Cost {
+  if (p.usage.input === null && p.usage.output === null)
+    return unknownCost("request usage is not recorded");
   const selected = selectedRates(catalog, r, p);
   if (!("rates" in selected)) return selected;
   const result = zeroCost();

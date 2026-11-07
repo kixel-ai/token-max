@@ -470,7 +470,11 @@ function check(options: {
     uncertainty.push(
       "shared history has ambiguous profile provenance; this is a conditional replay for the named current profile, not assigned historical spend",
     );
-  uncertainty.push(...cost["5m"].unknown, ...cost["1h"].unknown);
+  uncertainty.push(
+    ...relevant.filter((r) => r.time >= since).flatMap((r) => r.issues),
+    ...cost["5m"].unknown,
+    ...cost["1h"].unknown,
+  );
   return {
     check: "claude-cache-ttl",
     profile: profile.id,

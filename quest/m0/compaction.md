@@ -26,3 +26,7 @@ Recommendations for the implementer:
   the separate idle check evaluates their on/off policy after the window
   recommendation. Report each saving relative to that order, rather than
   adding independent savings that may overlap.
+
+## Required
+
+- [Replay and the cache TTL check](/quest/m0/replay.md) - the reader, prices, and report it adds to

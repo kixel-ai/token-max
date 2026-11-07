@@ -52,3 +52,7 @@ measurement for the maintainer's confirmed skills/MCP cost goal.
   Resolve current effective components separately, and expose when
   components entered the window where observable. Verify record shapes
   before writing synthetic fixtures.
+
+## Required
+
+- [Replay and the cache TTL check](/quest/m0/replay.md) - deduplicated requests, prices, profile provenance, and structural context events

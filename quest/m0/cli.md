@@ -48,3 +48,7 @@ chosen for replay.
   guidance-only findings, unknowns, multiple profiles, long names, narrow
   terminals, plain output, JSON, and failed scans. Add representative README
   examples; no real transcript content or invented real-host savings.
+
+## Required
+
+- [Replay and the cache TTL check](/quest/m0/replay.md) - shared CLI flags, structured findings, evidence, and exit semantics

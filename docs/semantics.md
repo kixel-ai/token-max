@@ -13,6 +13,8 @@ usage validation. Context records still establish the subsequent model/client.
 File dates and modification times cannot prove that all records precede the
 window. A broken JSON record cannot safely prove its top-level timestamp, so it
 fails even when the file began earlier. Diagnostics never quote JSON parser errors.
+Unexpected normalization exceptions remain internal errors, distinct from malformed
+JSON/UTF-8 and explicit invalid metadata. The CLI sanitizes internal failures.
 
 Claude assistant entries sharing a message identity are usage snapshots. They are
 merged, never summed. `api-request.id` links through assistant `requestRef` to
@@ -22,14 +24,17 @@ absence of assistant usage is not zero spend. Nested subagent filenames distingu
 separate conversations even when their parent `sessionId` is the same.
 
 Claude's top-level usage overlaps message iterations and omits compaction and
-advisor iterations. When iterations exist, pricing uses that list alone, with
+advisor iterations. An absent or empty iteration list uses the top-level usage;
+an empty list is a valid older client shape, not zero spend. When nonempty
+iterations exist, pricing uses that list alone, with
 each iteration's model. Advisor service tier is independent; an omitted tier stays
 unknown. Unsupported iteration kinds stay unpriced. These semantics come from
 [threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold)
 and [advisor billing](https://platform.claude.com/docs/en/agents-and-tools/tool-use/advisor-tool),
 checked 2026-11-07. The metadata-only local sample had 4,180 usage records whose
-top-level counters equalled their message-iteration counters. This sample does
-not establish a complete host audit and is not a committed fixture.
+top-level counters equalled their nonempty message-iteration counters. That
+sample missed valid empty lists and does not establish a complete host audit.
+All committed fixtures are synthetic.
 
 Codex `token_usage_record.usage` is individual response usage, deduplicated by
 `response_id`. `turn_token_usage` and `thread_token_usage` are cumulative.
@@ -72,7 +77,8 @@ reader normalizes their sum as total input. Five-minute writes use the catalog;
 one-hour writes derive the documented 2x ordinary-input rate. US inference uses
 the documented 1.1x multiplier. Supported fast Opus rates use the documented 2x
 factor across the full context window; other speed/tier combinations remain
-unknown. Server web search adds its public per-search fee. Web fetch has no extra
+unknown. Absent geography and the older `not_available` sentinel use the labelled
+global API-equivalent assumption, without claiming an observed region. Server web search adds its public per-search fee. Web fetch has no extra
 fee. Code-execution charges remain unknown without runtime, tool version, and
 free-allowance evidence. Client-side calls add no separate server-tool charge.
 These rules and Haiku 5.5's 100,000-input threshold are from

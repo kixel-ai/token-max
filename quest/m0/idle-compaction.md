@@ -46,7 +46,7 @@ checked 2026-11-06, define the available controls:
 
 Use the replay check's verified compaction signals and estimated summary
 charges. If the format cannot distinguish idle summaries, report that
-limit and model opportunities conditionally. For returned gaps with known
+limit and use the explicit activation estimate below. For returned gaps with known
 settings and versions, use observed applied/not-applied outcomes and the
 first request's actual usage as the baseline. Do not charge on for a
 summary merely because a returned gap was long enough. Report activation
@@ -71,6 +71,21 @@ client lifetime, bound cost between closure before the trigger (no summary)
 and staying open and awake (one charged summary). The same uncertainty
 applies to hypothetical on scenarios whose activation is unobserved, not
 to replacing known returned outcomes with assumed activation.
+
+For the deciding estimate, use recorded on outcomes where available. For
+unobserved eligible periods, use the applied-summary fraction from
+comparable known-on periods with the same version, client, and flag state,
+when available; otherwise assume the documented trigger fires once with
+the client left open and awake. Apply that activation estimate to both
+hypothetical resumed periods and final periods without an observed
+activation, charging a summary in the latter without a return benefit.
+The empirical fraction includes nonactivation from client lifetime; do not
+multiply it by a second unknown stayed-open probability. State that final
+periods are assumed to activate at the same rate as the comparable
+returned periods. Label the empirical basis or documented-trigger fallback
+and show the closed/open alternatives as sensitivity. Unknown activation
+and client lifetime therefore have stated deciding estimates, rather than
+being reasons to withhold the net recommendation.
 
 Compare on and off over the same window, first at current settings and
 then after the TTL and compaction-window recommendations. Identify the
@@ -103,9 +118,9 @@ Show the net over the window and per month, the assumptions, and a range
 for unknown client lifetime and unobserved summary sizes. Price summaries
 in unresumed sessions as well as resumed ones. Report the break-even
 fraction of uncertain periods that must have stayed open to change the
-winner and the extra re-read cost per resumed summary that would erase
-on's saving, always as a caveat to the fixed-transcript assumption rather
-than an unbounded input to the recommendation gate. Define delta as on
+winner. Also report the extra re-read cost per resumed summary that would
+erase on's saving as a caveat to the fixed-transcript assumption, rather
+than an unbounded input to the recommendation. Define delta as on
 cost minus off cost, summed over the whole analysis window, including
 summaries in unresumed sessions. Use observed costs where possible and
 state the assumptions used to estimate activation, client lifetime,
@@ -128,7 +143,9 @@ summary that only adds cost, a return before original expiry, an expired
 prefix on a post-compaction request, and compactions without double counting.
 Verify mixed periods whose aggregate winner differs from the winner on
 most periods, a sensitivity range crossing zero with an estimable net
-winner, and a net-zero tie that keeps the current setting.
+winner, and a net-zero tie that keeps the current setting. Verify the
+same-cohort activation estimate and documented-trigger fallback, including
+their charges on final periods without double-counting client lifetime.
 
 ## Required
 

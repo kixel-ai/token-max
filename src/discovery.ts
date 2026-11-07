@@ -16,6 +16,7 @@ import {
   compactionControls,
   idleControls,
   scopedEnvironment,
+  speedControls,
 } from "./controls.js";
 
 /** Explicit roots limit the entire scan; otherwise discover host-local profiles. */
@@ -27,6 +28,9 @@ export interface DiscoveryOptions {
   codexDirs?: string[];
   /** Override the system managed file for host adapters and synthetic tests. */
   managedSettingsFile?: string;
+  /** Override Codex system files for host adapters and synthetic tests. */
+  codexSystemConfigFile?: string;
+  codexRequirementsFile?: string;
 }
 
 function missing(error: unknown): boolean {
@@ -145,6 +149,7 @@ export function structuralSettings(
     "subagentPromptCacheTtl",
     "idleCompaction",
     "fastMode",
+    "fastModePerSessionOptIn",
     "autoCompact",
     "autoCompactEnabled",
     "autoCompactWindow",
@@ -192,6 +197,7 @@ export async function discoverProjectOwners(
     profile.backgroundDirectories = Object.create(null) as NonNullable<
       Profile["backgroundDirectories"]
     >;
+    profile.speedDirectories = Object.create(null);
     profile.idleDirectories = Object.create(null) as NonNullable<
       Profile["idleDirectories"]
     >;
@@ -281,6 +287,11 @@ export async function discoverProjectOwners(
         scopes,
         env: localEnv,
       });
+      profile.speedDirectories![cwd] = speedControls({
+        harness: "claude",
+        scopes,
+        env: localEnv,
+      });
       const c = idleControls({ scopes, env: localEnv });
       const config = Object.assign({}, ...scopes.map((s) => s.config), {
         env: Object.assign({}, ...scopes.map((s) => object(s.config.env))),
@@ -305,6 +316,10 @@ export async function discoverProjectOwners(
       try {
         await stat(cwd);
       } catch {
+        profile.speedDirectories![cwd]!.resolved = false;
+        profile.speedDirectories![cwd]!.value = null;
+        profile.speedDirectories![cwd]!.reason =
+          "recorded working directory no longer exists; current ownership unresolved";
         c.resolved = false;
         c.reason =
           "recorded working directory no longer exists; current project/local ownership is unresolved";
@@ -442,6 +457,115 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       )
         provider = "custom";
     }
+    const speedScopes =
+      root.harness === "claude"
+        ? [
+            { config: user, file: settingsFile },
+            { config: managed, file: managedFile },
+          ]
+        : [
+            {
+              config: await settings(
+                options.codexSystemConfigFile ?? "/etc/codex/config.toml",
+                "codex",
+              ),
+              file: options.codexSystemConfigFile ?? "/etc/codex/config.toml",
+            },
+            { config: user, file: settingsFile },
+          ];
+    const requirementsFile =
+      options.codexRequirementsFile ?? "/etc/codex/requirements.toml";
+    const requirements =
+      root.harness === "codex" ? await settings(requirementsFile, "codex") : {};
+    const speed = speedControls({
+      harness: root.harness,
+      scopes: speedScopes,
+      env: localEnv,
+    });
+    if (root.harness === "codex") {
+      const baseTier = [...speedScopes]
+        .reverse()
+        .find((s) => Object.hasOwn(s.config, "service_tier"))
+        ?.config.service_tier;
+      const possibleTiers: unknown[] = [baseTier];
+      for (const row of Object.values(object(user.profiles)))
+        possibleTiers.push(object(row).service_tier ?? baseTier);
+      for (const key of ["fast_mode", "ultrafast_mode"]) {
+        const value = object(requirements.features)[key];
+        if (value !== undefined && typeof value !== "boolean")
+          throw new ScanError("invalid required speed feature", {
+            file: requirementsFile,
+            line: 1,
+          });
+        if (
+          value === false &&
+          ((key === "fast_mode" &&
+            ["fast", "priority"].includes(String(speed.value))) ||
+            (key === "ultrafast_mode" && speed.value === "ultrafast"))
+        ) {
+          Object.assign(speed, {
+            value: "standard",
+            owner: `${requirementsFile}:features.${key}`,
+            reason: "premium tier blocked by managed requirements",
+            resolved: true,
+          });
+        }
+      }
+      if (
+        user.profile !== undefined ||
+        Object.keys(object(user.profiles)).length
+      ) {
+        Object.assign(speed, {
+          value: null,
+          resolved: false,
+          reason:
+            "legacy profile selector/tables exist; current Codex removed them in 0.134.0, installed version and selected profile are unresolved",
+        });
+      }
+      for (const entry of await readdir(canonical)) {
+        if (!/^[a-zA-Z0-9_-]+\.config\.toml$/.test(entry)) continue;
+        const file = join(canonical, entry);
+        const config = await settings(file, "codex");
+        possibleTiers.push(config.service_tier ?? baseTier);
+        if (
+          ["model", "model_provider", "service_tier", "features"].some((key) =>
+            Object.hasOwn(config, key),
+          )
+        ) {
+          Object.assign(speed, {
+            value: null,
+            resolved: false,
+            reason:
+              "named profile files can override speed/model/gates; --profile selection is unobserved",
+            owner: `${settingsFile}; ${file} (--profile selection unresolved)`,
+          });
+        }
+      }
+      const blocked = (tier: unknown) =>
+        (["fast", "priority"].includes(String(tier)) &&
+          object(requirements.features).fast_mode === false) ||
+        (tier === "ultrafast" &&
+          object(requirements.features).ultrafast_mode === false);
+      // An unobserved profile cannot bypass a hard policy block. A different,
+      // allowed premium tier still keeps profile selection unresolved.
+      if (
+        possibleTiers.some(blocked) &&
+        possibleTiers.every(
+          (tier) =>
+            tier === undefined ||
+            ["standard", "default"].includes(String(tier)) ||
+            blocked(tier),
+        )
+      ) {
+        Object.assign(speed, {
+          value: "standard",
+          resolved: true,
+          owner: `${requirementsFile}:features`,
+          reason:
+            "all locally configured premium tiers are blocked by managed requirements, including profile alternatives",
+        });
+      }
+    }
     const histories: string[] = [];
     for (const name of root.harness === "claude"
       ? ["projects"]
@@ -456,6 +580,26 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
           });
       }
     }
+    const background = backgroundControls({
+      harness: root.harness,
+      scopes: [
+        { config: user, file: settingsFile },
+        { config: managed, file: managedFile },
+      ],
+      env: localEnv,
+    });
+    if (
+      root.harness === "codex" &&
+      (await readdir(canonical)).some((name) =>
+        /^[a-zA-Z0-9_-]+\.config\.toml$/.test(name),
+      )
+    )
+      for (const control of Object.values(background)) {
+        control.value = null;
+        control.resolved = false;
+        control.reason =
+          "Codex named profile selection is not established; base config is not an effective control";
+      }
     profiles.set(key, {
       id: identity(key),
       harness: root.harness,
@@ -472,14 +616,8 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       }),
       provider,
       settings: structuralSettings(config),
-      background: backgroundControls({
-        harness: root.harness,
-        scopes: [
-          { config: user, file: settingsFile },
-          { config: managed, file: managedFile },
-        ],
-        env: localEnv,
-      }),
+      background,
+      speed,
       compaction: compactionControls({
         harness: root.harness,
         user,
@@ -548,4 +686,52 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
     profiles: [...profiles.values()],
     snapshots: [...files.values()],
   };
+}
+
+/** Keep unresolved Codex project overrides advisory rather than asserting user defaults own a launch. */
+export async function discoverCodexSpeedOwners(
+  options: DiscoveryOptions,
+  profiles: Profile[],
+  requests: Request[],
+): Promise<void> {
+  for (const profile of profiles.filter((p) => p.harness === "codex")) {
+    for (const cwd of new Set(
+      requests
+        .filter((r) => r.profiles.includes(profile.id))
+        .flatMap((r) => (r.cwd ? [r.cwd] : [])),
+    )) {
+      for (let path = cwd; ; path = dirname(path)) {
+        options.signal?.throwIfAborted();
+        const file = join(path, ".codex", "config.toml");
+        const config = await settings(file, "codex");
+        if (
+          ["model", "model_provider", "service_tier", "features"].some((key) =>
+            Object.hasOwn(config, key),
+          ) &&
+          !profile.speedDirectories?.[cwd]
+        ) {
+          profile.speedDirectories ??= Object.create(null);
+          profile.speedDirectories![cwd] = {
+            ...profile.speed!,
+            value: null,
+            resolved: false,
+            owner: file,
+            reason:
+              "current project overrides exist; trust, profile and CLI/session selection are not established",
+          };
+        }
+        try {
+          await stat(join(path, ".git"));
+          break;
+        } catch (error) {
+          if (!missing(error) && object(error).code !== "ENOTDIR")
+            throw new ScanError("cannot inspect project scope", {
+              file: path,
+              line: 0,
+            });
+        }
+        if (dirname(path) === path) break;
+      }
+    }
+  }
 }

@@ -1,7 +1,7 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window and native Claude idle-compaction settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -241,3 +241,33 @@ cost per resumed summary accompany the recommendation. Missing boundaries never
 prove that discarded or unlogged summaries did not run. Without linked billed
 summary output and full resumed-prefix calibration, affected hypothetical costs
 stay unknown; `postTokens` alone cannot establish the full request.
+
+## Fast mode
+
+The maintainer's cost preference is fast mode off for both harnesses. The
+`fast-mode` check names the current effective local preference, its owner and
+the standard-speed replacement: Claude `fastMode: false`, or Codex
+`service_tier = "default"`. Use `/fast off` for an active session. No settings
+are edited. A justified current premium preference causes exit 1 even without
+historical usage or prices. Standard current settings never receive a change
+because of historical premium sessions.
+
+Claude resolution includes `fastModePerSessionOptIn`, managed `fastMode: false`,
+project/local files at recorded working directories, model support and the active
+profile's `CLAUDE_CODE_DISABLE_FAST_MODE`. Codex resolves local system/user
+settings, independent fast/ultrafast feature gates and local requirements.
+Unresolved named/legacy profile selection, project trust/overrides, custom
+providers and unsupported models stay advisory. Unrecorded CLI/session overrides
+and remote account policy are unknown, not inferred from old sessions.
+
+Each card separates observed response-speed premiums from a current-setting
+estimate applied to recorded usage. Native Codex usage records do not record a
+billed tier; requested turn/thread settings are retained separately and never
+count as a billed premium. Claude response usage can record billed speed. Missing
+speed, usage or exact pricing stays unknown. Dollar comparisons use the same
+model and standard API rates, preserving recorded cache reads, write lifetimes,
+geography and context tiers. These are **rate-only API-price equivalents**:
+Claude's separate fast/standard caches mean cache-switch effects are excluded.
+They hold work constant, do not value latency, and make no subscription-bill,
+credit-multiplier or combined savings claim. Fast mode compares with the current
+profile, independently of the TTL/window/idle recommendations.

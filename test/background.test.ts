@@ -60,7 +60,11 @@ test("background controls preserve per-feature owners and environment precedence
     c["session-recap"]!.owner,
     "managed.json:env.CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
   );
-  assert.equal(c["goal-checkins"]!.value, 0);
+  assert.equal(c["goal-checkins"]!.value, 60);
+  assert.equal(
+    c["goal-checkins"]!.owner,
+    "user.json:env.CLAUDE_CODE_GOAL_CHECKIN_MINUTES",
+  );
   assert.equal(
     controls(
       { env: { CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: "off" } },

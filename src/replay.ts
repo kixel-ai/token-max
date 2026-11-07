@@ -1,3 +1,4 @@
+import { speedChecks } from "./fast.js";
 import { analyzeExposure } from "./exposure.js";
 import type {
   BillingPart,
@@ -614,6 +615,7 @@ export function analyze(options: {
       now,
     }),
   );
+  checks.push(...speedChecks({ scan, catalog, since, now }));
   const background = backgroundChecks({ scan, catalog, since, now });
   for (const check of checks) {
     if (background.some((b) => b.profile === check.profile)) {

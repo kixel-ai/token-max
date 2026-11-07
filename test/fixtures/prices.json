@@ -17,7 +17,10 @@
           "cache_write": 0.125,
           "tiers": [
             {
-              "tier": { "type": "context", "size": 100000 },
+              "tier": {
+                "type": "context",
+                "size": 100000
+              },
               "input": 0.5,
               "output": 2.5,
               "cache_read": 0.05,
@@ -38,7 +41,10 @@
           "cache_write": 2.5,
           "tiers": [
             {
-              "tier": { "type": "context", "size": 272000 },
+              "tier": {
+                "type": "context",
+                "size": 272000
+              },
               "input": 4,
               "output": 15,
               "cache_read": 0.2,
@@ -53,7 +59,33 @@
           }
         }
       },
-      "gpt-5.4": { "cost": { "input": 2.5, "output": 15, "cache_read": 0.25 } }
+      "gpt-5.4": {
+        "cost": {
+          "input": 2.5,
+          "output": 15,
+          "cache_read": 0.25
+        }
+      },
+      "gpt-5.6": {
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.4,
+          "cache_write": 5,
+          "tiers": [
+            {
+              "tier": {
+                "type": "context",
+                "size": 272000
+              },
+              "input": 8,
+              "output": 30,
+              "cache_read": 0.8,
+              "cache_write": 10
+            }
+          ]
+        }
+      }
     }
   }
 }

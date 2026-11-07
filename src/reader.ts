@@ -13,6 +13,7 @@ import type {
 import {
   discover,
   discoverProjectOwners,
+  discoverCodexSpeedOwners,
   structuralSettings,
   type DiscoveryOptions,
 } from "./discovery.js";
@@ -218,6 +219,7 @@ function request(
     locations: [location],
     accounting: "individual",
     attempt: null,
+    requestedSpeed: { tier: context.tier, speed: null },
     issues: [],
   };
 }
@@ -502,11 +504,14 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
               "pre-window output budget is invalid; no budget estimate retained",
             );
           }
+          pending.requestedSpeed = {
+            tier: label(params.service_tier),
+            speed: label(params.speed),
+          };
           pending.parts = [
             part(
               {
-                service_tier: params.service_tier,
-                speed: params.speed,
+                // Attempt parameters are requested, not proof of the billed tier/speed.
                 inference_geo: params.inference_geo,
               },
               pending.model,
@@ -747,7 +752,8 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             kind: "message",
             model: r.model,
             usage: usage(p.usage, "codex"),
-            tier: label(p.service_tier) ?? context.tier,
+            // Native TokenUsageRecord has no billed service-tier field.
+            tier: null,
             speed: null,
             geo: null,
           },
@@ -816,7 +822,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             kind: "message",
             model: r.model,
             usage: u,
-            tier: context.tier,
+            tier: null,
             speed: null,
             geo: null,
           },
@@ -919,6 +925,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
       if (ref) {
         r.source ??= ref.source;
         r.attempt = ref.attempt;
+        if (ref.requestedSpeed) r.requestedSpeed = ref.requestedSpeed;
         r.time = Math.min(r.time, ref.time);
         r.profiles = [...new Set([...r.profiles, ...ref.profiles])];
       }
@@ -999,6 +1006,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   const sortedRequests = allRequests.filter((r) => !beforeWindow(r));
   const sortedEvents = allEvents.filter((e) => !beforeWindow(e));
   await discoverProjectOwners(options, discovery.profiles, allRequests);
+  await discoverCodexSpeedOwners(options, discovery.profiles, allRequests);
   for (const r of sortedRequests)
     for (const issue of r.issues) issues.add(issue);
   if (sortedEvents.some((e) => e.kind === "compaction"))

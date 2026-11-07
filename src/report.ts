@@ -183,7 +183,9 @@ export function formatReport(
         `${instant(result.since)} ${arrow} ${instant(result.until)}; ${result.requests} requests; ${result.windowBasis}`,
       );
       field(
-        "Estimated net saving vs baseline",
+        result.check === "fast-mode"
+          ? "Estimated rate-only saving vs current speed"
+          : "Estimated net saving vs baseline",
         `${result.savingsUsd === null ? "unknown" : usd(result.savingsUsd)} over window; ${result.monthlySavingsUsd === null ? "unknown" : usd(result.monthlySavingsUsd)} / 30 days`,
       );
       if (result.check === "claude-cache-ttl") {
@@ -240,6 +242,24 @@ export function formatReport(
         );
         field("Total feature cost", money(result.totalFeatureCost));
         notes("Background coverage", result.coverage);
+      } else if (result.check === "fast-mode") {
+        field("Standard-speed replacement", result.replacement);
+        field(
+          "Observed response-tier premium (rate-only API equivalent)",
+          `${money(result.observed.premium)} over selected window; ${estimate(result.observed.monthlyPremiumUsd)} / 30 days`,
+        );
+        field(
+          "Speed coverage",
+          `${result.observed.premiumParts} premium, ${result.observed.standardParts} standard, ${result.observed.unknownParts} unknown billed parts`,
+        );
+        field(
+          "Current-setting premium estimate (rate-only)",
+          `${money(result.currentEstimate.premium)}; ${result.currentEstimate.pricedParts} priced premium parts, ${result.currentEstimate.unknownParts} unknown parts`,
+        );
+        field(
+          "Speed limits",
+          "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price equivalents, not subscription savings. Work held constant; latency value excluded.",
+        );
       } else {
         field(
           "Models",
@@ -391,6 +411,12 @@ export function formatReport(
               "Recorded client",
               `${client.client ?? "unknown"}; version ${client.version ?? "unknown"}; ${client.requests} requests`,
             );
+        } else if (result.check === "fast-mode") {
+          cost("Observed response-tier premium", result.observed.premium);
+          cost(
+            "Current-setting premium estimate",
+            result.currentEstimate.premium,
+          );
         } else {
           cost("Current-window baseline", result.baselineCost);
           cost("Existing summaries", result.observedSummaryCost);
@@ -440,7 +466,8 @@ export function formatReport(
         }
         if (
           result.check !== "idle-compaction" &&
-          result.check !== "background-generation"
+          result.check !== "background-generation" &&
+          result.check !== "fast-mode"
         )
           witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
@@ -509,6 +536,7 @@ export function formatReport(
 
 function reason(result: CheckResult): string {
   if (result.check === "background-generation") return result.guidance;
+  if (result.check === "fast-mode") return result.reason;
   if (result.check === "idle-compaction")
     return result.recommended === null
       ? "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."

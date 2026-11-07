@@ -30,17 +30,18 @@ above 95% across gaps up to 30 minutes.
 Recommendations for the implementer:
 
 - Price a ping as a read of the session's last context plus a short prompt
-  and reply, and count the pings on a session's final idle period, which
-  never resumes.
+  and reply, including estimated pings in final periods with no observed
+  return under the same client-lifetime assumptions as the other policies.
 - Report the best cap and its net, not only whether any cap wins.
 - Compare no keepalive, idle compaction, and each keepalive cap at the same
   recommended TTL and compaction window, using the idle check's client
   lifetime bounds for final periods rather than assuming every final
   period stays open. Pings reset the last-request clock and may prevent
   idle compaction; replay that timing rather than charging both policies
-  independently. Recommend the better supported net saving and report
-  conditional results when uncertainty changes the winner. Do not add the
-  two policies' savings for the same idle period.
+  independently. Recommend the lower estimated aggregate net cost and
+  show uncertainty beside that recommendation; do not require every period
+  or sensitivity scenario to favor it. Do not add the two policies'
+  savings for the same idle period.
 
 ## Required
 

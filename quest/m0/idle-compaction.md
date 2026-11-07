@@ -4,10 +4,9 @@
 
 `token-max` reports how often Claude Code sessions have idle-compaction
 opportunities, compares `idleCompaction` on and off at public API prices,
-and recommends either value when supported by the evidence. When logs
-cannot establish a winner, it reports conditional savings and the
-break-even instead of claiming measured savings or silently keeping the
-current value. It never edits settings or prints transcript text.
+and recommends whichever has the lower estimated total net cost over the
+analysis window. It reports the assumptions and uncertainty beside the
+recommendation and never edits settings or prints transcript text.
 
 ## Plan
 
@@ -17,6 +16,12 @@ cost more than they save. This is part of m0's compaction analysis. The
 on/off recommendation uses the effective token threshold; threshold tuning
 is outside this quest. Report costs by context size so that the aggregate
 does not conceal differences between small and large sessions.
+
+Clarified 2026-11-06 (maintainer): recommend the setting that is net better
+or worse overall. Aggregate the estimated savings and extra costs across
+all periods; do not require a win on each period or across every possible
+scenario. Uncertainty explains the estimate rather than imposing that
+stronger recommendation policy.
 
 The [settings reference](https://code.claude.com/docs/en/settings-reference#idlecompaction)
 and [cache behavior](https://code.claude.com/docs/en/prompt-caching#compacting-the-conversation),
@@ -69,10 +74,11 @@ to replacing known returned outcomes with assumed activation.
 
 Compare on and off over the same window, first at current settings and
 then after the TTL and compaction-window recommendations. Identify the
-baseline for each saving; independent savings are not additive. With a
-recommended main-conversation 5m TTL or a window below the idle threshold,
-report that idle compaction is inapplicable. Keepalive is a later
-alternative to this policy.
+baseline for each saving; independent savings are not additive. The latter
+configuration decides the recommended toggle; the current-settings result
+is reported for context. With a recommended main-conversation 5m TTL or a
+window below the idle threshold, report that idle compaction is
+inapplicable. Keepalive is a later alternative to this policy.
 
 Price on's warm summarization input, summary output, and subsequent cache
 reads and writes against off's retained history, cold resumes, and later
@@ -100,30 +106,29 @@ fraction of uncertain periods that must have stayed open to change the
 winner and the extra re-read cost per resumed summary that would erase
 on's saving, always as a caveat to the fixed-transcript assumption rather
 than an unbounded input to the recommendation gate. Define delta as on
-cost minus off cost across the reported activation, client-lifetime,
-summary-size, and timing ranges. Recommend off only if the entire range
-is positive, or on only if it is negative, and only emit a change when
-that differs from the effective setting. A range containing zero or
-missing required bounds produces a conditional result and exit 0, with
-the break-even showing which setting wins on each side. These are modeled
-API-price savings, not an observed comparison of both policies or
-reductions to a subscription bill.
+cost minus off cost, summed over the whole analysis window, including
+summaries in unresumed sessions. Use observed costs where possible and
+state the assumptions used to estimate activation, client lifetime,
+summary size, and timing where they are unobserved. Recommend off when
+the aggregate estimated delta is positive, on when it is negative, and
+keep the current value when it is zero. Emit a change and a nonzero exit
+only when the recommended value differs from the effective setting and
+the control applies. A zero-cost period, an unprofitable individual idle,
+or a sensitivity range crossing zero does not override the aggregate
+estimate's winner. Show those sensitivity results and break-evens beside
+the recommendation. If required inputs cannot be estimated, report the
+missing evidence and conditional costs instead of inventing a net value
+or emitting a change. These are modeled API-price savings, not an observed
+comparison of both policies or reductions to a subscription bill.
 
 Synthetic tests cover both recommendation directions, conditional results,
 final periods with unknown client lifetime, and ineligible clients, TTLs,
 sizes, or controls. Include a resumed idle with savings, an unresumed
 summary that only adds cost, a return before original expiry, an expired
 prefix on a post-compaction request, and compactions without double counting.
-
-## Waiting
-
-- Maintainer: choose whether a zero-cost edge caused by no compaction
-  running should block an on/off recommendation. Recommended: allow a
-  recommendation when it is never more expensive across the reported
-  range and sometimes cheaper. The alternative is to keep the strict
-  positive-saving rule above, which makes many useful on/off cases
-  conditional. This needs the maintainer's choice at the required
-  third-round review checkpoint; no implementation can settle that policy.
+Verify mixed periods whose aggregate winner differs from the winner on
+most periods, a sensitivity range crossing zero with an estimable net
+winner, and a net-zero tie that keeps the current setting.
 
 ## Required
 

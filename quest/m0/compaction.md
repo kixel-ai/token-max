@@ -24,9 +24,8 @@ Recommendations for the implementer:
 - Evaluate windows after the TTL check's recommended values. Use replay's
   observed or estimated compaction charges once in the current baseline;
   the separate idle check evaluates their on/off policy after the window
-  recommendation. Report
-  each saving relative to that order, rather than adding independent
-  savings that may overlap.
+  recommendation. Report each saving relative to that order, rather than
+  adding independent savings that may overlap.
 
 ## Required
 

@@ -62,9 +62,11 @@ Decision prompts, chosen options marked ✅:
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
-  Say so in the output, report uncertainty in the measurable inputs, and
-  give a change only when the saving holds across their reported ranges.
-  Show behavioral limits such as extra re-reading as break-even caveats.
+  Recommend the lower estimated aggregate net cost, including extra work
+  the setting would add. State the replay assumptions, show uncertainty
+  and break-evens beside the estimate, and do not require a win on every
+  period or in every sensitivity scenario. Missing inputs that cannot be
+  estimated prevent a recommendation; uncertainty alone does not.
 - Default to a window since the setting last changed, read from the
   transcripts, so old behavior does not argue against a setting already in
   place. If no change history exists, use explicit `--since` or the available

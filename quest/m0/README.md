@@ -2,13 +2,15 @@
 
 ## Goal
 
-token-max 0.1.0 is published on crates.io, and its README shows how to
-install and run it. It replays this host's Claude Code and Codex transcripts
+`@kixelated/token-max` 0.1.0 is published on npm, and its README shows how to run it
+with npx or bunx, without a global install or Rust toolchain. It replays this host's Claude Code and Codex transcripts
 against public API prices and reports which agent settings should change.
 For each setting it prints the current value, the recommended one, the file
-or tool that owns it, the evidence, and what the change would have saved
-over the window and per month. It exits nonzero when anything should change
-and never edits settings. moq-dev/quest's `SETUP.md` points to it.
+or tool that owns it, and the evidence. Where costs can be quantified, it
+shows estimated net savings over the window and per month; otherwise it
+gives an applicable provider-guidance warning and says the dollars are
+unknown. It exits nonzero when anything should change and never edits
+settings. moq-dev/quest's `SETUP.md` points to it.
 
 ## Plan
 
@@ -53,27 +55,104 @@ Decision prompts, chosen options marked ✅:
 - Data: ✅ its own per-request transcript parser and
   [models.dev](https://models.dev) prices, the catalog ccusage also uses
   (rejected: ccusage's output, which lacks the per-request detail).
-- Language: ✅ Rust. Repository: ✅ kixelated. Name: ✅ token-max, the
+- Language: ✅ Node-compatible TypeScript, with Bun for development
+  (supersedes Rust, 2026-11-06: the maintainer delegated the choice and
+  explicitly allowed TypeScript; only a Rust stub exists). Distribution:
+  ✅ npm through npx and bunx (rejected: requiring Cargo or a native-binary
+  wrapper). Repository: ✅ kixelated. Name: ✅ token-max, the
   maintainer's pick (191 GitHub repositories share the name, and
   [Kalmantic/jusTokenMax](https://github.com/Kalmantic/jusTokenMax), a
   token-reduction toolkit, is close in name and topic).
 - Quest wrapper: ✅ none (rejected: `quest doctor` calling token-max).
 
+Expanded 2026-11-06 (maintainer, /quest-plan): ✅ include fast-mode,
+background-generation, skills-usage, and MCP/loaded-context checks in m0
+(rejected: m1). The goal is to quantify settings from transcripts where
+possible and warn from Claude/Codex guidance where they cannot be priced.
+Fast mode should be off. Extend the existing skills catalog quest rather
+than create a second owner for it. Model and review effort selection remain
+outside this expansion.
+
+Also requested 2026-11-06: ✅ a polished terminal report and one-command npm
+distribution in m0. Replay owns the TypeScript/tooling migration; the two
+new quests separately own presentation and packaging. The npm identifier
+is `@kixelated/token-max`; the command remains `token-max`. Keep the report
+usable in scripts and avoid a second analysis implementation.
+
+The epic's own remaining work is the end-to-end first-release validation,
+publishing the complete 0.1.0 package after every child merges, verifying
+the child's first-use docs against the published package, and clearing
+Quest's release handoff. The npm child writes the docs and prepares/tests
+the artifact and release path; it does not publish ahead of the other checks. Use the scoped package under the delegated distribution choice;
+do not infer publishability from a registry 404.
+
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
-  Say so in the output, and recommend a change only when the saving clears
-  that uncertainty.
+  Recommend the lower estimated aggregate net cost, including extra work
+  the setting would add. State the replay assumptions, show uncertainty
+  and break-evens beside the estimate, and do not require a win on every
+  period or in every sensitivity scenario. Missing inputs that cannot be
+  estimated prevent a priced recommendation; uncertainty alone does not.
+- Distinguish measured token usage, estimated attribution or replay, and
+  guidance without dollars in both text and JSON. Missing attribution is
+  unknown, never zero. Exit 2 on a failed scan, 1 when a change is
+  recommended, and 0 otherwise. Emit a change when an applicable effective
+  setting differs from a priced net winner, fast mode is enabled, the Bash
+  foreground cap is at or above its effective cache TTL, or the known
+  current ping policy differs from the estimated net winner among no
+  keepalive, the caps, and idle compaction where supported. With a supported
+  mechanism, this includes starting or changing a winning cap and stopping
+  active pings when another policy wins. Unknown ping state or an unsupported
+  mechanism stays advisory.
+  Guidance also emits a change for a documented budget violation, duplicate
+  listing, or a skill/MCP with positive recurring overhead and no observed
+  use under complete exposure and invocation visibility across the window.
+  Every automatic finding must still apply to the profile's current
+  effective configuration; historical-only or unresolved current state is
+  advisory. Unused findings for components introduced during the window
+  stay advisory. Rare-use rankings, incomplete visibility, unknown costs
+  alone, and conditional suggestions are advisory and exit zero unless
+  another check emits a change. Cite the applicable provider/version
+  guidance; no invented size or rarity cutoffs.
+- Cost attribution is not automatically removable waste: a skill, tool, or
+  check-in can avoid other work. State the fixed-behavior assumption and
+  account for observable extra reads or requests. Name each comparison's
+  baseline. Fast mode, background generation, skills, and context each
+  compare with the recorded/current profile baseline, holding other
+  settings constant; recommendations are not applied between these checks.
+  The existing TTL, window, idle, and keepalive checks retain their stated
+  evaluation order and label conditional baselines. m0 reports per-check
+  savings only, with no summed or joint savings total. API-price equivalents
+  are not a claim about subscription bills.
 - Default to a window since the setting last changed, read from the
   transcripts, so old behavior does not argue against a setting already in
-  place.
-- Read sessions where each CLI keeps them, honoring `CLAUDE_CONFIG_DIR` and
-  `CODEX_HOME`, and never print prompt or reply text.
+  place. If no change history exists, use explicit `--since` or the available
+  transcript window and label the replay as applying current settings to
+  historical sessions.
+- Discover and report all transcript profiles, honoring `CLAUDE_CONFIG_DIR`
+  and `CODEX_HOME` and explicit directory selection. Resolve settings and
+  recommendations per profile, deduplicate shared histories, and never
+  print prompt or reply text. Processing and token estimation stay local;
+  analysis network access is limited to public price data; package-manager
+  installation downloads are separate. Do not upload
+  transcript, instruction, skill, or schema content to a counting service.
+
+## Waiting
+
+- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-06, `npm whoami` returned E401; public packages suggest scope ownership but do not establish this session's authority. An agent can prepare and test without credentials, but cannot complete the account owner's login or grant itself rights. Check the authenticated identity and scope permissions up front. Configure trusted publishing near the actual release, respecting its first-publish expiry and whether it supports a new package; otherwise bootstrap by publishing the tested complete tarball with public access, then configure it for later releases. The npm child documents the path. No release is attempted during planning.
 
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - the transcript reader, prices, report, and the first check, which reproduces the audit's cache figures
+- [Polished terminal report](/quest/m0/cli.md) - clear recommendations, cost evidence, progress, and plain/JSON output
+- [One-command npm distribution](/quest/m0/npm.md) - built JavaScript launched with npx or Bun, without a Rust install
+- [Fast-mode check](/quest/m0/fast-mode.md) - recommends standard speed and reports the observed premium where the billed tier and price are known
 - [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
+- [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
+- [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
-- [Skills catalog check](/quest/m0/skills-catalog.md) - flags duplicate entries and a Codex skills catalog over its budget
-- [Keepalive check](/quest/m0/keepalive.md) - whether pinging idle sessions under the cache TTL would have cost less than their misses
+- [Context exposure measurement](/quest/m0/context-exposure.md) - local component estimates and invocation/exposure coverage shared by skills and context checks
+- [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
+- [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
+- [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds

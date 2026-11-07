@@ -344,7 +344,8 @@ test("unlinked API attempts expose missing usage instead of disappearing from co
     assert.equal(data.coverage.missingUsage, 1);
     assert.equal(data.requests[0]!.attempt!.maxOutputTokens, 1234);
     assert.equal(data.requests[0]!.agent, "subagent");
-    assert.equal(data.requests[0]!.parts[0]!.tier, "standard");
+    assert.equal(data.requests[0]!.parts[0]!.tier, null);
+    assert.equal(data.requests[0]!.requestedSpeed!.tier, "standard");
     assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE/);
     assert.equal(data.requests[0]!.evidence, "unknown");
     assert.match(
@@ -384,7 +385,8 @@ test("nested Codex settings and trigger attribution retain only whitelisted meta
     );
     await writeFile(file, lines.join("\n") + "\n");
     const data = await scan(w.options);
-    assert.equal(data.requests[0]!.parts[0]!.tier, "fast");
+    assert.equal(data.requests[0]!.parts[0]!.tier, null);
+    assert.equal(data.requests[0]!.requestedSpeed!.tier, "fast");
     assert.equal(data.requests[0]!.source, "cli");
     assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE/);
   } finally {

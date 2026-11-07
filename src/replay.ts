@@ -1,3 +1,4 @@
+import { speedChecks } from "./fast.js";
 import { analyzeExposure } from "./exposure.js";
 import type {
   BillingPart,
@@ -613,6 +614,7 @@ export function analyze(options: {
       now,
     }),
   );
+  checks.push(...speedChecks({ scan, catalog, since, now }));
   return {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),

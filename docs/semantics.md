@@ -480,3 +480,60 @@ Current provider guidance distinguishes skill discovery from body loading:
 [Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
+
+## Speed controls and premiums
+
+`checks` includes the `fast-mode` variant, using the same report, rendering,
+evidence, action and exit policy as the other checks. Its `current` and
+`recommended` values describe speed after known disabling controls;
+`replacement` names the owning setting syntax. `observed.premium` is the selected
+window's rate-only premium at present API rates, with known subtotal and unknown
+total kept separate. `currentEstimate.premium` applies the current effective
+speed preference to those tokens. Only the latter supplies this check's
+`savingsUsd` when it recommends a change. It is a rate-only comparison, not net
+of cache switching. A standard current preference keeps, regardless of old
+premium usage. No records means unknown dollars, not zero.
+
+Claude's default is off; per-session opt-in suppresses a saved true preference
+at startup. Managed false, environment disable, unsupported selected models and
+project/local overrides take precedence. Only active-profile shell environment
+is applied. The tool observes local files, not live session toggles, CLI
+`--settings`, server policy or availability checks. Codex gates default on in
+current documented versions; fast/priority and ultrafast use independent gates.
+Its local system/user files and requirements are inspected. Legacy
+`profile`/`profiles` configuration is version-dependent (removed in 0.134.0);
+new `NAME.config.toml` files require an unobserved `--profile` selection. Those
+scopes and project trust/launch selection stay advisory when unresolved.
+
+Requested controls have their own `Request.requestedSpeed` metadata and never
+populate billed `BillingPart.tier`/`speed`. In particular the native
+[Codex TokenUsageRecord schema](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs)
+contains no billed tier. Native Codex historical premiums therefore remain
+unknown; current-setting estimates can still use the recorded counts. Claude
+response `usage.speed` and `usage.service_tier` identify observed rates, including
+standard fallback after a fast request. Missing speed is unknown for this check,
+even where the general historical cost estimate labels a standard-speed
+assumption. Each sampling iteration keeps its own model and billing metadata.
+
+The [OpenAI API price table](https://developers.openai.com/api/docs/pricing),
+checked 2026-11-07, gives supported GPT-6 and GPT-5.6 fast rates at 2x standard,
+GPT-5.5 at 2.5x and GPT-5.4 at 2x below/equal 272K input. Verified ultrafast rates
+for GPT-6 Astra and GPT-6.1 Sol are 6x across their context tiers. Older or
+unsupported combinations remain unknown. These API rates are unrelated to
+subscription/credit multipliers. The existing same-model pricing path preserves
+reads, writes, write lifetimes, context tiers and Claude geography, with unchanged
+server fees excluded from the difference. Unverified usage and missing prices
+cannot supply a complete premium. Claude's fast and standard caches are separate;
+recorded cache categories are held constant and cold-cache switching costs are
+excluded. Monthly amounts extrapolate the selected window, independently of
+other checks, with fixed work and no valuation of latency.
+
+Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fast-mode),
+[Claude settings](https://code.claude.com/docs/en/settings-reference#fastmode),
+[Codex speed](https://learn.chatgpt.com/docs/agent-configuration/speed),
+[Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
+[profile migration](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles),
+[API fast mode](https://developers.openai.com/api/docs/guides/fast-mode) and
+[API ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode),
+checked 2026-11-07. Synthetic metadata follows these schemas; no real session
+content is stored or tested.

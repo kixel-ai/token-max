@@ -111,6 +111,18 @@ export interface WindowControl {
   minimumClaudePatch?: number;
   comparisonUnknown?: string;
 }
+/** Current native idle controls, with ownership and unresolved scopes kept explicit. */
+export interface IdleControl {
+  value: boolean | null;
+  owner: string;
+  threshold: number | null;
+  thresholdOwner: string;
+  autoCompact: boolean | null;
+  reason: string;
+  resolved: boolean;
+  ttl?: Profile["ttl"];
+  compaction?: Profile["compaction"];
+}
 /** A selected profile's current settings and their owning controls. */
 export interface Profile {
   id: string;
@@ -129,6 +141,9 @@ export interface Profile {
     default: WindowControl;
     models: Record<string, WindowControl>;
   };
+  idle?: IdleControl;
+  /** Current project controls observed at recorded working directories. */
+  idleDirectories?: Record<string, IdleControl>;
 }
 /** Discovery includes exclusions and failures so selection cannot imply full-host coverage. */
 export interface RootStatus {
@@ -278,7 +293,77 @@ export interface CompactionCheckResult extends CheckBase<number> {
   cacheEvidence: CacheReplayEvidence[];
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
-export type CheckResult = TtlCheckResult | CompactionCheckResult;
+export type CheckResult =
+  TtlCheckResult | CompactionCheckResult | IdleCheckResult;
+/** One request gap or final observation period, without an assumed session end. */
+export interface IdlePeriod {
+  request: string;
+  resume: string | null;
+  session: string;
+  contextTokens: number | null;
+  gapMs: number;
+  status: "eligible" | "ineligible" | "unknown" | "censored";
+  reason: string;
+  confirmed: boolean;
+  returnTiming: "before-expiry" | "after-expiry" | "near-expiry" | "final";
+  outcome: "applied" | "not-applied" | "unobserved";
+  event: string | null;
+  version: string | null;
+  client: string | null;
+  flagState: string | null;
+  activation: number | null;
+  activationBasis: string;
+  summaryCost: Cost;
+  calibration?: {
+    events: string[];
+    summaryTokens: number;
+    prefixTokens: number;
+  };
+}
+/** An aggregate idle policy comparison at one named TTL/window configuration. */
+export interface IdleScenario {
+  baseline: string;
+  applicable: boolean;
+  ttls: Record<"main" | "subagent", Ttl | null>;
+  windows: { owner: string; models: (string | null)[]; value: number | null }[];
+  periods: IdlePeriod[];
+  cost: Record<"on" | "off", Cost>;
+  /** Only changed charges, relative to the shared recorded-request baseline. */
+  adjustment: Record<"on" | "off", Cost>;
+  deltaUsd: number | null;
+  monthlyDeltaUsd: number | null;
+  byContext: {
+    tokens: number | null;
+    periods: number;
+    deltaUsd: number | null;
+  }[];
+  activationCohorts: {
+    version: string;
+    client: string;
+    flagState: string;
+    applied: number;
+    eligible: number;
+    fraction: number;
+  }[];
+  sensitivity: {
+    closedDeltaUsd: number | null;
+    openDeltaUsd: number | null;
+    largerSummaryDeltaUsd: number | null;
+    lateTriggerDeltaUsd: number | null;
+    lifetimeBreakEvenFraction: number | null;
+    rereadBreakEvenUsdPerResumedSummary: number | null;
+  };
+  unknown: string[];
+}
+/** Idle on/off runs after the TTL and window decisions, with a current-policy comparison. */
+export interface IdleCheckResult extends CheckBase<boolean> {
+  check: "idle-compaction";
+  bucket: "main";
+  threshold: number | null;
+  currentSettings: IdleScenario;
+  afterRecommendations: IdleScenario;
+  usageEstimates: UsageEstimate[];
+}
 /** The reusable parser output for downstream checks. */
 export interface Scan {
   snapshotStartedAt: string;

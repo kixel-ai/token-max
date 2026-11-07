@@ -1,7 +1,7 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL and compaction-window settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window and native Claude idle-compaction settings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -108,7 +108,9 @@ usage coverage, pre-window cache context, partially known costs, summary estimat
 component measurements with exposure/invocation coverage, calibration provenance,
 and check results. Each check has a `check` discriminator: `claude-cache-ttl`
 retains its TTL-specific fields, while `compaction-window` includes candidate
-windows, modeled summaries, prefix charges and sensitivity. TypeScript consumers
+windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
+current-settings and post-recommendation on/off costs, request/final periods,
+activation cohorts, context-size costs and lifetime/summary/timing sensitivities. TypeScript consumers
 should narrow `CheckResult` by `check` before reading setting-specific fields.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
@@ -147,3 +149,33 @@ Summary generation and cold resumed prefixes are included in net savings. Larger
 observed summaries/prefixes, cold-summary costs, and the extra re-read spend that
 would erase a saving accompany the aggregate winner. Lost detail and changed work
 remain unmeasured risks, not zero-cost observations.
+
+Idle compaction compares on and off over the same window, first with current
+controls and then after applicable TTL and window changes. The latter aggregate
+estimate decides: positive on-minus-off cost favors off, negative favors on, and
+a zero tie retains the current toggle. Final periods incur expected summary cost
+without an invented return benefit. A sensitivity crossing zero does not veto the
+point estimate. A recommended 5m main TTL or a window at/below the idle threshold
+makes idle compaction inapplicable.
+
+The native toggle defaults to true, requires Claude Code v2.1.290+, enabled
+auto-compaction and a 1h main TTL; versions before v2.1.314 also need confirmed
+feature availability. The threshold defaults to 200,000 tokens, with a 100,000
+floor for `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`. This check does not tune it.
+Current user, project/local, managed and active-profile environment owners are
+read separately from historical metadata. Missing directories, unknown execution
+mode/version/flags or unresolved controls remain advisory and unpriced where they
+affect the comparison. Native CLI interactivity needs REPL provenance; Desktop
+labels alone do not establish local/SSH execution. T3's proactive policies are
+outside this native check.
+
+Only verified native informational notices attribute an applied idle summary.
+`precomputed` alone does not. Where comparable known-on outcomes exist, their
+same-version/client/flag applied fraction estimates unobserved activation,
+including final periods. Otherwise the deciding assumption leaves the client
+open and awake for one documented near-expiry trigger. Closed/open alternatives,
+summary-size and timing sensitivity, the activation break-even and extra re-read
+cost per resumed summary accompany the recommendation. Missing boundaries never
+prove that discarded or unlogged summaries did not run. Without linked billed
+summary output and full resumed-prefix calibration, affected hypothetical costs
+stay unknown; `postTokens` alone cannot establish the full request.

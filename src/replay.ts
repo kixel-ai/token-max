@@ -28,6 +28,7 @@ import { estimateUsage } from "./estimates.js";
 import { observedTtl } from "./cache.js";
 import { cacheBucket as bucket, replayParts } from "./scenarios.js";
 import { compactionChecks } from "./compaction.js";
+import { idleChecks } from "./idle.js";
 import { identity, ScanError } from "./safe.js";
 
 const TTL_SOURCE =
@@ -596,6 +597,18 @@ export function analyze(options: {
       summaries: compactions,
       estimates,
       ttls: checks.filter((c) => c.check === "claude-cache-ttl"),
+      since,
+      now,
+    }),
+  );
+  checks.push(
+    ...idleChecks({
+      scan,
+      catalog,
+      summaries: compactions,
+      estimates,
+      ttls: checks.filter((c) => c.check === "claude-cache-ttl"),
+      windows: checks.filter((c) => c.check === "compaction-window"),
       since,
       now,
     }),

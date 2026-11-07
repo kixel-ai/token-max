@@ -34,7 +34,8 @@ const SOURCES = [
   "https://developers.openai.com/api/docs/guides/compaction (2026-11-07)",
 ];
 
-interface Sample {
+/** Linked summary output and the full first post-compaction cache prefix. */
+export interface CompactionSample {
   event: string;
   request: Request;
   p: BillingPart;
@@ -44,7 +45,11 @@ interface Sample {
   summary: BillingPart;
 }
 
-function sameCohort(r: Request, p: BillingPart, sample: Sample): boolean {
+function sameCohort(
+  r: Request,
+  p: BillingPart,
+  sample: CompactionSample,
+): boolean {
   return (
     p.model !== null &&
     r.provider !== null &&
@@ -75,12 +80,13 @@ function prefix(r: Request, p: BillingPart): number | null {
       : u.read + u.write;
 }
 
-function samples(options: {
+/** Calibrate summaries from billed output and full resumed requests, never postTokens alone. */
+export function compactionSamples(options: {
   requests: Request[];
   events: StructuralEvent[];
   summaries: CompactionCharge[];
-}): Sample[] {
-  const result: Sample[] = [];
+}): CompactionSample[] {
+  const result: CompactionSample[] = [];
   const byId = new Map(options.requests.map((r) => [r.id, r]));
   const boundaries = options.events.filter((e) => e.kind === "compaction");
   for (const event of boundaries) {
@@ -134,7 +140,7 @@ function samples(options: {
 }
 
 function summaryPart(
-  sample: Sample,
+  sample: CompactionSample,
   input: number,
   output: number,
   cold: boolean,
@@ -187,7 +193,7 @@ function simulate(options: {
   window: number;
   models: (string | null)[];
   catalog: Catalog;
-  samples: Sample[];
+  samples: CompactionSample[];
   since: number;
   larger: boolean;
   cold: boolean;
@@ -458,6 +464,48 @@ function simulate(options: {
   return result;
 }
 
+/** Apply selected window controls using the same simulation as the window check. */
+export function replayWindows(options: {
+  requests: Request[];
+  events: StructuralEvent[];
+  estimates: Map<string, UsageEstimate>;
+  windows: { value: number | null; models: (string | null)[] }[];
+  catalog: Catalog;
+  samples: CompactionSample[];
+  since: number;
+  ttls: Record<"main" | "subagent", Ttl | null>;
+}): Simulation {
+  const result: Simulation = {
+    requests: options.requests,
+    events: [],
+    added: [],
+    errors: [],
+    affected: new Set(),
+    estimatedParts: new Set(),
+  };
+  for (const window of options.windows) {
+    if (window.value === null) continue;
+    const next = simulate({
+      ...options,
+      requests: result.requests,
+      events: [...options.events, ...result.events],
+      estimates:
+        result.requests === options.requests ? options.estimates : new Map(),
+      window: window.value,
+      models: window.models,
+      larger: false,
+      cold: false,
+    });
+    result.requests = next.requests;
+    result.events.push(...next.events);
+    result.added.push(...next.added);
+    result.errors.push(...next.errors);
+    for (const id of next.affected) result.affected.add(id);
+    for (const id of next.estimatedParts) result.estimatedParts.add(id);
+  }
+  return result;
+}
+
 /** Compare compaction windows after the recommended TTLs, without summing independent savings. */
 export function compactionChecks(options: {
   scan: Scan;
@@ -537,7 +585,7 @@ export function compactionChecks(options: {
       unmatched,
       ...baseline.filter((i) => i.p.kind === "compaction").map(total),
     ]);
-    const calibration = samples({
+    const calibration = compactionSamples({
       requests,
       events,
       summaries: options.summaries,

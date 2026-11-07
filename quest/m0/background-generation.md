@@ -62,7 +62,3 @@ usage](https://code.claude.com/docs/en/costs#background-token-usage),
 [recap and suggestion settings](https://code.claude.com/docs/en/settings-reference),
 [goal check-in control](https://code.claude.com/docs/en/env-vars), and
 [Codex recap setting](https://learn.chatgpt.com/docs/config-file/config-reference).
-
-## Related
-
-- [Idle compaction check](/quest/m0/idle-compaction.md) - owns idle-summary costs and the on/off comparison

@@ -32,12 +32,12 @@ function instant(value: number | null): string {
 function estimate(value: number | null): string {
   return value === null ? "unknown" : usd(value);
 }
-function setting(value: string | number | null): string {
+function setting(value: string | number | boolean | null): string {
   return value === null
     ? "unknown"
     : typeof value === "number"
       ? `${value} tokens`
-      : value;
+      : String(value);
 }
 
 /** Render all findings in a wrapping flow, with complete evidence available in details. */
@@ -192,6 +192,37 @@ export function formatReport(
             "Fixed costs",
             "Identical fixed costs remain unknown and cancel in the cache comparison.",
           );
+      } else if (result.check === "idle-compaction") {
+        field(
+          "Effective idle threshold",
+          result.threshold === null ? "unknown" : `${result.threshold} tokens`,
+        );
+        for (const scenario of [
+          result.currentSettings,
+          result.afterRecommendations,
+        ]) {
+          field(
+            "Idle comparison",
+            `${scenario.baseline}; ${scenario.applicable ? "applicable" : "inapplicable"}; on ${money(scenario.cost.on)}, off ${money(scenario.cost.off)}`,
+          );
+          field(
+            "On minus off",
+            `${estimate(scenario.deltaUsd)} over window; ${estimate(scenario.monthlyDeltaUsd)} / 30 days`,
+          );
+          field(
+            "Idle periods",
+            `${scenario.periods.length} request/final periods; ${scenario.periods.filter((p) => p.status === "eligible").length} eligible, ${scenario.periods.filter((p) => p.confirmed).length} confirmed; ${scenario.periods.filter((p) => p.status === "censored").length} censored; ${scenario.periods.filter((p) => p.resume === null).length} final periods without observed return`,
+          );
+        }
+        const s = result.afterRecommendations.sensitivity;
+        field(
+          "Idle sensitivity, on minus off",
+          `closed ${estimate(s.closedDeltaUsd)}; open/awake ${estimate(s.openDeltaUsd)}; larger summary/full prefix ${estimate(s.largerSummaryDeltaUsd)}; late trigger ${estimate(s.lateTriggerDeltaUsd)}. The aggregate estimate decides.`,
+        );
+        field(
+          "Extra re-read break-even per resumed summary",
+          estimate(s.rereadBreakEvenUsdPerResumedSummary),
+        );
       } else {
         field(
           "Models",
@@ -279,6 +310,59 @@ export function formatReport(
               );
             }
           }
+        } else if (result.check === "idle-compaction") {
+          for (const scenario of [
+            result.currentSettings,
+            result.afterRecommendations,
+          ]) {
+            field("Idle scenario", scenario.baseline);
+            field(
+              "Conditional TTL baseline",
+              `main ${scenario.ttls.main ?? "unknown"}; outside-main ${scenario.ttls.subagent ?? "unknown"}; project-specific policies are retained in the period evidence`,
+            );
+            for (const w of scenario.windows)
+              field(
+                "Window control",
+                `${w.owner}; ${w.value ?? "unknown"} tokens; models ${w.models.map((m) => m ?? "unknown").join(", ")}`,
+              );
+            cost("Idle on", scenario.cost.on);
+            cost("Idle off", scenario.cost.off);
+            cost(
+              "On adjustment to common recorded baseline",
+              scenario.adjustment.on,
+            );
+            cost(
+              "Off adjustment to common recorded baseline",
+              scenario.adjustment.off,
+            );
+            for (const size of scenario.byContext)
+              field(
+                "Idle by context",
+                `${size.tokens ?? "unknown"} tokens; ${size.periods} periods; on minus off ${estimate(size.deltaUsd)}`,
+              );
+            for (const p of scenario.periods) {
+              field(
+                "Idle period",
+                `${p.request}; resume ${p.resume ?? "not observed"}; context ${p.contextTokens ?? "unknown"} tokens; gap ${p.gapMs}ms; ${p.status}; ${p.returnTiming}; ${p.reason}; ${p.outcome}; boundary ${p.event ?? "unobserved"}`,
+              );
+              field(
+                "Activation",
+                `${p.activation ?? "unknown"}; ${p.activationBasis}; version ${p.version ?? "unknown"}; client ${p.client ?? "unknown"}; flags ${p.flagState ?? "unknown"}`,
+              );
+              cost("Idle summary", p.summaryCost);
+              if (p.calibration)
+                field(
+                  "Idle geometry",
+                  `${p.calibration.summaryTokens} summary output tokens; ${p.calibration.prefixTokens} full resumed prefix tokens; boundaries ${p.calibration.events.join(", ")}`,
+                );
+            }
+            for (const cohort of scenario.activationCohorts)
+              field(
+                "Activation cohort",
+                `${cohort.version}/${cohort.client}/${cohort.flagState}: ${cohort.applied}/${cohort.eligible} applied (${cohort.fraction})`,
+              );
+            notes("Idle unknown", scenario.unknown);
+          }
         } else {
           cost("Current-window baseline", result.baselineCost);
           cost("Existing summaries", result.observedSummaryCost);
@@ -324,7 +408,7 @@ export function formatReport(
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        witnesses(result.cacheEvidence);
+        if (result.check !== "idle-compaction") witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
         notes("Source", result.sources);
@@ -390,6 +474,10 @@ export function formatReport(
 }
 
 function reason(result: CheckResult): string {
+  if (result.check === "idle-compaction")
+    return result.recommended === null
+      ? "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
+      : "Lowest estimated aggregate on/off net cost, including unresumed summaries; sensitivity does not veto the point estimate.";
   if (result.evidence === "guidance")
     return `Provider guidance; dollars ${result.savingsUsd === null ? "unknown" : "estimated separately"}. ${result.assumptions.join("; ")}`;
   if (result.recommended === null)

@@ -11,6 +11,8 @@ export interface DiscoveryOptions {
   env?: NodeJS.ProcessEnv;
   claudeDirs?: string[];
   codexDirs?: string[];
+  /** Override the system managed file for host adapters and synthetic tests. */
+  managedSettingsFile?: string;
 }
 
 function missing(error: unknown): boolean {
@@ -43,11 +45,33 @@ function ttl(value: unknown): Ttl | null {
   return value === "5m" || value === "1h" ? value : null;
 }
 
-function controls(
-  config: Record<string, unknown>,
-  env: NodeJS.ProcessEnv,
-  file: string,
-): Profile["ttl"] {
+/** Documented system file; other managed delivery mechanisms remain unobserved. */
+export function managedSettingsPath(
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === "darwin")
+    return "/Library/Application Support/ClaudeCode/managed-settings.json";
+  if (platform === "win32")
+    return "C:\\Program Files\\ClaudeCode\\managed-settings.json";
+  return "/etc/claude-code/managed-settings.json";
+}
+
+function controls(options: {
+  config: Record<string, unknown>;
+  env: NodeJS.ProcessEnv;
+  file: string;
+  managed: Record<string, unknown>;
+  managedFile: string;
+}): Profile["ttl"] {
+  const { config, env, file, managed, managedFile } = options;
+  const settingOwner = (key: string) =>
+    (Object.hasOwn(managed, key) ? managedFile : file) + ":" + key;
+  const envOwner = (key: string) =>
+    Object.hasOwn(env, key)
+      ? key
+      : (Object.hasOwn(object(managed.env), key) ? managedFile : file) +
+        ":env." +
+        key;
   const values = { ...object(config.env), ...env };
   const result = {} as Profile["ttl"];
   for (const bucket of ["main", "subagent"] as const) {
@@ -57,38 +81,37 @@ function controls(
         : "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL";
     const key = bucket === "main" ? "promptCacheTtl" : "subagentPromptCacheTtl";
     let value: Ttl | null = null;
-    let owner = file + ":" + key;
+    let owner = settingOwner(key);
     let reason =
       "billing state is unknown; main default can change from included subscription usage to credits";
     if (values.DISABLE_PROMPT_CACHING === "1") {
       reason = "prompt caching is disabled";
     } else if (values.FORCE_PROMPT_CACHING_5M === "1") {
       value = "5m";
-      owner = "FORCE_PROMPT_CACHING_5M";
+      owner = envOwner("FORCE_PROMPT_CACHING_5M");
       reason = "environment override";
     } else if (ttl(values[variable])) {
       value = ttl(values[variable]);
-      owner = variable;
+      owner = envOwner(variable);
       reason = "environment override";
     } else if (ttl(config[key])) {
       value = ttl(config[key]);
       reason = "current user/managed setting";
     } else if (values.ENABLE_PROMPT_CACHING_1H === "1") {
       value = "1h";
-      owner = "ENABLE_PROMPT_CACHING_1H";
+      owner = envOwner("ENABLE_PROMPT_CACHING_1H");
       reason = "environment override; agent frontmatter may take precedence";
     } else if (bucket === "subagent") {
       value = "5m";
       reason =
         "documented default; agent frontmatter and server helpers may override";
     } else if (
-      values.ANTHROPIC_API_KEY ||
       values.CLAUDE_CODE_USE_BEDROCK === "1" ||
       values.CLAUDE_CODE_USE_VERTEX === "1" ||
       values.CLAUDE_CODE_USE_FOUNDRY === "1"
     ) {
       value = "5m";
-      reason = "API/cloud billing default";
+      reason = "explicit cloud-provider billing default";
     }
     result[bucket] = { value, owner, reason };
   }
@@ -172,10 +195,11 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       continue;
     const path = join(home, entry.name);
     try {
+      if (!(await stat(path)).isDirectory()) continue;
       await stat(join(path, harness === "claude" ? "projects" : "sessions"));
       add(harness, path, "discovered");
     } catch (error) {
-      if (!missing(error)) {
+      if (!missing(error) && object(error).code !== "ENOTDIR") {
         add(harness, path, "discovered");
       }
     }
@@ -211,14 +235,10 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       root.harness === "claude" ? "settings.json" : "config.toml",
     );
     let config = await settings(settingsFile, root.harness);
+    const managedFile = options.managedSettingsFile ?? managedSettingsPath();
+    const managed =
+      root.harness === "claude" ? await settings(managedFile, "claude") : {};
     if (root.harness === "claude") {
-      const managed = await settings(
-        join(
-          home === homedir() ? "/etc/claude-code" : home,
-          "managed-settings.json",
-        ),
-        "claude",
-      );
       config = {
         ...config,
         ...managed,
@@ -268,7 +288,13 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       aliases: [root.path],
       histories,
       settingsFile,
-      ttl: controls(config, localEnv, settingsFile),
+      ttl: controls({
+        config,
+        env: localEnv,
+        file: settingsFile,
+        managed,
+        managedFile,
+      }),
       provider,
       settings: structuralSettings(config),
     });

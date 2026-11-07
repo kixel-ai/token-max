@@ -18,7 +18,11 @@ export async function workspace() {
     claude,
     codex,
     dispose: () => rm(home, { recursive: true, force: true }),
-    options: { home, env: {} },
+    options: {
+      home,
+      env: {},
+      managedSettingsFile: join(home, "managed-settings.json"),
+    },
   };
 }
 /** Copy a checked-in synthetic transcript into an isolated profile. */

@@ -59,6 +59,8 @@ export interface Request {
 /** Structural context and timing evidence, never a billed boundary request. */
 export interface StructuralEvent {
   id: string;
+  /** All observed conversation aliases and safe locations for a copied event. */
+  origins: { session: string; location: Location }[];
   harness: Harness;
   session: string;
   time: number;
@@ -87,6 +89,14 @@ export interface StructuralEvent {
   toolId: string | null;
   settings: Record<string, string | number | boolean>;
   idleAttribution: "unknown" | "notice";
+  /** Preceding metadata from this file, retained even before the selected window. */
+  pricing: {
+    model: string | null;
+    provider: string | null;
+    tier: string | null;
+    speed: string | null;
+    geo: string | null;
+  } | null;
 }
 /** A selected profile's current user settings and their effective TTL controls. */
 export interface Profile {
@@ -155,11 +165,16 @@ export interface CheckResult {
   requests: number;
   cost: Record<Ttl, Cost>;
   summaryCost: Record<Ttl, Cost>;
+  /** Scenario-dependent request costs used to compare TTLs. */
+  comparisonCost: Record<Ttl, Cost>;
+  /** Server fees and unmatched summary proxies held identical in both scenarios. */
+  fixedCost: Cost;
   savingsUsd: number | null;
   monthlySavingsUsd: number | null;
   breakEven: string | null;
   sensitivity: {
     coldPrefix1hUsd: number | null;
+    coldPrefix1hComparisonUsd: number | null;
     warmReuseBreakEvenFraction: number | null;
   };
   assumptions: string[];

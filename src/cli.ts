@@ -59,13 +59,17 @@ export function formatReport(report: Report): string {
     lines.push(
       `  5m ${money(result.cost["5m"])}; 1h ${money(result.cost["1h"])} (summary proxies: ${money(result.summaryCost["5m"])}/${money(result.summaryCost["1h"])})`,
     );
+    if (result.fixedCost.totalUsd === null)
+      lines.push(
+        `  TTL comparison: 5m ${money(result.comparisonCost["5m"])}; 1h ${money(result.comparisonCost["1h"])}; identical fixed costs remain unknown.`,
+      );
     if (result.savingsUsd !== null)
       lines.push(
         `  Estimated net saving vs current: $${result.savingsUsd.toFixed(2)}${result.monthlySavingsUsd === null ? "" : `; $${result.monthlySavingsUsd.toFixed(2)}/30 days`}`,
       );
     if (result.breakEven)
       lines.push(
-        `  Sensitivity: ${result.breakEven}; cold-prefix 1h $${result.sensitivity.coldPrefix1hUsd!.toFixed(2)}. The aggregate estimate decides the winner.`,
+        `  Sensitivity: ${result.breakEven}; cold-prefix 1h comparison $${result.sensitivity.coldPrefix1hComparisonUsd!.toFixed(2)} (fixed costs excluded). The aggregate estimate decides the winner.`,
       );
     for (const assumption of result.assumptions)
       lines.push(`  Assumption: ${assumption}`);

@@ -141,6 +141,7 @@ interface Context {
   tier: string | null;
   source: string | null;
   cwd: string | null;
+  pricing: StructuralEvent["pricing"];
 }
 
 function event(
@@ -153,8 +154,9 @@ function event(
 ): StructuralEvent {
   return {
     id: identity(
-      `${snapshot.harness}:${context.session}:${kind}:${typeof key === "string" ? key : `${snapshot.file}:${location.line}`}`,
+      `${snapshot.harness}:${kind}:${typeof key === "string" ? key : `${snapshot.file}:${location.line}`}`,
     ),
+    origins: [{ session: context.session, location }],
     harness: snapshot.harness,
     session: context.session,
     time,
@@ -175,6 +177,7 @@ function event(
     toolId: null,
     settings: {},
     idleAttribution: "unknown",
+    pricing: context.pricing ? { ...context.pricing } : null,
   };
 }
 
@@ -325,9 +328,10 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   const legacy: { request: Request; totalKey: string | null }[] = [];
   function addEvent(e: StructuralEvent) {
     const previous = events.get(e.id);
-    if (previous)
+    if (previous) {
       previous.profiles = [...new Set([...previous.profiles, ...e.profiles])];
-    else events.set(e.id, e);
+      previous.origins.push(...e.origins);
+    } else events.set(e.id, e);
   }
   function add(r: Request) {
     const previous = requests.get(r.id);
@@ -386,6 +390,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
       tier: null,
       source: null,
       cwd: null,
+      pricing: null,
     };
     let previousTotal: Usage | null = null;
     await readSnapshot(snapshot, (raw, location) => {
@@ -422,6 +427,21 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
             ];
           refs.set(ref, pending);
           return;
+        }
+        // Structural pricing context is needed for later boundaries even outside --since.
+        if (raw.type === "assistant" && raw.isApiErrorMessage !== true) {
+          const m = object(raw.message);
+          const u = object(m.usage);
+          if (m.model !== "<synthetic>" && label(m.model)) {
+            context.model = label(m.model);
+            context.pricing = {
+              model: context.model,
+              provider: context.provider,
+              tier: label(u.service_tier),
+              speed: label(u.speed),
+              geo: label(u.inference_geo),
+            };
+          }
         }
         if (!selected) return;
         if (raw.type === "assistant") {
@@ -637,7 +657,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
           location,
           context,
           time,
-          `${context.session}:${time}:${JSON.stringify(total)}`,
+          `${context.turn ?? context.session}:${time}:${JSON.stringify(total)}`,
         );
         r.accounting = info.last_token_usage ? "legacy-last" : "legacy-delta";
         r.evidence = info.last_token_usage ? "measured" : "estimated";
@@ -788,9 +808,18 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
         );
     }
   }
-  for (const e of events.values())
+  for (const e of events.values()) {
     if (e.request?.startsWith("ref:"))
       e.request = refToRequest.get(e.request.slice(4)) ?? null;
+    if (e.harness === "claude" && e.pricing && e.pricing.provider === null) {
+      const current = discovery.profiles.filter((p) =>
+        e.profiles.includes(p.id),
+      );
+      const providers = new Set(current.map((p) => p.provider));
+      if (providers.size === 1)
+        e.pricing.provider = current[0]!.provider ?? "anthropic";
+    }
+  }
   const sortedRequests = [...requests.values()].sort(
     (a, b) => a.time - b.time || a.id.localeCompare(b.id),
   );

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
 import type { Profile, Request, Scan, StructuralEvent } from "../src/model.js";
+import { formatReport } from "../src/cli.js";
 import { analyze } from "../src/replay.js";
 import { scan } from "../src/reader.js";
 import {
@@ -312,4 +313,143 @@ test("default windows use observed write-TTL changes while explicit windows take
     analyze({ scan: s, catalog: c, now: 1200000, since: 0 }).checks[0]!.since,
     0,
   );
+});
+
+test("scenario-invariant unknown server fees do not veto a priced TTL difference", async () => {
+  const first = makeRequest({ serverTools: { code_execution_requests: 1 } });
+  const next = makeRequest({
+    ...first,
+    id: "later",
+    time: 600000,
+    endTime: 600000,
+  });
+  const result = analyze({
+    scan: data([first, next]),
+    catalog: await prices(),
+    now: 1200000,
+  }).checks[0]!;
+  assert.equal(result.action, "change");
+  assert.equal(result.recommended, "1h");
+  assert.equal(result.cost["5m"].totalUsd, null);
+  assert.equal(result.cost["1h"].totalUsd, null);
+  assert.ok(result.savingsUsd! > 0);
+  const report = analyze({
+    scan: data([first, next]),
+    catalog: await prices(),
+    now: 1200000,
+  });
+  assert.match(formatReport(report), /identical fixed costs remain unknown/);
+  // Unknown request usage is not scenario-invariant and must still block a winner.
+  next.parts[0]!.usage = { ...next.parts[0]!.usage, write: null, read: null };
+  assert.equal(
+    analyze({
+      scan: data([first, next]),
+      catalog: await prices(),
+      now: 1200000,
+    }).checks[0]!.recommended,
+    null,
+  );
+});
+
+test("mixed outside-main agent TTLs retain the available history window", async () => {
+  const first = makeRequest({
+    agent: "subagent",
+    source: "agent:builtin:general-purpose",
+  });
+  const helper = makeRequest({
+    id: "helper",
+    session: "helper-session",
+    agent: "subagent",
+    source: "session_title",
+    time: 600000,
+    endTime: 600000,
+    parts: [{ ...first.parts[0]!, usage: claudeUsage({ ttl: "1h" }) }],
+  });
+  const again = { ...first, id: "again", time: 1200000, endTime: 1200000 };
+  const result = analyze({
+    scan: data([first, helper, again]),
+    catalog: await prices(),
+    now: 1800000,
+  }).checks[0]!;
+  assert.equal(result.since, 0);
+  assert.equal(result.requests, 3);
+  assert.match(result.windowBasis, /mixed/i);
+});
+
+test("a selected boundary retains its own pre-window pricing context", async () => {
+  const w = await workspace();
+  try {
+    const file = join(w.claude, "projects/project/main.jsonl");
+    await fixture(file, "claude.jsonl");
+    const fs = await import("node:fs/promises");
+    await writeFile(
+      file,
+      (await fs.readFile(file, "utf8")).replace(
+        "2026-11-01T00:20:00Z",
+        "2026-11-02T00:20:00Z",
+      ),
+    );
+    const s = await scan({ ...w.options, since: Date.parse("2026-11-02") });
+    assert.equal(s.requests.length, 0);
+    const result = analyze({
+      scan: s,
+      catalog: await prices(),
+      since: Date.parse("2026-11-02"),
+      now: Date.parse("2026-11-03"),
+    });
+    assert.equal(result.compactions[0]!.cost.totalUsd, 0.0064);
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("an unknown unmatched summary proxy cancels without hiding its unknown full cost", async () => {
+  const first = makeRequest({
+    agent: "subagent",
+    source: "agent:builtin:general-purpose",
+  });
+  const next = makeRequest({
+    ...first,
+    id: "next",
+    time: 600000,
+    endTime: 600000,
+  });
+  const event: StructuralEvent = {
+    id: "unpriced-summary",
+    origins: [
+      { session: "other-session", location: { file: "synthetic", line: 1 } },
+    ],
+    harness: "claude",
+    session: "other-session",
+    time: 300000,
+    kind: "compaction",
+    profiles: ["profile"],
+    location: { file: "synthetic", line: 1 },
+    request: null,
+    model: null,
+    version: "2.1.314",
+    client: "sdk-ts",
+    cwd: null,
+    trigger: "auto",
+    precomputed: true,
+    preTokens: null,
+    postTokens: null,
+    durationMs: null,
+    tool: null,
+    toolId: null,
+    settings: {},
+    idleAttribution: "unknown",
+    pricing: null,
+  };
+  const result = analyze({
+    scan: data([first, next], [event]),
+    catalog: await prices(),
+    now: 1200000,
+  }).checks[0]!;
+  assert.equal(result.recommended, "1h");
+  assert.equal(result.action, "change");
+  assert.equal(result.summaryCost["5m"].totalUsd, null);
+  assert.equal(result.fixedCost.totalUsd, null);
+  assert.equal(result.cost["1h"].totalUsd, null);
+  assert.ok(result.savingsUsd! > 0);
 });

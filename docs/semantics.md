@@ -37,7 +37,11 @@ Overlapping `event_msg.token_count` records are removed by matching cumulative
 thread usage, not added again. Older records use `last_token_usage` where present;
 otherwise only verified differences between successive cumulative counters are
 used. Repeated totals add nothing. A first total or reset without a per-request
-last usage stays unknown. Inherited response identities deduplicate across files.
+last usage stays unknown. Inherited response identities deduplicate across files. Legacy records with a
+recorded turn identity also deduplicate copied counters across changed session
+metadata. Without a response/turn identity, copied legacy history cannot be
+proved identical from timestamps and token counts alone; the session-scoped
+fallback does not claim a complete fork-history deduplication.
 The [Codex protocol](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs),
 inspected 2026-11-07, defines these counters and their accumulation.
 
@@ -83,13 +87,26 @@ are preserved as evidence of an externally warmed prefix. First visible requests
 keep observed reads. Model/speed/provider/conversation changes and compaction
 boundaries break inferred reuse. The lower aggregate estimate decides the winner,
 even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
-reuse break-even accompany the estimate and do not veto it.
+reuse break-even accompany the estimate and do not veto it. `comparisonCost`
+contains scenario-dependent request costs; `fixedCost` holds server fees and
+unmatched summary proxies identical in both scenarios. Those fixed terms cancel
+even if their full price is unknown, while the full scenario totals retain null
+and the reason. Unknown request usage can change the TTL difference and still
+blocks a priced winner. Mixed agent/source TTLs preserve the available history;
+a transition is inferred only within a source/agent/model cohort, with no
+conflicting latest cohort TTLs.
 
 Current TTL resolution follows force-5m, bucket environment, bucket setting,
 enable-1h, then defaults. Shell overrides apply only to the active config root;
 each profile's settings environment is read separately. Main subscription billing
 within plan versus credits is not inferred from credential files, so its unset
-default can be unknown. Agent frontmatter, project/CLI controls, cloud/gateway
+default can be unknown. An API key in the environment does not prove that Claude
+Code accepted API billing. User settings and the platform's system managed JSON
+file retain the supplying file as owner, including settings-provided environment
+variables. Other managed delivery mechanisms are not inspected; this is a
+conditional replay of the observed files, not proof of effective organization
+policy. See [managed file locations](https://code.claude.com/docs/en/managed-settings),
+checked 2026-11-07. Agent frontmatter, project/CLI controls, cloud/gateway
 support, and server-controlled helpers can override a profile default. The latest
 recorded client version is the labelled applicability assumption; versions absent
 or before 2.1.242 stay advisory. See
@@ -101,7 +118,10 @@ request references associate usage; a unique summary since the preceding boundar
 can receive labelled sequence attribution. Linked usage is already in request
 costs and is never added again. An unmatched Claude boundary gets one separate
 estimate using `preTokens` as ordinary summary input and `postTokens` as an output
-proxy, with the preceding model/tier/provider assumption. Warm reads can cost less;
+proxy, with the preceding model/tier/provider assumption from that file's
+metadata, even before `--since`. Stable boundary identities deduplicate copied
+boundaries across changed session metadata; their observed conversation/location
+aliases remain available for attribution and cache invalidation. Warm reads can cost less;
 cold writes can reach 2x input, before unknown system/tool/instruction overhead.
 The proxy is included once in each outside-main TTL scenario, separately from
 subagent request totals. Unknown timing and missing write splits prevent inventing

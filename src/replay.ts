@@ -88,20 +88,37 @@ function proxyRequest(
   event: StructuralEvent,
   previous: Request | undefined,
 ): Request | null {
-  if (!previous || event.preTokens === null || event.postTokens === null)
-    return null;
-  const part = previous.parts.at(-1);
-  if (!part) return null;
+  if (event.preTokens === null || event.postTokens === null) return null;
+  const pricing = event.pricing ?? previous?.parts.at(-1);
+  if (!pricing) return null;
   return {
-    ...previous,
+    evidence: "estimated",
     id: identity(event.id),
+    harness: event.harness,
+    session: event.session,
     time: event.time,
     endTime: event.time,
     agent: "subagent",
+    model: pricing.model,
+    provider: event.pricing?.provider ?? previous?.provider ?? null,
+    api: "messages",
+    source: "compaction",
+    trigger: event.trigger,
+    reference: null,
+    turn: null,
+    version: event.version,
+    client: event.client,
+    cwd: event.cwd,
+    profiles: event.profiles,
+    locations: [event.location],
+    accounting: "individual",
     serverTools: {},
     parts: [
       {
-        ...part,
+        model: pricing.model,
+        tier: pricing.tier,
+        speed: pricing.speed,
+        geo: pricing.geo,
         kind: "compaction",
         usage: {
           input: event.preTokens,
@@ -116,7 +133,9 @@ function proxyRequest(
         },
       },
     ],
-    issues: ["summary model/tier/provider assumed from preceding request"],
+    issues: [
+      "summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded",
+    ],
   };
 }
 
@@ -136,14 +155,21 @@ export function compactionCharges(
   }
   const byId = new Map(scan.requests.map((r) => [r.id, r]));
   for (const e of scan.events.filter((e) => e.kind === "compaction")) {
-    const session = sessions.get(e.session) ?? [];
+    const aliases = [...new Set(e.origins.map((o) => o.session))];
+    const session = [
+      ...new Map(
+        aliases
+          .flatMap((alias) => sessions.get(alias) ?? [])
+          .map((r) => [r.id, r]),
+      ).values(),
+    ].sort((a, b) => a.time - b.time);
     let linked = e.request ? byId.get(e.request) : undefined;
     let pairing = "explicit request identity";
     if (!linked) {
       const candidates = session.filter(
         (r) =>
           r.time <= e.time &&
-          r.time > (lastBoundary.get(e.session) ?? -Infinity) &&
+          r.time > (lastBoundary.get(r.session) ?? -Infinity) &&
           r.parts.some((p) => p.kind === "compaction") &&
           !claimed.has(r.id),
       );
@@ -153,7 +179,7 @@ export function compactionCharges(
           "estimated sequence attribution: one recorded summary since preceding boundary";
       }
     }
-    lastBoundary.set(e.session, e.time);
+    for (const alias of aliases) lastBoundary.set(alias, e.time);
     const assumptions = [
       "boundary time and duration do not establish summary generation time",
       "precomputed does not prove idle compaction; no missing final boundary proves no summary",
@@ -210,17 +236,33 @@ export function compactionCharges(
 function defaultSince(
   requests: Request[],
   selectedBucket: "main" | "subagent",
-): number | null {
-  let previous: Ttl | null = null;
-  let change: number | null = null;
+): { change: number | null; mixed: boolean } {
+  const cohorts = new Map<string, { ttl: Ttl; change: number | null }>();
+  let ambiguous = false;
   for (const r of requests)
-    for (const part of r.parts)
-      if (bucket(r, part) === selectedBucket) {
-        const ttl = observedTtl(part);
-        if (ttl && previous && ttl !== previous) change = r.time;
-        if (ttl) previous = ttl;
-      }
-  return change;
+    for (const p of r.parts) {
+      if (bucket(r, p) !== selectedBucket) continue;
+      const ttl = observedTtl(p);
+      if (!ttl) continue;
+      // Sources/agent kinds can legitimately have different policies concurrently.
+      // Missing source cannot establish a transition within the outside-main bucket.
+      if (selectedBucket === "subagent" && !r.source) ambiguous = true;
+      const key = [r.source, r.agent, p.kind, p.model].join(":");
+      const previous = cohorts.get(key);
+      cohorts.set(key, {
+        ttl,
+        change:
+          previous && previous.ttl !== ttl
+            ? r.time
+            : (previous?.change ?? null),
+      });
+    }
+  const mixed = new Set([...cohorts.values()].map((c) => c.ttl)).size > 1;
+  if (mixed || ambiguous) return { change: null, mixed: true };
+  const changes = [...cohorts.values()].flatMap((c) =>
+    c.change === null ? [] : [c.change],
+  );
+  return { change: changes.length ? Math.max(...changes) : null, mixed: false };
 }
 
 function replayCost(options: {
@@ -238,15 +280,15 @@ function replayCost(options: {
   const boundaries = new Map<string, number[]>();
   for (const e of scan.events)
     if (e.kind === "compaction") {
-      const times = boundaries.get(e.session) ?? [];
-      times.push(e.time);
-      boundaries.set(e.session, times);
+      for (const origin of e.origins) {
+        const times = boundaries.get(origin.session) ?? [];
+        times.push(e.time);
+        boundaries.set(origin.session, times);
+      }
     }
   for (const r of requests) {
-    let includesPart = false;
     for (const p of r.parts) {
       if (bucket(r, p) !== selectedBucket) continue;
-      includesPart = true;
       const key = [r.session, p.model, r.provider, p.speed, p.kind].join(":");
       let prior = previous.get(key);
       if (
@@ -277,7 +319,6 @@ function replayCost(options: {
         });
       else previous.delete(key);
     }
-    if (includesPart && r.time >= since) parts.push(serverCost(r));
   }
   return addCosts(parts);
 }
@@ -308,8 +349,11 @@ function check(options: {
         )
       : [];
   if (!relevant.length && !boundaries.length) return null;
-  const change =
-    options.since === undefined ? defaultSince(requests, selectedBucket) : null;
+  const window =
+    options.since === undefined
+      ? defaultSince(requests, selectedBucket)
+      : { change: null, mixed: false };
+  const change = window.change;
   const since =
     options.since ??
     change ??
@@ -332,43 +376,60 @@ function check(options: {
         .map((s) => s.ttlCost["1h"]),
     ),
   };
-  const cost = {
-    "5m": addCosts([
-      replayCost({ requests, scan, catalog, selectedBucket, ttl: "5m", since }),
-      summaryCost["5m"],
-    ]),
-    "1h": addCosts([
-      replayCost({ requests, scan, catalog, selectedBucket, ttl: "1h", since }),
-      summaryCost["1h"],
-    ]),
-  };
-  const cold = addCosts([
-    replayCost({
+  const comparisonCost = {
+    "5m": replayCost({
+      requests,
+      scan,
+      catalog,
+      selectedBucket,
+      ttl: "5m",
+      since,
+    }),
+    "1h": replayCost({
       requests,
       scan,
       catalog,
       selectedBucket,
       ttl: "1h",
       since,
-      coldPrefixes: true,
     }),
-    summaryCost["1h"],
+  };
+  const fixedCost = addCosts([
+    ...relevant.filter((r) => r.time >= since).map(serverCost),
+    summaryCost["5m"],
   ]);
+  const cost = {
+    "5m": addCosts([comparisonCost["5m"], fixedCost]),
+    "1h": addCosts([comparisonCost["1h"], fixedCost]),
+  };
+  const coldComparison = replayCost({
+    requests,
+    scan,
+    catalog,
+    selectedBucket,
+    ttl: "1h",
+    since,
+    coldPrefixes: true,
+  });
+  const cold = addCosts([coldComparison, fixedCost]);
   const benefit =
-    cold.totalUsd !== null && cost["1h"].totalUsd !== null
-      ? cold.totalUsd - cost["1h"].totalUsd
+    coldComparison.totalUsd !== null && comparisonCost["1h"].totalUsd !== null
+      ? coldComparison.totalUsd - comparisonCost["1h"].totalUsd
       : null;
   const breakEven =
-    benefit !== null && benefit > 0 && cost["5m"].totalUsd !== null
-      ? (cold.totalUsd! - cost["5m"].totalUsd) / benefit
+    benefit !== null && benefit > 0 && comparisonCost["5m"].totalUsd !== null
+      ? (coldComparison.totalUsd! - comparisonCost["5m"].totalUsd) / benefit
       : null;
   const current = profile.ttl[selectedBucket];
   let recommended: Ttl | null = null;
-  if (cost["5m"].totalUsd !== null && cost["1h"].totalUsd !== null)
+  if (
+    comparisonCost["5m"].totalUsd !== null &&
+    comparisonCost["1h"].totalUsd !== null
+  )
     recommended =
-      cost["5m"].totalUsd! < cost["1h"].totalUsd!
+      comparisonCost["5m"].totalUsd! < comparisonCost["1h"].totalUsd!
         ? "5m"
-        : cost["1h"].totalUsd! < cost["5m"].totalUsd!
+        : comparisonCost["1h"].totalUsd! < comparisonCost["5m"].totalUsd!
           ? "1h"
           : current.value;
   const recentVersion =
@@ -385,7 +446,8 @@ function check(options: {
       : "advisory";
   const savings =
     current.value && recommended
-      ? cost[current.value].totalUsd! - cost[recommended].totalUsd!
+      ? comparisonCost[current.value].totalUsd! -
+        comparisonCost[recommended].totalUsd!
       : null;
   const profiles = [
     ...new Set([
@@ -426,11 +488,15 @@ function check(options: {
         ? "explicit --since; current settings applied to history"
         : change !== null
           ? "since latest observed write-TTL transition; not proof of a setting change"
-          : "available history; no recorded setting change, current settings applied to history",
+          : window.mixed
+            ? "available history; mixed agent/source TTLs do not establish a shared setting transition"
+            : "available history; no recorded setting change, current settings applied to history",
     baseline: `current ${selectedBucket} TTL for ${profile.root}`,
     requests: relevant.filter((r) => r.time >= since).length,
     cost,
     summaryCost,
+    comparisonCost,
+    fixedCost,
     savingsUsd: savings,
     monthlySavingsUsd:
       savings !== null && now > since
@@ -442,6 +508,7 @@ function check(options: {
         : `1h breaks even at ${(breakEven * 100).toFixed(1)}% of modeled warm-prefix reuse in 5-60 minute gaps`,
     sensitivity: {
       coldPrefix1hUsd: cold.totalUsd,
+      coldPrefix1hComparisonUsd: coldComparison.totalUsd,
       warmReuseBreakEvenFraction: breakEven,
     },
     assumptions: [
@@ -449,6 +516,7 @@ function check(options: {
       "latest recorded client version is assumed to remain applicable to current profile controls",
       "1h writes use documented 2x input; first visible request keeps observed reads from prefixes warmed before the window",
       "reuse conversions are limited to the previously cached prefix; new input stays a write",
+      "server fees and unmatched summary proxies are held identical in both TTL scenarios and cancel in comparisonCost, even if fixedCost is unknown",
       "per-check savings share baselines and must not be summed",
     ],
     uncertainty: [...new Set(uncertainty)],

@@ -1,8 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { appendFile, mkdir, stat, symlink, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
-import { discover } from "../src/discovery.js";
+import { discover, managedSettingsPath } from "../src/discovery.js";
 import { readSnapshot, scan, usage } from "../src/reader.js";
 import { ScanError } from "../src/safe.js";
 import { fixture, workspace } from "./helpers.js";
@@ -258,7 +265,7 @@ test("current environment overrides are scoped to the active config root", async
       JSON.stringify({ promptCacheTtl: "1h", subagentPromptCacheTtl: "1h" }),
     );
     const data = await discover({
-      home: w.home,
+      ...w.options,
       env: {
         CLAUDE_CONFIG_DIR: w.claude,
         FORCE_PROMPT_CACHING_5M: "1",
@@ -403,4 +410,149 @@ test("large UTF-8 records span chunks without retaining content; a shrunk snapsh
   } finally {
     await w.dispose();
   }
+});
+
+test("copied Claude boundaries deduplicate across changed session IDs", async () => {
+  const w = await workspace();
+  try {
+    const file = join(w.claude, "projects/project/main.jsonl");
+    await fixture(file, "claude.jsonl");
+    await writeFile(
+      join(w.claude, "projects/project/copy.jsonl"),
+      (await readFile(file, "utf8")).replaceAll("session-a", "session-copy"),
+    );
+    const result = await scan(w.options);
+    assert.equal(result.requests.length, 2);
+    assert.equal(
+      result.events.filter((e) => e.kind === "compaction").length,
+      1,
+    );
+    assert.equal(
+      new Set(
+        result.events
+          .find((e) => e.kind === "compaction")!
+          .origins.map((o) => o.session),
+      ).size,
+      2,
+    );
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("managed TTL controls retain the managed owner and API-key presence leaves billing unknown", async () => {
+  const w = await workspace();
+  try {
+    const managedFile = join(w.home, "managed-settings.json");
+    await writeFile(
+      join(w.claude, "settings.json"),
+      JSON.stringify({ promptCacheTtl: "5m" }),
+    );
+    await writeFile(managedFile, JSON.stringify({ promptCacheTtl: "1h" }));
+    const managed = (await discover(w.options)).profiles.find(
+      (p) => p.harness === "claude",
+    )!;
+    assert.equal(managed.ttl.main.value, "1h");
+    assert.equal(managed.ttl.main.owner, managedFile + ":promptCacheTtl");
+    await writeFile(
+      managedFile,
+      JSON.stringify({ env: { FORCE_PROMPT_CACHING_5M: "1" } }),
+    );
+    const forced = (await discover(w.options)).profiles.find(
+      (p) => p.harness === "claude",
+    )!;
+    assert.equal(forced.ttl.main.value, "5m");
+    assert.equal(
+      forced.ttl.main.owner,
+      managedFile + ":env.FORCE_PROMPT_CACHING_5M",
+    );
+    await writeFile(managedFile, "{}");
+    await writeFile(join(w.claude, "settings.json"), "{}");
+    const unknown = await discover({
+      ...w.options,
+      env: { ANTHROPIC_API_KEY: "SYNTHETIC_TEST_KEY" },
+    });
+    assert.equal(
+      unknown.profiles.find((p) => p.harness === "claude")!.ttl.main.value,
+      null,
+    );
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("automatic discovery ignores a symlinked Claude config file", async () => {
+  const w = await workspace();
+  try {
+    const file = join(w.home, "account.json");
+    await writeFile(file, "{}");
+    await symlink(file, join(w.home, ".claude.json"));
+    const result = await discover(w.options);
+    assert.equal(result.profiles.length, 2);
+    await assert.rejects(
+      discover({ ...w.options, claudeDirs: [file] }),
+      ScanError,
+    );
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("legacy Codex copied turn identities deduplicate across fork session metadata", async () => {
+  const w = await workspace();
+  try {
+    const records = [
+      {
+        type: "session_meta",
+        timestamp: "2026-11-01T00:00:00Z",
+        payload: { id: "parent", source: "cli", model_provider: "openai" },
+      },
+      {
+        type: "turn_context",
+        timestamp: "2026-11-01T00:00:00Z",
+        payload: {
+          turn_id: "shared-turn",
+          model: "gpt-5.4",
+          service_tier: "standard",
+        },
+      },
+      {
+        type: "event_msg",
+        timestamp: "2026-11-01T00:01:00Z",
+        payload: {
+          type: "token_count",
+          info: {
+            total_token_usage: { input_tokens: 100, output_tokens: 10 },
+            last_token_usage: { input_tokens: 100, output_tokens: 10 },
+          },
+        },
+      },
+    ];
+    const raw = records.map((r) => JSON.stringify(r)).join("\n") + "\n";
+    await writeFile(join(w.codex, "sessions/parent.jsonl"), raw);
+    await writeFile(
+      join(w.codex, "sessions/fork.jsonl"),
+      raw.replace('"id":"parent"', '"id":"fork","forked_from_id":"parent"'),
+    );
+    const result = await scan(w.options);
+    assert.equal(result.requests.length, 1);
+    assert.equal(result.requests[0]!.locations.length, 2);
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("managed file locations match the supported host platforms", () => {
+  assert.equal(
+    managedSettingsPath("darwin"),
+    "/Library/Application Support/ClaudeCode/managed-settings.json",
+  );
+  assert.equal(
+    managedSettingsPath("linux"),
+    "/etc/claude-code/managed-settings.json",
+  );
+  assert.equal(
+    managedSettingsPath("win32"),
+    "C:\\Program Files\\ClaudeCode\\managed-settings.json",
+  );
 });

@@ -491,17 +491,24 @@ test("unsupported Opus history has no hypothetical premium and unknown iteration
     );
     const s = await scan({ ...w.options, claudeDirs: [w.claude] });
     const r = makeRequest({ profiles: [s.profiles[0]!.id] });
-    r.parts[0]!.model = "claude-opus-4-7";
     s.requests = [r];
     const c = await prices();
-    const result = speedChecks({
-      scan: s,
-      catalog: c,
-      since: undefined,
-      now: 100,
-    })[0]!;
-    assert.equal(result.currentEstimate.premium.totalUsd, 0);
-    assert.equal(result.action, "change");
+    for (const model of [
+      "claude-opus-4-7",
+      "claude-opus-4-1",
+      "claude-opus-4-6",
+      "claude-sonnet-5",
+    ]) {
+      r.parts[0]!.model = model;
+      const result = speedChecks({
+        scan: s,
+        catalog: c,
+        since: undefined,
+        now: 100,
+      })[0]!;
+      assert.equal(result.currentEstimate.premium.totalUsd, 0, model);
+      assert.equal(result.action, "change");
+    }
     r.parts = [{ ...makeRequest().parts[0]!, kind: "advisor" }];
     assert.equal(
       speedChecks({ scan: s, catalog: c, since: undefined, now: 100 })[0]!
@@ -657,5 +664,73 @@ test("invalid speed controls name the effective source file including Windows dr
         return true;
       },
     );
+  }
+});
+
+test("managed blocks survive named/legacy alternatives while a separately allowed premium remains unresolved", async () => {
+  const w = await workspace();
+  try {
+    const { unlink } = await import("node:fs/promises");
+    const file = join(w.codex, "config.toml");
+    const named = join(w.codex, "review.config.toml");
+    const req = join(w.home, "requirements.toml");
+    const options = {
+      ...w.options,
+      codexDirs: [w.codex],
+      codexRequirementsFile: req,
+    };
+    await writeFile(req, "[features]\nfast_mode=false");
+    await writeFile(
+      file,
+      'model="gpt-6.1-sol"\nservice_tier="fast"\n[profiles.review]\nservice_tier="default"',
+    );
+    assert.equal((await scan(options)).profiles[0]!.speed!.value, "standard");
+    await writeFile(file, 'model="gpt-6.1-sol"\nservice_tier="fast"');
+    await writeFile(named, 'service_tier="default"');
+    const blocked = (await scan(options)).profiles[0]!.speed!;
+    assert.equal(blocked.value, "standard");
+    assert.equal(blocked.resolved, true);
+    assert.match(blocked.owner, /requirements.toml:features/);
+    await writeFile(named, 'service_tier="ultrafast"');
+    assert.equal((await scan(options)).profiles[0]!.speed!.value, null);
+    await writeFile(req, "[features]\nfast_mode=false\nultrafast_mode=false");
+    assert.equal((await scan(options)).profiles[0]!.speed!.value, "standard");
+    await unlink(named);
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("partially priced premium retains covered categories as subtotal while its total remains unknown", async () => {
+  const w = await workspace();
+  try {
+    await writeFile(
+      join(w.claude, "settings.json"),
+      '{"model":"opus","fastMode":true}',
+    );
+    const s = await scan({ ...w.options, claudeDirs: [w.claude] });
+    const r = makeRequest({ profiles: [s.profiles[0]!.id] });
+    r.parts[0]!.speed = "fast";
+    r.parts[0]!.usage = {
+      ...claudeUsage({ input: 100, read: 300, write: 200 }),
+      output: null,
+    };
+    s.requests = [r];
+    const result = speedChecks({
+      scan: s,
+      catalog: await prices(),
+      since: undefined,
+      now: 100,
+    })[0]!;
+    const known = (100 * 4 + 300 * 0.2 + 200 * 5) / 1e6;
+    assert.equal(result.observed.premium.totalUsd, null);
+    assert.ok(Math.abs(result.observed.premium.knownUsd - known) < 1e-12);
+    assert.equal(result.savingsUsd, null);
+    assert.ok(
+      Math.abs(result.currentEstimate.premium.knownUsd - known) < 1e-12,
+    );
+    assert.match(result.observed.premium.unknown.join(" "), /output/);
+  } finally {
+    await w.dispose();
   }
 });

@@ -420,6 +420,13 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       env: localEnv,
     });
     if (root.harness === "codex") {
+      const baseTier = [...speedScopes]
+        .reverse()
+        .find((s) => Object.hasOwn(s.config, "service_tier"))
+        ?.config.service_tier;
+      const possibleTiers: unknown[] = [baseTier];
+      for (const row of Object.values(object(user.profiles)))
+        possibleTiers.push(object(row).service_tier ?? baseTier);
       for (const key of ["fast_mode", "ultrafast_mode"]) {
         const value = object(requirements.features)[key];
         if (value !== undefined && typeof value !== "boolean")
@@ -456,6 +463,7 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
         if (!/^[a-zA-Z0-9_-]+\.config\.toml$/.test(entry)) continue;
         const file = join(canonical, entry);
         const config = await settings(file, "codex");
+        possibleTiers.push(config.service_tier ?? baseTier);
         if (
           ["model", "model_provider", "service_tier", "features"].some((key) =>
             Object.hasOwn(config, key),
@@ -469,6 +477,30 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
             owner: `${settingsFile}; ${file} (--profile selection unresolved)`,
           });
         }
+      }
+      const blocked = (tier: unknown) =>
+        (["fast", "priority"].includes(String(tier)) &&
+          object(requirements.features).fast_mode === false) ||
+        (tier === "ultrafast" &&
+          object(requirements.features).ultrafast_mode === false);
+      // An unobserved profile cannot bypass a hard policy block. A different,
+      // allowed premium tier still keeps profile selection unresolved.
+      if (
+        possibleTiers.some(blocked) &&
+        possibleTiers.every(
+          (tier) =>
+            tier === undefined ||
+            ["standard", "default"].includes(String(tier)) ||
+            blocked(tier),
+        )
+      ) {
+        Object.assign(speed, {
+          value: "standard",
+          resolved: true,
+          owner: `${requirementsFile}:features`,
+          reason:
+            "all locally configured premium tiers are blocked by managed requirements, including profile alternatives",
+        });
       }
     }
     const histories: string[] = [];

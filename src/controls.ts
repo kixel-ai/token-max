@@ -263,6 +263,24 @@ export function windowControl(
   return current;
 }
 
+/** Whether a current documented Claude model supports fast speed, without resolving custom aliases. */
+export function claudeFastSupport(model: string | null): boolean | null {
+  if (model === null) return null;
+  if (
+    /^(?:opus(?:\[1m\])?|claude-opus-(?:5-5|5|4-8)(?:-\d{8})?(?:\[1m\])?)$/.test(
+      model,
+    )
+  )
+    return true;
+  if (
+    /^(?:(?:sonnet|haiku)(?:\[1m\])?|claude-(?:opus|sonnet|haiku)-\d+(?:-\d+)*(?:\[1m\])?)$/.test(
+      model,
+    )
+  )
+    return false;
+  return null;
+}
+
 /** Resolve current speed controls using documented defaults and explicit disabling gates. */
 export function speedControls(options: {
   harness: Profile["harness"];
@@ -359,27 +377,16 @@ export function speedControls(options: {
         "premium availability/effective ownership through this provider or gateway is unresolved",
       );
     const selected = env.ANTHROPIC_MODEL ?? model.value;
-    if (typeof selected !== "string")
-      return result(
-        null,
-        fast.owner,
-        "saved fast mode is on but current model support is unresolved",
-      );
-    if (
-      /^(?:opus(?:\[1m\])?|claude-opus-(?:5-5|5|4-8)(?:-\d{8})?(?:\[1m\])?)$/.test(
-        selected,
-      )
-    )
+    const support = claudeFastSupport(
+      typeof selected === "string" ? selected : null,
+    );
+    if (support === true)
       return result(
         "fast",
         fast.owner,
         "current supported Opus fast preference; account availability and unrecorded launch/session overrides are unknown",
       );
-    if (
-      /^(?:sonnet|haiku)(?:\[1m\])?$|^claude-(?:sonnet|haiku)-|^claude-opus-4-7(?:-|$)/.test(
-        selected,
-      )
-    )
+    if (support === false)
       return result(
         "standard",
         env.ANTHROPIC_MODEL !== undefined

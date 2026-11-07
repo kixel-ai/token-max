@@ -1,3 +1,4 @@
+import { claudeFastSupport } from "./controls.js";
 import type {
   BillingPart,
   Cost,
@@ -7,7 +8,7 @@ import type {
 } from "./model.js";
 import {
   addCosts,
-  pricePart,
+  priceComponents,
   unknownCost,
   zeroCost,
   type Catalog,
@@ -50,20 +51,31 @@ function difference(catalog: Catalog, r: Request, p: BillingPart): Cost {
     )
   )
     return unknownCost("no verified billed usage for speed comparison");
-  const billed = pricePart(catalog, r, p);
-  const normal = pricePart(catalog, r, standard(p));
-  return {
-    knownUsd:
-      billed.totalUsd !== null && normal.totalUsd !== null
-        ? billed.totalUsd - normal.totalUsd
-        : 0,
-    totalUsd:
-      billed.totalUsd !== null && normal.totalUsd !== null
-        ? billed.totalUsd - normal.totalUsd
-        : null,
-    unknown: [...new Set([...billed.unknown, ...normal.unknown])],
-    assumptions: [...new Set([...billed.assumptions, ...normal.assumptions])],
-  };
+  const billed = priceComponents(catalog, r, p);
+  const normal = priceComponents(catalog, r, standard(p));
+  return addCosts(
+    (["cache", "ordinary", "output"] as const).map((key): Cost => {
+      const a = billed[key],
+        b = normal[key];
+      // A matched missing category contributes unknown to both sides. Only the
+      // identically covered numeric categories contribute a known difference.
+      const sharedCoverage =
+        JSON.stringify([...a.unknown].sort()) ===
+        JSON.stringify([...b.unknown].sort());
+      return {
+        knownUsd:
+          (a.totalUsd !== null && b.totalUsd !== null) || sharedCoverage
+            ? a.knownUsd - b.knownUsd
+            : 0,
+        totalUsd:
+          a.totalUsd !== null && b.totalUsd !== null
+            ? a.totalUsd - b.totalUsd
+            : null,
+        unknown: [...new Set([...a.unknown, ...b.unknown])],
+        assumptions: [...new Set([...a.assumptions, ...b.assumptions])],
+      };
+    }),
+  );
 }
 
 /** Compare speed alone at the current profile baseline, independently of TTL/window recommendations. */
@@ -142,9 +154,7 @@ export function speedChecks(options: {
             // Claude only enables fast mode on supported Opus; other models stay standard.
             if (
               r.harness === "claude" &&
-              /^(?:claude-(?:sonnet|haiku)-|claude-opus-4-7(?:-|$))/.test(
-                p.model ?? "",
-              )
+              claudeFastSupport(p.model) === false
             ) {
               estimated.push(zeroCost());
               continue;

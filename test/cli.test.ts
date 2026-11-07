@@ -92,7 +92,7 @@ test("built CLI renders priced compaction windows from synthetic transcripts alo
     api.id = "sample-api";
     const message = records[1];
     message.requestRef = "sample-api";
-    message.timestamp = "2026-11-01T00:00:02Z";
+    message.timestamp = "2026-11-01T00:00:01Z";
     const usage = (write: number, input = 0, output = 10) => ({
       ...message.message.usage,
       input_tokens: input,
@@ -113,13 +113,19 @@ test("built CLI renders priced compaction windows from synthetic transcripts alo
       ],
     };
     const boundary = records.at(-1);
-    boundary.timestamp = "2026-11-01T00:00:01Z";
+    boundary.timestamp = "2026-11-01T00:00:02Z";
     boundary.requestRef = "sample-api";
     boundary.compactMetadata = {
       trigger: "auto",
       preTokens: 300000,
       postTokens: 2000,
     };
+    const resume = structuredClone(message);
+    delete resume.requestRef;
+    resume.uuid = "sample-resumed-block";
+    resume.message.id = "sample-resume";
+    resume.timestamp = "2026-11-01T00:00:03Z";
+    resume.message.usage = initial;
     const large = Array.from({ length: 4 }, (_, i) => {
       const r = structuredClone(message);
       delete r.requestRef;
@@ -144,7 +150,7 @@ test("built CLI renders priced compaction windows from synthetic transcripts alo
     });
     await writeFile(
       file,
-      [api, boundary, message, ...large]
+      [api, message, boundary, resume, ...large]
         .map((r) => JSON.stringify(r))
         .join("\n") + "\n",
     );
@@ -164,8 +170,8 @@ test("built CLI renders priced compaction windows from synthetic transcripts alo
       env,
       encoding: "utf8",
     });
-    assert.equal(structured.status, 1, structured.stderr);
     const report = JSON.parse(structured.stdout);
+    assert.equal(structured.status, 1, structured.stderr);
     const result = report.checks.find(
       (c: { check: string }) => c.check === "compaction-window",
     );

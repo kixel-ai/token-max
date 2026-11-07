@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing package.json version of the complete release
+        required: true
+        type: string
+      authentication:
+        description: Trusted publishing, or authenticated bootstrap for the first complete release
+        required: true
+        type: choice
+        default: trusted
+        options: [trusted, bootstrap]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    permissions:
+      contents: read
+      actions: read
+    if: github.ref == 'refs/heads/main' && github.repository == 'kixelated/token-max'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Require a complete release and preconfigured environment protection
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release.mjs
+
+  validate:
+    needs: preflight
+    uses: ./.github/workflows/check.yml
+
+  publish:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: npm-package
+          path: package
+      - name: Verify the checked artifact and explicit release version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {createHash} from 'node:crypto';
+          const artifact = JSON.parse(readFileSync('package/artifact.json'));
+          assert.equal(artifact.name, '@kixelated/token-max');
+          assert.equal(artifact.version, process.env.RELEASE_VERSION);
+          assert.notEqual(artifact.version, '0.0.0');
+          assert.equal('sha512-' + createHash('sha512').update(readFileSync('package/token-max.tgz')).digest('base64'), artifact.integrity);
+          JS
+      - name: Publish the tested tarball using npm trusted publishing
+        if: inputs.authentication == 'trusted'
+        run: npm publish package/token-max.tgz --access public --ignore-scripts
+      - name: Authenticated first publication of the tested complete tarball
+        if: inputs.authentication == 'bootstrap'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
+        run: |
+          test -n "$NODE_AUTH_TOKEN"
+          npm whoami --registry=https://registry.npmjs.org
+          npm publish package/token-max.tgz --access public --ignore-scripts

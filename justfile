@@ -1,4 +1,4 @@
-# Everything CI runs.
+# Local validation; CI also exercises the artifact across its OS/runtime matrix.
 check:
     bun install --frozen-lockfile
     bunx --no-install prettier --check .
@@ -6,6 +6,8 @@ check:
     bun run build
     bun test ./test
     node --test dist/test/*.test.js
+    bun run pack
+    bun run test:package
     quest check
 
 build:

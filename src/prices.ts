@@ -181,7 +181,8 @@ export function unknownCost(reason: string): Cost {
   return { knownUsd: 0, totalUsd: null, unknown: [reason], assumptions: [] };
 }
 
-function writeBilling(model: string): boolean | null {
+/** Whether the documented GPT generation bills cache writes separately from ordinary input. */
+export function writeBilling(model: string): boolean | null {
   const match = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/.exec(model);
   if (!match) return null;
   return (

@@ -30,13 +30,12 @@ async function syntheticReport(): Promise<Report> {
 
 test("recommendations lead advisory/keep findings, with separate baselines and complete narrow output", async () => {
   const report = await syntheticReport();
-  const change = report.checks[0]!;
+  const change = report.checks.find((c) => c.check === "claude-cache-ttl")!;
   change.savingsUsd = 12.34;
   change.monthlySavingsUsd = 24.68;
   const advisory = structuredClone(change);
   advisory.action = "advisory";
   advisory.evidence = "guidance";
-  advisory.check = "synthetic-rare-use-ranking";
   advisory.current = null;
   advisory.recommended = null;
   advisory.savingsUsd = null;
@@ -52,7 +51,6 @@ test("recommendations lead advisory/keep findings, with separate baselines and c
   const keep = structuredClone(change);
   keep.action = "keep";
   keep.current = keep.recommended;
-  keep.check = "synthetic-keep";
   report.checks = [advisory, keep, change];
   const profile = report.scan.profiles[0]!;
   profile.root = "/synthetic/e\u0301-東京-👩‍💻/" + "long-profile-name-".repeat(8);
@@ -65,7 +63,7 @@ test("recommendations lead advisory/keep findings, with separate baselines and c
   };
   report.scan.profiles.push(other);
   advisory.profile = other.id;
-  const before = structuredClone(report);
+  const before = JSON.stringify(report);
   for (const width of [28, 40, 80]) {
     const text = formatReport(report, { width, details: true });
     assert.ok(
@@ -101,12 +99,16 @@ test("recommendations lead advisory/keep findings, with separate baselines and c
       "decomposed filename must not be NFC-normalized",
     );
   }
-  assert.deepEqual(report, before, "rendering must not alter JSON or analysis");
+  assert.equal(
+    JSON.stringify(report),
+    before,
+    "rendering must not alter JSON or analysis",
+  );
 });
 
 test("details retain every assumption, unknown cost, witness and finding without a top-N cutoff", async () => {
   const report = await syntheticReport();
-  const result = report.checks[0]!;
+  const result = report.checks.find((c) => c.check === "claude-cache-ttl")!;
   result.cost["1h"] = {
     knownUsd: 9.87,
     totalUsd: null,
@@ -155,7 +157,7 @@ test("details retain every assumption, unknown cost, witness and finding without
   report.checks.push(
     ...Array.from({ length: 12 }, (_, i) => ({
       ...structuredClone(result),
-      check: `synthetic-advisory-${i}`,
+      owner: `synthetic-advisory-${i}`,
       action: "advisory" as const,
       evidence: "unknown" as const,
       current: null,
@@ -184,7 +186,9 @@ test("details retain every assumption, unknown cost, witness and finding without
   assert.match(text, /Predecessor:/);
   assert.equal(
     (text.match(/Identical fixed costs remain unknown/g) ?? []).length,
-    report.checks.filter((c) => c.fixedCost.totalUsd === null).length,
+    report.checks.filter(
+      (c) => c.check === "claude-cache-ttl" && c.fixedCost.totalUsd === null,
+    ).length,
   );
   assert.match(formatReport(report), /--details/);
   const styled = formatReport(report, {
@@ -200,7 +204,7 @@ test("terminal controls in all metadata and prose are escaped, while JSON retain
   const report = await syntheticReport();
   const hostile =
     "synthetic\x1b]8;;https://invalid\x07\r\n\t\u009b31m\u202ereversed\u2066\u200e\u200f\u061c";
-  const result = report.checks[0]!;
+  const result = report.checks.find((c) => c.check === "claude-cache-ttl")!;
   result.owner = hostile;
   result.baseline = hostile;
   result.assumptions.push(hostile);

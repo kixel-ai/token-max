@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
 import type { Profile, Request, Scan, StructuralEvent } from "../src/model.js";
 import { formatReport } from "../src/report.js";
-import { analyze } from "../src/replay.js";
+import { analyze as analyzeReport } from "../src/replay.js";
 import { scan, usage } from "../src/reader.js";
 import {
   claudeUsage,
@@ -13,6 +13,14 @@ import {
   prices,
   workspace,
 } from "./helpers.js";
+
+function analyze(options: Parameters<typeof analyzeReport>[0]) {
+  const report = analyzeReport(options);
+  return {
+    ...report,
+    checks: report.checks.filter((c) => c.check === "claude-cache-ttl"),
+  };
+}
 
 function data(requests: Request[], events: StructuralEvent[] = []): Scan {
   const profile: Profile = {
@@ -36,6 +44,15 @@ function data(requests: Request[], events: StructuralEvent[] = []): Scan {
     },
     provider: null,
     settings: {},
+    compaction: {
+      default: {
+        value: null,
+        owner: "synthetic",
+        reason: "unknown",
+        applicable: false,
+      },
+      models: {},
+    },
   };
   return {
     exposure: { components: [], requests: [], invocations: [], visibility: [] },

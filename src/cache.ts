@@ -8,6 +8,13 @@ import type {
 } from "./model.js";
 
 const MINUTE = 60_000;
+/** Documented Claude lifetimes shared by every cache counterfactual. */
+export const TTL_MILLISECONDS: Record<Ttl, number> = {
+  "5m": 5 * MINUTE,
+  "1h": 60 * MINUTE,
+};
+/** Default billed-write retention used for conditional new Codex prefixes. */
+export const CODEX_CACHE_MILLISECONDS = 30 * MINUTE;
 type Cohort = readonly (string | null)[];
 interface StateBase {
   cohort: Cohort;
@@ -85,8 +92,14 @@ class History {
 
   candidates(order: number, time: number): CacheState[] {
     const start = this.after(order, "order");
-    const expired = Math.max(start, this.after(time - 60 * MINUTE, "time"));
-    const recent = Math.max(start, this.after(time - 5 * MINUTE, "time"));
+    const expired = Math.max(
+      start,
+      this.after(time - TTL_MILLISECONDS["1h"], "time"),
+    );
+    const recent = Math.max(
+      start,
+      this.after(time - TTL_MILLISECONDS["5m"], "time"),
+    );
     const result: CacheState[] = [];
     if (expired > start) result.push(this.states[expired - 1]!);
     if (recent < this.states.length) result.push(this.states.at(-1)!);
@@ -125,7 +138,11 @@ function apply(options: {
   const gap = previous ? time - previous.time : null;
   // A copied bracket split cannot prove an estimated attempt was externally warmed.
   const observed = options.estimated ? null : observedTtl(p);
-  if (gap !== null && gap >= 5 * MINUTE && gap < 60 * MINUTE) {
+  if (
+    gap !== null &&
+    gap >= TTL_MILLISECONDS["5m"] &&
+    gap < TTL_MILLISECONDS["1h"]
+  ) {
     if (ttl === "5m" && observed !== "5m") {
       u.write += u.read;
       u.read = 0;

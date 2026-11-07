@@ -15,6 +15,8 @@ function environment(home: string): NodeJS.ProcessEnv {
     ENABLE_PROMPT_CACHING_1H: "",
     CLAUDE_CODE_PROMPT_CACHE_TTL: "",
     CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: "",
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "",
+    DISABLE_AUTO_COMPACT: "",
     NO_COLOR: "",
     TERM: "xterm-256color",
   };
@@ -72,6 +74,124 @@ test("built CLI supports JSON, exit 0/1/2, and never prints partial findings or 
     assert.equal(failed.stdout, "");
     assert.doesNotMatch(failed.stderr, /SYNTHETIC_PRIVATE|recommended/);
     assert.equal(JSON.parse(failed.stderr).location.line, 1);
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("built CLI renders priced compaction windows from synthetic transcripts alongside TTL checks", async () => {
+  const w = await workspace();
+  try {
+    const file = join(w.claude, "projects/project/main.jsonl");
+    await fixture(file, "claude.jsonl");
+    const records = (await readFile(file, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    const api = records[0];
+    api.id = "sample-api";
+    const message = records[1];
+    message.requestRef = "sample-api";
+    message.timestamp = "2026-11-01T00:00:02Z";
+    const usage = (write: number, input = 0, output = 10) => ({
+      ...message.message.usage,
+      input_tokens: input,
+      output_tokens: output,
+      cache_creation_input_tokens: write,
+      cache_creation: {
+        ephemeral_5m_input_tokens: write,
+        ephemeral_1h_input_tokens: 0,
+      },
+    });
+    const initial = usage(20000);
+    const summary = usage(0, 300000, 2000);
+    message.message.usage = {
+      ...initial,
+      iterations: [
+        { ...initial, type: "message" },
+        { ...summary, type: "compaction" },
+      ],
+    };
+    const boundary = records.at(-1);
+    boundary.timestamp = "2026-11-01T00:00:01Z";
+    boundary.requestRef = "sample-api";
+    boundary.compactMetadata = {
+      trigger: "auto",
+      preTokens: 300000,
+      postTokens: 2000,
+    };
+    const large = Array.from({ length: 4 }, (_, i) => {
+      const r = structuredClone(message);
+      delete r.requestRef;
+      r.uuid = `large-block-${i}`;
+      r.message.id = `large-${i}`;
+      r.timestamp = `2026-11-01T0${i + 1}:00:00Z`;
+      r.message.usage = {
+        ...initial,
+        iterations: [
+          {
+            ...initial,
+            type: "message",
+            cache_creation_input_tokens: 150000,
+            cache_creation: {
+              ephemeral_5m_input_tokens: 150000,
+              ephemeral_1h_input_tokens: 0,
+            },
+          },
+        ],
+      };
+      return r;
+    });
+    await writeFile(
+      file,
+      [api, boundary, message, ...large]
+        .map((r) => JSON.stringify(r))
+        .join("\n") + "\n",
+    );
+    await writeFile(
+      join(w.claude, "settings.json"),
+      '{"promptCacheTtl":"5m","autoCompactWindow":400000}',
+    );
+    const args = [
+      resolve("dist/src/cli.js"),
+      "--claude-dir",
+      w.claude,
+      "--prices-file",
+      resolve("test/fixtures/prices.json"),
+    ];
+    const env = environment(w.home);
+    const structured = spawnSync(process.execPath, [...args, "--json"], {
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(structured.status, 1, structured.stderr);
+    const report = JSON.parse(structured.stdout);
+    const result = report.checks.find(
+      (c: { check: string }) => c.check === "compaction-window",
+    );
+    assert.equal(result.action, "change");
+    assert.equal(result.current, 400000);
+    assert.equal(result.recommended, 100000);
+    const text = spawnSync(
+      process.execPath,
+      [...args, "--details", "--plain"],
+      { env, encoding: "utf8" },
+    );
+    assert.equal(text.status, 1, text.stderr);
+    assert.equal(text.stderr, "");
+    for (const value of [
+      "claude-cache-ttl",
+      "CHANGE  compaction-window",
+      "Current: 400000 tokens",
+      "Suggested: 100000 tokens",
+      "Conditional TTL baseline",
+      "Added compaction",
+      "Geometry basis",
+      "compaction loses detail",
+      result.owner,
+    ])
+      assert.ok(text.stdout.includes(value), value);
+    assert.doesNotMatch(text.stdout, /SYNTHETIC_PRIVATE|\x1b|total sav/i);
   } finally {
     await w.dispose();
   }

@@ -1,7 +1,7 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL and compaction-window settings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -106,7 +106,10 @@ Text and `--json` share the same analysis. JSON schema version 1 is unchanged an
 includes profile aliases, snapshots, deduplicated requests, structural events,
 usage coverage, pre-window cache context, partially known costs, summary estimates,
 component measurements with exposure/invocation coverage, calibration provenance,
-and check results.
+and check results. Each check has a `check` discriminator: `claude-cache-ttl`
+retains its TTL-specific fields, while `compaction-window` includes candidate
+windows, modeled summaries, prefix charges and sensitivity. TypeScript consumers
+should narrow `CheckResult` by `check` before reading setting-specific fields.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.
@@ -128,3 +131,19 @@ unsupported attempts before the selected window. Missing cohort metadata spans
 compatible histories; JSON and text retain predecessor witnesses. A comparison
 stays unpriced when those histories imply different cache charges, while invariant
 charges can still be compared.
+
+Compaction-window comparisons run after the recommended TTLs and use the current
+explicit window as their baseline. Claude controls resolve environment overrides,
+managed and user settings, including `modelSettings.<model>.autoCompactWindow`;
+Codex uses `model_auto_compact_token_limit`. Unresolved tuned defaults, disabled
+compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
+advisory. No settings are edited.
+
+Candidates come from current controls, price-tier boundaries, provider limits,
+and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching
+cohorts; unsupported affected candidates stay unpriced. Observed compactions remain
+charged once, including when earlier hypothetical passes might replace them.
+Summary generation and cold resumed prefixes are included in net savings. Larger
+observed summaries/prefixes, cold-summary costs, and the extra re-read spend that
+would erase a saving accompany the aggregate winner. Lost detail and changed work
+remain unmeasured risks, not zero-cost observations.

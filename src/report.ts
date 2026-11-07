@@ -1,5 +1,10 @@
 import { wrapText } from "./terminal.js";
-import type { CheckResult, Cost, Report } from "./model.js";
+import type {
+  CacheReplayEvidence,
+  CheckResult,
+  Cost,
+  Report,
+} from "./model.js";
 import { display, terminalText } from "./safe.js";
 
 /** Text presentation never changes analysis or the JSON report. */
@@ -23,6 +28,16 @@ function money(cost: Cost): string {
 }
 function instant(value: number | null): string {
   return value === null ? "unknown" : new Date(value).toISOString();
+}
+function estimate(value: number | null): string {
+  return value === null ? "unknown" : usd(value);
+}
+function setting(value: string | number | null): string {
+  return value === null
+    ? "unknown"
+    : typeof value === "number"
+      ? `${value} tokens`
+      : value;
 }
 
 /** Render all findings in a wrapping flow, with complete evidence available in details. */
@@ -58,6 +73,20 @@ export function formatReport(
     field(name, money(value));
     notes("Unknown", value.unknown);
     notes("Assumption", value.assumptions);
+  }
+  function witnesses(values: CacheReplayEvidence[]) {
+    for (const evidence of values) {
+      field(
+        "Cache evidence",
+        `${evidence.request}/${evidence.part} ${evidence.ttl}: ${evidence.state}, ${evidence.outcome}; ${evidence.reason}`,
+      );
+      for (const p of evidence.predecessors)
+        field(
+          "Predecessor",
+          `${p.request}/${p.part}: ${p.state}, prefix ${p.prefixEvidence}, cohort ${p.cohortKnown ? "known" : "incomplete"}, ${instant(p.time)}; ${p.reason}`,
+        );
+      if (!evidence.predecessors.length) field("Predecessor", "unrecorded");
+    }
   }
   const profiles = new Map(report.scan.profiles.map((p) => [p.id, p]));
   function profileName(id: string): string {
@@ -140,8 +169,8 @@ export function formatReport(
       );
       field("Profile", profileName(result.profile));
       field("Owner", display(result.owner));
-      field("Current", result.current ?? "unknown");
-      field("Suggested", result.recommended ?? "unknown");
+      field("Current", setting(result.current));
+      field("Suggested", setting(result.recommended));
       field("Reason", reason(result));
       field("Baseline", result.baseline);
       field(
@@ -152,19 +181,49 @@ export function formatReport(
         "Estimated net saving vs baseline",
         `${result.savingsUsd === null ? "unknown" : usd(result.savingsUsd)} over window; ${result.monthlySavingsUsd === null ? "unknown" : usd(result.monthlySavingsUsd)} / 30 days`,
       );
-      field(
-        "Replay cost",
-        `5m ${money(result.cost["5m"])}; 1h ${money(result.cost["1h"])}`,
-      );
-      field(
-        "Cache comparison",
-        `5m ${money(result.comparisonCost["5m"])}; 1h ${money(result.comparisonCost["1h"])}`,
-      );
-      if (result.fixedCost.totalUsd === null)
+      if (result.check === "claude-cache-ttl") {
         field(
-          "Fixed costs",
-          "Identical fixed costs remain unknown and cancel in the cache comparison.",
+          "Replay cost",
+          `5m ${money(result.cost["5m"])}; 1h ${money(result.cost["1h"])}`,
         );
+        field(
+          "Cache comparison",
+          `5m ${money(result.comparisonCost["5m"])}; 1h ${money(result.comparisonCost["1h"])}`,
+        );
+        if (result.fixedCost.totalUsd === null)
+          field(
+            "Fixed costs",
+            "Identical fixed costs remain unknown and cancel in the cache comparison.",
+          );
+      } else {
+        field(
+          "Models",
+          result.models
+            .map((m) => (m === null ? "unknown" : display(m)))
+            .join(", "),
+        );
+        field(
+          "Conditional TTL baseline",
+          `main ${result.ttls.main ?? "unknown"}; subagent ${result.ttls.subagent ?? "unknown"}; window comparison follows available TTL recommendations`,
+        );
+        field("Current-window baseline cost", money(result.baselineCost));
+        const suggested = result.scenarios.find(
+          (s) => s.window === result.recommended,
+        );
+        field(
+          "Suggested-window cost",
+          suggested ? money(suggested.cost) : "unknown",
+        );
+        field(
+          "Existing summaries (linked/proxy)",
+          money(result.observedSummaryCost),
+        );
+        if (suggested)
+          field(
+            "Net sensitivity",
+            `larger observed summary/prefix ${estimate(suggested.sensitivity.largerSummarySavingsUsd)}; cold summary ${estimate(suggested.sensitivity.coldSummarySavingsUsd)}; extra re-read break-even ${estimate(suggested.sensitivity.rereadBreakEvenUsd)}. Conditional scenarios; the aggregate estimate decides.`,
+          );
+      }
       if (result.usageEstimates.length)
         field(
           "Unlinked attempts",
@@ -173,7 +232,7 @@ export function formatReport(
       if (result.breakEven) field("Break-even", result.breakEven);
       field(
         "Limits",
-        "Fixed-behavior replay with current settings applied to history; monthly values extrapolate the comparison window. Full assumptions and uncertainty: --details.",
+        `${result.check === "compaction-window" ? "Earlier compaction loses detail and can add re-reads or changed work. " : ""}Fixed-behavior replay with current settings applied to history; monthly values extrapolate the comparison window. Full assumptions and uncertainty: --details.`,
       );
       if (action === "change")
         field(
@@ -188,38 +247,77 @@ export function formatReport(
       if (options.details) {
         for (const id of result.historyProfiles)
           field("History profile", profileName(id));
-        for (const ttl of ["5m", "1h"] as const) {
-          cost(`${ttl} replay`, result.cost[ttl]);
-          cost(`${ttl} cache comparison`, result.comparisonCost[ttl]);
-          cost(`${ttl} summary proxies`, result.summaryCost[ttl]);
-        }
-        cost("Identical fixed costs", result.fixedCost);
-        field(
-          "Cold-prefix 1h replay",
-          result.sensitivity.coldPrefix1hUsd === null
-            ? "unknown"
-            : usd(result.sensitivity.coldPrefix1hUsd),
-        );
-        field(
-          "Cold-prefix 1h cache comparison",
-          result.sensitivity.coldPrefix1hComparisonUsd === null
-            ? "unknown"
-            : usd(result.sensitivity.coldPrefix1hComparisonUsd),
-        );
-        if (result.sensitivity.unlinked) {
-          field(
-            "Attempt sensitivity",
-            "Conditional cache-only scenarios, not guaranteed bounds; the aggregate estimate decides.",
-          );
+        if (result.check === "claude-cache-ttl") {
           for (const ttl of ["5m", "1h"] as const) {
-            cost(
-              `${ttl}, no billed/cache-affecting attempt`,
-              result.sensitivity.unlinked.noBilledAttempt[ttl],
+            cost(`${ttl} replay`, result.cost[ttl]);
+            cost(`${ttl} cache comparison`, result.comparisonCost[ttl]);
+            cost(`${ttl} summary proxies`, result.summaryCost[ttl]);
+          }
+          cost("Identical fixed costs", result.fixedCost);
+          field(
+            "Cold-prefix 1h replay",
+            result.sensitivity.coldPrefix1hUsd === null
+              ? "unknown"
+              : usd(result.sensitivity.coldPrefix1hUsd),
+          );
+          field(
+            "Cold-prefix 1h cache comparison",
+            result.sensitivity.coldPrefix1hComparisonUsd === null
+              ? "unknown"
+              : usd(result.sensitivity.coldPrefix1hComparisonUsd),
+          );
+          if (result.sensitivity.unlinked) {
+            field(
+              "Attempt sensitivity",
+              "Conditional cache-only scenarios, not guaranteed bounds; the aggregate estimate decides.",
             );
-            cost(
-              `${ttl}, cold estimated input`,
-              result.sensitivity.unlinked.coldCache[ttl],
+            for (const ttl of ["5m", "1h"] as const) {
+              cost(
+                `${ttl}, no billed/cache-affecting attempt`,
+                result.sensitivity.unlinked.noBilledAttempt[ttl],
+              );
+              cost(
+                `${ttl}, cold estimated input`,
+                result.sensitivity.unlinked.coldCache[ttl],
+              );
+            }
+          }
+        } else {
+          cost("Current-window baseline", result.baselineCost);
+          cost("Existing summaries", result.observedSummaryCost);
+          for (const scenario of result.scenarios) {
+            field(
+              "Candidate window",
+              `${scenario.window} tokens; ${scenario.affectedRequests} affected requests; ${scenario.added.length} added compactions`,
             );
+            cost("Candidate full cost", scenario.cost);
+            cost(
+              "Candidate baseline comparison",
+              scenario.baselineComparisonCost,
+            );
+            cost("Candidate comparison", scenario.comparisonCost);
+            field(
+              "Candidate net saving vs baseline",
+              estimate(scenario.savingsUsd),
+            );
+            field(
+              "Candidate sensitivity",
+              `larger observed summary/prefix net saving ${estimate(scenario.sensitivity.largerSummarySavingsUsd)}; cold summary net saving ${estimate(scenario.sensitivity.coldSummarySavingsUsd)}; extra re-read break-even ${estimate(scenario.sensitivity.rereadBreakEvenUsd)}`,
+            );
+            for (const added of scenario.added) {
+              field(
+                "Added compaction",
+                `at ${added.request}; ${added.inputTokens} summary input tokens; ${added.summaryTokens} summary output tokens; ${added.prefixTokens} resumed-prefix tokens`,
+              );
+              for (const basis of added.basis)
+                field(
+                  "Geometry basis",
+                  `boundary ${basis.event}; resumed request ${basis.request}`,
+                );
+              cost("Added summary", added.summaryCost);
+              cost("Resumed prefix", added.prefixCost);
+            }
+            witnesses(scenario.cacheEvidence);
           }
         }
         for (const estimate of result.usageEstimates) {
@@ -229,18 +327,7 @@ export function formatReport(
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        for (const evidence of result.cacheEvidence) {
-          field(
-            "Cache evidence",
-            `${evidence.request}/${evidence.part} ${evidence.ttl}: ${evidence.state}, ${evidence.outcome}; ${evidence.reason}`,
-          );
-          for (const p of evidence.predecessors)
-            field(
-              "Predecessor",
-              `${p.request}/${p.part}: ${p.state}, prefix ${p.prefixEvidence}, cohort ${p.cohortKnown ? "known" : "incomplete"}, ${instant(p.time)}; ${p.reason}`,
-            );
-          if (!evidence.predecessors.length) field("Predecessor", "unrecorded");
-        }
+        witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
         notes("Source", result.sources);
@@ -312,5 +399,7 @@ function reason(result: CheckResult): string {
     return "No priced winner established; missing evidence is unknown, never zero.";
   if (result.action === "advisory")
     return "Conditional replay winner; current effective setting or applicability is unresolved.";
-  return "Lowest estimated aggregate cache cost under the stated replay assumptions.";
+  return result.check === "compaction-window"
+    ? "Lowest estimated aggregate net cost, including added summaries and resumed-prefix charges; existing boundaries retained."
+    : "Lowest estimated aggregate cache cost under the stated replay assumptions.";
 }

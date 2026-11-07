@@ -31,11 +31,18 @@ not complete billing audits or remote Node/Bun compatibility checks.
   the destination. Report unsupported runtime/version clearly, without a
   silent execution fallback. POSIX SSH destinations cover the initial
   Linux/macOS use case; identify other remote platforms as unsupported.
-- Reuse discovery, frozen snapshots, native/T3 adapters, settings checks,
-  cancellation and privacy on the host. The coordinator supplies a single
-  selected price-catalog revision so different caches cannot manufacture
-  cross-host cost differences. Do not expose auth/environment secrets or
-  raw transcript/component text through the transport or diagnostics.
+- Build and ship a self-contained ESM helper through the existing bundle
+  pipeline, including its dependency licenses in the checked package. It
+  must execute from streamed stdin under Node/Bun with no sibling modules,
+  package metadata or remote `node_modules`; include its version identity.
+  Extend packed-artifact tests and the package allowlist for that helper.
+- Run discovery, frozen native snapshots, any supported T3 metadata
+  transaction and content-derived exposure extraction on the owning host.
+  The coordinator performs all pricing and settings comparisons on the
+  sanitized normalized metadata with one selected price catalog. Remote
+  hosts do not fetch prices. Reuse the same readers/adapters and privacy
+  rules; never expose auth/environment secrets or raw transcript/component
+  text through the transport or diagnostics.
 - Use a versioned, validated stream of derived scan/control metadata with
   backpressure. Do not buffer an entire SSH stdout stream. Delimit protocol
   errors from remote stderr and SSH/auth/runtime failures. Quote remote
@@ -68,10 +75,6 @@ prerequisite. Sources checked 2026-11-07:
 [desktop catalog store](https://github.com/pingdotgg/t3code/blob/9c6429d74b59c7a06fb7357526457d192a744a9f/apps/desktop/src/app/DesktopConnectionCatalogStore.ts),
 [environment CLI](https://github.com/pingdotgg/t3code/blob/9c6429d74b59c7a06fb7357526457d192a744a9f/apps/server/src/cli/environment.ts),
 and [OpenSSH command handling](https://man.openbsd.org/ssh.1).
-
-## Required
-
-- [One-command npm distribution](/quest/m0/npm.md) - the checked, runtime-compatible JavaScript artifact used for remote execution
 
 ## Related
 

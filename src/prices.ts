@@ -258,7 +258,35 @@ function selectedRates(
   let factor = 1;
   if (p.tier === null)
     return unknownCost("effective service tier is not recorded");
-  if (!["standard", "default"].includes(p.tier))
+  if (
+    r.provider === "openai" &&
+    ["fast", "priority", "ultrafast"].includes(p.tier)
+  ) {
+    const multiplier =
+      p.tier === "ultrafast"
+        ? /^gpt-(?:6-astra|6\.1-sol)(?:-\d{4}-\d{2}-\d{2})?$/.test(p.model)
+          ? 6
+          : null
+        : /^gpt-(?:6(?:\.1)?-(?:sol|terra|astra|luna)|5\.6-(?:sol|terra|luna))(?:-\d{4}-\d{2}-\d{2})?$/.test(
+              p.model,
+            )
+          ? 2
+          : /^gpt-5\.5(?:-\d{4}-\d{2}-\d{2})?$/.test(p.model) &&
+              p.usage.input !== null &&
+              p.usage.input <= 272000
+            ? 2.5
+            : /^gpt-5\.4(?:-mini)?(?:-\d{4}-\d{2}-\d{2})?$/.test(p.model) &&
+                p.usage.input !== null &&
+                p.usage.input <= 272000
+              ? 2
+              : null;
+    if (multiplier === null)
+      return unknownCost("premium tier lacks verified model/context rates");
+    factor *= multiplier;
+    assumptions.push(
+      `documented ${p.tier} API token rates are ${multiplier}x standard, preserving context tiers and cache categories (2026-11-07)`,
+    );
+  } else if (!["standard", "default"].includes(p.tier))
     return unknownCost("effective service tier has no supported catalog rate");
   if (r.provider === "anthropic") {
     if (p.speed === "fast") {

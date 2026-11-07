@@ -58,6 +58,8 @@ export interface Request {
   accounting: "individual" | "legacy-last" | "legacy-delta";
   /** Recorded API-attempt budget; this does not establish execution or billing. */
   attempt: { maxOutputTokens: number | null } | null;
+  /** Requested controls never establish the billed response tier. */
+  requestedSpeed?: { tier: string | null; speed: string | null };
   issues: string[];
 }
 /** Structural context and timing evidence, never a billed boundary request. */
@@ -123,6 +125,14 @@ export interface IdleControl {
   ttl?: Profile["ttl"];
   compaction?: Profile["compaction"];
 }
+/** Current speed preference after known disabling controls, without inferred session overrides. */
+export interface SpeedControl {
+  value: string | null;
+  owner: string;
+  replacement: string;
+  resolved: boolean;
+  reason: string;
+}
 /** A selected profile's current settings and their owning controls. */
 export interface Profile {
   id: string;
@@ -142,6 +152,8 @@ export interface Profile {
     models: Record<string, WindowControl>;
   };
   idle?: IdleControl;
+  speed?: SpeedControl;
+  speedDirectories?: Record<string, SpeedControl>;
   /** Current project controls observed at recorded working directories. */
   idleDirectories?: Record<string, IdleControl>;
 }
@@ -294,7 +306,23 @@ export interface CompactionCheckResult extends CheckBase<number> {
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
 export type CheckResult =
-  TtlCheckResult | CompactionCheckResult | IdleCheckResult;
+  TtlCheckResult | CompactionCheckResult | IdleCheckResult | SpeedCheckResult;
+/** Rate-only premium comparisons keep current-setting estimates separate from observed response premiums. */
+export interface SpeedCheckResult extends CheckBase<string> {
+  check: "fast-mode";
+  bucket: "all";
+  replacement: string;
+  reason: string;
+  observed: {
+    premiumParts: number;
+    standardParts: number;
+    unknownParts: number;
+    premium: Cost;
+    monthlyPremiumUsd: number | null;
+  };
+  currentEstimate: { premium: Cost; pricedParts: number; unknownParts: number };
+  usageEstimates: UsageEstimate[];
+}
 /** One request gap or final observation period, without an assumed session end. */
 export interface IdlePeriod {
   request: string;

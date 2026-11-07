@@ -9,4 +9,4 @@ printing a prompt.
 
 ## Required
 
-- [m0: first release](/quest/m0/README.md) - token-max 0.1.0 on crates.io with the cache, compaction, Bash cap, skills catalog, and keepalive checks
+- [m0: first release](/quest/m0/README.md) - token-max 0.1.0 on crates.io with the cache, compaction window, idle compaction, Bash cap, skills catalog, and keepalive checks

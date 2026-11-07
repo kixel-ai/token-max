@@ -1,11 +1,11 @@
-# [S] Keepalive check
+# [M] Keepalive check
 
 ## Goal
 
-`token-max` reports whether pinging an idle session just under its cache
-TTL would have cost less than the cache misses it saw, for each cap on how
-long to keep pinging, and recommends a keepalive only when one comes out
-ahead.
+`token-max` compares leaving sessions idle, compacting them while idle,
+and pinging just under the cache TTL for each cap on how long to keep
+pinging. It recommends a keepalive only when it beats both alternatives
+after their costs and unknown client lifetimes are accounted for.
 
 ## Plan
 

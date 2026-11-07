@@ -62,8 +62,9 @@ Decision prompts, chosen options marked ✅:
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
-  Say so in the output, and recommend a change only when the saving clears
-  that uncertainty.
+  Say so in the output, report uncertainty in the measurable inputs, and
+  give a change only when the saving holds across their reported ranges.
+  Show behavioral limits such as extra re-reading as break-even caveats.
 - Default to a window since the setting last changed, read from the
   transcripts, so old behavior does not argue against a setting already in
   place. If no change history exists, use explicit `--since` or the available
@@ -79,4 +80,4 @@ Recommendations for every check:
 - [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
 - [Skills catalog check](/quest/m0/skills-catalog.md) - flags duplicate entries and a Codex skills catalog over its budget
-- [Keepalive check](/quest/m0/keepalive.md) - whether pinging idle sessions under the cache TTL would have cost less than their misses
+- [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat both idle compaction and leaving sessions idle after costs and client lifetime bounds

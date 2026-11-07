@@ -39,16 +39,16 @@ checked 2026-11-06, define the available controls:
   feature flags. Report unsupported controls or blocked prerequisites
   instead of recommending a toggle that cannot take effect.
 
-Start by establishing which events the logs expose. Compare structural
-metadata from real resumed and unresumed idle summaries before defining
-an identification rule, retaining no text. Current `compact_boundary`
-records label triggers `auto` or `manual`, not `idle`; `precomputed: true`
-is an undocumented candidate signal, not a guaranteed idle label. A
-boundary may appear only on resume. A missing boundary therefore does not
-prove that no idle summary was generated or paid for. Use synthetic parser
-fixtures matching verified metadata, not invented idle events. If the
-format cannot distinguish idle summaries, report that limit and model
-opportunities conditionally.
+Use the replay check's verified compaction signals and estimated summary
+charges. If the format cannot distinguish idle summaries, report that
+limit and model opportunities conditionally. For returned gaps with known
+settings and versions, use observed applied/not-applied outcomes and the
+first request's actual usage as the baseline. Do not charge on for a
+summary merely because a returned gap was long enough. Report activation
+rates by version and client where known, and compare them to the
+break-even rate; do not transfer those rates to a different version or
+feature-flag state. An unlogged discarded summary cannot be established
+from a missing applied boundary; expose that limit separately.
 
 The check reads effective settings, their owners, and recorded versions.
 Use historical settings only when recorded. If the last change is unknown,
@@ -64,43 +64,56 @@ have not reached the idle trigger are censored, not abandoned sessions.
 No session-end marker is assumed. For older final periods with unknown
 client lifetime, bound cost between closure before the trigger (no summary)
 and staying open and awake (one charged summary). The same uncertainty
-applies to intervening gaps when the client could have closed and resumed.
+applies to hypothetical on scenarios whose activation is unobserved, not
+to replacing known returned outcomes with assumed activation.
 
 Compare on and off over the same window, first at current settings and
 then after the TTL and compaction-window recommendations. Identify the
 baseline for each saving; independent savings are not additive. With a
-recommended 5m TTL or a window below the idle threshold, report that idle
-compaction is inapplicable. Keepalive is a later alternative to this policy.
+recommended main-conversation 5m TTL or a window below the idle threshold,
+report that idle compaction is inapplicable. Keepalive is a later
+alternative to this policy.
 
 Price on's warm summarization input, summary output, and subsequent cache
 reads and writes against off's retained history, cold resumes, and later
-manual or automatic compactions. A compaction request has its own TTL
-bucket; use the summary-to-resume delay and preserve any unchanged cached
-system/project prefix. Account for returns after summarization but before
-the original cache expiry too. Use observed usage if available; otherwise
-estimate from `preTokens` at the read price and `postTokens` as a summary
-size proxy, stating which overhead and cache layers cannot be separated.
-Carry context changes forward until the paths converge, counting observed
-compactions once. Do not claim the uncompacted future is observed in an
-already-compacted transcript.
+manual or automatic compactions. A compaction request shares the
+outside-main TTL bucket with sub-agents, so use both TTL recommendations.
+Prefer actual resumed-request cache reads/writes over inferring cache
+survival from the gap: other same-directory sessions may keep a prefix
+warm. Preserve any unchanged cached system/project prefix. Without observed
+generation timing, estimate summary-to-resume delay from the documented
+near-expiry trigger and label it uncertain; boundary time and `durationMs`
+are not generation timing. Returns near expiry need a timing range, not an
+asserted before/after classification. Use the replay check's usage or
+estimated summary charges. For carry-forward, calibrate full post-compaction
+context from observed resumed requests, including system/project context
+and new input. `postTokens` alone is a summary-size proxy, not the full
+request; a summary-only lower bound cannot support a savings
+recommendation. Carry changes forward until the paths converge, counting
+observed compactions once. Do not claim the uncompacted future is observed
+in an already-compacted transcript.
 
 Show the net over the window and per month, the assumptions, and a range
 for unknown client lifetime and unobserved summary sizes. Price summaries
 in unresumed sessions as well as resumed ones. Report the break-even
 fraction of uncertain periods that must have stayed open to change the
 winner and the extra re-read cost per resumed summary that would erase
-on's saving. This exposes unobserved detail recovery without demanding an
-unbounded guarantee about future behavior. Recommend on or off under the
-stated fixed-transcript replay when observed evidence selects a winner;
-otherwise report which side of the break-even favors each setting as a
-conditional result, without an actionable change or nonzero exit. These
-are API-price estimates, not reductions to a subscription bill.
+on's saving, always as a caveat to the fixed-transcript assumption rather
+than an unbounded input to the recommendation gate. Define delta as on
+cost minus off cost across the reported activation, client-lifetime,
+summary-size, and timing ranges. Recommend off only if the entire range
+is positive, or on only if it is negative, and only emit a change when
+that differs from the effective setting. A range containing zero or
+missing required bounds produces a conditional result and exit 0, with
+the break-even showing which setting wins on each side. These are modeled
+API-price savings, not an observed comparison of both policies or
+reductions to a subscription bill.
 
 Synthetic tests cover both recommendation directions, conditional results,
 final periods with unknown client lifetime, and ineligible clients, TTLs,
 sizes, or controls. Include a resumed idle with savings, an unresumed
-summary that only adds cost, a return before original expiry, a summary
-whose own cache has expired, and compaction events without double counting.
+summary that only adds cost, a return before original expiry, an expired
+prefix on a post-compaction request, and compactions without double counting.
 
 ## Required
 

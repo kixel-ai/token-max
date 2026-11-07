@@ -10,8 +10,9 @@ for main sessions (`promptCacheTtl`) and sub-agents
 (`subagentPromptCacheTtl`). The report format, `--since`, `--json`, and the
 nonzero exit when a change is recommended are in place for the later
 checks. The reader also exposes available structural compaction, turn, and
-client metadata for those checks, separately from model requests. Tests
-run on small synthetic transcripts.
+client metadata for those checks, separately from model requests, and
+estimates compaction charges missing from request usage. Tests run on small
+synthetic transcripts.
 
 ## Plan
 
@@ -50,3 +51,23 @@ Recommendations for the implementer:
   request. Missing metadata stays unknown; summary text is never retained
   or printed. The consuming check interprets eligibility and reads the
   settings it needs.
+- Validate compaction identification and cost signals here, before later
+  checks use them. Inspect metadata for resumed and final idle periods;
+  final periods may record nothing about a summary. Current boundaries
+  distinguish `auto` and `manual`, not `idle`. Validate documented idle
+  notices in system/informational records and their pairing with boundaries
+  before using `precomputed: true`, an undocumented candidate signal. Match
+  notices during parsing without retaining or printing their text. Unknown
+  compaction reasons stay unknown; synthetic fixtures match verified record
+  shapes. A missing boundary on an unresumed session proves nothing about
+  summary generation or cost.
+- Associate observed compactions with their usage when present. Otherwise
+  expose one explicitly estimated summary charge from `preTokens` at the
+  applicable input price and `postTokens` as a summary-output proxy, with
+  cache/input overhead limits stated. This lets every later check price
+  observed summaries once without waiting for the idle-policy check.
+  Compactions share the outside-main TTL bucket controlled by
+  `subagentPromptCacheTtl`; include these estimated charges when comparing
+  that TTL, separately from the sub-agent audit figures. A boundary can be
+  logged at resume; neither its timestamp nor `durationMs` establishes when
+  the summary was generated. Preserve those distinctions in the metadata.

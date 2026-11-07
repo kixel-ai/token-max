@@ -2,8 +2,8 @@
 
 ## Goal
 
-token-max 0.1.0 is published on crates.io, and its README shows how to
-install and run it. It replays this host's Claude Code and Codex transcripts
+token-max 0.1.0 is published on npm, and its README shows how to run it
+with npx or bunx, without a global install or Rust toolchain. It replays this host's Claude Code and Codex transcripts
 against public API prices and reports which agent settings should change.
 For each setting it prints the current value, the recommended one, the file
 or tool that owns it, and the evidence. Where costs can be quantified, it
@@ -55,7 +55,11 @@ Decision prompts, chosen options marked ✅:
 - Data: ✅ its own per-request transcript parser and
   [models.dev](https://models.dev) prices, the catalog ccusage also uses
   (rejected: ccusage's output, which lacks the per-request detail).
-- Language: ✅ Rust. Repository: ✅ kixelated. Name: ✅ token-max, the
+- Language: ✅ Node-compatible TypeScript, with Bun for development
+  (supersedes Rust, 2026-11-06: the maintainer delegated the choice and
+  explicitly allowed TypeScript; only a Rust stub exists). Distribution:
+  ✅ npm through npx and bunx (rejected: requiring Cargo or a native-binary
+  wrapper). Repository: ✅ kixelated. Name: ✅ token-max, the
   maintainer's pick (191 GitHub repositories share the name, and
   [Kalmantic/jusTokenMax](https://github.com/Kalmantic/jusTokenMax), a
   token-reduction toolkit, is close in name and topic).
@@ -68,6 +72,11 @@ possible and warn from Claude/Codex guidance where they cannot be priced.
 Fast mode should be off. Extend the existing skills catalog quest rather
 than create a second owner for it. Model and review effort selection remain
 outside this expansion.
+
+Also requested 2026-11-06: ✅ a polished terminal report and one-command npm
+distribution in m0. Replay owns the TypeScript/tooling migration; the two
+new quests separately own presentation and packaging. Keep the report
+usable in scripts and avoid a second analysis implementation.
 
 Recommendations for every check:
 
@@ -92,8 +101,8 @@ Recommendations for every check:
   advisory. Unused findings for components introduced during the window
   stay advisory. Rare-use rankings, incomplete visibility, unknown costs
   alone, and conditional suggestions are advisory and exit zero unless
-  another check emits a change. Cite the
-  applicable provider/version guidance; no invented size or rarity cutoffs.
+  another check emits a change. Cite the applicable provider/version
+  guidance; no invented size or rarity cutoffs.
 - Cost attribution is not automatically removable waste: a skill, tool, or
   check-in can avoid other work. State the fixed-behavior assumption and
   account for observable extra reads or requests. Name each comparison's
@@ -113,12 +122,15 @@ Recommendations for every check:
   and `CODEX_HOME` and explicit directory selection. Resolve settings and
   recommendations per profile, deduplicate shared histories, and never
   print prompt or reply text. Processing and token estimation stay local;
-  the only network access is fetching public price data. Do not upload
+  analysis network access is limited to public price data; package-manager
+  installation downloads are separate. Do not upload
   transcript, instruction, skill, or schema content to a counting service.
 
 ## Required
 
 - [Replay and the cache TTL check](/quest/m0/replay.md) - the transcript reader, prices, report, and the first check, which reproduces the audit's cache figures
+- [Polished terminal report](/quest/m0/cli.md) - clear recommendations, cost evidence, progress, and plain/JSON output
+- [One-command npm distribution](/quest/m0/npm.md) - built JavaScript launched with npx or Bun, without a Rust install
 - [Fast-mode check](/quest/m0/fast-mode.md) - recommends standard speed and reports the observed premium where the billed tier and price are known
 - [Compaction window check](/quest/m0/compaction.md) - recommends Claude Code's and Codex's auto-compact thresholds from the spend above each candidate
 - [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete

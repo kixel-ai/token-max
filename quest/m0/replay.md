@@ -2,7 +2,8 @@
 
 ## Goal
 
-`token-max` reads every Claude Code and Codex session on the host, one
+`token-max` is a Node-compatible TypeScript CLI that reads every Claude
+Code and Codex session on the host, one
 record per model request (time, session, main or sub-agent, model, input,
 cache write by TTL, cache read, output), prices them from models.dev, and
 runs its first check: Claude Code's prompt cache TTL, 5m or 1h, separately
@@ -41,6 +42,14 @@ these figures in the PR.
 
 Recommendations for the implementer:
 
+- Replace the Rust stub and its build/test tooling with TypeScript and Bun
+  development tooling, keeping shipped code compatible with maintained
+  Node LTS releases and Bun. Update the Nix shell, CI, checks, and developer
+  documentation with the runtime change. Use streaming file I/O and retain
+  the bounded transcript-text lifetime; do not load whole histories to
+  simplify the port. CLI polish and npm release packaging have separate
+  quests; this quest owns the working core, minimal report, and shared
+  result model. The maintainer delegated this choice on 2026-11-06.
 - Discover the default and environment-selected roots plus recognizable
   local profiles such as `~/.claude*/projects`; accept repeatable
   `--claude-dir` and `--codex-dir` overrides for arbitrary locations. Print
@@ -109,7 +118,8 @@ Recommendations for the implementer:
   formats with verified cumulative/delta semantics, including repeated
   totals, resets, and inherited session history.
 - For both harnesses, freeze file lengths at run start; defer an
-  unterminated final line as in progress and report the snapshot boundary. Exclude data provably outside the selected window
+  unterminated final line as in progress and report the snapshot boundary.
+  Exclude data provably outside the selected window
   before validation when safe; a file's start date alone is insufficient.
   Complete malformed selected records fail the run with location
   diagnostics containing no transcript text. Keep the workspace's strict

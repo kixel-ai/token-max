@@ -28,8 +28,10 @@ Recommendations for the implementer:
 - Track each skill's actual rendered listing, exposed sessions/requests,
   observed invocations or loads, and last observed use in the selected
   window. Resolve names, paths, namespaces, and duplicate sources. Direct
-  Skill calls are strong evidence; shell reads of SKILL.md or inherited
-  instructions may be weaker evidence. Count deduplicated calls and explain
+  Skill calls and explicit typed invocations are strong evidence; shell
+  reads of SKILL.md or inherited instructions may be weaker evidence.
+  Requested use, confirmed loads, and successful invocations stay distinct.
+  Count deduplicated calls and explain
   gaps, rather than interpreting a missing invocation event as never used.
 - Report "no observed use during N exposed sessions" and the window, not
   "never used". Show use count/rate and recurring cost to rank infrequent
@@ -37,6 +39,9 @@ Recommendations for the implementer:
   unknown historical catalogs, and incomplete invocation visibility need
   separate labels. A useful rare skill may belong in a project or remain
   manually invocable instead of being disabled everywhere.
+  Automatic unused recommendations require complete exposure and invocation
+  visibility and positive recurring overhead; all other low-use findings
+  are advisory under the milestone's exit-code rules.
 - Price the listing actually sent, including name, description, and path
   where present, across its request exposures. Skill bodies and references
   loaded on use are a separate attributed cost. Use marginal before/after
@@ -44,7 +49,9 @@ Recommendations for the implementer:
   freed space, so removed entries' gross cost is not always net savings.
   Include relevant cache behavior and disclose unmeasured extra work.
 - Keep the existing duplicate-folder and Codex
-  `skills.max_context_tokens` checks. Use the harness's effective budget and
+  `skills.max_context_tokens` checks, including its documented maximum.
+  Include Claude `skillListingBudgetFraction` and
+  `skillListingMaxDescChars`. Use the harness's effective budget and
   truncation/omission evidence; do not assume every installed skill is sent
   or the full skill body is loaded on every request.
 - Recommend supported visibility controls: Claude `skillOverrides` can use
@@ -63,4 +70,4 @@ this check adds cross-harness transcript replay and API-price estimates.
 
 ## Required
 
-- [Replay and the cache TTL check](/quest/m0/replay.md) - the reader, prices, and report it adds to
+- [Context exposure measurement](/quest/m0/context-exposure.md) - local size estimates, exposure, and invocation coverage on top of replay

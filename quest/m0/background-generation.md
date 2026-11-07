@@ -15,12 +15,13 @@ m1). The maintainer asked whether disabling background generation matters
 in their own transcripts and wanted a dollar amount if computable. Do not
 turn missing attribution into a zero-cost result or a made-up saving.
 
-The metadata-only host survey over 2026-10-30 through 11-06 local time found
-no separately attributed recap/suggestion usage in the inspected Claude
-main-session or Codex records. Some malformed historical records were
-excluded, so this was feasibility research, not a complete billing audit.
-Future versions or other hosts may expose more; validate actual record
-shapes before adding synthetic fixtures.
+The initial metadata survey covered only the default Claude profile and
+mostly SDK/IDE clients; it cannot establish whether interactive background
+generation is logged or what this host spends on it. Alternate profiles
+hold most of its Claude data. Before relying on an attribution rule,
+capture eligible interactive sessions with suggestions/recaps enabled and
+disabled, including generation without a later user turn. Determine what
+is recorded and validate those shapes before adding synthetic fixtures.
 
 - Resolve Claude `promptSuggestionEnabled`, `awaySummaryEnabled`,
   `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION`,
@@ -33,10 +34,15 @@ shapes before adding synthetic fixtures.
   and tier. Token counts without a feature identity remain unattributed;
   idle gaps, terminal focus guesses, and short replies are not proof of a
   recap or suggestion request.
-- If costs can be estimated from verified activation/context evidence,
-  state the model and assumptions and show sensitivity. Otherwise show
-  unknown dollars. Neither a speculative per-idle-period charge nor all
-  unexplained spend is a measured feature cost.
+- Observed feature costs take precedence. With known eligible client and
+  feature state, a documented trigger may supply the activation estimate,
+  such as a suggestion request after a completed response. Use verified
+  context/output proxies from controlled capture where available; state
+  the deciding assumptions and sensitivity as with idle compaction. Idle
+  time alone does not establish eligibility. Without estimable inputs show
+  unknown dollars. A modelled trigger is not a measured feature cost.
+- If calls or their cache refreshes are not logged, report that baseline
+  coverage gap for every affected replay, not just this feature's total.
 - Compare the lower aggregate estimated net cost, including observable
   follow-on work and any cache warming lost when requests disappear. Goal
   check-ins may advance work; suggestion acceptance or whether a person

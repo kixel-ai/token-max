@@ -42,6 +42,14 @@ Recommendations for the implementer:
   show uncertainty beside that recommendation; do not require every period
   or sensitivity scenario to favor it. Do not add the two policies'
   savings for the same idle period.
+- Define a deciding lifetime estimate for every cap, not just closed/open
+  bounds. Use recorded client liveness/shutdown events when present. Without
+  them, model the documented open-and-awake condition through the earlier
+  of return and cap; final periods incur the full cap. Label that fallback
+  assumption and show closure/sleep sensitivity and the break-even open
+  duration. Do not extend the idle check's one-hour activation fraction to
+  multi-hour ping lifetimes. Choose the aggregate estimate's winner, not a
+  requirement to win across every lifetime bound.
 
 ## Required
 

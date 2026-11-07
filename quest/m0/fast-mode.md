@@ -14,7 +14,8 @@ Decided 2026-11-06 (maintainer, /quest-plan): ✅ add the check in m0
 cost preference; faster responses may still be useful to someone else.
 
 - Resolve Claude `fastMode`, `fastModePerSessionOptIn`, and applicable
-  session/environment overrides, and Codex `service_tier`, feature gates,
+  session/environment overrides, including `CLAUDE_CODE_DISABLE_FAST_MODE`
+  and managed `fastMode: false`, and Codex `service_tier`, feature gates,
   profiles, and session overrides. Warn on an effective premium speed tier,
   including supported ultrafast modes. Do not flag a saved value that an
   effective override disables or claim an unobserved session override.
@@ -23,6 +24,9 @@ cost preference; faster responses may still be useful to someone else.
   response tier/speed when present; a requested tier is not proof that it
   was billed. Distinguish observed premiums, estimates from known effective
   settings, and requests with unknown tier or price.
+  Holding recorded cache categories constant is a rate-only estimate:
+  Claude fast and standard modes use separate caches, so label excluded
+  switching effects or replay them where cache history supports it.
 - Missing historical billing metadata does not prevent the settings
   warning, but prevents an unsupported dollar claim. An unset setting uses
   that version's documented default. The observed settings window must not

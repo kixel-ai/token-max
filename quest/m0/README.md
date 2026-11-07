@@ -78,25 +78,37 @@ Recommendations for every check:
   period or in every sensitivity scenario. Missing inputs that cannot be
   estimated prevent a priced recommendation; uncertainty alone does not.
 - Distinguish measured token usage, estimated attribution or replay, and
-  guidance without a dollar estimate in both text and JSON. Missing
-  attribution is unknown, never zero. A guidance warning can recommend a
-  concrete change without priced savings; unknown results and conditional
-  suggestions alone do not make the exit nonzero. Cite the provider and
-  applicable version or client for guidance, and avoid invented size or
-  rarity cutoffs.
+  guidance without dollars in both text and JSON. Missing attribution is
+  unknown, never zero. An error fails the run. Otherwise emit a change and
+  nonzero exit only when an applicable effective setting differs from a
+  priced net winner, fast mode is enabled, or guidance identifies a
+  documented budget violation, duplicate listing, or a skill/MCP with
+  positive recurring overhead and no observed use under complete exposure
+  and invocation visibility for the window. Rare-use rankings, incomplete
+  visibility, unknown costs alone, and conditional suggestions are advisory
+  and exit zero unless another check emits a change. Cite the applicable
+  provider/version guidance; no invented size or rarity cutoffs.
 - Cost attribution is not automatically removable waste: a skill, tool, or
   check-in can avoid other work. State the fixed-behavior assumption and
   account for observable extra reads or requests. Name each comparison's
-  baseline; combine savings only through a joint replay, since removing
-  context, changing TTL, and removing requests can overlap. API-price
-  equivalents are not a claim about subscription bills.
+  baseline. Fast mode, background generation, skills, and context each
+  compare with the recorded/current profile baseline, holding other
+  settings constant; recommendations are not applied between these checks.
+  The existing TTL, window, idle, and keepalive checks retain their stated
+  evaluation order and label conditional baselines. m0 reports per-check
+  savings only, with no summed or joint savings total. API-price equivalents
+  are not a claim about subscription bills.
 - Default to a window since the setting last changed, read from the
   transcripts, so old behavior does not argue against a setting already in
   place. If no change history exists, use explicit `--since` or the available
   transcript window and label the replay as applying current settings to
   historical sessions.
-- Read sessions where each CLI keeps them, honoring `CLAUDE_CONFIG_DIR` and
-  `CODEX_HOME`, and never print prompt or reply text.
+- Discover and report all transcript profiles, honoring `CLAUDE_CONFIG_DIR`
+  and `CODEX_HOME` and explicit directory selection. Resolve settings and
+  recommendations per profile, deduplicate shared histories, and never
+  print prompt or reply text. Processing and token estimation stay local;
+  the only network access is fetching public price data. Do not upload
+  transcript, instruction, skill, or schema content to a counting service.
 
 ## Required
 
@@ -106,6 +118,7 @@ Recommendations for every check:
 - [Idle compaction check](/quest/m0/idle-compaction.md) - compares on and off from idle frequency, return patterns, estimated net costs, and break-evens where logs are incomplete
 - [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
 - [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
+- [Context exposure measurement](/quest/m0/context-exposure.md) - local component estimates and invocation/exposure coverage shared by skills and context checks
 - [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat both idle compaction and leaving sessions idle after costs and client lifetime bounds

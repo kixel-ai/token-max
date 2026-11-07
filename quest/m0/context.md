@@ -33,13 +33,18 @@ those findings instead of adding their costs again.
   calls, last use, and usage visibility. Include identifiable nested calls
   through execution wrappers; code references alone do not prove execution
   or success. With incomplete call visibility, say "no observed use", not
-  "unused". Rank low usage beside recurring cost without arbitrary cutoffs.
+  "unused". Incomplete visibility and rare use only produce advisory
+  rankings; an automatic unused finding requires complete exposure/call
+  visibility and positive recurring overhead, per the milestone rules.
 - Recommend scoped disabling of unused MCP servers/tools and restoring
   deferred loading where appropriate. Claude exposes `ENABLE_TOOL_SEARCH`
   and per-server `alwaysLoad`; check supported models/provider conditions
   before warning. Codex exposes server/tool enablement; do not recommend
   retired tool-search switches. A small frequently used toolset can be
   cheaper upfront once discovery overhead is included.
+  Claude server disabling uses `/mcp`; per-tool deny rules restrict calls
+  but must not be assumed to remove schema/listing costs. Codex has
+  server/tool enablement lists. Name the supported control for each finding.
 - Use applicable provider guidance to warn about oversized always-loaded
   instructions, duplicate content, or catalogs over documented budgets.
   Suggest concise descriptions, project/path scoping, and moving detailed
@@ -48,6 +53,9 @@ those findings instead of adding their costs again.
   recommending arbitrary truncation that discards required instructions.
   Current file sizes can support a current warning but not a claim about
   historical exposure or dollars.
+  Include agent listings, hooks, and plugin/app/managed instructions in the
+  category breakdown; link shared plugin costs without charging them to
+  both skills and MCPs.
 - Check inline tool-output budgets against observed output sizes and
   repeated reads: Claude exposes `bashOutputMaxChars` and
   `MAX_MCP_OUTPUT_TOKENS`; Codex exposes `tool_output_token_limit`. Compare
@@ -66,7 +74,7 @@ and [Codex MCP settings](https://learn.chatgpt.com/docs/config-file/config-refer
 
 ## Required
 
-- [Replay and the cache TTL check](/quest/m0/replay.md) - request/context exposure, token counts, prices, and report primitives
+- [Context exposure measurement](/quest/m0/context-exposure.md) - local size estimates, exposure, and invocation coverage on top of replay
 
 ## Related
 

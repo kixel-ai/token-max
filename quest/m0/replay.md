@@ -12,9 +12,10 @@ nonzero exit when a change is recommended are in place for the later
 checks. The reader also exposes available structural compaction, turn, and
 client metadata for those checks, separately from model requests, and
 estimates compaction charges missing from request usage. It exposes
-request attribution, effective service tiers, context exposure, and usage
-coverage for the other checks, and supports guidance without priced
-savings. Tests run on small synthetic transcripts.
+request attribution, effective service tiers, structural context events,
+and usage coverage for the other checks, and supports guidance without
+priced savings. The context-exposure quest owns component estimates and
+exposure reconstruction. Tests run on small synthetic transcripts.
 
 ## Plan
 
@@ -40,6 +41,20 @@ these figures in the PR.
 
 Recommendations for the implementer:
 
+- Discover the default and environment-selected roots plus recognizable
+  local profiles such as `~/.claude*/projects`; accept repeatable
+  `--claude-dir` and `--codex-dir` overrides for arbitrary locations. Print
+  discovered, selected, excluded, and inaccessible roots so detection gaps
+  cannot silently look like a whole-host report. Explicit selection limits
+  the run; inaccessible selected roots fail it.
+- Scan main and nested subagent transcripts. Canonicalize directories and
+  deduplicate request identities across files and profiles. Distinct config
+  roots can share one projects directory; read that history once, preserve
+  the aliases, and resolve each profile's settings and billing/provider
+  conditions separately. Assign historical costs to a profile only with
+  provenance; ambiguous shared history stays a labelled shared bucket, not
+  a full-cost copy under every alias. Current-setting replays name the
+  chosen profile and assumption. Apply these rules to every later check.
 - Fetch models.dev's `api.json` with a cached copy for offline runs, and
   name the price an estimate assumed when the catalog lacks one, such as the
   1h write.
@@ -48,6 +63,18 @@ Recommendations for the implementer:
   public model for internal models such as `codex-auto-review`. OpenAI
   cached input is part of total input, reasoning output is part of output,
   and its catalog's cache-write field is not an additional OpenAI charge.
+- Resolve contradictory catalog fields against the provider's documented
+  threshold with a dated source in the price adapter. In particular,
+  `tiers[].size` and the legacy `context_over_200k` name must not silently
+  choose different thresholds. Unsupported model/tier combinations remain
+  unpriced, including fast-mode entries without long-context rates. Price
+  whole baseline and counterfactual requests again when a change crosses a
+  context tier; do not multiply removed tokens by the old marginal rate.
+- Verify whether Claude top-level usage includes `usage.iterations` before
+  using either; never add overlapping totals. Account for recorded
+  `inference_geo`/regional pricing and public server-tool fees when
+  applicable, otherwise expose unpriced charges. Keep these distinct from
+  client-side tool calls and from compaction boundaries.
 - Each Claude request records its cache writes by TTL, which dates the last
   TTL change for the default window.
 - Keep the reader to request fields and structural metadata, so transcript
@@ -70,24 +97,15 @@ Recommendations for the implementer:
   `response_id`; its turn/thread usage fields are cumulative. Do not add
   overlapping `event_msg.token_count` accounting again. Support older
   formats with verified cumulative/delta semantics, including repeated
-  totals, resets, and inherited session history. Malformed records fail the
-  run with location diagnostics that contain no transcript text; exploratory
-  scans that excluded bad records are not complete billing audits.
-- Expose skill/tool identities, invocation evidence, and the intervals in
-  which context components were actually visible. Current Codex
-  `world_state.state.host_skills.body` holds a rendered catalog;
-  `state.tools` can hold deferred namespace descriptions, while
-  `top_level_tools` may contain only hashes. Actual schemas may appear in
-  `response_item.additional_tools`. Claude records skill listings,
-  instruction files, request shapes, and deferred-tool deltas. Verify these
-  formats before making synthetic fixtures; hashes are not schema text.
-- Tokenize exposed components during parsing and retain counts, identities,
-  fingerprints, and exposure metadata, not their content. Identify the
-  tokenizer or approximation and use the request's cache/read/write prices
-  for marginal context estimates. When component positions or cache status
-  are missing, label the allocation assumption and show a range rather than
-  treating all repeated context as uncached. Do not count snapshots as
-  requests or assume current installed metadata existed historically.
+  totals, resets, and inherited session history. Freeze file lengths at run
+  start; defer an unterminated final line as in progress and report the
+  snapshot boundary. Exclude data provably outside the selected window
+  before validation when safe; a file's start date alone is insufficient.
+  Complete malformed selected records fail the run with location
+  diagnostics containing no transcript text. Keep the workspace's strict
+  failure policy: no success report or recommendations from a failed scan,
+  and no skip-malformed mode in m0. Earlier exploratory partial scans are
+  not complete billing audits.
 - Validate compaction identification and cost signals here, before later
   checks use them. Inspect metadata for resumed and final idle periods;
   final periods may record nothing about a summary. Current boundaries

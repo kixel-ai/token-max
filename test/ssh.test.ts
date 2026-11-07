@@ -251,6 +251,7 @@ if(host==='failure'){process.stderr.write('SYNTHETIC_SECRET\\n');process.exit(25
 if(command.includes('uname -s')) {
  process.stdout.write(JSON.stringify({protocol:1,platform:'Linux',node:host==='bun'?null:{kind:'node',version:'24.0.0',path:process.env.REMOTE_NODE,platform:'linux'},bun:{kind:'bun',version:'1.4.4',path:process.env.REMOTE_BUN,platform:'linux'}}));process.exit(0);
 }
+if(host==='runtime-failure'){process.stderr.write('SYNTHETIC_SECRET runtime crash\\n');process.exit(42);}
 process.stderr.write('SYNTHETIC_SECRET stderr noise\\n');
 const env={...process.env,HOME:process.env.REMOTE_HOME,CLAUDE_CONFIG_DIR:'',CODEX_HOME:'',XDG_CACHE_HOME:process.env.REMOTE_HOME+'/.cache'};
 const child=spawn('/bin/sh',['-c',command],{stdio:host==='corrupt'||host==='mismatch'?['inherit','pipe','inherit']:'inherit',env});
@@ -294,6 +295,28 @@ test(
     try {
       const transcript = join(w.claude, "projects/project/main.jsonl");
       await fixture(transcript, "claude.jsonl");
+      const records = (await readFile(transcript, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      Object.assign(records[0].params, {
+        system: "SYNTHETIC_PRIVATE_INSTRUCTION",
+        messages: [{ role: "user", content: "SYNTHETIC_PRIVATE_PROMPT" }],
+        tools: [
+          {
+            name: "mcp__example__query",
+            description: "SYNTHETIC_PRIVATE_SCHEMA",
+            input_schema: {
+              type: "object",
+              properties: { secret: { type: "string" } },
+            },
+          },
+        ],
+      });
+      await writeFile(
+        transcript,
+        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+      );
       const before = await readFile(transcript);
       const invoke = (flags: string[]) =>
         spawnSync(
@@ -315,6 +338,8 @@ test(
       assert.match(report.scan.hosts[0].runtime, /^node/);
       assert.match(report.scan.hosts[1].runtime, /^bun/);
       assert.equal(report.scan.requests.length, 2);
+      assert.ok(report.scan.exposure.components.length >= 2);
+      assert.equal(report.scan.exposure.requests[0].coverage, "complete-text");
       assert.equal(
         new Set(
           report.scan.requests[0].origins.map((o: { host: string }) => o.host),
@@ -341,6 +366,7 @@ test(
         ["--ssh", "node", "--ssh", "failure"],
         ["--ssh", "mismatch"],
         ["--ssh", "corrupt"],
+        ["--ssh", "runtime-failure"],
       ]) {
         const failure = invoke(flags);
         assert.equal(failure.status, 2, failure.stderr);
@@ -350,6 +376,23 @@ test(
           /SYNTHETIC_SECRET|SYNTHETIC_PRIVATE/,
         );
       }
+      const sshFailure = invoke(["--ssh", "failure"]);
+      assert.match(JSON.parse(sshFailure.stderr).error, /OpenSSH failed/);
+      const runtimeFailure = invoke(["--ssh", "runtime-failure"]);
+      assert.match(
+        JSON.parse(runtimeFailure.stderr).error,
+        /runtime or POSIX preflight failed/,
+      );
+      delete records[3].message.usage.output_tokens;
+      await writeFile(
+        transcript,
+        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+      );
+      const missing = invoke(["--ssh", "node"]);
+      assert.ok(missing.status === 0 || missing.status === 1, missing.stderr);
+      const unknown = JSON.parse(missing.stdout);
+      assert.equal(unknown.scan.coverage.missingUsage, 1);
+      assert.equal(unknown.historical[0].cost.totalUsd, null);
       await writeFile(
         transcript,
         '{"type":"assistant","private":"SYNTHETIC_SECRET",BROKEN}\n',

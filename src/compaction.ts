@@ -770,9 +770,7 @@ export function compactionChecks(options: {
       const applicable =
         control.applicable &&
         perModelSupported &&
-        (profile.harness !== "claude" ||
-          (!models.includes(null) &&
-            ttlResults.every((t) => t.action !== "advisory")));
+        (profile.harness !== "claude" || !models.includes(null));
       const profiles = [...new Set(selected.flatMap((r) => r.profiles))];
       const savings = winning?.savingsUsd ?? (recommended !== null ? 0 : null);
       checks.push({
@@ -800,8 +798,8 @@ export function compactionChecks(options: {
             : "available selected history after the TTL comparison windows; current controls applied to history",
         baseline:
           control.value === null
-            ? "recorded requests after recommended Claude TTLs; current window unknown, advisory comparison only"
-            : "current window applied to recorded requests after recommended Claude TTLs; observed summaries retained once; savings are incremental and checks must not be summed",
+            ? "recorded requests after available Claude TTL recommendations (otherwise current controls); current window unknown, advisory comparison only"
+            : "current window applied to recorded requests after available Claude TTL recommendations (otherwise current controls); observed summaries retained once; savings are incremental and checks must not be summed",
         requests: selected.filter((r) => r.time >= since).length,
         baselineCost,
         observedSummaryCost,
@@ -837,6 +835,7 @@ export function compactionChecks(options: {
           "extra summaries read the whole modeled context at ordinary input rates; output and resumed prefix use cohort medians from linked billed summaries and first subsequent requests; first resumed prefix is cold and charged in that request, never added twice",
           "first post-boundary prefix includes fixed instructions and retained/new context, not just summary output; counts do not establish content identity; summaries may use the recorded summary model rather than the conversation model",
           "ordinary requests, outputs, tools and incremental growth are held fixed until each observed boundary; proportional quality or behavioral improvements are not assumed",
+          "available TTL recommendations form the baseline; where no priced TTL recommendation exists, the current explicit control is used and unknown affected TTL charges remain unpriced",
           "unknown unchanged costs cancel only in the comparison; full totals remain unknown; affected context tiers reprice the entire request including output",
           "changed prefixes are fully reused only within the chosen Claude lifetime or the documented default 30m billed Codex lifetime, with stable prefix identity assumed; expiry makes the new prefix cold and cannot inherit external warming of the old transcript",
           "cold-summary sensitivity charges 1h Claude writes or 12h billed Codex writes; larger-summary sensitivity uses observed cohort maxima; neither sensitivity vetoes the aggregate estimate",

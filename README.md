@@ -167,6 +167,12 @@ windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` ad
 current-settings and post-recommendation on/off costs, request/final periods,
 activation cohorts, context-size costs and lifetime/summary/timing sensitivities. TypeScript consumers
 should narrow `CheckResult` by `check` before reading setting-specific fields.
+`background-generation` adds separate native feature controls, ownership, client
+coverage, explicitly attributed request costs where available and conditional
+guidance. Unlogged generation and cache refreshes keep total feature and net
+dollars unknown. Enabled toggles alone never justify a disable recommendation;
+goal check-ins can also change autonomous follow-on work. The affected TTL,
+window and idle checks expose that incomplete baseline in `baselineCoverage`.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.

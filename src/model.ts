@@ -1,4 +1,8 @@
 import type { ExposureScan, analyzeExposure } from "./exposure.js";
+import type {
+  BackgroundControls,
+  BackgroundCheckResult,
+} from "./background.js";
 
 /** The two locally supported transcript formats. */
 export type Harness = "claude" | "codex";
@@ -144,6 +148,10 @@ export interface Profile {
   idle?: IdleControl;
   /** Current project controls observed at recorded working directories. */
   idleDirectories?: Record<string, IdleControl>;
+  /** Native background controls; historical activation is never inferred from these. */
+  background?: BackgroundControls;
+  /** Current controls at recorded project directories, with unresolved scopes explicit. */
+  backgroundDirectories?: Record<string, BackgroundControls>;
 }
 /** Discovery includes exclusions and failures so selection cannot imply full-host coverage. */
 export interface RootStatus {
@@ -222,6 +230,8 @@ export interface CheckBase<Value> {
   until: number | null;
   windowBasis: string;
   baseline: string;
+  /** Missing calls and cache effects that can change this replay's baseline. */
+  baselineCoverage?: string[];
   requests: number;
   savingsUsd: number | null;
   monthlySavingsUsd: number | null;
@@ -294,7 +304,10 @@ export interface CompactionCheckResult extends CheckBase<number> {
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
 export type CheckResult =
-  TtlCheckResult | CompactionCheckResult | IdleCheckResult;
+  | TtlCheckResult
+  | CompactionCheckResult
+  | IdleCheckResult
+  | BackgroundCheckResult;
 /** One request gap or final observation period, without an assumed session end. */
 export interface IdlePeriod {
   request: string;

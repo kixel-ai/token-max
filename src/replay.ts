@@ -29,6 +29,7 @@ import { observedTtl } from "./cache.js";
 import { cacheBucket as bucket, replayParts } from "./scenarios.js";
 import { compactionChecks } from "./compaction.js";
 import { idleChecks } from "./idle.js";
+import { backgroundChecks } from "./background.js";
 import { identity, ScanError } from "./safe.js";
 
 const TTL_SOURCE =
@@ -613,6 +614,16 @@ export function analyze(options: {
       now,
     }),
   );
+  const background = backgroundChecks({ scan, catalog, since, now });
+  for (const check of checks) {
+    if (background.some((b) => b.profile === check.profile)) {
+      check.baselineCoverage = [
+        "Native background generation and its cache refreshes are not fully logged; this replay uses the recorded-request baseline, not complete profile spend. See the feature-specific background-generation coverage.",
+      ];
+      check.uncertainty.push(...check.baselineCoverage);
+    }
+  }
+  checks.push(...background);
   return {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),

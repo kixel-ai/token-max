@@ -12,7 +12,7 @@ import type {
 } from "./model.js";
 import {
   discover,
-  discoverIdleOwners,
+  discoverProjectOwners,
   structuralSettings,
   type DiscoveryOptions,
 } from "./discovery.js";
@@ -998,7 +998,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
     options.since !== undefined && value.time < options.since;
   const sortedRequests = allRequests.filter((r) => !beforeWindow(r));
   const sortedEvents = allEvents.filter((e) => !beforeWindow(e));
-  await discoverIdleOwners(options, discovery.profiles, allRequests);
+  await discoverProjectOwners(options, discovery.profiles, allRequests);
   for (const r of sortedRequests)
     for (const issue of r.issues) issues.add(issue);
   if (sortedEvents.some((e) => e.kind === "compaction"))

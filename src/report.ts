@@ -166,10 +166,18 @@ export function formatReport(
       );
       field("Profile", profileName(result.profile));
       field("Owner", display(result.owner));
-      field("Current", setting(result.current));
+      field(
+        "Current",
+        result.check === "background-generation" &&
+          result.bucket === "goal-checkins" &&
+          typeof result.current === "number"
+          ? `${result.current} minutes`
+          : setting(result.current),
+      );
       field("Suggested", setting(result.recommended));
       field("Reason", reason(result));
       field("Baseline", result.baseline);
+      notes("Baseline coverage", result.baselineCoverage ?? []);
       field(
         "Window",
         `${instant(result.since)} ${arrow} ${instant(result.until)}; ${result.requests} requests; ${result.windowBasis}`,
@@ -223,6 +231,15 @@ export function formatReport(
           "Extra re-read break-even per resumed summary",
           estimate(s.rereadBreakEvenUsdPerResumedSummary),
         );
+      } else if (result.check === "background-generation") {
+        field("Client applicability", result.applicability);
+        field("Guidance", result.guidance);
+        field(
+          "Attributed requests",
+          `${result.attributedRequests.length}; ${money(result.attributedCost)}; included in recorded costs, not additional charges`,
+        );
+        field("Total feature cost", money(result.totalFeatureCost));
+        notes("Background coverage", result.coverage);
       } else {
         field(
           "Models",
@@ -252,7 +269,10 @@ export function formatReport(
             `larger observed summary/prefix ${estimate(suggested.sensitivity.largerSummarySavingsUsd)}; cold summary ${estimate(suggested.sensitivity.coldSummarySavingsUsd)}; extra re-read break-even ${estimate(suggested.sensitivity.rereadBreakEvenUsd)}. Conditional scenarios; the aggregate estimate decides.`,
           );
       }
-      if (result.usageEstimates.length)
+      if (
+        result.check !== "background-generation" &&
+        result.usageEstimates.length
+      )
         field(
           "Unlinked attempts",
           `${result.usageEstimates.filter((e) => e.evidence === "estimated").length} estimated inputs; ${result.usageEstimates.filter((e) => e.evidence === "unknown").length} unsupported inputs. Original usage and historical billing stay unknown.`,
@@ -363,6 +383,14 @@ export function formatReport(
               );
             notes("Idle unknown", scenario.unknown);
           }
+        } else if (result.check === "background-generation") {
+          cost("Attributed request cost", result.attributedCost);
+          cost("Total feature cost", result.totalFeatureCost);
+          for (const client of result.clients)
+            field(
+              "Recorded client",
+              `${client.client ?? "unknown"}; version ${client.version ?? "unknown"}; ${client.requests} requests`,
+            );
         } else {
           cost("Current-window baseline", result.baselineCost);
           cost("Existing summaries", result.observedSummaryCost);
@@ -401,14 +429,20 @@ export function formatReport(
             witnesses(scenario.cacheEvidence);
           }
         }
-        for (const estimate of result.usageEstimates) {
+        for (const estimate of result.check === "background-generation"
+          ? []
+          : result.usageEstimates) {
           field(
             "Attempt",
             `${estimate.request}: ${estimate.evidence}; basis ${estimate.basis.join(", ") || "unavailable"}; ${estimate.reason}; output budget ${estimate.maxOutputTokens ?? "unknown"} (not observed output)`,
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        if (result.check !== "idle-compaction") witnesses(result.cacheEvidence);
+        if (
+          result.check !== "idle-compaction" &&
+          result.check !== "background-generation"
+        )
+          witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
         notes("Source", result.sources);
@@ -474,6 +508,7 @@ export function formatReport(
 }
 
 function reason(result: CheckResult): string {
+  if (result.check === "background-generation") return result.guidance;
   if (result.check === "idle-compaction")
     return result.recommended === null
       ? "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."

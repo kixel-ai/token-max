@@ -480,3 +480,83 @@ Current provider guidance distinguishes skill discovery from body loading:
 [Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
+
+## Native background generation
+
+`background-generation` reports Claude prompt suggestions, session recaps and
+active-goal check-in intervals separately, plus Codex `tui.auto_recap`. It resolves
+observed user, project/local and system managed Claude files and the active
+profile's environment. Environment controls override toggles. Disabling telemetry
+or using a third-party provider can make the suggestion toggle ineffective unless
+explicitly opted in. Goal intervals use the documented 30-minute fallback for
+invalid values and accept zero to disable. Codex named profiles, project trust and
+unrecorded launch selection remain unresolved rather than treating base config as
+the effective owner. Other managed delivery mechanisms are outside observed
+ownership. Missing or deleted working directories also keep ownership unresolved.
+The latest recorded client version is an applicability assumption, not proof of
+what is installed now. Client eligibility does not establish feature activation.
+
+Guidance was checked 2026-11-07 against the current primary
+[Claude background usage](https://code.claude.com/docs/en/costs#background-token-usage),
+[settings](https://code.claude.com/docs/en/settings-reference),
+[environment controls](https://code.claude.com/docs/en/env-vars),
+[interactive behavior](https://code.claude.com/docs/en/interactive-mode),
+[Codex settings](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [explicit recap command](https://learn.chatgpt.com/docs/developer-commands).
+Suggestions can be skipped for cold caches, short conversations, errors, plan
+mode, usage limits, backoff and feature-flag conditions. Recaps need at least
+three turns, an unfocused interactive terminal and three minutes after completion;
+they do not run twice in a row. Codex automatic recaps belong to the TUI; explicit
+`/recap` remains available when disabled. An active goal waiting on background
+work is a prerequisite for goal check-ins, not a generic long gap, scheduled task,
+guardian review, user request or subagent call. The documented Claude goal interval
+requires 2.1.234, and the suggestion environment behavior requires 2.1.238.
+Recap and Codex client identification use the captured 2.1.319 and 0.167.0 versions
+as conservative verified floors, not claims about when those features shipped.
+
+The 2026-11-07 metadata survey selected the six most recent files in each of three
+Claude profiles and one Codex profile, rather than only the mostly-SDK default
+Claude profile. It did not establish feature billing. Isolated native Claude
+2.1.319 and Codex 0.167.0 terminal captures used synthetic conversations, three
+completed turns and an unfocused final interval without another user turn.
+Claude recorded warm cache reads. These probes did not establish that a suggestion
+or automatic recap actually executed or provide a complete linked billing ledger;
+absence of a visible feature event is not a zero-cost measurement. Capture settings
+and generated data stayed in checkout-local scratch; no historical spend was
+measured. Earlier complete-host scans failed on malformed complete JSONL records,
+so no full-host cost total is validated. Selected malformed records still fail,
+and none are repaired or bypassed.
+
+Inspection of the installed Claude 2.1.319 generator verifies `prompt_suggestion`
+and `away_summary` query sources and `skipTranscript: true` for both calls.
+The existing reader already preserves explicit request source and identity links.
+An explicitly tagged `prompt_suggestion` request, if present, can therefore price
+its deduplicated usage at the recorded model, tier, cache categories and output.
+`attributedCost` covers only that subset and is already included in historical
+recorded-request cost. It must not be added again. No synthetic native feature
+record or trigger field was invented: positive source attribution tests use
+normalized requests and the inspected source identifier. `away_summary` alone
+cannot separate automatic recaps from explicit `/recap`, so it does not attribute
+removable automatic usage. Goal and Codex recap attribution stay unknown without
+a verified identity. Idle compaction retains its existing owner and pricing.
+
+`totalFeatureCost` retains a known attributed subtotal and a null total because
+unlogged calls remain unknown. A priced subset does not establish disable savings.
+No complete context/output proxy, cache-refresh linkage or follow-on comparison
+was verified for these clients. This supported path supplies conditional provider
+guidance with unknown net and monthly dollars and advisory exit status. Unknown
+costs alone never recommend a change. Goal advice remains conditional because
+removing a check-in may remove autonomous work. For suggestions and recaps,
+unobserved acceptance is a fixed-behavior caveat; it does not veto a future
+supported net estimate. Lost cache warming and observable replacement work must
+be priced before one can choose a lower aggregate net cost. Independent per-check
+savings are never summed.
+
+Each existing TTL, window and idle replay carries `baselineCoverage`, also shown
+in ordinary text output: unlogged background calls and cache refreshes can affect
+its recorded-request baseline. Current disabled settings do not reconstruct past
+feature state. Without a verified settings-change history the explicit `--since`
+or available window is used and labelled. Shared profile histories remain
+conditional and their costs are not assigned repeatedly. T3 ephemeral helper
+requests are distinct from these native features and may be unlogged; this check
+makes no claim to cover their spend or settings.

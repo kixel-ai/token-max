@@ -11,6 +11,7 @@ import type {
   Ttl,
 } from "./model.js";
 import { identity, label, object, ScanError } from "./safe.js";
+import { backgroundControls } from "./background.js";
 import {
   compactionControls,
   idleControls,
@@ -169,7 +170,7 @@ export function structuralSettings(
 }
 
 /** Resolve current project/local controls at recorded directories, preserving every owner. */
-export async function discoverIdleOwners(
+export async function discoverProjectOwners(
   options: DiscoveryOptions,
   profiles: Profile[],
   requests: Request[],
@@ -181,17 +182,28 @@ export async function discoverIdleOwners(
     resolve(env.CLAUDE_CONFIG_DIR ?? join(home, ".claude")),
   ).catch(() => "");
   const managedFile = options.managedSettingsFile ?? managedSettingsPath();
-  for (const profile of profiles.filter((p) => p.harness === "claude")) {
+  for (const profile of profiles) {
     options.signal?.throwIfAborted();
-    const user = await settings(profile.settingsFile, "claude");
-    const managed = await settings(managedFile, "claude");
-    const localEnv = active === profile.root ? env : {};
+    const user = await settings(profile.settingsFile, profile.harness);
+    const managed =
+      profile.harness === "claude" ? await settings(managedFile, "claude") : {};
+    const localEnv =
+      profile.harness === "claude" && active === profile.root ? env : {};
+    profile.backgroundDirectories = Object.create(null) as NonNullable<
+      Profile["backgroundDirectories"]
+    >;
     profile.idleDirectories = Object.create(null) as NonNullable<
       Profile["idleDirectories"]
     >;
     const relevant = requests.filter(
       (r) => r.profiles.includes(profile.id) && r.agent === "main",
     );
+    if (relevant.some((r) => r.cwd === null))
+      for (const c of Object.values(profile.background ?? {})) {
+        c.resolved = false;
+        c.reason =
+          "recorded working directory is absent; current project ownership cannot be resolved";
+      }
     if (relevant.some((r) => r.cwd === null) && profile.idle) {
       profile.idle.resolved = false;
       profile.idle.reason =
@@ -218,12 +230,57 @@ export async function discoverIdleOwners(
         if (dirname(path) === path) break;
       }
       const scopes = [{ config: user, file: profile.settingsFile }];
+      if (profile.harness === "codex") {
+        let projectLayer = false;
+        for (let path = cwd; ; path = dirname(path)) {
+          const file = join(path, ".codex", "config.toml");
+          try {
+            await stat(file);
+            projectLayer = true;
+          } catch (error) {
+            if (!missing(error))
+              throw new ScanError("cannot inspect project config", {
+                file,
+                line: 1,
+              });
+          }
+          if (path === root || dirname(path) === path) break;
+        }
+        const controls = backgroundControls({
+          harness: "codex",
+          scopes,
+          env: {},
+        });
+        const named = (await readdir(profile.root)).some((name) =>
+          name.endsWith(".config.toml"),
+        );
+        let directoryExists = true;
+        try {
+          await stat(cwd);
+        } catch {
+          directoryExists = false;
+        }
+        if (projectLayer || named || !directoryExists)
+          for (const c of Object.values(controls)) {
+            c.value = null;
+            c.resolved = false;
+            c.reason =
+              "Codex project trust/overrides, named profile selection or current working directory are not established; base config is not an effective control";
+          }
+        profile.backgroundDirectories[cwd] = controls;
+        continue;
+      }
       for (const file of [
         join(root, ".claude", "settings.json"),
         join(root, ".claude", "settings.local.json"),
       ])
         scopes.push({ config: await settings(file, "claude"), file });
       scopes.push({ config: managed, file: managedFile });
+      profile.backgroundDirectories[cwd] = backgroundControls({
+        harness: "claude",
+        scopes,
+        env: localEnv,
+      });
       const c = idleControls({ scopes, env: localEnv });
       const config = Object.assign({}, ...scopes.map((s) => s.config), {
         env: Object.assign({}, ...scopes.map((s) => object(s.config.env))),
@@ -251,6 +308,12 @@ export async function discoverIdleOwners(
         c.resolved = false;
         c.reason =
           "recorded working directory no longer exists; current project/local ownership is unresolved";
+        for (const control of Object.values(
+          profile.backgroundDirectories[cwd]!,
+        )) {
+          control.resolved = false;
+          control.reason = c.reason;
+        }
       }
       profile.idleDirectories[cwd] = c;
     }
@@ -409,6 +472,14 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       }),
       provider,
       settings: structuralSettings(config),
+      background: backgroundControls({
+        harness: root.harness,
+        scopes: [
+          { config: user, file: settingsFile },
+          { config: managed, file: managedFile },
+        ],
+        env: localEnv,
+      }),
       compaction: compactionControls({
         harness: root.harness,
         user,

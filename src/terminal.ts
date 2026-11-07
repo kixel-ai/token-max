@@ -5,7 +5,7 @@ const graphemes = new Intl.Segmenter();
 /** Wrap plain text by terminal cells without normalizing Unicode or shortening words. */
 export function wrapText(
   text: string,
-  options: { width?: number; indent?: number } = {},
+  options: { width?: number; indent?: number; continuation?: number } = {},
 ): string {
   return text
     .split("\n")
@@ -15,14 +15,20 @@ export function wrapText(
       if (options.width === undefined)
         return " ".repeat(options.indent ?? 0) + input;
       const width = Math.max(1, Math.floor(options.width));
-      const padding = " ".repeat(Math.min(indent, Math.max(0, width - 2)));
-      const columns = width - padding.length;
+      let padding = " ".repeat(Math.min(indent, Math.max(0, width - 2)));
+      const continuation =
+        options.continuation !== undefined && options.continuation < width
+          ? " ".repeat(options.continuation)
+          : padding;
+      let columns = width - padding.length;
       const rows: string[] = [];
       let row = "";
       let cells = 0;
       let spaces = "";
       function flush() {
         rows.push(padding + row);
+        padding = continuation;
+        columns = width - padding.length;
         row = "";
         cells = 0;
       }

@@ -18,13 +18,13 @@ Usage: token-max [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
-  --details              Show all check evidence, assumptions, uncertainty and sources
-  --plain                Plain text without color or decorative Unicode
-  --json                 Complete structured report, schema version 1
-  --offline              Use cached public prices without network access
-  --prices-file FILE     Use a local models.dev catalog without network access
-  --price-cache FILE     Cache path (default: ~/.cache/token-max/models.json)
-  -h, --help             Show this help
+  --details               Show all check evidence, assumptions, uncertainty and sources
+  --plain                 Plain text without color or decorative Unicode
+  --json                  Complete structured report, schema version 1
+  --offline               Use cached public prices without network access
+  --prices-file FILE      Use a local models.dev catalog without network access
+  --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
+  -h, --help              Show this help
 
 Without profile flags, discover local Claude/Codex profiles. Explicit profiles
 limit the entire run. Current settings are applied to the selected history;
@@ -80,10 +80,17 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     }
     if (values.help) {
       process.stdout.write(
-        wrapText(
-          HELP,
-          process.stdout.isTTY ? { width: process.stdout.columns || 80 } : {},
-        ),
+        HELP.split("\n")
+          .map((row) => {
+            const description = /^ {2}-.*? {2,}(?=\S)/.exec(row);
+            return wrapText(row, {
+              ...(process.stdout.isTTY
+                ? { width: process.stdout.columns || 80 }
+                : {}),
+              ...(description ? { continuation: description[0].length } : {}),
+            });
+          })
+          .join("\n"),
       );
       return 0;
     }
@@ -181,7 +188,7 @@ export async function main(args = process.argv.slice(2)): Promise<number> {
     process.stderr.write(
       json
         ? JSON.stringify(diagnostic) + "\n"
-        : `token-max: ${safe.message}${safe.location ? ` at ${display(safe.location.file)}:${safe.location.line}` : ""}\n${cancellation.signal.aborted ? "" : "No report produced. Use --help for profile, window and pricing options.\n"}`,
+        : `token-max: ${safe.message}${safe.location ? ` at ${display(safe.location.file)}:${safe.location.line}` : ""}\n`,
     );
     return 2;
   } finally {

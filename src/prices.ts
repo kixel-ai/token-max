@@ -1,4 +1,4 @@
-import { createReadStream } from "node:fs";
+import { createReadStream, rmSync } from "node:fs";
 import { mkdir, open, rename, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -126,6 +126,16 @@ export async function loadPrices(options: PriceOptions): Promise<Catalog> {
     return result;
   }
   const temporary = options.cache + "." + randomUUID() + ".tmp";
+  // A forced CLI exit cannot await finally. Remove only this operation's file;
+  // other concurrent downloads own their own UUIDs.
+  const discard = () => {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // Cleanup cannot turn a forced exit into an uncaught exception.
+    }
+  };
+  process.on("exit", discard);
   try {
     const response = await fetch(PRICE_URL, {
       redirect: "error",
@@ -157,7 +167,11 @@ export async function loadPrices(options: PriceOptions): Promise<Catalog> {
       "cannot fetch or cache public prices; use --offline with an existing cache",
     );
   } finally {
-    await rm(temporary, { force: true }).catch(() => {});
+    try {
+      await rm(temporary, { force: true }).catch(() => {});
+    } finally {
+      process.off("exit", discard);
+    }
   }
 }
 

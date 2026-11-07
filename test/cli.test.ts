@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { resolve, join } from "node:path";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
+import { watch } from "node:fs";
 import { fixture, workspace } from "./helpers.js";
 
 function environment(home: string): NodeJS.ProcessEnv {
@@ -257,6 +258,16 @@ test("built text CLI handles all-clear, empty windows, missing histories, offlin
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /^  --since /m);
     assert.match(help.stdout, /^  token-max --since /m);
+    for (const row of help.stdout
+      .split("\n")
+      .filter((line) => /^  -/.test(line))) {
+      const option = /^ {2}-.*? {2,}(?=\S)/.exec(row)!;
+      assert.equal(option[0].length, 26, row);
+    }
+    const invalid = run(["--bogus"]);
+    assert.equal(invalid.status, 2);
+    assert.equal(invalid.stdout, "");
+    assert.equal((invalid.stderr.match(/use --help/gi) ?? []).length, 1);
     for (const flag of [
       "--since",
       "--claude-dir",
@@ -328,6 +339,7 @@ process.stdout.columns = 40;`,
     assert.match(help.stdout, /^  --since /m);
     assert.match(help.stdout, /^  token-max --since /m);
     assert.ok(help.stdout.split("\n").every((line) => line.length <= 40));
+    assert.match(help.stdout, /^ {26}\S/m);
     const plain = run(["--plain", "--details"]);
     assert.equal(plain.status, 1, plain.stderr);
     assert.doesNotMatch(plain.stdout + plain.stderr, /\x1b|→/);
@@ -432,10 +444,12 @@ globalThis.fetch = (_url, {signal}) => new Promise((_resolve, reject) => {
     await writeFile(
       stalled,
       `process.on('message', () => {});
-globalThis.fetch = (_url, {signal}) => new Promise(() => {
+globalThis.fetch = (_url, {signal}) => {
   signal.addEventListener('abort', () => process.send('aborted'), {once: true});
-  process.send('fetching');
-});`,
+  return new Response(new ReadableStream({start(controller) {
+    controller.enqueue(new TextEncoder().encode('{"anthropic":{"models":{'));
+  }}));
+};`,
     );
     const child = spawn(
       "node",
@@ -445,9 +459,19 @@ globalThis.fetch = (_url, {signal}) => new Promise(() => {
         resolve("dist/src/cli.js"),
         "--claude-dir",
         w.claude,
+        "--price-cache",
+        join(w.home, "forced-prices.json"),
       ],
       { env: environment(w.home), stdio: ["ignore", "pipe", "pipe", "ipc"] },
     );
+    let interrupted = false;
+    const observer = watch(w.home, (_event, name) => {
+      if (!interrupted && name?.startsWith("forced-prices.json.")) {
+        interrupted = true;
+        child.kill("SIGINT");
+      }
+    });
+    child.once("close", () => observer.close());
     let output = "";
     child.stdout!.setEncoding("utf8").on("data", (chunk) => {
       output += chunk;
@@ -455,14 +479,22 @@ globalThis.fetch = (_url, {signal}) => new Promise(() => {
     child.stderr!.setEncoding("utf8").on("data", (chunk) => {
       output += chunk;
     });
-    child.on("message", (message) =>
-      child.kill(message === "fetching" ? "SIGINT" : "SIGTERM"),
-    );
+    child.on("message", () => child.kill("SIGTERM"));
     const status = await new Promise<number | null>((resolve, reject) => {
       child.once("error", reject);
       child.once("close", resolve);
     });
     assert.equal(status, 2);
+    assert.ok(
+      interrupted,
+      "force cancellation starts after a real temporary cache file exists",
+    );
+    assert.ok(
+      !(await readdir(w.home)).some((name) =>
+        name.startsWith("forced-prices.json."),
+      ),
+      "force cancellation removes the partial price cache",
+    );
     assert.equal(
       output,
       "",

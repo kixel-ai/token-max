@@ -97,10 +97,7 @@ export function formatReport(
   line("token-max", 0, 1);
   line("Public API-price estimates, not subscription bills.");
   const requests = report.scan.requests;
-  const earliest = requests.reduce<number | null>(
-    (time, r) => Math.min(time ?? r.time, r.time),
-    null,
-  );
+  const earliest = requests[0]?.time ?? null;
   field(
     "Window",
     `${report.scan.since === null ? "available history" : "explicit --since"}; ${instant(report.scan.since ?? earliest)} ${arrow} ${report.generatedAt}`,

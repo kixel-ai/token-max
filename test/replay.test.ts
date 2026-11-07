@@ -612,6 +612,14 @@ test("retry estimates attribute additional downstream reads, never the following
   }).checks[0]!;
   assert.equal(invalidated.usageEstimates[0]!.evidence, "unknown");
   assert.equal(invalidated.recommended, null);
+  first.parts[0]!.usage = claudeUsage({ input: 1000, write: 0 });
+  after.parts[0]!.usage = claudeUsage({ input: 1200, write: 200 });
+  const noReadEvidence = analyze({
+    scan: data([first, attempt, after]),
+    catalog: await prices(),
+    now: 60000,
+  }).checks[0]!;
+  assert.equal(noReadEvidence.usageEstimates[0]!.evidence, "unknown");
 });
 
 test("pre-window estimated cache seeds retain provenance and sensitivity without adding their charges", async () => {

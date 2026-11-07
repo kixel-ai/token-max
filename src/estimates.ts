@@ -150,6 +150,7 @@ export function estimateUsage(scan: Scan): Map<string, UsageEstimate> {
       const growing =
         complete &&
         after.time - before.time < 5 * 60_000 &&
+        next.usage.read! > 0 &&
         inputBeforeNewWrites! >= p.usage.input! &&
         next.usage.read! >= previousPrefix;
       if (!exact && !growing) {

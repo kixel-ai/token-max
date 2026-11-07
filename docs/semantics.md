@@ -111,8 +111,8 @@ An API attempt can receive a comparison-only input estimate from its immediately
 adjacent measured requests in the same conversation/file. Identical input/cache
 geometry supports copying that geometry. Growing input and cacheable lengths also
 support a conditional retry estimate when the entire bracket spans less than the
-shortest documented cache lifetime, five minutes, and the next measured read
-contains at least the preceding cached prefix. That preceding prefix supplies
+shortest documented cache lifetime, five minutes, and the next measured read is
+positive and contains at least the preceding cached prefix. That preceding prefix supplies
 warm reads; the additional next-request reads supply estimated writes at the TTL
 being replayed. The next request's own new writes are excluded from the attempt's
 input, with its ordinary-input count assumed unchanged. Thus estimated cacheable

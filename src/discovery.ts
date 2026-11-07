@@ -11,6 +11,7 @@ import type {
   Ttl,
 } from "./model.js";
 import { identity, label, object, ScanError } from "./safe.js";
+import { skillState } from "./skills.js";
 import {
   compactionControls,
   idleControls,
@@ -648,6 +649,135 @@ export async function discoverCodexSpeedOwners(
         }
         if (dirname(path) === path) break;
       }
+    }
+  }
+}
+
+/** Resolve skill controls per profile and recorded directory without treating installed files as exposure. */
+export async function discoverSkillOwners(
+  options: DiscoveryOptions,
+  profiles: Profile[],
+  requests: Request[],
+): Promise<void> {
+  const home = options.home ?? homedir();
+  const env = options.env ?? process.env;
+  for (const profile of profiles) {
+    const harness = profile.harness;
+    const user = await settings(profile.settingsFile, harness);
+    const systemFile =
+      harness === "claude"
+        ? (options.managedSettingsFile ?? managedSettingsPath())
+        : (options.codexSystemConfigFile ?? "/etc/codex/config.toml");
+    const system = await settings(systemFile, harness);
+    const active = await realpath(
+      resolve(
+        env[harness === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] ??
+          join(home, harness === "claude" ? ".claude" : ".codex"),
+      ),
+    ).catch(() => "");
+    const localEnv = active === profile.root ? env : {};
+    const userScope = { config: user, file: profile.settingsFile },
+      systemScope = { config: system, file: systemFile };
+    const roots =
+      harness === "claude"
+        ? [
+            join(dirname(systemFile), ".claude/skills"),
+            join(profile.root, "skills"),
+          ]
+        : [
+            join(home, ".agents/skills"),
+            join(profile.root, "skills"),
+            "/etc/codex/skills",
+          ];
+    const baseScopes =
+      harness === "claude"
+        ? [userScope, systemScope]
+        : [systemScope, userScope];
+    const selectedProfiles =
+      user.profile !== undefined ||
+      Object.keys(object(user.profiles)).length > 0 ||
+      (await readdir(profile.root)).some((name) =>
+        name.endsWith(".config.toml"),
+      );
+    const base = { harness, roots, env: localEnv, signal: options.signal };
+    profile.skills = await skillState({
+      ...base,
+      scopes: baseScopes,
+      resolved: harness === "claude" || !selectedProfiles,
+      reason:
+        "current local default files; launch/session, remote managed and account/plugin state are unobserved",
+    });
+    profile.skillDirectories = Object.create(null);
+    const relevant = requests.filter((r) => r.profiles.includes(profile.id));
+    if (relevant.some((r) => r.cwd === null)) {
+      profile.skills.resolved = false;
+      profile.skills.reason =
+        "recorded directory absent; effective project skill controls are unresolved";
+    }
+    for (const cwd of new Set(
+      relevant.flatMap((r) => (r.cwd ? [r.cwd] : [])),
+    )) {
+      const ancestors: string[] = [];
+      let repository = false;
+      let exists = true;
+      try {
+        await stat(cwd);
+      } catch {
+        exists = false;
+      }
+      for (let path = cwd; ; path = dirname(path)) {
+        options.signal?.throwIfAborted();
+        ancestors.unshift(path);
+        try {
+          await stat(join(path, ".git"));
+          repository = true;
+          break;
+        } catch (error) {
+          if (!missing(error) && object(error).code !== "ENOTDIR")
+            throw new ScanError("cannot resolve skill project scope", {
+              file: path,
+              line: 0,
+            });
+        }
+        if (dirname(path) === path) break;
+      }
+      if (!repository) ancestors.splice(0, ancestors.length, cwd);
+      let scopes = [...baseScopes];
+      let projectOverride = false;
+      const projectRoots: string[] = [];
+      if (harness === "claude") {
+        scopes = [userScope];
+        for (const name of ["settings.json", "settings.local.json"]) {
+          const file = join(ancestors[0]!, ".claude", name);
+          scopes.push({ config: await settings(file, harness), file });
+        }
+        scopes.push(systemScope);
+        for (const path of ancestors)
+          projectRoots.push(join(path, ".claude/skills"));
+      } else {
+        for (const path of ancestors) {
+          projectRoots.push(join(path, ".agents/skills"));
+          const file = join(path, ".codex/config.toml");
+          const config = await settings(file, harness);
+          if (["skills", "plugins"].some((key) => Object.hasOwn(config, key)))
+            projectOverride = true;
+          scopes.push({ config, file });
+        }
+      }
+      profile.skillDirectories![cwd] = await skillState({
+        ...base,
+        roots: [...roots, ...projectRoots],
+        scopes,
+        resolved:
+          exists &&
+          !projectOverride &&
+          (harness === "claude" || !selectedProfiles),
+        reason: !exists
+          ? "recorded directory no longer exists; current scope unresolved"
+          : projectOverride || (harness === "codex" && selectedProfiles)
+            ? "Codex project trust or profile/launch selection is unresolved"
+            : "current user/project/local/managed files; launch overrides, live plugin state and remote managed delivery are unobserved",
+      });
     }
   }
 }

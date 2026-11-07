@@ -1,5 +1,6 @@
 import { speedChecks } from "./fast.js";
 import { analyzeExposure } from "./exposure.js";
+import { skillsChecks } from "./skills.js";
 import type {
   BillingPart,
   CacheReplayEvidence,
@@ -615,6 +616,8 @@ export function analyze(options: {
     }),
   );
   checks.push(...speedChecks({ scan, catalog, since, now }));
+  const exposure = analyzeExposure(scan.exposure, scan.requests, catalog);
+  checks.push(...skillsChecks({ scan, catalog, exposure, since, now }));
   return {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),
@@ -626,7 +629,7 @@ export function analyze(options: {
     },
     historical,
     compactions,
-    exposure: analyzeExposure(scan.exposure, scan.requests, catalog),
+    exposure,
     checks,
     assumptions: [
       "host-local read-only analysis; network access is only for public prices",

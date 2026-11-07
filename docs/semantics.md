@@ -466,8 +466,8 @@ estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so automatic
-unused findings remain blocked. This layer adds no skills-catalog or context
-recommendation check and changes no local agent settings.
+unused findings remain blocked. This shared measurement layer changes no local
+agent settings; the skills consumer is described below.
 
 Record shapes were checked on 2026-11-07 using local structural metadata only;
 no real transcript text was printed or copied into fixtures. Claude's existing
@@ -537,3 +537,74 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 [API ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode),
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
+
+## Skills catalog findings
+
+The additive `skills-catalog` check consumes the shared reader, component revisions,
+calibration, `priceExposureChange`, `Cost`, `CheckResult` and renderer. A recorded
+listing member hashes its name, path when present, and description separately.
+Namespaced identities stay separate. Exact names connect calls only when they
+identify one source; colliding name-only use remains an unallocated usage row.
+Recorded call identities deduplicate copied histories. Missing identities retain
+the reader's disclosed limits. Requested, called, completed, failed, loaded and
+weak-reference evidence never imply each other's success. Manual/hidden skills
+can retain body costs even with no listing exposure.
+
+Full Claude Messages inputs promote a previously recorded listing or loaded body
+only when the complete text span matches by fingerprint at a line boundary. The
+collector retains counts/hashes, not span text. System spans are excluded from
+the remaining system component so skills/context ownership does not overlap.
+Chronological Codex/Claude catalogs remain candidates. Counts distinguish wire
+and candidate requests/sessions; the reported use rate uses their union and is
+not an estimate of all sessions in which the skill was installed or available.
+Unknown historical catalogs, client visibility and installation time are explicit.
+There is no automatic unused change without complete exposure/invocation visibility
+throughout the window, positive recurring overhead, a known applicable current
+control and no recent-introduction caveat. Native evidence establishes none of
+those completeness guarantees, so all no-observed-use rankings remain advisory.
+
+Current metadata is read locally from documented skill roots per profile/project,
+following symlinks without loops. Scalar frontmatter resolves identity; unsupported
+multiline/complex metadata remains unresolved rather than being guessed. Claude
+enterprise/personal/project order and symlink deduplication identify the local
+winner; nested names, added directories, synced/account skills and live plugin
+inventories can remain unresolved. Codex same-name sources remain separate, and
+last matching name/path enablement wins. User/project/local/managed setting owners
+are preserved; unknown Codex project trust/profile selection stays advisory.
+Current files never backfill historical catalogs or prove introduction time.
+
+Documented numeric constraints are checked for Codex's positive catalog token
+budget (maximum 10,000), Claude's positive listing fraction (at most 1), and
+Claude's positive integer description cap. Defaults are model-dependent 2%/8,000
+characters for Codex, 1% and 1,536 description characters for Claude. The Claude
+fixed-character environment override is reported separately; no undocumented
+maximum is invented. Explicit recorded omission/overflow warnings remain historical
+budget-pressure evidence, not current violations. A current Codex duplicate change
+requires rendered duplicate metadata matching two currently enabled identical
+sources in a resolved scope. Unknown costs do not invent dollar savings.
+
+Each entry's `listing.gross` is estimated marginal removal without replacement,
+with shared cache-position sensitivity and full context-tier/output repricing.
+It is not measured spend or net removable waste. `marginal` substitutes a later
+observed catalog revision from the same selected scope/key that omits the target
+and retains the other identities. Its complete footprint includes new backfill
+and description expansion. This is a conditional comparison, not causal evidence
+that the proposed control produced that catalog. Without such a supported
+replacement the net is unknown. Replacement tokens are ordinary input, remaining
+cache geometry/output/work are held fixed, and unknown future cache-key changes,
+extra reads/requests or lost skill value are not zero-cost observations. Skill
+bodies and references loaded on use remain in the recorded request baseline;
+their attribution is reported separately. Shared plugin instructions, MCP tools
+and results remain owned by the context consumer. Independent entry/check effects
+must not be summed. Monthly gross costs extrapolate the stated window.
+
+Controls follow current primary documentation checked 2026-11-07, not an inferred
+installed binary version: [Claude skills](https://code.claude.com/docs/en/skills),
+[Claude listing/visibility settings](https://code.claude.com/docs/en/settings-reference),
+[Codex loading, budgets and invocation policy](https://learn.chatgpt.com/docs/build-skills),
+and [Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference).
+Claude `user-invocable: false` does not hide metadata; `skillOverrides` does not
+control plugin skills. Codex `allow_implicit_invocation: false` is not assigned a
+catalog saving. Claude `/skill-doctor` is complementary, requires v2.1.252+, and
+does not establish complete historical visibility for this analyzer. No settings
+are edited and no host-wide validation is claimed from synthetic fixtures.

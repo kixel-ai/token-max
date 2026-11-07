@@ -1,4 +1,5 @@
 import type { ExposureScan, analyzeExposure } from "./exposure.js";
+import type { SkillState, SkillsCheckResult } from "./skills.js";
 
 /** The two locally supported transcript formats. */
 export type Harness = "claude" | "codex";
@@ -154,6 +155,8 @@ export interface Profile {
   idle?: IdleControl;
   speed?: SpeedControl;
   speedDirectories?: Record<string, SpeedControl>;
+  skills?: SkillState;
+  skillDirectories?: Record<string, SkillState>;
   /** Current project controls observed at recorded working directories. */
   idleDirectories?: Record<string, IdleControl>;
 }
@@ -306,7 +309,11 @@ export interface CompactionCheckResult extends CheckBase<number> {
 }
 /** Setting-specific evidence accompanies one common recommendation model. */
 export type CheckResult =
-  TtlCheckResult | CompactionCheckResult | IdleCheckResult | SpeedCheckResult;
+  | TtlCheckResult
+  | CompactionCheckResult
+  | IdleCheckResult
+  | SpeedCheckResult
+  | SkillsCheckResult;
 /** Rate-only premium comparisons keep current-setting estimates separate from observed response premiums. */
 export interface SpeedCheckResult extends CheckBase<string> {
   check: "fast-mode";

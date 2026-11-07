@@ -44,6 +44,9 @@ export interface Component extends Size {
   scope: "component" | "aggregate";
   members: string[];
   targets: string[];
+  /** Hashed entry metadata connects names and paths without retaining descriptions. */
+  skill?: { name: string; path: string | null; description: string | null };
+  catalog?: { budgetExceeded: boolean };
 }
 /** Actual calls, requested skills and weak script references are different evidence. */
 export interface Invocation {
@@ -228,6 +231,10 @@ export class ExposureCollector {
   private knownSkills = new Set<string>();
   private userAliases = new Map<string, Map<string, number>>();
   private invalidated = false;
+  private catalogSpans = new Map<
+    string,
+    { units: number; prefix: number; digest: string }
+  >();
   private pendingTools = new Map<
     string,
     {
@@ -296,6 +303,14 @@ export class ExposureCollector {
                 ? [target("mcp", input.key)]
                 : []),
       });
+    if (input.category === "skill-body" && typeof input.content === "string") {
+      const prefix = input.content.split("\n", 1)[0]!;
+      this.catalogSpans.set(revision, {
+        units: input.content.length,
+        prefix: prefix.length,
+        digest: identity(prefix),
+      });
+    }
     return revision;
   }
   private clear(category?: Category) {
@@ -436,22 +451,44 @@ export class ExposureCollector {
       });
     const listing = (key: string, body: string, provenance: string) => {
       const aggregate = add("skill-listing", key, body, provenance);
+      this.components.get(aggregate)!.catalog = {
+        budgetExceeded: /Exceeded skills context budget\./.test(body),
+      };
+      const prefix = body.split("\n", 1)[0]!;
+      this.catalogSpans.set(aggregate, {
+        units: body.length,
+        prefix: prefix.length,
+        digest: identity(prefix),
+      });
       const members: string[] = [];
-      const matches = [...body.matchAll(/^- ([a-zA-Z0-9_.:-]+):[^\n]*$/gm)];
+      const matches = [
+        ...body.matchAll(/^- ([a-zA-Z0-9_.:-]+)(?:: ([^\n]*))?$/gm),
+      ];
       matches.forEach((match) => {
-        this.knownSkills.add(target("skill", match[1]!));
-        members.push(
-          this.component({
-            category: "skill-listing",
-            key: match[1]!,
-            content: match[0],
-            provenance: "rendered-listing-entry-span",
-            location,
-            time: time ?? 0,
-            member: true,
-            group: group(match[1]!),
-          }),
-        );
+        const name = target("skill", match[1]!);
+        const path = / \(file: ([^\n]+)\)$/.exec(match[2] ?? "");
+        const pathTarget = path ? target("skill", path[1]!) : null;
+        this.knownSkills.add(name);
+        const member = this.component({
+          category: "skill-listing",
+          key: path?.[1] ?? match[1]!,
+          content: match[0],
+          provenance: "rendered-listing-entry-span",
+          location,
+          time: time ?? 0,
+          member: true,
+          group: group(match[1]!),
+          targets: pathTarget ? [name, pathTarget] : [name],
+        });
+        this.components.get(member)!.skill = {
+          name,
+          path: pathTarget,
+          description:
+            match[2] === undefined
+              ? null
+              : identity(path ? match[2]!.slice(0, path.index) : match[2]),
+        };
+        members.push(member);
       });
       this.components.get(aggregate)!.members = members;
       return aggregate;
@@ -671,14 +708,58 @@ export class ExposureCollector {
       let components: string[] = [];
       let completeCharacters: number | null = null;
       if (full) {
+        // Match recorded catalog spans by hashes in actual wire text. Nothing from
+        // an attachment is promoted merely because it preceded this request.
+        const catalogs = [...this.active.values()].filter(
+          (id) =>
+            ["skill-listing", "skill-body"].includes(
+              this.components.get(id)!.category,
+            ) && this.catalogSpans.has(id),
+        );
+        const matched = new Set<string>();
+        const strip = (value: unknown): unknown => {
+          if (Array.isArray(value)) return value.map(strip);
+          if (value && typeof value === "object")
+            return Object.fromEntries(
+              Object.entries(value).map(([key, v]) => [
+                key,
+                key === "text" || key === "content" ? strip(v) : v,
+              ]),
+            );
+          if (typeof value !== "string") return value;
+          let result = value;
+          for (const catalog of catalogs) {
+            if (matched.has(catalog)) continue;
+            const span = this.catalogSpans.get(catalog)!;
+            if (!span.units) continue;
+            const starts = [
+              0,
+              ...Array.from(result.matchAll(/\n/g), (m) => m.index! + 1),
+            ];
+            for (const start of starts) {
+              if (
+                identity(result.slice(start, start + span.prefix)) !==
+                  span.digest ||
+                identity(result.slice(start, start + span.units)) !==
+                  this.components.get(catalog)!.fingerprint
+              )
+                continue;
+              matched.add(catalog);
+              result =
+                result.slice(0, start) + result.slice(start + span.units);
+              break;
+            }
+          }
+          return result;
+        };
+        const system = strip(params.system);
+        // Message spans are matched too; only the system remainder is a separately
+        // attributed component, so listings never overlap its context ownership.
+        strip(params.messages);
         components = [
-          add(
-            "other",
-            "wire-system",
-            JSON.stringify(params.system),
-            "wire-system",
-          ),
+          add("other", "wire-system", JSON.stringify(system), "wire-system"),
         ];
+        components.push(...matched);
         for (const v of array(params.tools)) {
           const tool = record(v);
           components.push(

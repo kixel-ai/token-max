@@ -1,7 +1,7 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction, standard-speed and skills-catalog settings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -174,7 +174,7 @@ Independent check savings must not be summed.
 
 See [billing and replay semantics](docs/semantics.md) for supported accounting,
 assumptions, sources, and limits. Component measurements are shared infrastructure;
-skills/context recommendations and other setting checks remain in the
+context recommendations and other setting checks remain in the
 [first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from
@@ -265,3 +265,36 @@ Claude's separate fast/standard caches mean cache-switch effects are excluded.
 They hold work constant, do not value latency, and make no subscription-bill,
 credit-multiplier or combined savings claim. Fast mode compares with the current
 profile, independently of the TTL/window/idle recommendations.
+
+## Skills catalogs
+
+The `skills-catalog` check ranks rendered skill entries by observed counts and
+the rate of exposed/candidate sessions with use. It shows the window, wire versus
+candidate exposure, requested use, calls, confirmed loads, completed calls/loads,
+last observed use, revisions, duplicates and current local owners. No rarity
+threshold is applied. A missing event means "no observed use", not "never used".
+No supported client/version currently establishes complete exposure and invocation
+visibility across the window, so unused and infrequent-use rankings stay advisory.
+First observation is not an installation date; recent introduction stays unknown.
+
+Current Codex duplicate sources that match actual rendered duplicate metadata and
+documented budget violations can emit changes. Historical-only or unresolved
+scope findings stay advisory. Claude deduplicates symlink targets and applies
+source precedence. Its supported local controls are `skillOverrides` states
+`name-only`, `user-invocable-only` and `off`; plugin skills use `/plugin`.
+Codex supports last-matching name/path `skills.config` enablement and
+`skills.max_context_tokens` up to 10,000 tokens. Disabling implicit invocation
+alone has no established catalog-token saving. Local ownership does not prove
+live session, account/plugin, CLI override or remote managed state.
+
+Only recorded rendered listings establish historical sizes. Installed skill files
+provide current identity/ownership evidence. Whole listing costs and member spans
+are not additive. Gross listing overhead is estimated only for matching wire
+exposure and token calibration, with cache allocation sensitivity. `--details`
+shows conditional observed before/after catalog substitutions, including budget
+backfill and longer remaining descriptions. Without a supported replacement,
+net savings stay unknown. All replacements use ordinary-input pricing; real
+cache-key changes, future reuse and additional work remain unmeasured. Bodies
+loaded on use retain separate attribution and remain charged. Shared plugin
+instructions, tools and results belong to the context check and are not charged
+again here. See the [provider sources and accounting details](docs/semantics.md#skills-catalog-findings).

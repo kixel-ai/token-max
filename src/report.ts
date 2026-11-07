@@ -243,6 +243,42 @@ export function formatReport(
           "Speed limits",
           "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price equivalents, not subscription savings. Work held constant; latency value excluded.",
         );
+      } else if (result.check === "skills-catalog") {
+        field("Skill", result.name ?? result.target ?? "catalog budget");
+        field(
+          "Exposure",
+          `${result.exposure.wireRequests} wire requests / ${result.exposure.wireSessions} sessions; ${result.exposure.candidateRequests} candidate requests / ${result.exposure.candidateSessions} sessions; window completeness unestablished`,
+        );
+        field(
+          "Observed use",
+          `${result.use.requested} requests to use, ${result.use.calls} calls (${result.use.successfulCalls} completed), ${result.use.loads} loads (${result.use.successfulLoads} completed), ${result.use.references} weak references; ${result.use.rate === null ? "unknown" : (100 * result.use.rate).toFixed(1) + "%"} of exposed/candidate sessions; last ${instant(result.use.last)}`,
+        );
+        field(
+          "Listing gross overhead",
+          `${money(result.listing.gross)} over window; ${estimate(result.listing.monthlyGrossUsd)} / 30 days; ${result.listing.characters} rendered characters across exposures. Gross is not net savings.`,
+        );
+        field(
+          "On-demand bodies, preserved",
+          `${money(result.bodies.gross)}; ${result.bodies.wireRequests} wire and ${result.bodies.candidateRequests} candidate revision exposures`,
+        );
+        field(
+          "Current applicability",
+          `${result.currentResolved ? "local control resolved" : "unresolved"}; first observed ${instant(result.firstObserved)}, introduction ${result.introduced}; observed client versions ${result.versions.map((v) => v ?? "unknown").join(", ") || "unknown"}; controls follow provider docs checked 2026-11-07, installed version unverified`,
+        );
+        field(
+          "Duplicates",
+          `${result.duplicates.length} matching rendered revisions; ${result.revisions.length} revisions of this entry`,
+        );
+        if (result.budgetPressure)
+          field(
+            "Budget pressure",
+            "Recorded catalog warning: descriptions may be shortened or entries omitted; historical pressure alone does not establish a current violation.",
+          );
+        for (const budget of result.budgets)
+          field(
+            "Catalog control",
+            `${budget.key}=${budget.value ?? "unknown/model-dependent"}; ${budget.owner}`,
+          );
       } else {
         field(
           "Models",
@@ -389,6 +425,22 @@ export function formatReport(
             "Current-setting premium estimate",
             result.currentEstimate.premium,
           );
+        } else if (result.check === "skills-catalog") {
+          cost("Listing gross overhead, not net savings", result.listing.gross);
+          cost("Preserved on-demand body attribution", result.bodies.gross);
+          for (const change of result.marginal) {
+            field(
+              "Conditional catalog substitution",
+              `${change.request}: ${change.before} (${change.beforeTokens ?? "unknown"} tokens) -> ${change.after ?? "unknown replacement"} (${change.afterTokens ?? "unknown"} tokens); observed replacement includes backfill/description expansion`,
+            );
+            cost("Fixed-behavior marginal net", change.net);
+            field(
+              "Cache allocation sensitivity",
+              change.rangeUsd
+                ? `${estimate(change.rangeUsd[0])} to ${estimate(change.rangeUsd[1])}`
+                : "unknown",
+            );
+          }
         } else {
           cost("Current-window baseline", result.baselineCost);
           cost("Existing summaries", result.observedSummaryCost);
@@ -434,7 +486,11 @@ export function formatReport(
           );
           notes("Attempt assumption", estimate.assumptions);
         }
-        if (result.check !== "idle-compaction" && result.check !== "fast-mode")
+        if (
+          result.check !== "idle-compaction" &&
+          result.check !== "fast-mode" &&
+          result.check !== "skills-catalog"
+        )
           witnesses(result.cacheEvidence);
         notes("Assumption", result.assumptions);
         notes("Uncertainty", result.uncertainty);
@@ -501,6 +557,7 @@ export function formatReport(
 }
 
 function reason(result: CheckResult): string {
+  if (result.check === "skills-catalog") return result.reason;
   if (result.check === "fast-mode") return result.reason;
   if (result.check === "idle-compaction")
     return result.recommended === null

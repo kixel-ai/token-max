@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pricePart, priceRequest, serverCost } from "../src/prices.js";
+import {
+  pairedSavings,
+  pricePart,
+  priceRequest,
+  serverCost,
+  unknownCost,
+} from "../src/prices.js";
 import { usage } from "../src/reader.js";
 import { claudeUsage, makeRequest, prices } from "./helpers.js";
 
@@ -158,4 +164,33 @@ test("unavailable Claude geography uses the labelled global API equivalent", asy
     pricePart(c, r, { ...p, geo: "unexpected_region" }).totalUsd,
     null,
   );
+});
+
+test("paired savings decide only when unpriced parts cannot flip the sign", () => {
+  const known = (usd: number) => ({
+    knownUsd: usd,
+    totalUsd: usd,
+    unknown: [],
+    assumptions: [],
+  });
+  const missing = unknownCost("missing");
+  const pair = (baseline: number, alternative: number) => ({
+    baseline: known(baseline),
+    alternative: known(alternative),
+  });
+  const gap = { baseline: missing, alternative: missing };
+  assert.deepEqual(pairedSavings([pair(3, 1), pair(2, 1)]), {
+    usd: 3,
+    priced: 2,
+    total: 2,
+    decided: true,
+  });
+  // Each unpriced part may differ by up to the largest priced difference (2).
+  assert.equal(pairedSavings([pair(3, 1), pair(2, 1), gap]).decided, true);
+  assert.equal(
+    pairedSavings([pair(3, 1), pair(2, 1), gap, gap]).decided,
+    false,
+  );
+  assert.equal(pairedSavings([gap]).decided, false);
+  assert.equal(pairedSavings([]).decided, true);
 });

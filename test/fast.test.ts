@@ -436,7 +436,7 @@ test("unknown speeds, price gaps and explicit windows never turn missing premium
   }
 });
 
-test("built CLI warns from current settings alone, remains read-only and fails malformed selected scans", async () => {
+test("built CLI warns from current settings alone, remains read-only and skips unreadable lines", async () => {
   const w = await workspace();
   try {
     const { spawnSync } = await import("node:child_process");
@@ -473,10 +473,9 @@ test("built CLI warns from current settings alone, remains read-only and fails m
       join(w.codex, "sessions/broken.jsonl"),
       '{"private":"SYNTHETIC_PRIVATE",BROKEN}\n',
     );
-    const failed = run();
-    assert.equal(failed.status, 2);
-    assert.equal(failed.stdout, "");
-    assert.doesNotMatch(failed.stderr, /SYNTHETIC_PRIVATE/);
+    const skipped = run();
+    assert.equal(skipped.status, 0);
+    assert.doesNotMatch(skipped.stdout + skipped.stderr, /SYNTHETIC_PRIVATE/);
   } finally {
     await w.dispose();
   }

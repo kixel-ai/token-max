@@ -17,6 +17,7 @@ import type {
 } from "./model.js";
 import {
   addCosts,
+  pairedSavings,
   pricePart,
   priceRequest,
   PRICE_SOURCES,
@@ -251,6 +252,8 @@ function replayCost(options: {
   attemptScenario?: "point" | "none" | "cold";
 }): {
   comparison: Cost;
+  /** Cache cost per selected request part, keyed by request id and part index. */
+  items: Map<string, Cost>;
   fixed: Cost;
   predecessors: Set<string>;
   evidence: CacheReplayEvidence[];
@@ -258,7 +261,7 @@ function replayCost(options: {
   const { requests, scan, catalog, selectedBucket, ttl, since } = options;
   const predecessors = new Set<string>();
   const evidence: CacheReplayEvidence[] = [];
-  const parts: Cost[] = [];
+  const items = new Map<string, Cost>();
   const fixed: Cost[] = [];
   for (const item of replayParts({
     requests,
@@ -281,11 +284,15 @@ function replayCost(options: {
       for (const predecessor of item.evidence.predecessors)
         predecessors.add(predecessor.request);
     }
-    parts.push(item.components.cache);
+    items.set(
+      `${item.request.id}:${item.request.parts.indexOf(item.p)}`,
+      item.components.cache,
+    );
     fixed.push(item.components.ordinary, item.components.output);
   }
   return {
-    comparison: addCosts(parts),
+    comparison: addCosts([...items.values()]),
+    items,
     fixed: addCosts(fixed),
     predecessors,
     evidence,
@@ -412,17 +419,20 @@ function check(options: {
       ? (coldComparison.totalUsd! - comparisonCost["5m"].totalUsd) / benefit
       : null;
   const current = profile.ttl[selectedBucket];
-  let recommended: Ttl | null = null;
-  if (
-    comparisonCost["5m"].totalUsd !== null &&
-    comparisonCost["1h"].totalUsd !== null
-  )
-    recommended =
-      comparisonCost["5m"].totalUsd! < comparisonCost["1h"].totalUsd!
+  // Positive when 1h is cheaper than 5m on the parts both replays price.
+  const paired = pairedSavings(
+    [...short.items].map(([key, baseline]) => ({
+      baseline,
+      alternative: long.items.get(key) ?? unknownCost("part not replayed"),
+    })),
+  );
+  const recommended: Ttl | null = !paired.decided
+    ? null
+    : paired.usd > 0
+      ? "1h"
+      : paired.usd < 0
         ? "5m"
-        : comparisonCost["1h"].totalUsd! < comparisonCost["5m"].totalUsd!
-          ? "1h"
-          : current.value;
+        : current.value;
   const recentVersion =
     relevant.at(-1)?.version ?? requests.at(-1)?.version ?? null;
   const applies =
@@ -437,8 +447,11 @@ function check(options: {
       : "advisory";
   const savings =
     current.value && recommended
-      ? comparisonCost[current.value].totalUsd! -
-        comparisonCost[recommended].totalUsd!
+      ? current.value === recommended
+        ? 0
+        : current.value === "5m"
+          ? paired.usd
+          : -paired.usd
       : null;
   const profiles = [
     ...new Set([
@@ -510,6 +523,7 @@ function check(options: {
     fixedCost,
     usageEstimates,
     cacheEvidence: [...short.evidence, ...long.evidence],
+    coverage: { priced: paired.priced, total: paired.total },
     savingsUsd: savings,
     monthlySavingsUsd:
       savings !== null && now > since

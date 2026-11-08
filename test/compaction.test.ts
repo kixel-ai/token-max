@@ -113,6 +113,8 @@ function data(count = 4): Scan {
       tierKnown: requests.length,
       missingUsage: 0,
       deferredFiles: 0,
+      skippedLines: 0,
+      skippedFiles: 0,
       issues: [],
     },
   };
@@ -703,7 +705,7 @@ test("shared Claude controls produce one aggregate recommendation for all affect
   }
 });
 
-test("small unknown iterations cancel while truly missing input retains unknown eligibility", async () => {
+test("small unknown iterations cancel while truly missing input leaves only its own session unpriced", async () => {
   const s = data();
   const small = makeRequest({
     id: "small-unknown",
@@ -721,11 +723,11 @@ test("small unknown iterations cancel while truly missing input retains unknown 
   assert.equal(check.action, "change");
   near(check.savingsUsd, 1.96);
   small.parts[0]!.usage.input = null;
-  assert.equal(
-    compaction(analyze({ scan: s, catalog: await prices(), now: 18000000 }))
-      .scenarios[0]!.savingsUsd,
-    null,
-  );
+  const scenario = compaction(
+    analyze({ scan: s, catalog: await prices(), now: 18000000 }),
+  ).scenarios[0]!;
+  near(scenario.savingsUsd, 1.96);
+  assert.equal(scenario.coverage.total - scenario.coverage.priced, 1);
 });
 
 test("Claude historical window differences and structured TTL window alignment remain visible", async () => {

@@ -216,6 +216,7 @@ export function speedChecks(options: {
           baseline:
             "current profile speed, holding recorded model, work, tokens, cache categories, geography, context tiers and all other settings constant; independent of TTL/window/idle recommendations",
           requests: requests.length,
+          coverage: null,
           savingsUsd: action === "change" ? currentCost.totalUsd : null,
           monthlySavingsUsd:
             action === "change" ? month(currentCost.totalUsd) : null,

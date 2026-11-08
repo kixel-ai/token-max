@@ -71,6 +71,8 @@ function data(requests: Request[], events: StructuralEvent[] = []): Scan {
       tierKnown: requests.length,
       missingUsage: 0,
       deferredFiles: 0,
+      skippedLines: 0,
+      skippedFiles: 0,
       issues: [],
     },
   };
@@ -606,7 +608,9 @@ test("growing-context retry evidence supports an estimate within the recorded ca
     now: after.time + 1000,
   }).checks[0]!;
   assert.equal(expired.usageEstimates[0]!.evidence, "unknown");
-  assert.equal(expired.recommended, null);
+  // One unpriced part among twenty clearly 1h-favoring parts cannot flip the winner.
+  assert.equal(expired.recommended, "1h");
+  assert.ok(expired.coverage!.priced < expired.coverage!.total);
 });
 
 test("retry estimates attribute additional downstream reads, never the following request's own writes", async () => {
@@ -631,7 +635,7 @@ test("retry estimates attribute additional downstream reads, never the following
     now: 60000,
   }).checks[0]!;
   assert.equal(invalidated.usageEstimates[0]!.evidence, "unknown");
-  assert.equal(invalidated.recommended, null);
+  assert.ok(invalidated.coverage!.priced < invalidated.coverage!.total);
   first.parts[0]!.usage = claudeUsage({ input: 1000, write: 0 });
   after.parts[0]!.usage = claudeUsage({ input: 1200, write: 200 });
   const noReadEvidence = analyze({
@@ -901,7 +905,7 @@ test("bracketing cannot cross changes of source, model, client, profile provenan
       catalog,
       now: 1800000,
     }).checks.find((c) => c.bucket === "main")!;
-    assert.equal(check.recommended, null, change);
+    assert.ok(check.coverage!.priced < check.coverage!.total, change);
     assert.equal(check.usageEstimates[0]!.evidence, "unknown", change);
   }
 });
@@ -940,7 +944,9 @@ test("estimation needs both adjacent measured brackets and preserves other unsup
           : [first, attempt, other, after];
     const check = analyze({ scan: data(requests), catalog, now: 1800000 })
       .checks[0]!;
-    assert.equal(check.recommended, null, layout);
+    // Two-part histories cannot outweigh their unpriced half; the mixed history can.
+    assert.equal(check.recommended, layout === "mixed" ? "1h" : null, layout);
+    assert.ok(check.coverage!.priced < check.coverage!.total, layout);
     assert.equal(check.requests, requests.length, layout);
     assert.equal(
       check.usageEstimates.filter((e) => e.evidence === "estimated").length,

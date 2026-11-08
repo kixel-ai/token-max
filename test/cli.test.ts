@@ -68,7 +68,7 @@ test("built CLI supports JSON, exit 0/1/2, and never prints partial findings or 
     assert.equal(run().status, 0);
     await writeFile(
       file,
-      '{"type":"assistant","private":"SYNTHETIC_PRIVATE_REPLY",BROKEN}\n',
+      '{"timestamp":"2020-01-01T00:00:00Z","type":"assistant","private":"SYNTHETIC_PRIVATE_REPLY","message":{"usage":{"input_tokens":"bad"}}}\n',
     );
     const failed = run();
     assert.equal(failed.status, 2);
@@ -369,11 +369,10 @@ process.stdout.columns = 40;`,
       join(w.claude, "projects/project/main.jsonl"),
       '{"private":"SYNTHETIC_PRIVATE",BROKEN}\n',
     );
-    const failed = run();
-    assert.equal(failed.status, 2);
-    assert.equal(failed.stdout, "");
-    assert.match(failed.stderr, /invalid complete transcript record/);
-    assert.doesNotMatch(failed.stderr, /SYNTHETIC_PRIVATE|Checking settings/);
+    const skipped = run();
+    assert.notEqual(skipped.status, 2);
+    assert.match(skipped.stdout, /1 unreadable transcript\s+lines in 1 files/);
+    assert.doesNotMatch(skipped.stdout + skipped.stderr, /SYNTHETIC_PRIVATE/);
   } finally {
     await w.dispose();
   }

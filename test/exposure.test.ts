@@ -936,3 +936,86 @@ test("copied MCP calls deduplicate across inherited session aliases", async () =
     await w.dispose();
   }
 });
+
+test("current Claude and Codex record shapes: request blobs, block-rendered attachments, sameAs definitions, null skill bodies", async () => {
+  const call = {
+    type: "tool_use",
+    id: "tool-1",
+    name: "mcp__example__search",
+    input: {},
+  };
+  const definition = {
+    name: "mcp__example__search",
+    definition: { name: "mcp__example__search", input_schema: {} },
+  };
+  const data = await transcript("claude", [
+    attachment(0, {
+      type: "deferred_tools_delta",
+      addedNames: [],
+      addedLines: [],
+      removedNames: [],
+      surfacedDefinitions: [definition],
+    }),
+    attachment(1, {
+      type: "deferred_tools_delta",
+      addedNames: [],
+      addedLines: [],
+      removedNames: [],
+      surfacedDefinitions: [
+        { name: definition.name, sameAs: "attachment-0", listing: "" },
+      ],
+    }),
+    {
+      ...attachment(2, { type: "queued_command", prompt: [] }),
+      rendered: [
+        { content: [{ type: "text", text: "SYNTHETIC_PRIVATE_QUEUED" }] },
+      ],
+    },
+    // Hash-addressed copy of a turn: no timestamp, never a second invocation.
+    {
+      type: "api-request-blob",
+      hash: "blob",
+      sessionId: "session",
+      message: { role: "assistant", content: [call] },
+    },
+    assistant(3, [call]),
+  ]);
+  assert.equal(
+    data.exposure.invocations.filter((i) => i.kind === "mcp-call").length,
+    1,
+  );
+  assert.equal(
+    data.exposure.components.filter((c) => c.category === "mcp-schema").length,
+    1,
+  );
+  assert.ok(
+    data.exposure.components.some(
+      (c) => c.provenance === "unclassified-rendered-attachment",
+    ),
+  );
+  await assert.rejects(
+    transcript("claude", [
+      attachment(0, {
+        type: "deferred_tools_delta",
+        addedNames: [],
+        addedLines: [],
+        removedNames: [],
+        surfacedDefinitions: [
+          { name: definition.name, sameAs: "attachment-9", listing: "" },
+        ],
+      }),
+    ]),
+    /unresolved surfaced definition reference/,
+  );
+  const codex = await transcript("codex", [
+    codexMeta,
+    turn,
+    world(1, { host_skills: { body: null, version: 1 } }),
+    billed(2),
+  ]);
+  assert.ok(
+    codex.exposure.components.some(
+      (c) => c.provenance === "world-state-metadata-only",
+    ),
+  );
+});

@@ -227,6 +227,8 @@ export class ExposureCollector {
   private views = new Map<string, Omit<Exposure, "request">>();
   private knownSkills = new Set<string>();
   private userAliases = new Map<string, Map<string, number>>();
+  // Surfaced tool definitions by attachment uuid and name, for later `sameAs` references.
+  private surfaced = new Map<string, string>();
   private invalidated = false;
   private pendingTools = new Map<
     string,
@@ -398,6 +400,7 @@ export class ExposureCollector {
       this.pendingTools = new Map();
       this.knownSkills = new Set();
       this.userAliases = new Map();
+      this.surfaced = new Map();
       this.invalidated = false;
     }
     const p = object(raw.payload);
@@ -484,7 +487,7 @@ export class ExposureCollector {
         const v = record(value);
         const body = field === "host_skills" ? v.body : v.text;
         // Structured entries describe availability/fingerprints, not rendered sizes.
-        if (body !== undefined) {
+        if (body !== undefined && body !== null) {
           this.clear(category);
           if (category === "skill-listing")
             listing(field, text(body), "world-state-rendered");
@@ -597,12 +600,25 @@ export class ExposureCollector {
           const definition = record(v);
           const name = text(definition.name);
           this.remove("mcp-discovery", name);
-          add(
-            "mcp-schema",
-            name,
-            JSON.stringify(record(definition.definition)),
-            "surfaced-tool-definition",
-          );
+          let revision: string;
+          if (definition.sameAs !== undefined) {
+            const same = this.surfaced.get(`${id(definition.sameAs)}:${name}`);
+            if (!same)
+              throw new ScanError("unresolved surfaced definition reference");
+            const component = this.components.get(same)!;
+            const prior = this.active.get(component.key);
+            if (prior && prior !== same) this.pendingRemoved.add(prior);
+            this.active.set(component.key, same);
+            component.locations.push(location);
+            revision = same;
+          } else
+            revision = add(
+              "mcp-schema",
+              name,
+              JSON.stringify(record(definition.definition)),
+              "surfaced-tool-definition",
+            );
+          this.surfaced.set(`${id(raw.uuid)}:${name}`, revision);
         }
       } else if (kind === "deferred_tools_record") {
         // Deferred definitions exist locally but are not necessarily in the model input.
@@ -624,7 +640,14 @@ export class ExposureCollector {
       } else if (raw.rendered !== undefined) {
         // Unknown attachment categories still contribute visible derived evidence.
         const rendered = array(raw.rendered)
-          .map((v) => text(record(v).content))
+          .map((v) => {
+            const content = record(v).content;
+            return typeof content === "string"
+              ? content
+              : array(content)
+                  .map((block) => text(record(block).text))
+                  .join("\n");
+          })
           .join("\n");
         add(
           "other",
@@ -729,9 +752,12 @@ export class ExposureCollector {
       raw.type === "event_msg" && p.type === "item_completed"
         ? record(p.item)
         : p;
+    // api-request-blob lines are hash-addressed copies of turns already recorded as user/assistant lines.
     const contents =
       snapshot.harness === "claude"
-        ? message.content
+        ? raw.type === "user" || raw.type === "assistant"
+          ? message.content
+          : undefined
         : (item.content ?? (p.type === "user_message" ? p.message : undefined));
     const user =
       raw.type === "user" ||

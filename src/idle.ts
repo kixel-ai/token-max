@@ -1052,6 +1052,7 @@ export function idleChecks(options: {
         events: [],
         added: [],
         errors: [],
+        uncertain: new Map(),
         affected: new Set(),
         estimatedParts: new Set(),
       };
@@ -1367,6 +1368,7 @@ export function idleChecks(options: {
         usageEstimates: [...options.estimates.values()].filter((e) =>
           requests.some((r) => r.id === e.request),
         ),
+        coverage: null,
         savingsUsd: savings,
         monthlySavingsUsd:
           savings !== null && now > since

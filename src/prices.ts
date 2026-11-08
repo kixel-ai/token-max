@@ -190,6 +190,37 @@ export function addCosts(costs: Cost[]): Cost {
     assumptions: [...new Set(costs.flatMap((c) => c.assumptions))],
   };
 }
+/** Baseline-minus-alternative savings over the items both scenarios price. */
+export interface PairedSavings {
+  usd: number;
+  priced: number;
+  total: number;
+  /** True when the unpriced items cannot flip the sign, each bounded by the largest priced difference. */
+  decided: boolean;
+}
+/** Compare two scenarios item by item, so a few unpriced requests cannot hide a clear winner. */
+export function pairedSavings(
+  pairs: { baseline: Cost; alternative: Cost }[],
+): PairedSavings {
+  let usd = 0;
+  let priced = 0;
+  let largest = 0;
+  for (const { baseline, alternative } of pairs) {
+    if (baseline.totalUsd === null || alternative.totalUsd === null) continue;
+    const delta = baseline.totalUsd - alternative.totalUsd;
+    usd += delta;
+    priced++;
+    largest = Math.max(largest, Math.abs(delta));
+  }
+  const unpriced = pairs.length - priced;
+  return {
+    usd,
+    priced,
+    total: pairs.length,
+    decided:
+      unpriced === 0 || (priced > 0 && Math.abs(usd) > unpriced * largest),
+  };
+}
 /** Represent missing pricing without substituting a different model. */
 export function unknownCost(reason: string): Cost {
   return { knownUsd: 0, totalUsd: null, unknown: [reason], assumptions: [] };

@@ -173,6 +173,8 @@ export interface Snapshot {
   device: number;
   inode: number;
   deferredBytes: number;
+  /** Complete lines that were not valid JSON objects, such as truncated or interleaved writes. */
+  skippedLines: number;
   lines: number;
 }
 /** A price may be partially known without pretending the known subtotal is the total. */
@@ -235,6 +237,8 @@ export interface CheckBase<Value> {
   windowBasis: string;
   baseline: string;
   requests: number;
+  /** Request parts priced in both compared scenarios; null when the check is not a per-part replay. */
+  coverage: { priced: number; total: number } | null;
   savingsUsd: number | null;
   monthlySavingsUsd: number | null;
   breakEven: string | null;
@@ -282,6 +286,8 @@ export interface WindowScenario {
   baselineComparisonCost: Cost;
   comparisonCost: Cost;
   savingsUsd: number | null;
+  /** Changed request parts priced under both windows. */
+  coverage: { priced: number; total: number };
   added: AddedCompaction[];
   affectedRequests: number;
   cacheEvidence: CacheReplayEvidence[];
@@ -413,6 +419,9 @@ export interface Scan {
     tierKnown: number;
     missingUsage: number;
     deferredFiles: number;
+    /** Unreadable complete lines skipped; their usage counts as missing. */
+    skippedLines: number;
+    skippedFiles: number;
     issues: string[];
   };
 }

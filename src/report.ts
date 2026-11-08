@@ -114,7 +114,7 @@ export function formatReport(
   const coverage = report.scan.coverage;
   field(
     "Coverage",
-    `${coverage.requests} selected requests in ${report.scan.snapshots.length} files; ${requests.filter((r) => r.evidence === "measured").length} with measured usage; ${coverage.missingUsage} missing usage`,
+    `${coverage.requests} selected requests in ${report.scan.snapshots.length} files; ${requests.filter((r) => r.evidence === "measured").length} with measured usage; ${coverage.missingUsage} missing usage${coverage.skippedLines ? `; ${coverage.skippedLines} unreadable transcript lines in ${coverage.skippedFiles} files skipped (truncated or interleaved writes)` : ""}`,
   );
   field(
     "Prices",

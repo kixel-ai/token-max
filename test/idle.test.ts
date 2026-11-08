@@ -148,6 +148,8 @@ function data(target: Request[], boundaries: StructuralEvent[] = []): Scan {
       tierKnown: requests.length,
       missingUsage: 0,
       deferredFiles: 0,
+      skippedLines: 0,
+      skippedFiles: 0,
       issues: [],
     },
   };

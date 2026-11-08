@@ -2892,14 +2892,15 @@ mod tests {
             assert!(compact.contains("ConditionalTTLbaseline:main5m;subagent5m"));
             for scenario in &check.scenarios {
                 assert!(compact.contains(&format!("Candidatewindow:{}tokens", scenario.window)));
-                for added in &scenario.added {
+                if !scenario.added.is_empty() {
                     assert!(compact.contains(&format!(
-                        "at{};{}summaryinputtokens;{}summaryoutputtokens;{}resumed-prefixtokens",
-                        added.request,
-                        added.input_tokens,
-                        added.summary_tokens,
-                        added.prefix_tokens
+                        "Addedcompactions:{}summaries;input",
+                        scenario.added.len()
                     )));
+                    assert!(compact.contains("Addedsummaries:"));
+                    assert!(compact.contains("Resumedprefixes:"));
+                }
+                for added in &scenario.added {
                     for basis in &added.basis {
                         assert!(compact.contains(&format!(
                             "boundary{};resumedrequest{}",

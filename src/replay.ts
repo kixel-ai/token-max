@@ -30,7 +30,7 @@ import {
 import { estimateUsage } from "./estimates.js";
 import { observedTtl } from "./cache.js";
 import { cacheBucket as bucket, replayParts } from "./scenarios.js";
-import { compactionChecks } from "./compaction.js";
+import { compactionChecks, skippedLines } from "./compaction.js";
 import { idleChecks } from "./idle.js";
 import { identity, ScanError } from "./safe.js";
 
@@ -286,7 +286,8 @@ function replayCost(options: {
         predecessors.add(predecessor.request);
     }
     items.set(
-      `${item.request.id}:${item.request.parts.indexOf(item.p)}`,
+      // Replay clones each part, so only its recorded index identifies it.
+      `${item.request.id}:${item.part}`,
       item.components.cache,
     );
     fixed.push(item.components.ordinary, item.components.output);
@@ -426,6 +427,7 @@ function check(options: {
       baseline,
       alternative: long.items.get(key) ?? unknownCost("part not replayed"),
     })),
+    skippedLines(scan, profile.id),
   );
   const recommended: Ttl | null = !paired.decided
     ? null

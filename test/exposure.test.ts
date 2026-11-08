@@ -635,10 +635,17 @@ test("recorded request shapes price each piece at its cache position and count i
     `"skillOverrides": {"review": "user-invocable-only"}`,
   );
   assert.ok(listing.characters! > 0);
-  // No earlier request bounds where the listing sits among these cached reads,
-  // so it stays unpriced rather than guessed.
-  assert.equal(review.priced, 0);
-  assert.equal(review.estimatedUsd, null);
+  // With no earlier request, the listing could sit anywhere after the system
+  // prompt. Tools and system fill the cached reads and 1h writes, so every
+  // possible offset pays the ordinary input price.
+  const prefix =
+    (JSON.stringify(system).length +
+      tools.reduce((n, t) => n + JSON.stringify(t).length, 0)) *
+    ratio;
+  assert.ok(prefix > 2900);
+  assert.equal(review.priced, 1);
+  // Displayed tokens are rounded, so compare the per-token rate.
+  assert.ok(Math.abs(review.costUsd / review.tokens! / 4e-6 - 1) < 0.01);
   assert.equal(row("Claude Code system prompt").control, null);
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
   // Every priced piece here costs well under the default $1 per use; an
@@ -661,14 +668,17 @@ test("recorded request shapes price each piece at its cache position and count i
     strict.context.find((c) => c.name === name)!.verdict;
   assert.equal(verdict("Artifact"), "off");
   assert.equal(verdict("docs"), "off");
-  assert.equal(verdict("review"), null);
+  assert.equal(verdict("review"), "keep");
   assert.equal(verdict("Bash"), null);
   const text = formatReport(strict, { width: 200 });
   assert.match(
     text,
     /Artifact tool( \[[^\]]*\])?: on -> off\. Costs .*; never used\./,
   );
-  assert.match(text, /Skill review( \[[^\]]*\])?: on\. Cost unknown/);
+  assert.match(
+    text,
+    /Skill review( \[[^\]]*\])?: on\. Costs .*; the model never used it\./,
+  );
   const snippet = text.slice(text.indexOf("To turn these off"));
   assert.match(snippet, /"enableArtifact": false/);
   assert.match(snippet, /"deny": \[\s*"mcp__docs"\s*\]/);
@@ -680,6 +690,11 @@ test("attachments take their latest possible cache position; media and copied ca
     {
       name: "Artifact",
       description: "a".repeat(2000),
+      input_schema: { type: "object" },
+    },
+    {
+      name: "mcp__docs__read",
+      description: "r".repeat(200),
       input_schema: { type: "object" },
     },
   ];
@@ -745,6 +760,13 @@ test("attachments take their latest possible cache position; media and copied ca
       names: ["review"],
       isInitial: true,
     }),
+    // Server instructions ride in messages while the server's tool leads the
+    // prompt, so one row mixes a known and an attachment position.
+    attachment(0, {
+      type: "mcp_instructions_delta",
+      addedNames: ["docs"],
+      addedBlocks: ["m".repeat(300)],
+    }),
     {
       type: "api-request-shape",
       sessionId: "session",
@@ -779,6 +801,25 @@ test("attachments take their latest possible cache position; media and copied ca
     }),
     request(5, ["m1", "m2"]),
     reply(5, usage(0, 3500, 500)),
+    // Fewer cached reads than the previous input: a carried attachment could
+    // sit in the reads or the writes, so this request leaves it unpriced.
+    request(7, ["m1", "m2"]),
+    reply(7, usage(0, 1500, 2500)),
+    // The tool list shrinks, so the previous input no longer says where
+    // messages start: a new file could sit in the reads or the writes.
+    {
+      type: "api-request-shape",
+      sessionId: "session",
+      timestamp: at(8),
+      shapeHash: "smaller",
+      shape: { system, tools: [tools[0]] },
+    },
+    attachment(8, {
+      type: "instructions",
+      files: [{ path: "/repo/sub/CLAUDE.md", content: "k".repeat(600) }],
+    }),
+    { ...request(9, ["m1", "m2"]), shapeHash: "smaller" },
+    reply(9, usage(0, 1500, 3500)),
   ];
   const w = await workspace();
   try {
@@ -817,7 +858,7 @@ test("attachments take their latest possible cache position; media and copied ca
     const { signature: _, ...thinking } = first.content[0]!;
     const expected =
       JSON.stringify(system).length +
-      JSON.stringify(tools[0]).length +
+      tools.reduce((n, t) => n + JSON.stringify(t).length, 0) +
       JSON.stringify({ ...first, content: [thinking, first.content[1]] })
         .length;
     assert.equal(calibration!.samples[0]!.characters, expected);
@@ -838,8 +879,22 @@ test("attachments take their latest possible cache position; media and copied ca
     assert.ok(
       Math.abs(instructions.costUsd / (tokens * (8 + 8) * 1e-6) - 1) < 0.001,
     );
-    assert.ok(review.costUsd > 0 && review.priced === 3);
-    assert.ok(review.estimatedUsd === review.costUsd);
+    // In the first request the listing could straddle 1h writes and ordinary
+    // input, so that request stays unpriced; later ones read it from cache.
+    assert.equal(review.requests, 5);
+    assert.equal(review.priced, 2);
+    assert.ok(
+      Math.abs(review.costUsd / (review.tokens! * 2 * 0.2e-6) - 1) < 0.01,
+    );
+    assert.equal(review.estimatedUsd, (review.costUsd * 5) / 2);
+    // The server row is priced only where both its tool and its instructions
+    // were: not in the first request, where the instructions straddle slots.
+    const docs = row("docs");
+    assert.equal(docs.requests, 5);
+    assert.equal(docs.priced, 2);
+    const nested = row("/repo/sub/CLAUDE.md");
+    assert.equal(nested.requests, 1);
+    assert.equal(nested.priced, 0);
   } finally {
     await w.dispose();
   }

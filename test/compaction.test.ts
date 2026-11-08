@@ -739,6 +739,84 @@ test("small unknown iterations cancel while truly missing input leaves only its 
   assert.equal(scenario.coverage.total - scenario.coverage.priced, 1);
 });
 
+test("each added summary is its own pair, so a few unpriced sessions cannot outweigh many small differences", async () => {
+  const s = data();
+  const large = s.requests.filter((r) => r.id.startsWith("large-"));
+  for (let k = 1; k < 10; k++)
+    for (const r of large)
+      s.requests.push({
+        ...structuredClone(r),
+        id: `${r.id}-${k}`,
+        session: `copy-${k}`,
+      });
+  for (let k = 0; k < 4; k++) {
+    const missing = makeRequest({
+      id: `missing-${k}`,
+      session: `missing-${k}`,
+      time: 1000,
+      endTime: 1000,
+    });
+    missing.parts[0]!.kind = "unknown";
+    missing.parts[0]!.usage = claudeUsage({ write: 5000 });
+    missing.parts[0]!.usage.input = null;
+    s.requests.push(missing);
+  }
+  s.requests.sort((a, b) => a.time - b.time);
+  const check = compaction(
+    analyze({ scan: s, catalog: await prices(), now: 18000000 }),
+  );
+  const scenario = check.scenarios.find((c) => c.window === 100000)!;
+  assert.equal(scenario.added.length, 10);
+  assert.equal(scenario.coverage.total - scenario.coverage.priced, 4);
+  near(scenario.savingsUsd, 19.6);
+  assert.equal(check.action, "change");
+});
+
+test("a window that changes no request is a keep, not missing evidence", async () => {
+  const s = data(0);
+  const small = makeRequest({ id: "small", time: 1000, endTime: 1000 });
+  small.parts[0]!.usage = claudeUsage({ write: 20000 });
+  s.requests = [small];
+  s.events = [];
+  const report = analyze({ scan: s, catalog: await prices(), now: 18000000 });
+  const check = compaction(report);
+  assert.equal(check.action, "keep");
+  assert.ok(check.scenarios.every((c) => c.coverage.total === 0));
+  const text = formatReport(report, { width: 200 });
+  assert.match(
+    text,
+    /Keep[\s\S]*Auto-compact window \(claude-opus-5-5\): 400,000 tokens/,
+  );
+  assert.doesNotMatch(text, /could not confirm/);
+});
+
+test("unreadable lines count as unknown parts, so many of them block a recommendation", async () => {
+  const s = data();
+  const snapshot = (skippedLines: number) => ({
+    file: "synthetic",
+    harness: "claude" as const,
+    profiles: ["profile"],
+    bytes: 0,
+    device: 0,
+    inode: 0,
+    deferredBytes: 0,
+    skippedLines,
+    lines: 0,
+  });
+  s.snapshots = [snapshot(1)];
+  assert.equal(
+    compaction(analyze({ scan: s, catalog: await prices(), now: 18000000 }))
+      .action,
+    "change",
+  );
+  s.snapshots = [snapshot(10000)];
+  const check = compaction(
+    analyze({ scan: s, catalog: await prices(), now: 18000000 }),
+  );
+  assert.equal(check.recommended, null);
+  assert.equal(check.action, "advisory");
+});
+
 test("Claude historical window differences and structured TTL window alignment remain visible", async () => {
   const s = data();
   const e = structuredClone(s.events[0]!);

@@ -108,7 +108,8 @@ for a failed scan, price fetch, invalid argument, or cancellation. JSON errors g
 success report or partial recommendations. Invalid selected usage fails with only
 a file and line. Complete lines that are not JSON objects, which harnesses leave
 after crashes and concurrent writes, are skipped and counted in the report and in
-JSON `coverage.skippedLines`; their usage counts as missing. Unterminated final
+JSON `coverage.skippedLines`; their usage counts as missing, and each one counts
+as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
 The default report says what was read, then puts every setting and feature on
@@ -139,9 +140,10 @@ Each piece is sized from the request shapes Claude Code records (tools, then the
 system prompt, then messages) and converted to tokens with a characters-to-tokens
 ratio measured from the same transcripts. It is priced at the cache position it
 occupied in that request: cached read, 1h write, 5m write, then ordinary input.
-Attachments have no recorded position, so each is placed as late as its history
-allows. Requests that could not be priced are estimated from those that could,
-and a piece with none is shown as unknown.
+Attachments have no recorded position, so one is priced only when every
+position its history allows pays the same rate. Requests that could not be
+priced are estimated from those that could, and a piece with none is shown as
+unknown.
 Removing a piece can also shift later cache writes and compaction, which this
 does not model. Requests without a recorded shape, and Codex requests, are not
 priced per piece.
@@ -253,7 +255,7 @@ remain unmeasured risks, not zero-cost observations.
 Idle compaction compares on and off over the same window, first with current
 controls and then after applicable TTL and window changes. The latter aggregate
 estimate decides: positive on-minus-off cost favors off, negative favors on, and
-a zero tie retains the current toggle. Final periods incur expected summary cost
+a zero tie, such as when no gap was long enough to trigger, is not enough evidence. Final periods incur expected summary cost
 without an invented return benefit. A sensitivity crossing zero does not veto the
 point estimate. A recommended 5m main TTL or a window at/below the idle threshold
 makes idle compaction inapplicable.

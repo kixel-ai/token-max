@@ -1320,8 +1320,9 @@ export function idleChecks(options: {
         "idle on/off after applicable TTL and compaction-window changes; independent savings are not additive",
       );
       const delta = afterRecommendations.deltaUsd;
-      const winner =
-        delta === null ? null : delta < 0 ? true : delta > 0 ? false : c.value;
+      // Equal costs are not evidence for either value, such as when no idle gap
+      // was long enough to trigger a summary.
+      const winner = delta === null || delta === 0 ? null : delta < 0;
       const recent = main
         .filter((r) => control(profile, r).owner === owner)
         .at(-1)!;

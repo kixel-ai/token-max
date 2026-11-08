@@ -239,6 +239,28 @@ test("unresumed summaries cost money; recent finals are censored rather than aba
   assert.equal(off.recommended, false);
 });
 
+test("idle on with no gap long enough to trigger is not enough evidence, never a cost claim", async () => {
+  const s = data([0, 10, 20, 30].map((m) => request(`r${m}`, m + 100)));
+  s.profiles[0]!.idle!.value = true;
+  const c = await check(s, 140);
+  near(c.afterRecommendations.deltaUsd, 0);
+  assert.ok(
+    c.afterRecommendations.periods.every(
+      (p) => p.status === "censored" || p.status === "ineligible",
+    ),
+  );
+  assert.equal(c.recommended, null);
+  assert.equal(c.action, "advisory");
+  const report = analyze({
+    scan: s,
+    catalog: await prices(),
+    now: 140 * MINUTE,
+  });
+  const text = formatReport(report);
+  assert.doesNotMatch(text, /Summarizing idle sessions cost less/);
+  assert.match(text, /never idle long enough/);
+});
+
 test("actual external cache evidence and near-expiry timing can make on lose", async () => {
   for (const minute of [158, 200]) {
     const back = request("return", minute, 1000);
@@ -795,7 +817,7 @@ test("native informational notices are the only parsed idle attribution; project
   }
 });
 
-test("a net-zero tie retains either current toggle", async () => {
+test("a net-zero tie is not evidence for either toggle", async () => {
   for (const current of [false, true]) {
     const s = data([
       request("before", 100, 312500),
@@ -817,8 +839,16 @@ test("a net-zero tie retains either current toggle", async () => {
     s.profiles[0]!.idle!.value = current;
     const c = await check(s);
     near(c.afterRecommendations.deltaUsd, 0);
-    assert.equal(c.recommended, current);
-    assert.equal(c.action, "keep");
+    assert.equal(c.recommended, null);
+    assert.equal(c.action, "advisory");
+    const report = analyze({
+      scan: s,
+      catalog: await prices(),
+      now: 201 * MINUTE,
+    });
+    report.checks = report.checks.filter((r) => r.check === "idle-compaction");
+    report.checks[0] = c;
+    assert.match(formatReport(report), /On and off cost the same/);
   }
 });
 

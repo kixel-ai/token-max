@@ -201,6 +201,8 @@ export interface PairedSavings {
 /** Compare two scenarios item by item, so a few unpriced requests cannot hide a clear winner. */
 export function pairedSavings(
   pairs: { baseline: Cost; alternative: Cost }[],
+  /** Further items that could differ but left no evidence, such as unreadable transcript lines. */
+  unknown = 0,
 ): PairedSavings {
   let usd = 0;
   let priced = 0;
@@ -212,11 +214,11 @@ export function pairedSavings(
     priced++;
     largest = Math.max(largest, Math.abs(delta));
   }
-  const unpriced = pairs.length - priced;
+  const unpriced = pairs.length - priced + unknown;
   return {
     usd,
     priced,
-    total: pairs.length,
+    total: pairs.length + unknown,
     decided:
       unpriced === 0 || (priced > 0 && Math.abs(usd) > unpriced * largest),
   };

@@ -905,7 +905,8 @@ impl Reader {
                 });
             }
         }
-        if !selected && kind != Some("assistant") && !compact_boundary {
+        // Earlier user turns still count toward thresholds such as a recap's three turns.
+        if !selected && !matches!(kind, Some("assistant" | "user")) && !compact_boundary {
             return Ok(());
         }
         let context = &file.context;
@@ -1033,6 +1034,11 @@ impl Reader {
                 for block in content {
                     let b = object(block);
                     if is(b, "type", "tool_result") {
+                        tool_result = true;
+                        // Earlier tool results are not retained, so their metadata cannot fail the scan.
+                        if !selected {
+                            continue;
+                        }
                         let mut e = event(
                             snapshot,
                             location,
@@ -1043,7 +1049,6 @@ impl Reader {
                         );
                         e.tool_id = opaque(b, "tool_use_id")?;
                         self.add_event(e);
-                        tool_result = true;
                     }
                 }
             }
@@ -1601,6 +1606,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         events,
         cache_context: CacheContext {
             requests: context_requests,
+            prompts: context_events
+                .iter()
+                .filter(|e| e.kind == EventKind::TurnStart)
+                .cloned()
+                .collect(),
             boundaries: context_events
                 .into_iter()
                 .filter(|e| e.kind == EventKind::Compaction)
@@ -1832,6 +1842,36 @@ mod tests {
         let skipped = scan(&windowed).unwrap();
         assert_eq!(skipped.coverage.skipped_lines, 2);
         assert_eq!(skipped.coverage.skipped_files, 1);
+    }
+
+    #[test]
+    fn earlier_prompts_are_context_and_earlier_tool_results_never_fail() {
+        let w = Workspace::new();
+        let user = |time: &str, content: Value| {
+            json!({
+                "type": "user",
+                "sessionId": "s",
+                "uuid": format!("u-{time}"),
+                "timestamp": time,
+                "message": { "role": "user", "content": content },
+            })
+        };
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[
+                user("2025-12-31T00:00:00Z", json!("SYNTHETIC_PRIVATE_PROMPT")),
+                user(
+                    "2025-12-31T00:01:00Z",
+                    json!([{ "type": "tool_result", "tool_use_id": 7 }]),
+                ),
+                user("2026-01-02T00:00:00Z", json!("SYNTHETIC_PRIVATE_PROMPT")),
+            ]),
+        );
+        let data = scan(&since(options(&w), "2026-01-01T00:00:00Z")).unwrap();
+        assert_eq!(data.cache_context.prompts.len(), 1);
+        assert_eq!(data.cache_context.prompts[0].kind, EventKind::TurnStart);
+        assert_eq!(data.events.len(), 1);
+        assert!(!private(&data));
     }
 
     #[test]

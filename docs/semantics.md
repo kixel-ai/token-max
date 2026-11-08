@@ -10,7 +10,8 @@ final-line sizes. Metadata storage grows with requests/events, not transcript te
 
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
-separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence.
+separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence,
+and user prompts for per-session thresholds such as a recap's three turns.
 `scan.since` records the billing selection; checks inherit it, and a comparison
 cannot expand an already filtered scan to an earlier billing window.
 Invalid pre-window usage becomes an unknown cache state, never a billed estimate or
@@ -555,10 +556,9 @@ in the uncertainty instead. A suggestion follows a turn with at least two
 responses whose last response sent and wrote at most 10,000 uncached tokens,
 the client's cold-cache cutoff. A recap follows a turn once the session has three
 user turns and the next prompt came at least three minutes later; a final turn
-is not counted, since nothing shows the terminal stayed open. Prompts before
-`--since` are not retained, so a session with earlier responses counts as past
-both thresholds. Focus and the
-suggestion throttle after many unused suggestions are not recorded and are
+is not counted, since nothing shows the terminal stayed open. Responses and
+prompts before the window count toward both thresholds; only turns inside it are
+charged. Focus and the suggestion throttle after many unused suggestions are not recorded and are
 assumed favorable to running.
 
 A fork reads the last response's cached prefix and writes nothing. Its new input

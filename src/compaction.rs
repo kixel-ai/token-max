@@ -3303,6 +3303,7 @@ mod tests {
             s.cache_context = CacheContext {
                 requests: vec![summary],
                 boundaries: vec![event],
+                prompts: vec![],
             };
             s.since = Some(1000);
             let report = report(&s);

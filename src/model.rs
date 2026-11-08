@@ -1408,6 +1408,8 @@ pub struct ContextCost {
 pub struct CacheContext {
     pub requests: Vec<Request>,
     pub boundaries: Vec<StructuralEvent>,
+    /// Earlier user turns, which count toward per-session thresholds.
+    pub prompts: Vec<StructuralEvent>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]

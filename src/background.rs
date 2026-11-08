@@ -62,7 +62,9 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             .iter()
             .filter(|r| r.profiles.contains(&profile.id) && input.since.is_none_or(|s| r.time >= s))
             .collect();
-        let ends = turn_ends(input.scan, profile, &requests);
+        let mut ends = turn_ends(input.scan, profile);
+        // Earlier history only establishes eligibility; charge turns inside the window.
+        ends.retain(|e| input.since.is_none_or(|s| e.request.time >= s));
         for control in &profile.background {
             result.push(check(input, profile, control, &requests, &ends));
         }
@@ -85,31 +87,23 @@ struct TurnEnd<'a> {
     next: Option<&'a Request>,
 }
 
-/// Every turn-ending main-conversation response of a Claude profile, in session order.
-fn turn_ends<'a>(scan: &Scan, profile: &Profile, requests: &[&'a Request]) -> Vec<TurnEnd<'a>> {
+/// Every turn-ending main-conversation response of a Claude profile, in session order,
+/// counting responses and prompts from before the scanned window too.
+fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
     if profile.harness != Harness::Claude {
         return vec![];
     }
-    let main = |r: &Request| r.harness == Harness::Claude && r.agent == crate::model::Agent::Main;
     let mut sessions: indexmap::IndexMap<&str, Vec<&'a Request>> = indexmap::IndexMap::new();
-    for &r in requests {
-        if main(r) {
+    for r in scan.cache_context.requests.iter().chain(&scan.requests) {
+        if r.harness == Harness::Claude
+            && r.agent == crate::model::Agent::Main
+            && r.profiles.contains(&profile.id)
+        {
             sessions.entry(&r.session).or_default().push(r);
         }
     }
-    // Responses before the window; its prompts are not retained, so such a session counts
-    // as past the response and turn thresholds, like the other gates this estimate assumes.
-    let mut earlier: indexmap::IndexMap<&str, usize> = indexmap::IndexMap::new();
-    for r in &scan.cache_context.requests {
-        let first = sessions
-            .get(r.session.as_str())
-            .and_then(|s| s.iter().map(|q| q.time).min());
-        if main(r) && r.profiles.contains(&profile.id) && first.is_some_and(|f| r.time < f) {
-            *earlier.entry(&r.session).or_default() += 1;
-        }
-    }
     let mut starts: indexmap::IndexMap<&str, Vec<Millis>> = indexmap::IndexMap::new();
-    for e in &scan.events {
+    for e in scan.cache_context.prompts.iter().chain(&scan.events) {
         if e.kind == EventKind::TurnStart && e.profiles.contains(&profile.id) {
             starts.entry(&e.session).or_default().push(e.time);
         }
@@ -119,7 +113,6 @@ fn turn_ends<'a>(scan: &Scan, profile: &Profile, requests: &[&'a Request]) -> Ve
         main.sort_by_key(|r| r.time);
         let mut prompts = starts.get(session).cloned().unwrap_or_default();
         prompts.sort_unstable();
-        let prior = earlier.get(session).copied().unwrap_or(0);
         for (i, &r) in main.iter().enumerate() {
             let next = main.get(i + 1).copied();
             let prompt = prompts.iter().copied().find(|&t| t > r.time);
@@ -138,12 +131,8 @@ fn turn_ends<'a>(scan: &Scan, profile: &Profile, requests: &[&'a Request]) -> Ve
                     && r.source
                         .as_deref()
                         .is_none_or(|s| s.starts_with("repl_main_thread")),
-                responses: prior + i + 1,
-                turns: if prior > 0 {
-                    usize::MAX
-                } else {
-                    prompts.iter().filter(|&&t| t <= r.time).count()
-                },
+                responses: i + 1,
+                turns: prompts.iter().filter(|&&t| t <= r.time).count(),
                 prompt,
                 next,
             });
@@ -596,18 +585,34 @@ mod tests {
     }
 
     #[test]
-    fn sessions_started_before_the_window_are_already_eligible() {
-        let mut s = turns(&[
+    fn history_before_the_window_counts_toward_eligibility() {
+        let features = [
             (BackgroundFeature::PromptSuggestions, true),
             (BackgroundFeature::SessionRecaps, true),
-        ]);
-        // The window starts at 2 minutes: earlier prompts and responses are out of the scan.
-        let earlier: Vec<Request> = s.requests.drain(..2).collect();
-        s.cache_context.requests = earlier;
-        s.events.retain(|e| e.time >= 2 * MINUTE);
-        let checks = run(&s, 1.0);
-        assert_eq!(checks[0].generations, Some(2));
-        assert_eq!(checks[1].generations, Some(1));
+        ];
+        let window = |s: &Scan| {
+            background_checks(&BackgroundInput {
+                scan: s,
+                catalog: &prices(),
+                since: Some(2 * MINUTE),
+                now: 30 * 24 * 60 * MINUTE,
+                max_cost_per_use_usd: 1.0,
+            })
+            .iter()
+            .map(|c| c.generations)
+            .collect::<Vec<_>>()
+        };
+        // A narrower analysis window over a full scan.
+        let mut s = turns(&features);
+        assert_eq!(window(&s), [Some(2), Some(1)]);
+        // A scan cut at 2 minutes keeps earlier responses and prompts as context.
+        s.cache_context.requests = s.requests.drain(..2).collect();
+        let (earlier, events) = s.events.drain(..).partition(|e| e.time < 2 * MINUTE);
+        (s.cache_context.prompts, s.events) = (earlier, events);
+        assert_eq!(window(&s), [Some(2), Some(1)]);
+        // With only one earlier prompt, the turn at 2 minutes is the second: no recap.
+        s.cache_context.prompts.truncate(1);
+        assert_eq!(window(&s), [Some(2), Some(0)]);
     }
 
     #[test]

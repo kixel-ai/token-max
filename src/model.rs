@@ -1329,7 +1329,7 @@ pub struct ContextCost {
     /// How many of those requests could be priced.
     pub priced: u64,
     /// Tokens it took in the most recent request that carried it.
-    pub tokens: Option<f64>,
+    pub tokens: Option<i64>,
     /// API-price equivalent over the priced requests only.
     pub cost_usd: f64,
     /// costUsd scaled to every request that carried it; null when none could be priced.

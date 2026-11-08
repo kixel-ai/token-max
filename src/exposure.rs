@@ -2603,7 +2603,7 @@ fn quote<S: Sink>(text: &str, sink: &mut S) {
 }
 
 /// JavaScript's `Number.prototype.toString` for a parsed JSON number.
-fn number(n: &Number) -> String {
+pub(crate) fn number(n: &Number) -> String {
     const SAFE: u64 = 1 << 53;
     if let Some(u) = n.as_u64()
         && u <= SAFE

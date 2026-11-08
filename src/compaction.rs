@@ -947,7 +947,7 @@ struct Run {
 }
 
 /// Parse one version component as JavaScript `Number` would; None for NaN.
-fn js_number(text: &str) -> Option<f64> {
+pub(crate) fn js_number(text: &str) -> Option<f64> {
     // JavaScript trims Unicode spaces and the byte-order mark, but not NEL.
     let text = text.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
     if text.is_empty() {

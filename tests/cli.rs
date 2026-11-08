@@ -236,8 +236,10 @@ fn renders_priced_compaction_windows_alongside_ttl_checks() {
     ] {
         assert!(stdout.contains(value), "{value}");
     }
-    assert!(!stdout.contains("SYNTHETIC_PRIVATE") && !stdout.contains('\x1b'));
-    assert!(!stdout.to_lowercase().contains("total sav"));
+    let lower = stdout.to_lowercase();
+    for forbidden in ["synthetic_private", "\x1b", "total sav"] {
+        assert!(!lower.contains(forbidden), "{forbidden}");
+    }
 }
 
 /// The offset of an option row's description, as `/^ {2}-.*? {2,}(?=\S)/` matches it.
@@ -529,6 +531,136 @@ fn explicit_windows_match_the_library_replay() {
     }
 }
 
+/// The published crate carries the license and the semantics document the README links to.
+#[test]
+fn the_crate_package_ships_its_license_and_docs() {
+    let output = Command::new(env!("CARGO"))
+        .args(["package", "--list", "--allow-dirty", "--offline"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let list = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for file in ["LICENSE", "README.md", "docs/semantics.md"] {
+        assert!(list.lines().any(|l| l == file), "{file}");
+    }
+}
+
+/// A relocated binary needs no checkout, resolves relative paths from its working directory and
+/// leaves transcripts and settings untouched.
+#[test]
+fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
+    let w = Workspace::new();
+    let consumer = w.home.join("consumer with spaces");
+    std::fs::create_dir_all(consumer.join("profile/projects/project")).unwrap();
+    // A hard link, unlike a fresh copy, has no write descriptor a concurrently forked test
+    // child could still hold when this test executes it.
+    let bin = consumer.join("token-max");
+    std::fs::hard_link(BIN, &bin).unwrap();
+    let transcript = consumer.join("profile/projects/project/main.jsonl");
+    let settings = consumer.join("profile/settings.json");
+    std::fs::copy(fixture("claude.jsonl"), &transcript).unwrap();
+    std::fs::copy(fixture("prices.json"), consumer.join("prices.json")).unwrap();
+    let original = std::fs::read(&transcript).unwrap();
+    let invoke = |extra: &[&str]| {
+        let mut c = Command::new(&bin);
+        c.args(extra)
+            .current_dir(&consumer)
+            .env_clear()
+            .env("HOME", &w.home)
+            .env("NO_COLOR", "1")
+            .stdin(Stdio::null());
+        run(&mut c)
+    };
+    let last_line = |stderr: &str| -> Value {
+        serde_json::from_str(stderr.trim().lines().last().unwrap()).unwrap()
+    };
+    let profile = ["--claude-dir", "profile", "--prices-file", "prices.json"];
+    let with = |extra: &'static str| [&profile[..], &[extra][..]].concat();
+
+    let (status, help, stderr) = invoke(&["--help"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert!(help.contains("Usage: token-max"));
+    let (status, version, stderr) = invoke(&["--version"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert_eq!(version, format!("{}\n", env!("CARGO_PKG_VERSION")));
+
+    std::fs::write(&settings, r#"{"promptCacheTtl":"5m"}"#).unwrap();
+    let (status, text, text_err) = invoke(&with("--plain"));
+    assert_eq!(status, 1, "{text_err}");
+    assert!(
+        text.contains("Main-agent prompt cache TTL: 5m -> 1h"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Saves $") || text.contains("Saves <$"),
+        "{text}"
+    );
+    let (status, json, json_err) = invoke(&with("--json"));
+    assert_eq!(status, 1, "{json_err}");
+    let report: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(report["schemaVersion"], 1);
+    assert_eq!(report["scan"]["requests"].as_array().unwrap().len(), 2);
+    let check = |name: &str| {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == name)
+            .unwrap_or_else(|| panic!("{name}"))
+            .clone()
+    };
+    let ttl = check("claude-cache-ttl");
+    assert_eq!(ttl["action"], "change");
+    assert_eq!(ttl["recommended"], "1h");
+    assert_eq!(
+        check("idle-compaction")["action"],
+        "advisory",
+        "SDK usage must retain the idle check without recommending a native toggle"
+    );
+    let unknown = text
+        .find("Not enough evidence")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(text[unknown..].contains("Idle compaction"), "{text}");
+    let all = format!("{text}{json}{text_err}{json_err}");
+    assert!(!all.contains("SYNTHETIC_PRIVATE"));
+    assert_eq!(std::fs::read(&transcript).unwrap(), original);
+    assert_eq!(
+        std::fs::read_to_string(&settings).unwrap(),
+        r#"{"promptCacheTtl":"5m"}"#
+    );
+
+    std::fs::write(&settings, r#"{"promptCacheTtl":"1h"}"#).unwrap();
+    let (status, clear, stderr) = invoke(&with("--json"));
+    assert_eq!(status, 0, "{stderr}");
+    let clear: Value = serde_json::from_str(&clear).unwrap();
+    let checks = clear["checks"].as_array().unwrap();
+    assert!(checks.iter().all(|c| c["action"] != "change"));
+
+    let (status, stdout, stderr) = invoke(&["--bogus", "--json"]);
+    assert_eq!(status, 2, "{stderr}");
+    assert_eq!(stdout, "");
+    let error = last_line(&stderr)["error"].as_str().unwrap().to_string();
+    assert!(error.contains("invalid arguments"), "{error}");
+
+    std::fs::write(
+        &transcript,
+        r#"{"timestamp":"2020-01-01T00:00:00Z","type":"assistant","private":"SYNTHETIC_PRIVATE","message":{"usage":{"input_tokens":"bad"}}}
+"#,
+    )
+    .unwrap();
+    let (status, stdout, stderr) = invoke(&with("--json"));
+    assert_eq!(status, 2, "{stderr}");
+    assert_eq!(stdout, "");
+    assert_eq!(last_line(&stderr)["location"]["line"], 1);
+    assert!(!stderr.contains("SYNTHETIC_PRIVATE"));
+}
+
 /// Every JSON number as a float, so `1` and `1.0` compare equal.
 fn numbers(value: Value) -> Value {
     match value {
@@ -691,9 +823,15 @@ mod unix {
             "Checking settings",
         ] {
             assert!(stderr.contains(phase), "{phase}");
-            assert!(!stdout.contains(phase));
         }
-        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        for leak in [
+            "Scanning",
+            "Loading public",
+            "Checking settings",
+            "SYNTHETIC_PRIVATE",
+        ] {
+            assert!(!stdout.contains(leak), "{leak}");
+        }
         let (status, stdout, stderr) = invoke(&[], &[("NO_COLOR", "1")]);
         assert_eq!(status, 1, "{stderr}");
         assert!(!stdout.contains('\x1b'));

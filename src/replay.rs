@@ -958,8 +958,6 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controls::Env;
-    use crate::discovery::DiscoveryOptions;
     use crate::model::{
         Attempt, CacheContext, EstimateEvidence, ExposureScan, IdleAttribution, KnownState,
         Location, Origin, PrefixEvidence, ReplayOutcome, ScanCoverage, Snapshot,
@@ -1015,15 +1013,18 @@ mod tests {
         }
     }
 
+    /// The report with only its TTL checks, so rendered details cover only what these tests vary.
     fn report_at(scan: &Scan, since: Option<Millis>, now: Millis) -> Report {
-        analyze(AnalyzeOptions {
+        let mut report = analyze(AnalyzeOptions {
             scan: scan.clone(),
             catalog: &prices(),
             since,
             now,
             max_cost_per_use_usd: 1.0,
         })
-        .unwrap()
+        .unwrap();
+        report.checks.retain(|c| matches!(c, CheckResult::Ttl(_)));
+        report
     }
 
     fn ttls(report: &Report) -> Vec<&TtlCheck> {
@@ -1133,18 +1134,9 @@ mod tests {
     }
 
     fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
-        let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
         ScanOptions {
-            discovery: DiscoveryOptions {
-                home: text(&w.home),
-                env: Env::new(),
-                claude_dirs: vec![],
-                codex_dirs: vec![],
-                managed_settings_file: text(&w.managed_settings_file()),
-                codex_system_config_file: text(&w.home.join("system.toml")),
-                codex_requirements_file: text(&w.home.join("requirements.toml")),
-            },
             since,
+            ..w.scan_options()
         }
     }
 

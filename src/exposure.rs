@@ -2650,6 +2650,9 @@ pub(crate) fn number(n: &Number) -> String {
 }
 
 #[cfg(test)]
+mod scan_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support::make_request;
@@ -3153,40 +3156,6 @@ mod tests {
         assert_eq!(bodies[0].targets, [target("skill", "plugin:known")]);
         assert_eq!(bodies[0].provenance, "observed-tool-result-not-wire-proof");
         assert_eq!(scan.requests[0].view.candidates.len(), 3);
-    }
-
-    #[test]
-    fn codex_aliases_match_repeated_text_occurrences() {
-        let response = |second: u32| {
-            json!({ "type": "response_item", "timestamp": at(second), "payload": {
-                "type": "message", "role": "user",
-                "content": [{ "type": "input_text", "text": "run $known" }] } })
-        };
-        let event = |second: u32| {
-            json!({ "type": "event_msg", "timestamp": at(second),
-                    "payload": { "type": "user_message", "message": "run $known" } })
-        };
-        let mut c = ExposureCollector::new(None);
-        let mut feed = Feed::new("/s/a.jsonl", Harness::Codex, &["codex"]);
-        feed.all(
-            &mut c,
-            vec![
-                json!({ "type": "session_meta", "timestamp": at(0), "payload": { "id": "s" } }),
-                json!({ "type": "world_state", "timestamp": at(0), "payload": {
-                    "state": { "host_skills": { "body": "- known: x" } } } }),
-                response(1),
-                event(1),
-                response(2),
-                event(2),
-            ],
-        );
-        let scan = c.finish(&[], None);
-        assert_eq!(scan.invocations.len(), 2);
-        assert!(scan.invocations.iter().all(|i| {
-            i.kind == InvocationKind::SkillRequest
-                && i.identity_basis == IdentityBasis::ContentOccurrence
-                && i.locations.len() == 2
-        }));
     }
 
     #[test]

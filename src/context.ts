@@ -323,9 +323,13 @@ export function contextCosts(input: {
     }
     const revision = (piece: Placed) => `${piece.revision}:${piece.key}`;
     const prior = previous.get(r.session);
-    // The leading tools and system prompt, by revision: when they change, the
-    // previous input no longer bounds where messages start.
-    const prefix = json(exposure.components.slice(0, exposure.prefix));
+    // The leading tools and system prompt by revision, and the tokenizer that
+    // counted them: when either changes, the previous input no longer bounds
+    // where messages start in this request's tokens.
+    const prefix = json([
+      cohort(r),
+      exposure.components.slice(0, exposure.prefix),
+    ]);
     previous.set(r.session, {
       input: u?.input ?? null,
       keys: new Set(parts.filter((x) => !x.prefix).map(revision)),

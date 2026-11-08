@@ -467,8 +467,9 @@ was first seen. Attachments such as skill listings and instruction files ride in
 messages at no recorded offset, so their history bounds them instead: a
 revision the session's previous request carried lies between the end of the
 system prompt and the end of that request's input, a new or changed revision was
-appended after it, and with no usable previous request, or when the tools or
-system prompt changed since it, it lies anywhere after the system prompt. An attachment is priced only when every offset in its bounds
+appended after it, and with no usable previous request, or when the tools,
+system prompt or model's tokenizer changed since it, it lies anywhere after the
+system prompt. An attachment is priced only when every offset in its bounds
 falls in the same cache slot; otherwise it stays unpriced for that request. A
 row with any unpriced piece in a request, such as an MCP server whose tool is
 priced but whose instructions are not, is unpriced for that request. Each piece's calibrated

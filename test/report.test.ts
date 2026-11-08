@@ -245,3 +245,50 @@ test("an unresolved fast-mode owner stays beside a resolved one; only vanished d
   assert.match(text, /synthetic project override ownership is unresolved/i);
   assert.doesNotMatch(text, /working directory no longer exists/);
 });
+
+test("short windows scale to 30 days, snippets stay valid JSON when narrow, and details count feature changes", async () => {
+  const report = await syntheticReport();
+  const check = report.checks.find((c) => c.check === "claude-cache-ttl")!;
+  check.action = "change";
+  check.current = "5m";
+  check.recommended = "1h";
+  check.since = Date.parse("2026-11-01T00:00:00Z");
+  check.until = check.since + 3600000;
+  check.savingsUsd = 1;
+  check.monthlySavingsUsd = 720;
+  assert.match(formatReport(report, { width: 200 }), /Saves \$720\./);
+
+  const name = "google-drive:google-drive-comments";
+  report.checks = [];
+  report.context = [
+    {
+      profiles: [report.scan.profiles[0]!.id],
+      kind: "skill",
+      name,
+      control: {
+        path: ["skillOverrides", name],
+        value: "user-invocable-only",
+        append: false,
+      },
+      requests: 10,
+      priced: 10,
+      tokens: 100,
+      costUsd: 5,
+      estimatedUsd: 5,
+      calls: 0,
+      lastUsed: null,
+      current: true,
+      costPerUseUsd: 5,
+      verdict: "off",
+    },
+  ];
+  const narrow = formatReport(report, { width: 40 }).split("\n");
+  const start = narrow.findIndex((l) => l.trim() === "{");
+  const end = narrow.indexOf("  }", start);
+  assert.deepEqual(JSON.parse(narrow.slice(start, end + 1).join("\n")), {
+    skillOverrides: { [name]: "user-invocable-only" },
+  });
+  const details = formatReport(report, { width: 200, details: true });
+  assert.match(details, /1 recommended change/);
+  assert.doesNotMatch(details, /No applicable/);
+});

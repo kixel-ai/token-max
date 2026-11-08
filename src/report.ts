@@ -106,7 +106,13 @@ export function formatReport(
   }
 
   if (!options.details) {
-    summary(report, { line, section, profileName: shortProfile, arrow });
+    summary(report, {
+      line,
+      section,
+      profileName: shortProfile,
+      arrow,
+      raw: (text) => lines.push(terminalText(text)),
+    });
     return lines.join("\n") + "\n";
   }
 
@@ -142,7 +148,10 @@ export function formatReport(
     ["advisory", "Advisory findings", 33],
     ["keep", "Keep current settings", 0],
   ] as const;
-  const changes = report.checks.filter((c) => c.action === "change").length;
+  // Features recommended off are changes too, and also cause exit 1.
+  const changes =
+    report.checks.filter((c) => c.action === "change").length +
+    report.context.filter((c) => c.verdict === "off").length;
   section(
     changes
       ? `${changes} recommended change${changes === 1 ? "" : "s"}`
@@ -156,7 +165,10 @@ export function formatReport(
     line(
       "No selected requests. Try an earlier --since or select another profile.",
     );
-  else if (!report.checks.length)
+  else if (
+    !report.checks.length &&
+    !report.context.some((c) => c.verdict !== null)
+  )
     line(
       "No applicable checks for the selected requests. Usage coverage does not establish that every setting is optimal.",
     );
@@ -630,6 +642,7 @@ function summary(
     section: (title: string) => void;
     profileName: (id: string) => string;
     arrow: string;
+    raw: (text: string) => void;
   },
 ) {
   const { line, section } = out;
@@ -693,10 +706,11 @@ function summary(
     settingName(r) + (many ? ` [${out.profileName(r.profile)}]` : "");
   const span = since === null ? null : Math.max(until - since, DAY);
   // Everything is shown per 30 days so lines with different windows compare directly.
+  // Scaled by the real duration, however short, as monthlySavingsUsd is.
   const monthly = (usd: number, from: number | null, to: number | null) =>
-    from === null || to === null
+    from === null || to === null || to <= from
       ? about(usd)
-      : about((usd * 30 * DAY) / Math.max(to - from, DAY));
+      : about((usd * 30 * DAY) / (to - from));
   const settingsFile = new Map(
     report.scan.profiles.map((p) => [p.id, home(p.settingsFile)]),
   );
@@ -746,7 +760,7 @@ function summary(
     if (action(r) === "change") {
       const saves =
         r.savingsUsd !== null
-          ? ` Saves ${monthly(r.savingsUsd, r.since, r.until)}${coverageNote(r)}.`
+          ? ` Saves ${r.monthlySavingsUsd === null ? monthly(r.savingsUsd, r.since, r.until) : about(r.monthlySavingsUsd)}${coverageNote(r)}.`
           : r.check === "fast-mode"
             ? ` ${capitalize(r.reason)}.`
             : "";
@@ -823,10 +837,11 @@ function summary(
     line(
       `To turn these off, merge this into ${file}, adding to any lists already there:`,
     );
+    // Never wrapped, so the snippet stays valid JSON at any terminal width.
     for (const row of JSON.stringify(settingsPatch(controls), null, 2).split(
       "\n",
     ))
-      line(row, 2);
+      out.raw(`  ${row}`);
   }
   if (span !== null && pieces.length)
     line(

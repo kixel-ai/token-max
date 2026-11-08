@@ -132,6 +132,9 @@ Each piece is sized from the request shapes Claude Code records (tools, then the
 system prompt, then messages) and converted to tokens with a characters-to-tokens
 ratio measured from the same transcripts. It is priced at the cache position it
 occupied in that request: cached read, 1h write, 5m write, then ordinary input.
+Attachments have no recorded position, so each is placed as late as its history
+allows. Requests that could not be priced are estimated from those that could,
+and a piece with none is shown as unknown.
 Removing a piece can also shift later cache writes and compaction, which this
 does not model. Requests without a recorded shape, and Codex requests, are not
 priced per piece.

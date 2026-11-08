@@ -270,6 +270,11 @@ test("text-only wire requests calibrate matching cohorts and preserve unknown ne
   assert.equal(calibration.samples.length, 1);
   assert.equal(calibration.samples[0]!.tokens, 1000);
   assert.equal(measureSize({ text: "🌲木abc" }).characters, 5);
+  // Full requests list tools before the system prompt, matching the cache prefix.
+  const order = data.exposure.requests[0]!.components.map(
+    (id) => data.exposure.components.find((c) => c.id === id)!.category,
+  );
+  assert.deepEqual(order, ["mcp-schema", "other"]);
   const server = report.context.find((c) => c.kind === "mcp-server")!;
   assert.equal(server.name, "example");
   assert.equal(server.priced, 1);
@@ -618,6 +623,139 @@ test("recorded request shapes price each piece at its cache position and count i
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
 });
 
+test("attachments take their latest possible cache position; media and copied calls do not skew counts", async () => {
+  const tools = [
+    {
+      name: "Artifact",
+      description: "a".repeat(2000),
+      input_schema: { type: "object" },
+    },
+  ];
+  const system = [{ type: "text", text: "s".repeat(1000) }];
+  // Tool input named data is billed text; only thinking signatures are opaque.
+  const first = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "t", signature: "z".repeat(5000) },
+      {
+        type: "tool_use",
+        id: "c1",
+        name: "Artifact",
+        input: { data: "d".repeat(4000) },
+      },
+    ],
+  };
+  const image = {
+    role: "user",
+    content: [
+      {
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: "AAAA" },
+      },
+    ],
+  };
+  const usage = (input: number, read: number, write: number) => ({
+    input_tokens: input,
+    cache_read_input_tokens: read,
+    cache_creation_input_tokens: write,
+    cache_creation: {
+      ephemeral_5m_input_tokens: 0,
+      ephemeral_1h_input_tokens: write,
+    },
+  });
+  const request = (n: number, tail: string[]) => ({
+    type: "api-request",
+    id: `api-${n}`,
+    timestamp: at(n),
+    sessionId: "session",
+    shapeHash: "shape",
+    keep: 0,
+    tail,
+    requestDigest: `d${n}`,
+    params: { model: "claude-opus-5-5" },
+  });
+  const reply = (n: number, u: object) => {
+    const a = assistant(n, [
+      { type: "tool_use", id: "c1", name: "Artifact", input: {} },
+    ]);
+    Object.assign(a.message.usage, u);
+    return a;
+  };
+  const records = [
+    attachment(0, {
+      type: "skill_listing",
+      content: "- review: " + "r".repeat(300),
+      names: ["review"],
+      isInitial: true,
+    }),
+    {
+      type: "api-request-shape",
+      sessionId: "session",
+      timestamp: at(0),
+      shapeHash: "shape",
+      shape: { system, tools },
+    },
+    {
+      type: "api-request-blob",
+      sessionId: "session",
+      hash: "m1",
+      message: first,
+    },
+    request(1, ["m1"]),
+    reply(1, usage(100, 0, 2900)),
+    attachment(2, {
+      type: "instructions",
+      files: [{ path: "/repo/CLAUDE.md", content: "i".repeat(600) }],
+    }),
+    {
+      type: "api-request-blob",
+      sessionId: "session",
+      hash: "m2",
+      message: image,
+    },
+    request(3, ["m1", "m2"]),
+    reply(3, usage(0, 3000, 500)),
+  ];
+  const w = await workspace();
+  try {
+    for (const file of ["a", "b"])
+      await writeFile(
+        join(w.claude, `projects/project/${file}.jsonl`),
+        records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+      );
+    const data = await scan(w.options);
+    const report = analyze({ scan: data, catalog: await prices() });
+    const [calibration] = report.exposure.calibration;
+    // Only the text-only request calibrates, with its tool input counted.
+    assert.equal(calibration!.samples.length, 1);
+    const { signature: _, ...thinking } = first.content[0]!;
+    const expected =
+      JSON.stringify(system).length +
+      JSON.stringify(tools[0]).length +
+      JSON.stringify({ ...first, content: [thinking, first.content[1]] })
+        .length;
+    assert.equal(calibration!.samples[0]!.characters, expected);
+    const ratio = calibration!.tokensPerCharacter;
+    const row = (name: string) => report.context.find((c) => c.name === name)!;
+    // The same call copied into a second transcript file counts once.
+    assert.equal(row("Artifact").calls, 1);
+    // The listing came with the first request, so the second reads it from cache.
+    const review = row("review");
+    const instructions = row("/repo/CLAUDE.md");
+    assert.equal(instructions.priced, 1);
+    const tokens = 600 * ratio;
+    assert.ok(tokens < 500, "the new file fits in the second request's writes");
+    // The instruction file is new in the second request, so it pays the 1h write price.
+    assert.ok(
+      Math.abs(instructions.costUsd / instructions.tokens! / 8e-6 - 1) < 0.02,
+    );
+    assert.ok(review.costUsd > 0 && review.priced === 2);
+    assert.ok(review.estimatedUsd === review.costUsd);
+  } finally {
+    await w.dispose();
+  }
+});
+
 test("provided schemas, listing member ownership and identified command file reads are derived once", async () => {
   const data = await transcript("codex", [
     codexMeta,
@@ -783,6 +921,8 @@ test("cohort calibration outside measured request support leaves that comparison
   const system = report.context.find((c) => c.kind === "system")!;
   assert.equal(system.requests, 2);
   assert.equal(system.priced, 1);
+  // The unpriced request is scaled from the priced one, never counted as free.
+  assert.equal(system.estimatedUsd, system.costUsd * 2);
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
 });
 

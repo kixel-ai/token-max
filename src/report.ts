@@ -780,9 +780,12 @@ export function contextSection(
   const optional = (c: ContextCost) =>
     c.control !== null || c.kind === "instructions";
   const rows = report.context.filter(
-    (c) => details || (optional(c) && c.current && c.costUsd > 0),
+    (c) => details || (optional(c) && c.current && (c.estimatedUsd ?? 0) > 0),
   );
-  if (!rows.length) return;
+  const unpriced = report.context.filter(
+    (c) => optional(c) && c.current && c.estimatedUsd === null,
+  );
+  if (!rows.length && !unpriced.length) return;
   const requests = report.scan.requests;
   const since = report.scan.since ?? requests[0]?.time ?? null;
   const until = Date.parse(report.generatedAt);
@@ -807,10 +810,11 @@ export function contextSection(
             : c.kind === "instructions"
               ? home(c.name)
               : c.name;
-    const monthly =
-      span === null
-        ? ""
-        : ` (about ${about((c.costUsd * 30 * DAY) / span)} per 30 days)`;
+    // Unpriced requests are scaled from the priced ones, never counted as free.
+    const cost =
+      c.estimatedUsd === null
+        ? "cost unknown"
+        : `${about(c.estimatedUsd)}${span === null ? "" : ` (about ${about((c.estimatedUsd * 30 * DAY) / span)} per 30 days)`}${c.priced < c.requests ? `, estimated from the ${count(c.priced)} of ${count(c.requests)} requests that could be priced` : ""}`;
     const use =
       c.calls === null
         ? ""
@@ -818,7 +822,7 @@ export function contextSection(
           ? "; no recorded use"
           : `; used ${count(c.calls)} time${c.calls === 1 ? "" : "s"}, last ${new Date(c.lastUsed!).toISOString().slice(0, 10)}`;
     line(
-      `${label}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: ${about(c.costUsd)}${monthly}${use}`,
+      `${label}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: ${cost}${use}`,
       2,
     );
     const size =
@@ -844,15 +848,20 @@ export function contextSection(
   if (!details && rows.length > shown.length) {
     const rest = rows.slice(shown.length);
     line(
-      `${rest.length} more cost ${about(rest.reduce((n, c) => n + c.costUsd, 0))} together; --details lists every piece.`,
+      `${rest.length} more cost ${about(rest.reduce((n, c) => n + c.estimatedUsd!, 0))} together; --details lists every piece.`,
       2,
     );
   }
+  if (!details && unpriced.length)
+    line(
+      `${unpriced.length} more could not be priced, because their requests lack recorded usage, a request shape or a calibration.`,
+      2,
+    );
   if (!details) {
     const fixed = report.context.filter((c) => !optional(c) && c.current);
     if (fixed.length)
       line(
-        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${about(fixed.reduce((n, c) => n + c.costUsd, 0))}.`,
+        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${about(fixed.reduce((n, c) => n + (c.estimatedUsd ?? 0), 0))}.`,
       );
   }
 }

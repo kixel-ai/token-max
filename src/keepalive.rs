@@ -147,8 +147,9 @@ struct Return {
     /// Its price after `k` pings' turns, reading a warm or rewriting a cold prefix.
     warm_price: Steps,
     cold_price: Steps,
-    /// Later requests before a compaction, which also read the pings' turns.
-    later: u64,
+    /// Later requests before a compaction that found the cache warm and cold, which also
+    /// read or write the pings' turns.
+    later: (u64, u64),
 }
 
 /// One idle gap or final period.
@@ -182,7 +183,9 @@ impl Period {
                 r.cold_price.at(k)
             }
         };
-        let carried = r.later as f64 * (r.warm_price.at(sent) - r.warm_price.at(0));
+        let (warm, cold) = r.later;
+        let carried = warm as f64 * (r.warm_price.at(sent) - r.warm_price.at(0))
+            + cold as f64 * (r.cold_price.at(sent) - r.cold_price.at(0));
         price(r.warm, 0) - price(r.warm || self.rescued(cap), sent) - carried
     }
     /// Net saving under a cap of `cap` pings; finals count only when `open`.
@@ -296,10 +299,11 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     let mut compactions: HashMap<&str, Vec<Millis>> = HashMap::new();
     for e in &options.scan.events {
         if e.kind == EventKind::Compaction && e.profiles.contains(&profile.id) {
-            compactions
-                .entry(e.session.as_str())
-                .or_default()
-                .push(e.time);
+            // A copied history keeps the boundary under every conversation alias.
+            let aliases = e.origins.iter().map(|o| o.session.as_str());
+            for session in std::iter::once(e.session.as_str()).chain(aliases) {
+                compactions.entry(session).or_default().push(e.time);
+            }
         }
     }
     let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::new();
@@ -312,11 +316,11 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     struct Gap<'r> {
         a: &'r Request,
         /// The return, its gap, whether a compaction came between, and how many later
-        /// requests come before the next compaction.
-        b: Option<(&'r Request, Millis, bool, u64)>,
+        /// requests before the next compaction found the cache warm and cold.
+        b: Option<(&'r Request, Millis, bool, (u64, u64))>,
     }
     let mut gaps: Vec<Gap> = vec![];
-    if let Some(interval) = interval {
+    if let (Some(lifetime), Some(interval)) = (&lifetime, interval) {
         for (session, list) in &sessions {
             let times = compactions.get(session);
             // A compaction between two requests replaces the cached prefix.
@@ -329,9 +333,16 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
                             }))
                 })
                 .collect();
-            let mut later = vec![0u64; list.len()];
+            let mut later = vec![(0u64, 0u64); list.len()];
             for k in (0..list.len().saturating_sub(1)).rev() {
-                later[k] = if boundary[k + 1] { 0 } else { 1 + later[k + 1] };
+                if !boundary[k + 1] {
+                    let (warm, cold) = later[k + 1];
+                    later[k] = if list[k + 1].time - list[k].end_time <= lifetime.ms {
+                        (warm + 1, cold)
+                    } else {
+                        (warm, cold + 1)
+                    };
+                }
             }
             for (i, &a) in list.iter().enumerate() {
                 let b = list.get(i + 1).map(|&b| {
@@ -401,7 +412,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
                             .find(|p| matches!(p.kind, PartKind::Message | PartKind::Compaction))
                             .filter(|p| documented(p))?;
                         let u = &resumed.usage;
-                        let ordinary = u.input? - u.read? - u.write.unwrap_or(0);
+                        let ordinary = u.input? - u.read? - u.write?;
                         let cacheable = u.input? - ordinary;
                         let reusable = !compacted
                             && resumed.model == part.model
@@ -409,7 +420,8 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
                             && b.provider == g.a.provider;
                         let prefix = if reusable { context.min(cacheable) } else { 0 };
                         let output = u.output?;
-                        let added = |k: i64| k * new;
+                        // A compaction between them replaced the pings' turns too.
+                        let added = |k: i64| if compacted { 0 } else { k * new };
                         Some(Return {
                             room: room?,
                             needed: needed(gap).filter(|_| reusable),
@@ -879,9 +891,16 @@ mod tests {
         let mut compacted = scan(one_hour(), vec![turn("b", 0), turn("b", 2 * HOUR)]);
         compacted.events.push(crate::model::StructuralEvent {
             id: "boundary".into(),
-            origins: vec![],
+            // Recorded under another alias of the same copied history.
+            origins: vec![crate::model::Origin {
+                session: "b".into(),
+                location: crate::model::Location {
+                    file: "synthetic".into(),
+                    line: 1,
+                },
+            }],
             harness: Harness::Claude,
-            session: "b".into(),
+            session: "copy".into(),
             time: HOUR,
             kind: EventKind::Compaction,
             profiles: vec!["profile".into()],

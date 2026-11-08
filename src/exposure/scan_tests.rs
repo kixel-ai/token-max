@@ -1142,6 +1142,14 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     let calls = kinds(e, InvocationKind::McpCall);
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].status, InvocationStatus::Completed);
+    // The call and its nested completion share `mcp-one`, so the server has one use.
+    let uses: u64 = e
+        .tool_calls
+        .iter()
+        .filter(|c| c.name.starts_with("mcp__example"))
+        .map(|c| c.calls)
+        .sum();
+    assert_eq!(uses, 1);
     assert_eq!(
         kinds(e, InvocationKind::SkillLoad)[0].status,
         InvocationStatus::Completed

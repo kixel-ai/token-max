@@ -1848,9 +1848,11 @@ impl ExposureCollector {
             let bare = text(p.get("name"))?;
             let name = codex_tool_name(bare, p.get("namespace").and_then(Value::as_str));
             let call = text(present(p.get("id")).or(p.get("call_id")))?;
-            // Outputs name the call by `call_id`.
+            // Uses count by the id a nested completion shares; outputs name the call by `call_id`.
+            self.call(call, &name, line.time);
             let output_id = text(present(p.get("call_id")).or(p.get("id")))?;
-            self.call(output_id, &name, line.time);
+            let owner = self.call_tools[call].clone();
+            self.call_tools.insert(output_id.to_string(), owner);
             let kind = if name.starts_with("mcp__") {
                 Some(InvocationKind::McpCall)
             } else if resource_tool(&name) {

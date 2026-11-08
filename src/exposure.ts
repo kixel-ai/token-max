@@ -1,4 +1,4 @@
-import type { Cost, Harness, Location, Request, Snapshot } from "./model.js";
+import type { Harness, Location, Request, Snapshot } from "./model.js";
 import {
   count,
   id,
@@ -8,10 +8,10 @@ import {
   ScanError,
   timestamp,
 } from "./safe.js";
-import { pricePart, unknownCost, type Catalog } from "./prices.js";
 
 /** Each context category has exactly one downstream owner. */
 export type Category =
+  | "tool-schema"
   | "skill-listing"
   | "skill-body"
   | "mcp-discovery"
@@ -34,6 +34,8 @@ export interface Size {
 export interface Component extends Size {
   id: string;
   key: string;
+  /** Readable name: a tool, skill, server or file path, never content. */
+  name: string;
   category: Category;
   owner: "skills" | "context";
   group: string | null;
@@ -88,6 +90,8 @@ export interface Exposure {
     items: string[] | null;
   } | null;
   completeCharacters: number | null;
+  /** How many leading components are the recorded tools and system prompt, in cache-prefix order. */
+  prefix: number;
   wireModel: string | null;
   reasons: string[];
 }
@@ -113,6 +117,15 @@ export interface ExposureScan {
   requests: Exposure[];
   invocations: Invocation[];
   visibility: Visibility[];
+  /** Selected-window calls to each tool, deduplicated by call id. */
+  toolCalls: ToolCalls[];
+}
+/** How often one tool was called within the window, per profile set. */
+export interface ToolCalls {
+  name: string;
+  profiles: string[];
+  calls: number;
+  lastUsed: number;
 }
 /** Character estimates are calibrated only within a matching model and client cohort. */
 export interface Calibration {
@@ -131,6 +144,11 @@ export function measureSize(input: { text: unknown; tokens?: unknown }): Size {
       typeof input.text === "string" ? input.text : "opaque",
     ),
   };
+}
+
+/** Built-in tools and MCP tools have different owners and controls. */
+function toolCategory(name: string): Category {
+  return name.startsWith("mcp__") ? "mcp-schema" : "tool-schema";
 }
 
 function characters(value: string): number {
@@ -152,6 +170,67 @@ function text(value: unknown): string {
   if (typeof value !== "string") throw new ScanError("invalid context text");
   return value;
 }
+/** Count each tool's calls per profile set, after merging copies of one call. */
+function toolCalls(
+  calls: Iterable<{ name: string; profiles: Set<string>; time: number }>,
+): ToolCalls[] {
+  const result = new Map<string, ToolCalls>();
+  for (const call of calls) {
+    const profiles = [...call.profiles].sort();
+    const key = JSON.stringify([call.name, profiles]);
+    const prior = result.get(key);
+    if (prior) {
+      prior.calls++;
+      prior.lastUsed = Math.max(prior.lastUsed, call.time);
+    } else
+      result.set(key, {
+        name: call.name,
+        profiles,
+        calls: 1,
+        lastUsed: call.time,
+      });
+  }
+  return [...result.values()];
+}
+
+/**
+ * Characters of one recorded message, or null when its content holds images,
+ * documents or redacted thinking, whose billed tokens text cannot measure. Only
+ * a content-level thinking block's opaque signature is dropped; every other
+ * field, tool input included, counts.
+ */
+function blobCharacters(message: unknown): number | null {
+  let opaque = false;
+  const blocks = (content: unknown): unknown =>
+    Array.isArray(content)
+      ? content.map((v: unknown) => {
+          if (!v || typeof v !== "object") return v;
+          const block = v as Record<string, unknown>;
+          if (
+            block.type === "image" ||
+            block.type === "document" ||
+            block.type === "redacted_thinking"
+          )
+            opaque = true;
+          if (block.type === "thinking") {
+            const { signature: _, ...rest } = block;
+            return rest;
+          }
+          return block.type === "tool_result"
+            ? { ...block, content: blocks(block.content) }
+            : block;
+        })
+      : content;
+  const m =
+    message && typeof message === "object"
+      ? (message as Record<string, unknown>)
+      : {};
+  const serialized = JSON.stringify(
+    "content" in m ? { ...m, content: blocks(m.content) } : message,
+  );
+  return opaque ? null : characters(serialized);
+}
+
 function completeText(params: Record<string, unknown>): boolean {
   function content(value: unknown): boolean {
     if (typeof value === "string") return true;
@@ -188,10 +267,9 @@ function completeText(params: Record<string, unknown>): boolean {
   return complete;
 }
 
-function cohort(r: Request): string {
-  return identity(
-    JSON.stringify([r.harness, r.model, r.provider, r.client, r.version]),
-  );
+// Tokenization belongs to the model; client versions only change what is sent.
+export function cohort(r: Request): string {
+  return identity(JSON.stringify([r.harness, r.model, r.provider]));
 }
 function target(kind: "skill" | "mcp", value: string): string {
   return identity(`${kind}:${value}`);
@@ -208,6 +286,12 @@ function group(value: string): string | null {
 
 /** Collect derived metadata in the reader's frozen, single parsing pass. */
 export class ExposureCollector {
+  constructor(private readonly since?: number) {}
+  // Tool calls by call id, so copies in other transcript files count once.
+  private calls = new Map<
+    string,
+    { name: string; profiles: Set<string>; time: number }
+  >();
   private components = new Map<string, Component>();
   private invocations = new Map<string, Invocation>();
   private observations = new Map<
@@ -229,6 +313,14 @@ export class ExposureCollector {
   private userAliases = new Map<string, Map<string, number>>();
   // Surfaced tool definitions by attachment uuid and name, for later `sameAs` references.
   private surfaced = new Map<string, string>();
+  // Request shapes (system prompt and tool definitions) by hash, as sizes only.
+  private shapes = new Map<
+    string,
+    { system: Size; tools: { name: string; size: Size }[] }
+  >();
+  // Hash-addressed message sizes in the current file, for complete request sizes.
+  // Text characters per message blob, or null when it holds images or other opaque input.
+  private blobs = new Map<string, number | null>();
   private invalidated = false;
   private pendingTools = new Map<
     string,
@@ -251,11 +343,14 @@ export class ExposureCollector {
     deferred?: boolean;
     member?: boolean;
     targets?: string[];
+    size?: Size;
   }): string {
     const key = identity(`${input.category}:${input.key}`);
-    const size = measureSize({
-      text: input.opaque ? undefined : input.content,
-    });
+    const size = input.size
+      ? { ...input.size }
+      : measureSize({
+          text: input.opaque ? undefined : input.content,
+        });
     if (input.opaque)
       size.fingerprint = identity(JSON.stringify(input.content));
     const revision = identity(`${key}:${size.fingerprint}`);
@@ -275,6 +370,7 @@ export class ExposureCollector {
         ...size,
         id: revision,
         key,
+        name: input.key,
         category: input.category,
         owner: input.category.startsWith("skill-") ? "skills" : "context",
         group: input.group ?? null,
@@ -401,6 +497,7 @@ export class ExposureCollector {
       this.knownSkills = new Set();
       this.userAliases = new Map();
       this.surfaced = new Map();
+      this.blobs = new Map();
       this.invalidated = false;
     }
     const p = object(raw.payload);
@@ -668,7 +765,23 @@ export class ExposureCollector {
         );
       }
 
-    // Full Messages API parameters can prove wire exposure; digest-only requests cannot.
+    if (raw.type === "api-request-shape") {
+      const shape = record(raw.shape);
+      this.shapes.set(id(raw.shapeHash), {
+        system: measureSize({ text: JSON.stringify(shape.system) }),
+        tools: array(shape.tools).map((v) => {
+          const tool = record(v);
+          return {
+            name: text(tool.name),
+            size: measureSize({ text: JSON.stringify(tool) }),
+          };
+        }),
+      });
+    }
+    if (raw.type === "api-request-blob")
+      this.blobs.set(id(raw.hash), blobCharacters(raw.message));
+
+    // Full Messages API parameters or a recorded request shape prove wire exposure.
     if (raw.type === "api-request") {
       const params = object(raw.params);
       const full =
@@ -693,26 +806,69 @@ export class ExposureCollector {
         this.digests.set(id(raw.requestDigest), refs.items);
       let components: string[] = [];
       let completeCharacters: number | null = null;
-      if (full) {
+      const shape =
+        !full && typeof raw.shapeHash === "string"
+          ? this.shapes.get(id(raw.shapeHash))
+          : undefined;
+      if (shape) {
+        // The prompt cache prefix runs tools, then system, then messages.
+        this.clear("tool-schema");
+        this.clear("mcp-schema");
+        const tools = shape.tools.map((tool) =>
+          this.component({
+            category: toolCategory(tool.name),
+            key: tool.name,
+            content: null,
+            size: tool.size,
+            provenance: "shape-tool",
+            location,
+            time: time ?? 0,
+            group: group(tool.name),
+          }),
+        );
+        const system = this.component({
+          category: "other",
+          key: "wire-system",
+          content: null,
+          size: shape.system,
+          provenance: "shape-system",
+          location,
+          time: time ?? 0,
+        });
+        const prefix = new Set([...tools, system]);
         components = [
+          ...tools,
+          system,
+          ...[...this.active.values()].filter((c) => !prefix.has(c)),
+        ];
+        const messages = refs.items?.every((h) => this.blobs.get(h) != null)
+          ? refs.items.reduce((n, h) => n + this.blobs.get(h)!, 0)
+          : null;
+        if (messages !== null)
+          completeCharacters =
+            messages +
+            shape.system.characters! +
+            shape.tools.reduce((n, t) => n + t.size.characters!, 0);
+      }
+      if (full) {
+        // Listed in cache-prefix order: tools, then system.
+        components = array(params.tools).map((v) => {
+          const tool = record(v);
+          return add(
+            toolCategory(text(tool.name)),
+            text(tool.name),
+            JSON.stringify(tool),
+            "wire-tool",
+          );
+        });
+        components.push(
           add(
             "other",
             "wire-system",
             JSON.stringify(params.system),
             "wire-system",
           ),
-        ];
-        for (const v of array(params.tools)) {
-          const tool = record(v);
-          components.push(
-            add(
-              "mcp-schema",
-              text(tool.name),
-              JSON.stringify(tool),
-              "wire-tool",
-            ),
-          );
-        }
+        );
         if (completeText(params))
           completeCharacters = characters(
             JSON.stringify({
@@ -724,22 +880,31 @@ export class ExposureCollector {
       }
       this.wire = {
         components,
-        candidates: full ? [] : [...this.active.values()],
+        candidates: full || shape ? [] : [...this.active.values()],
         removed: [...this.pendingRemoved],
         inherited: [],
         deferred: [...this.deferred],
-        linkage: full ? "wire" : "unknown",
+        linkage: full || shape ? "wire" : "unknown",
         coverage: completeCharacters === null ? "partial" : "complete-text",
         references: refs,
         completeCharacters,
+        prefix: full
+          ? array(params.tools).length + 1
+          : shape
+            ? shape.tools.length + 1
+            : 0,
         wireModel: label(params.model),
-        reasons: full
+        reasons: shape
           ? [
-              "serialized text includes wire framing; API tokenization is calibrated, not exact",
+              "recorded request shape gives the system prompt and tools; message attachments are placed by chronology",
             ]
-          : [
-              "request digest/base/keep/tail hashes have no verified content mapping; attachment state is candidate exposure only",
-            ],
+          : full
+            ? [
+                "serialized text includes wire framing; API tokenization is calibrated, not exact",
+              ]
+            : [
+                "request digest/base/keep/tail hashes have no verified content mapping; attachment state is candidate exposure only",
+              ],
       };
       this.observations.set(`${snapshot.file}:ref:${id(raw.id)}`, {
         exposure: this.view(this.wire),
@@ -844,6 +1009,16 @@ export class ExposureCollector {
       }
       if (b.type === "tool_use") {
         const name = text(b.name);
+        const callId = text(b.id);
+        if (time !== null && (this.since === undefined || time >= this.since)) {
+          const call = this.calls.get(callId) ?? {
+            name,
+            profiles: new Set<string>(),
+            time,
+          };
+          for (const profile of this.file!.profiles) call.profiles.add(profile);
+          this.calls.set(callId, call);
+        }
         const args = object(b.input);
         if (name === "Skill") {
           const skill = text(args.skill);
@@ -1020,6 +1195,7 @@ export class ExposureCollector {
       coverage: current.length ? "partial" : "unknown",
       references: null,
       completeCharacters: null,
+      prefix: 0,
       wireModel: null,
       reasons: [
         "chronological state is not proof of exact request exposure",
@@ -1095,6 +1271,7 @@ export class ExposureCollector {
             coverage: "unknown",
             references: null,
             completeCharacters: null,
+            prefix: 0,
             wireModel: null,
             reasons: [
               views.length
@@ -1207,6 +1384,7 @@ export class ExposureCollector {
         (i) => since === null || i.time >= since,
       ),
       visibility,
+      toolCalls: toolCalls(this.calls.values()),
     };
   }
 }
@@ -1223,8 +1401,6 @@ export function calibrate(
     if (
       !r ||
       !r.model ||
-      !r.client ||
-      !r.version ||
       r.evidence !== "measured" ||
       r.parts.length !== 1 ||
       exposure.coverage !== "complete-text" ||
@@ -1258,227 +1434,4 @@ export function calibrate(
     result.set(key, c);
   }
   return [...result.values()];
-}
-
-/** Convert a component using recorded tokens first, otherwise a matching empirical calibration. */
-export function estimateTokens(
-  size: Size,
-  calibration?: Calibration,
-): { estimate: number | null; range: [number, number] | null; basis: string } {
-  if (size.recordedTokens !== null)
-    return {
-      estimate: size.recordedTokens,
-      range: [size.recordedTokens, size.recordedTokens],
-      basis: "recorded component tokens",
-    };
-  if (size.characters === null || !calibration)
-    return {
-      estimate: null,
-      range: null,
-      basis: "characters only; no complete matching text calibration",
-    };
-  return {
-    estimate: Math.round(size.characters * calibration.tokensPerCharacter),
-    range: [
-      Math.floor(size.characters * calibration.range[0]),
-      Math.ceil(size.characters * calibration.range[1]),
-    ],
-    basis: `empirical calibration ${calibration.cohort}`,
-  };
-}
-
-/** Reprice a complete before/after input change, including the whole request's context tier. */
-export function priceExposureChange(input: {
-  catalog: Catalog;
-  request: Request;
-  removedTokens: number;
-  addedTokens: number;
-  position?: {
-    read: number;
-    write5m: number;
-    write1h: number;
-    ordinary: number;
-  };
-}): {
-  gross: Cost;
-  fixedBehaviorNet: Cost;
-  range: [number, number] | null;
-  assumptions: string[];
-} {
-  const { request: r, catalog } = input;
-  const removed = count(input.removedTokens)!;
-  const added = count(input.addedTokens)!;
-  const assumptions = [
-    "fixed behavior holds output and tool execution identical; this is an API-price equivalent",
-    "remaining cache geometry is held fixed; actual cache-key changes and future reuse can differ",
-    "use the observed replacement listing/schema footprint, including backfill and expansion; independent savings must not be summed",
-  ];
-  const unknown = (reason: string) => ({
-    gross: unknownCost(reason),
-    fixedBehaviorNet: unknownCost(reason),
-    range: null,
-    assumptions,
-  });
-  if (r.parts.length !== 1 || r.parts[0]!.usage.input === null)
-    return unknown("single-part total request usage required");
-  const p = r.parts[0]!;
-  const u = p.usage;
-  if (removed > u.input!)
-    throw new ScanError("component removal exceeds request input");
-  if (u.read === null || u.write === null)
-    return unknown("request cache geometry unknown");
-  if (r.harness !== "claude" && u.write !== 0)
-    return unknown(
-      "Codex write lifetime positions unavailable for this context change",
-    );
-  if (
-    r.harness === "claude" &&
-    u.write !== 0 &&
-    (u.write5m === null || u.write1h === null)
-  )
-    return unknown("write lifetime allocation unknown");
-  const slots = {
-    read: u.read,
-    write5m: u.write5m ?? 0,
-    write1h: u.write1h ?? 0,
-    ordinary: u.input! - u.read - u.write,
-  };
-  if (r.harness === "codex") slots.ordinary = u.input! - u.read;
-  function cost(remove: typeof slots, replacement: number): Cost {
-    const next = {
-      ...u,
-      input: u.input! - removed + replacement,
-      read: u.read! - remove.read,
-      write: u.write! - remove.write5m - remove.write1h,
-      write5m: slots.write5m - remove.write5m,
-      write1h: slots.write1h - remove.write1h,
-    };
-    // Replacement is ordinary input unless a caller provides a richer recorded counterfactual.
-    return pricePart(catalog, r, { ...p, usage: next });
-  }
-  const baseline = pricePart(catalog, r, p);
-  const allocations: (typeof slots)[] = [];
-  if (input.position) {
-    const position = input.position;
-    if (
-      Object.keys(slots).some(
-        (k) =>
-          count(position[k as keyof typeof slots])! >
-          slots[k as keyof typeof slots],
-      ) ||
-      Object.values(position).reduce((n, v) => n + count(v)!, 0) !== removed
-    )
-      throw new ScanError("invalid component cache positions");
-    allocations.push(position);
-    assumptions.push(
-      "recorded cache positions supplied by caller; replacement allocated to ordinary input",
-    );
-  } else {
-    // Evaluate every vertex of the bounded allocation polytope, avoiding arbitrary cache assumptions.
-    const keys = Object.keys(slots) as (keyof typeof slots)[];
-    for (const free of keys) {
-      const rest = keys.filter((k) => k !== free);
-      for (let mask = 0; mask < 1 << rest.length; mask++) {
-        const a = { read: 0, write5m: 0, write1h: 0, ordinary: 0 };
-        rest.forEach((k, i) => (a[k] = mask & (1 << i) ? slots[k] : 0));
-        a[free] = removed - Object.values(a).reduce((n, v) => n + v, 0);
-        if (a[free] >= 0 && a[free] <= slots[free]) allocations.push(a);
-      }
-    }
-    assumptions.push(
-      "cache positions absent; proportional allocation is the estimate, feasible cache allocations supply sensitivity; replacement is ordinary input",
-    );
-  }
-  if (baseline.totalUsd === null)
-    return unknown("baseline request cost unknown; no zero billing assumed");
-  const changes = allocations.map((a) => cost(a, added));
-  if (changes.some((c) => c.totalUsd === null))
-    return unknown("counterfactual request price unknown");
-  const delta = (after: Cost): Cost => ({
-    knownUsd: baseline.totalUsd! - after.totalUsd!,
-    totalUsd: baseline.totalUsd! - after.totalUsd!,
-    unknown: [],
-    assumptions: [
-      ...assumptions,
-      ...baseline.assumptions,
-      ...after.assumptions,
-    ],
-  });
-  const proportional =
-    input.position ??
-    (Object.fromEntries(
-      Object.entries(slots).map(([k, v]) => [
-        k,
-        u.input === 0 ? 0 : (removed * v) / u.input!,
-      ]),
-    ) as typeof slots);
-  const gross = delta(cost(proportional, 0));
-  const net = delta(cost(proportional, added));
-  const values = changes.map((c) => baseline.totalUsd! - c.totalUsd!);
-  return {
-    gross,
-    fixedBehaviorNet: net,
-    range: [Math.min(...values), Math.max(...values)],
-    assumptions,
-  };
-}
-
-/** Build shared measurement output without making skills or context recommendations. */
-export function analyzeExposure(
-  scan: ExposureScan,
-  requests: Request[],
-  catalog: Catalog,
-) {
-  const calibration = calibrate(scan, requests);
-  const requestsById = new Map(requests.map((r) => [r.id, r]));
-  const componentsById = new Map(scan.components.map((c) => [c.id, c]));
-  const calibrationByCohort = new Map(calibration.map((c) => [c.cohort, c]));
-  return {
-    calibration,
-    requests: scan.requests.map((e) => {
-      const r = requestsById.get(e.request)!;
-      const c = calibrationByCohort.get(cohort(r));
-      return {
-        request: r.id,
-        components: [...e.components, ...e.candidates].map((id) => {
-          const component = componentsById.get(id)!;
-          const tokens = estimateTokens(component, c);
-          const priced =
-            tokens.estimate === null ||
-            !e.components.includes(id) ||
-            (r.parts[0]?.usage.input !== null &&
-              tokens.estimate > (r.parts[0]?.usage.input ?? 0))
-              ? null
-              : priceExposureChange({
-                  catalog,
-                  request: r,
-                  removedTokens: tokens.estimate,
-                  addedTokens: 0,
-                });
-          return {
-            component: id,
-            exposure: e.components.includes(id) ? "wire" : "candidate",
-            tokens,
-            gross:
-              priced?.gross ??
-              unknownCost(
-                tokens.estimate !== null &&
-                  tokens.estimate > (r.parts[0]?.usage.input ?? Infinity)
-                  ? "calibrated component estimate exceeds observed request input; comparison unsupported"
-                  : tokens.basis,
-              ),
-            grossRangeUsd: priced?.range ?? null,
-            fixedBehaviorNet: unknownCost(
-              "replacement exposure/backfill and behavior not established; gross removal is not net savings",
-            ),
-          };
-        }),
-      };
-    }),
-    assumptions: [
-      "current effective component ownership remains unresolved; installed metadata is not historical exposure",
-      "candidate exposure is not priced; no complete visibility guarantee, automatic unused finding or aggregate independent savings",
-      "shared plugin overhead has a single context owner; skill and MCP links are attribution only",
-    ],
-  };
 }

@@ -371,6 +371,25 @@ function selectedRates(
   };
 }
 
+/** Claude per-token prices for one part's cache reads, writes and ordinary input; null when unpriced. */
+export function unitRates(
+  catalog: Catalog,
+  r: Request,
+  p: BillingPart,
+): { read: number; write5m: number; write1h: number; ordinary: number } | null {
+  if (r.harness !== "claude") return null;
+  const selected = selectedRates(catalog, r, p);
+  if (!("rates" in selected)) return null;
+  const { input, read, write } = selected.rates;
+  if (input === null || read === null || write === null) return null;
+  return {
+    read: read / 1e6,
+    write5m: write / 1e6,
+    write1h: (input * 2) / 1e6,
+    ordinary: input / 1e6,
+  };
+}
+
 /** Price cache, ordinary input and output at the whole request's context tier. */
 export function priceComponents(
   catalog: Catalog,

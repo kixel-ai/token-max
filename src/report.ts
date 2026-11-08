@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { wrapText } from "./terminal.js";
+import type { ContextCost } from "./context.js";
 import type {
   CacheReplayEvidence,
   CheckResult,
@@ -453,6 +454,8 @@ export function formatReport(
     }
   }
 
+  contextSection(report, { line, section, profileName }, true);
+
   section("Recorded usage and coverage");
   field(
     "Attribution",
@@ -482,7 +485,7 @@ export function formatReport(
   const exposure = report.scan.exposure;
   field(
     "Component coverage",
-    `${exposure.components.length} revisions; ${exposure.requests.filter((r) => r.linkage === "wire").length}/${exposure.requests.length} requests with wire exposure; ${exposure.invocations.length} invocation observations; ${report.exposure.calibration.length} calibrated model/client cohorts. Candidate exposure stays unpriced; typed/nested visibility is incomplete.`,
+    `${exposure.components.length} revisions; ${exposure.requests.filter((r) => r.linkage === "wire").length}/${exposure.requests.length} requests with wire exposure; ${exposure.invocations.length} invocation observations; ${report.exposure.calibration.length} calibrated models. Requests without a recorded shape are not priced per component.`,
   );
   if (report.compactions.length)
     field(
@@ -745,6 +748,11 @@ function summary(
       line(unresolved(r), 6);
     }
   }
+  contextSection(
+    report,
+    { line, section, profileName: out.profileName },
+    false,
+  );
   line();
   line(
     `Prices: ${report.prices.offline ? "cached" : "fetched"} from ${home(report.prices.source)}${report.prices.fetchedAt ? ` (${report.prices.fetchedAt.slice(0, 10)})` : ""}.`,
@@ -762,4 +770,117 @@ function coverageNote(r: CheckResult): string {
   // Percent, because one request can bill several parts.
   const percent = Math.floor((c.priced / c.total) * 1000) / 10;
   return `, using the ${percent}% of requests with measured usage`;
+}
+
+/** A sum of context costs that never turns an unknown piece into $0. */
+function knownTotal(rows: ContextCost[]): string {
+  const known = rows.filter((c) => c.estimatedUsd !== null);
+  if (!known.length) return "cost unknown";
+  const total = about(known.reduce((n, c) => n + c.estimatedUsd!, 0));
+  const missing = rows.length - known.length;
+  return missing
+    ? `at least ${total}, with ${count(missing)} piece${missing === 1 ? "" : "s"} that could not be priced`
+    : total;
+}
+
+const CONTEXT_SUMMARY_ROWS = 12;
+/** What each removable piece of context cost; the summary shows the largest current ones. */
+export function contextSection(
+  report: Report,
+  out: {
+    line: (text?: string, indent?: number, style?: number) => void;
+    section: (title: string) => void;
+    profileName: (id: string) => string;
+  },
+  details: boolean,
+) {
+  const { line, section } = out;
+  // Pieces a person could reasonably turn off; the rest is the price of using Claude Code at all.
+  const optional = (c: ContextCost) =>
+    c.control !== null || c.kind === "instructions";
+  const rows = report.context.filter(
+    (c) => details || (optional(c) && c.current && (c.estimatedUsd ?? 0) > 0),
+  );
+  const unpriced = report.context.filter(
+    (c) => optional(c) && c.current && c.estimatedUsd === null,
+  );
+  if (!rows.length && !unpriced.length) return;
+  const requests = report.scan.requests;
+  const since = report.scan.since ?? requests[0]?.time ?? null;
+  const until = Date.parse(report.generatedAt);
+  const span = since === null ? null : Math.max(until - since, DAY);
+  const many = report.scan.profiles.length > 1;
+  const settingsFile = new Map(
+    report.scan.profiles.map((p) => [p.id, home(p.settingsFile)]),
+  );
+  section("What each piece of context costs");
+  line(
+    "Sent with every request whether or not it is used, priced over the same window. Turning one off saves about its cost and gives up that feature; you decide which are worth it.",
+  );
+  const shown = details ? rows : rows.slice(0, CONTEXT_SUMMARY_ROWS);
+  for (const c of shown) {
+    const label =
+      c.kind === "tool"
+        ? `${c.name} tool`
+        : c.kind === "mcp-server"
+          ? `MCP server ${c.name}`
+          : c.kind === "skill"
+            ? `Skill ${c.name}`
+            : c.kind === "instructions"
+              ? home(c.name)
+              : c.name;
+    // Unpriced requests are scaled from the priced ones, never counted as free.
+    const cost =
+      c.estimatedUsd === null
+        ? "cost unknown"
+        : `${about(c.estimatedUsd)}${span === null ? "" : ` (about ${about((c.estimatedUsd * 30 * DAY) / span)} per 30 days)`}${c.priced < c.requests ? `, estimated from the ${count(c.priced)} of ${count(c.requests)} requests that could be priced` : ""}`;
+    const use =
+      c.calls === null
+        ? ""
+        : c.calls === 0
+          ? "; no recorded use"
+          : `; used ${count(c.calls)} time${c.calls === 1 ? "" : "s"}, last ${new Date(c.lastUsed!).toISOString().slice(0, 10)}`;
+    line(
+      `${label}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: ${cost}${use}`,
+      2,
+    );
+    const size =
+      c.tokens === null
+        ? ""
+        : `${count(c.tokens)} tokens in ${count(c.requests)} requests`;
+    const priced =
+      c.priced < c.requests
+        ? `; ${count(c.requests - c.priced)} requests could not be priced`
+        : "";
+    if (details)
+      line(`${size}${priced}${c.current ? "" : "; no longer sent"}`, 6);
+    const where = settingsFile.get(c.profiles[0] ?? "") ?? "settings.json";
+    line(
+      c.control
+        ? `Turn off: ${c.control} in ${where}`
+        : c.kind === "instructions"
+          ? "Turn off: trim or scope this file"
+          : "No setting turns this off",
+      6,
+    );
+  }
+  if (!details && rows.length > shown.length) {
+    const rest = rows.slice(shown.length);
+    line(
+      `${rest.length} more cost ${about(rest.reduce((n, c) => n + c.estimatedUsd!, 0))} together; --details lists every piece.`,
+      2,
+    );
+  }
+  if (!details && unpriced.length)
+    line(
+      `${unpriced.length} more could not be priced, because their requests lack recorded usage, a request shape or a calibration.`,
+      2,
+    );
+  if (!details) {
+    const fixed = report.context.filter((c) => !optional(c) && c.current);
+    if (fixed.length)
+      line(
+        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${knownTotal(fixed)}.`,
+      );
+  }
 }

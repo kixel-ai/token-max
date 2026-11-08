@@ -1,4 +1,5 @@
-import type { ExposureScan, analyzeExposure } from "./exposure.js";
+import type { Calibration, ExposureScan } from "./exposure.js";
+import type { ContextCost } from "./context.js";
 
 /** The two locally supported transcript formats. */
 export type Harness = "claude" | "codex";
@@ -441,7 +442,9 @@ export interface Report {
     cost: Cost;
   }[];
   compactions: CompactionCharge[];
-  exposure: ReturnType<typeof analyzeExposure>;
+  exposure: { calibration: Calibration[]; assumptions: string[] };
+  /** What each piece of always-sent context cost, most expensive first. */
+  context: ContextCost[];
   checks: CheckResult[];
   assumptions: string[];
 }

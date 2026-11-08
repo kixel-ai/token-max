@@ -347,7 +347,7 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
   const snapshotStartedAt = new Date().toISOString();
   const discovery = await discover(options);
   const snapshotFinishedAt = new Date().toISOString();
-  const exposure = new ExposureCollector();
+  const exposure = new ExposureCollector(options.since);
   const requests = new Map<string, Request>();
   const events = new Map<string, StructuralEvent>();
   // Only explicit compaction lineage can connect a notice to its boundary.

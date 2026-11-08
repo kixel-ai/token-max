@@ -446,8 +446,12 @@ enablement remains separately unresolved. No installed/current file size is used
 to establish historical exposure.
 
 `report.exposure` publishes empirical calibration samples only for linked,
-measured, single-part, complete text-only inputs with matching request/response
-model, client and version. It uses the observed input tokens per Unicode character
+measured, single-part, complete text-only inputs with a matching request/response
+model, grouped by harness, model and provider. Claude requests that record a
+shape and only known text message blobs are complete. A blob holding an image,
+document or redacted thinking is not text and blocks calibration; a thinking
+block's opaque `signature` is dropped and every other field, tool input
+included, counts. It uses the observed input tokens per Unicode character
 of serialized system/messages/tools, including framing. Transfer to component
 text is an estimate; sample extrema are sensitivity scenarios, not guaranteed
 bounds. Recorded component token counts take precedence in the shared sizing
@@ -455,15 +459,42 @@ primitive. Without matching calibration, output keeps characters and unknown
 tokens/dollars. Images, opaque blocks, deferred definitions, digest-only requests,
 and multi-iteration totals cannot calibrate partial text.
 
-The shared context-change pricing primitive accepts an observed removed and
-replacement footprint. It reprices the whole request across context tiers,
-including output. Known cache positions take precedence; otherwise proportional
-allocation supplies the estimate and all feasible cache-allocation vertices
-supply sensitivity. Replacement tokens are assumed ordinary input. Remaining
-cache geometry and behavior are held fixed; actual cache-key changes and future
-reuse can differ. Gross overhead and fixed-behavior net effects are separate.
-Automatic report measurements leave net savings unknown until replacement
-exposure/backfill is established. Independent component savings are not additive.
+`report.context` prices each piece of recurring context. Only Claude requests
+with a recorded `api-request-shape` or full parameters qualify: tool
+definitions, then the system prompt, lead the prompt in recorded order.
+Prefix membership follows each request's own tool list, not where a component
+was first seen. Attachments such as skill listings and instruction files ride in
+messages at no recorded offset, so their history bounds them instead: a
+revision the session's previous request carried lies between the end of the
+system prompt and the end of that request's input, a new or changed revision was
+appended after it, and with no usable previous request, or when the tools,
+system prompt or model's tokenizer changed since it, it lies anywhere after the
+system prompt. An attachment is priced only when every offset in its bounds
+falls in the same cache slot; otherwise it stays unpriced for that request. A
+row with any unpriced piece in a request, such as an MCP server whose tool is
+priced but whose instructions are not, is unpriced for that request. Each piece's calibrated
+tokens are charged at the slot they fall in: cached reads, then 1h writes, then
+5m writes, then ordinary input, at the request's model, provider and context
+tier. A request whose calibrated pieces exceed its recorded input is left
+unpriced rather than clipped. `costUsd` covers priced requests only;
+`estimatedUsd` scales it to every request that carried the piece and is null
+when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
+once. Skill listings split into their member skills plus the listing framing;
+MCP tools group by server. One-off attachments, skill bodies and tool results
+are excluded because no setting removes them up front.
+
+Each row names the setting that removes the piece: `enableArtifact` and
+`enableWorkflows` for those tools, a bare-name `permissions.deny` rule for
+other tools and `mcp__<server>` for a server, which
+[remove the tool from context](https://code.claude.com/docs/en/permissions),
+and `skillOverrides` set to `user-invocable-only` for a skill. Instruction files
+have no switch. Core tools, the system prompt and the listing framing are always
+sent. Calls count `tool_use` IDs in the window once, even when copied into several
+transcript files. A copy cannot say which profile made a call, so it counts for
+every row of its tool that shares a profile with it; skill uses count
+Skill calls and typed requests. The cost is gross: removing a piece leaves later
+cache writes, compaction timing and replacement work unmodeled, and rows are not
+additive with the TTL or compaction checks.
 
 Invocation evidence separates typed and mentioned skill requests, command
 wrappers, unresolved references, Skill calls, identified SKILL.md reads, direct MCP calls, actual
@@ -481,8 +512,8 @@ estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so automatic
-unused findings remain blocked. This layer adds no skills-catalog or context
-recommendation check and changes no local agent settings.
+unused findings remain blocked. The context rows report cost and use for the
+user to weigh, never an unused verdict, and change no local agent settings.
 
 Record shapes were checked on 2026-11-07 using local structural metadata only;
 no real transcript text was printed or copied into fixtures. Claude's existing

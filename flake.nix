@@ -36,8 +36,6 @@
             pkgs.clippy
             pkgs.rustfmt
             pkgs.rust-analyzer
-            pkgs.bun
-            pkgs.nodejs_24
             pkgs.just
             quest.packages.${system}.default
           ];

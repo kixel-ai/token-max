@@ -6,6 +6,10 @@ rust-version = "1.99"
 description = "Recommends cheaper agent settings from your Claude Code and Codex transcripts"
 license = "MIT"
 repository = "https://github.com/kixelated/token-max"
+readme = "README.md"
+keywords = ["claude", "codex", "cost", "cache", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["/src", "/tests", "/test/fixtures", "/docs/semantics.md", "/README.md", "/LICENSE"]
 
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }

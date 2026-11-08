@@ -1,17 +1,9 @@
-# Local validation; CI also exercises the artifact across its OS/runtime matrix.
+# Local validation; CI runs this plus the tests on macOS and Windows.
 check:
-    bun install --frozen-lockfile
-    bunx --no-install prettier --check .
-    bun run check
-    bun run build
-    bun test ./test
-    node --test dist/test/*.test.js
-    bun run pack
-    bun run test:package
+    cargo fmt --check
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo test --locked
     quest check
 
-build:
-    bun run build
-
 run *args:
-    bun src/cli.ts {{args}}
+    cargo run --release --locked -- {{args}}

@@ -104,19 +104,27 @@ setting or environment override and never apply it.
 
 Exit codes are `0` for no applicable change, `1` for a recommended change, and `2`
 for a failed scan, price fetch, invalid argument, or cancellation. JSON errors go to stderr; a failed run emits no
-success report or partial recommendations. Complete malformed selected records
-fail with only a file and line. Unterminated final lines are deferred, with frozen
-file lengths and deferred byte counts in JSON. There is no skip-malformed mode.
+success report or partial recommendations. Invalid selected usage fails with only
+a file and line. Complete lines that are not JSON objects, which harnesses leave
+after crashes and concurrent writes, are skipped and counted in the report and in
+JSON `coverage.skippedLines`; their usage counts as missing. Unterminated final
+lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
-The default report starts with the selected window, profiles, usage coverage and
-price catalog, then puts actionable changes before advisory findings and settings
-to keep. Each card names the current and suggested values, owner, baseline,
-estimated window/monthly net savings, and evidence. Unknown dollars stay unknown;
-a known subtotal is not the total. Measured request usage is distinct from
-estimated replay and unpriced provider guidance. Low-use rankings and unresolved
-current ownership remain advisory; they do not cause exit 1.
+The default report says what was read, then gives one plain verdict per setting
+under **Change**, **Keep**, or **Not enough evidence**. A change names the current
+and suggested values, the estimated savings over the window and per 30 days, and
+the file that owns the setting. A keep says how much the alternative would have
+cost where that is known. Not enough evidence says why in one sentence, such as
+two options being too close to call. Unresolved current ownership stays there and
+does not cause exit 1.
 
-Use `--details` for every check's assumptions, uncertainty, cost components,
+Comparisons use the requests priced under both options. Requests with missing
+usage are left out of both sides, and a recommendation is made only when they
+could not flip it, assuming none differs by more than the largest measured
+difference. The verdict then says what share of requests was measured.
+
+Use `--details` for the full evidence cards: every check's owner, baseline,
+assumptions, uncertainty, cost components,
 break-evens, sensitivity scenarios, cache witnesses and sources. Nothing is hidden
 behind an interactive prompt or a top-N limit. The layout wraps long paths and
 names on narrow terminals. Redirected output keeps each field on one line so
@@ -127,35 +135,32 @@ with exit 2 and no success report; a repeated signal forces exit if I/O stalls.
 Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
 
 Illustrative excerpt from **synthetic** usage, with a synthetic owner and prices
-(not a measurement of this host). The comparison spans 30 days, so the window
-and 30-day figures agree:
+(not a measurement of this host):
 
 ```text
-1 recommended change
-Each check has its own baseline. Do not sum independent savings.
+token-max
+Estimated with public API prices, not your subscription bill. Nothing was changed.
 
-Recommended changes
+Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
+  claude ~/.claude
 
-CHANGE  claude-cache-ttl / main  [estimated]
-  Profile: claude "/example/.claude"
-  Owner: "/example/.claude/settings.json:promptCacheTtl"
-  Current: 5m
-  Suggested: 1h
-  Reason: Lowest estimated aggregate cache cost under the stated replay
-  assumptions.
-  Baseline: current main TTL for /example/.claude
-  Window: 2026-11-01T00:00:00.000Z -> 2026-12-01T00:00:00.000Z; 2 requests;
-  available history; no recorded setting change, current settings applied to
-  history
-  Estimated net saving vs baseline: $1.50 over window; $1.50 / 30 days
-  Replay cost: 5m $10.50; 1h $9.00
-  Cache comparison: 5m $10.50; 1h $9.00
+1 setting change recommended.
+
+Change
+  Main-agent prompt cache TTL: 5m -> 1h
+      Saves about $150 over 30 days (about $150 per 30 days).
+      Set in ~/.claude/settings.json:promptCacheTtl
+
+Keep
+  Fast mode: off
+
+Not enough evidence
+  Idle compaction: on
+      Sessions were never idle long enough for it to trigger, so it made no difference.
 ```
 
-An advisory card instead says `ADVISORY` with its evidence label. Missing values
-say `unknown`, including net savings when dollars cannot be established. A run
-with no histories or no requests in the selected window gives a next step; no
-applicable changes does not imply complete visibility or optimal settings.
+A run with no histories or no requests in the selected window gives a next step;
+no applicable changes does not imply complete visibility or optimal settings.
 
 Text and `--json` share the same analysis. JSON schema version 1 is unchanged and
 includes profile aliases, snapshots, deduplicated requests, structural events,
@@ -180,8 +185,8 @@ skills/context recommendations and other setting checks remain in the
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from
 matching adjacent measured requests, including growing-context retry geometry
 within one five-minute cache lifetime, with their IDs and assumptions reported;
-original usage and historical billing stay unknown. Unsupported inputs leave the
-affected comparison unpriced. Sensitivity scenarios accompany the aggregate
+original usage and historical billing stay unknown. Unsupported inputs leave their
+own parts unpriced. Sensitivity scenarios accompany the aggregate
 winner, and unknown fixed charges can cancel without pretending they cost zero.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
@@ -250,8 +255,8 @@ Claude resolution includes `fastModePerSessionOptIn`, managed `fastMode: false`,
 project/local files at recorded working directories, model support and the active
 profile's `CLAUDE_CODE_DISABLE_FAST_MODE`. Codex resolves local system/user
 settings, independent fast/ultrafast feature gates and local requirements.
-Unresolved named/legacy profile selection, project trust/overrides, custom
-providers and unsupported models stay advisory. Unrecorded CLI/session overrides
+Unresolved named/legacy profile selection, project trust/overrides,
+unsupported providers and unsupported models stay advisory. Unrecorded CLI/session overrides
 and remote account policy are unknown, not inferred from old sessions.
 
 Each card separates observed response-speed premiums from a current-setting

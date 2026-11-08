@@ -150,7 +150,10 @@ test("net window winner prices summary and new prefix once, retaining observed s
   assert.deepEqual(scenario.added[0]!.basis, [
     { event: "sample-boundary", request: "sample-resume" },
   ]);
-  assert.match(formatReport(report), /compaction loses detail/);
+  assert.match(
+    formatReport(report, { details: true }),
+    /compaction loses detail/,
+  );
   assert.match(check.breakEven!, /1.9600/);
   near(scenario.sensitivity.rereadBreakEvenUsd, 1.96);
   assert.equal(check.ttls.main, "5m");
@@ -207,7 +210,7 @@ test("window presentation keeps conditional baselines, every scenario and geomet
     unknown: ["synthetic unknown charge"],
     assumptions: [],
   };
-  const plain = formatReport(unknown);
+  const plain = formatReport(unknown, { details: true });
   assert.match(plain, /ADVISORY  compaction-window/);
   assert.match(
     plain,

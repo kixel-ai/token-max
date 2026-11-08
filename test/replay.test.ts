@@ -360,7 +360,10 @@ test("scenario-invariant unknown server fees do not veto a priced TTL difference
     catalog: await prices(),
     now: 1200000,
   });
-  assert.match(formatReport(report), /identical fixed costs remain unknown/i);
+  assert.match(
+    formatReport(report, { details: true }),
+    /identical fixed costs remain unknown/i,
+  );
   // Unknown request usage is not scenario-invariant and must still block a winner.
   next.parts[0]!.usage = { ...next.parts[0]!.usage, write: null, read: null };
   assert.equal(
@@ -552,7 +555,7 @@ test("unlinked attempts use matching bracket evidence without converting observe
       check.sensitivity.unlinked!.coldCache["5m"].totalUsd!,
   );
   assert.ok(check.sensitivity.unlinked!.noBilledAttempt["5m"].totalUsd! > 0);
-  assert.match(formatReport(report), /unlinked.*estimated/i);
+  assert.match(formatReport(report, { details: true }), /unlinked.*estimated/i);
 });
 
 test("growing-context retry evidence supports an estimate within the recorded cache lifetime", async () => {

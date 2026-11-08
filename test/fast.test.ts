@@ -164,8 +164,9 @@ test("rate-only premium preserves Claude 5m/1h reads/writes, geography and fixed
     assert.equal(result.observed.standardParts, 1);
     assert.equal(result.currentEstimate.pricedParts, 2);
     const json = JSON.stringify(report);
-    for (const details of [false, true]) {
-      const text = formatReport(report, { details });
+    assert.match(formatReport(report), /Fast mode \[/);
+    {
+      const text = formatReport(report, { details: true });
       assert.match(text, /Observed response-tier premium/);
       assert.match(text, /Current-setting premium estimate/);
       assert.match(text, /cache-switch effects excluded/);

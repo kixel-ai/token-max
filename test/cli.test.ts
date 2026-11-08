@@ -232,21 +232,20 @@ test("built text CLI handles all-clear, empty windows, missing histories, offlin
     await writeFile(join(w.claude, "settings.json"), '{"promptCacheTtl":"1h"}');
     const clear = run(["--plain"]);
     assert.equal(clear.status, 0, clear.stderr);
-    assert.match(clear.stdout, /No applicable setting changes/);
-    assert.match(clear.stdout, /Keep current settings/);
+    assert.match(clear.stdout, /No setting changes recommended/);
+    assert.match(clear.stdout, /^Keep$/m);
     assert.doesNotMatch(clear.stdout, /\x1b|→|SYNTHETIC_PRIVATE/);
     assert.equal(clear.stderr, "");
     const none = run(["--since", "2027-01-01"]);
     assert.equal(none.status, 0, none.stderr);
-    assert.match(none.stdout, /No selected requests/);
+    assert.match(none.stdout, /No requests found/);
     assert.match(none.stdout, /earlier --since/);
     const offline = run(
       ["--offline", "--price-cache", resolve("test/fixtures/prices.json")],
       args.slice(0, 3),
     );
     assert.equal(offline.status, 0, offline.stderr);
-    assert.match(offline.stdout, /offline\/local/);
-    assert.match(offline.stdout, /catalog timestamp/);
+    assert.match(offline.stdout, /Prices: cached from/);
     const failure = run(
       ["--offline", "--price-cache", join(w.home, "absent-prices")],
       args.slice(0, 3),
@@ -357,9 +356,7 @@ process.stdout.columns = 40;`,
     assert.ok(
       piped.stdout
         .split("\n")
-        .includes(
-          `  Owner: ${JSON.stringify(join(w.claude, "settings.json") + ":promptCacheTtl")}`,
-        ),
+        .includes("      Set in ~/.claude/settings.json:promptCacheTtl"),
       "piped paths remain on one copyable line",
     );
     const dumb = run([], { ...env, TERM: "dumb" });

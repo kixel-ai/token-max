@@ -55,8 +55,9 @@ not complete billing audits or remote Node/Bun compatibility checks.
   identities across selected hosts, preserving all origins and ambiguous
   profile attribution. Conflicting copies do not silently become two bills.
   Keep per-setting savings non-additive and API-price framing explicit.
-- A failed selected host or malformed selected record fails the requested
-  report atomically with exit 2 and safe host/location diagnostics. Missing
+- A failed selected host or invalid selected usage fails the requested
+  report atomically with exit 2 and safe host/location diagnostics.
+  Unreadable lines are skipped and counted, as locally. Missing
   usage remains unknown under the existing policy. Do not silently drop an
   unreachable destination or emit a partially successful whole-host report.
 - Test the actual helper and transport with synthetic remote subprocesses:

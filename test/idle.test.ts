@@ -683,7 +683,8 @@ test("native informational notices are the only parsed idle attribution; project
       now: 100 * MINUTE,
     });
     assert.doesNotMatch(JSON.stringify(report), /Compacted while idle/);
-    assert.match(formatReport(report), /idle-compaction/);
+    assert.match(formatReport(report), /Idle compaction/);
+    assert.match(formatReport(report, { details: true }), /idle-compaction/);
     await writeFile(
       file,
       [

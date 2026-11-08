@@ -524,6 +524,7 @@ function check(options: {
     usageEstimates,
     cacheEvidence: [...short.evidence, ...long.evidence],
     coverage: { priced: paired.priced, total: paired.total },
+    oneHourSavingsUsd: paired.usd,
     savingsUsd: savings,
     monthlySavingsUsd:
       savings !== null && now > since

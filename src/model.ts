@@ -251,6 +251,8 @@ export interface TtlCheckResult extends CheckBase<Ttl> {
   check: "claude-cache-ttl";
   windowBasisKind: "explicit" | "ttl-transition" | "available";
   bucket: "main" | "subagent";
+  /** How much less 1h costs than 5m on the parts both replays price; negative when 5m is cheaper. */
+  oneHourSavingsUsd: number;
   cost: Record<Ttl, Cost>;
   summaryCost: Record<Ttl, Cost>;
   /** Cache charges used to compare TTLs; ordinary input/output are fixed. */

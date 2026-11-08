@@ -254,8 +254,8 @@ try {
     await writeFile(settings, '{"promptCacheTtl":"5m"}');
     const text = await invoke([...args, "--plain"]);
     assert.equal(text.status, 1, text.stderr);
-    assert.match(text.stdout, /CHANGE.*claude-cache-ttl/);
-    assert.match(text.stdout, /Estimated net saving vs baseline: \$/);
+    assert.match(text.stdout, /Main-agent prompt cache TTL: 5m -> 1h/);
+    assert.match(text.stdout, /Saves about <?\$/);
     const json = await invoke([...args, "--json"]);
     assert.equal(json.status, 1, json.stderr);
     const report = JSON.parse(json.stdout);
@@ -274,7 +274,7 @@ try {
       "advisory",
       "SDK usage must retain the idle check without recommending a native toggle",
     );
-    assert.match(text.stdout, /ADVISORY.*idle-compaction/);
+    assert.match(text.stdout, /Not enough evidence[\s\S]*Idle compaction/);
     assert.doesNotMatch(
       text.stdout + json.stdout + text.stderr + json.stderr,
       /SYNTHETIC_PRIVATE/,
@@ -298,7 +298,7 @@ try {
     );
     await writeFile(
       transcript,
-      '{"type":"assistant","private":"SYNTHETIC_PRIVATE",BROKEN}\n',
+      '{"timestamp":"2020-01-01T00:00:00Z","type":"assistant","private":"SYNTHETIC_PRIVATE","message":{"usage":{"input_tokens":"bad"}}}\n',
     );
     const failure = await invoke([...args, "--json"]);
     assert.equal(failure.status, 2, failure.stderr);

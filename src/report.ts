@@ -580,8 +580,7 @@ function unresolved(result: CheckResult): string {
     return result.recommended === result.current
       ? "The replay favors the current value, but could not confirm it applies to your current sessions."
       : `The replay favors ${settingValue(result, result.recommended)}, but could not confirm the current setting applies to your sessions.`;
-  if (result.requests === 0)
-    return "No requests in this window to compare.";
+  if (result.requests === 0) return "No requests in this window to compare.";
   if (result.check === "claude-cache-ttl") {
     if (!result.coverage?.priced)
       return "No requests with measured cache usage to compare.";

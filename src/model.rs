@@ -410,6 +410,7 @@ pub enum BackgroundFeature {
 
 /// One background feature's current state and the control that owns it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundControl {
     pub feature: BackgroundFeature,
     pub value: bool,
@@ -419,6 +420,8 @@ pub struct BackgroundControl {
     pub owner: String,
     /// The setting that turns it off.
     pub off: String,
+    /// The file to set it in; null for an environment variable.
+    pub off_file: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -747,6 +750,8 @@ pub struct BackgroundCheck {
     pub feature: BackgroundFeature,
     /// The setting that turns it off.
     pub off: String,
+    /// The file to set it in; null for an environment variable.
+    pub off_file: Option<String>,
     /// Turns where it would have run; null when they cannot be found in transcripts.
     pub generations: Option<u64>,
     /// Estimated cost of its requests over the window.

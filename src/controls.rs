@@ -185,8 +185,11 @@ fn env_flag(value: &Value) -> Option<bool> {
     }
 }
 
-/// The last scope's boolean at a dotted key, with its owner; an error for any other type.
-fn scoped_bool(scopes: &[SettingsScope], key: &str) -> Result<Option<(bool, String)>, ScanError> {
+/// The last scope's boolean at a dotted key, with its file; an error for any other type.
+fn scoped_bool<'a>(
+    scopes: &[SettingsScope<'a>],
+    key: &str,
+) -> Result<Option<(bool, &'a str)>, ScanError> {
     let mut result = None;
     for scope in scopes {
         let mut parts = key.split('.');
@@ -196,7 +199,7 @@ fn scoped_bool(scopes: &[SettingsScope], key: &str) -> Result<Option<(bool, Stri
         }
         match row {
             None => {}
-            Some(Value::Bool(b)) => result = Some((*b, format!("{}:{key}", scope.file))),
+            Some(Value::Bool(b)) => result = Some((*b, scope.file)),
             Some(_) => return Err(invalid(format!("invalid {key}"), scope.file)),
         }
     }
@@ -221,11 +224,11 @@ pub fn claude_background(
             .contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
     let toggle = |feature, key: &str, variable: &str, off: &str| {
         let forced = environment.values.get(variable).and_then(env_flag);
-        let (value, owner) = match forced {
-            Some(value) => (value, environment.owners[variable].clone()),
+        let (value, owner, file) = match forced {
+            Some(value) => (value, environment.owners[variable].clone(), None),
             None => match scoped_bool(scopes, key)? {
-                Some(found) => found,
-                None => (true, format!("{first}:{key} (default)")),
+                Some((value, file)) => (value, format!("{file}:{key}"), Some(file)),
+                None => (true, format!("{first}:{key} (default)"), Some(first)),
             },
         };
         Ok::<_, ScanError>((
@@ -234,11 +237,11 @@ pub fn claude_background(
                 value,
                 minutes: None,
                 owner,
-                off: if forced.is_some() {
-                    format!("{variable}={off}")
-                } else {
-                    format!("\"{key}\": false")
+                off: match file {
+                    None => format!("{variable}={off}"),
+                    Some(_) => format!("\"{key}\": false"),
                 },
+                off_file: file.map(String::from),
             },
             forced.is_some(),
         ))
@@ -277,6 +280,7 @@ pub fn claude_background(
             None => format!("{variable} (default)"),
         },
         off: format!("{variable}=0"),
+        off_file: None,
     };
     Ok(vec![suggestions, recaps, goal])
 }
@@ -284,16 +288,18 @@ pub fn claude_background(
 /// Resolve Codex's automatic recaps, lowest-precedence scope first; on by default.
 pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundControl>, ScanError> {
     let key = "tui.auto_recap";
-    let (value, owner) = scoped_bool(scopes, key)?.unwrap_or_else(|| {
-        let user = scopes.last().map_or("config.toml", |s| s.file);
-        (true, format!("{user}:{key} (default)"))
-    });
+    let user = scopes.last().map_or("config.toml", |s| s.file);
+    let (value, file, owner) = match scoped_bool(scopes, key)? {
+        Some((value, file)) => (value, file, format!("{file}:{key}")),
+        None => (true, user, format!("{user}:{key} (default)")),
+    };
     Ok(vec![BackgroundControl {
         feature: BackgroundFeature::AutoRecaps,
         value,
         minutes: None,
         owner,
         off: format!("{key} = false"),
+        off_file: Some(file.into()),
     }])
 }
 
@@ -960,6 +966,8 @@ mod tests {
             (c[1].value, c[1].owner.as_str()),
             (true, "managed.json:awaySummaryEnabled")
         );
+        // Turning it off has to happen where the effective value is set.
+        assert_eq!(c[1].off_file.as_deref(), Some("managed.json"));
         assert_eq!((c[2].value, c[2].minutes), (false, Some(0)));
         // The shell overrides settings; an unsupported value is unset.
         let shell = env(&[
@@ -972,6 +980,7 @@ mod tests {
             (c[0].value, c[0].off.as_str()),
             (true, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
         );
+        assert_eq!(c[0].off_file, None);
         assert_eq!(c[1].owner, "managed.json:awaySummaryEnabled");
         assert_eq!((c[2].value, c[2].minutes), (true, Some(30)));
     }

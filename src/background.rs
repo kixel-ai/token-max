@@ -90,10 +90,22 @@ fn turn_ends<'a>(scan: &Scan, profile: &Profile, requests: &[&'a Request]) -> Ve
     if profile.harness != Harness::Claude {
         return vec![];
     }
+    let main = |r: &Request| r.harness == Harness::Claude && r.agent == crate::model::Agent::Main;
     let mut sessions: indexmap::IndexMap<&str, Vec<&'a Request>> = indexmap::IndexMap::new();
     for &r in requests {
-        if r.harness == Harness::Claude && r.agent == crate::model::Agent::Main {
+        if main(r) {
             sessions.entry(&r.session).or_default().push(r);
+        }
+    }
+    // Responses before the window; its prompts are not retained, so such a session counts
+    // as past the response and turn thresholds, like the other gates this estimate assumes.
+    let mut earlier: indexmap::IndexMap<&str, usize> = indexmap::IndexMap::new();
+    for r in &scan.cache_context.requests {
+        let first = sessions
+            .get(r.session.as_str())
+            .and_then(|s| s.iter().map(|q| q.time).min());
+        if main(r) && r.profiles.contains(&profile.id) && first.is_some_and(|f| r.time < f) {
+            *earlier.entry(&r.session).or_default() += 1;
         }
     }
     let mut starts: indexmap::IndexMap<&str, Vec<Millis>> = indexmap::IndexMap::new();
@@ -107,6 +119,7 @@ fn turn_ends<'a>(scan: &Scan, profile: &Profile, requests: &[&'a Request]) -> Ve
         main.sort_by_key(|r| r.time);
         let mut prompts = starts.get(session).cloned().unwrap_or_default();
         prompts.sort_unstable();
+        let prior = earlier.get(session).copied().unwrap_or(0);
         for (i, &r) in main.iter().enumerate() {
             let next = main.get(i + 1).copied();
             let prompt = prompts.iter().copied().find(|&t| t > r.time);
@@ -125,8 +138,12 @@ fn turn_ends<'a>(scan: &Scan, profile: &Profile, requests: &[&'a Request]) -> Ve
                     && r.source
                         .as_deref()
                         .is_none_or(|s| s.starts_with("repl_main_thread")),
-                responses: i + 1,
-                turns: prompts.iter().filter(|&&t| t <= r.time).count(),
+                responses: prior + i + 1,
+                turns: if prior > 0 {
+                    usize::MAX
+                } else {
+                    prompts.iter().filter(|&&t| t <= r.time).count()
+                },
                 prompt,
                 next,
             });
@@ -204,7 +221,22 @@ fn lost_warming(catalog: &Catalog, profile: &Profile, end: &TurnEnd<'_>) -> Cost
     else {
         return unknown_cost("the request after the recap has no recorded usage");
     };
-    let (Some(read), Some(rates)) = (part.usage.read, unit_rates(catalog, next, part)) else {
+    // Only reads of the cache the recap refreshed: same model, speed and provider, and no
+    // more than the prefix it read.
+    let Some(recap) = last_message(end.request) else {
+        return unknown_cost("the turn's last response has no recorded usage");
+    };
+    if (&part.model, &part.speed, &next.provider)
+        != (&recap.model, &recap.speed, &end.request.provider)
+    {
+        return zero_cost();
+    }
+    let prefix = match (recap.usage.read, recap.usage.write) {
+        (Some(read), Some(write)) => read + write,
+        _ => return unknown_cost("the turn's last response has no recorded cache usage"),
+    };
+    let read = part.usage.read.map(|read| read.min(prefix));
+    let (Some(read), Some(rates)) = (read, unit_rates(catalog, next, part)) else {
         return unknown_cost("the request after the recap has no priced cache reads");
     };
     let write = match ttl {
@@ -318,8 +350,15 @@ fn check(
             "Codex does not record automatic recap requests in its session files".into(),
         ),
     }
-    let cost = add_costs(pairs.iter().map(|(on, _)| on));
-    let lost = add_costs(pairs.iter().map(|(_, off)| off));
+    let (cost, lost) = if control.value && !measurable {
+        let unknown = unknown_cost("these requests are not recorded");
+        (unknown.clone(), unknown)
+    } else {
+        (
+            add_costs(pairs.iter().map(|(on, _)| on)),
+            add_costs(pairs.iter().map(|(_, off)| off)),
+        )
+    };
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
     let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
@@ -374,6 +413,7 @@ fn check(
         },
         feature,
         off: control.off.clone(),
+        off_file: control.off_file.clone(),
         generations: measurable.then_some(pairs.len() as u64),
         cost,
         lost_warming: lost,
@@ -393,6 +433,7 @@ mod tests {
             minutes: None,
             owner: "/synthetic/.claude/settings.json:key".into(),
             off: "\"key\": false".into(),
+            off_file: Some("/synthetic/.claude/settings.json".into()),
         }
     }
 
@@ -548,6 +589,25 @@ mod tests {
         let recap = fork_cost(&prices(), &s.requests[2], RECAP_PROMPT, RECAP_OUTPUT);
         let net = recap.total_usd.unwrap() - lost;
         assert!((c.base.savings_usd.unwrap() - net).abs() < 1e-12);
+        // A request on another model reads a cache the recap never touched.
+        let mut other = s.clone();
+        other.requests[3].parts[0].model = Some("claude-sonnet-5".into());
+        assert_eq!(run(&other, 1.0)[0].lost_warming.total_usd, Some(0.0));
+    }
+
+    #[test]
+    fn sessions_started_before_the_window_are_already_eligible() {
+        let mut s = turns(&[
+            (BackgroundFeature::PromptSuggestions, true),
+            (BackgroundFeature::SessionRecaps, true),
+        ]);
+        // The window starts at 2 minutes: earlier prompts and responses are out of the scan.
+        let earlier: Vec<Request> = s.requests.drain(..2).collect();
+        s.cache_context.requests = earlier;
+        s.events.retain(|e| e.time >= 2 * MINUTE);
+        let checks = run(&s, 1.0);
+        assert_eq!(checks[0].generations, Some(2));
+        assert_eq!(checks[1].generations, Some(1));
     }
 
     #[test]
@@ -559,9 +619,11 @@ mod tests {
         let checks = run(&s, 1.0);
         assert_eq!(checks[0].base.action, Action::Keep);
         assert_eq!(checks[0].base.savings_usd, None);
+        assert_eq!(checks[0].cost.total_usd, Some(0.0));
         assert_eq!(checks[1].base.action, Action::Advisory);
         assert_eq!(checks[1].base.evidence, Evidence::Guidance);
         assert_eq!(checks[1].generations, None);
+        assert_eq!(checks[1].cost.total_usd, None);
     }
 
     #[test]

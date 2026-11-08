@@ -282,14 +282,10 @@ fn feature_label(feature: BackgroundFeature) -> &'static str {
 
 /// How to turn a background feature off: an environment variable as is, a setting in its file.
 fn background_off(c: &BackgroundCheck, out: &Out<'_>) -> String {
-    if c.off.starts_with("CLAUDE_CODE_") {
-        return format!("Set {}", c.off);
+    match &c.off_file {
+        Some(file) => format!("Set {} in {}", c.off, out.home(file)),
+        None => format!("Set {}", c.off),
     }
-    let file = out
-        .profiles
-        .get(c.base.profile.as_str())
-        .map_or_else(|| "settings".into(), |p| out.home(&p.settings_file));
-    format!("Set {} in {file}", c.off)
 }
 
 /// A value as the evidence cards print it.
@@ -1716,20 +1712,21 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             Action::Keep => {}
         }
         match result {
-            CheckResult::Background(b)
-                if r.current == Some(Setting::Toggle(true)) && b.generations == Some(0) =>
-            {
-                format!(
-                    "{head}. No recorded interactive terminal turn would have run it, so it cost nothing."
-                )
+            CheckResult::Background(_) if r.current != Some(Setting::Toggle(true)) => {
+                format!("{head}. Costs nothing; set in {}.", out.home(r.owner))
             }
-            CheckResult::Background(_) if r.current == Some(Setting::Toggle(true)) => format!(
-                "{head}. Costs {}{}; its uses are not recorded.",
+            CheckResult::Background(b) if b.generations == Some(0) => format!(
+                "{head}. No recorded interactive terminal turn would have run it, so it cost nothing. {} to turn it off.",
+                background_off(b, out)
+            ),
+            CheckResult::Background(b) => format!(
+                "{head}. Costs {}{}; its uses are not recorded. {} to turn it off.",
                 match r.monthly_savings_usd {
                     Some(m) => about(m),
                     None => monthly(r.savings_usd.unwrap_or(0.0), r.since, r.until),
                 },
-                coverage_note(r)
+                coverage_note(r),
+                background_off(b, out)
             ),
             CheckResult::Ttl(t) if t.one_hour_savings_usd != 0.0 => {
                 let other = if r.current == Some(Setting::Ttl(Ttl::OneHour)) {

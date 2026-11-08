@@ -555,7 +555,9 @@ in the uncertainty instead. A suggestion follows a turn with at least two
 responses whose last response sent and wrote at most 10,000 uncached tokens,
 the client's cold-cache cutoff. A recap follows a turn once the session has three
 user turns and the next prompt came at least three minutes later; a final turn
-is not counted, since nothing shows the terminal stayed open. Focus and the
+is not counted, since nothing shows the terminal stayed open. Prompts before
+`--since` are not retained, so a session with earlier responses counts as past
+both thresholds. Focus and the
 suggestion throttle after many unused suggestions are not recorded and are
 assumed favorable to running.
 
@@ -564,7 +566,8 @@ is the last response's uncached input and output plus the instruction (about 350
 tokens for a suggestion, 100 for a recap), and its output is assumed to be 50 or
 100 tokens. A recap's read refreshes the cache; when the next request came after
 the cache lifetime but within three minutes more, turning recaps off would make
-it rewrite its cached prefix, which is subtracted from the saving. Turns without
+it rewrite its cached prefix, which is subtracted from the saving. Only reads
+on the same model, speed and provider count, up to the prefix the recap read. Turns without
 recorded usage are scaled from the priced ones, and with none priced the check
 is unknown.
 
@@ -572,7 +575,9 @@ Uses (an accepted suggestion, a read recap) are not recorded, so the whole
 estimate counts as one use: a feature is recommended off when it cost more than
 `--max-cost-per-use` over the window. Goal check-ins start ordinary-looking task
 notification turns and Codex does not record automatic recaps, so both report an
-unknown cost and stay advisory. Every other check's recorded baseline omits
+unknown cost and stay advisory. Each line names where to turn the feature off:
+the settings file that owns the effective value, managed settings included, or
+the environment variable that forces it. Every other check's recorded baseline omits
 these unlogged requests and their cache refreshes. Sources:
 [background token usage](https://code.claude.com/docs/en/costs#background-token-usage),
 [prompt suggestions and session recap](https://code.claude.com/docs/en/interactive-mode),

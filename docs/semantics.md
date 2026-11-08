@@ -468,7 +468,7 @@ history alone, and with no calibration it uses
 [OpenAI's rule of thumb](https://help.openai.com/en/articles/4936856) of 0.25
 tokens per character. A Codex piece recorded only by identity, such as
 metadata-only instructions or a `top_level_tools` hash, stays an unpriced row,
-except that a provided schema of the same tools in the request measures it.
+except that a provided schema of the same tool in the request measures it.
 Prefix membership follows each request's own tool list, not where a component
 was first seen. Attachments such as skill listings and instruction files ride in
 messages at no recorded offset, so their history bounds them instead: a
@@ -513,8 +513,8 @@ other tools and `mcp__<server>` for a server, which
 [remove the tool from context](https://code.claude.com/docs/en/permissions),
 and `skillOverrides` set to `user-invocable-only` for a skill. For Codex,
 `mcp_servers.<id>.enabled = false` in `config.toml` removes a server the request's own profile
-declares (ids that differ only in punctuation and expose one name leave it
-without a switch), and `features.apps = false` removes ChatGPT apps (`codex_apps`); other
+declares (a request copied into several profiles gets one only when each
+declares it under the same id), and `features.apps = false` removes ChatGPT apps (`codex_apps`); other
 Codex tools have no switch. Instruction files have no switch. Core tools, the system prompt and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for

@@ -194,9 +194,8 @@ struct Pieces<'a> {
 }
 
 /// One component's share of a piece: its characters, or None when only its
-/// identity is recorded, and whether it is a provided schema, which measures
-/// what an opaque schema identity of the same piece stands for.
-type Split = (usize, Option<i64>, bool);
+/// identity is recorded.
+type Split = (usize, Option<i64>);
 
 impl Pieces<'_> {
     fn intern(
@@ -298,8 +297,9 @@ fn tool(name: &str) -> (String, ContextKind, String, Option<Control>) {
 /// server has one only where a selected config.toml declares it, since a server
 /// a plugin or launcher adds is switched where it is added. Ids that differ only
 /// in punctuation expose the same server name, so the piece is keyed by the
-/// declaring id, and two such ids in one profile set leave it without a switch.
-fn codex_tool(name: &str, servers: &[String]) -> (String, ContextKind, String, Option<Control>) {
+/// declaring id. A request copied into several profiles gets a switch only when
+/// each of them declares the server under the same single id.
+fn codex_tool(name: &str, servers: &[&[String]]) -> (String, ContextKind, String, Option<Control>) {
     let Some(rest) = name.strip_prefix("mcp__") else {
         return (
             format!("codex:tool:{name}"),
@@ -313,12 +313,12 @@ fn codex_tool(name: &str, servers: &[String]) -> (String, ContextKind, String, O
     let control = if server == CODEX_APPS {
         disable(&["features", "apps"])
     } else {
-        let declared: HashSet<&String> = servers
+        let declared: Vec<Vec<&String>> = servers
             .iter()
-            .filter(|id| codex_server(id) == server)
+            .map(|ids| ids.iter().filter(|id| codex_server(id) == server).collect())
             .collect();
-        match Vec::from_iter(declared)[..] {
-            [id] => {
+        match declared.first().map(Vec::as_slice) {
+            Some(&[id]) if declared.iter().all(|d| d[..] == [id]) => {
                 key = format!("{key}@{id}");
                 disable(&["mcp_servers", id, "enabled"])
             }
@@ -432,15 +432,10 @@ fn pieces(
 /// Split one Codex world-state or provided-tool component into switchable pieces.
 fn codex_pieces(
     component: &Component,
-    servers: &[String],
+    servers: &[&[String]],
     interned: &mut Pieces<'_>,
 ) -> Vec<Split> {
     let characters = component.size.characters;
-    let schema = characters.is_some()
-        && matches!(
-            component.category,
-            Category::ToolSchema | Category::McpSchema
-        );
     let (key, kind, name, control) = match component.category {
         Category::ToolSchema | Category::McpSchema | Category::McpDiscovery => {
             codex_tool(&component.name, servers)
@@ -466,11 +461,7 @@ fn codex_pieces(
         ),
         _ => return vec![],
     };
-    vec![(
-        interned.intern(key, kind, name, control),
-        characters,
-        schema,
-    )]
+    vec![(interned.intern(key, kind, name, control), characters)]
 }
 
 /// The piece for one tool's output, filed under the tool, or its MCP server.
@@ -560,26 +551,46 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             (Harness::Codex, Linkage::Chronological) => (&view.candidates, true),
             _ => (&[], false),
         };
-        // The MCP servers this request's own Codex profiles declare.
-        let servers: Vec<String> = input
+        // The MCP servers each of this request's own Codex profiles declares.
+        let servers: Vec<&[String]> = input
             .profiles
             .iter()
             .filter(|p| p.harness == Harness::Codex && r.profiles.contains(&p.id))
-            .flat_map(|p| p.mcp_servers.iter().cloned())
+            .map(|p| p.mcp_servers.as_slice())
+            .collect();
+        let component = |id: &str| {
+            *components
+                .get(id)
+                .expect("exposures reference recorded components")
+        };
+        // Codex names its top-level tools by an opaque identity; a provided
+        // schema of the same tool already measures it.
+        let measured: HashSet<&str> = shown
+            .iter()
+            .map(|id| component(id))
+            .filter(|c| {
+                c.size.characters.is_some()
+                    && matches!(c.category, Category::ToolSchema | Category::McpSchema)
+            })
+            .map(|c| c.name.as_str())
             .collect();
         let mut parts: Vec<Placed<'_>> = vec![];
         for (index, id) in shown.iter().enumerate() {
             let id: &str = id;
+            let component = component(id);
+            if codex
+                && component.size.characters.is_none()
+                && measured.contains(component.name.as_str())
+            {
+                continue;
+            }
             if !interned.of.contains_key(&(id, owner)) {
-                let component = components
-                    .get(id)
-                    .expect("exposures reference recorded components");
                 let split = if codex {
                     codex_pieces(component, &servers, &mut interned)
                 } else {
                     pieces(component, &components, &mut interned)
                         .into_iter()
-                        .map(|(key, characters)| (key, Some(characters), false))
+                        .map(|(key, characters)| (key, Some(characters)))
                         .collect()
                 };
                 interned.of.insert((id, owner), split);
@@ -588,7 +599,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             parts.extend(
                 interned.of[&(id, owner)]
                     .iter()
-                    .map(|&(key, characters, _)| Placed {
+                    .map(|&(key, characters)| Placed {
                         key,
                         characters: characters.unwrap_or(0),
                         prefix,
@@ -597,15 +608,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     }),
             );
         }
-        // Codex names its top-level tools by an opaque identity; a provided
-        // schema for the same piece already measures them.
-        let schemas: HashSet<usize> = shown
-            .iter()
-            .flat_map(|id| &interned.of[&(&**id, owner)])
-            .filter(|&&(_, _, schema)| schema)
-            .map(|&(key, _, _)| key)
-            .collect();
-        parts.retain(|x| !(x.opaque && schemas.contains(&x.key)));
         let prior_results = previous
             .get(r.session.as_str())
             .and_then(|p| p.results)
@@ -1505,11 +1507,11 @@ mod tests {
     #[test]
     fn codex_opaque_pieces_and_switches_per_profile() {
         // gpt-5.4 bills no cache writes, so its usage may omit them.
-        let codex = |id: &str, profile: &str| {
+        let codex = |id: &str, profiles: &[&str]| {
             let mut r = make_request();
             r.id = id.into();
             r.session = id.into();
-            r.profiles = vec![profile.into()];
+            r.profiles = profiles.iter().map(|p| p.to_string()).collect();
             r.harness = Harness::Codex;
             r.provider = Some("openai".into());
             r.model = Some("gpt-5.4".into());
@@ -1552,10 +1554,16 @@ mod tests {
                 opaque("top", Category::McpSchema, "functions"),
                 component("provided", Category::ToolSchema, "functions", 400, &[]),
                 opaque("agents", Category::Instructions, "agents_md"),
+                opaque("search", Category::McpSchema, "mcp__other__search"),
+                component("read", Category::ToolSchema, "mcp__other__read", 400, &[]),
             ],
             requests: vec![
-                chronological("r1", &["docs", "top", "provided", "agents"]),
+                chronological(
+                    "r1",
+                    &["docs", "top", "provided", "agents", "search", "read"],
+                ),
                 chronological("r2", &["docs", "top"]),
+                chronological("r3", &["docs"]),
             ],
             ..ExposureScan::default()
         };
@@ -1568,14 +1576,18 @@ mod tests {
         };
         let rows = context_costs(&ContextInput {
             scan: &scan,
-            requests: &[codex("r1", "a"), codex("r2", "b")],
+            requests: &[
+                codex("r1", &["a"]),
+                codex("r2", &["b"]),
+                codex("r3", &["a", "b"]),
+            ],
             profiles: &[profile("a", "docs-server"), profile("b", "docs_server")],
             catalog: &prices(),
             max_cost_per_use_usd: 1.0,
         });
         let of = |name: &str, profile: &str| {
             rows.iter()
-                .find(|c| c.name == name && c.profiles == [profile])
+                .find(|c| c.name == name && c.profiles.join("+") == profile)
                 .expect(name)
         };
         for (profile, id) in [("a", "docs-server"), ("b", "docs_server")] {
@@ -1591,6 +1603,11 @@ mod tests {
         // without one, the tools' size is unknown.
         assert_eq!(of("functions", "a").priced, 1);
         assert_eq!(of("functions", "b").priced, 0);
+        // Another tool's schema of the same server does not measure it.
+        assert_eq!(of("other", "a").priced, 0);
+        // A request copied into profiles that declare the server differently
+        // gets no switch.
+        assert_eq!(of("docs_server", "a+b").control, None);
         // Metadata-only instructions stay visible, unpriced.
         let agents = of("AGENTS.md", "a");
         assert_eq!((agents.requests, agents.priced), (1, 0));

@@ -168,6 +168,55 @@ function text(value: unknown): string {
   if (typeof value !== "string") throw new ScanError("invalid context text");
   return value;
 }
+/** Count each tool's calls per profile set, after merging copies of one call. */
+function toolCalls(
+  calls: Iterable<{ name: string; profiles: Set<string>; time: number }>,
+): ToolCalls[] {
+  const result = new Map<string, ToolCalls>();
+  for (const call of calls) {
+    const profiles = [...call.profiles].sort();
+    const key = JSON.stringify([call.name, profiles]);
+    const prior = result.get(key);
+    if (prior) {
+      prior.calls++;
+      prior.lastUsed = Math.max(prior.lastUsed, call.time);
+    } else
+      result.set(key, {
+        name: call.name,
+        profiles,
+        calls: 1,
+        lastUsed: call.time,
+      });
+  }
+  return [...result.values()];
+}
+
+/**
+ * Characters of one recorded message, or null when it holds images, documents
+ * or redacted thinking, whose billed tokens text cannot measure. Thinking
+ * signatures are opaque and dropped; every other field, tool input included, counts.
+ */
+function blobCharacters(message: unknown): number | null {
+  let opaque = false;
+  const serialized = JSON.stringify(message, (_key, value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      return value;
+    const block = value as Record<string, unknown>;
+    if (
+      block.type === "image" ||
+      block.type === "document" ||
+      block.type === "redacted_thinking"
+    )
+      opaque = true;
+    if (block.type === "thinking" && "signature" in block) {
+      const { signature: _, ...rest } = block;
+      return rest;
+    }
+    return value;
+  });
+  return opaque ? null : characters(serialized);
+}
+
 function completeText(params: Record<string, unknown>): boolean {
   function content(value: unknown): boolean {
     if (typeof value === "string") return true;
@@ -224,8 +273,11 @@ function group(value: string): string | null {
 /** Collect derived metadata in the reader's frozen, single parsing pass. */
 export class ExposureCollector {
   constructor(private readonly since?: number) {}
-  private toolCalls = new Map<string, ToolCalls>();
-  private seenCalls = new Set<string>();
+  // Tool calls by call id, so copies in other transcript files count once.
+  private calls = new Map<
+    string,
+    { name: string; profiles: Set<string>; time: number }
+  >();
   private components = new Map<string, Component>();
   private invocations = new Map<string, Invocation>();
   private observations = new Map<
@@ -253,7 +305,8 @@ export class ExposureCollector {
     { system: Size; tools: { name: string; size: Size }[] }
   >();
   // Hash-addressed message sizes in the current file, for complete request sizes.
-  private blobs = new Map<string, number>();
+  // Text characters per message blob, or null when it holds images or other opaque input.
+  private blobs = new Map<string, number | null>();
   private invalidated = false;
   private pendingTools = new Map<
     string,
@@ -431,7 +484,6 @@ export class ExposureCollector {
       this.userAliases = new Map();
       this.surfaced = new Map();
       this.blobs = new Map();
-      this.seenCalls = new Set();
       this.invalidated = false;
     }
     const p = object(raw.payload);
@@ -713,15 +765,7 @@ export class ExposureCollector {
       });
     }
     if (raw.type === "api-request-blob")
-      this.blobs.set(
-        id(raw.hash),
-        // Signatures and media payloads are opaque bytes, not text the tokenizer reads.
-        characters(
-          JSON.stringify(raw.message, (key, value) =>
-            key === "signature" || key === "data" ? undefined : value,
-          ),
-        ),
-      );
+      this.blobs.set(id(raw.hash), blobCharacters(raw.message));
 
     // Full Messages API parameters or a recorded request shape prove wire exposure.
     if (raw.type === "api-request") {
@@ -783,7 +827,7 @@ export class ExposureCollector {
           system,
           ...[...this.active.values()].filter((c) => !prefix.has(c)),
         ];
-        const messages = refs.items?.every((h) => this.blobs.has(h))
+        const messages = refs.items?.every((h) => this.blobs.get(h) != null)
           ? refs.items.reduce((n, h) => n + this.blobs.get(h)!, 0)
           : null;
         if (messages !== null)
@@ -793,25 +837,24 @@ export class ExposureCollector {
             shape.tools.reduce((n, t) => n + t.size.characters!, 0);
       }
       if (full) {
-        components = [
+        // Listed in cache-prefix order: tools, then system.
+        components = array(params.tools).map((v) => {
+          const tool = record(v);
+          return add(
+            toolCategory(text(tool.name)),
+            text(tool.name),
+            JSON.stringify(tool),
+            "wire-tool",
+          );
+        });
+        components.push(
           add(
             "other",
             "wire-system",
             JSON.stringify(params.system),
             "wire-system",
           ),
-        ];
-        for (const v of array(params.tools)) {
-          const tool = record(v);
-          components.push(
-            add(
-              toolCategory(text(tool.name)),
-              text(tool.name),
-              JSON.stringify(tool),
-              "wire-tool",
-            ),
-          );
-        }
+        );
         if (completeText(params))
           completeCharacters = characters(
             JSON.stringify({
@@ -948,25 +991,14 @@ export class ExposureCollector {
       if (b.type === "tool_use") {
         const name = text(b.name);
         const callId = text(b.id);
-        if (
-          time !== null &&
-          (this.since === undefined || time >= this.since) &&
-          !this.seenCalls.has(callId)
-        ) {
-          this.seenCalls.add(callId);
-          const profiles = [...this.file!.profiles].sort();
-          const key = JSON.stringify([name, profiles]);
-          const prior = this.toolCalls.get(key);
-          if (prior) {
-            prior.calls++;
-            prior.lastUsed = Math.max(prior.lastUsed, time);
-          } else
-            this.toolCalls.set(key, {
-              name,
-              profiles,
-              calls: 1,
-              lastUsed: time,
-            });
+        if (time !== null && (this.since === undefined || time >= this.since)) {
+          const call = this.calls.get(callId) ?? {
+            name,
+            profiles: new Set<string>(),
+            time,
+          };
+          for (const profile of this.file!.profiles) call.profiles.add(profile);
+          this.calls.set(callId, call);
         }
         const args = object(b.input);
         if (name === "Skill") {
@@ -1331,7 +1363,7 @@ export class ExposureCollector {
         (i) => since === null || i.time >= since,
       ),
       visibility,
-      toolCalls: [...this.toolCalls.values()],
+      toolCalls: toolCalls(this.calls.values()),
     };
   }
 }

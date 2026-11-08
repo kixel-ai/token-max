@@ -711,7 +711,7 @@ function summary(
     const label =
       pieceLabel(c) +
       (many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : "");
-    const cost = `Costs ${monthly(c.costUsd, since, until)}`;
+    const cost = `Costs ${monthly(c.estimatedUsd!, since, until)}${c.priced < c.requests ? ` (estimated from the ${percent(c.priced, c.requests)}% of its requests that could be priced)` : ""}`;
     const uses =
       c.calls === 0
         ? c.kind === "skill"
@@ -765,26 +765,35 @@ function summary(
     for (const c of kept) line(piece(c), 2);
   }
   const unknown = checks.filter((r) => action(r) === "advisory");
-  if (unknown.length) {
+  // Switchable context still sent today whose requests could not be priced at all.
+  const unpriced = report.context.filter(
+    (c) => c.current && c.control !== null && c.estimatedUsd === null,
+  );
+  if (unknown.length || unpriced.length) {
     section("Not enough evidence");
     for (const r of unknown) line(checkLine(r), 2);
+    for (const c of unpriced)
+      line(
+        `${pieceLabel(c)}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: on. Cost unknown: none of its requests recorded enough usage to price it.`,
+        2,
+      );
   }
   // Context with no switch: worth seeing, but not a setting to change.
   const fixed = report.context.filter(
-    (c) => c.current && c.verdict === null && c.costUsd > 0,
+    (c) => c.current && c.control === null && (c.estimatedUsd ?? 0) > 0,
   );
   if (fixed.length) {
     section("No setting turns these off");
     for (const c of fixed.filter((c) => c.kind === "instructions"))
       line(
-        `${home(c.name)}: costs ${monthly(c.costUsd, since, until)}. Shorten it, or move parts into path-scoped rules or skills.`,
+        `${home(c.name)}: costs ${monthly(c.estimatedUsd!, since, until)}. Shorten it, or move parts into path-scoped rules or skills.`,
         2,
       );
     const core = fixed.filter((c) => c.kind !== "instructions");
     if (core.length)
       line(
         `System prompt, core tools such as Bash and Read, and the skill and subagent lists: cost ${monthly(
-          core.reduce((n, c) => n + c.costUsd, 0),
+          core.reduce((n, c) => n + c.estimatedUsd!, 0),
           since,
           until,
         )}.`,
@@ -821,6 +830,10 @@ function summary(
     "--details shows the evidence and assumptions behind each line; --json is for scripts.",
   );
 }
+/** Share to one decimal, rounded down so a partial share never reads as 100%. */
+function percent(part: number, whole: number): number {
+  return Math.floor((part / whole) * 1000) / 10;
+}
 function pieceLabel(c: ContextCost): string {
   return c.kind === "tool"
     ? `${c.name} tool`
@@ -856,8 +869,7 @@ function coverageNote(r: CheckResult): string {
   const c = r.coverage;
   if (!c || c.priced === c.total) return "";
   // Percent, because one request can bill several parts.
-  const percent = Math.floor((c.priced / c.total) * 1000) / 10;
-  return `, using the ${percent}% of requests with measured usage`;
+  return `, using the ${percent(c.priced, c.total)}% of requests with measured usage`;
 }
 
 const CONTEXT_SUMMARY_ROWS = 12;
@@ -876,9 +888,12 @@ export function contextSection(
   const optional = (c: ContextCost) =>
     c.control !== null || c.kind === "instructions";
   const rows = report.context.filter(
-    (c) => details || (optional(c) && c.current && c.costUsd > 0),
+    (c) => details || (optional(c) && c.current && (c.estimatedUsd ?? 0) > 0),
   );
-  if (!rows.length) return;
+  const unpriced = report.context.filter(
+    (c) => optional(c) && c.current && c.estimatedUsd === null,
+  );
+  if (!rows.length && !unpriced.length) return;
   const requests = report.scan.requests;
   const since = report.scan.since ?? requests[0]?.time ?? null;
   const until = Date.parse(report.generatedAt);
@@ -894,10 +909,11 @@ export function contextSection(
   const shown = details ? rows : rows.slice(0, CONTEXT_SUMMARY_ROWS);
   for (const c of shown) {
     const label = pieceLabel(c);
-    const monthly =
-      span === null
-        ? ""
-        : ` (about ${about((c.costUsd * 30 * DAY) / span)} per 30 days)`;
+    // Unpriced requests are scaled from the priced ones, never counted as free.
+    const cost =
+      c.estimatedUsd === null
+        ? "cost unknown"
+        : `${about(c.estimatedUsd)}${span === null ? "" : ` (about ${about((c.estimatedUsd * 30 * DAY) / span)} per 30 days)`}${c.priced < c.requests ? `, estimated from the ${count(c.priced)} of ${count(c.requests)} requests that could be priced` : ""}`;
     const use =
       c.calls === null
         ? ""
@@ -905,7 +921,7 @@ export function contextSection(
           ? "; no recorded use"
           : `; used ${count(c.calls)} time${c.calls === 1 ? "" : "s"}, last ${new Date(c.lastUsed!).toISOString().slice(0, 10)}`;
     line(
-      `${label}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: ${about(c.costUsd)}${monthly}${use}`,
+      `${label}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: ${cost}${use}`,
       2,
     );
     const size =
@@ -931,15 +947,20 @@ export function contextSection(
   if (!details && rows.length > shown.length) {
     const rest = rows.slice(shown.length);
     line(
-      `${rest.length} more cost ${about(rest.reduce((n, c) => n + c.costUsd, 0))} together; --details lists every piece.`,
+      `${rest.length} more cost ${about(rest.reduce((n, c) => n + c.estimatedUsd!, 0))} together; --details lists every piece.`,
       2,
     );
   }
+  if (!details && unpriced.length)
+    line(
+      `${unpriced.length} more could not be priced, because their requests lack recorded usage, a request shape or a calibration.`,
+      2,
+    );
   if (!details) {
     const fixed = report.context.filter((c) => !optional(c) && c.current);
     if (fixed.length)
       line(
-        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${about(fixed.reduce((n, c) => n + c.costUsd, 0))}.`,
+        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${about(fixed.reduce((n, c) => n + (c.estimatedUsd ?? 0), 0))}.`,
       );
   }
 }

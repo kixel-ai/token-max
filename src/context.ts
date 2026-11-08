@@ -27,14 +27,16 @@ export interface ContextCost {
   priced: number;
   /** Tokens it took in the most recent request that carried it. */
   tokens: number | null;
-  /** API-price equivalent over the priced requests. */
+  /** API-price equivalent over the priced requests only. */
   costUsd: number;
+  /** costUsd scaled to every request that carried it; null when none could be priced. */
+  estimatedUsd: number | null;
   /** Observed uses in the window; null when uses are not observable. Skills count only model calls, since typing one still works when it is hidden. */
   calls: number | null;
   lastUsed: number | null;
   /** Whether the profile's most recent request still carried it. */
   current: boolean;
-  /** Cost divided by uses, counting no use as one; null without a use count. */
+  /** estimatedUsd divided by uses, counting no use as one; null without both. */
   costPerUseUsd: number | null;
   /** "off" when it cost more per use than the limit; null when it cannot be switched off today or was never priced. */
   verdict: "off" | "keep" | null;
@@ -70,6 +72,8 @@ interface Piece {
   name: string;
   control: Control | null;
   characters: number;
+  /** Tools and the system prompt lead the request in a fixed order; everything else rides in messages. */
+  prefix: boolean;
 }
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -85,7 +89,7 @@ const CORE_TOOLS = new Set([
 ]);
 
 /** The setting that owns a tool, grouping a tool family under one switch. */
-function tool(name: string): Omit<Piece, "characters"> {
+function tool(name: string): Omit<Piece, "characters" | "prefix"> {
   if (name.startsWith("mcp__")) {
     const server = name.split("__")[1] ?? name;
     return {
@@ -126,6 +130,19 @@ function pieces(
   component: Component,
   components: Map<string, Component>,
 ): Piece[] {
+  const prefix = PREFIX.has(component.provenance);
+  return split(component, components).map((p) => ({ ...p, prefix }));
+}
+const PREFIX = new Set([
+  "shape-tool",
+  "shape-system",
+  "wire-tool",
+  "wire-system",
+]);
+function split(
+  component: Component,
+  components: Map<string, Component>,
+): Omit<Piece, "prefix">[] {
   const characters = component.characters;
   if (characters === null) return [];
   const name = component.name;
@@ -225,8 +242,11 @@ function pieces(
 
 /**
  * Price each piece of context in every selected request that recorded its exact
- * shape. A piece is charged at the cache state of its position in the prompt
- * prefix (tools, then system, then message attachments).
+ * shape. A piece is charged at the cache state of its position in the prompt:
+ * tools and the system prompt lead in recorded order. Message attachments have
+ * no recorded offset, so each takes the latest position its history allows:
+ * the end of the session's previous request when that request carried it too,
+ * else the end of this request, where newly added content goes.
  */
 export function contextCosts(input: {
   scan: ExposureScan;
@@ -242,11 +262,17 @@ export function contextCosts(input: {
   const requests = new Map(input.requests.map((r) => [r.id, r]));
   const components = new Map(scan.components.map((c) => [c.id, c]));
   const piecesOf = new Map<string, Piece[]>();
-  const rows = new Map<string, ContextCost>();
+  const rows = new Map<string, ContextCost & { time: number }>();
   const latest = new Map<string, { time: number; keys: Set<string> }>();
-  for (const exposure of scan.requests) {
-    const r = requests.get(exposure.request);
-    if (!r || exposure.linkage !== "wire" || r.harness !== "claude") continue;
+  const previous = new Map<string, { input: number; keys: Set<string> }>();
+  const ordered = scan.requests
+    .map((exposure) => ({ exposure, r: requests.get(exposure.request) }))
+    .filter(
+      (e): e is { exposure: (typeof scan.requests)[number]; r: Request } =>
+        !!e.r && e.exposure.linkage === "wire" && e.r.harness === "claude",
+    )
+    .sort((a, b) => a.r.time - b.r.time);
+  for (const { exposure, r } of ordered) {
     const profiles = [...r.profiles].sort();
     const owner = json(profiles);
     const parts: Piece[] = exposure.components.flatMap((id) => {
@@ -270,73 +296,105 @@ export function contextCosts(input: {
       u.read !== null &&
       u.write !== null &&
       (u.write === 0 || (u.write1h !== null && u.write5m !== null));
-    const total =
-      ratio === undefined
-        ? 0
-        : parts.reduce((n, piece) => n + piece.characters * ratio, 0);
+    const size = (piece: Piece) => piece.characters * (ratio ?? 0);
+    const total = parts.reduce((n, piece) => n + size(piece), 0);
     // A calibration that overshoots the recorded input cannot place these pieces.
     const placed = priced && total <= u!.input!;
-    // Cache slots in prefix order: reads, then 1h writes, then 5m writes, then ordinary input.
-    const slots = placed
-      ? [
-          [u!.read!, rates!.read],
-          [u!.write === 0 ? 0 : u!.write1h!, rates!.write1h],
-          [u!.write === 0 ? 0 : u!.write5m!, rates!.write5m],
-          [Infinity, rates!.ordinary],
-        ]
-      : [];
-    let offset = 0;
-    const keys = new Set<string>();
-    const charged = new Map<string, { tokens: number; cost: number }>();
-    for (const piece of parts) {
-      const key = `${owner}:${piece.key}`;
-      const first = !keys.has(key);
-      keys.add(key);
-      const row =
-        rows.get(key) ??
-        ({
-          profiles,
-          kind: piece.kind,
-          name: piece.name,
-          control: piece.control,
-          requests: 0,
-          priced: 0,
-          tokens: null,
-          costUsd: 0,
-          calls: null,
-          lastUsed: null,
-          current: false,
-          costPerUseUsd: null,
-          verdict: null,
-          time: -Infinity,
-        } as ContextCost & { time: number });
+    const unique = new Map(
+      parts.map((piece) => [`${owner}:${piece.key}`, piece]),
+    );
+    const keys = new Set(unique.keys());
+    for (const [key, piece] of unique) {
+      const row = rows.get(key) ?? {
+        profiles,
+        kind: piece.kind,
+        name: piece.name,
+        control: piece.control,
+        requests: 0,
+        priced: 0,
+        tokens: null,
+        costUsd: 0,
+        estimatedUsd: null,
+        calls: null,
+        lastUsed: null,
+        current: false,
+        costPerUseUsd: null,
+        verdict: null,
+        time: -Infinity,
+      };
+      row.requests++;
       rows.set(key, row);
-      if (first) row.requests++;
-      if (!placed) continue;
-      const tokens = piece.characters * ratio!;
-      let cost = 0;
-      let start = offset;
-      let floor = 0;
-      for (const [size, price] of slots as [number, number][]) {
-        const end = floor + size;
-        const overlap = Math.max(
-          0,
-          Math.min(end, start + tokens) - Math.max(floor, start),
-        );
-        cost += overlap * price;
-        floor = end;
-      }
-      offset += tokens;
-      const sum = charged.get(key) ?? { tokens: 0, cost: 0 };
-      charged.set(key, { tokens: sum.tokens + tokens, cost: sum.cost + cost });
     }
-    for (const [key, sum] of charged) {
-      const row = rows.get(key)! as ContextCost & { time: number };
-      row.priced++;
-      row.costUsd += sum.cost;
-      if (r.time >= row.time) {
-        row.time = r.time;
-        row.tokens = Math.round(sum.tokens);
+    const prior = previous.get(r.session);
+    const messages = new Set(
+      parts.filter((piece) => !piece.prefix).map((piece) => piece.key),
+    );
+    if (u?.input != null)
+      previous.set(r.session, { input: u.input, keys: messages });
+    if (placed) {
+      const end = u!.input!;
+      // Cache slots in prefix order: reads, then 1h writes, then 5m writes, then ordinary input.
+      const slots: [number, number][] = [
+        [u!.read!, rates!.read],
+        [u!.write === 0 ? 0 : u!.write1h!, rates!.write1h],
+        [u!.write === 0 ? 0 : u!.write5m!, rates!.write5m],
+        [Infinity, rates!.ordinary],
+      ];
+      const charge = (start: number, tokens: number) => {
+        let cost = 0;
+        let floor = 0;
+        for (const [length, price] of slots) {
+          cost +=
+            Math.max(
+              0,
+              Math.min(floor + length, start + tokens) - Math.max(floor, start),
+            ) * price;
+          floor += length;
+        }
+        return cost;
+      };
+      const head = parts.filter((piece) => piece.prefix);
+      const carried = parts.filter(
+        (piece) => !piece.prefix && prior?.keys.has(piece.key),
+      );
+      const fresh = parts.filter(
+        (piece) => !piece.prefix && !prior?.keys.has(piece.key),
+      );
+      const sum = (list: Piece[]) => list.reduce((n, x) => n + size(x), 0);
+      const prefixEnd = sum(head);
+      const starts = new Map<Piece, number>();
+      let offset = 0;
+      for (const piece of head) {
+        starts.set(piece, offset);
+        offset += size(piece);
+      }
+      const stack = (list: Piece[], last: number) => {
+        let offset = Math.max(prefixEnd, last - sum(list));
+        for (const piece of list) {
+          starts.set(piece, offset);
+          offset += size(piece);
+        }
+      };
+      stack(carried, Math.min(prior?.input ?? end, end));
+      stack(fresh, end);
+      const charged = new Map<string, { tokens: number; cost: number }>();
+      for (const piece of parts) {
+        const key = `${owner}:${piece.key}`;
+        const tokens = size(piece);
+        const prior = charged.get(key) ?? { tokens: 0, cost: 0 };
+        charged.set(key, {
+          tokens: prior.tokens + tokens,
+          cost: prior.cost + charge(starts.get(piece)!, tokens),
+        });
+      }
+      for (const [key, sum] of charged) {
+        const row = rows.get(key)!;
+        row.priced++;
+        row.costUsd += sum.cost;
+        if (r.time >= row.time) {
+          row.time = r.time;
+          row.tokens = Math.round(sum.tokens);
+        }
       }
     }
     const last = latest.get(owner);
@@ -357,6 +415,9 @@ export function contextCosts(input: {
   for (const [key, row] of rows) {
     const owner = json(row.profiles);
     row.current = latest.get(owner)?.keys.has(key) ?? false;
+    row.estimatedUsd = row.priced
+      ? (row.costUsd * row.requests) / row.priced
+      : null;
     delete (row as Partial<ContextCost & { time: number }>).time;
     let calls: { calls: number; last: number } | null = null;
     if (row.kind === "tool" || row.kind === "mcp-server") {
@@ -380,10 +441,15 @@ export function contextCosts(input: {
     if (calls) {
       row.calls = calls.calls;
       row.lastUsed = calls.calls ? calls.last : null;
-      row.costPerUseUsd = row.costUsd / Math.max(1, calls.calls);
+      row.costPerUseUsd =
+        row.estimatedUsd === null
+          ? null
+          : row.estimatedUsd / Math.max(1, calls.calls);
     }
-    if (row.control && row.current && row.priced && row.costPerUseUsd !== null)
+    if (row.control && row.current && row.costPerUseUsd !== null)
       row.verdict = row.costPerUseUsd > input.maxCostPerUseUsd ? "off" : "keep";
   }
-  return [...rows.values()].sort((a, b) => b.costUsd - a.costUsd);
+  return [...rows.values()].sort(
+    (a, b) => (b.estimatedUsd ?? -1) - (a.estimatedUsd ?? -1),
+  );
 }

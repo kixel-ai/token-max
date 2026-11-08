@@ -18,15 +18,15 @@ The skills catalog quest owns skill-specific findings; this check links
 those findings instead of adding their costs again.
 
 Decided 2026-11-07 (maintainer): ✅ put an estimated dollar amount on every
-setting and let the user decide (rejected: recommend disabling rarely used
-pieces). Settings that don't change the experience, like the cache TTL, get a
-recommendation; tools, MCP servers, skills and instruction files get their
-cost, use count and off switch, with no waste verdict. Rarely used is not
-unused. Recorded in AGENTS.md.
+setting, one line each. Later the same day: ✅ recommend turning a tool, MCP
+server or skill off when it cost more than $1 per recorded use, counting no
+use as one, with `--max-cost-per-use` to change it (rejected: report cost and
+leave every call to the user; a rarely used count threshold). The report ends
+with one settings snippet for the recommended changes. Recorded in AGENTS.md.
 
 Progress 2026-11-07: per-piece costs from recorded Claude request shapes,
-priced at their cache positions, with call counts and controls, are in the
-default report. Codex pieces, tool-result context and output-budget checks
+priced at their cache positions, with call counts, controls and cost-per-use
+verdicts, are in the default report. Codex pieces, tool-result context and output-budget checks
 remain.
 
 - Attribute actual exposed server instructions, discovery names,

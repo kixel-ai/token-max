@@ -707,11 +707,18 @@ function summary(
   line(
     `Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than ${about(report.maxCostPerUseUsd)} per use (--max-cost-per-use).`,
   );
+  // One coverage note for every feature line instead of one per line.
+  const carried = pieces.reduce((n, c) => n + c.requests, 0);
+  const priced = pieces.reduce((n, c) => n + c.priced, 0);
+  if (priced < carried)
+    line(
+      `Feature costs are scaled up from the ${percent(priced, carried)}% of their requests that could be priced.`,
+    );
   const piece = (c: ContextCost) => {
     const label =
       pieceLabel(c) +
       (many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : "");
-    const cost = `Costs ${monthly(c.estimatedUsd!, since, until)}${c.priced < c.requests ? ` (estimated from the ${percent(c.priced, c.requests)}% of its requests that could be priced)` : ""}`;
+    const cost = `Costs ${monthly(c.estimatedUsd!, since, until)}`;
     const uses =
       c.calls === 0
         ? c.kind === "skill"
@@ -774,7 +781,7 @@ function summary(
     for (const r of unknown) line(checkLine(r), 2);
     for (const c of unpriced)
       line(
-        `${pieceLabel(c)}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: on. Cost unknown: none of its requests recorded enough usage to price it.`,
+        `${pieceLabel(c)}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: on. Cost unknown: none of its requests could be priced.`,
         2,
       );
   }

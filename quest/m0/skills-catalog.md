@@ -16,11 +16,12 @@ for both harnesses in m0 (rejected: defer to m1). The maintainer wants
 unused/rarely used skills identified and the cost of leaving them enabled
 quantified where possible. Recommendations stay read-only.
 
-Decided 2026-11-07 (maintainer): ✅ report each skill's cost and uses and
-leave the call to the user (rejected: rank skills for disabling), per the
-[context quest](/quest/m0/context.md). Progress: Claude listing members are
-priced per skill with `skillOverrides` named; Codex catalogs, duplicates and
-budget checks remain.
+Decided 2026-11-07 (maintainer): ✅ recommend `skillOverrides` set to
+`user-invocable-only` for a skill whose listing cost more than $1 per model
+call (rejected: leave the call to the user), per the
+[context quest](/quest/m0/context.md). Typed uses still work when hidden, so
+only model calls count. Progress: Claude listing members are priced and judged
+per skill; Codex catalogs, duplicates and budget checks remain.
 
 The 2026-11-05 audit found Codex listing 182 skills per request, 104 of them
 four copies of the claude.ai skills Claude Code syncs into

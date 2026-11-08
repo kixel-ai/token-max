@@ -7,6 +7,7 @@ pub mod estimates;
 pub mod exposure;
 pub mod model;
 pub mod prices;
+pub mod reader;
 pub mod safe;
 pub mod scenarios;
 pub mod terminal;

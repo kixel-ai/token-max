@@ -604,6 +604,7 @@ dependencies = [
  "clap",
  "indexmap",
  "jiff",
+ "memchr",
  "serde",
  "serde_json",
  "sha2",

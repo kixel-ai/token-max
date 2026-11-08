@@ -2554,7 +2554,7 @@ fn write_object<S: Sink>(
 }
 
 /// Object entries in JavaScript order: array indices ascending, then insertion order.
-fn js_entries(map: &Map<String, Value>) -> Vec<(&str, &Value)> {
+pub(crate) fn js_entries(map: &Map<String, Value>) -> Vec<(&str, &Value)> {
     let mut entries: Vec<(&str, &Value)> = map.iter().map(|(k, v)| (k.as_str(), v)).collect();
     entries.sort_by_key(|(k, _)| array_index(k).map_or((1, 0), |n| (0, n)));
     entries

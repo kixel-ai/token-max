@@ -331,8 +331,8 @@ test("image inputs and unlinked requests never calibrate from partial text", asy
   const report = analyze({ scan: data, catalog: await prices() });
   assert.ok(report.context.every((c) => c.estimatedUsd === null));
   const text = formatReport(report, { width: 200 });
-  assert.match(text, /1 more could not be priced/);
-  assert.match(text, /and the skill and subagent lists\): cost unknown\./);
+  assert.match(text, /Artifact tool( \[[^\]]*\])?: on\. Cost unknown/);
+  assert.match(text, /and the skill and subagent lists: cost unknown\./);
 });
 
 test("typed/mentioned skills, actual nested completions and script references stay distinct", async () => {
@@ -641,9 +641,13 @@ test("recorded request shapes price each piece at its cache position and count i
   assert.equal(review.estimatedUsd, null);
   assert.equal(row("Claude Code system prompt").control, null);
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
-  // Every piece here costs well under the default $1 per use.
+  // Every priced piece here costs well under the default $1 per use; an
+  // unpriced one gets no verdict.
   assert.ok(
-    report.context.every((c) => c.verdict === (c.control ? "keep" : null)),
+    report.context.every(
+      (c) =>
+        c.verdict === (c.control && c.estimatedUsd !== null ? "keep" : null),
+    ),
   );
 
   // A piece is recommended off when its cost per use, counting no use as one,
@@ -657,17 +661,14 @@ test("recorded request shapes price each piece at its cache position and count i
     strict.context.find((c) => c.name === name)!.verdict;
   assert.equal(verdict("Artifact"), "off");
   assert.equal(verdict("docs"), "off");
-  assert.equal(verdict("review"), "keep");
+  assert.equal(verdict("review"), null);
   assert.equal(verdict("Bash"), null);
   const text = formatReport(strict, { width: 200 });
   assert.match(
     text,
     /Artifact tool( \[[^\]]*\])?: on -> off\. Costs .*; never used\./,
   );
-  assert.match(
-    text,
-    /Skill review( \[[^\]]*\])?: on\. Costs .*; the model never used it\./,
-  );
+  assert.match(text, /Skill review( \[[^\]]*\])?: on\. Cost unknown/);
   const snippet = text.slice(text.indexOf("To turn these off"));
   assert.match(snippet, /"enableArtifact": false/);
   assert.match(snippet, /"deny": \[\s*"mcp__docs"\s*\]/);

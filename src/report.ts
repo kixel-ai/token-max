@@ -787,23 +787,21 @@ function summary(
   }
   // Context with no switch: worth seeing, but not a setting to change.
   const fixed = report.context.filter(
-    (c) => c.current && c.control === null && (c.estimatedUsd ?? 0) > 0,
+    (c) => c.current && c.control === null && c.estimatedUsd !== 0,
   );
   if (fixed.length) {
     section("No setting turns these off");
     for (const c of fixed.filter((c) => c.kind === "instructions"))
       line(
-        `${home(c.name)}: costs ${monthly(c.estimatedUsd!, since, until)}. Shorten it, or move parts into path-scoped rules or skills.`,
+        `${home(c.name)}: ${c.estimatedUsd === null ? "cost unknown" : `costs ${monthly(c.estimatedUsd, since, until)}`}. Shorten it, or move parts into path-scoped rules or skills.`,
         2,
       );
     const core = fixed.filter((c) => c.kind !== "instructions");
+    // Scaled to 30 days like every other line, without counting unknowns as $0.
+    const scale = span === null ? 1 : (30 * DAY) / span;
     if (core.length)
       line(
-        `System prompt, core tools such as Bash and Read, and the skill and subagent lists: cost ${monthly(
-          core.reduce((n, c) => n + c.estimatedUsd!, 0),
-          since,
-          until,
-        )}.`,
+        `System prompt, core tools such as Bash and Read, and the skill and subagent lists: ${knownTotal(core.map((c) => ({ ...c, estimatedUsd: c.estimatedUsd === null ? null : c.estimatedUsd * scale })))}.`,
         2,
       );
   }

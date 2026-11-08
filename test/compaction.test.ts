@@ -766,6 +766,24 @@ test("each added summary is its own pair, so a few unpriced sessions cannot outw
   assert.equal(check.action, "change");
 });
 
+test("a window that changes no request is a keep, not missing evidence", async () => {
+  const s = data(0);
+  const small = makeRequest({ id: "small", time: 1000, endTime: 1000 });
+  small.parts[0]!.usage = claudeUsage({ write: 20000 });
+  s.requests = [small];
+  s.events = [];
+  const report = analyze({ scan: s, catalog: await prices(), now: 18000000 });
+  const check = compaction(report);
+  assert.equal(check.action, "keep");
+  assert.ok(check.scenarios.every((c) => c.coverage.total === 0));
+  const text = formatReport(report, { width: 200 });
+  assert.match(
+    text,
+    /Keep[\s\S]*Auto-compact window \(claude-opus-5-5\): 400,000 tokens/,
+  );
+  assert.doesNotMatch(text, /could not confirm/);
+});
+
 test("unreadable lines count as unknown parts, so many of them block a recommendation", async () => {
   const s = data();
   const snapshot = (skippedLines: number) => ({

@@ -835,6 +835,14 @@ test("a net-zero tie is not evidence for either toggle", async () => {
     near(c.afterRecommendations.deltaUsd, 0);
     assert.equal(c.recommended, null);
     assert.equal(c.action, "advisory");
+    const report = analyze({
+      scan: s,
+      catalog: await prices(),
+      now: 201 * MINUTE,
+    });
+    report.checks = report.checks.filter((r) => r.check === "idle-compaction");
+    report.checks[0] = c;
+    assert.match(formatReport(report), /On and off cost the same/);
   }
 });
 

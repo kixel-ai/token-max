@@ -539,6 +539,52 @@ fn numbers(value: Value) -> Value {
     }
 }
 
+// Ported from fast.test.ts: "built CLI warns from current settings alone, remains read-only and skips unreadable lines".
+#[test]
+fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_lines() {
+    let w = Workspace::new();
+    let settings = w.codex.join("config.toml");
+    let config = "model=\"gpt-6.1-sol\"\nservice_tier=\"ultrafast\"";
+    std::fs::write(&settings, config).unwrap();
+    let base = [
+        "--codex-dir".to_string(),
+        text(&w.codex),
+        "--prices-file".into(),
+        text(&fixture("prices.json")),
+        "--json".into(),
+    ];
+    let invoke = || {
+        let mut c = command(&w, &args(&base, &[]));
+        c.env("CODEX_HOME", &w.codex);
+        run(&mut c)
+    };
+    let (status, stdout, stderr) = invoke();
+    assert_eq!(status, 1, "{stderr}");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    let fast = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["check"] == "fast-mode")
+        .unwrap();
+    assert_eq!(fast["savingsUsd"], Value::Null);
+    assert_eq!(std::fs::read_to_string(&settings).unwrap(), config);
+    std::fs::write(
+        &settings,
+        format!("{config}\n[features]\nultrafast_mode=false"),
+    )
+    .unwrap();
+    assert_eq!(invoke().0, 0);
+    std::fs::write(
+        w.codex.join("sessions/broken.jsonl"),
+        "{\"private\":\"SYNTHETIC_PRIVATE\",BROKEN}\n",
+    )
+    .unwrap();
+    let (status, stdout, stderr) = invoke();
+    assert_eq!(status, 0, "{stderr}");
+    assert!(!format!("{stdout}{stderr}").contains("SYNTHETIC_PRIVATE"));
+}
+
 #[cfg(unix)]
 mod unix {
     use std::io::Read;

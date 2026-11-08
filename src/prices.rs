@@ -69,6 +69,20 @@ impl Catalog {
     }
 }
 
+/// Catalog edits for tests of missing public prices.
+#[cfg(test)]
+impl Catalog {
+    pub(crate) fn clear_models(&mut self) {
+        self.models.clear();
+    }
+
+    pub(crate) fn remove_model(&mut self, provider: &str, model: &str) {
+        if let Some(models) = self.models.get_mut(provider) {
+            models.remove(model);
+        }
+    }
+}
+
 fn rate(value: Option<&Value>) -> Result<Option<f64>, ScanError> {
     match value {
         None | Some(Value::Null) => Ok(None),
@@ -1342,5 +1356,97 @@ mod tests {
             parse(r#"[{"models":{"m":{}}}]"#).unwrap_err(),
             "public price catalog contains no models"
         );
+    }
+
+    // Ported from fast.test.ts: "OpenAI fast and ultrafast API repricing preserves long context and billed write lifetimes".
+    #[test]
+    fn openai_fast_and_ultrafast_repricing_preserves_long_context_and_billed_write_lifetimes() {
+        let catalog = prices();
+        let p = BillingPart {
+            model: Some("gpt-6.1-sol".into()),
+            speed: None,
+            tier: Some("default".into()),
+            usage: crate::reader::usage(
+                &serde_json::json!({
+                    "input_tokens": 300000,
+                    "output_tokens": 100,
+                    "input_tokens_details": {
+                        "cached_tokens": 200000,
+                        "cache_write_tokens": 50000,
+                        "cache_write_tokens_details": {
+                            "ttl_30m_tokens": 20000,
+                            "ttl_12h_tokens": 30000,
+                        },
+                    },
+                }),
+                Harness::Codex,
+            )
+            .unwrap(),
+            ..make_request().parts[0].clone()
+        };
+        let r = Request {
+            parts: vec![p.clone()],
+            ..codex_request()
+        };
+        let normal = price_part(&catalog, &r, &p).total_usd.unwrap();
+        for tier in ["fast", "priority", "ultrafast"] {
+            let multiplier = if tier == "ultrafast" { 6.0 } else { 2.0 };
+            let repriced = BillingPart {
+                tier: Some(tier.into()),
+                ..p.clone()
+            };
+            assert_eq!(
+                price_part(&catalog, &r, &repriced).total_usd,
+                Some(normal * multiplier),
+                "{tier}"
+            );
+        }
+        let luna = BillingPart {
+            tier: Some("ultrafast".into()),
+            model: Some("gpt-6-luna".into()),
+            ..p.clone()
+        };
+        assert_eq!(price_part(&catalog, &r, &luna).total_usd, None);
+        let unbilled = BillingPart {
+            tier: Some("fast".into()),
+            usage: Usage {
+                write: None,
+                ..p.usage
+            },
+            ..p
+        };
+        assert_eq!(price_part(&catalog, &r, &unbilled).total_usd, None);
+    }
+
+    // Ported from fast.test.ts: "plain GPT-5.6 alias has verified fast rates without substituting catalog model prices".
+    #[test]
+    fn plain_gpt_5_6_alias_has_verified_fast_rates_without_substituting_catalog_prices() {
+        let mut c = prices();
+        let r = codex_request();
+        let p = BillingPart {
+            model: Some("gpt-5.6".into()),
+            usage: crate::reader::usage(
+                &serde_json::json!({
+                    "input_tokens": 300000,
+                    "output_tokens": 100,
+                    "cached_input_tokens": 200000,
+                    "cache_write_input_tokens": 0,
+                }),
+                Harness::Codex,
+            )
+            .unwrap(),
+            tier: Some("default".into()),
+            speed: None,
+            ..r.parts[0].clone()
+        };
+        let standard = price_part(&c, &r, &p).total_usd.unwrap();
+        assert!(standard > 0.0);
+        let fast = BillingPart {
+            tier: Some("fast".into()),
+            ..p
+        };
+        assert_eq!(price_part(&c, &r, &fast).total_usd, Some(standard * 2.0));
+        c.remove_model("openai", "gpt-5.6");
+        assert_eq!(price_part(&c, &r, &fast).total_usd, None);
     }
 }

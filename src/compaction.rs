@@ -1686,9 +1686,11 @@ mod tests {
             r.parts[0].usage = writes(150000);
             requests.push(r);
         }
+        // Coverage and snapshot times match the TypeScript fixture, which the text report prints.
+        let n = requests.len() as u64;
         Scan {
-            snapshot_started_at: String::new(),
-            snapshot_finished_at: String::new(),
+            snapshot_started_at: crate::safe::iso(0),
+            snapshot_finished_at: crate::safe::iso(0),
             since: None,
             roots: vec![],
             profiles: vec![profile],
@@ -1697,7 +1699,12 @@ mod tests {
             events: vec![boundary()],
             exposure: ExposureScan::default(),
             cache_context: CacheContext::default(),
-            coverage: ScanCoverage::default(),
+            coverage: ScanCoverage {
+                requests: n,
+                source_known: n,
+                tier_known: n,
+                ..ScanCoverage::default()
+            },
         }
     }
 
@@ -2320,23 +2327,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn codex_summary_and_cold_prefix_use_the_full_context_tier() {
-        let check = &checks(&scenario("codex"))[0];
-        near(check.observed_summary_cost.total_usd, 1.23);
-        let added = &check.scenarios[0].added[0];
-        near(added.summary_cost.total_usd, 1.23);
-        near(added.prefix_cost.total_usd, 0.05);
-    }
-
-    #[test]
-    fn estimated_attempts_are_reported_with_their_brackets() {
-        let check = &checks(&scenario("attempt"))[0];
-        assert_eq!(check.usage_estimates.len(), 1);
-        assert_eq!(check.usage_estimates[0].basis, ["large-0", "large-1"]);
-        assert_eq!(check.baseline_cost.total_usd, None);
-    }
-
     fn sample_scan() -> (Vec<Request>, Vec<StructuralEvent>) {
         let s = data(2);
         (s.requests, s.events)
@@ -2758,5 +2748,780 @@ mod tests {
             .collect();
         assert_eq!(modeled, [("modeled:large-0:0", HOUR)]);
         assert_eq!(result.estimated_parts.len(), 3);
+    }
+
+    /// The TypeScript compaction tests, each through `analyze` (with the TTL checks it runs) and the text report.
+    mod end_to_end {
+        use super::{at, controls, data, near, usage, writes};
+        use crate::controls::{CompactionSources, Env, compaction_controls, window_control};
+        use crate::discovery::DiscoveryOptions;
+        use crate::model::*;
+        use crate::reader::{ScanOptions, scan};
+        use crate::replay::{AnalyzeOptions, analyze};
+        use crate::report::{ReportOptions, format_report};
+        use crate::test_support::{Workspace, make_request, prices};
+        use serde_json::{Map, Value, json};
+
+        const NOW: Millis = 18_000_000;
+        const HOUR: Millis = 3_600_000;
+
+        fn report(scan: &Scan) -> Report {
+            analyze(AnalyzeOptions {
+                scan: scan.clone(),
+                catalog: &prices(),
+                since: None,
+                now: NOW,
+                max_cost_per_use_usd: 1.0,
+            })
+            .unwrap()
+        }
+
+        fn windows(report: &Report) -> Vec<&CompactionCheck> {
+            report
+                .checks
+                .iter()
+                .filter_map(|c| match c {
+                    CheckResult::Compaction(c) => Some(c),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn compaction(report: &Report) -> &CompactionCheck {
+            windows(report)[0]
+        }
+
+        fn check(scan: &Scan) -> CompactionCheck {
+            compaction(&report(scan)).clone()
+        }
+
+        fn text(report: &Report, width: Option<usize>, details: bool) -> String {
+            format_report(
+                report,
+                ReportOptions {
+                    width,
+                    details,
+                    ..ReportOptions::default()
+                },
+            )
+        }
+
+        fn window(check: &CompactionCheck, window: i64) -> &WindowScenario {
+            check.scenarios.iter().find(|c| c.window == window).unwrap()
+        }
+
+        fn without_whitespace(text: &str) -> String {
+            text.chars().filter(|c| !c.is_whitespace()).collect()
+        }
+
+        fn codex_usage(value: Value) -> Usage {
+            crate::reader::usage(&value, Harness::Codex).unwrap()
+        }
+
+        fn object(value: Value) -> Map<String, Value> {
+            value.as_object().cloned().unwrap()
+        }
+
+        fn scan_options(w: &Workspace) -> ScanOptions {
+            let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
+            ScanOptions {
+                discovery: DiscoveryOptions {
+                    home: text(&w.home),
+                    env: Env::new(),
+                    claude_dirs: vec![],
+                    codex_dirs: vec![],
+                    managed_settings_file: text(&w.managed_settings_file()),
+                    codex_system_config_file: text(&w.home.join("system.toml")),
+                    codex_requirements_file: text(&w.home.join("requirements.toml")),
+                },
+                since: None,
+            }
+        }
+
+        // Ported from compaction.test.ts: "net window winner prices summary and new prefix once, retaining observed summaries".
+        #[test]
+        fn net_window_winner_prices_summary_and_new_prefix_once_retaining_observed_summaries() {
+            let report = report(&data(4));
+            let check = compaction(&report);
+            assert_eq!(check.base.action, Action::Change);
+            assert_eq!(check.base.current, Some(400000));
+            assert_eq!(check.base.recommended, Some(100000));
+            assert_eq!(
+                check.base.owner,
+                "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow"
+            );
+            let scenario = window(check, 100000);
+            near(scenario.savings_usd, 1.96);
+            near(
+                Some(check.baseline_cost.total_usd.unwrap() - scenario.cost.total_usd.unwrap()),
+                1.96,
+            );
+            assert_eq!(scenario.added.len(), 1);
+            near(scenario.added[0].summary_cost.total_usd, 0.64);
+            near(scenario.added[0].prefix_cost.total_usd, 0.1);
+            near(check.observed_summary_cost.total_usd, 1.24);
+            assert_eq!(
+                scenario.added[0].basis,
+                [CompactionBasis {
+                    event: "sample-boundary".into(),
+                    request: "sample-resume".into(),
+                }]
+            );
+            assert!(text(&report, None, true).contains("compaction loses detail"));
+            assert!(check.base.break_even.as_deref().unwrap().contains("1.9600"));
+            near(scenario.sensitivity.reread_break_even_usd, 1.96);
+            assert_eq!(check.ttls.main, Some(Ttl::FiveMinutes));
+        }
+
+        // Ported from compaction.test.ts: "window presentation keeps conditional baselines, every scenario and geometry evidence reachable".
+        #[test]
+        fn window_presentation_keeps_conditional_baselines_every_scenario_and_geometry_evidence() {
+            let report = report(&data(4));
+            let check = compaction(&report);
+            let compact = without_whitespace(&text(&report, Some(40), true));
+            let values = [&check.base.owner, &check.base.baseline]
+                .into_iter()
+                .chain(check.models.iter().flatten())
+                .chain(&check.base.assumptions)
+                .chain(&check.base.uncertainty)
+                .chain(&check.base.sources);
+            for value in values {
+                assert!(compact.contains(&without_whitespace(value)), "{value}");
+            }
+            assert!(compact.contains("Current:400000tokens"));
+            assert!(compact.contains("Suggested:100000tokens"));
+            assert!(compact.contains("ConditionalTTLbaseline:main5m;subagent5m"));
+            for scenario in &check.scenarios {
+                assert!(compact.contains(&format!("Candidatewindow:{}tokens", scenario.window)));
+                for added in &scenario.added {
+                    assert!(compact.contains(&format!(
+                        "at{};{}summaryinputtokens;{}summaryoutputtokens;{}resumed-prefixtokens",
+                        added.request,
+                        added.input_tokens,
+                        added.summary_tokens,
+                        added.prefix_tokens
+                    )));
+                    for basis in &added.basis {
+                        assert!(compact.contains(&format!(
+                            "boundary{};resumedrequest{}",
+                            basis.event, basis.request
+                        )));
+                    }
+                }
+            }
+            let mut unknown = report.clone();
+            let unresolved = unknown
+                .checks
+                .iter_mut()
+                .find_map(|c| match c {
+                    CheckResult::Compaction(c) => Some(c),
+                    _ => None,
+                })
+                .unwrap();
+            unresolved.base.current = None;
+            unresolved.base.recommended = None;
+            unresolved.base.action = Action::Advisory;
+            unresolved.base.evidence = Evidence::Unknown;
+            unresolved.base.savings_usd = None;
+            unresolved.base.monthly_savings_usd = None;
+            unresolved.baseline_cost = Cost {
+                known_usd: 1.23,
+                total_usd: None,
+                unknown: vec!["synthetic unknown charge".into()],
+                assumptions: vec![],
+            };
+            let plain = text(&unknown, None, true);
+            assert!(plain.contains("ADVISORY  compaction-window"), "{plain}");
+            assert!(plain.contains("Current-window baseline cost: unknown ($1.23 known subtotal)"));
+            assert!(plain.contains(
+                "Estimated net saving vs baseline: unknown over window; unknown / 30 days"
+            ));
+        }
+
+        // Ported from compaction.test.ts: "summary overhead can lose, sensitivity cannot veto a positive aggregate estimate".
+        #[test]
+        fn summary_overhead_can_lose_and_sensitivity_cannot_veto_a_positive_aggregate() {
+            let one = check(&data(1));
+            assert_eq!(one.base.recommended, Some(100000));
+            assert_eq!(one.base.action, Action::Change);
+            let scenario = &one.scenarios[0];
+            near(scenario.savings_usd, 0.01);
+            assert!(scenario.sensitivity.cold_summary_savings_usd.unwrap() < 0.0);
+            let mut larger = data(1);
+            larger.events[0].post_tokens = Some(3000);
+            larger.requests[0].parts[1].usage.output = Some(3000);
+            let loss = check(&larger);
+            assert_eq!(loss.base.recommended, Some(400000));
+            assert_eq!(loss.base.action, Action::Keep);
+            assert!(loss.scenarios[0].savings_usd.unwrap() < 0.0);
+        }
+
+        // Ported from compaction.test.ts: "current smaller window is the comparison baseline, rather than old larger history".
+        #[test]
+        fn current_smaller_window_is_the_comparison_baseline() {
+            let mut s = data(4);
+            s.profiles[0].compaction.models["claude-opus-5-5"].value = Some(100000);
+            let check = check(&s);
+            assert_eq!(check.base.recommended, Some(100000));
+            assert_eq!(check.base.action, Action::Keep);
+            near(check.base.savings_usd, 0.0);
+            near(check.scenarios[0].savings_usd, 0.0);
+            near(
+                check.baseline_cost.total_usd,
+                check.scenarios[0].cost.total_usd.unwrap(),
+            );
+        }
+
+        // Ported from compaction.test.ts: "unsupported affected usage is unpriced; unknown unchanged output cancels with provenance".
+        #[test]
+        fn unsupported_affected_usage_is_unpriced_and_unknown_unchanged_output_cancels() {
+            let mut s = data(4);
+            s.requests[2].parts[0].usage.output = None;
+            let output = check(&s);
+            assert_eq!(output.baseline_cost.total_usd, None);
+            assert_eq!(output.base.action, Action::Change);
+            near(output.base.savings_usd, 1.96);
+            let mut missing = data(4);
+            missing.requests[2].parts[0].usage.input = None;
+            missing.requests[2].evidence = RequestEvidence::Unknown;
+            let unknown = check(&missing);
+            assert_eq!(unknown.base.action, Action::Advisory);
+            assert_eq!(unknown.scenarios[0].savings_usd, None);
+            assert!(unknown.base.uncertainty.join(" ").contains("missing input"));
+            let mut no_sample = data(4);
+            no_sample.events[0].post_tokens = None;
+            no_sample.requests[0].parts[1].usage.output = None;
+            assert_eq!(check(&no_sample).scenarios[0].savings_usd, None);
+        }
+
+        // Ported from compaction.test.ts: "historical-only or unsupported client controls remain advisory, including unknown candidates".
+        #[test]
+        fn historical_only_or_unsupported_client_controls_remain_advisory() {
+            let mut s = data(4);
+            let control = &mut s.profiles[0].compaction.models["claude-opus-5-5"];
+            control.value = None;
+            control.applicable = false;
+            let unknown_current = check(&s);
+            assert_eq!(unknown_current.base.recommended, Some(100000));
+            assert_eq!(unknown_current.base.action, Action::Advisory);
+            let mut old = data(4);
+            for r in &mut old.requests {
+                r.version = Some("2.1.287".into());
+            }
+            assert_eq!(check(&old).base.action, Action::Advisory);
+            for r in &mut old.requests {
+                r.version = Some("3.unverified".into());
+            }
+            assert_eq!(check(&old).base.action, Action::Advisory);
+            let mut unsupported = data(4);
+            unsupported.requests[2].parts[0].model = Some("unknown-model".into());
+            assert_eq!(check(&unsupported).scenarios[0].savings_usd, None);
+        }
+
+        // Ported from compaction.test.ts: "Codex standalone compaction uses linked billed summary and cold prefix at the full context tier".
+        #[test]
+        fn codex_standalone_compaction_uses_linked_billed_summary_and_cold_prefix() {
+            let mut s = data(4);
+            let p = &mut s.profiles[0];
+            p.harness = Harness::Codex;
+            p.settings = [(
+                "model_auto_compact_token_limit".into(),
+                Scalar::Number(400000.0),
+            )]
+            .into_iter()
+            .collect();
+            let mut user = json!({ "model_auto_compact_token_limit": 400000 });
+            p.compaction = controls(Harness::Codex, user.clone(), &Env::new(), "config.toml");
+            s.requests[0].parts.truncate(1);
+            for r in &mut s.requests {
+                r.harness = Harness::Codex;
+                r.api = Api::Responses;
+                r.provider = Some("openai".into());
+                r.model = Some("gpt-6.1-sol".into());
+                r.parts[0].model = r.model.clone();
+                let size = if r.id == "sample-resume" {
+                    20000
+                } else {
+                    300000
+                };
+                r.parts[0].usage = codex_usage(json!({
+                    "input_tokens": size,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": size,
+                    "output_tokens": 10,
+                }));
+            }
+            let mut summary = Request {
+                id: "summary".into(),
+                time: -1000,
+                end_time: -1000,
+                ..s.requests[0].clone()
+            };
+            summary.parts = vec![BillingPart {
+                kind: PartKind::Compaction,
+                usage: codex_usage(json!({
+                    "input_tokens": 300000,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0,
+                    "output_tokens": 2000,
+                })),
+                ..s.requests[0].parts[0].clone()
+            }];
+            s.requests.insert(0, summary);
+            let e = &mut s.events[0];
+            e.harness = Harness::Codex;
+            e.request = Some("summary".into());
+            e.post_tokens = None;
+            e.model = Some("gpt-6.1-sol".into());
+            let first_check = check(&s);
+            assert_eq!(first_check.base.action, Action::Change);
+            assert_eq!(first_check.base.recommended, Some(20000));
+            near(first_check.observed_summary_cost.total_usd, 1.23);
+            let first = &window(&first_check, 20000).added[0];
+            near(first.summary_cost.total_usd, 1.23);
+            near(first.prefix_cost.total_usd, 0.05);
+            near(window(&first_check, 20000).savings_usd, 4.5702);
+            let mut unpriced = s.clone();
+            let unsupported = &mut unpriced.profiles[0];
+            unsupported.settings.insert(
+                "model_auto_compact_token_limit_scope".into(),
+                Scalar::Text("body_after_prefix".into()),
+            );
+            user["model_auto_compact_token_limit_scope"] = json!("body_after_prefix");
+            unsupported.compaction = controls(Harness::Codex, user, &Env::new(), "config.toml");
+            let u = check(&unpriced);
+            assert_eq!(u.base.action, Action::Advisory);
+            assert_eq!(u.scenarios[0].savings_usd, None);
+        }
+
+        // Ported from compaction.test.ts: "bracketed Claude model controls scan safely and unresolved aliases stay advisory".
+        #[test]
+        fn bracketed_claude_model_controls_scan_safely_and_unresolved_aliases_stay_advisory() {
+            let w = Workspace::new();
+            let user = json!({
+                "autoCompactWindow": 600000,
+                "modelSettings": {
+                    "opus[1m]": { "autoCompactWindow": 400000 },
+                    "claude-opus-4-6[1m]": { "autoCompactWindow": 300000 },
+                },
+            });
+            std::fs::write(w.claude.join("settings.json"), user.to_string()).unwrap();
+            let result = scan(&scan_options(&w)).unwrap();
+            let mut p = result
+                .profiles
+                .iter()
+                .find(|p| p.harness == Harness::Claude)
+                .unwrap()
+                .clone();
+            assert_eq!(window_control(&p, Some("opus[1m]")).value, Some(400000));
+            let aliased = window_control(&p, Some("claude-opus-4-6"));
+            assert_eq!(aliased.value, None);
+            assert!(!aliased.applicable);
+            assert!(aliased.reason.contains("alias"));
+            let (user, managed) = (object(user), object(json!({ "autoCompactWindow": 500000 })));
+            p.compaction = compaction_controls(&CompactionSources {
+                harness: Harness::Claude,
+                user: &user,
+                managed: &managed,
+                env: &Env::new(),
+                file: "user.json",
+                managed_file: "managed.json",
+                scopes: None,
+            })
+            .unwrap();
+            let current = window_control(&p, Some("claude-opus-4-6"));
+            assert_eq!(current.value, Some(500000));
+            assert_eq!(current.owner, "managed.json:autoCompactWindow");
+            std::fs::write(
+                w.claude.join("settings.json"),
+                json!({ "modelSettings": { "opus[1m]": null } }).to_string(),
+            )
+            .unwrap();
+            let error = scan(&scan_options(&w)).unwrap_err();
+            assert!(
+                error.message.contains("invalid per-model settings"),
+                "{}",
+                error.message
+            );
+        }
+
+        // Ported from compaction.test.ts: "discovery retains only whitelisted compaction controls and malformed selected limits fail".
+        #[test]
+        fn discovery_retains_only_whitelisted_compaction_controls_and_malformed_limits_fail() {
+            let w = Workspace::new();
+            std::fs::write(
+                w.claude.join("settings.json"),
+                json!({
+                    "modelSettings": {
+                        "claude-opus-5-5": { "autoCompactWindow": 400000, "privateText": "PRIVATE" },
+                    },
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                w.codex.join("config.toml"),
+                "model_auto_compact_token_limit = 240000\nmodel_auto_compact_token_limit_scope = 'body_after_prefix'\n",
+            )
+            .unwrap();
+            let result = scan(&scan_options(&w)).unwrap();
+            let claude = result
+                .profiles
+                .iter()
+                .find(|p| p.harness == Harness::Claude)
+                .unwrap();
+            assert_eq!(
+                window_control(claude, Some("claude-opus-5-5")).value,
+                Some(400000)
+            );
+            let codex = result
+                .profiles
+                .iter()
+                .find(|p| p.harness == Harness::Codex)
+                .unwrap();
+            assert_eq!(codex.compaction.default.value, Some(240000));
+            assert!(!codex.compaction.default.applicable);
+            assert!(!serde_json::to_string(&result).unwrap().contains("PRIVATE"));
+            std::fs::write(
+                w.codex.join("config.toml"),
+                "model_auto_compact_token_limit = 'bad'\n",
+            )
+            .unwrap();
+            let error = scan(&scan_options(&w)).unwrap_err();
+            assert!(
+                error.message.contains("invalid compaction token limit"),
+                "{}",
+                error.message
+            );
+        }
+
+        // Ported from compaction.test.ts: "window replay uses TTL recommendations and never inherits old-prefix external warming".
+        #[test]
+        fn window_replay_uses_ttl_recommendations_and_never_inherits_external_warming() {
+            let mut s = data(2);
+            let time = s.requests[1].time + 600000;
+            let next = &mut s.requests[2];
+            next.time = time;
+            next.end_time = time;
+            next.parts[0].usage = writes(150000);
+            let next = next.clone();
+            let warm_check = check(&s);
+            assert_eq!(warm_check.ttls.main, Some(Ttl::OneHour));
+            near(warm_check.scenarios[0].added[0].prefix_cost.total_usd, 0.16);
+            let warm = warm_check.scenarios[0].cost.total_usd.unwrap();
+            let mut external = Request {
+                id: "externally-warmed".into(),
+                time: next.time + HOUR,
+                end_time: next.time + HOUR,
+                ..next.clone()
+            };
+            external.parts = vec![BillingPart {
+                usage: usage(0, 150000, 10, Ttl::FiveMinutes, 0),
+                ..next.parts[0].clone()
+            }];
+            s.requests.push(external);
+            let cold = check(&s);
+            assert_eq!(cold.ttls.main, Some(Ttl::OneHour));
+            // The first new prefix expired: its 20k rewrite costs $0.16, not an inherited old read.
+            near(
+                Some(cold.scenarios[0].cost.total_usd.unwrap() - warm),
+                0.1602,
+            );
+            assert_eq!(s.requests[2].parts[0].usage.read, Some(0));
+        }
+
+        // Ported from compaction.test.ts: "changing a message prefix preserves unchanged billed compaction iterations".
+        #[test]
+        fn changing_a_message_prefix_preserves_unchanged_billed_compaction_iterations() {
+            let mut s = data(2);
+            let time = s.requests[1].time + 600000;
+            s.requests[2].time = time;
+            s.requests[2].end_time = time;
+            for r in &mut s.requests[1..3] {
+                r.parts.push(BillingPart {
+                    kind: PartKind::Compaction,
+                    usage: usage(1000, 150000, 100, Ttl::OneHour, 0),
+                    ..r.parts[0].clone()
+                });
+            }
+            let before = s.requests.clone();
+            let check = check(&s);
+            assert_eq!(check.ttls.main, Some(Ttl::OneHour));
+            assert_eq!(check.ttls.subagent, Some(Ttl::OneHour));
+            near(check.base.savings_usd, 0.426);
+            assert_eq!(s.requests, before);
+        }
+
+        // Ported from compaction.test.ts: "window estimates reuse bracketed attempt inputs and retain missing historical billing".
+        #[test]
+        fn window_estimates_reuse_bracketed_attempt_inputs_and_retain_missing_billing() {
+            let mut s = data(2);
+            let before = s.requests[1].clone();
+            let after = &mut s.requests[2];
+            after.time = before.time + 2000;
+            after.end_time = after.time;
+            after.parts[0].usage = usage(0, 150000, 10, Ttl::FiveMinutes, 0);
+            let after = after.id.clone();
+            let mut attempt = Request {
+                id: "attempt".into(),
+                time: before.time + 1000,
+                end_time: before.time + 1000,
+                evidence: RequestEvidence::Unknown,
+                reference: Some("attempt-ref".into()),
+                attempt: Some(Attempt {
+                    max_output_tokens: Some(100),
+                }),
+                ..make_request()
+            };
+            attempt.parts[0].usage = crate::reader::usage(&json!({}), Harness::Claude).unwrap();
+            s.requests.insert(2, attempt);
+            let check = check(&s);
+            assert_eq!(
+                check.usage_estimates[0].evidence,
+                EstimateEvidence::Estimated
+            );
+            assert_eq!(check.usage_estimates[0].basis, [before.id, after]);
+            assert_eq!(check.baseline_cost.total_usd, None);
+            assert_eq!(check.scenarios[0].cost.total_usd, None);
+            near(check.base.savings_usd, 0.062);
+            assert_eq!(s.requests[2].parts[0].usage.input, None);
+        }
+
+        // Ported from compaction.test.ts: "pre-window summary linkage calibrates selected work without charging old generation".
+        #[test]
+        fn pre_window_summary_linkage_calibrates_selected_work_without_charging_old_generation() {
+            let mut s = data(4);
+            let mut summary = at("old-summary", "sample", -1000);
+            summary.parts[0].kind = PartKind::Compaction;
+            summary.parts[0].usage = usage(0, 0, 2000, Ttl::FiveMinutes, 300000);
+            s.requests[0].parts.truncate(1);
+            let mut event = s.events.pop().unwrap();
+            event.request = Some(summary.id.clone());
+            event.pre_tokens = None;
+            event.post_tokens = None;
+            s.cache_context = CacheContext {
+                requests: vec![summary],
+                boundaries: vec![event],
+            };
+            s.since = Some(1000);
+            let report = report(&s);
+            let check = compaction(&report);
+            assert_eq!(check.base.since, Some(1000));
+            assert_eq!(check.base.requests, 5);
+            near(check.observed_summary_cost.total_usd, 0.0);
+            assert_eq!(report.compactions.len(), 0);
+            near(check.scenarios[0].added[0].summary_cost.total_usd, 0.64);
+            near(check.base.savings_usd, 1.96);
+        }
+
+        // Ported from compaction.test.ts: "an unsupported smaller window does not veto another candidate's positive aggregate".
+        #[test]
+        fn an_unsupported_smaller_window_does_not_veto_another_candidates_positive_aggregate() {
+            let mut s = data(4);
+            s.requests[0].parts[0].usage = writes(150000);
+            for r in &mut s.requests[1..] {
+                r.parts[0].usage = writes(300000);
+            }
+            let check = check(&s);
+            assert_eq!(check.scenarios[0].savings_usd, None);
+            assert_eq!(check.base.recommended, Some(150000));
+            assert_eq!(check.base.action, Action::Change);
+            assert!(check.base.savings_usd.unwrap() > 0.0);
+        }
+
+        // Ported from compaction.test.ts: "shared Claude controls produce one aggregate recommendation for all affected models".
+        #[test]
+        fn shared_claude_controls_produce_one_aggregate_recommendation_for_all_models() {
+            for environment in [false, true] {
+                let mut s = data(4);
+                let model = "claude-haiku-5-5";
+                let mut other = s.requests[0].clone();
+                other.id = "haiku-resume".into();
+                other.session = "haiku-sample".into();
+                other.model = Some(model.into());
+                for p in &mut other.parts {
+                    p.model = Some(model.into());
+                }
+                let mut event = s.events[0].clone();
+                event.id = "haiku-boundary".into();
+                event.session = other.session.clone();
+                event.origins[0].session = other.session.clone();
+                event.model = Some(model.into());
+                event.request = Some(other.id.clone());
+                event.pricing.as_mut().unwrap().model = Some(model.into());
+                s.requests.push(other);
+                s.events.push(event);
+                for i in 0..3 {
+                    let mut request = Request {
+                        model: Some(model.into()),
+                        ..at(&format!("haiku-{i}"), "haiku", (i + 1) * HOUR)
+                    };
+                    request.parts[0].model = Some(model.into());
+                    request.parts[0].usage = writes(150000);
+                    s.requests.push(request);
+                }
+                let mut env = Env::new();
+                if environment {
+                    env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "400000".into());
+                }
+                s.profiles[0].compaction = controls(
+                    Harness::Claude,
+                    json!({ "autoCompactWindow": 400000 }),
+                    &env,
+                    "settings.json",
+                );
+                let report = report(&s);
+                let checks = windows(&report);
+                assert_eq!(checks.len(), 1);
+                let models: std::collections::HashSet<_> =
+                    checks[0].models.iter().map(|m| m.as_deref()).collect();
+                assert_eq!(
+                    models,
+                    [Some("claude-opus-5-5"), Some(model)].into_iter().collect()
+                );
+                assert_eq!(
+                    checks[0].base.owner,
+                    if environment {
+                        "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+                    } else {
+                        "settings.json:autoCompactWindow"
+                    }
+                );
+                assert_eq!(checks[0].base.recommended, Some(100000));
+                assert_eq!(checks[0].base.action, Action::Change);
+            }
+        }
+
+        // Ported from compaction.test.ts: "small unknown iterations cancel while truly missing input leaves only its own session unpriced".
+        #[test]
+        fn small_unknown_iterations_cancel_while_missing_input_leaves_only_its_session_unpriced() {
+            let mut s = data(4);
+            let mut small = at("small-unknown", "separate-small", 1000);
+            small.parts[0].kind = PartKind::Unknown;
+            small.parts[0].usage = writes(5000);
+            s.requests.push(small);
+            let first = check(&s);
+            assert_eq!(first.baseline_cost.total_usd, None);
+            assert_eq!(first.base.action, Action::Change);
+            near(first.base.savings_usd, 1.96);
+            s.requests.last_mut().unwrap().parts[0].usage.input = None;
+            let scenario = check(&s).scenarios[0].clone();
+            near(scenario.savings_usd, 1.96);
+            assert_eq!(scenario.coverage.total - scenario.coverage.priced, 1);
+        }
+
+        // Ported from compaction.test.ts: "each added summary is its own pair, so a few unpriced sessions cannot outweigh many small differences".
+        #[test]
+        fn each_added_summary_is_its_own_pair_so_few_unpriced_sessions_cannot_outweigh_many() {
+            let mut s = data(4);
+            let large: Vec<Request> = s
+                .requests
+                .iter()
+                .filter(|r| r.id.starts_with("large-"))
+                .cloned()
+                .collect();
+            for k in 1..10 {
+                for r in &large {
+                    s.requests.push(Request {
+                        id: format!("{}-{k}", r.id),
+                        session: format!("copy-{k}"),
+                        ..r.clone()
+                    });
+                }
+            }
+            for k in 0..4 {
+                let mut missing = at(&format!("missing-{k}"), &format!("missing-{k}"), 1000);
+                missing.parts[0].kind = PartKind::Unknown;
+                missing.parts[0].usage = writes(5000);
+                missing.parts[0].usage.input = None;
+                s.requests.push(missing);
+            }
+            // Stable, like Array.prototype.sort.
+            s.requests.sort_by_key(|r| r.time);
+            let check = check(&s);
+            let scenario = window(&check, 100000);
+            assert_eq!(scenario.added.len(), 10);
+            assert_eq!(scenario.coverage.total - scenario.coverage.priced, 4);
+            near(scenario.savings_usd, 19.6);
+            assert_eq!(check.base.action, Action::Change);
+        }
+
+        // Ported from compaction.test.ts: "a window that changes no request is a keep, not missing evidence".
+        #[test]
+        fn a_window_that_changes_no_request_is_a_keep_not_missing_evidence() {
+            let mut s = data(0);
+            let mut small = at("small", "session", 1000);
+            small.parts[0].usage = writes(20000);
+            s.requests = vec![small];
+            s.events = vec![];
+            let report = report(&s);
+            let check = compaction(&report);
+            assert_eq!(check.base.action, Action::Keep);
+            assert!(check.scenarios.iter().all(|c| c.coverage.total == 0));
+            let text = text(&report, Some(200), false);
+            let keep = text.find("Keep").expect("a Keep section");
+            assert!(
+                text[keep..].contains("Auto-compact window (claude-opus-5-5): 400,000 tokens"),
+                "{text}"
+            );
+            assert!(!text.contains("could not confirm"), "{text}");
+        }
+
+        // Ported from compaction.test.ts: "unreadable lines count as unknown parts, so many of them block a recommendation".
+        #[test]
+        fn unreadable_lines_count_as_unknown_parts_so_many_block_a_recommendation() {
+            let mut s = data(4);
+            let snapshot = |skipped_lines| Snapshot {
+                file: "synthetic".into(),
+                harness: Harness::Claude,
+                profiles: vec!["profile".into()],
+                bytes: 0,
+                device: 0,
+                inode: 0,
+                deferred_bytes: 0,
+                skipped_lines,
+                lines: 0,
+            };
+            s.snapshots = vec![snapshot(1)];
+            assert_eq!(check(&s).base.action, Action::Change);
+            s.snapshots = vec![snapshot(10000)];
+            let blocked = check(&s);
+            assert_eq!(blocked.base.recommended, None);
+            assert_eq!(blocked.base.action, Action::Advisory);
+        }
+
+        // Ported from compaction.test.ts: "Claude historical window differences and structured TTL window alignment remain visible".
+        #[test]
+        fn claude_historical_window_differences_remain_visible() {
+            let mut s = data(4);
+            let mut e = s.events[0].clone();
+            e.id = "settings".into();
+            e.kind = EventKind::Settings;
+            e.settings = [("autoCompactWindow".into(), Scalar::Number(1000000.0))]
+                .into_iter()
+                .collect();
+            s.events.push(e);
+            let check = check(&s);
+            assert!(
+                check
+                    .base
+                    .uncertainty
+                    .join(" ")
+                    .contains("historical recorded limits differ")
+            );
+            assert_eq!(check.base.action, Action::Change);
+        }
+
+        // Ported from compaction.test.ts: "added summaries require billed output and do not confuse postTokens with output".
+        #[test]
+        fn added_summaries_require_billed_output_and_do_not_confuse_post_tokens_with_output() {
+            let mut s = data(4);
+            s.requests[0].parts.truncate(1);
+            s.events[0].request = None;
+            s.events[0].post_tokens = Some(60000);
+            let report = report(&s);
+            assert_eq!(report.compactions[0].evidence, Evidence::Estimated);
+            assert_eq!(compaction(&report).scenarios[0].savings_usd, None);
+        }
     }
 }

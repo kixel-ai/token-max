@@ -324,41 +324,61 @@ pub struct Replayed {
     pub evidence: Option<CacheReplayEvidence>,
 }
 
-#[derive(Default)]
 struct Session {
     histories: IndexMap<Cohort, History>,
-    cursor: usize,
+    /// The next unpassed boundary in each layer.
+    cursors: Vec<usize>,
 }
 
-/// Replay explicit cache states, preserving unknown histories across cohorts and windows.
-#[derive(Default)]
-pub struct CacheChain {
-    sessions: HashMap<String, Session>,
-    boundaries: HashMap<String, Vec<Millis>>,
-    order: i64,
+/// Claude compaction boundary times in each origin session, sorted; build once per event set
+/// and share across every replay of it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CacheBoundaries {
+    times: HashMap<String, Vec<Millis>>,
 }
 
-impl CacheChain {
-    /// A chain whose histories reset at every Claude compaction boundary, in each origin session.
+impl CacheBoundaries {
+    /// Index every Claude compaction boundary under each of its origin sessions.
     pub fn new<'a>(events: impl IntoIterator<Item = &'a StructuralEvent>) -> Self {
-        let mut boundaries: HashMap<String, Vec<Millis>> = HashMap::new();
+        let mut times: HashMap<String, Vec<Millis>> = HashMap::new();
         for event in events {
             if event.harness != Harness::Claude || event.kind != EventKind::Compaction {
                 continue;
             }
             for origin in &event.origins {
-                boundaries
+                times
                     .entry(origin.session.clone())
                     .or_default()
                     .push(event.time);
             }
         }
-        for times in boundaries.values_mut() {
-            times.sort_unstable();
+        for list in times.values_mut() {
+            list.sort_unstable();
         }
+        Self { times }
+    }
+
+    fn get(&self, session: &str) -> &[Millis] {
+        self.times.get(session).map_or(&[][..], Vec::as_slice)
+    }
+}
+
+/// Replay explicit cache states, preserving unknown histories across cohorts and windows.
+pub struct CacheChain<'b> {
+    sessions: HashMap<String, Session>,
+    /// Boundary layers. Histories reset when a boundary in any layer passes, so a prebuilt
+    /// index plus a few extra events replays exactly like one index of their concatenation.
+    boundaries: Vec<&'b CacheBoundaries>,
+    order: i64,
+}
+
+impl<'b> CacheChain<'b> {
+    /// A chain whose histories reset at every boundary in any of `boundaries`.
+    pub fn new(boundaries: impl IntoIterator<Item = &'b CacheBoundaries>) -> Self {
         Self {
-            boundaries,
-            ..Self::default()
+            sessions: HashMap::new(),
+            boundaries: boundaries.into_iter().collect(),
+            order: 0,
         }
     }
 
@@ -368,16 +388,19 @@ impl CacheChain {
         let p = touch.p;
         let ttl = touch.ttl;
         if !self.sessions.contains_key(&r.session) {
-            self.sessions.insert(r.session.clone(), Session::default());
+            let session = Session {
+                histories: IndexMap::new(),
+                cursors: vec![0; self.boundaries.len()],
+            };
+            self.sessions.insert(r.session.clone(), session);
         }
         let session = self.sessions.get_mut(&r.session).expect("inserted");
-        let times = self
-            .boundaries
-            .get(&r.session)
-            .map_or(&[][..], Vec::as_slice);
-        while session.cursor < times.len() && times[session.cursor] <= r.time {
-            session.histories.clear();
-            session.cursor += 1;
+        for (layer, cursor) in self.boundaries.iter().zip(&mut session.cursors) {
+            let times = layer.get(&r.session);
+            while *cursor < times.len() && times[*cursor] <= r.time {
+                session.histories.clear();
+                *cursor += 1;
+            }
         }
         let histories = &mut session.histories;
         let cohort = CohortRef {
@@ -801,7 +824,8 @@ mod tests {
             pricing: None,
         };
         for session in ["original", "copy"] {
-            let mut chain = CacheChain::new([&boundary]);
+            let boundaries = CacheBoundaries::new([&boundary]);
+            let mut chain = CacheChain::new([&boundaries]);
             for r in [&first, &missing] {
                 let r = Request {
                     session: session.into(),

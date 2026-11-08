@@ -624,9 +624,9 @@ pub struct CompactionBasis {
 #[serde(rename_all = "camelCase")]
 pub struct AddedCompaction {
     pub request: String,
-    pub input_tokens: f64,
-    pub summary_tokens: f64,
-    pub prefix_tokens: f64,
+    pub input_tokens: i64,
+    pub summary_tokens: i64,
+    pub prefix_tokens: i64,
     pub basis: Vec<CompactionBasis>,
     pub summary_cost: Cost,
     pub prefix_cost: Cost,

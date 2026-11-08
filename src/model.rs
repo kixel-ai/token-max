@@ -237,7 +237,7 @@ pub struct Request {
 /// A safe location under one conversation alias.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Origin {
-    pub session: String,
+    pub session: Text,
     pub location: Location,
 }
 
@@ -288,16 +288,16 @@ pub struct StructuralEvent {
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
     pub harness: Harness,
-    pub session: String,
+    pub session: Text,
     pub time: Millis,
     pub kind: EventKind,
     pub profiles: Vec<String>,
     pub location: Location,
     pub request: Option<String>,
-    pub model: Option<String>,
-    pub version: Option<String>,
-    pub client: Option<String>,
-    pub cwd: Option<String>,
+    pub model: Option<Text>,
+    pub version: Option<Text>,
+    pub client: Option<Text>,
+    pub cwd: Option<Text>,
     pub trigger: Option<String>,
     pub precomputed: Option<bool>,
     pub pre_tokens: Option<i64>,
@@ -308,7 +308,7 @@ pub struct StructuralEvent {
     pub settings: IndexMap<String, Scalar>,
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
-    pub pricing: Option<Pricing>,
+    pub pricing: Option<std::sync::Arc<Pricing>>,
 }
 
 /// A current window control, without inventing a tuned model default.

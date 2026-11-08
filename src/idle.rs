@@ -413,8 +413,8 @@ impl<'r> ReplayIndex<'r> {
                 index.selected_events.insert(e.id.as_str());
             }
             for (i, origin) in e.origins.iter().enumerate() {
-                let session = origin.session.as_str();
-                if e.origins[..i].iter().any(|o| o.session == session) {
+                let session = &*origin.session;
+                if e.origins[..i].iter().any(|o| &*o.session == session) {
                     continue;
                 }
                 index.events.entry(session).or_default().push(e);
@@ -1928,7 +1928,7 @@ fn historically_available(events: &[&StructuralEvent], r: &Request) -> bool {
             break;
         }
         if e.kind == EventKind::Settings
-            && e.origins.iter().any(|o| o.session == r.session)
+            && e.origins.iter().any(|o| *o.session == *r.session)
             && let Some(v) = e.settings.get("idleCompactionAvailable")
         {
             value = Some(v);
@@ -2323,13 +2323,13 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
-            pricing: Some(Pricing {
+            pricing: Some(std::sync::Arc::new(Pricing {
                 model: Some("claude-opus-5-5".into()),
                 provider: Some("anthropic".into()),
                 tier: Some("standard".into()),
                 speed: Some("standard".into()),
                 geo: Some("global".into()),
-            }),
+            })),
         }
     }
 

@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{ErrorKind, Read};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::{IndexMap, IndexSet};
@@ -541,19 +542,27 @@ fn replace_lone_surrogates(text: &str) -> Option<String> {
 }
 
 /// Metadata established by earlier records of the same file.
+/// Fields every structural event copies are shared, since a history holds millions of events.
 struct Context {
-    session: String,
+    session: Text,
     agent: Agent,
-    model: Option<String>,
+    model: Option<Text>,
     provider: Option<String>,
-    client: Option<String>,
-    version: Option<String>,
+    client: Option<Text>,
+    version: Option<Text>,
     turn: Option<String>,
     trigger: Option<String>,
     tier: Option<String>,
     source: Option<String>,
-    cwd: Option<String>,
-    pricing: Option<Pricing>,
+    cwd: Option<Text>,
+    pricing: Option<Arc<Pricing>>,
+}
+
+/// Replace `slot` only when the value changes, so unchanged records keep sharing one copy.
+fn set(slot: &mut Option<Text>, value: Option<&str>) {
+    if slot.as_deref() != value {
+        *slot = value.map(Text::from);
+    }
 }
 
 /// Per-file reading state.
@@ -570,7 +579,7 @@ impl FileState {
         let subagent = is_subagent(&snapshot.file);
         Self {
             context: Context {
-                session: identity(&snapshot.file),
+                session: identity(&snapshot.file).into(),
                 agent: match (snapshot.harness, subagent) {
                     (Harness::Claude, true) => Agent::Subagent,
                     (Harness::Claude, false) => Agent::Main,
@@ -654,11 +663,11 @@ fn request(
         evidence: RequestEvidence::Measured,
         id: format!("{}:{identity}", harness_name(snapshot.harness)),
         harness: snapshot.harness,
-        session: context.session.clone(),
+        session: context.session.to_string(),
         agent: context.agent,
         time,
         end_time: time,
-        model: context.model.clone(),
+        model: context.model.as_deref().map(String::from),
         provider: context.provider.clone(),
         api: match snapshot.harness {
             Harness::Claude => Api::Messages,
@@ -668,9 +677,9 @@ fn request(
         trigger: context.trigger.clone(),
         reference: None,
         turn: context.turn.clone(),
-        version: context.version.clone(),
-        client: context.client.clone(),
-        cwd: context.cwd.clone(),
+        version: context.version.as_deref().map(String::from),
+        client: context.client.as_deref().map(String::from),
+        cwd: context.cwd.as_deref().map(String::from),
         parts: vec![],
         server_tools: None,
         profiles: snapshot.profiles.clone(),
@@ -785,9 +794,8 @@ impl Reader {
         let context = &mut file.context;
         if let Some(cwd) = string(raw, "cwd")
             && crate::safe::is_absolute(cwd)
-            && context.cwd.as_deref() != Some(cwd)
         {
-            context.cwd = Some(cwd.to_string());
+            set(&mut context.cwd, Some(cwd));
         }
         if let Some(value) = raw.get("sessionId") {
             let session = value
@@ -802,15 +810,16 @@ impl Reader {
                     identity(&format!("{opaque}:{name}"))
                 } else {
                     opaque
-                };
+                }
+                .into();
                 file.session_raw = Some(session.to_string());
             }
         }
         if let Some(version) = label(member(raw, "version")) {
-            context.version = Some(version);
+            set(&mut context.version, Some(&version));
         }
         if let Some(client) = label(member(raw, "entrypoint")) {
-            context.client = Some(client);
+            set(&mut context.client, Some(&client));
         }
         let kind = string(raw, "type");
         let uuid = string(raw, "uuid");
@@ -899,14 +908,17 @@ impl Reader {
             if string(m, "model") != Some("<synthetic>")
                 && let Some(model) = label(member(m, "model"))
             {
-                context.model = Some(model.clone());
-                context.pricing = Some(Pricing {
+                set(&mut context.model, Some(&model));
+                let pricing = Pricing {
                     model: Some(model),
                     provider: context.provider.clone(),
                     tier: label(member(u, "service_tier")),
                     speed: label(member(u, "speed")),
                     geo: label(member(u, "inference_geo")),
-                });
+                };
+                if context.pricing.as_deref() != Some(&pricing) {
+                    context.pricing = Some(Arc::new(pricing));
+                }
             }
         }
         if !selected && kind != Some("assistant") && !compact_boundary {
@@ -1089,15 +1101,24 @@ impl Reader {
         let absolute_cwd = string(p, "cwd").filter(|cwd| crate::safe::is_absolute(cwd));
         if kind == Some("session_meta") {
             if let Some(cwd) = absolute_cwd {
-                context.cwd = Some(cwd.to_string());
+                set(&mut context.cwd, Some(cwd));
             }
-            context.session = id(coalesce(p.get("id"), p.get("session_id")).unwrap_or(&NULL))?;
+            context.session =
+                id(coalesce(p.get("id"), p.get("session_id")).unwrap_or(&NULL))?.into();
             context.provider = label(member(p, "model_provider"));
             let source = member(p, "source");
-            context.client = label(member(p, "originator")).or_else(|| label(source));
+            set(
+                &mut context.client,
+                label(member(p, "originator"))
+                    .or_else(|| label(source))
+                    .as_deref(),
+            );
             let spawned = truthy(object(source).get("subagent"));
             context.source = label(source).or_else(|| spawned.then(|| "subagent".into()));
-            context.version = label(member(p, "cli_version"));
+            set(
+                &mut context.version,
+                label(member(p, "cli_version")).as_deref(),
+            );
             context.agent = match source {
                 Value::Object(_) if spawned => Agent::Subagent,
                 Value::String(_) => Agent::Main,
@@ -1119,9 +1140,9 @@ impl Reader {
             }
         } else if kind == Some("turn_context") {
             if let Some(cwd) = absolute_cwd {
-                context.cwd = Some(cwd.to_string());
+                set(&mut context.cwd, Some(cwd));
             }
-            context.model = label(member(p, "model"));
+            set(&mut context.model, label(member(p, "model")).as_deref());
             context.turn = opaque(p, "turn_id")?;
             context.tier = label(member(p, "service_tier"));
             if let Some(time) = time
@@ -1302,7 +1323,7 @@ impl Reader {
                     context.tier = Some(tier);
                 }
                 if let Some(model) = label(member(applied, "model")) {
-                    context.model = Some(model);
+                    set(&mut context.model, Some(&model));
                 }
                 if let Some(provider) = label(member(applied, "model_provider_id")) {
                     context.provider = Some(provider);
@@ -1534,6 +1555,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             }
         }
     }
+    // Events share their pricing context, so fill each shared copy once per provider. Each
+    // entry keeps its source alive, so no other copy can reuse the address it is keyed by.
+    let mut filled: HashMap<(usize, String), (Arc<Pricing>, Arc<Pricing>)> = HashMap::new();
     for e in &mut events {
         if let Some(reference) = e.request.as_deref().and_then(|r| r.strip_prefix("ref:")) {
             e.request = ref_to_request.get(reference).cloned();
@@ -1543,7 +1567,16 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             && pricing.provider.is_none()
             && let Some(provider) = agreed(&sharing(&profiles, &e.profiles))
         {
-            pricing.provider = Some(provider.unwrap_or_else(|| "anthropic".into()));
+            let provider = provider.unwrap_or_else(|| "anthropic".into());
+            let key = (Arc::as_ptr(pricing) as usize, provider);
+            let (_, shared) = filled.entry(key).or_insert_with_key(|(_, provider)| {
+                let shared = Arc::new(Pricing {
+                    provider: Some(provider.clone()),
+                    ..(**pricing).clone()
+                });
+                (pricing.clone(), shared)
+            });
+            *pricing = shared.clone();
         }
     }
     attribute_idle(&mut events, &event_ids, &compact_parents, &notice_parents);
@@ -1644,7 +1677,7 @@ fn attribute_idle(
                 Some(parents) if parents.len() == 1 => *parents.iter().next().unwrap(),
                 _ => None,
             };
-            let sessions = e.origins.iter().map(|o| o.session.clone()).collect();
+            let sessions = e.origins.iter().map(|o| o.session.to_string()).collect();
             (e.time, sessions, parent)
         })
         .collect();
@@ -1665,7 +1698,7 @@ fn attribute_idle(
                     && boundary
                         .origins
                         .iter()
-                        .any(|o| sessions.contains(&o.session))
+                        .any(|o| sessions.iter().any(|s| **s == *o.session))
                 {
                     boundary.idle_attribution = IdleAttribution::Notice;
                 }

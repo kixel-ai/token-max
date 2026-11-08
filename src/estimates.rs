@@ -48,7 +48,7 @@ pub fn estimate_usage(scan: &Scan) -> IndexMap<String, UsageEstimate> {
         }
         for origin in &event.origins {
             boundaries
-                .entry(origin.session.as_str())
+                .entry(&*origin.session)
                 .or_default()
                 .push(event.time);
         }

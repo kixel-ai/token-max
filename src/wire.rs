@@ -138,23 +138,32 @@ fn shared<S: Serializer>(
     serializer: S,
     value: impl FnOnce(S) -> Result<S::Ok, S::Error>,
 ) -> Result<S::Ok, S::Error> {
-    let found = ENCODER.with_borrow(|e| {
-        e.as_ref()
-            .map(|e| e.tables[table as usize].get(&address).copied())
-    });
-    match found {
+    match sent(table, address) {
         None => value(serializer),
         Some(Some(index)) => serializer.serialize_u64(index),
         Some(None) => {
             let ok = value(serializer)?;
-            ENCODER.with_borrow_mut(|e| {
-                let table = &mut e.as_mut().expect("encoding").tables[table as usize];
-                let index = table.len() as u64;
-                table.insert(address, index);
-            });
+            index(table, address);
             Ok(ok)
         }
     }
+}
+
+/// The index of a value this stream already sent, or None outside a stream.
+fn sent(table: Table, address: usize) -> Option<Option<u64>> {
+    ENCODER.with_borrow(|e| {
+        e.as_ref()
+            .map(|e| e.tables[table as usize].get(&address).copied())
+    })
+}
+
+/// Assign the next index to a value just sent.
+fn index(table: Table, address: usize) {
+    ENCODER.with_borrow_mut(|e| {
+        let table = &mut e.as_mut().expect("encoding").tables[table as usize];
+        let index = table.len() as u64;
+        table.insert(address, index);
+    });
 }
 
 /// A value decoded earlier in this stream.
@@ -329,28 +338,55 @@ impl<'de> Deserialize<'de> for Exposure {
 }
 
 impl Serialize for Digests {
-    /// A flat list in the report; in a stream, its base, the length it keeps and its own tail.
+    /// A flat list in the report. In a stream, an index once sent, and otherwise every unsent
+    /// list in its chain, oldest first, each as its base's index, the length it keeps from
+    /// that base and its own tail. A chain can be thousands of requests long, so it is sent
+    /// as one array rather than nested.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        if !encoding() {
-            return serializer.collect_seq(self.iter());
+        let index = match sent(Table::Digests, self.address()) {
+            None => return serializer.collect_seq(self.iter()),
+            Some(index) => index,
+        };
+        if let Some(index) = index {
+            return serializer.serialize_u64(index);
         }
+        let mut chain = vec![self];
+        while let Some((base, _)) = chain[chain.len() - 1].base() {
+            if sent(Table::Digests, base.address()) != Some(None) {
+                break;
+            }
+            chain.push(base);
+        }
+        chain.reverse();
+        serializer.collect_seq(chain.into_iter().map(Node))
+    }
+}
+
+/// One list of an unsent chain, whose base was sent before it.
+struct Node<'a>(&'a Digests);
+
+impl Serialize for Node<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         struct Tail<'a>(&'a Ids);
         impl Serialize for Tail<'_> {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
                 ids::serialize(self.0, serializer)
             }
         }
-        shared(Table::Digests, self.address(), serializer, |s| {
-            let (base, keep) = match self.base() {
-                Some((base, keep)) => (Some(base), keep),
-                None => (None, 0),
-            };
-            let mut node = s.serialize_struct("Digests", 3)?;
-            node.serialize_field("base", &base)?;
-            node.serialize_field("keep", &keep)?;
-            node.serialize_field("tail", &Tail(self.tail()))?;
-            node.end()
-        })
+        let (base, keep) = match self.0.base() {
+            Some((base, keep)) => {
+                let index = sent(Table::Digests, base.address()).flatten();
+                (Some(index.expect("bases are sent first")), keep)
+            }
+            None => (None, 0),
+        };
+        let mut node = serializer.serialize_struct("Digests", 3)?;
+        node.serialize_field("base", &base)?;
+        node.serialize_field("keep", &keep)?;
+        node.serialize_field("tail", &Tail(self.0.tail()))?;
+        let ok = node.end()?;
+        index(Table::Digests, self.0.address());
+        Ok(ok)
     }
 }
 
@@ -359,7 +395,7 @@ impl<'de> Deserialize<'de> for Digests {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Node {
-            base: Option<Digests>,
+            base: Option<u64>,
             keep: usize,
             #[serde(with = "ids")]
             tail: Ids,
@@ -368,21 +404,27 @@ impl<'de> Deserialize<'de> for Digests {
         impl<'de> Visitor<'de> for V {
             type Value = Digests;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("a digest list or an earlier list's index")
+                f.write_str("a digest chain or an earlier list's index")
             }
             fn visit_u64<E: de::Error>(self, index: u64) -> Result<Digests, E> {
                 earlier(index, |d| &d.digests)
             }
-            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Digests, A::Error> {
-                let Node { base, keep, tail } = Node::deserialize(MapAccessDeserializer::new(map))?;
-                let digests = match &base {
-                    Some(base) if keep > 0 && keep <= base.len() => {
-                        Digests::new(Some((base, keep)), tail)
-                    }
-                    None if keep == 0 => Digests::new(None, tail),
-                    _ => return Err(de::Error::custom("invalid digest prefix length")),
-                };
-                remember(digests, |d| &mut d.digests)
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Digests, A::Error> {
+                let mut last = None;
+                while let Some(Node { base, keep, tail }) = seq.next_element()? {
+                    let base: Option<Digests> = base
+                        .map(|index| earlier(index, |d| &d.digests))
+                        .transpose()?;
+                    let digests = match &base {
+                        Some(base) if keep > 0 && keep <= base.len() => {
+                            Digests::new(Some((base, keep)), tail)
+                        }
+                        None if keep == 0 => Digests::new(None, tail),
+                        _ => return Err(de::Error::custom("invalid digest prefix length")),
+                    };
+                    last = Some(remember(digests, |d| &mut d.digests)?);
+                }
+                last.ok_or_else(|| de::Error::custom("empty digest chain"))
             }
         }
         deserializer.deserialize_any(V)
@@ -497,6 +539,20 @@ mod tests {
         let file = &scan.requests[0].locations[0].file;
         let quoted = serde_json::to_string(&**file).unwrap();
         assert!(text.matches(&quoted).count() < report.matches(&quoted).count());
+    }
+
+    #[test]
+    fn long_unsent_digest_chains_are_not_nested() {
+        let mut scan = sample();
+        let mut items = Digests::new(None, ids(&["0"]));
+        for n in 1..1000 {
+            items = Digests::new(Some((&items, n)), ids(&[&n.to_string()]));
+        }
+        scan.exposure.requests.push(Exposure {
+            request: "late".into(),
+            view: view(items),
+        });
+        assert_eq!(decode(&encode(scan.clone())).unwrap(), scan);
     }
 
     #[test]

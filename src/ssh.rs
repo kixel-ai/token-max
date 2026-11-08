@@ -140,6 +140,9 @@ pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanErr
         .args(["-o", "ClearAllForwardings=yes"])
         .args(["-o", "PermitLocalCommand=no"])
         .args(["-o", "RemoteCommand=none"])
+        // The destination reads a closed stdin as cancellation, so keep it open.
+        .args(["-o", "StdinNull=no"])
+        .args(["-o", "ForkAfterAuthentication=no"])
         // A persisted control master would hold the stream open after the audit ends.
         .args(["-o", "ControlPersist=no"])
         .arg("--")

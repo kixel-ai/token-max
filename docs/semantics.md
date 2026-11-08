@@ -591,7 +591,8 @@ content is stored or tested.
 ## SSH hosts
 
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
-commands, a configured remote command or a persisted control master, and asks
+commands, a configured remote command or a persisted control master, with
+stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
 the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
 `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
 snapshots, readers and exposure extraction produce the same scan a local run

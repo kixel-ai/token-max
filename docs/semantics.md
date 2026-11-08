@@ -421,12 +421,15 @@ period after the last request. Pings fire every five sixths of the cache
 lifetime after the last request: 50 minutes under a 1h TTL, which is also below
 the native idle-compaction trigger at 54 minutes, and 25 minutes under Codex's
 30-minute minimum. A return within the last ping plus the lifetime reads its
-resumed prefix (the smaller of the previous context and the return's input)
-instead of rewriting it at the lifetime's write rate. Each ping reads the
-session's last context, writes the median recorded request's new input and
-produces its output; later pings and the return also read that growth. Prices
-come from the same per-part pricing as recorded requests, at the first and
-second ping's context tier.
+resumed prefix (the smaller of the previous request's input and the return's
+cacheable input) instead of rewriting it at the lifetime's write rate. A
+compaction, or a model, speed or provider change, between the two leaves nothing
+for pings to keep warm. Each ping reads the previous request's whole input and
+writes the median recorded request's new input, which already carries the
+previous reply, plus its output. Later pings, the return and every later request
+before a compaction read those turns, and a return that stays cold writes them.
+Pings and returns are priced with the same per-part pricing as recorded
+requests, each at its own context tier.
 
 Caps are the ping counts that rescue each recorded return, up to seven days,
 when recurring Claude Code tasks expire

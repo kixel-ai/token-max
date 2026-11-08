@@ -441,7 +441,7 @@ impl<'a> Out<'a> {
     }
 }
 
-/// Render all findings in a wrapping flow, with complete evidence available in details.
+/// Render all findings in a wrapping flow, with grouped evidence in details.
 pub fn format_report(report: &Report, options: ReportOptions) -> String {
     let mut profiles = IndexMap::new();
     for p in &report.scan.profiles {

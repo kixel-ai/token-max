@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { wrapText } from "./terminal.js";
 import type {
   CacheReplayEvidence,
@@ -93,6 +94,15 @@ export function formatReport(
     const p = profiles.get(id);
     return p ? `${p.harness} ${display(p.root)}` : display(id);
   }
+  function shortProfile(id: string): string {
+    const p = profiles.get(id);
+    return p ? `${p.harness} ${home(p.root)}` : home(id);
+  }
+
+  if (!options.details) {
+    summary(report, { line, section, profileName: shortProfile, arrow });
+    return lines.join("\n") + "\n";
+  }
 
   line("token-max", 0, 1);
   line("Public API-price estimates, not subscription bills.");
@@ -114,7 +124,7 @@ export function formatReport(
   const coverage = report.scan.coverage;
   field(
     "Coverage",
-    `${coverage.requests} selected requests in ${report.scan.snapshots.length} files; ${requests.filter((r) => r.evidence === "measured").length} with measured usage; ${coverage.missingUsage} missing usage`,
+    `${coverage.requests} selected requests in ${report.scan.snapshots.length} files; ${requests.filter((r) => r.evidence === "measured").length} with measured usage; ${coverage.missingUsage} missing usage${coverage.skippedLines ? `; ${coverage.skippedLines} unreadable transcript lines in ${coverage.skippedFiles} files skipped (truncated or interleaved writes)` : ""}`,
   );
   field(
     "Prices",
@@ -515,4 +525,241 @@ function reason(result: CheckResult): string {
   return result.check === "compaction-window"
     ? "Lowest estimated aggregate net cost, including added summaries and resumed-prefix charges; existing boundaries retained."
     : "Lowest estimated aggregate cache cost under the stated replay assumptions.";
+}
+
+const DAY = 86400000;
+function home(path: string): string {
+  const dir = homedir();
+  return path === dir || path.startsWith(dir + "/")
+    ? "~" + path.slice(dir.length)
+    : path;
+}
+function about(value: number): string {
+  const rounded = Math.abs(value) >= 10 ? Math.round(value) : value;
+  return usd(rounded).replace(/\.00$/, "");
+}
+function days(since: number | null, until: number | null): string {
+  if (since === null || until === null) return "the window";
+  const count = Math.max(1, Math.round((until - since) / DAY));
+  return `${count} day${count === 1 ? "" : "s"}`;
+}
+function count(value: number): string {
+  return value.toLocaleString("en-US");
+}
+
+/** Plain name for the setting a check is about. */
+function settingName(result: CheckResult): string {
+  switch (result.check) {
+    case "claude-cache-ttl":
+      return result.bucket === "main"
+        ? "Main-agent prompt cache TTL"
+        : "Subagent prompt cache TTL";
+    case "compaction-window": {
+      const models = result.models.filter((m): m is string => m !== null);
+      return `Auto-compact window${models.length ? ` (${models.join(", ")})` : ""}`;
+    }
+    case "idle-compaction":
+      return "Idle compaction";
+    case "fast-mode":
+      return "Fast mode";
+  }
+}
+function settingValue(result: CheckResult, value: unknown): string {
+  if (value === null || value === undefined) return "unknown";
+  if (result.check === "idle-compaction") return value ? "on" : "off";
+  if (result.check === "fast-mode")
+    return value === "standard" ? "off" : String(value);
+  if (typeof value === "number") return `${count(value)} tokens`;
+  return String(value);
+}
+
+/** One plain sentence on why a check could not reach a verdict. */
+function unresolved(result: CheckResult): string {
+  if (result.check === "fast-mode") return capitalize(result.reason) + ".";
+  if (result.recommended !== null)
+    return result.recommended === result.current
+      ? "The replay favors the current value, but could not confirm it applies to your current sessions."
+      : `The replay favors ${settingValue(result, result.recommended)}, but could not confirm the current setting applies to your sessions.`;
+  if (result.requests === 0) return "No requests in this window to compare.";
+  if (result.check === "claude-cache-ttl") {
+    if (!result.coverage?.priced)
+      return "No requests with measured cache usage to compare.";
+    return `5m and 1h differ by only ${about(Math.abs(result.oneHourSavingsUsd))} over ${days(result.since, result.until)} on measured requests, too close to call.`;
+  }
+  if (result.check === "compaction-window") {
+    if (result.current === null)
+      return result.uncertainty.some((u) =>
+        u.includes("default is not established"),
+      )
+        ? "No window is set for this model and its default is not documented."
+        : "The current window setting could not be resolved.";
+    const reasons = result.scenarios.flatMap((s) => s.comparisonCost.unknown);
+    if (reasons.some((r) => r.includes("compaction summary")))
+      return "Too few recorded compactions to model a different window.";
+    return "Too many requests lack recorded usage to compare windows.";
+  }
+  const periods = result.afterRecommendations.periods;
+  if (
+    periods.length &&
+    periods.every((p) => p.status === "censored" || p.status === "ineligible")
+  )
+    return "Sessions were never idle long enough for it to trigger, so it made no difference.";
+  if (!periods.some((p) => p.status === "eligible"))
+    return "No idle gaps could be compared with it on and off.";
+  if (result.afterRecommendations.deltaUsd === 0)
+    return "On and off cost the same on recorded idle gaps, so neither is cheaper.";
+  return "Idle summaries or resumed sessions could not be priced.";
+}
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** The default report: one verdict per setting, in plain words. */
+function summary(
+  report: Report,
+  out: {
+    line: (text?: string, indent?: number, style?: number) => void;
+    section: (title: string) => void;
+    profileName: (id: string) => string;
+    arrow: string;
+  },
+) {
+  const { line, section, arrow } = out;
+  const coverage = report.scan.coverage;
+  const requests = report.scan.requests;
+  const since = report.scan.since ?? requests[0]?.time ?? null;
+  const until = Date.parse(report.generatedAt);
+  const many = report.scan.profiles.length > 1;
+  line("token-max", 0, 1);
+  line(
+    "Estimated with public API prices, not your subscription bill. Nothing was changed.",
+  );
+  line();
+  line(
+    coverage.requests && since !== null
+      ? `Read ${count(coverage.requests)} requests from ${new Date(since).toISOString().slice(0, 10)} to ${report.generatedAt.slice(0, 10)} (${days(since, until)}):`
+      : `No requests found${report.scan.since === null ? "" : ` since ${new Date(report.scan.since).toISOString().slice(0, 10)}`} in:`,
+  );
+  for (const p of report.scan.profiles) line(out.profileName(p.id), 2);
+  if (coverage.missingUsage)
+    line(
+      `${count(coverage.missingUsage)} requests have no recorded usage and are left out of comparisons.`,
+    );
+  if (coverage.skippedLines)
+    line(
+      `${count(coverage.skippedLines)} unreadable transcript lines in ${count(coverage.skippedFiles)} files were skipped.`,
+    );
+  if (!report.scan.snapshots.length)
+    line(
+      "No transcript histories found. Select a profile with --claude-dir or --codex-dir after using that agent.",
+    );
+  else if (!coverage.requests)
+    line("Try an earlier --since or select another profile.");
+
+  // A check for a working directory that no longer exists has no setting left
+  // to change; show it only when it is the sole result for its setting.
+  const key = (r: CheckResult) =>
+    `${r.check}:${r.bucket}:${r.profile}:${r.check === "compaction-window" ? r.models.join(",") : ""}`;
+  // A comparison with no requests is not a verdict, whatever the tie-break said.
+  // Window coverage counts only changed parts, so zero there can still be a keep.
+  // Fast mode warns from current settings alone, so it never needs requests.
+  const empty = (r: CheckResult) =>
+    (r.check === "claude-cache-ttl" || r.check === "compaction-window") &&
+    r.requests === 0;
+  const action = (r: CheckResult) => (empty(r) ? "advisory" : r.action);
+  const decided = new Set(
+    report.checks.filter((r) => action(r) !== "advisory").map(key),
+  );
+  // Only a vanished directory is proven irrelevant; any other unresolved owner,
+  // such as a project override, stays visible beside the resolved verdict.
+  const checks = report.checks.filter(
+    (r) =>
+      !(
+        action(r) === "advisory" &&
+        r.check === "fast-mode" &&
+        r.reason.includes("working directory no longer exists") &&
+        decided.has(key(r))
+      ),
+  );
+  const name = (r: CheckResult) =>
+    settingName(r) + (many ? ` [${out.profileName(r.profile)}]` : "");
+  const changes = checks.filter((r) => action(r) === "change");
+  line();
+  line(
+    changes.length
+      ? `${changes.length} setting change${changes.length === 1 ? "" : "s"} recommended.`
+      : "No setting changes recommended.",
+    0,
+    1,
+  );
+  const window = (r: CheckResult) => days(r.since, r.until);
+  const monthly = (r: CheckResult) =>
+    r.monthlySavingsUsd === null
+      ? ""
+      : ` (about ${about(r.monthlySavingsUsd)} per 30 days)`;
+  if (changes.length) {
+    section("Change");
+    for (const r of changes) {
+      line(
+        `${name(r)}: ${settingValue(r, r.current)} ${arrow} ${settingValue(r, r.recommended)}`,
+        2,
+        36,
+      );
+      if (r.savingsUsd !== null)
+        line(
+          `Saves about ${about(r.savingsUsd)} over ${window(r)}${monthly(r)}${coverageNote(r)}.`,
+          6,
+        );
+      else if (r.check === "fast-mode") line(r.reason + ".", 6);
+      line(`Set in ${home(r.owner)}`, 6);
+    }
+  }
+  const keeps = checks.filter((r) => action(r) === "keep");
+  if (keeps.length) {
+    section("Keep");
+    for (const r of keeps) {
+      line(`${name(r)}: ${settingValue(r, r.current)}`, 2);
+      if (r.check === "claude-cache-ttl" && r.oneHourSavingsUsd !== 0) {
+        const other = r.current === "1h" ? "5m" : "1h";
+        const margin = Math.abs(r.oneHourSavingsUsd);
+        line(
+          `${r.current} costs about ${about(margin)} less than ${other} over ${r.windowBasisKind === "ttl-transition" ? `the ${window(r)} since it last changed` : window(r)}${coverageNote(r)}.`,
+          6,
+        );
+      } else if (r.check === "compaction-window")
+        line("No other window was cheaper on recorded sessions.", 6);
+      else if (r.check === "idle-compaction")
+        line(
+          r.current
+            ? "Summarizing idle sessions cost less than re-reading them."
+            : "Summarizing idle sessions would not have saved money.",
+          6,
+        );
+    }
+  }
+  const unknown = checks.filter((r) => action(r) === "advisory");
+  if (unknown.length) {
+    section("Not enough evidence");
+    for (const r of unknown) {
+      line(`${name(r)}: ${settingValue(r, r.current)}`, 2);
+      line(unresolved(r), 6);
+    }
+  }
+  line();
+  line(
+    `Prices: ${report.prices.offline ? "cached" : "fetched"} from ${home(report.prices.source)}${report.prices.fetchedAt ? ` (${report.prices.fetchedAt.slice(0, 10)})` : ""}.`,
+  );
+  line(
+    "Each line compares one setting with everything else unchanged; savings do not add up.",
+  );
+  line(
+    "--details shows the evidence and assumptions behind each line; --json is for scripts.",
+  );
+}
+function coverageNote(r: CheckResult): string {
+  const c = r.coverage;
+  if (!c || c.priced === c.total) return "";
+  // Percent, because one request can bill several parts.
+  const percent = Math.floor((c.priced / c.total) * 1000) / 10;
+  return `, using the ${percent}% of requests with measured usage`;
 }

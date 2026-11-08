@@ -388,11 +388,8 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
       else if (combinedEnv.CLAUDE_CODE_USE_VERTEX === "1")
         provider = "google-vertex-anthropic";
       else if (combinedEnv.CLAUDE_CODE_USE_FOUNDRY === "1") provider = "azure";
-      else if (
-        combinedEnv.ANTHROPIC_BASE_URL &&
-        combinedEnv.ANTHROPIC_BASE_URL !== "https://api.anthropic.com"
-      )
-        provider = "custom";
+      // A custom ANTHROPIC_BASE_URL (gateway or proxy) still speaks the Anthropic API,
+      // so its requests are priced as public Anthropic API equivalents.
     }
     const speedScopes =
       root.harness === "claude"
@@ -584,6 +581,7 @@ export async function discover(options: DiscoveryOptions = {}): Promise<{
             device: info.dev,
             inode: info.ino,
             deferredBytes: 0,
+            skippedLines: 0,
             lines: 0,
           });
       }

@@ -164,8 +164,9 @@ test("rate-only premium preserves Claude 5m/1h reads/writes, geography and fixed
     assert.equal(result.observed.standardParts, 1);
     assert.equal(result.currentEstimate.pricedParts, 2);
     const json = JSON.stringify(report);
-    for (const details of [false, true]) {
-      const text = formatReport(report, { details });
+    assert.match(formatReport(report), /Fast mode \[/);
+    {
+      const text = formatReport(report, { details: true });
       assert.match(text, /Observed response-tier premium/);
       assert.match(text, /Current-setting premium estimate/);
       assert.match(text, /cache-switch effects excluded/);
@@ -436,7 +437,7 @@ test("unknown speeds, price gaps and explicit windows never turn missing premium
   }
 });
 
-test("built CLI warns from current settings alone, remains read-only and fails malformed selected scans", async () => {
+test("built CLI warns from current settings alone, remains read-only and skips unreadable lines", async () => {
   const w = await workspace();
   try {
     const { spawnSync } = await import("node:child_process");
@@ -473,10 +474,9 @@ test("built CLI warns from current settings alone, remains read-only and fails m
       join(w.codex, "sessions/broken.jsonl"),
       '{"private":"SYNTHETIC_PRIVATE",BROKEN}\n',
     );
-    const failed = run();
-    assert.equal(failed.status, 2);
-    assert.equal(failed.stdout, "");
-    assert.doesNotMatch(failed.stderr, /SYNTHETIC_PRIVATE/);
+    const skipped = run();
+    assert.equal(skipped.status, 0);
+    assert.doesNotMatch(skipped.stdout + skipped.stderr, /SYNTHETIC_PRIVATE/);
   } finally {
     await w.dispose();
   }

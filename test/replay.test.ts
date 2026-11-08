@@ -71,6 +71,8 @@ function data(requests: Request[], events: StructuralEvent[] = []): Scan {
       tierKnown: requests.length,
       missingUsage: 0,
       deferredFiles: 0,
+      skippedLines: 0,
+      skippedFiles: 0,
       issues: [],
     },
   };
@@ -118,6 +120,55 @@ test("TTL compares aggregate net cost in either direction and holds new prefix w
     analyze({ scan: tie, catalog: c, now: 1 }).checks[0]!.action,
     "keep",
   );
+});
+
+test("each iteration of one request keeps its own replayed cache cost", async () => {
+  const base = makeRequest();
+  const part = base.parts[0]!;
+  // A write followed by a read of it in the same request: 1h only makes the write dearer.
+  const s = data([
+    makeRequest({
+      parts: [
+        { ...part, usage: claudeUsage({ write: 1000 }) },
+        { ...part, usage: claudeUsage({ write: 0, read: 1000 }) },
+      ],
+    }),
+  ]);
+  s.profiles[0]!.ttl.main.value = "1h";
+  const check = analyze({ scan: s, catalog: await prices(), now: 1 })
+    .checks[0]!;
+  assert.equal(check.recommended, "5m");
+  assert.equal(check.action, "change");
+  assert.ok(Math.abs(check.savingsUsd! - (1000 * (8 - 5)) / 1e6) < 1e-10);
+});
+
+test("unreadable lines are unknown evidence that can block a TTL recommendation", async () => {
+  const first = makeRequest();
+  const next = makeRequest({
+    id: "next",
+    time: 600000,
+    endTime: 600000,
+    parts: [{ ...first.parts[0]!, usage: claudeUsage({ write: 1100 }) }],
+  });
+  const s = data([first, next]);
+  s.snapshots = [
+    {
+      file: "synthetic",
+      harness: "claude",
+      profiles: ["profile"],
+      bytes: 0,
+      device: 0,
+      inode: 0,
+      deferredBytes: 0,
+      skippedLines: 10000,
+      lines: 0,
+    },
+  ];
+  const check = analyze({ scan: s, catalog: await prices(), now: 1200000 })
+    .checks[0]!;
+  assert.equal(check.recommended, null);
+  assert.equal(check.action, "advisory");
+  assert.equal(check.coverage!.total, check.coverage!.priced + 10000);
 });
 
 test("5m rewrites a 1h read after 5 minutes; sessions and models do not share inferred cache", async () => {
@@ -358,7 +409,10 @@ test("scenario-invariant unknown server fees do not veto a priced TTL difference
     catalog: await prices(),
     now: 1200000,
   });
-  assert.match(formatReport(report), /identical fixed costs remain unknown/i);
+  assert.match(
+    formatReport(report, { details: true }),
+    /identical fixed costs remain unknown/i,
+  );
   // Unknown request usage is not scenario-invariant and must still block a winner.
   next.parts[0]!.usage = { ...next.parts[0]!.usage, write: null, read: null };
   assert.equal(
@@ -550,7 +604,7 @@ test("unlinked attempts use matching bracket evidence without converting observe
       check.sensitivity.unlinked!.coldCache["5m"].totalUsd!,
   );
   assert.ok(check.sensitivity.unlinked!.noBilledAttempt["5m"].totalUsd! > 0);
-  assert.match(formatReport(report), /unlinked.*estimated/i);
+  assert.match(formatReport(report, { details: true }), /unlinked.*estimated/i);
 });
 
 test("growing-context retry evidence supports an estimate within the recorded cache lifetime", async () => {
@@ -606,7 +660,9 @@ test("growing-context retry evidence supports an estimate within the recorded ca
     now: after.time + 1000,
   }).checks[0]!;
   assert.equal(expired.usageEstimates[0]!.evidence, "unknown");
-  assert.equal(expired.recommended, null);
+  // One unpriced part among twenty clearly 1h-favoring parts cannot flip the winner.
+  assert.equal(expired.recommended, "1h");
+  assert.ok(expired.coverage!.priced < expired.coverage!.total);
 });
 
 test("retry estimates attribute additional downstream reads, never the following request's own writes", async () => {
@@ -631,7 +687,7 @@ test("retry estimates attribute additional downstream reads, never the following
     now: 60000,
   }).checks[0]!;
   assert.equal(invalidated.usageEstimates[0]!.evidence, "unknown");
-  assert.equal(invalidated.recommended, null);
+  assert.ok(invalidated.coverage!.priced < invalidated.coverage!.total);
   first.parts[0]!.usage = claudeUsage({ input: 1000, write: 0 });
   after.parts[0]!.usage = claudeUsage({ input: 1200, write: 200 });
   const noReadEvidence = analyze({
@@ -901,7 +957,7 @@ test("bracketing cannot cross changes of source, model, client, profile provenan
       catalog,
       now: 1800000,
     }).checks.find((c) => c.bucket === "main")!;
-    assert.equal(check.recommended, null, change);
+    assert.ok(check.coverage!.priced < check.coverage!.total, change);
     assert.equal(check.usageEstimates[0]!.evidence, "unknown", change);
   }
 });
@@ -940,7 +996,9 @@ test("estimation needs both adjacent measured brackets and preserves other unsup
           : [first, attempt, other, after];
     const check = analyze({ scan: data(requests), catalog, now: 1800000 })
       .checks[0]!;
-    assert.equal(check.recommended, null, layout);
+    // Two-part histories cannot outweigh their unpriced half; the mixed history can.
+    assert.equal(check.recommended, layout === "mixed" ? "1h" : null, layout);
+    assert.ok(check.coverage!.priced < check.coverage!.total, layout);
     assert.equal(check.requests, requests.length, layout);
     assert.equal(
       check.usageEstimates.filter((e) => e.evidence === "estimated").length,

@@ -17,6 +17,7 @@ import { CLAUDE_WINDOW_BOUNDS, windowControl } from "./controls.js";
 import { replayParts, type ReplayedPart } from "./scenarios.js";
 import {
   addCosts,
+  pairedSavings,
   priceComponents,
   pricePart,
   serverCost,
@@ -181,6 +182,8 @@ interface Simulation {
   requests: Request[];
   added: AddedCompaction[];
   errors: string[];
+  /** Sessions whose replay is unknown from this time on; other sessions stay priced. */
+  uncertain: Map<string, number>;
   affected: Set<string>;
   events: StructuralEvent[];
   estimatedParts: Set<string>;
@@ -203,6 +206,7 @@ function simulate(options: {
     requests: [],
     added: [],
     errors: [],
+    uncertain: new Map(),
     affected: new Set(),
     events: [],
     estimatedParts: new Set(),
@@ -225,6 +229,11 @@ function simulate(options: {
       boundaries.set(origin.session, times);
     }
   for (const r of options.requests) {
+    const fail = (reason: string) => {
+      result.errors.push(reason);
+      if (!result.uncertain.has(r.session))
+        result.uncertain.set(r.session, r.time);
+    };
     const billing = options.estimates.get(r.id)?.part;
     const parts = billing ? [billing] : r.parts;
     let state = states.get(r.session);
@@ -262,7 +271,7 @@ function simulate(options: {
           ((prefix(r, p) === null || p.kind === "unknown") &&
             (state.removed > 0 || u.input > options.window)))
       ) {
-        result.errors.push(
+        fail(
           "missing input/cache geometry or iteration semantics can affect window eligibility",
         );
         state.input = null;
@@ -275,7 +284,7 @@ function simulate(options: {
           u.input === null ||
           (state.input !== null && u.input < state.input))
       ) {
-        result.errors.push(
+        fail(
           "compacted context crosses multipart, model/agent/provider/speed changes or an unexplained input decrease",
         );
         state.removed = 0;
@@ -286,9 +295,7 @@ function simulate(options: {
         oldPrefix !== null &&
         oldPrefix < state.removed
       ) {
-        result.errors.push(
-          "recorded prefix cannot contain the modeled removed context",
-        );
+        fail("recorded prefix cannot contain the modeled removed context");
         state.removed = 0;
       }
       let added: AddedCompaction | null = null;
@@ -300,7 +307,7 @@ function simulate(options: {
       ) {
         const matches = options.samples.filter((s) => sameCohort(r, p, s));
         if (messages.length !== 1 || !matches.length || oldPrefix === null) {
-          result.errors.push(
+          fail(
             "no compatible measured compaction summary and resumed-prefix sample, or ambiguous multipart request",
           );
         } else {
@@ -318,7 +325,7 @@ function simulate(options: {
             ),
           );
           if (summaryCohorts.size !== 1)
-            result.errors.push(
+            fail(
               "compatible samples disagree about summary model/provider/tier/speed/geography",
             );
           const output = options.larger
@@ -332,7 +339,7 @@ function simulate(options: {
             resumed + ordinary > options.window ||
             resumed >= oldPrefix - state.removed
           ) {
-            result.errors.push(
+            fail(
               "observed resumed-prefix proxy does not shrink this context below the candidate window",
             );
           } else {
@@ -405,7 +412,7 @@ function simulate(options: {
           !added &&
           (u.read ?? 0) > 0
         )
-          result.errors.push(
+          fail(
             "counterfactual prefix cache retention is not established for this Codex model",
           );
         u.read = warm ? Math.min(state.prefix!, remaining) : 0;
@@ -415,7 +422,7 @@ function simulate(options: {
           u.write1h = ttl === "1h" ? u.write : 0;
         } else if (billedWrites) {
           if (original.usage.write === null)
-            result.errors.push(
+            fail(
               "Codex cache-write geometry is missing for an affected request",
             );
           u.write = remaining - u.read;
@@ -480,6 +487,7 @@ export function replayWindows(options: {
     events: [],
     added: [],
     errors: [],
+    uncertain: new Map(),
     affected: new Set(),
     estimatedParts: new Set(),
   };
@@ -500,6 +508,11 @@ export function replayWindows(options: {
     result.events.push(...next.events);
     result.added.push(...next.added);
     result.errors.push(...next.errors);
+    for (const [session, time] of next.uncertain)
+      result.uncertain.set(
+        session,
+        Math.min(time, result.uncertain.get(session) ?? time),
+      );
     for (const id of next.affected) result.affected.add(id);
     for (const id of next.estimatedParts) result.estimatedParts.add(id);
   }
@@ -719,24 +732,52 @@ export function compactionChecks(options: {
             ? before
             : raw(window, larger, cold);
         const previous = before?.after ?? baseline;
-        const beforeCosts: Cost[] = before
-          ? [
-              ...before.simulation.added.map((a) => a.summaryCost),
-              ...before.errors,
-            ]
-          : [];
-        const afterCosts: Cost[] = [
-          ...point.simulation.added.map((a) => a.summaryCost),
-          ...point.errors,
-        ];
+        // One pair per request that gains or loses a summary, so the unpriced
+        // bound compares against single differences rather than their total.
+        const summaries = new Map<
+          string,
+          { baseline: Cost[]; alternative: Cost[] }
+        >();
+        const summary = (request: string) => {
+          const entry = summaries.get(request) ?? {
+            baseline: [],
+            alternative: [],
+          };
+          summaries.set(request, entry);
+          return entry;
+        };
+        for (const a of before?.simulation.added ?? [])
+          summary(a.request).baseline.push(a.summaryCost);
+        for (const a of point.simulation.added)
+          summary(a.request).alternative.push(a.summaryCost);
+        const pairs = [...summaries.values()].map((s) => ({
+          baseline: addCosts(s.baseline),
+          alternative: addCosts(s.alternative),
+        }));
+        const uncertain = (r: Request) =>
+          [before?.simulation.uncertain, point.simulation.uncertain].some(
+            (sessions) => (sessions?.get(r.session) ?? Infinity) <= r.time,
+          );
         for (const [index, item] of point.after.entries()) {
           const original = previous[index]!;
+          if (uncertain(item.request)) {
+            const reason =
+              "session replay is unknown after a request it cannot model";
+            pairs.push({
+              baseline: unknownCost(reason),
+              alternative: unknownCost(reason),
+            });
+            continue;
+          }
           if (JSON.stringify(original.p) === JSON.stringify(item.p)) continue;
-          beforeCosts.push(
+          const baselineParts = [
             original.components.cache,
             original.components.ordinary,
-          );
-          afterCosts.push(item.components.cache, item.components.ordinary);
+          ];
+          const alternativeParts = [
+            item.components.cache,
+            item.components.ordinary,
+          ];
           const oldOutput = outputUnit(catalog, original).totalUsd;
           const newOutput = outputUnit(catalog, item).totalUsd;
           if (
@@ -744,18 +785,35 @@ export function compactionChecks(options: {
             newOutput === null ||
             oldOutput !== newOutput
           ) {
-            beforeCosts.push(original.components.output);
-            afterCosts.push(item.components.output);
+            baselineParts.push(original.components.output);
+            alternativeParts.push(item.components.output);
           }
+          pairs.push({
+            baseline: addCosts(baselineParts),
+            alternative: addCosts(alternativeParts),
+          });
         }
-        const baselineComparisonCost = addCosts(beforeCosts);
-        const comparisonCost = addCosts(afterCosts);
+        const beforeErrors = before?.errors ?? [];
+        const baselineComparisonCost = addCosts([
+          ...pairs.map((p) => p.baseline),
+          ...beforeErrors,
+        ]);
+        const comparisonCost = addCosts([
+          ...pairs.map((p) => p.alternative),
+          ...point.errors,
+        ]);
+        // Per-session failures are unpriced pairs; an unknown current control still blocks a price.
+        const paired = pairedSavings(pairs, skippedLines(scan, profile.id));
         const savingsUsd =
-          baselineComparisonCost.totalUsd !== null &&
-          comparisonCost.totalUsd !== null
-            ? baselineComparisonCost.totalUsd - comparisonCost.totalUsd
-            : null;
-        return { ...point, baselineComparisonCost, comparisonCost, savingsUsd };
+          control.comparisonUnknown || !paired.decided ? null : paired.usd;
+        const coverage = { priced: paired.priced, total: paired.total };
+        return {
+          ...point,
+          baselineComparisonCost,
+          comparisonCost,
+          savingsUsd,
+          coverage,
+        };
       };
       const scenarios: WindowScenario[] = windows.map((window) => {
         const point = run(window, false, false);
@@ -767,6 +825,7 @@ export function compactionChecks(options: {
           baselineComparisonCost: point.baselineComparisonCost,
           comparisonCost: point.comparisonCost,
           savingsUsd: point.savingsUsd,
+          coverage: point.coverage,
           added: point.simulation.added,
           affectedRequests: point.simulation.affected.size,
           cacheEvidence: point.after.flatMap((i) =>
@@ -872,6 +931,9 @@ export function compactionChecks(options: {
         cacheEvidence: baseline.flatMap((i) =>
           i.evidence ? [i.evidence] : [],
         ),
+        coverage:
+          (winning ?? scenarios.find((s) => s.window === control.value))
+            ?.coverage ?? null,
         savingsUsd: savings,
         monthlySavingsUsd:
           savings !== null && now > since
@@ -925,4 +987,11 @@ export function compactionChecks(options: {
     }
   }
   return checks;
+}
+
+/** Unreadable lines in a profile's transcripts; each could have been a request. */
+export function skippedLines(scan: Scan, profile: string): number {
+  return scan.snapshots
+    .filter((s) => s.profiles.includes(profile))
+    .reduce((n, s) => n + s.skippedLines, 0);
 }

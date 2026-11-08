@@ -103,7 +103,10 @@ Recommendations for every check:
   the setting would add. State the replay assumptions, show uncertainty
   and break-evens beside the estimate, and do not require a win on every
   period or in every sensitivity scenario. Missing inputs that cannot be
-  estimated prevent a priced recommendation; uncertainty alone does not.
+  estimated leave their own requests unpriced; a recommendation stands when
+  those requests, each bounded by the largest measured difference, cannot
+  flip it, and the report says what share was measured. Uncertainty alone
+  never blocks one.
 - Distinguish measured token usage, estimated attribution or replay, and
   guidance without dollars in both text and JSON. Missing attribution is
   unknown, never zero. Exit 2 on a failed scan, 1 when a change is
@@ -153,6 +156,16 @@ Recommendations for every check:
 
 - Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-07, `npm whoami` still returned E401; public packages suggest scope ownership but do not establish this session's authority. An agent can prepare and test without credentials, but cannot complete the account owner's login or grant itself rights. Check the authenticated identity and scope permissions up front. Configure trusted publishing near the actual release, respecting its first-publish expiry and whether it supports a new package; otherwise bootstrap by publishing the tested complete tarball with public access, then configure it for later releases. Follow [release preparation](../../docs/releasing.md): the main-only `npm` environment has been configured and verified by an agent, without a manual reviewer gate; bootstrap the tested complete tarball using environment-only authentication if needed, and configure OIDC near a subsequent release within its two-day validation window. An agent can automate protected execution, but cannot sign in as the owner or grant itself scope rights. No release was attempted.
 
+Decided 2026-11-08 (maintainer, after the first run on the maintainer's
+host): ✅ recommend from the measured requests when the missing ones cannot
+flip the result (rejected: any unpriced request blocks the check; on that
+host 40 of 17,029 requests blocked every check). ✅ skip and count unreadable
+transcript lines (rejected: fail the run; the host has 36 truncated or
+interleaved lines, several recent). ✅ price a custom `ANTHROPIC_BASE_URL` as
+the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
+of one plain verdict per setting, with the evidence cards under `--details`.
+✅ scale work in its own quest.
+
 ## Required
 
 - [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
@@ -162,3 +175,4 @@ Recommendations for every check:
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds
 - [T3 profiles and settings](/quest/m0/t3.md) - native history discovery, T3 ownership, and T3-specific idle policies without double billing
 - [SSH host audits](/quest/m0/ssh.md) - selected remote audits with the same artifact and a combined privacy-preserving report
+- [Scan large histories](/quest/m0/scale.md) - a default run completes on a host with tens of gigabytes of transcripts, and `--json` and `--details` stay usable

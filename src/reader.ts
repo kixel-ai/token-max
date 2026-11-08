@@ -307,24 +307,25 @@ export async function readSnapshot(
         chunks.push(Buffer.from(buffer.subarray(start, index)));
         snapshot.lines++;
         const location = { file: snapshot.file, line: snapshot.lines };
-        let raw: unknown;
+        let raw: unknown = null;
         try {
           const text = new TextDecoder("utf-8", { fatal: true }).decode(
             Buffer.concat(chunks),
           );
           raw = JSON.parse(text);
         } catch {
-          throw new ScanError("invalid complete transcript record", location);
+          // Harnesses leave truncated or interleaved lines after crashes and concurrent writes.
         }
         if (raw === null || typeof raw !== "object" || Array.isArray(raw))
-          throw new ScanError("expected a transcript object", location);
-        try {
-          consume(object(raw), location);
-        } catch (error) {
-          if (error instanceof ScanError)
-            throw new ScanError(error.message, location);
-          throw error;
-        }
+          snapshot.skippedLines++;
+        else
+          try {
+            consume(object(raw), location);
+          } catch (error) {
+            if (error instanceof ScanError)
+              throw new ScanError(error.message, location);
+            throw error;
+          }
         chunks = [];
         pending = 0;
         start = index + 1;
@@ -1039,6 +1040,9 @@ export async function scan(options: ScanOptions = {}): Promise<Scan> {
         r.parts.some((p) => p.usage.input === null || p.usage.output === null),
       ).length,
       deferredFiles: discovery.snapshots.filter((s) => s.deferredBytes > 0)
+        .length,
+      skippedLines: discovery.snapshots.reduce((n, s) => n + s.skippedLines, 0),
+      skippedFiles: discovery.snapshots.filter((s) => s.skippedLines > 0)
         .length,
       issues: [...issues],
     },

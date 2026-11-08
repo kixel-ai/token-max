@@ -130,7 +130,7 @@ test("all lengths freeze before reading; unterminated final records and later ap
   }
 });
 
-test("complete malformed records fail with safe file and line, while valid out-of-window usage is excluded before validation", async () => {
+test("invalid selected usage fails with safe file and line, while unreadable lines are counted and skipped", async () => {
   const w = await workspace();
   try {
     const file = join(w.claude, "projects/project/bad.jsonl");
@@ -145,7 +145,7 @@ test("complete malformed records fail with safe file and line, while valid out-o
     );
     await appendFile(
       file,
-      '{"type":"assistant","private":"SYNTHETIC_PRIVATE_REPLY", broken}\n',
+      '{"type":"assistant","private":"SYNTHETIC_PRIVATE_REPLY", broken}\n[1]\n',
     );
     await assert.rejects(scan(w.options), (error: unknown) => {
       assert.ok(error instanceof ScanError);
@@ -153,14 +153,12 @@ test("complete malformed records fail with safe file and line, while valid out-o
       assert.doesNotMatch(error.message, /SYNTHETIC_PRIVATE/);
       return true;
     });
-    await assert.rejects(
-      scan({ ...w.options, since: Date.parse("2026-01-01") }),
-      (error: unknown) => {
-        assert.ok(error instanceof ScanError);
-        assert.equal(error.location?.line, 2);
-        return true;
-      },
-    );
+    const skipped = await scan({
+      ...w.options,
+      since: Date.parse("2026-01-01"),
+    });
+    assert.equal(skipped.coverage.skippedLines, 2);
+    assert.equal(skipped.coverage.skippedFiles, 1);
   } finally {
     await w.dispose();
   }
@@ -599,6 +597,26 @@ test("unexpected normalization failures remain internal errors, never malformed 
       }),
       (error) => error === bug,
     );
+  } finally {
+    await w.dispose();
+  }
+});
+
+test("a custom ANTHROPIC_BASE_URL proxy is priced as the public Anthropic API", async () => {
+  const w = await workspace();
+  try {
+    await writeFile(
+      join(w.claude, "settings.json"),
+      JSON.stringify({ env: { ANTHROPIC_BASE_URL: "https://proxy.invalid" } }),
+    );
+    await fixture(
+      join(w.claude, "projects/project/main.jsonl"),
+      "claude.jsonl",
+    );
+    const data = await scan(w.options);
+    assert.equal(data.profiles[0]!.provider, null);
+    assert.ok(data.requests.length);
+    assert.ok(data.requests.every((r) => r.provider === "anthropic"));
   } finally {
     await w.dispose();
   }

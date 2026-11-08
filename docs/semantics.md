@@ -18,9 +18,12 @@ silently discarded attempt; it does not fail selected billing validation. Select
 usage errors fail the scan. Requests linked across the window use their recorded
 start time, so a completion after the boundary does not move old work into billing.
 Context records still establish subsequent model/client metadata. File dates and
-modification times cannot prove that all records precede the window. A broken JSON
-record cannot safely prove its top-level timestamp, so it fails even when the file
-began earlier. Diagnostics never quote JSON parser errors. Unexpected normalization
+modification times cannot prove that all records precede the window. A complete
+line that is not a JSON object cannot prove its timestamp either; it is skipped and
+counted, and its usage is missing, wherever it falls. Each counts as one unpriced
+pair in its profile's paired comparisons, so many such lines block a verdict. Real histories contain such
+lines from truncated Codex records that were later rewritten and from interleaved
+concurrent Claude writes. Diagnostics never quote JSON parser errors. Unexpected normalization
 exceptions remain internal errors, distinct from malformed JSON/UTF-8 and explicit
 invalid metadata. The CLI sanitizes internal failures.
 
@@ -62,7 +65,9 @@ Counts are measured evidence where individually recorded; cumulative differences
 are estimated and unverifiable deltas are unknown. Costs are estimates at the
 catalog's present public API rates. Missing costs have both a known subtotal and
 a null total, with reasons. An internal model is never replaced with a public one.
-Custom endpoints and unsupported providers/tiers are not assigned standard rates.
+A Claude profile with a custom `ANTHROPIC_BASE_URL`, such as a gateway or proxy,
+still speaks the Anthropic API and is priced as the public Anthropic API
+equivalent. Unsupported providers/tiers are not assigned standard rates.
 Without historical endpoint metadata, a standard Claude profile uses an explicitly
 labelled public Anthropic API equivalent. Conflicting provider conditions on a
 shared history stay unknown. Historical spend is never assigned to all aliases.
@@ -106,6 +111,15 @@ boundary origins. The lower aggregate estimate decides the winner,
 even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
 reuse break-even accompany the estimate and do not veto it.
 
+Scenarios are compared part by part. The decision sums the difference over parts
+priced under both options and treats every other part as able to differ by at
+most the largest priced difference. A winner is recommended only when that bound
+cannot flip the sign; otherwise the check stays unknown. A handful of failed or
+in-flight requests therefore cannot hide a clear winner, while a close call stays
+unresolved. `coverage` gives the priced and total part counts, and the TTL result
+adds `oneHourSavingsUsd` so a kept setting can state its margin. Scenario totals
+still keep null and the unknown reasons.
+
 The maintainer's [B1 cache-state decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6710296074)
 uses explicit known, estimated and unknown predecessor states. A recorded cache
 touch establishes a known prefix in its fully resolved cohort; supported attempt
@@ -129,7 +143,7 @@ expired/recent predecessors and the prefix extrema in the 5-to-60-minute range;
 they are not a duplicate inventory of every attempt. Every original attempt stays
 in the scan. Unknown prefix lengths are evaluated at the conversion extrema, not
 assigned a billed point estimate. If possible predecessors imply different cache
-reads/writes, only that affected comparison stays unpriced, with no invented cache
+reads/writes, only that part's comparison stays unpriced, with no invented cache
 subtotal for the request. If the geometry is invariant, the comparison can be
 priced while predecessor attribution remains unknown. This is an evidence test,
 not a demand that every sensitivity scenario favor the aggregate winner.
@@ -222,9 +236,7 @@ provider binary and recognized as described below. `precomputed` remains an undo
 duration cannot establish generation time; absence of a boundary in a final idle
 period does not prove that no summary was generated or charged. Later checks must
 keep these limits when interpreting eligibility and final periods. No observed
-idle fixture or reproducible historical billing total is claimed. The host has
-multiple malformed complete records across several histories; the first safe
-failure location is not a claim that repairing one file would enable a full audit.
+idle fixture or reproducible historical billing total is claimed.
 
 ## Compaction windows
 
@@ -281,8 +293,11 @@ lifetime or the documented default 30m billed Codex lifetime. A new prefix canno
 inherit external warming of the replaced transcript.
 
 Observed boundaries reset modeled reductions. Ambiguous multipart geometry,
-missing affected usage, model/agent/provider changes, unexplained context decreases
-and unsupported cache retention leave candidates unpriced. Unchanged unknown costs
+missing affected usage, a missing compaction sample, model/agent/provider changes,
+unexplained context decreases and unsupported cache retention leave the rest of
+that session unpriced under the candidate. Other sessions stay priced and the
+same part-by-part decision rule as the TTL check applies; an unresolved current
+window control still leaves the comparison unpriced. Unchanged unknown costs
 may cancel; affected input/cache prices and context tiers are repriced, including
 output when its unit rate changes. Full totals keep unknown charges even when the
 comparison is priced. Bracketed attempt estimates retain their witnesses and never
@@ -461,7 +476,7 @@ inference. Codex user aliases without a shared message identity are matched by
 their corresponding equal-text occurrence, with that identity basis disclosed. Observed nested completions establish
 positive evidence, never complete nested visibility. Corrupt pre-window exposure metadata invalidates subsequent candidate state and
 adds a coverage issue, preserving the reader's existing billing-window semantics.
-Complete malformed selected records still fail the entire scan. Calibration
+Calibration
 estimates outside the request's measured input support stay unpriced.
 
 No supported client/version

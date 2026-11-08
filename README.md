@@ -111,10 +111,14 @@ usage are left out of both sides, and a recommendation is made only when they
 could not flip it, assuming none differs by more than the largest measured
 difference. The verdict then says what share of requests was measured.
 
-Use `--details` for the full evidence cards: every check's owner, baseline,
-assumptions, uncertainty, cost components,
-break-evens, sensitivity scenarios, cache witnesses and sources. Nothing is hidden
-behind an interactive prompt or a top-N limit. The layout wraps long paths and
+Use `--details` for evidence cards: every check's owner, baseline, assumptions,
+uncertainty, cost components, break-evens, sensitivity scenarios, cache witnesses
+and sources. Repeated idle periods, cache witnesses and attempt estimates are
+grouped by their recorded outcomes and reasons. Token ranges and combined costs
+summarize modeled compactions; geometry sources are listed once. Identifiers in
+grouped cache and attempt evidence are examples. `--json` retains every period,
+witness, context-size comparison and modeled compaction. Nothing is hidden behind an interactive prompt
+or a top-N limit. The layout wraps long paths and
 names on narrow terminals. Redirected output keeps each field on one line so
 paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode. Redirected output

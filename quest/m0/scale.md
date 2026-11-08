@@ -1,4 +1,4 @@
-# [M] Scan large histories
+# [M] Make full-history JSON practical
 
 ## Goal
 
@@ -8,36 +8,33 @@ can use.
 
 ## Plan
 
-Measured 2026-11-08 on the maintainer's host (21 GB in 16,315 transcripts
-across `~/.claude`, `~/.claude-proxy`, `~/.claude-api-credits` and `~/.codex`),
-with the TypeScript implementation:
+The Rust rewrite and this quest's memory work let the full history complete.
+Consecutive component lists share their prefixes, replay emits one request's
+parts at a time, and structural events share session and pricing metadata.
+The reader releases temporary indexes before analysis and avoids spare capacity
+in its final vectors. Text details group repeated idle periods, cache witnesses,
+usage estimates and modeled compaction geometry; JSON retains the full evidence.
 
-- The default run was killed at 27 GB RSS after about 10 minutes, with or
-  without `--since`. Every file is read and every pre-window request is kept
-  as cache context, so `--since` does not bound the work.
-- One profile for one week (`~/.claude-proxy`, 192,775 requests) took 24
-  minutes, 158 s of it scanning. A CPU profile put 800 s in idle's
-  per-context-size grouping, which filtered every period once per distinct
-  size, 180 s in compaction's predecessor lookup, and 77 s rebuilding the
-  cache boundary index for every replay.
-- `--json` on a 321 MB profile failed with `RangeError: Out of memory` in
-  `JSON.stringify`, so the report never reaches stdout.
-- `--details` on that profile printed 121,083 lines, about 120,000 of them
-  one line per idle period.
+Remaining: JSON schema version 1 repeats the complete component lists, request
+evidence and modeled histories. A frozen whole-host run on 2026-11-08 produced
+26,543,011,046 JSON bytes for roughly one million requests. Streaming prevents
+a second output-sized allocation, but the file is still impractical to inspect
+or load in ordinary JSON consumers. Keeping every request and event also means
+memory remains proportional to the full history, including before `--since`.
+Changing those arrays or their selected-window coverage changes the public
+report schema.
 
-The Rust rewrite indexes those lookups and streams JSON to stdout. Its output
-matched the TypeScript's exactly on `~/.claude-api-credits` (JSON, text and
-`--details`). Measured the same day with the Rust release build:
+Do not discard old files from their modification times or a cache-TTL cutoff:
+they may carry component catalogs, pricing context, conversation aliases and
+compaction calibration used by selected requests. Design the compact report and
+its evidence opt-in before removing history from the serialized scan.
 
-- `~/.claude-proxy` for one week: 89 s and 3.4 GB.
-- The default run over the whole host (983,585 requests from 47 days): 7.4
-  minutes and 12.5 GB.
+## Waiting
 
-Remaining: memory still grows with the whole history. Cache context only
-needs pre-window requests within the longest cache lifetime of the window,
-and a file whose last write precedes that point cannot add a selected
-request. Each component keeps one location per request that carried it,
-about half the exposure memory. The JSON report repeats per-request
-evidence, which may need a smaller default shape; that changes schema
-version 1 and needs the maintainer's call. `--details` should summarize
-per-period evidence and leave the full list to JSON.
+- Maintainer: choose the JSON evidence contract. Recommend a new schema version
+  with aggregate checks and component costs by default and an explicit opt-in
+  for full per-request evidence; the alternative keeps version 1's complete
+  arrays and its multi-gigabyte output. The original implementation brief
+  reserved schema changes for this decision, so it cannot be automated without
+  choosing a public API change. Check: a maintainer decision recorded on the PR
+  selects the default fields and the full-evidence opt-in.

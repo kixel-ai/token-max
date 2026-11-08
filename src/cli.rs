@@ -27,7 +27,7 @@ Usage: token-max [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
-  --details               Show all check evidence, assumptions, uncertainty and sources
+  --details               Show grouped check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
   --json                  Complete structured report, schema version 1
   --offline               Use cached public prices without network access

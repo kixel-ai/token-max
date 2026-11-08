@@ -1460,3 +1460,49 @@ pub struct Report {
     pub checks: Vec<CheckResult>,
     pub assumptions: Vec<String>,
 }
+
+#[cfg(test)]
+mod ids_tests {
+    use super::{Ids, Text};
+    use std::collections::HashSet;
+
+    #[test]
+    fn branches_keep_their_flat_values_after_ancestors_are_dropped() {
+        let texts = |values: &[&str]| values.iter().copied().map(Text::from).collect::<Vec<_>>();
+        let first = Ids::from(texts(&["a", "b", "c", "d"]));
+        let second = Ids::new(Some((&first, 2)), texts(&["e", "f"]).into());
+        let third = Ids::new(Some((&second, 3)), texts(&["g"]).into());
+        let branch = Ids::new(Some((&third, 1)), texts(&["h"]).into());
+        let last = Ids::sharing(Some(&branch), texts(&["a", "h", "i"]));
+        drop((first, second, third, branch));
+        let flat = texts(&["a", "h", "i"]);
+        for start in 0..=flat.len() + 1 {
+            assert_eq!(
+                last.iter_from(start).cloned().collect::<Vec<_>>(),
+                flat[start.min(flat.len())..]
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&last).unwrap(),
+            serde_json::to_value(&flat).unwrap()
+        );
+        assert!(HashSet::from([Ids::from(flat)]).contains(&last));
+        assert_ne!(last, Ids::from(texts(&["a", "different", "i"])));
+    }
+
+    #[test]
+    fn long_growing_lists_serialize_and_drop_without_recursion() {
+        let mut ids = Ids::from(vec![]);
+        for n in 0..20_000 {
+            ids = Ids::new(
+                Some((&ids, ids.len())),
+                vec![Text::from(n.to_string())].into(),
+            );
+        }
+        assert_eq!(ids.len(), 20_000);
+        let json = serde_json::to_value(&ids).unwrap();
+        assert_eq!(json[0], "0");
+        assert_eq!(json[19_999], "19999");
+        drop(ids);
+    }
+}

@@ -255,7 +255,7 @@ try {
     const text = await invoke([...args, "--plain"]);
     assert.equal(text.status, 1, text.stderr);
     assert.match(text.stdout, /Main-agent prompt cache TTL: 5m -> 1h/);
-    assert.match(text.stdout, /Saves about <?\$/);
+    assert.match(text.stdout, /Saves <?\$/);
     const json = await invoke([...args, "--json"]);
     assert.equal(json.status, 1, json.stderr);
     const report = JSON.parse(json.stdout);

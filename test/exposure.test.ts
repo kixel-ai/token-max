@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scan } from "../src/reader.js";
 import { analyze } from "../src/replay.js";
@@ -312,7 +312,13 @@ test("image inputs and unlinked requests never calibrate from partial text", asy
             ],
           },
         ],
-        tools: [],
+        tools: [
+          {
+            name: "Artifact",
+            description: "a",
+            input_schema: { type: "object" },
+          },
+        ],
       },
     },
     assistant(1),
@@ -321,6 +327,12 @@ test("image inputs and unlinked requests never calibrate from partial text", asy
   assert.equal(calibrate(data.exposure, data.requests).length, 0);
   assert.notEqual(data.exposure.requests[1]!.linkage, "wire");
   assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE/);
+  // Without a calibration nothing is priced, and nothing is shown as $0.
+  const report = analyze({ scan: data, catalog: await prices() });
+  assert.ok(report.context.every((c) => c.estimatedUsd === null));
+  const text = formatReport(report, { width: 200 });
+  assert.match(text, /1 more could not be priced/);
+  assert.match(text, /and the skill and subagent lists\): cost unknown\./);
 });
 
 test("typed/mentioned skills, actual nested completions and script references stay distinct", async () => {
@@ -555,6 +567,15 @@ test("recorded request shapes price each piece at its cache position and count i
       names: ["review"],
       isInitial: true,
     }),
+    // Seen first as a surfaced definition, then sent in the request's tools: it
+    // is priced where the request puts it, not where it first appeared.
+    attachment(0, {
+      type: "deferred_tools_delta",
+      addedNames: [],
+      addedLines: [],
+      removedNames: [],
+      surfacedDefinitions: [{ name: tools[2]!.name, definition: tools[2] }],
+    }),
     {
       type: "api-request-shape",
       sessionId: "session",
@@ -605,6 +626,8 @@ test("recorded request shapes price each piece at its cache position and count i
   assert.equal(row("Bash").calls, 1);
   assert.equal(row("docs").calls, 1);
   assert.equal(row("docs").kind, "mcp-server");
+  assert.equal(row("docs").priced, 1);
+  assert.equal(data.exposure.requests[0]!.prefix, tools.length + 1);
   const review = row("review");
   assert.equal(review.kind, "skill");
   assert.equal(
@@ -612,15 +635,10 @@ test("recorded request shapes price each piece at its cache position and count i
     `"skillOverrides": {"review": "user-invocable-only"}`,
   );
   assert.ok(listing.characters! > 0);
-  // The skill listing follows tools and the system prompt, past the 2,000
-  // cached reads and 900 1h writes, so it pays the ordinary input price.
-  const prefix =
-    (JSON.stringify(system).length +
-      tools.reduce((n, t) => n + JSON.stringify(t).length, 0)) *
-    ratio;
-  assert.ok(prefix > 2900);
-  // Displayed tokens are rounded, so compare the per-token rate.
-  assert.ok(Math.abs(review.costUsd / review.tokens! / 4e-6 - 1) < 0.01);
+  // No earlier request bounds where the listing sits among these cached reads,
+  // so it stays unpriced rather than guessed.
+  assert.equal(review.priced, 0);
+  assert.equal(review.estimatedUsd, null);
   assert.equal(row("Claude Code system prompt").control, null);
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
   // Every piece here costs well under the default $1 per use.
@@ -674,7 +692,12 @@ test("attachments take their latest possible cache position; media and copied ca
         type: "tool_use",
         id: "c1",
         name: "Artifact",
-        input: { data: "d".repeat(4000) },
+        // Tool input can hold fields named like opaque ones; they are billed text.
+        input: {
+          type: "thinking",
+          signature: "q".repeat(100),
+          data: "d".repeat(4000),
+        },
       },
     ],
   };
@@ -748,6 +771,13 @@ test("attachments take their latest possible cache position; media and copied ca
     },
     request(3, ["m1", "m2"]),
     reply(3, usage(0, 3000, 500)),
+    // A changed file at the same path is new content, not carried content.
+    attachment(4, {
+      type: "instructions",
+      files: [{ path: "/repo/CLAUDE.md", content: "j".repeat(600) }],
+    }),
+    request(5, ["m1", "m2"]),
+    reply(5, usage(0, 3500, 500)),
   ];
   const w = await workspace();
   try {
@@ -756,6 +786,28 @@ test("attachments take their latest possible cache position; media and copied ca
         join(w.claude, `projects/project/${file}.jsonl`),
         records.map((r) => JSON.stringify(r)).join("\n") + "\n",
       );
+    // A second profile holds a copy without the call, so the request belongs to
+    // both profiles while the call was recorded in one.
+    const other = join(w.home, ".claude-work/projects/project");
+    await mkdir(other, { recursive: true });
+    await writeFile(
+      join(other, "c.jsonl"),
+      records
+        .map((r) =>
+          JSON.stringify(
+            r.type === "assistant"
+              ? {
+                  ...r,
+                  message: {
+                    ...(r as unknown as { message: object }).message,
+                    content: [],
+                  },
+                }
+              : r,
+          ),
+        )
+        .join("\n") + "\n",
+    );
     const data = await scan(w.options);
     const report = analyze({ scan: data, catalog: await prices() });
     const [calibration] = report.exposure.calibration;
@@ -770,19 +822,22 @@ test("attachments take their latest possible cache position; media and copied ca
     assert.equal(calibration!.samples[0]!.characters, expected);
     const ratio = calibration!.tokensPerCharacter;
     const row = (name: string) => report.context.find((c) => c.name === name)!;
-    // The same call copied into a second transcript file counts once.
+    // The same call copied into a second file counts once, and still counts for
+    // a row shared with a profile whose copy lacks it.
+    assert.equal(row("Artifact").profiles.length, 2);
     assert.equal(row("Artifact").calls, 1);
     // The listing came with the first request, so the second reads it from cache.
     const review = row("review");
     const instructions = row("/repo/CLAUDE.md");
-    assert.equal(instructions.priced, 1);
+    assert.equal(instructions.priced, 2);
     const tokens = 600 * ratio;
     assert.ok(tokens < 500, "the new file fits in the second request's writes");
-    // The instruction file is new in the second request, so it pays the 1h write price.
+    // The file is new in the second request, and its changed revision is new
+    // in the third, so both pay the 1h write price rather than a cached read.
     assert.ok(
-      Math.abs(instructions.costUsd / instructions.tokens! / 8e-6 - 1) < 0.02,
+      Math.abs(instructions.costUsd / (tokens * (8 + 8) * 1e-6) - 1) < 0.001,
     );
-    assert.ok(review.costUsd > 0 && review.priced === 2);
+    assert.ok(review.costUsd > 0 && review.priced === 3);
     assert.ok(review.estimatedUsd === review.costUsd);
   } finally {
     await w.dispose();

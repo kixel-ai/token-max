@@ -461,10 +461,14 @@ and multi-iteration totals cannot calibrate partial text.
 `report.context` prices each piece of recurring context. Only Claude requests
 with a recorded `api-request-shape` or full parameters qualify: tool
 definitions, then the system prompt, lead the prompt in recorded order.
-Attachments such as skill listings and instruction files ride in messages at no
-recorded offset, so each takes the latest position its history allows: the end
-of the session's previous request when that request carried it too, else the
-end of this request, where newly added content goes. Each piece's calibrated
+Prefix membership follows each request's own tool list, not where a component
+was first seen. Attachments such as skill listings and instruction files ride in
+messages at no recorded offset, so each is placed only when the session's
+previous request bounds it: a revision that request carried lies within its
+input and takes the latest such position, and a new or changed revision was
+appended after it and takes the end of this request. With no bounding request,
+attachments are priced only when the request read nothing from cache, where
+position barely matters; otherwise they stay unpriced for that request. Each piece's calibrated
 tokens are charged at the slot they fall in: cached reads, then 1h writes, then
 5m writes, then ordinary input, at the request's model, provider and context
 tier. A request whose calibrated pieces exceed its recorded input is left
@@ -482,12 +486,13 @@ other tools and `mcp__<server>` for a server, which
 and `skillOverrides` set to `user-invocable-only` for a skill. Instruction files
 have no switch. Core tools, the system prompt and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
-transcript files; skill uses count only the model's Skill calls, since a hidden
-skill can still be typed. A piece still sent today is recommended off when
-`estimatedUsd` divided by its uses, counting no use as one, exceeds
-`maxCostPerUseUsd` (default $1, `--max-cost-per-use`); otherwise it is kept. The
-ratio does not depend on the window's length. A piece with no priced request
-gets no verdict. The cost is gross: removing a piece leaves later
+transcript files, and go to the row whose profile set differs least from the
+call's, since copies can split a request and its calls across profiles; skill
+uses count only the model's Skill calls, since a hidden skill can still be
+typed. A piece still sent today is recommended off when `estimatedUsd` divided
+by its uses, counting no use as one, exceeds `maxCostPerUseUsd` (default $1,
+`--max-cost-per-use`); otherwise it is kept. The ratio does not depend on the
+window's length. A piece with no priced request gets no verdict. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
 

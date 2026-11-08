@@ -72,8 +72,13 @@ interface Piece {
   name: string;
   control: Control | null;
   characters: number;
-  /** Tools and the system prompt lead the request in a fixed order; everything else rides in messages. */
+}
+/** A piece as it appears in one request. */
+interface Placed extends Piece {
+  /** Tools and the system prompt lead the request in recorded order; everything else rides in messages. */
   prefix: boolean;
+  /** The component revision it came from, so changed content is not mistaken for carried content. */
+  revision: string;
 }
 
 const json = (value: unknown) => JSON.stringify(value);
@@ -89,7 +94,7 @@ const CORE_TOOLS = new Set([
 ]);
 
 /** The setting that owns a tool, grouping a tool family under one switch. */
-function tool(name: string): Omit<Piece, "characters" | "prefix"> {
+function tool(name: string): Omit<Piece, "characters"> {
   if (name.startsWith("mcp__")) {
     const server = name.split("__")[1] ?? name;
     return {
@@ -130,19 +135,6 @@ function pieces(
   component: Component,
   components: Map<string, Component>,
 ): Piece[] {
-  const prefix = PREFIX.has(component.provenance);
-  return split(component, components).map((p) => ({ ...p, prefix }));
-}
-const PREFIX = new Set([
-  "shape-tool",
-  "shape-system",
-  "wire-tool",
-  "wire-system",
-]);
-function split(
-  component: Component,
-  components: Map<string, Component>,
-): Omit<Piece, "prefix">[] {
   const characters = component.characters;
   if (characters === null) return [];
   const name = component.name;
@@ -264,7 +256,10 @@ export function contextCosts(input: {
   const piecesOf = new Map<string, Piece[]>();
   const rows = new Map<string, ContextCost & { time: number }>();
   const latest = new Map<string, { time: number; keys: Set<string> }>();
-  const previous = new Map<string, { input: number; keys: Set<string> }>();
+  const previous = new Map<
+    string,
+    { input: number | null; keys: Set<string> }
+  >();
   const ordered = scan.requests
     .map((exposure) => ({ exposure, r: requests.get(exposure.request) }))
     .filter(
@@ -275,13 +270,14 @@ export function contextCosts(input: {
   for (const { exposure, r } of ordered) {
     const profiles = [...r.profiles].sort();
     const owner = json(profiles);
-    const parts: Piece[] = exposure.components.flatMap((id) => {
+    const parts: Placed[] = exposure.components.flatMap((id, index) => {
       let cached = piecesOf.get(id);
       if (!cached) {
         cached = pieces(components.get(id)!, components);
         piecesOf.set(id, cached);
       }
-      return cached;
+      const prefix = index < exposure.prefix;
+      return cached.map((piece) => ({ ...piece, prefix, revision: id }));
     });
     const p = r.parts.length === 1 ? r.parts[0]! : null;
     const u = p?.usage;
@@ -296,7 +292,7 @@ export function contextCosts(input: {
       u.read !== null &&
       u.write !== null &&
       (u.write === 0 || (u.write1h !== null && u.write5m !== null));
-    const size = (piece: Piece) => piece.characters * (ratio ?? 0);
+    const size = (piece: Placed) => piece.characters * (ratio ?? 0);
     const total = parts.reduce((n, piece) => n + size(piece), 0);
     // A calibration that overshoots the recorded input cannot place these pieces.
     const placed = priced && total <= u!.input!;
@@ -325,12 +321,12 @@ export function contextCosts(input: {
       row.requests++;
       rows.set(key, row);
     }
+    const revision = (piece: Placed) => `${piece.revision}:${piece.key}`;
     const prior = previous.get(r.session);
-    const messages = new Set(
-      parts.filter((piece) => !piece.prefix).map((piece) => piece.key),
-    );
-    if (u?.input != null)
-      previous.set(r.session, { input: u.input, keys: messages });
+    previous.set(r.session, {
+      input: u?.input ?? null,
+      keys: new Set(parts.filter((x) => !x.prefix).map(revision)),
+    });
     if (placed) {
       const end = u!.input!;
       // Cache slots in prefix order: reads, then 1h writes, then 5m writes, then ordinary input.
@@ -354,21 +350,25 @@ export function contextCosts(input: {
         return cost;
       };
       const head = parts.filter((piece) => piece.prefix);
+      // Attachments are placed only when the session's previous request bounds
+      // them: one it carried lies within its input, and a new one was appended
+      // after it. A cold request writes everything, so position matters little.
+      const bounded = (prior && prior.input !== null) || u!.read === 0;
       const carried = parts.filter(
-        (piece) => !piece.prefix && prior?.keys.has(piece.key),
+        (piece) => !piece.prefix && prior?.keys.has(revision(piece)),
       );
       const fresh = parts.filter(
-        (piece) => !piece.prefix && !prior?.keys.has(piece.key),
+        (piece) => !piece.prefix && !prior?.keys.has(revision(piece)),
       );
-      const sum = (list: Piece[]) => list.reduce((n, x) => n + size(x), 0);
+      const sum = (list: Placed[]) => list.reduce((n, x) => n + size(x), 0);
       const prefixEnd = sum(head);
-      const starts = new Map<Piece, number>();
+      const starts = new Map<Placed, number>();
       let offset = 0;
       for (const piece of head) {
         starts.set(piece, offset);
         offset += size(piece);
       }
-      const stack = (list: Piece[], last: number) => {
+      const stack = (list: Placed[], last: number) => {
         let offset = Math.max(prefixEnd, last - sum(list));
         for (const piece of list) {
           starts.set(piece, offset);
@@ -379,6 +379,7 @@ export function contextCosts(input: {
       stack(fresh, end);
       const charged = new Map<string, { tokens: number; cost: number }>();
       for (const piece of parts) {
+        if (!piece.prefix && !bounded) continue;
         const key = `${owner}:${piece.key}`;
         const tokens = size(piece);
         const prior = charged.get(key) ?? { tokens: 0, cost: 0 };
@@ -400,52 +401,72 @@ export function contextCosts(input: {
     const last = latest.get(owner);
     if (!last || r.time >= last.time) latest.set(owner, { time: r.time, keys });
   }
-  const skills = new Map<string, { calls: number; last: number }>();
+  // Copied histories can leave a call and the requests around it with different
+  // profile sets, so each call goes to the row whose profiles differ least.
+  const families = new Map<string, ContextCost[]>();
+  for (const row of rows.values()) {
+    if (
+      row.kind !== "tool" &&
+      row.kind !== "mcp-server" &&
+      row.kind !== "skill"
+    )
+      continue;
+    const family = `${row.kind}:${row.name}`;
+    families.set(family, [...(families.get(family) ?? []), row]);
+    row.calls = 0;
+  }
+  const last = new Map<ContextCost, number>();
+  const credit = (
+    family: string,
+    profiles: string[],
+    time: number,
+    calls = 1,
+  ) => {
+    let best: ContextCost | null = null;
+    let distance = Infinity;
+    for (const row of families.get(family) ?? []) {
+      const shared = profiles.filter((p) => row.profiles.includes(p)).length;
+      const d = row.profiles.length + profiles.length - 2 * shared;
+      if (shared && d < distance) {
+        best = row;
+        distance = d;
+      }
+    }
+    if (!best) return;
+    best.calls! += calls;
+    last.set(best, Math.max(last.get(best) ?? -Infinity, time));
+  };
+  for (const c of scan.toolCalls) {
+    const family = c.name.startsWith("mcp__")
+      ? `mcp-server:${c.name.split("__")[1]}`
+      : `tool:${c.name.startsWith("Artifact") ? "Artifact" : c.name}`;
+    credit(family, c.profiles, c.lastUsed, c.calls);
+  }
+  const skills = new Map<string, string>();
+  for (const row of rows.values())
+    if (row.kind === "skill")
+      skills.set(identity(`skill:${row.name}`), `skill:${row.name}`);
   for (const i of scan.invocations)
     // Typed requests keep working when a skill is hidden from the model, so only
     // the model's own calls show what its listing is for.
-    if (i.kind === "skill-call" && i.status !== "reference") {
-      const key = `${json([...i.profiles].sort())}:${i.target}`;
-      const prior = skills.get(key) ?? { calls: 0, last: -Infinity };
-      skills.set(key, {
-        calls: prior.calls + 1,
-        last: Math.max(prior.last, i.time),
-      });
-    }
+    if (
+      i.kind === "skill-call" &&
+      i.status !== "reference" &&
+      skills.has(i.target)
+    )
+      credit(skills.get(i.target)!, i.profiles, i.time);
   for (const [key, row] of rows) {
-    const owner = json(row.profiles);
-    row.current = latest.get(owner)?.keys.has(key) ?? false;
+    row.current = latest.get(json(row.profiles))?.keys.has(key) ?? false;
     row.estimatedUsd = row.priced
       ? (row.costUsd * row.requests) / row.priced
       : null;
+    row.lastUsed = last.get(row) ?? null;
     delete (row as Partial<ContextCost & { time: number }>).time;
-    let calls: { calls: number; last: number } | null = null;
-    if (row.kind === "tool" || row.kind === "mcp-server") {
-      calls = { calls: 0, last: -Infinity };
-      for (const c of scan.toolCalls) {
-        if (json([...c.profiles].sort()) !== owner) continue;
-        const match =
-          row.kind === "mcp-server"
-            ? c.name.startsWith(`mcp__${row.name}__`)
-            : c.name === row.name ||
-              (row.name === "Artifact" && c.name.startsWith("Artifact"));
-        if (!match) continue;
-        calls.calls += c.calls;
-        calls.last = Math.max(calls.last, c.lastUsed);
-      }
-    } else if (row.kind === "skill")
-      calls = skills.get(`${owner}:${identity(`skill:${row.name}`)}`) ?? {
-        calls: 0,
-        last: -Infinity,
-      };
-    if (calls) {
-      row.calls = calls.calls;
-      row.lastUsed = calls.calls ? calls.last : null;
+    if (row.calls !== null)
       row.costPerUseUsd =
         row.estimatedUsd === null
           ? null
-          : row.estimatedUsd / Math.max(1, calls.calls);
-    }
+          : row.estimatedUsd / Math.max(1, row.calls);
     if (row.control && row.current && row.costPerUseUsd !== null)
       row.verdict = row.costPerUseUsd > input.maxCostPerUseUsd ? "off" : "keep";
   }

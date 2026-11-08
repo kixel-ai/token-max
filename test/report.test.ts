@@ -288,6 +288,23 @@ test("short windows scale to 30 days, snippets stay valid JSON when narrow, and 
   assert.deepEqual(JSON.parse(narrow.slice(start, end + 1).join("\n")), {
     skillOverrides: { [name]: "user-invocable-only" },
   });
+  // The always-sent total uses the same exact scale as every other line.
+  report.scan.since = Date.parse(report.generatedAt) - 3600000;
+  report.context.push({
+    ...report.context[0]!,
+    kind: "system",
+    name: "Claude Code system prompt",
+    control: null,
+    costUsd: 1,
+    estimatedUsd: 1,
+    calls: null,
+    costPerUseUsd: null,
+    verdict: null,
+  });
+  assert.match(
+    formatReport(report, { width: 200 }),
+    /skill and subagent lists: \$720\./,
+  );
   const details = formatReport(report, { width: 200, details: true });
   assert.match(details, /1 recommended change/);
   assert.doesNotMatch(details, /No applicable/);

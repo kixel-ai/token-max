@@ -704,7 +704,7 @@ function summary(
   );
   const name = (r: CheckResult) =>
     settingName(r) + (many ? ` [${out.profileName(r.profile)}]` : "");
-  const span = since === null ? null : Math.max(until - since, DAY);
+  const span = since === null || until <= since ? null : until - since;
   // Everything is shown per 30 days so lines with different windows compare directly.
   // Scaled by the real duration, however short, as monthlySavingsUsd is.
   const monthly = (usd: number, from: number | null, to: number | null) =>

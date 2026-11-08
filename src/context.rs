@@ -338,7 +338,7 @@ struct Prior<'a> {
     input: Option<i64>,
     keys: HashSet<(&'a str, usize)>,
     /// The tokenizer and the leading tools and system prompt by revision.
-    prefix: (String, &'a [Text]),
+    prefix: (String, Vec<&'a Text>),
 }
 
 struct Row {
@@ -476,7 +476,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // where messages start in this request's tokens.
         let prefix = (
             tokenizer,
-            &view.components[..view.prefix.min(view.components.len())],
+            view.components.iter().take(view.prefix).collect::<Vec<_>>(),
         );
         let prior = previous.insert(
             r.session.as_str(),

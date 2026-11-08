@@ -713,7 +713,9 @@ struct Reader {
     since: Option<Millis>,
     exposure: ExposureCollector,
     requests: IndexMap<String, Request>,
-    events: IndexMap<String, StructuralEvent>,
+    // Events in arrival order, and each one's position by id.
+    events: Vec<StructuralEvent>,
+    event_ids: HashMap<String, usize>,
     // Only explicit compaction lineage can connect a notice to its boundary.
     // Ordinary messages stop the walk; a missing parent is not a historical match.
     compact_parents: HashMap<Key, Option<Link>>,
@@ -730,13 +732,15 @@ impl Reader {
     }
 
     fn add_event(&mut self, e: StructuralEvent) {
-        match self.events.get_mut(&e.id) {
-            Some(previous) => {
+        match self.event_ids.get(&e.id) {
+            Some(&index) => {
+                let previous = &mut self.events[index];
                 union(&mut previous.profiles, e.profiles);
                 previous.origins.extend(e.origins);
             }
             None => {
-                self.events.insert(e.id.clone(), e);
+                self.event_ids.insert(e.id.clone(), self.events.len());
+                self.events.push(e);
             }
         }
     }
@@ -1435,7 +1439,8 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         since,
         exposure: ExposureCollector::new(since),
         requests: IndexMap::new(),
-        events: IndexMap::new(),
+        events: vec![],
+        event_ids: HashMap::new(),
         compact_parents: HashMap::new(),
         notice_parents: HashMap::new(),
         refs: IndexMap::new(),
@@ -1458,6 +1463,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         exposure,
         mut requests,
         mut events,
+        event_ids,
         compact_parents,
         notice_parents,
         refs,
@@ -1528,7 +1534,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             }
         }
     }
-    for e in events.values_mut() {
+    for e in &mut events {
         if let Some(reference) = e.request.as_deref().and_then(|r| r.strip_prefix("ref:")) {
             e.request = ref_to_request.get(reference).cloned();
         }
@@ -1540,19 +1546,32 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             pricing.provider = Some(provider.unwrap_or_else(|| "anthropic".into()));
         }
     }
-    attribute_idle(&mut events, &compact_parents, &notice_parents);
-    let mut all_requests: Vec<Request> = requests.into_values().collect();
+    attribute_idle(&mut events, &event_ids, &compact_parents, &notice_parents);
+    drop((
+        event_ids,
+        compact_parents,
+        notice_parents,
+        refs,
+        ref_to_request,
+    ));
+    // Every request and event stays in memory, so sort in place: a stable slice sort would
+    // buffer half of them, and splitting at the window keeps the selected part where it is.
     // Request IDs are a harness name and a hex digest, where byte order is locale order.
-    all_requests.sort_by(|a, b| a.time.cmp(&b.time).then_with(|| a.id.cmp(&b.id)));
-    let mut all_events: Vec<StructuralEvent> = events.into_values().collect();
-    all_events.sort_by_key(|e| e.time);
-    discover_idle_owners(&options.discovery, &mut profiles, &all_requests)?;
-    discover_codex_speed_owners(&mut profiles, &all_requests)?;
+    requests.sort_by_cached_key(|_, r| (r.time, r.id.clone()));
+    let mut requests: Vec<Request> = requests.into_values().collect();
+    events.sort_by_cached_key(|e| e.time);
+    discover_idle_owners(&options.discovery, &mut profiles, &requests)?;
+    discover_codex_speed_owners(&mut profiles, &requests)?;
     let before = |time: Millis| since.is_some_and(|since| time < since);
-    let (context_requests, requests): (Vec<Request>, Vec<Request>) =
-        all_requests.into_iter().partition(|r| before(r.time));
-    let (context_events, events): (Vec<StructuralEvent>, Vec<StructuralEvent>) =
-        all_events.into_iter().partition(|e| before(e.time));
+    let split = requests.partition_point(|r| before(r.time));
+    let context_requests: Vec<Request> = requests.drain(..split).collect();
+    requests.shrink_to_fit();
+    let split = events.partition_point(|e| before(e.time));
+    let context_boundaries: Vec<StructuralEvent> = events
+        .drain(..split)
+        .filter(|e| e.kind == EventKind::Compaction)
+        .collect();
+    events.shrink_to_fit();
     for r in &requests {
         for issue in &r.issues {
             if !issues.contains(issue) {
@@ -1601,10 +1620,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         events,
         cache_context: CacheContext {
             requests: context_requests,
-            boundaries: context_events
-                .into_iter()
-                .filter(|e| e.kind == EventKind::Compaction)
-                .collect(),
+            boundaries: context_boundaries,
         },
         coverage,
     })
@@ -1614,12 +1630,13 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
 ///
 /// Attribution only ever sets `notice`, so the order notices are visited in does not matter.
 fn attribute_idle(
-    events: &mut IndexMap<String, StructuralEvent>,
+    events: &mut [StructuralEvent],
+    ids: &HashMap<String, usize>,
     compact_parents: &HashMap<Key, Option<Link>>,
     notice_parents: &HashMap<String, HashSet<Option<Key>>>,
 ) {
     let notices: Vec<(Millis, Vec<String>, Option<Key>)> = events
-        .values()
+        .iter()
         .filter(|e| e.kind == EventKind::IdleNotice)
         .map(|e| {
             let parents = notice_parents.get(&e.id);
@@ -1640,7 +1657,8 @@ fn attribute_idle(
                 break;
             };
             if let Some(boundary) = &link.boundary {
-                if let Some(boundary) = events.get_mut(boundary)
+                if let Some(&boundary) = ids.get(boundary)
+                    && let boundary = &mut events[boundary]
                     && boundary.trigger.as_deref() == Some("auto")
                     && boundary.time <= time
                     && boundary.idle_attribution != IdleAttribution::Notice

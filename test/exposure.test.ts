@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { scan } from "../src/reader.js";
 import { analyze } from "../src/replay.js";
 import { calibrate, measureSize } from "../src/exposure.js";
+import { controlText } from "../src/context.js";
+import { formatReport } from "../src/report.js";
 import { id } from "../src/safe.js";
 import { prices, workspace } from "./helpers.js";
 
@@ -587,7 +589,7 @@ test("recorded request shapes price each piece at its cache position and count i
   );
   const row = (name: string) => report.context.find((c) => c.name === name)!;
   const artifact = row("Artifact");
-  assert.equal(artifact.control, `"enableArtifact": false`);
+  assert.equal(controlText(artifact.control!), `"enableArtifact": false`);
   assert.equal(artifact.calls, 0);
   assert.ok(artifact.current);
   // Tools lead the prefix, so Artifact sits entirely inside the 2,000 cached-read tokens.
@@ -601,7 +603,7 @@ test("recorded request shapes price each piece at its cache position and count i
   const review = row("review");
   assert.equal(review.kind, "skill");
   assert.equal(
-    review.control,
+    controlText(review.control!),
     `"skillOverrides": {"review": "user-invocable-only"}`,
   );
   assert.ok(listing.characters! > 0);
@@ -616,6 +618,37 @@ test("recorded request shapes price each piece at its cache position and count i
   assert.ok(Math.abs(review.costUsd / review.tokens! / 4e-6 - 1) < 0.01);
   assert.equal(row("Claude Code system prompt").control, null);
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
+  // Every piece here costs well under the default $1 per use.
+  assert.ok(
+    report.context.every((c) => c.verdict === (c.control ? "keep" : null)),
+  );
+
+  // A piece is recommended off when its cost per use, counting no use as one,
+  // exceeds the limit. Typed skill requests would not count as uses.
+  const strict = analyze({
+    scan: data,
+    catalog: await prices(),
+    maxCostPerUseUsd: artifact.costUsd / 2,
+  });
+  const verdict = (name: string) =>
+    strict.context.find((c) => c.name === name)!.verdict;
+  assert.equal(verdict("Artifact"), "off");
+  assert.equal(verdict("docs"), "off");
+  assert.equal(verdict("review"), "keep");
+  assert.equal(verdict("Bash"), null);
+  const text = formatReport(strict, { width: 200 });
+  assert.match(
+    text,
+    /Artifact tool( \[[^\]]*\])?: on -> off\. Costs .*; never used\./,
+  );
+  assert.match(
+    text,
+    /Skill review( \[[^\]]*\])?: on\. Costs .*; the model never used it\./,
+  );
+  const snippet = text.slice(text.indexOf("To turn these off"));
+  assert.match(snippet, /"enableArtifact": false/);
+  assert.match(snippet, /"deny": \[\s*"mcp__docs"\s*\]/);
+  assert.doesNotMatch(snippet, /skillOverrides/);
 });
 
 test("provided schemas, listing member ownership and identified command file reads are derived once", async () => {

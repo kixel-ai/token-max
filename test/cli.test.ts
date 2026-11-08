@@ -267,8 +267,12 @@ test("built text CLI handles all-clear, empty windows, missing histories, offlin
     assert.equal(invalid.status, 2);
     assert.equal(invalid.stdout, "");
     assert.equal((invalid.stderr.match(/use --help/gi) ?? []).length, 1);
+    const limit = run(["--max-cost-per-use", "lots"]);
+    assert.equal(limit.status, 2);
+    assert.match(limit.stderr, /--max-cost-per-use requires a dollar amount/);
     for (const flag of [
       "--since",
+      "--max-cost-per-use",
       "--claude-dir",
       "--codex-dir",
       "--details",
@@ -356,7 +360,9 @@ process.stdout.columns = 40;`,
     assert.ok(
       piped.stdout
         .split("\n")
-        .includes("      Set in ~/.claude/settings.json:promptCacheTtl"),
+        .some((l) =>
+          l.endsWith(" Set in ~/.claude/settings.json:promptCacheTtl."),
+        ),
       "piped paths remain on one copyable line",
     );
     const dumb = run([], { ...env, TERM: "dumb" });

@@ -1,6 +1,7 @@
 //! token-max replays local Claude Code and Codex transcripts against public API prices.
 
 pub mod cache;
+pub mod compaction;
 pub mod controls;
 pub mod discovery;
 pub mod estimates;

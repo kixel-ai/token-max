@@ -4,10 +4,10 @@ use std::collections::HashSet;
 
 use indexmap::IndexMap;
 
-use crate::cache::{CacheChain, Replayed, Touch};
+use crate::cache::{CacheBoundaries, CacheChain, Replayed, Touch};
 use crate::model::{
     Agent, BillingPart, Bucket, CacheReplayEvidence, Harness, Millis, PartKind, Request,
-    RequestEvidence, StructuralEvent, Ttl, UsageEstimate,
+    RequestEvidence, Ttl, UsageEstimate,
 };
 use crate::prices::{Catalog, Components, price_components, unknown_cost};
 
@@ -93,12 +93,16 @@ pub struct ReplayedPart<'a> {
 }
 
 /// Replay the same cache histories and usage estimates for every setting consumer.
-pub fn replay_parts<'a, 'e>(
+///
+/// `boundaries` index the compaction events that reset cache histories. Callers build each
+/// index once (for example per profile) and pass modeled events as another small layer,
+/// because rebuilding the index from every event on each replay dominated the run time.
+pub fn replay_parts<'a, 'b>(
     requests: impl IntoIterator<Item = &'a Request>,
-    events: impl IntoIterator<Item = &'e StructuralEvent>,
+    boundaries: impl IntoIterator<Item = &'b CacheBoundaries>,
     options: &ReplayOptions,
 ) -> Vec<ReplayedPart<'a>> {
-    let mut chain = CacheChain::new(events);
+    let mut chain = CacheChain::new(boundaries);
     let mut result = Vec::new();
     for r in requests {
         let estimate = options.estimates.get(&r.id).and_then(|e| e.part.as_ref());
@@ -177,4 +181,94 @@ pub fn replay_parts<'a, 'e>(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{EventKind, IdleAttribution, Location, Origin, StructuralEvent};
+    use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
+
+    fn at(id: &str, session: &str, time: Millis, read: i64, write: i64) -> Request {
+        let mut r = Request {
+            id: id.into(),
+            session: session.into(),
+            time,
+            end_time: time,
+            ..make_request()
+        };
+        r.parts[0].usage = claude_usage(ClaudeUsage {
+            read,
+            write,
+            ..ClaudeUsage::default()
+        });
+        r
+    }
+
+    fn boundary(id: &str, session: &str, time: Millis) -> StructuralEvent {
+        let location = Location {
+            file: "synthetic".into(),
+            line: 1,
+        };
+        StructuralEvent {
+            id: id.into(),
+            origins: vec![Origin {
+                session: session.into(),
+                location: location.clone(),
+            }],
+            harness: Harness::Claude,
+            session: session.into(),
+            time,
+            kind: EventKind::Compaction,
+            profiles: vec!["profile".into()],
+            location,
+            request: None,
+            model: None,
+            version: None,
+            client: None,
+            cwd: None,
+            trigger: None,
+            precomputed: None,
+            pre_tokens: None,
+            post_tokens: None,
+            duration_ms: None,
+            tool: None,
+            tool_id: None,
+            settings: IndexMap::new(),
+            idle_attribution: IdleAttribution::Unknown,
+            pricing: None,
+        }
+    }
+
+    /// Splitting boundaries across a prebuilt index and an extra layer replays like one index.
+    #[test]
+    fn layered_boundaries_replay_like_their_concatenation() {
+        let requests = [
+            at("a-0", "a", 0, 0, 1000),
+            at("b-0", "b", 0, 0, 1000),
+            at("a-1", "a", 600_000, 0, 1500),
+            at("b-1", "b", 600_000, 0, 1500),
+            at("a-2", "a", 1_200_000, 0, 1500),
+            at("b-2", "b", 1_200_000, 0, 1500),
+        ];
+        let base = [boundary("base", "a", 300_000)];
+        let extra = [boundary("extra", "b", 900_000)];
+        let catalog = prices();
+        let estimates = IndexMap::new();
+        let options = ReplayOptions {
+            estimates: &estimates,
+            catalog: &catalog,
+            ttls: ReplayTtls::all(Some(Ttl::OneHour)),
+            since: 0,
+            cold_prefixes: false,
+            estimated_parts: None,
+            attempt_scenario: AttemptScenario::Point,
+        };
+        let combined = CacheBoundaries::new(base.iter().chain(&extra));
+        let (base, extra) = (CacheBoundaries::new(&base), CacheBoundaries::new(&extra));
+        let layered = replay_parts(&requests, [&base, &extra], &options);
+        assert_eq!(layered, replay_parts(&requests, [&combined], &options));
+        assert_ne!(layered, replay_parts(&requests, [&base], &options));
+        assert_ne!(layered, replay_parts(&requests, [], &options));
+    }
 }

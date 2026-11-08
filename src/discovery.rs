@@ -188,7 +188,7 @@ fn collation_weight(c: char) -> Option<u32> {
 
 /// JavaScript's default `localeCompare` (ICU root collation) for printable ASCII paths:
 /// punctuation before digits before letters, then lowercase before uppercase.
-fn locale_compare(a: &str, b: &str) -> Ordering {
+pub(crate) fn locale_compare(a: &str, b: &str) -> Ordering {
     let primary = |s: &str| s.chars().filter_map(collation_weight).collect::<Vec<_>>();
     let tertiary = |s: &str| {
         s.chars()

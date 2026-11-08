@@ -769,6 +769,21 @@ test("attachments take their latest possible cache position; media and copied ca
     // sit in the reads or the writes, so this request leaves it unpriced.
     request(7, ["m1", "m2"]),
     reply(7, usage(0, 1500, 2500)),
+    // The tool list shrinks, so the previous input no longer says where
+    // messages start: a new file could sit in the reads or the writes.
+    {
+      type: "api-request-shape",
+      sessionId: "session",
+      timestamp: at(8),
+      shapeHash: "smaller",
+      shape: { system, tools: [tools[0]] },
+    },
+    attachment(8, {
+      type: "instructions",
+      files: [{ path: "/repo/sub/CLAUDE.md", content: "k".repeat(600) }],
+    }),
+    { ...request(9, ["m1", "m2"]), shapeHash: "smaller" },
+    reply(9, usage(0, 1500, 3500)),
   ];
   const w = await workspace();
   try {
@@ -830,17 +845,20 @@ test("attachments take their latest possible cache position; media and copied ca
     );
     // In the first request the listing could straddle 1h writes and ordinary
     // input, so that request stays unpriced; later ones read it from cache.
-    assert.equal(review.requests, 4);
+    assert.equal(review.requests, 5);
     assert.equal(review.priced, 2);
     assert.ok(
       Math.abs(review.costUsd / (review.tokens! * 2 * 0.2e-6) - 1) < 0.01,
     );
-    assert.equal(review.estimatedUsd, (review.costUsd * 4) / 2);
+    assert.equal(review.estimatedUsd, (review.costUsd * 5) / 2);
     // The server row is priced only where both its tool and its instructions
     // were: not in the first request, where the instructions straddle slots.
     const docs = row("docs");
-    assert.equal(docs.requests, 4);
+    assert.equal(docs.requests, 5);
     assert.equal(docs.priced, 2);
+    const nested = row("/repo/sub/CLAUDE.md");
+    assert.equal(nested.requests, 1);
+    assert.equal(nested.priced, 0);
   } finally {
     await w.dispose();
   }

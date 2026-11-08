@@ -214,7 +214,7 @@ export function contextCosts(input: {
   const latest = new Map<string, { time: number; keys: Set<string> }>();
   const previous = new Map<
     string,
-    { input: number | null; keys: Set<string> }
+    { input: number | null; keys: Set<string>; prefix: string }
   >();
   const ordered = scan.requests
     .map((exposure) => ({ exposure, r: requests.get(exposure.request) }))
@@ -277,9 +277,13 @@ export function contextCosts(input: {
     }
     const revision = (piece: Placed) => `${piece.revision}:${piece.key}`;
     const prior = previous.get(r.session);
+    // The leading tools and system prompt, by revision: when they change, the
+    // previous input no longer bounds where messages start.
+    const prefix = json(exposure.components.slice(0, exposure.prefix));
     previous.set(r.session, {
       input: u?.input ?? null,
       keys: new Set(parts.filter((x) => !x.prefix).map(revision)),
+      prefix,
     });
     if (placed) {
       const end = u!.input!;
@@ -335,7 +339,11 @@ export function contextCosts(input: {
           entry.cost += charge(offset, tokens);
           offset += tokens;
         } else {
-          const known = prior && prior.input !== null && prior.input <= end;
+          const known =
+            prior &&
+            prior.prefix === prefix &&
+            prior.input !== null &&
+            prior.input <= end;
           const carried = known && prior.keys.has(revision(piece));
           const from = known && !carried ? prior.input! : prefixEnd;
           const to = (carried ? prior.input! : end) - tokens;

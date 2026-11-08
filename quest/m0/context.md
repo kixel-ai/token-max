@@ -95,4 +95,4 @@ and [Codex MCP settings](https://learn.chatgpt.com/docs/config-file/config-refer
 
 ## Related
 
-- [Skills catalog and usage check](/quest/m0/skills-catalog.md) - owns skill listing and usage recommendations
+- [Codex skills catalog](/quest/m0/skills-catalog.md) - owns skill-specific Codex lines and duplicate listings on top of the Codex pricing here

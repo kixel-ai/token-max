@@ -137,6 +137,8 @@ struct Pieces<'a> {
     ids: HashMap<String, usize>,
     kinds: Vec<Kind>,
     of: HashMap<&'a str, Vec<(usize, i64)>>,
+    /// The row a skill invocation counts for, by hashed `skill:<name>` target.
+    skills: HashMap<String, String>,
 }
 
 impl Pieces<'_> {
@@ -184,6 +186,37 @@ fn disable(setting: &str) -> Option<Control> {
         value: ControlValue::Bool(false),
         append: false,
     })
+}
+
+/// The namespace Claude Code reserves for skills synced from a claude.ai account.
+pub const SYNCED_SKILLS: &str = "anthropic-skills";
+
+/// The row and setting for one skill listing entry. `skillOverrides` hides a local or
+/// bundled skill from the model and keeps `/name` working, but it does not apply to
+/// plugin skills, and synced skills only turn off together through `syncClaudeAiSkills`.
+fn skill(member: &str) -> (String, Option<Control>) {
+    if member
+        .strip_prefix(SYNCED_SKILLS)
+        .is_some_and(|rest| rest.starts_with(':'))
+    {
+        return (SYNCED_SKILLS.into(), disable("syncClaudeAiSkills"));
+    }
+    // A plugin's skill, or an added directory's same-named one: no settings key turns
+    // off just that skill.
+    if member.contains(':') {
+        return (member.into(), None);
+    }
+    let control = Control {
+        path: vec!["skillOverrides".into(), member.into()],
+        value: ControlValue::Text("user-invocable-only".into()),
+        append: false,
+    };
+    (member.into(), Some(control))
+}
+
+/// Whether a control hides a skill from the model only, leaving typed uses working.
+pub fn typed_only(control: Option<&Control>) -> bool {
+    control.is_some_and(|c| c.path.first().is_some_and(|p| p == "skillOverrides"))
 }
 
 /// The MCP server a tool belongs to: the text between the first and second `__`.
@@ -265,13 +298,21 @@ fn pieces(
             let mut result: Vec<(usize, i64)> = members
                 .into_iter()
                 .map(|(member, n)| {
-                    let control = Control {
-                        path: vec!["skillOverrides".into(), member.into()],
-                        value: ControlValue::Text("user-invocable-only".into()),
-                        append: false,
-                    };
-                    let key = format!("skill:{member}");
-                    let id = interned.intern(key, ContextKind::Skill, member.into(), Some(control));
+                    let (name, control) = skill(member);
+                    let targets = &mut interned.skills;
+                    if let Some(short) = member
+                        .strip_prefix(SYNCED_SKILLS)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                    {
+                        // `/pdf` reaches the synced `anthropic-skills:pdf` only while no
+                        // other skill has the short name.
+                        targets
+                            .entry(identity(&format!("skill:{short}")))
+                            .or_insert_with(|| name.clone());
+                    }
+                    targets.insert(identity(&format!("skill:{member}")), name.clone());
+                    let key = format!("skill:{name}");
+                    let id = interned.intern(key, ContextKind::Skill, name, control);
                     (id, n)
                 })
                 .collect();
@@ -629,19 +670,25 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         };
         credit(family, &c.profiles, c.last_used, c.calls);
     }
-    let skills: HashMap<String, &str> = interned
+    let typed: HashMap<&str, bool> = interned
         .kinds
         .iter()
         .filter(|k| k.kind == ContextKind::Skill)
-        .map(|k| (identity(&format!("skill:{}", k.name)), k.name.as_str()))
+        .map(|k| (k.name.as_str(), typed_only(k.control.as_ref())))
         .collect();
     for i in &scan.invocations {
-        // Typed requests keep working when a skill is hidden from the model, so only
-        // the model's own calls show what its listing is for.
-        if i.kind != InvocationKind::SkillCall || i.status == InvocationStatus::Reference {
+        let Some(name) = interned.skills.get(&i.target) else {
             continue;
-        }
-        if let Some(&name) = skills.get(&i.target) {
+        };
+        // Typed requests keep working when a skill is hidden from the model, so only
+        // the model's own calls show what its listing is for. A setting that removes
+        // the skill entirely takes typed requests away too, so those count as uses.
+        let counts = match i.kind {
+            InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
+            InvocationKind::SkillRequest => !typed[name.as_str()],
+            _ => false,
+        };
+        if counts {
             credit((ContextKind::Skill, name), &i.profiles, i.time, 1);
         }
     }
@@ -1072,6 +1119,81 @@ mod tests {
         // The latest request dropped the tool and plugin, so neither gets a verdict.
         assert!(!artifact.current && artifact.verdict.is_none());
         assert!(!plugin.current);
+    }
+
+    #[test]
+    fn skills_take_the_setting_their_source_supports() {
+        let members = [
+            "review",
+            "pdf",
+            "anthropic-skills:pdf",
+            "anthropic-skills:xlsx",
+            "tools:deploy",
+        ];
+        let mut components: Vec<Component> = members
+            .iter()
+            .map(|m| component(m, Category::SkillListing, m, 100, &[]))
+            .collect();
+        components.push(component(
+            "listing",
+            Category::SkillListing,
+            "skills",
+            500,
+            &members,
+        ));
+        let invocation = |kind, target: &str, time| Invocation {
+            id: format!("i{time}"),
+            target: identity(&format!("skill:{target}")),
+            group: None,
+            kind,
+            status: if kind == InvocationKind::SkillCall {
+                InvocationStatus::Called
+            } else {
+                InvocationStatus::Requested
+            },
+            via: Via::Tool,
+            session: "session".into(),
+            sessions: vec!["session".into()],
+            identity_basis: IdentityBasis::Recorded,
+            harness: Harness::Claude,
+            client: None,
+            version: None,
+            time,
+            profiles: vec!["profile".into()],
+            locations: vec![],
+        };
+        let scan = ExposureScan {
+            components,
+            requests: vec![exposure("r1", &["listing"], 0, 500)],
+            invocations: vec![
+                // The local skill owns the short name, so this is not the synced one.
+                invocation(InvocationKind::SkillRequest, "pdf", 1),
+                invocation(InvocationKind::SkillRequest, "xlsx", 2),
+                invocation(InvocationKind::SkillCall, "anthropic-skills:pdf", 3),
+                invocation(InvocationKind::SkillRequest, "tools:deploy", 4),
+            ],
+            ..ExposureScan::default()
+        };
+        let rows = costs(&scan, &[request("r1", 1, 0, 0, 500)], 1.0);
+        // Typing /pdf still works when the model cannot see it, so it is no model use.
+        let pdf = row(&rows, "pdf");
+        assert_eq!(
+            control_text(pdf.control.as_ref().unwrap()),
+            r#""skillOverrides": {"pdf": "user-invocable-only"}"#
+        );
+        assert_eq!(pdf.calls, Some(0));
+        // Synced skills share one switch that removes typed uses too.
+        let synced = row(&rows, SYNCED_SKILLS);
+        assert_eq!(
+            control_text(synced.control.as_ref().unwrap()),
+            r#""syncClaudeAiSkills": false"#
+        );
+        assert_eq!((synced.calls, synced.last_used), (Some(2), Some(3)));
+        assert_eq!(synced.tokens, Some(200));
+        // skillOverrides does not reach a plugin's skill, so no verdict names it.
+        let plugin = row(&rows, "tools:deploy");
+        assert_eq!(plugin.control, None);
+        assert_eq!((plugin.calls, plugin.verdict), (Some(1), None));
     }
 
     #[test]

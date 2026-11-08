@@ -1,5 +1,6 @@
 import { speedChecks } from "./fast.js";
-import { analyzeExposure } from "./exposure.js";
+import { calibrate } from "./exposure.js";
+import { contextCosts } from "./context.js";
 import type {
   BillingPart,
   CacheReplayEvidence,
@@ -641,7 +642,19 @@ export function analyze(options: {
     },
     historical,
     compactions,
-    exposure: analyzeExposure(scan.exposure, scan.requests, catalog),
+    exposure: {
+      calibration: calibrate(scan.exposure, scan.requests),
+      assumptions: [
+        "component tokens are characters times a per-model ratio calibrated against recorded request totals",
+        "each component is priced at the cache state of its position in the prompt prefix: tools, system, then message attachments in arrival order",
+        "removing a component is assumed to change nothing else; costs of different components can be added only as an upper bound on the saving",
+      ],
+    },
+    context: contextCosts({
+      scan: scan.exposure,
+      requests: scan.requests,
+      catalog,
+    }),
     checks,
     assumptions: [
       "host-local read-only analysis; network access is only for public prices",

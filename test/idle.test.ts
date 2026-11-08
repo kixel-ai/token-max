@@ -141,7 +141,13 @@ function data(target: Request[], boundaries: StructuralEvent[] = []): Scan {
     roots: [],
     snapshots: [],
     cacheContext: { requests: [], boundaries: [] },
-    exposure: { components: [], requests: [], invocations: [], visibility: [] },
+    exposure: {
+      components: [],
+      requests: [],
+      invocations: [],
+      visibility: [],
+      toolCalls: [],
+    },
     coverage: {
       requests: requests.length,
       sourceKnown: requests.length,

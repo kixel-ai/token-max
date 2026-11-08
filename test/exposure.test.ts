@@ -4,14 +4,9 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { scan } from "../src/reader.js";
 import { analyze } from "../src/replay.js";
-import {
-  calibrate,
-  estimateTokens,
-  measureSize,
-  priceExposureChange,
-} from "../src/exposure.js";
+import { calibrate, measureSize } from "../src/exposure.js";
 import { id } from "../src/safe.js";
-import { claudeUsage, makeRequest, prices, workspace } from "./helpers.js";
+import { prices, workspace } from "./helpers.js";
 
 const at = (second: number) =>
   new Date(Date.UTC(2026, 10, 1, 0, 0, second)).toISOString();
@@ -242,11 +237,8 @@ test("Claude attachment deltas track deferred definitions and whole listing repl
   assert.equal(e.requests[1]!.removed.length, 2);
   const report = analyze({ scan: data, catalog: await prices() });
   assert.equal(report.exposure.calibration.length, 0);
-  assert.ok(
-    report.exposure.requests.every((r) =>
-      r.components.every((c) => c.gross.totalUsd === null),
-    ),
-  );
+  // Digest-only requests prove no exact shape, so nothing is priced per piece.
+  assert.equal(report.context.length, 0);
   assert.ok(e.components.every((c) => c.current === "unresolved"));
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
 });
@@ -277,15 +269,11 @@ test("text-only wire requests calibrate matching cohorts and preserve unknown ne
   const calibration = report.exposure.calibration[0]!;
   assert.equal(calibration.samples.length, 1);
   assert.equal(calibration.samples[0]!.tokens, 1000);
-  const measured = measureSize({ text: "🌲木abc", tokens: 2 });
-  assert.equal(measured.characters, 5);
-  assert.equal(estimateTokens(measured, calibration).estimate, 2);
-  assert.equal(estimateTokens(measureSize({ text: "abc" })).estimate, null);
-  assert.ok(
-    report.exposure.requests[0]!.components.every(
-      (c) => c.gross.totalUsd !== null && c.fixedBehaviorNet.totalUsd === null,
-    ),
-  );
+  assert.equal(measureSize({ text: "🌲木abc" }).characters, 5);
+  const server = report.context.find((c) => c.kind === "mcp-server")!;
+  assert.equal(server.name, "example");
+  assert.equal(server.priced, 1);
+  assert.ok(server.costUsd > 0);
   assert.equal(
     calibrate(
       data.exposure,
@@ -523,62 +511,111 @@ test("malformed selected context and digest chains fail atomically with safe dia
   );
 });
 
-test("context pricing uses exact cache positions or explicit allocation sensitivity", async () => {
-  const r = makeRequest();
-  r.parts[0]!.usage = claudeUsage({ read: 500, write: 500, output: 10 });
-  const catalog = await prices();
-  const exact = priceExposureChange({
-    catalog,
-    request: r,
-    removedTokens: 100,
-    addedTokens: 0,
-    position: { read: 100, write5m: 0, write1h: 0, ordinary: 0 },
+test("recorded request shapes price each piece at its cache position and count its uses", async () => {
+  const tool = (name: string, size: number) => ({
+    name,
+    description: "x".repeat(size),
+    input_schema: { type: "object" },
   });
-  assert.ok(Math.abs(exact.fixedBehaviorNet.totalUsd! - 0.00002) < 1e-10);
-  const assumed = priceExposureChange({
-    catalog,
-    request: r,
-    removedTokens: 100,
-    addedTokens: 200,
+  const tools = [
+    tool("Artifact", 4000),
+    tool("Bash", 1000),
+    tool("mcp__docs__read", 500),
+  ];
+  const system = [{ type: "text", text: "s".repeat(2000) }];
+  const message = { role: "user", content: "SYNTHETIC_PRIVATE_PROMPT" };
+  const call = (id: string, name: string) => ({
+    type: "tool_use",
+    id,
+    name,
+    input: {},
   });
-  assert.ok(assumed.fixedBehaviorNet.totalUsd! < 0);
-  assert.ok(assumed.range![0] < assumed.range![1]);
-  const missing = makeRequest();
-  missing.parts[0]!.usage.input = null;
-  assert.equal(
-    priceExposureChange({
-      catalog,
-      request: missing,
-      removedTokens: 100,
-      addedTokens: 0,
-    }).gross.totalUsd,
-    null,
-  );
-  assert.throws(() =>
-    priceExposureChange({
-      catalog,
-      request: r,
-      removedTokens: 100,
-      addedTokens: 0,
-      position: { read: 600, write5m: 0, write1h: 0, ordinary: 0 },
+  const used = assistant(2, [call("t1", "mcp__docs__read")]);
+  const reply = assistant(1, [call("t2", "Bash")]);
+  reply.message.usage.input_tokens = 100;
+  reply.message.usage.cache_read_input_tokens = 2000;
+  reply.message.usage.cache_creation_input_tokens = 900;
+  Object.assign(reply.message.usage, {
+    cache_creation: {
+      ephemeral_5m_input_tokens: 0,
+      ephemeral_1h_input_tokens: 900,
+    },
+  });
+  const data = await transcript("claude", [
+    attachment(0, {
+      type: "skill_listing",
+      content: "- review: SYNTHETIC_PRIVATE_DESCRIPTION",
+      names: ["review"],
+      isInitial: true,
     }),
+    {
+      type: "api-request-shape",
+      sessionId: "session",
+      timestamp: at(0),
+      shapeHash: "shape",
+      shape: { system, tools },
+    },
+    { type: "api-request-blob", sessionId: "session", hash: "m1", message },
+    {
+      type: "api-request",
+      id: "api-1",
+      timestamp: at(0),
+      sessionId: "session",
+      shapeHash: "shape",
+      keep: 0,
+      tail: ["m1"],
+      requestDigest: "d1",
+      params: { model: "claude-opus-5-5" },
+    },
+    reply,
+    // A repeated snapshot of the same call is one use.
+    reply,
+    used,
+  ]);
+  const report = analyze({ scan: data, catalog: await prices() });
+  const listing = data.exposure.components.find(
+    (c) => c.category === "skill-listing" && c.scope === "aggregate",
+  )!;
+  const characters =
+    JSON.stringify(system).length +
+    tools.reduce((n, t) => n + JSON.stringify(t).length, 0) +
+    JSON.stringify(message).length;
+  const ratio = 3000 / characters;
+  assert.ok(
+    Math.abs(report.exposure.calibration[0]!.tokensPerCharacter - ratio) <
+      1e-12,
   );
-});
-
-test("crossing a context tier reprices output and every remaining input token", async () => {
-  const r = makeRequest({ model: "claude-haiku-5-5" });
-  r.parts[0] = {
-    ...r.parts[0]!,
-    model: "claude-haiku-5-5",
-    usage: claudeUsage({ input: 100001, write: 0, output: 1000 }),
-  };
-  const result = priceExposureChange({
-    catalog: await prices(),
-    request: r,
-    removedTokens: 1,
-    addedTokens: 0,
-  });
-  assert.ok(Math.abs(result.fixedBehaviorNet.totalUsd! - 0.0420005) < 1e-10);
+  const row = (name: string) => report.context.find((c) => c.name === name)!;
+  const artifact = row("Artifact");
+  assert.equal(artifact.control, `"enableArtifact": false`);
+  assert.equal(artifact.calls, 0);
+  assert.ok(artifact.current);
+  // Tools lead the prefix, so Artifact sits entirely inside the 2,000 cached-read tokens.
+  const artifactTokens = JSON.stringify(tools[0]).length * ratio;
+  assert.ok(artifactTokens < 2000);
+  assert.ok(Math.abs(artifact.costUsd - (artifactTokens * 0.2) / 1e6) < 1e-12);
+  assert.equal(row("Bash").control, null);
+  assert.equal(row("Bash").calls, 1);
+  assert.equal(row("docs").calls, 1);
+  assert.equal(row("docs").kind, "mcp-server");
+  const review = row("review");
+  assert.equal(review.kind, "skill");
+  assert.equal(
+    review.control,
+    `"skillOverrides": {"review": "user-invocable-only"}`,
+  );
+  assert.ok(listing.characters! > 0);
+  // The skill listing follows tools and the system prompt, past the 2,000
+  // cached reads and 900 1h writes, so it pays the ordinary input price.
+  const prefix =
+    (JSON.stringify(system).length +
+      tools.reduce((n, t) => n + JSON.stringify(t).length, 0)) *
+    ratio;
+  assert.ok(prefix > 2900);
+  // Displayed tokens are rounded, so compare the per-token rate.
+  assert.ok(Math.abs(review.costUsd / review.tokens! / 4e-6 - 1) < 0.01);
+  assert.equal(row("Claude Code system prompt").control, null);
+  assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
 });
 
 test("provided schemas, listing member ownership and identified command file reads are derived once", async () => {
@@ -742,10 +779,10 @@ test("cohort calibration outside measured request support leaves that comparison
   high.message.usage.input_tokens = 10000;
   const data = await transcript("claude", [wire(1), low, wire(3), high]);
   const report = analyze({ scan: data, catalog: await prices() });
-  const unsupported = report.exposure.requests[0]!.components[0]!;
-  assert.ok(unsupported.tokens.estimate! > 10);
-  assert.equal(unsupported.gross.totalUsd, null);
-  assert.match(unsupported.gross.unknown.join(), /exceeds observed/);
+  // The pooled ratio puts the low request's pieces above its recorded input.
+  const system = report.context.find((c) => c.kind === "system")!;
+  assert.equal(system.requests, 2);
+  assert.equal(system.priced, 1);
   assert.doesNotMatch(JSON.stringify(report), /SYNTHETIC_PRIVATE/);
 });
 

@@ -55,7 +55,13 @@ function data(requests: Request[], events: StructuralEvent[] = []): Scan {
     },
   };
   return {
-    exposure: { components: [], requests: [], invocations: [], visibility: [] },
+    exposure: {
+      components: [],
+      requests: [],
+      invocations: [],
+      visibility: [],
+      toolCalls: [],
+    },
     snapshotStartedAt: new Date(0).toISOString(),
     snapshotFinishedAt: new Date(0).toISOString(),
     since: null,

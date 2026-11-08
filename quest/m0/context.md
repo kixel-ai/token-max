@@ -17,6 +17,18 @@ and guidance warnings for context/MCP overhead that cannot be priced.
 The skills catalog quest owns skill-specific findings; this check links
 those findings instead of adding their costs again.
 
+Decided 2026-11-07 (maintainer): ✅ put an estimated dollar amount on every
+setting and let the user decide (rejected: recommend disabling rarely used
+pieces). Settings that don't change the experience, like the cache TTL, get a
+recommendation; tools, MCP servers, skills and instruction files get their
+cost, use count and off switch, with no waste verdict. Rarely used is not
+unused. Recorded in AGENTS.md.
+
+Progress 2026-11-07: per-piece costs from recorded Claude request shapes,
+priced at their cache positions, with call counts and controls, are in the
+default report. Codex pieces, tool-result context and output-budget checks
+remain.
+
 - Attribute actual exposed server instructions, discovery names,
   descriptions, schemas, and loaded CLAUDE.md/AGENTS.md/rule or memory
   content separately. Separate recurring discovery cost, on-demand schema
@@ -45,8 +57,11 @@ those findings instead of adding their costs again.
   before warning. Codex exposes server/tool enablement; do not recommend
   retired tool-search switches. A small frequently used toolset can be
   cheaper upfront once discovery overhead is included.
-  Claude server disabling uses `/mcp`; per-tool deny rules restrict calls
-  but must not be assumed to remove schema/listing costs. Codex has
+  Claude server disabling uses `/mcp`. A bare-name deny rule
+  (`"Artifact"`, `"mcp__server"`) removes the tool from context, while a
+  scoped rule such as `Bash(rm *)` only blocks matching calls
+  ([permissions](https://code.claude.com/docs/en/permissions), checked
+  2026-11-07). Codex has
   server/tool enablement lists and `mcp_servers.<id>.omit_tools_from` for
   `direct`, `deferred`, or `code_mode` surfaces; the equivalent app setting
   combines with server omissions. Omission changes exposure, while

@@ -118,6 +118,24 @@ cost where that is known. Not enough evidence says why in one sentence, such as
 two options being too close to call. Unresolved current ownership stays there and
 does not cause exit 1.
 
+After the verdicts, **What each piece of context costs** lists the tools, MCP
+servers, skills and instruction files sent with every request, each with its
+estimated cost over the window and per 30 days, how often it was called, and the
+setting that turns it off (for example `"enableArtifact": false`, a bare tool
+name in `permissions.deny`, or `skillOverrides`). These trade cost for a feature,
+so the report never calls one waste; you decide. The default view lists the
+largest ones still sent today; `--details` lists every piece, including those no
+longer sent. The system prompt, core tools such as Bash and Read, and the skill
+and subagent lists are always sent and are shown as one total.
+
+Each piece is sized from the request shapes Claude Code records (tools, then the
+system prompt, then messages) and converted to tokens with a characters-to-tokens
+ratio measured from the same transcripts. It is priced at the cache position it
+occupied in that request: cached read, 1h write, 5m write, then ordinary input.
+Removing a piece can also shift later cache writes and compaction, which this
+does not model. Requests without a recorded shape, and Codex requests, are not
+priced per piece.
+
 Comparisons use the requests priced under both options. Requests with missing
 usage are left out of both sides, and a recommendation is made only when they
 could not flip it, assuming none differs by more than the largest measured
@@ -162,11 +180,10 @@ Not enough evidence
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
 
-Text and `--json` share the same analysis. JSON schema version 1 is unchanged and
-includes profile aliases, snapshots, deduplicated requests, structural events,
+Text and `--json` share the same analysis. JSON schema version 1 includes profile aliases, snapshots, deduplicated requests, structural events,
 usage coverage, pre-window cache context, partially known costs, summary estimates,
 component measurements with exposure/invocation coverage, calibration provenance,
-and check results. Each check has a `check` discriminator: `claude-cache-ttl`
+per-piece context costs in `context`, and check results. Each check has a `check` discriminator: `claude-cache-ttl`
 retains its TTL-specific fields, while `compaction-window` includes candidate
 windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
 current-settings and post-recommendation on/off costs, request/final periods,
@@ -178,8 +195,7 @@ names that profile and is conditional, not another copy of historical spend.
 Independent check savings must not be summed.
 
 See [billing and replay semantics](docs/semantics.md) for supported accounting,
-assumptions, sources, and limits. Component measurements are shared infrastructure;
-skills/context recommendations and other setting checks remain in the
+assumptions, sources, and limits. Remaining setting checks are in the
 [first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from

@@ -171,6 +171,7 @@ fn text(report: &Report) -> String {
             color: false,
             unicode: false,
             details: false,
+            host: None,
         },
     )
 }
@@ -384,7 +385,11 @@ fn claude_attachment_deltas_track_deferred_definitions_and_listing_replacement_u
     assert_eq!(report.exposure.calibration.len(), 0);
     // Digest-only requests prove no exact shape, so nothing is priced per piece.
     assert_eq!(report.context.len(), 0);
-    assert!(e.components.iter().all(|c| c.current == "unresolved"));
+    assert!(
+        e.components
+            .iter()
+            .all(|c| c.current == crate::model::Current::Unresolved)
+    );
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
 }
 

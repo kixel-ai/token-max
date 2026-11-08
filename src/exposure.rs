@@ -780,7 +780,7 @@ impl ExposureCollector {
                     provenance: new.provenance.to_string(),
                     locations: vec![at.location.clone()],
                     first_seen: at.time,
-                    current: "unresolved",
+                    current: crate::model::Current::Unresolved,
                     scope: if !member
                         && matches!(category, Category::SkillListing | Category::Other)
                     {

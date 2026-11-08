@@ -240,6 +240,35 @@ prove that discarded or unlogged summaries did not run. Without linked billed
 summary output and full resumed-prefix calibration, affected hypothetical costs
 stay unknown; `postTokens` alone cannot establish the full request.
 
+## Other hosts over SSH
+
+`--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
+SSH configuration, keys and known hosts without prompting. Add
+`--include-local` to audit this host in the same run. Each destination needs
+the same version of token-max installed with `cargo install`; token-max
+installs nothing there itself. A missing or different version fails with the
+command to run. Linux and macOS destinations are supported.
+
+```sh
+token-max --ssh devbox --ssh user@laptop --include-local
+```
+
+The destination runs `token-max --ssh-scan`, which discovers that host's own
+profiles from its home and environment, reads its transcripts and settings,
+and streams only the metadata `--json` would show, never prompt, reply or
+component text. It looks for `token-max` on the non-interactive `PATH` and in
+`~/.cargo/bin`. Prices and every check run on this host, with one price
+catalog. `--claude-dir` and `--codex-dir` select local profiles only, so with
+`--ssh` they need `--include-local`.
+
+Each host is analyzed on its own and gets its own section, labeled with the
+destination, or `this host`. With `--ssh`, JSON is
+`{"schemaVersion": 1, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
+report per host and `ssh` null for this host. A history copied between hosts
+counts in each host's report, so don't add amounts across hosts. Any failed
+host, connection or stream fails the whole run with exit 2 and no report;
+Ctrl-C stops every destination.
+
 ## Fast mode
 
 The maintainer's cost preference is fast mode off for both harnesses. The

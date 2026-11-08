@@ -719,7 +719,7 @@ mod tests {
             provenance: "synthetic".into(),
             locations: vec![],
             first_seen: 0,
-            current: "unresolved",
+            current: crate::model::Current::Unresolved,
             scope: if members.is_empty() {
                 Scope::Component
             } else {

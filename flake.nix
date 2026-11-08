@@ -31,8 +31,11 @@
 
         devShells.default = pkgs.mkShell {
           packages = [
-            pkgs.bun
-            pkgs.nodejs_24
+            pkgs.cargo
+            pkgs.rustc
+            pkgs.clippy
+            pkgs.rustfmt
+            pkgs.rust-analyzer
             pkgs.just
             quest.packages.${system}.default
           ];

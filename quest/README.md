@@ -9,4 +9,4 @@ evidence without ever editing a setting or printing a prompt.
 
 ## Required
 
-- [m0: first release](/quest/m0/README.md) - `@kixelated/token-max` 0.1.0 on npm with a polished CLI, one-command launch, priced setting recommendations and guidance warnings for fast mode, background generation, skills, MCPs, and loaded context
+- [m0: first release](/quest/m0/README.md) - `token-max` 0.1.0 on crates.io with a polished CLI, one-command install, priced setting recommendations and guidance warnings for fast mode, background generation, skills, MCPs, and loaded context

@@ -5,63 +5,25 @@ recommend cheaper cache TTL, compaction-window, native Claude idle-compaction an
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
-The first npm release is being prepared; the commands below become available
-when the complete 0.1.0 release is published. The development package retains
-`private: true` until m0 prepares that release. See the
-[first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md).
-
-With Node.js 22, 24, or 26 LTS and npm:
+It needs a Rust toolchain. Until the first crates.io release, install from
+GitHub:
 
 ```sh
-npx --yes @kixelated/token-max@latest --help
-npx --yes @kixelated/token-max@latest --since 2026-11-01
-npx --yes @kixelated/token-max@latest --json --claude-dir ~/.claude-work
+cargo install --locked --git https://github.com/kixelated/token-max
+token-max --help
+token-max --since 2026-11-01
+token-max --json --claude-dir ~/.claude-work
 ```
 
-With Bun 1.4.4 (no Node installation needed):
+Or run it from a checkout with `cargo run --release -- --since 2026-11-01`.
+After 0.1.0 is published (see the
+[first-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md)),
+`cargo install --locked token-max` installs the same command.
 
-```sh
-bunx --bun @kixelated/token-max@latest --help
-bunx --bun @kixelated/token-max@latest --offline --plain
-```
-
-Put `--bun` before the package name: Bun otherwise respects the executable's
-Node shebang and tries to start Node. Both launchers download the npm package
-and cache it; first use requires registry access. `@latest` can check the
-registry again. This is separate from the analyzer's public-price fetch, and
-`--offline` controls prices only, not package-manager downloads. See
-[npx caching](https://docs.npmjs.com/cli/v11/commands/npm-exec/#a-note-on-caching)
-and [bunx execution](https://bun.com/docs/pm/bunx).
-
-Pin a published version for repeatable execution (0.1.0 is the planned first
-release, not yet published):
-
-```sh
-npx --yes @kixelated/token-max@0.1.0 --details
-bunx --bun @kixelated/token-max@0.1.0 --details
-```
-
-For frequent use, an optional global install provides the same command:
-
-```sh
-npm install --global @kixelated/token-max@0.1.0
-token-max --version
-token-max --offline --plain
-```
-
-The package contains built JavaScript with its dependencies bundled and their
-licenses included. It requires no consumer compilation, install scripts, native
-binary downloads, or Rust toolchain. The CLI receives the same arguments and
-working directory whether launched directly, with npx, or with bunx. Relative
-paths resolve from that directory. Reports go to stdout; diagnostics go to
-stderr; exit codes remain 0/1/2 as described below. Launchers may also print
-their own download diagnostics to stderr. Ctrl-C cancels the running analysis;
-the CLI handles SIGINT/SIGTERM with exit 2 and no success report. The launcher
-may report its own termination status when it is also interrupted.
-
-The package CI exercises the same tarball on Linux, macOS, and Windows under
-Node 22/24/26 and Bun 1.4.4, including a PATH with Bun alone. Until those matrix
-jobs pass, OS/runtime coverage is pending, not a verified support claim.
+Relative paths resolve from the working directory. Reports go to stdout;
+diagnostics go to stderr; exit codes are 0/1/2 as described below. Ctrl-C
+cancels the running analysis: SIGINT or SIGTERM exits 2 with no success
+report.
 
 For development:
 
@@ -69,15 +31,11 @@ For development:
 nix develop
 quest gate just check
 just run --since 2026-11-01
-just build
-node dist/cli.js --help
 ```
 
-`just check` installs locked dependencies, checks formatting and types, builds
-JavaScript, runs synthetic tests under Bun and Node, packs the allowlisted
-artifact, exercises clean consumers, and checks quests. The Nix shell pins Bun
-and Node 24. Analysis tests use synthetic histories and local prices only;
-launcher tests use a local fixture registry without publishing. See
+`just check` checks formatting, runs clippy with warnings as errors, runs the
+tests, and checks quests; CI also runs the tests on macOS and Windows. Tests
+use synthetic histories and local prices only. See
 [release preparation](https://github.com/kixelated/token-max/blob/main/docs/releasing.md)
 for protected publication and remaining owner setup.
 
@@ -161,7 +119,7 @@ names on narrow terminals. Redirected output keeps each field on one line so
 paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode. Redirected output
 is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
-with exit 2 and no success report; a repeated signal forces exit if I/O stalls.
+with exit 2 and no success report.
 Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
 
 Illustrative excerpt from **synthetic** usage, with a synthetic owner and prices
@@ -212,8 +170,8 @@ per-piece context costs in `context`, and check results. Each check has a `check
 retains its TTL-specific fields, while `compaction-window` includes candidate
 windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
 current-settings and post-recommendation on/off costs, request/final periods,
-activation cohorts, context-size costs and lifetime/summary/timing sensitivities. TypeScript consumers
-should narrow `CheckResult` by `check` before reading setting-specific fields.
+activation cohorts, context-size costs and lifetime/summary/timing sensitivities. Consumers
+should branch on `check` before reading setting-specific fields.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.

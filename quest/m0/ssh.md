@@ -15,7 +15,7 @@ Requested 2026-11-07 through /quest-plan and delegated by the maintainer's
 selection to m0 (rejected: requiring automatic T3 connection discovery or
 decrypting its saved catalog). Known feasibility targets are nixos, nixos2
 and kixtop; earlier read-only probes found native histories there, but were
-not complete billing audits or remote Node/Bun compatibility checks.
+not complete billing audits or remote runtime checks.
 
 - Support repeatable `--ssh HOST`, using existing OpenSSH configuration,
   authentication and host-key handling. With no host flags, preserve the
@@ -24,18 +24,12 @@ not complete billing audits or remote Node/Bun compatibility checks.
   to every configured alias or turn discovery into connection approval.
   Make directory/profile overrides' destination scope unambiguous; local
   paths must not silently acquire a different remote interpretation.
-- Preflight each selected destination's runtime capabilities and select a
-  supported Node or Bun path before execution. Stream the same-version
-  built helper from the checked artifact; require no installed token-max,
-  runtime download, global package, persistent agent or registry access on
-  the destination. Report unsupported runtime/version clearly, without a
-  silent execution fallback. POSIX SSH destinations cover the initial
-  Linux/macOS use case; identify other remote platforms as unsupported.
-- Build and ship a self-contained ESM helper through the existing bundle
-  pipeline, including its dependency licenses in the checked package. It
-  must execute from streamed stdin under Node/Bun with no sibling modules,
-  package metadata or remote `node_modules`; include its version identity.
-  Extend packed-artifact tests and the package allowlist for that helper.
+- Preflight each selected destination's platform and the same-version
+  token-max it will run (see Waiting), and report an unsupported platform
+  or version clearly, without a silent execution fallback. POSIX SSH
+  destinations cover the initial Linux/macOS use case; identify other
+  remote platforms as unsupported. Require no runtime download, persistent
+  agent or registry access on the destination.
 - Run discovery, frozen native snapshots, any supported T3 metadata
   transaction and content-derived exposure extraction on the owning host.
   The coordinator performs all pricing and settings comparisons on the
@@ -60,11 +54,10 @@ not complete billing audits or remote Node/Bun compatibility checks.
   Unreadable lines are skipped and counted, as locally. Missing
   usage remains unknown under the existing policy. Do not silently drop an
   unreachable destination or emit a partially successful whole-host report.
-- Test the actual helper and transport with synthetic remote subprocesses:
-  Node/Bun selection, version mismatch, names/paths with spaces, duplicate
+- Test the actual remote mode and transport with synthetic remote subprocesses:
+  platform selection, version mismatch, names/paths with spaces, duplicate
   copied histories, price consistency, host failures, protocol corruption,
-  stderr noise, cancellation and absence of content/secrets. Verify the
-  packed Node and Bun launchers. Where reachable, perform read-only smoke
+  stderr noise, cancellation and absence of content/secrets. Where reachable, perform read-only smoke
   runs on the named hosts and state coverage; never claim a full cost audit
   from a failed or partial scan.
 
@@ -76,6 +69,16 @@ prerequisite. Sources checked 2026-11-07:
 [desktop catalog store](https://github.com/pingdotgg/t3code/blob/9c6429d74b59c7a06fb7357526457d192a744a9f/apps/desktop/src/app/DesktopConnectionCatalogStore.ts),
 [environment CLI](https://github.com/pingdotgg/t3code/blob/9c6429d74b59c7a06fb7357526457d192a744a9f/apps/server/src/cli/environment.ts),
 and [OpenSSH command handling](https://man.openbsd.org/ssh.1).
+
+## Waiting
+
+- Maintainer: the Rust rewrite (2026-11-08) removed the plan's streamed
+  Node/Bun helper, so choose how a destination runs the analyzer.
+  Recommended: copy the local binary over the SSH connection to a private
+  temporary path when the destination's OS and architecture match, run it,
+  and delete it afterwards, so nothing stays installed. The alternative,
+  running a same-version `token-max` already installed with `cargo install`,
+  breaks the "no remote installation" goal.
 
 ## Related
 

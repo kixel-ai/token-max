@@ -2,8 +2,8 @@
 
 ## Goal
 
-`@kixelated/token-max` 0.1.0 is published on npm, and its README shows how to run it
-with npx or bunx, without a global install or Rust toolchain. It replays selected
+`token-max` 0.1.0 is published on crates.io, and its README shows how to
+install it with `cargo install`. It replays selected
 local and SSH-host Claude Code and Codex histories, including T3 provider instances,
 against public API prices and reports which agent settings should change.
 For each setting it prints the current value, the recommended one, the file
@@ -56,11 +56,13 @@ Decision prompts, chosen options marked ✅:
 - Data: ✅ its own per-request transcript parser and
   [models.dev](https://models.dev) prices, the catalog ccusage also uses
   (rejected: ccusage's output, which lacks the per-request detail).
-- Language: ✅ Node-compatible TypeScript, with Bun for development
-  (supersedes Rust, 2026-11-06: the maintainer delegated the choice and
-  explicitly allowed TypeScript; only a Rust stub exists). Distribution:
-  ✅ npm through npx and bunx (rejected: requiring Cargo or a native-binary
-  wrapper). Repository: ✅ kixelated. Name: ✅ token-max, the
+- Language: ✅ Rust (2026-11-08, superseding the 2026-11-06 choice of
+  Node-compatible TypeScript; the maintainer: "just rewrite it in Rust
+  already", "the only reason for JS is npx but cargo run is close enough").
+  A week of one profile took the TypeScript 24 minutes, mostly in quadratic
+  analysis loops the port replaced with indexes. Distribution: ✅ crates.io
+  through `cargo install` (rejected: npm through npx and bunx, and a
+  native-binary npm wrapper). JSON stays schema version 1. Repository: ✅ kixelated. Name: ✅ token-max, the
   maintainer's pick (191 GitHub repositories share the name, and
   [Kalmantic/jusTokenMax](https://github.com/Kalmantic/jusTokenMax), a
   token-reduction toolkit, is close in name and topic).
@@ -74,20 +76,17 @@ Fast mode should be off. Extend the existing skills catalog quest rather
 than create a second owner for it. Model and review effort selection remain
 outside this expansion.
 
-Also requested 2026-11-06: ✅ a polished terminal report and one-command npm
-distribution in m0. Replay owns the TypeScript/tooling migration; the two
-new quests separately own presentation and packaging. The npm identifier
-is `@kixelated/token-max`; the command remains `token-max`. Keep the report
+Also requested 2026-11-06: ✅ a polished terminal report and one-command
+distribution in m0 (npm then; crates.io since the Rust rewrite). The crate
+and the command are both `token-max`. Keep the report
 usable in scripts and avoid a second analysis implementation.
 
 The epic's own remaining work is the end-to-end first-release validation,
-publishing the complete 0.1.0 package after every child merges, verifying
-the child's first-use docs against the published package, and clearing
-Quest's release handoff. Packaging preparation supplies the built artifact, packed-consumer tests, and
-[protected release path](../../docs/releasing.md). This epic still owns the
-0.1.0 version change, publication, and published first-use verification after
-all children merge. No package was published during preparation. Use the scoped package under the delegated distribution choice;
-do not infer publishability from a registry 404.
+the 0.1.0 version change, publishing the crate after every child merges
+through the [protected release path](../../docs/releasing.md), verifying the
+README's install command against the published crate, and clearing Quest's
+release handoff. No crate has been published; `token-max` was unclaimed on
+crates.io on 2026-11-08, which does not prove it can be published.
 
 Expanded 2026-11-07 (/quest-plan, then "afk spawn and merge whatever you want"):
 ✅ include T3-aware Claude/Codex profiles/settings and explicit SSH host audits
@@ -154,7 +153,7 @@ Recommendations for every check:
 
 ## Waiting
 
-- Maintainer: restore npm publisher authentication and verify authority for `@kixelated` before the first release. On 2026-11-07, `npm whoami` still returned E401; public packages suggest scope ownership but do not establish this session's authority. An agent can prepare and test without credentials, but cannot complete the account owner's login or grant itself rights. Check the authenticated identity and scope permissions up front. Configure trusted publishing near the actual release, respecting its first-publish expiry and whether it supports a new package; otherwise bootstrap by publishing the tested complete tarball with public access, then configure it for later releases. Follow [release preparation](../../docs/releasing.md): the main-only `npm` environment has been configured and verified by an agent, without a manual reviewer gate; bootstrap the tested complete tarball using environment-only authentication if needed, and configure OIDC near a subsequent release within its two-day validation window. An agent can automate protected execution, but cannot sign in as the owner or grant itself scope rights. No release was attempted.
+- Maintainer: publish the first crates.io release with a short-lived token, since crates.io creates trusted publishers only for an existing crate, then add the trusted publisher for later releases. Follow [release preparation](../../docs/releasing.md); the `crates-io` GitHub environment restricted to `main` must exist first. An agent can automate the protected workflow and drive Chrome through crates.io setup, but cannot sign in as the owner. No release was attempted.
 
 Decided 2026-11-08 (maintainer, after the first run on the maintainer's
 host): ✅ recommend from the measured requests when the missing ones cannot

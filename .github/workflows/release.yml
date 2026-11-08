@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Existing package.json version of the complete release
+        description: The Cargo.toml version being released
         required: true
         type: string
       authentication:
-        description: Trusted publishing, or authenticated bootstrap for the first complete release
+        description: Trusted publishing, or a token for the first release (crates.io requires the crate to exist first)
         required: true
         type: choice
         default: trusted
@@ -18,29 +18,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: npm-release
+  group: crates-io-release
   cancel-in-progress: false
 
 jobs:
   preflight:
-    permissions:
-      contents: read
-      actions: read
     if: github.ref == 'refs/heads/main' && github.repository == 'kixelated/token-max'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
-        with:
-          node-version: 24
-          package-manager-cache: false
-      - name: Require a complete release and preconfigured environment protection
+      - name: Require the requested version in Cargo.toml
         env:
           RELEASE_VERSION: ${{ inputs.version }}
-          GH_TOKEN: ${{ github.token }}
-        run: node scripts/check-release.mjs
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "$version" = "$RELEASE_VERSION"
+          test "$version" != 0.0.0
 
   validate:
     needs: preflight
@@ -50,42 +45,19 @@ jobs:
     needs: validate
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    environment: npm
+    environment: crates-io
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
-        with:
-          name: npm-package
-          path: package
-      - name: Verify the checked artifact and explicit release version
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: |
-          node --input-type=module <<'JS'
-          import assert from 'node:assert/strict';
-          import {readFileSync} from 'node:fs';
-          import {createHash} from 'node:crypto';
-          const artifact = JSON.parse(readFileSync('package/artifact.json'));
-          assert.equal(artifact.name, '@kixelated/token-max');
-          assert.equal(artifact.version, process.env.RELEASE_VERSION);
-          assert.notEqual(artifact.version, '0.0.0');
-          assert.equal('sha512-' + createHash('sha512').update(readFileSync('package/token-max.tgz')).digest('base64'), artifact.integrity);
-          JS
-      - name: Publish the tested tarball using npm trusted publishing
+          persist-credentials: false
+      - name: Authenticate with crates.io trusted publishing
         if: inputs.authentication == 'trusted'
-        run: npm publish package/token-max.tgz --access public --ignore-scripts
-      - name: Authenticated first publication of the tested complete tarball
-        if: inputs.authentication == 'bootstrap'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+      - name: Publish the validated commit
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_BOOTSTRAP_TOKEN }}
-        run: |
-          test -n "$NODE_AUTH_TOKEN"
-          npm whoami --registry=https://registry.npmjs.org
-          npm publish package/token-max.tgz --access public --ignore-scripts
+          CARGO_REGISTRY_TOKEN: ${{ inputs.authentication == 'trusted' && steps.auth.outputs.token || secrets.CARGO_BOOTSTRAP_TOKEN }}
+        run: cargo publish --locked

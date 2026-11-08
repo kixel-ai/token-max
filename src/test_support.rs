@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use indexmap::IndexMap;
 
 use crate::model::*;
+use crate::prices::{Catalog, PriceOptions, load_prices};
 
 /// Adjustable synthetic Claude usage; defaults to a 1000-token 5m write and 10 output tokens.
 #[derive(Clone, Copy, Debug)]
@@ -96,6 +97,16 @@ pub fn make_request() -> Request {
         requested_speed: None,
         issues: vec![],
     }
+}
+
+/// Deterministic synthetic public prices, read without using the network.
+pub fn prices() -> Catalog {
+    load_prices(&PriceOptions {
+        file: Some(fixture_path("prices.json")),
+        cache: Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/unused-cache.json"),
+        offline: false,
+    })
+    .unwrap()
 }
 
 /// A checked-in synthetic fixture under `test/fixtures`.

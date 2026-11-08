@@ -220,3 +220,28 @@ test("terminal controls in all metadata and prose are escaped, while JSON retain
   assert.ok(compact.includes("\\u009b31m\\u202ereversed\\u2066"));
   assert.equal(JSON.parse(JSON.stringify(report)).checks[0].owner, hostile);
 });
+
+test("an unresolved fast-mode owner stays beside a resolved one; only vanished directories are hidden", async () => {
+  const report = await syntheticReport();
+  const resolved = report.checks.find((c) => c.check === "fast-mode")!;
+  assert.equal(resolved.action, "keep");
+  const project = {
+    ...structuredClone(resolved),
+    action: "advisory" as const,
+    current: null,
+    recommended: null,
+    owner: "/synthetic/project/.codex/config.toml",
+    reason: "synthetic project override ownership is unresolved",
+  };
+  const vanished = {
+    ...structuredClone(project),
+    owner: "/synthetic/gone/.claude/settings.json",
+    reason:
+      "recorded working directory no longer exists; current ownership unresolved",
+  };
+  report.checks.push(project, vanished);
+  const text = formatReport(report, { width: 200 });
+  assert.match(text, /Keep[\s\S]*Fast mode: off/);
+  assert.match(text, /synthetic project override ownership is unresolved/i);
+  assert.doesNotMatch(text, /working directory no longer exists/);
+});

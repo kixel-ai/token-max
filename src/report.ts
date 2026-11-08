@@ -583,8 +583,7 @@ function unresolved(result: CheckResult): string {
     return result.recommended === result.current
       ? "The replay favors the current value, but could not confirm it applies to your current sessions."
       : `The replay favors ${settingValue(result, result.recommended)}, but could not confirm the current setting applies to your sessions.`;
-  if (result.coverage?.total === 0)
-    return "No requests in this window to compare.";
+  if (result.requests === 0) return "No requests in this window to compare.";
   if (result.check === "claude-cache-ttl") {
     if (!result.coverage?.priced)
       return "No requests with measured cache usage to compare.";
@@ -610,6 +609,8 @@ function unresolved(result: CheckResult): string {
     return "Sessions were never idle long enough for it to trigger, so it made no difference.";
   if (!periods.some((p) => p.status === "eligible"))
     return "No idle gaps could be compared with it on and off.";
+  if (result.afterRecommendations.deltaUsd === 0)
+    return "On and off cost the same on recorded idle gaps, so neither is cheaper.";
   return "Idle summaries or resumed sessions could not be priced.";
 }
 function capitalize(text: string): string {
@@ -662,17 +663,24 @@ function summary(
   // to change; show it only when it is the sole result for its setting.
   const key = (r: CheckResult) =>
     `${r.check}:${r.bucket}:${r.profile}:${r.check === "compaction-window" ? r.models.join(",") : ""}`;
-  // A comparison with nothing to compare is not a verdict, whatever the tie-break said.
-  const empty = (r: CheckResult) => r.coverage?.total === 0;
+  // A comparison with no requests is not a verdict, whatever the tie-break said.
+  // Window coverage counts only changed parts, so zero there can still be a keep.
+  // Fast mode warns from current settings alone, so it never needs requests.
+  const empty = (r: CheckResult) =>
+    (r.check === "claude-cache-ttl" || r.check === "compaction-window") &&
+    r.requests === 0;
   const action = (r: CheckResult) => (empty(r) ? "advisory" : r.action);
   const decided = new Set(
     report.checks.filter((r) => action(r) !== "advisory").map(key),
   );
+  // Only a vanished directory is proven irrelevant; any other unresolved owner,
+  // such as a project override, stays visible beside the resolved verdict.
   const checks = report.checks.filter(
     (r) =>
       !(
         action(r) === "advisory" &&
         r.check === "fast-mode" &&
+        r.reason.includes("working directory no longer exists") &&
         decided.has(key(r))
       ),
   );

@@ -732,16 +732,28 @@ export function compactionChecks(options: {
             ? before
             : raw(window, larger, cold);
         const previous = before?.after ?? baseline;
-        const beforeSummaries = before
-          ? before.simulation.added.map((a) => a.summaryCost)
-          : [];
-        const afterSummaries = point.simulation.added.map((a) => a.summaryCost);
-        const pairs = [
-          {
-            baseline: addCosts(beforeSummaries),
-            alternative: addCosts(afterSummaries),
-          },
-        ];
+        // One pair per request that gains or loses a summary, so the unpriced
+        // bound compares against single differences rather than their total.
+        const summaries = new Map<
+          string,
+          { baseline: Cost[]; alternative: Cost[] }
+        >();
+        const summary = (request: string) => {
+          const entry = summaries.get(request) ?? {
+            baseline: [],
+            alternative: [],
+          };
+          summaries.set(request, entry);
+          return entry;
+        };
+        for (const a of before?.simulation.added ?? [])
+          summary(a.request).baseline.push(a.summaryCost);
+        for (const a of point.simulation.added)
+          summary(a.request).alternative.push(a.summaryCost);
+        const pairs = [...summaries.values()].map((s) => ({
+          baseline: addCosts(s.baseline),
+          alternative: addCosts(s.alternative),
+        }));
         const uncertain = (r: Request) =>
           [before?.simulation.uncertain, point.simulation.uncertain].some(
             (sessions) => (sessions?.get(r.session) ?? Infinity) <= r.time,
@@ -791,7 +803,7 @@ export function compactionChecks(options: {
           ...point.errors,
         ]);
         // Per-session failures are unpriced pairs; an unknown current control still blocks a price.
-        const paired = pairedSavings(pairs);
+        const paired = pairedSavings(pairs, skippedLines(scan, profile.id));
         const savingsUsd =
           control.comparisonUnknown || !paired.decided ? null : paired.usd;
         const coverage = { priced: paired.priced, total: paired.total };
@@ -975,4 +987,11 @@ export function compactionChecks(options: {
     }
   }
   return checks;
+}
+
+/** Unreadable lines in a profile's transcripts; each could have been a request. */
+export function skippedLines(scan: Scan, profile: string): number {
+  return scan.snapshots
+    .filter((s) => s.profiles.includes(profile))
+    .reduce((n, s) => n + s.skippedLines, 0);
 }

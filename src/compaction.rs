@@ -881,9 +881,9 @@ impl Replayer<'_> {
             estimated_parts,
             attempt_scenario: Default::default(),
         };
-        let mut result = replay_parts(requests, iter::once(self.cache).chain(extra), &options);
-        result.retain(|i| i.selected);
-        result
+        replay_parts(requests, iter::once(self.cache).chain(extra), &options)
+            .filter(|i| i.selected)
+            .collect()
     }
 
     /// Replay a simulated window and total it with the fixed charges and added summaries.

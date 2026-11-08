@@ -94,6 +94,8 @@ pub struct ReplayedPart<'a> {
 
 /// Replay the same cache histories and usage estimates for every setting consumer.
 ///
+/// Parts are replayed as the iterator is consumed, so a caller keeps only what it needs.
+///
 /// `boundaries` index the compaction events that reset cache histories. Callers build each
 /// index once (for example per profile) and pass modeled events as another small layer,
 /// because rebuilding the index from every event on each replay dominated the run time.
@@ -101,13 +103,14 @@ pub fn replay_parts<'a, 'b>(
     requests: impl IntoIterator<Item = &'a Request>,
     boundaries: impl IntoIterator<Item = &'b CacheBoundaries>,
     options: &ReplayOptions,
-) -> Vec<ReplayedPart<'a>> {
+) -> impl Iterator<Item = ReplayedPart<'a>> {
     let mut chain = CacheChain::new(boundaries);
-    let mut result = Vec::new();
-    for r in requests {
+    let options = *options;
+    requests.into_iter().flat_map(move |r| {
+        let mut result = Vec::new();
         let estimate = options.estimates.get(&r.id).and_then(|e| e.part.as_ref());
         if estimate.is_some() && options.attempt_scenario == AttemptScenario::NoBilledAttempt {
-            continue;
+            return result;
         }
         let parts = estimate.map_or(r.parts.as_slice(), std::slice::from_ref);
         for (part, p) in parts.iter().enumerate() {
@@ -179,8 +182,8 @@ pub fn replay_parts<'a, 'b>(
                 evidence: replayed.evidence,
             });
         }
-    }
-    result
+        result
+    })
 }
 
 #[cfg(test)]
@@ -266,9 +269,12 @@ mod tests {
         };
         let combined = CacheBoundaries::new(base.iter().chain(&extra));
         let (base, extra) = (CacheBoundaries::new(&base), CacheBoundaries::new(&extra));
-        let layered = replay_parts(&requests, [&base, &extra], &options);
-        assert_eq!(layered, replay_parts(&requests, [&combined], &options));
-        assert_ne!(layered, replay_parts(&requests, [&base], &options));
-        assert_ne!(layered, replay_parts(&requests, [], &options));
+        let replay = |boundaries: &[&CacheBoundaries]| {
+            replay_parts(&requests, boundaries.iter().copied(), &options).collect::<Vec<_>>()
+        };
+        let layered = replay(&[&base, &extra]);
+        assert_eq!(layered, replay(&[&combined]));
+        assert_ne!(layered, replay(&[&base]));
+        assert_ne!(layered, replay(&[]));
     }
 }

@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod estimates;
+pub mod exposure;
 pub mod model;
 pub mod prices;
 pub mod safe;

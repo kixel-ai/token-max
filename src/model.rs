@@ -1042,8 +1042,138 @@ pub enum TextCoverage {
 pub struct References {
     pub base: Option<String>,
     pub keep: Option<i64>,
-    pub tail: Vec<String>,
-    pub items: Option<Vec<String>>,
+    pub tail: Ids,
+    pub items: Option<Digests>,
+}
+
+/// A shared list of identifiers; equal lists are usually one allocation.
+pub type Ids = std::sync::Arc<[Text]>;
+
+/// A request's message digests, sharing the prefix it keeps from its base request.
+///
+/// Each request usually keeps every digest of the one before it, so flat lists
+/// would grow quadratically with conversation length.
+#[derive(Clone)]
+pub struct Digests(std::sync::Arc<DigestNode>);
+
+struct DigestNode {
+    /// The base request, whose first `keep` digests lead this list.
+    base: Option<Digests>,
+    keep: usize,
+    tail: Ids,
+    len: usize,
+}
+
+impl Digests {
+    /// The first `keep` digests of `base` (which must hold that many), then `tail`.
+    pub fn new(base: Option<(&Digests, usize)>, tail: Ids) -> Self {
+        let (mut base, keep) = match base {
+            Some((b, keep)) if keep > 0 => (Some(b), keep),
+            _ => (None, 0),
+        };
+        assert!(
+            base.is_none_or(|b| keep <= b.len()),
+            "digest prefix too long"
+        );
+        // Skip ancestors whose own tail this list does not keep.
+        while let Some(b) = base.filter(|b| keep <= b.0.keep) {
+            base = b.0.base.as_ref();
+        }
+        Digests(std::sync::Arc::new(DigestNode {
+            base: base.cloned(),
+            keep,
+            len: keep + tail.len(),
+            tail,
+        }))
+    }
+    pub fn len(&self) -> usize {
+        self.0.len
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.len == 0
+    }
+    /// The digests in order.
+    pub fn iter(&self) -> impl Iterator<Item = &Text> {
+        self.iter_from(0)
+    }
+    /// The digests from index `start` on, without walking the shared prefix before it.
+    pub fn iter_from(&self, start: usize) -> impl Iterator<Item = &Text> {
+        let mut segments = Vec::new();
+        let mut node = &*self.0;
+        let mut limit = node.len;
+        while limit > start {
+            let from = node.keep.max(start);
+            if limit > from {
+                segments.push(&node.tail[from - node.keep..limit - node.keep]);
+            }
+            limit = limit.min(node.keep);
+            match &node.base {
+                Some(b) if limit > start => node = &b.0,
+                _ => break,
+            }
+        }
+        segments.into_iter().rev().flatten()
+    }
+    /// The list whose first digests lead this one, and how many it keeps.
+    pub fn base(&self) -> Option<(&Digests, usize)> {
+        self.0.base.as_ref().map(|b| (b, self.0.keep))
+    }
+    /// An identity for this shared list, stable while it is alive.
+    pub fn address(&self) -> usize {
+        std::sync::Arc::as_ptr(&self.0) as usize
+    }
+    fn last(&self) -> Option<&Text> {
+        let mut node = &*self.0;
+        let index = node.len.checked_sub(1)?;
+        loop {
+            if index >= node.keep {
+                return node.tail.get(index - node.keep);
+            }
+            node = &node.base.as_ref()?.0;
+        }
+    }
+}
+
+impl Drop for DigestNode {
+    // Release long chains iteratively instead of recursing once per request.
+    fn drop(&mut self) {
+        let mut next = self.base.take();
+        while let Some(Digests(node)) = next {
+            next = match std::sync::Arc::try_unwrap(node) {
+                Ok(mut node) => node.base.take(),
+                Err(_) => None,
+            };
+        }
+    }
+}
+
+impl PartialEq for Digests {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+            || (self.len() == other.len() && self.iter().eq(other.iter()))
+    }
+}
+
+impl Eq for Digests {}
+
+impl std::hash::Hash for Digests {
+    // Consistent with element-wise equality without walking the whole list.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        self.last().hash(state);
+    }
+}
+
+impl std::fmt::Debug for Digests {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
+impl Serialize for Digests {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
 }
 
 /// A request-local view of historical state, including unresolved visibility.
@@ -1059,11 +1189,11 @@ pub struct Exposure {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExposureView {
-    pub components: Vec<Text>,
-    pub candidates: Vec<Text>,
-    pub removed: Vec<Text>,
-    pub inherited: Vec<Text>,
-    pub deferred: Vec<Text>,
+    pub components: Ids,
+    pub candidates: Ids,
+    pub removed: Ids,
+    pub inherited: Ids,
+    pub deferred: Ids,
     pub linkage: Linkage,
     pub coverage: TextCoverage,
     pub references: Option<References>,

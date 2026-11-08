@@ -5,6 +5,7 @@ use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexSet;
@@ -308,11 +309,53 @@ impl<R: Read> Read for Tee<R> {
     }
 }
 
+/// Partial downloads that a cancelled process must delete itself, because it exits without
+/// waiting for a download that a stalled response may block indefinitely.
+struct Downloads {
+    cancelled: bool,
+    files: Vec<PathBuf>,
+}
+
+static DOWNLOADS: Mutex<Downloads> = Mutex::new(Downloads {
+    cancelled: false,
+    files: Vec::new(),
+});
+
+fn downloads() -> MutexGuard<'static, Downloads> {
+    DOWNLOADS.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Delete every partial price download and refuse new ones, before a cancelled process exits.
+pub fn cancel_downloads() {
+    let mut downloads = downloads();
+    downloads.cancelled = true;
+    for file in downloads.files.drain(..) {
+        let _ = fs::remove_file(file);
+    }
+}
+
+/// Create a partial download, registered so cancellation can delete it.
+fn create_temporary(temporary: &Path) -> io::Result<File> {
+    let mut downloads = downloads();
+    if downloads.cancelled {
+        return Err(io::ErrorKind::Interrupted.into());
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let file = options.open(temporary)?;
+    downloads.files.push(temporary.to_path_buf());
+    Ok(file)
+}
+
 /// Removes this operation's partial download however it ends; other downloads own other names.
 struct Discard<'a>(&'a Path);
 
 impl Drop for Discard<'_> {
     fn drop(&mut self) {
+        let mut downloads = downloads();
+        downloads.files.retain(|file| file != self.0);
         let _ = fs::remove_file(self.0);
     }
 }
@@ -362,11 +405,7 @@ fn download(cache: &Path, temporary: &Path) -> Result<Catalog, Failure> {
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let file = options.open(temporary)?;
+    let file = create_temporary(temporary)?;
     let catalog = parse_catalog(Tee {
         body: response.body_mut().as_reader(),
         file,
@@ -1003,6 +1042,28 @@ mod tests {
 
     fn close(a: Option<f64>, b: f64) -> bool {
         (a.unwrap() - b).abs() < 1e-10
+    }
+
+    /// Cancellation is sticky for the process; no other test here downloads.
+    #[test]
+    fn cancellation_deletes_partial_downloads_and_refuses_new_ones() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(".tmp")
+            .join(format!("cancel-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let partial = dir.join("models.json.partial.tmp");
+        let finished = dir.join("models.json.finished.tmp");
+        let mut file = create_temporary(&partial).unwrap();
+        file.write_all(b"{\"anthropic\":").unwrap();
+        create_temporary(&finished).unwrap();
+        drop(Discard(&finished));
+        assert!(!finished.exists());
+        assert_eq!(downloads().files, vec![partial.clone()]);
+        cancel_downloads();
+        assert!(!partial.exists());
+        assert!(create_temporary(&dir.join("models.json.late.tmp")).is_err());
+        assert!(!dir.join("models.json.late.tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

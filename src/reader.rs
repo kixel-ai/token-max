@@ -6,7 +6,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{ErrorKind, Read};
-use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::{IndexMap, IndexSet};
@@ -337,15 +336,23 @@ fn kind_name(kind: EventKind) -> &'static str {
 }
 
 #[cfg(unix)]
-fn file_identity(info: &std::fs::Metadata) -> (u64, u64) {
+fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
-    (info.dev(), info.ino())
+    let info = file.metadata()?;
+    Ok((info.dev(), info.ino()))
+}
+
+/// The volume serial number and file index, which discovery records for Windows snapshots.
+#[cfg(windows)]
+fn file_identity(file: &File) -> std::io::Result<(u64, u64)> {
+    let info = winapi_util::file::information(file)?;
+    Ok((info.volume_serial_number(), info.file_index()))
 }
 
 /// Discovery records no device or inode without them.
-#[cfg(not(unix))]
-fn file_identity(_info: &std::fs::Metadata) -> (u64, u64) {
-    (0, 0)
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_file: &File) -> std::io::Result<(u64, u64)> {
+    Ok((0, 0))
 }
 
 /// Complete newline-terminated records of one snapshot, up to its frozen byte boundary.
@@ -383,7 +390,9 @@ pub fn read_snapshot(snapshot: &mut Snapshot) -> Result<Records<'_>, ScanError> 
     let info = handle
         .metadata()
         .map_err(|_| at("cannot inspect snapshotted transcript"))?;
-    if file_identity(&info) != (snapshot.device, snapshot.inode) || info.len() < snapshot.bytes {
+    let identity =
+        file_identity(&handle).map_err(|_| at("cannot inspect snapshotted transcript"))?;
+    if identity != (snapshot.device, snapshot.inode) || info.len() < snapshot.bytes {
         return Err(at("transcript changed identity or shrank after snapshot"));
     }
     let size = snapshot.bytes.min(CHUNK as u64) as usize;
@@ -771,7 +780,7 @@ impl Reader {
         let subagent = file.subagent;
         let context = &mut file.context;
         if let Some(cwd) = string(raw, "cwd")
-            && Path::new(cwd).is_absolute()
+            && crate::safe::is_absolute(cwd)
             && context.cwd.as_deref() != Some(cwd)
         {
             context.cwd = Some(cwd.to_string());
@@ -785,7 +794,7 @@ impl Reader {
             if file.session_raw.as_deref() != Some(session) {
                 let opaque = identity(session);
                 context.session = if subagent {
-                    let name = snapshot.file.rsplit('/').next().unwrap_or_default();
+                    let name = snapshot.file.rsplit(['/', '\\']).next().unwrap_or_default();
                     identity(&format!("{opaque}:{name}"))
                 } else {
                     opaque
@@ -1073,7 +1082,7 @@ impl Reader {
         let kind = string(raw, "type");
         let payload_kind = string(p, "type");
         let context = &mut file.context;
-        let absolute_cwd = string(p, "cwd").filter(|cwd| Path::new(cwd).is_absolute());
+        let absolute_cwd = string(p, "cwd").filter(|cwd| crate::safe::is_absolute(cwd));
         if kind == Some("session_meta") {
             if let Some(cwd) = absolute_cwd {
                 context.cwd = Some(cwd.to_string());
@@ -1652,11 +1661,17 @@ fn attribute_idle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RootState, Ttl};
     use crate::test_support::Workspace;
     use serde_json::json;
+    use std::path::Path;
 
     fn text(path: &Path) -> String {
+        // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
+        let path: std::path::PathBuf = if cfg!(windows) {
+            path.components().collect()
+        } else {
+            path.to_path_buf()
+        };
         path.to_string_lossy().into_owned()
     }
 
@@ -1742,8 +1757,11 @@ mod tests {
         assert!(!private(&data));
     }
 
+    // Creating the shared directory needs a symlink, which Windows reserves for privileged users.
+    #[cfg(unix)]
     #[test]
     fn shared_directories_are_read_once_keep_profile_aliases_and_include_nested_subagents() {
+        use crate::model::{RootState, Ttl};
         let w = Workspace::new();
         let alternate = w.home.join(".claude-work");
         std::fs::create_dir(&alternate).unwrap();

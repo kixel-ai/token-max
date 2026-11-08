@@ -3150,7 +3150,7 @@ mod tests {
             "env": {"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "90000"},
             "promptCacheTtl": "5m",
         });
-        let local_file = project.join(".claude/settings.local.json");
+        let local_file = project.join(".claude").join("settings.local.json");
         std::fs::write(&local_file, local.to_string()).unwrap();
         let common = |mut row: Value| {
             row["sessionId"] = json!("native");

@@ -133,6 +133,20 @@ pub fn id(value: &Value) -> Result<String, ScanError> {
     }
 }
 
+/// Node's `path.isAbsolute`: on Windows a rooted path such as `/project` counts, as does `C:\\project`.
+pub fn is_absolute(path: &str) -> bool {
+    if cfg!(windows) {
+        let b = path.as_bytes();
+        matches!(b.first(), Some(b'/' | b'\\'))
+            || (b.len() > 2
+                && b[0].is_ascii_alphabetic()
+                && b[1] == b':'
+                && matches!(b[2], b'/' | b'\\'))
+    } else {
+        path.starts_with('/')
+    }
+}
+
 /// Print file paths without allowing terminal control sequences.
 pub fn display(value: &str) -> String {
     terminal_text(&serde_json::to_string(value).expect("strings serialize"))

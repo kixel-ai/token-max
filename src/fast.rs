@@ -527,6 +527,12 @@ mod tests {
         const DAY_MS: Millis = 86_400_000;
 
         fn text(path: &Path) -> String {
+            // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
+            let path: std::path::PathBuf = if cfg!(windows) {
+                path.components().collect()
+            } else {
+                path.to_path_buf()
+            };
             path.to_string_lossy().into_owned()
         }
 

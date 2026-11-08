@@ -62,6 +62,12 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn text(path: &Path) -> String {
+    // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
+    let path: std::path::PathBuf = if cfg!(windows) {
+        path.components().collect()
+    } else {
+        path.to_path_buf()
+    };
     path.to_string_lossy().into_owned()
 }
 
@@ -371,7 +377,10 @@ fn arguments_follow_strict_parse_args() {
         (0, true)
     );
     let (status, stdout, _) = invoke(&["-v", "--"]);
-    assert_eq!((status, stdout.as_str()), (0, "0.0.0\n"));
+    assert_eq!(
+        (status, stdout),
+        (0, format!("{}\n", env!("CARGO_PKG_VERSION")))
+    );
     for (value, message) in [
         ("2026-11", "--since requires YYYY-MM-DD"),
         ("2026-11-01T00:00:00", "--since requires YYYY-MM-DD"),

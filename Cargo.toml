@@ -28,3 +28,6 @@ ureq = "3.5.1"
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2.191"
+
+[target."cfg(windows)".dependencies]
+winapi-util = "0.1.11"

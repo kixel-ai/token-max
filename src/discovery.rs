@@ -82,6 +82,7 @@ fn absent(kind: ErrorKind) -> bool {
 }
 
 /// Collapse `.`, `..` and repeated separators like Node's `path.normalize`, without a trailing slash.
+#[cfg(not(windows))]
 fn normalize_segments(path: &str, above_root: bool) -> String {
     let mut parts: Vec<&str> = Vec::new();
     for part in path.split('/') {
@@ -101,6 +102,7 @@ fn normalize_segments(path: &str, above_root: bool) -> String {
 }
 
 /// Node's POSIX `path.join`.
+#[cfg(not(windows))]
 fn join(parts: &[&str]) -> String {
     let joined = parts
         .iter()
@@ -128,6 +130,7 @@ fn join(parts: &[&str]) -> String {
 }
 
 /// Node's POSIX `path.resolve` for one path, relative to the process working directory.
+#[cfg(not(windows))]
 fn resolve(path: &str) -> String {
     let full = if path.starts_with('/') {
         path.to_string()
@@ -141,6 +144,7 @@ fn resolve(path: &str) -> String {
 }
 
 /// Node's POSIX `path.dirname`.
+#[cfg(not(windows))]
 fn dirname(path: &str) -> &str {
     let bytes = path.as_bytes();
     if bytes.is_empty() {
@@ -168,11 +172,81 @@ fn dirname(path: &str) -> &str {
 }
 
 /// `fs.realpath`, as a string; a non-UTF-8 target cannot name a file Node could open either.
+#[cfg(not(windows))]
 fn realpath(path: &str) -> std::io::Result<String> {
     fs::canonicalize(path)?
         .into_os_string()
         .into_string()
         .map_err(|_| ErrorKind::InvalidData.into())
+}
+
+/// Node's win32 `path.join`: join the non-empty parts and normalize them lexically.
+#[cfg(windows)]
+fn join(parts: &[&str]) -> String {
+    let mut path = std::path::PathBuf::new();
+    for part in parts.iter().filter(|p| !p.is_empty()) {
+        path.push(part);
+    }
+    lexical(&path)
+}
+
+/// Collapse `.` and `..` without touching the file system, as Node's win32 `path.normalize` does.
+#[cfg(windows)]
+fn lexical(path: &std::path::Path) -> String {
+    use std::path::Component;
+    let mut out: Vec<Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => match out.last() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(component),
+            },
+            other => out.push(other),
+        }
+    }
+    let joined: std::path::PathBuf = out.iter().collect();
+    match joined.to_string_lossy().into_owned() {
+        empty if empty.is_empty() => ".".into(),
+        text => text,
+    }
+}
+
+/// Node's win32 `path.resolve` for one path, relative to the process working directory.
+#[cfg(windows)]
+fn resolve(path: &str) -> String {
+    std::path::absolute(path)
+        .map(|absolute| lexical(&absolute))
+        .unwrap_or_else(|_| path.to_string())
+}
+
+/// Node's win32 `path.dirname`: a root is its own parent.
+#[cfg(windows)]
+fn dirname(path: &str) -> &str {
+    match std::path::Path::new(path).parent().and_then(|p| p.to_str()) {
+        Some("") => ".",
+        Some(parent) => parent,
+        None => path,
+    }
+}
+
+/// `fs.realpath`, as a string. Canonical Windows paths carry a `\\?\` prefix Node never shows.
+#[cfg(windows)]
+fn realpath(path: &str) -> std::io::Result<String> {
+    let canonical = fs::canonicalize(path)?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| std::io::Error::from(ErrorKind::InvalidData))?;
+    Ok(match canonical.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(share) => format!(r"\\{share}"),
+            None => rest.to_string(),
+        },
+        None => canonical,
+    })
 }
 
 /// The ICU root collation weight of a printable ASCII character; letters share a weight across case.
@@ -712,8 +786,23 @@ fn file_key(info: &fs::Metadata, _canonical: &str) -> FileKey {
     (info.dev(), info.ino(), String::new())
 }
 
+/// The volume serial number and file index Node's `stat` reports as `dev` and `ino` on Windows.
+#[cfg(windows)]
+fn file_key(_info: &fs::Metadata, canonical: &str) -> FileKey {
+    let handle = winapi_util::Handle::from_path_any(canonical);
+    match handle.and_then(|h| winapi_util::file::information(&h)) {
+        Ok(info) => (
+            info.volume_serial_number(),
+            info.file_index(),
+            String::new(),
+        ),
+        // An unopenable file fails later at read time with a safe error.
+        Err(_) => (0, 0, canonical.to_string()),
+    }
+}
+
 /// Without device and inode numbers, the canonical path is the identity.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn file_key(_info: &fs::Metadata, canonical: &str) -> FileKey {
     (0, 0, canonical.to_string())
 }
@@ -1151,11 +1240,17 @@ mod tests {
     use std::path::Path;
 
     fn text(path: &Path) -> String {
+        // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.
+        let path: std::path::PathBuf = if cfg!(windows) {
+            path.components().collect()
+        } else {
+            path.to_path_buf()
+        };
         path.to_string_lossy().into_owned()
     }
 
     fn canonical(path: &Path) -> String {
-        text(&fs::canonicalize(path).unwrap())
+        realpath(&text(path)).unwrap()
     }
 
     fn write(path: impl AsRef<Path>, contents: &str) {
@@ -1199,6 +1294,20 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn node_win32_path_semantics() {
+        assert_eq!(join(&[r"C:\a\b", r"..\c", "d"]), r"C:\a\c\d");
+        assert_eq!(join(&["a", "..", ".."]), "..");
+        assert_eq!(join(&["", ""]), ".");
+        assert_eq!(dirname(r"C:\a\b"), r"C:\a");
+        assert_eq!(dirname(r"C:\a"), r"C:\");
+        assert_eq!(dirname(r"C:\"), r"C:\");
+        assert_eq!(dirname("a"), ".");
+        assert!(!realpath(".").unwrap().starts_with(r"\\?\"));
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn node_path_semantics() {
         assert_eq!(join(&["/a/b/", "../c", "d"]), "/a/c/d");

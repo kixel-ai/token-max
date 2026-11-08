@@ -358,6 +358,10 @@ fn create_temporary(temporary: &Path) -> io::Result<File> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    // Cancellation deletes the file while the download still holds it open, which
+    // Windows allows only when every handle shares delete access.
+    #[cfg(windows)]
+    std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 0x7);
     let file = options.open(temporary)?;
     downloads.files.push(temporary.to_path_buf());
     Ok(file)
@@ -1080,6 +1084,8 @@ mod tests {
         assert!(!finished.exists());
         assert_eq!(downloads().files, vec![partial.clone()]);
         cancel_downloads();
+        // Without POSIX delete semantics, Windows hides a deleted file only once its last handle closes.
+        drop(file);
         assert!(!partial.exists());
         assert!(create_temporary(&dir.join("models.json.late.tmp")).is_err());
         assert!(!dir.join("models.json.late.tmp").exists());

@@ -1133,9 +1133,9 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                         &format!(
                             "at {}; {} summary input tokens; {} summary output tokens; {} resumed-prefix tokens",
                             added.request,
-                            js_number(added.input_tokens),
-                            js_number(added.summary_tokens),
-                            js_number(added.prefix_tokens)
+                            js_number(added.input_tokens as f64),
+                            js_number(added.summary_tokens as f64),
+                            js_number(added.prefix_tokens as f64)
                         ),
                     );
                     for basis in &added.basis {
@@ -2059,9 +2059,9 @@ mod tests {
                 },
                 added: vec![AddedCompaction {
                     request: "synthetic-added".into(),
-                    input_tokens: 150_000.5,
-                    summary_tokens: 2000.0,
-                    prefix_tokens: 1e-7,
+                    input_tokens: 150_000,
+                    summary_tokens: 2000,
+                    prefix_tokens: 1,
                     basis: vec![CompactionBasis {
                         event: "synthetic-boundary".into(),
                         request: "synthetic-resumed".into(),

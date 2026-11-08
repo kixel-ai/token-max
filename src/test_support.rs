@@ -164,3 +164,41 @@ impl Drop for Workspace {
         let _ = std::fs::remove_dir_all(&self.home);
     }
 }
+
+/// One synthetic Claude profile rooted at `root`, with explicit 5m TTLs and no speed or idle controls.
+pub fn make_profile(id: &str, root: &str) -> Profile {
+    let ttl = || TtlControl {
+        value: Some(Ttl::FiveMinutes),
+        owner: format!("{root}/settings.json:promptCacheTtl"),
+        reason: "explicit setting".into(),
+    };
+    Profile {
+        id: id.into(),
+        harness: Harness::Claude,
+        root: root.into(),
+        aliases: vec![],
+        histories: vec![format!("{root}/projects")],
+        settings_file: format!("{root}/settings.json"),
+        ttl: PerBucket {
+            main: ttl(),
+            subagent: ttl(),
+        },
+        provider: None,
+        settings: IndexMap::new(),
+        compaction: CompactionControls {
+            default: WindowControl {
+                value: None,
+                owner: format!("{root}/settings.json:autoCompactWindow"),
+                reason: "no explicit window".into(),
+                applicable: true,
+                minimum_claude_patch: None,
+                comparison_unknown: None,
+            },
+            models: IndexMap::new(),
+        },
+        idle: None,
+        speed: None,
+        speed_directories: None,
+        idle_directories: None,
+    }
+}

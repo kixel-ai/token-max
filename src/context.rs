@@ -137,24 +137,12 @@ struct Pieces<'a> {
     ids: HashMap<String, usize>,
     kinds: Vec<Kind>,
     of: HashMap<&'a str, Vec<(usize, i64)>>,
-    /// The rows a skill invocation may count for, by hashed `skill:<name>` target,
-    /// in precedence order: a short name reaches a synced skill only where no
-    /// other skill has it.
-    skills: HashMap<String, Vec<String>>,
+    /// The row a skill invocation counts for, by hashed `skill:<name>` target. The
+    /// scan already resolved a short name to the synced skill it reached.
+    skills: HashMap<String, String>,
 }
 
 impl Pieces<'_> {
-    /// Let invocations of skill `name` count for `row`, ahead of other rows when `first`.
-    fn target(&mut self, name: &str, row: &str, first: bool) {
-        let rows = self
-            .skills
-            .entry(identity(&format!("skill:{name}")))
-            .or_default();
-        if !rows.iter().any(|r| r == row) {
-            rows.insert(if first { 0 } else { rows.len() }, row.to_string());
-        }
-    }
-
     fn intern(
         &mut self,
         key: String,
@@ -314,10 +302,9 @@ fn pieces(
                 .into_iter()
                 .map(|(member, n)| {
                     let (name, control) = skill(member);
-                    if let Some(short) = synced_short(member) {
-                        interned.target(short, &name, false);
-                    }
-                    interned.target(member, &name, true);
+                    interned
+                        .skills
+                        .insert(identity(&format!("skill:{member}")), name.clone());
                     let key = format!("skill:{name}");
                     let id = interned.intern(key, ContextKind::Skill, name, control);
                     (id, n)
@@ -654,41 +641,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let name = interned.kinds[row.key].name.as_str();
         families.entry((kind, name)).or_default().push(index);
     }
-    let typed: HashMap<&str, bool> = interned
-        .kinds
-        .iter()
-        .filter(|k| k.kind == ContextKind::Skill)
-        .map(|k| (k.name.as_str(), typed_only(k.control.as_ref())))
-        .collect();
-    let mut skill_uses = vec![];
-    for i in &scan.invocations {
-        // The first row in precedence order that the invoking profile was shown.
-        let Some(name) = interned.skills.get(&i.target).and_then(|names| {
-            names.iter().find(|name| {
-                families
-                    .get(&(ContextKind::Skill, name.as_str()))
-                    .into_iter()
-                    .flatten()
-                    .any(|&index| {
-                        let profiles = &rows[index].cost.profiles;
-                        i.profiles.iter().any(|p| profiles.contains(p))
-                    })
-            })
-        }) else {
-            continue;
-        };
-        // Typed requests keep working when a skill is hidden from the model, so only
-        // the model's own calls show what its listing is for. A setting that removes
-        // the skill entirely takes typed requests away too, so those count as uses.
-        let counts = match i.kind {
-            InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
-            InvocationKind::SkillRequest => !typed[name.as_str()],
-            _ => false,
-        };
-        if counts {
-            skill_uses.push((name.as_str(), i));
-        }
-    }
     let mut last: HashMap<usize, Millis> = HashMap::new();
     let mut credit =
         |family: (ContextKind, &str), profiles: &[String], time: Millis, calls: u64| {
@@ -712,8 +664,27 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         };
         credit(family, &c.profiles, c.last_used, c.calls);
     }
-    for (name, i) in skill_uses {
-        credit((ContextKind::Skill, name), &i.profiles, i.time, 1);
+    let typed: HashMap<&str, bool> = interned
+        .kinds
+        .iter()
+        .filter(|k| k.kind == ContextKind::Skill)
+        .map(|k| (k.name.as_str(), typed_only(k.control.as_ref())))
+        .collect();
+    for i in &scan.invocations {
+        let Some(name) = interned.skills.get(&i.target) else {
+            continue;
+        };
+        // Typed requests keep working when a skill is hidden from the model, so only
+        // the model's own calls show what its listing is for. A setting that removes
+        // the skill entirely takes typed requests away too, so those count as uses.
+        let counts = match i.kind {
+            InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
+            InvocationKind::SkillRequest => !typed[name.as_str()],
+            _ => false,
+        };
+        if counts {
+            credit((ContextKind::Skill, name), &i.profiles, i.time, 1);
+        }
     }
     let latest: HashMap<usize, HashSet<usize>> = latest
         .into_iter()
@@ -1189,9 +1160,9 @@ mod tests {
             components,
             requests: vec![exposure("r1", &["listing"], 0, 500)],
             invocations: vec![
-                // The local skill owns the short name, so this is not the synced one.
+                // The scan resolved this short name to the local skill that owns it.
                 invocation(InvocationKind::SkillRequest, "pdf", 1),
-                invocation(InvocationKind::SkillRequest, "xlsx", 2),
+                invocation(InvocationKind::SkillRequest, "anthropic-skills:xlsx", 2),
                 invocation(InvocationKind::SkillCall, "anthropic-skills:pdf", 3),
                 invocation(InvocationKind::SkillRequest, "tools:deploy", 4),
             ],
@@ -1217,54 +1188,6 @@ mod tests {
         let plugin = row(&rows, "tools:deploy");
         assert_eq!(plugin.control, None);
         assert_eq!((plugin.calls, plugin.verdict), (Some(1), None));
-    }
-
-    #[test]
-    fn a_short_name_resolves_within_the_invoking_profile() {
-        let scan = ExposureScan {
-            components: vec![
-                component(
-                    "synced",
-                    Category::SkillListing,
-                    "anthropic-skills:pdf",
-                    100,
-                    &[],
-                ),
-                component("local", Category::SkillListing, "pdf", 100, &[]),
-                component("a", Category::SkillListing, "a", 100, &["synced"]),
-                component("b", Category::SkillListing, "b", 100, &["local"]),
-            ],
-            requests: vec![
-                exposure("ra", &["a"], 0, 100),
-                exposure("rb", &["b"], 0, 100),
-            ],
-            invocations: vec![Invocation {
-                id: "i".into(),
-                target: identity("skill:pdf"),
-                group: None,
-                kind: InvocationKind::SkillCall,
-                status: InvocationStatus::Called,
-                via: Via::Tool,
-                session: "session".into(),
-                sessions: vec!["session".into()],
-                identity_basis: IdentityBasis::Recorded,
-                harness: Harness::Claude,
-                client: None,
-                version: None,
-                time: 3,
-                profiles: vec!["a".into()],
-                locations: vec![],
-            }],
-            ..ExposureScan::default()
-        };
-        let mut ra = request("ra", 1, 0, 0, 100);
-        ra.profiles = vec!["a".into()];
-        let mut rb = request("rb", 2, 0, 0, 100);
-        rb.profiles = vec!["b".into()];
-        let rows = costs(&scan, &[ra, rb], 1.0);
-        // Profile b's local pdf owns the short name there, not in profile a.
-        assert_eq!(row(&rows, SYNCED_SKILLS).calls, Some(1));
-        assert_eq!(row(&rows, "pdf").calls, Some(0));
     }
 
     #[test]

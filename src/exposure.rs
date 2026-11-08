@@ -116,6 +116,9 @@ pub struct ExposureCollector {
     digests: HashMap<String, Digests>,
     // Skill names from listings; a mention only requests a skill the catalog knows.
     known_skills: HashSet<String>,
+    // Short names of listed synced skills: `/pdf` reaches `anthropic-skills:pdf` while no
+    // other known skill is named `pdf`.
+    synced_skills: HashMap<String, String>,
     user_aliases: HashMap<String, HashMap<String, u64>>,
     // Surfaced tool definitions by attachment uuid and name, for later `sameAs` references.
     surfaced: HashMap<(String, String), Text>,
@@ -347,6 +350,7 @@ impl ExposureCollector {
             deferred: IndexSet::new(),
             digests: HashMap::new(),
             known_skills: HashSet::new(),
+            synced_skills: HashMap::new(),
             user_aliases: HashMap::new(),
             surfaced: HashMap::new(),
             shapes: HashMap::new(),
@@ -368,6 +372,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.synced_skills.clear();
         self.uncertain = true;
         self.invalidated = true;
     }
@@ -665,6 +670,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.synced_skills.clear();
         self.user_aliases.clear();
         self.surfaced.clear();
         self.blobs.clear();
@@ -837,9 +843,22 @@ impl ExposureCollector {
     /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
     fn know_skill(&mut self, name: &str) {
         if let Some(short) = synced_short(name) {
-            self.known_skills.insert(short.to_string());
+            self.synced_skills
+                .insert(short.to_string(), name.to_string());
         }
         self.known_skills.insert(name.to_string());
+    }
+
+    fn knows_skill(&self, name: &str) -> bool {
+        self.known_skills.contains(name) || self.synced_skills.contains_key(name)
+    }
+
+    /// The skill a name reaches in the current catalog: another skill keeps its short name.
+    fn skill_name<'a>(&'a self, name: &'a str) -> &'a str {
+        match self.synced_skills.get(name) {
+            Some(full) if !self.known_skills.contains(name) => full,
+            _ => name,
+        }
     }
 
     /// A rendered skill listing and one member span per `- name: description` line.
@@ -887,8 +906,12 @@ impl ExposureCollector {
         let time = line
             .time
             .ok_or_else(|| ScanError::new("missing invocation timestamp"))?;
-        let scope = if is_skill(input.kind) { "skill" } else { "mcp" };
-        let target = target(scope, name);
+        let target = if is_skill(input.kind) {
+            target("skill", self.skill_name(name))
+        } else {
+            target("mcp", name)
+        };
+
         self.invocation(target, input, time, line.location);
         Ok(())
     }
@@ -1476,7 +1499,9 @@ impl ExposureCollector {
             }
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
-                self.known_skills.insert(name.to_string());
+                if !self.knows_skill(name) {
+                    self.known_skills.insert(name.to_string());
+                }
                 let invoke = Invoke {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
@@ -1499,7 +1524,7 @@ impl ExposureCollector {
                     }
                 };
                 for (offset, name) in mentions(t) {
-                    let (kind, status) = requested(self.known_skills.contains(name));
+                    let (kind, status) = requested(self.knows_skill(name));
                     let invoke = Invoke {
                         kind,
                         via: Via::Mention,
@@ -1511,7 +1536,7 @@ impl ExposureCollector {
                     self.invoke(name, invoke, line)?;
                 }
                 if let Some(name) = command(t) {
-                    let (kind, status) = requested(self.known_skills.contains(name));
+                    let (kind, status) = requested(self.knows_skill(name));
                     let invoke = Invoke {
                         kind,
                         via: Via::Wrapper,
@@ -1626,7 +1651,11 @@ impl ExposureCollector {
         };
         self.invoke(target_name, invoke, line)?;
         let pending = PendingTool {
-            target: target(scope, target_name),
+            target: if scope == "skill" {
+                target(scope, self.skill_name(target_name))
+            } else {
+                target(scope, target_name)
+            },
             group: group(target_name),
             kind,
         };
@@ -3168,29 +3197,43 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_short_name_requests_a_listed_synced_skill() {
-        let mut c = ExposureCollector::new(None);
-        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
-        feed.all(
-            &mut c,
-            vec![
-                attachment(
-                    0,
-                    json!({ "type": "skill_listing", "content": "x", "names": ["anthropic-skills:pdf"] }),
-                ),
-                user(1, json!("<command-name>/pdf</command-name>")),
-                assistant(2, json!([])),
-            ],
-        );
-        let scan = c.finish(&[feed.request("r", 3, None)], None);
-        let typed: Vec<_> = scan
-            .invocations
-            .iter()
-            .map(|i| (i.kind, i.target.clone()))
-            .collect();
+    fn a_short_name_reaches_a_synced_skill_unless_another_skill_owns_it() {
+        let resolved = |names: Value| {
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+            feed.all(
+                &mut c,
+                vec![
+                    attachment(
+                        0,
+                        json!({ "type": "skill_listing", "content": "x", "names": names }),
+                    ),
+                    user(1, json!("<command-name>/pdf</command-name>")),
+                    assistant(
+                        2,
+                        json!([tool_use("s", "Skill", json!({ "skill": "pdf" }))]),
+                    ),
+                ],
+            );
+            let scan = c.finish(&[feed.request("r", 3, None)], None);
+            scan.invocations
+                .iter()
+                .map(|i| (i.kind, i.target.clone()))
+                .collect::<Vec<_>>()
+        };
+        let both = |name: &str| {
+            [
+                (InvocationKind::SkillRequest, target("skill", name)),
+                (InvocationKind::SkillCall, target("skill", name)),
+            ]
+        };
         assert_eq!(
-            typed,
-            [(InvocationKind::SkillRequest, target("skill", "pdf"))]
+            resolved(json!(["anthropic-skills:pdf"])),
+            both("anthropic-skills:pdf")
+        );
+        assert_eq!(
+            resolved(json!(["pdf", "anthropic-skills:pdf"])),
+            both("pdf")
         );
     }
 

@@ -2235,10 +2235,14 @@ mod tests {
     use super::*;
     use crate::controls::{CompactionSources, compaction_controls};
     use crate::model::{
-        CacheContext, CompactionCheck, EstimateEvidence, ExposureScan, Location, Origin, Pricing,
-        ScanCoverage, TtlSensitivity, WindowBasisKind,
+        CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan, Location,
+        Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
     };
-    use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
+    use crate::reader::{ScanOptions, scan};
+    use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
+    use crate::report::{ReportOptions, format_report};
+    use crate::test_support::{ClaudeUsage, Workspace, claude_usage, make_request, prices};
+    use serde_json::json;
 
     const MINUTE: Millis = 60_000;
 
@@ -2428,102 +2432,45 @@ mod tests {
         }
     }
 
-    /// A stand-in for the replay module's compaction charges, covering the explicit links and
-    /// pre/post-token proxies these scans use; the first boundary claims a linked summary.
-    fn charges(scan: &Scan, catalog: &Catalog) -> Vec<CompactionCharge> {
-        let mut claimed = HashSet::new();
-        let mut boundaries: Vec<&StructuralEvent> = scan
-            .events
-            .iter()
-            .filter(|e| e.kind == EventKind::Compaction)
-            .collect();
-        boundaries.sort_by_key(|e| e.time);
-        boundaries
-            .into_iter()
-            .map(|e| {
-                let linked = e
-                    .request
-                    .as_deref()
-                    .and_then(|id| scan.requests.iter().find(|r| r.id == id));
-                let (request, cost) = match linked {
-                    Some(r) => {
-                        let costs: Vec<Cost> = r
-                            .parts
-                            .iter()
-                            .filter(|p| p.kind == PartKind::Compaction)
-                            .map(|p| price_part(catalog, r, p))
-                            .collect();
-                        let first = claimed.insert(r.id.clone());
-                        let cost = if first {
-                            add_costs(&costs)
-                        } else {
-                            zero_cost()
-                        };
-                        (Some(r.id.clone()), cost)
-                    }
-                    None => {
-                        let pricing = e.pricing.as_ref().expect("synthetic boundaries are priced");
-                        let proxy = Request {
-                            agent: Agent::Subagent,
-                            time: e.time,
-                            end_time: e.time,
-                            provider: pricing.provider.clone(),
-                            parts: vec![BillingPart {
-                                kind: PartKind::Compaction,
-                                model: pricing.model.clone(),
-                                usage: Usage {
-                                    input: e.pre_tokens,
-                                    output: e.post_tokens,
-                                    read: Some(0),
-                                    write: Some(0),
-                                    write5m: Some(0),
-                                    write1h: Some(0),
-                                    ..Usage::default()
-                                },
-                                tier: pricing.tier.clone(),
-                                speed: pricing.speed.clone(),
-                                geo: pricing.geo.clone(),
-                            }],
-                            ..make_request()
-                        };
-                        (None, price_part(catalog, &proxy, &proxy.parts[0]))
-                    }
-                };
-                CompactionCharge {
-                    event: e.id.clone(),
-                    request,
-                    evidence: Evidence::Measured,
-                    ttl_cost: Default::default(),
-                    assumptions: vec![],
-                    cost,
-                }
-            })
-            .collect()
-    }
-
     #[derive(Default)]
     struct Policies {
         ttls: Vec<TtlCheck>,
         windows: Vec<CompactionCheck>,
         estimates: IndexMap<String, UsageEstimate>,
+        /// Overrides the scan's window start.
+        since: Option<Millis>,
     }
 
     fn check_with(scan: &Scan, now: f64, policies: &Policies) -> IdleCheck {
         let catalog = prices();
-        let summaries = charges(scan, &catalog);
+        // Charging converts linked summaries to compaction parts, which the idle replay reads.
+        let mut scan = scan.clone();
+        let summaries = compaction_charges(&mut scan, &catalog);
         let ttls: Vec<&TtlCheck> = policies.ttls.iter().collect();
         let windows: Vec<&CompactionCheck> = policies.windows.iter().collect();
         idle_checks(&IdleOptions {
-            scan,
+            scan: &scan,
             catalog: &catalog,
             summaries: &summaries,
             estimates: &policies.estimates,
             ttls: &ttls,
             windows: &windows,
-            since: scan.since,
+            since: policies.since.or(scan.since),
             now: (now * MINUTE as f64) as Millis,
         })
         .remove(0)
+    }
+
+    /// The full report for `scan`, as the CLI builds it.
+    fn report(scan: Scan, now: f64) -> Report {
+        analyze(AnalyzeOptions {
+            scan,
+            catalog: &prices(),
+            since: None,
+            now: (now * MINUTE as f64) as Millis,
+            max_cost_per_use_usd: 1.0,
+        })
+        .unwrap()
     }
 
     fn check(scan: &Scan, now: f64) -> IdleCheck {
@@ -2647,6 +2594,12 @@ mod tests {
         );
         assert_eq!(c.base.recommended, None);
         assert_eq!(c.base.action, Action::Advisory);
+        let text = format_report(&report(s, 140.0), ReportOptions::default());
+        assert!(
+            !text.contains("Summarizing idle sessions cost less"),
+            "{text}"
+        );
+        assert!(text.contains("never idle long enough"), "{text}");
     }
 
     #[test]
@@ -2741,7 +2694,6 @@ mod tests {
         let part = s.requests[last].parts[0].clone();
         s.requests[last].parts[0].usage.input = None;
         s.profiles[0].compaction.default.value = None;
-        s.since = Some(100 * MINUTE);
         let estimate = UsageEstimate {
             request: "estimated".into(),
             evidence: EstimateEvidence::Estimated,
@@ -2753,6 +2705,7 @@ mod tests {
         };
         let policies = Policies {
             estimates: IndexMap::from([("estimated".to_string(), estimate)]),
+            since: Some(100 * MINUTE),
             ..Policies::default()
         };
         let c = check_with(&s, 200.0, &policies);
@@ -2990,6 +2943,11 @@ mod tests {
             near(c.after_recommendations.delta_usd, 0.0);
             assert_eq!(c.base.recommended, None);
             assert_eq!(c.base.action, Action::Advisory);
+            let mut report = report(s, 201.0);
+            report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
+            report.checks[0] = CheckResult::Idle(c);
+            let text = format_report(&report, ReportOptions::default());
+            assert!(text.contains("On and off cost the same"), "{text}");
         }
     }
 
@@ -3177,79 +3135,165 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_project_directory_is_not_a_policy_change_within_a_conversation() {
-        use crate::discovery::DiscoveryOptions;
-        use crate::reader::{ScanOptions, scan};
-        use crate::test_support::Workspace;
-        use serde_json::json;
-
+    fn native_notices_are_the_only_parsed_attribution_and_project_owners_and_threshold_floor_resolve()
+     {
         let w = Workspace::new();
         let text = |path: &std::path::Path| path.to_string_lossy().into_owned();
         let project = w.home.join("project");
-        let nested = project.join("nested");
         std::fs::create_dir_all(project.join(".git")).unwrap();
-        std::fs::create_dir_all(project.join(".claude")).unwrap();
-        std::fs::create_dir_all(&nested).unwrap();
-        let settings =
+        std::fs::create_dir(project.join(".claude")).unwrap();
+        let user =
             json!({"idleCompaction": true, "autoCompactWindow": 400000, "promptCacheTtl": "1h"});
-        std::fs::write(w.claude.join("settings.json"), settings.to_string()).unwrap();
+        std::fs::write(w.claude.join("settings.json"), user.to_string()).unwrap();
         let local = json!({
             "idleCompaction": false,
             "env": {"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "90000"},
             "promptCacheTtl": "5m",
         });
-        std::fs::write(
-            project.join(".claude/settings.local.json"),
-            local.to_string(),
-        )
-        .unwrap();
-        let row = |cwd: &std::path::Path, timestamp: &str, id: &str| {
-            json!({
-                "sessionId": "native",
-                "version": "2.1.316",
-                "entrypoint": "cli",
-                "cwd": text(cwd),
-                "type": "assistant",
-                "querySource": "repl_main_thread",
-                "timestamp": timestamp,
-                "message": {
-                    "id": id,
-                    "model": "claude-opus-5-5",
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                        "cache_creation_input_tokens": 300000,
-                        "cache_creation": {
-                            "ephemeral_1h_input_tokens": 300000,
-                            "ephemeral_5m_input_tokens": 0,
-                        },
-                        "service_tier": "standard",
-                    },
-                },
-            })
-            .to_string()
+        let local_file = project.join(".claude/settings.local.json");
+        std::fs::write(&local_file, local.to_string()).unwrap();
+        let common = |mut row: Value| {
+            row["sessionId"] = json!("native");
+            row["version"] = json!("2.1.316");
+            row["entrypoint"] = json!("cli");
+            row["cwd"] = json!(text(&project));
+            row
         };
-        let rows = [
-            row(&project, "1970-01-01T00:00:00.000Z", "request"),
-            row(&nested, "1970-01-01T01:00:00.000Z", "selected"),
-        ];
-        std::fs::write(
-            w.claude.join("projects/project/native.jsonl"),
-            rows.join("\n") + "\n",
-        )
-        .unwrap();
-        let selected = scan(&ScanOptions {
-            discovery: DiscoveryOptions {
-                home: text(&w.home),
-                env: Env::new(),
-                claude_dirs: vec![],
-                codex_dirs: vec![],
-                managed_settings_file: text(&w.managed_settings_file()),
-                codex_system_config_file: text(&w.home.join("system.toml")),
-                codex_requirements_file: text(&w.home.join("requirements.toml")),
+        let request = common(json!({
+            "type": "assistant",
+            "querySource": "repl_main_thread",
+            "timestamp": "1970-01-01T00:00:00.000Z",
+            "message": {
+                "id": "request",
+                "model": "claude-opus-5-5",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 300000,
+                    "cache_creation": {
+                        "ephemeral_1h_input_tokens": 300000,
+                        "ephemeral_5m_input_tokens": 0,
+                    },
+                    "service_tier": "standard",
+                },
             },
+        }));
+        let boundary = common(json!({
+            "type": "system",
+            "subtype": "compact_boundary",
+            "uuid": "boundary",
+            "timestamp": "1970-01-01T00:00:01.000Z",
+            "compactMetadata": {
+                "trigger": "auto",
+                "preTokens": 300000,
+                "postTokens": 2000,
+                "precomputed": true,
+            },
+        }));
+        let notice = common(json!({
+            "type": "system",
+            "subtype": "informational",
+            "level": "notice",
+            "uuid": "notice",
+            "parentUuid": "boundary",
+            "timestamp": "1970-01-01T00:00:02.000Z",
+            "content": "Compacted while idle, before the prompt cache expired · turn off with \"idleCompaction\": false in settings.json",
+        }));
+        let file = w.claude.join("projects/project/native.jsonl");
+        let write = |rows: &[&Value]| {
+            let lines: String = rows.iter().map(|r| format!("{r}\n")).collect();
+            std::fs::write(&file, lines).unwrap();
+        };
+        let attribution = |scan: &Scan| {
+            scan.events
+                .iter()
+                .find(|e| e.kind == EventKind::Compaction)
+                .unwrap()
+                .idle_attribution
+        };
+
+        write(&[&request, &boundary, &notice]);
+        let parsed = scan(&w.scan_options()).unwrap();
+        assert_eq!(attribution(&parsed), IdleAttribution::Notice);
+        let profile = parsed
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Claude)
+            .unwrap();
+        let owner = &profile.idle_directories.as_ref().unwrap()[text(&project).as_str()];
+        assert_eq!(owner.value, Some(false));
+        assert_eq!(owner.threshold, Some(100_000));
+        assert_eq!(owner.owner, format!("{}:idleCompaction", text(&local_file)));
+        assert_eq!(
+            owner.ttl.as_ref().unwrap().main.value,
+            Some(Ttl::FiveMinutes)
+        );
+        let full = report(parsed, 100.0);
+        assert!(
+            !serde_json::to_string(&full)
+                .unwrap()
+                .contains("Compacted while idle")
+        );
+        assert!(format_report(&full, ReportOptions::default()).contains("Idle compaction"));
+        let details = ReportOptions {
+            details: true,
+            ..ReportOptions::default()
+        };
+        assert!(format_report(&full, details).contains("idle-compaction"));
+
+        // The walk from a notice passes through the boundary's summary message.
+        let summary = common(json!({
+            "type": "user",
+            "uuid": "compact-summary",
+            "parentUuid": "boundary",
+            "timestamp": "1970-01-01T00:00:01.500Z",
+            "isCompactSummary": true,
+            "message": {"role": "user", "content": "SYNTHETIC_PRIVATE_SUMMARY"},
+        }));
+        let mut linked = notice.clone();
+        linked["parentUuid"] = json!("compact-summary");
+        write(&[&request, &boundary, &summary, &linked]);
+        let linked = scan(&w.scan_options()).unwrap();
+        assert_eq!(attribution(&linked), IdleAttribution::Notice);
+
+        write(&[&request, &boundary]);
+        let absent = scan(&w.scan_options()).unwrap();
+        assert_eq!(attribution(&absent), IdleAttribution::Unknown);
+
+        // A notice on another branch must not relabel an old boundary, even in the same session.
+        for trigger in ["auto", "manual"] {
+            let mut old = boundary.clone();
+            old["compactMetadata"]["trigger"] = json!(trigger);
+            let mut orphan = notice.clone();
+            orphan["parentUuid"] = json!("missing-boundary");
+            orphan["timestamp"] = json!("1970-01-01T02:00:00.000Z");
+            write(&[&request, &old, &orphan]);
+            let orphan = scan(&w.scan_options()).unwrap();
+            assert_eq!(attribution(&orphan), IdleAttribution::Unknown, "{trigger}");
+        }
+
+        let mut untimed = notice.clone();
+        untimed.as_object_mut().unwrap().remove("timestamp");
+        write(&[&untimed]);
+        let error = scan(&w.scan_options()).unwrap_err();
+        assert!(
+            error.message.contains("missing idle notice timestamp"),
+            "{}",
+            error.message
+        );
+
+        // A nested directory inherits its project's owner, so it is not a policy change.
+        let nested = project.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let mut moved = request.clone();
+        moved["cwd"] = json!(text(&nested));
+        moved["timestamp"] = json!("1970-01-01T01:00:00.000Z");
+        moved["message"]["id"] = json!("selected");
+        write(&[&request, &moved]);
+        let selected = scan(&ScanOptions {
             since: Some(MINUTE),
+            ..w.scan_options()
         })
         .unwrap();
         let profile = selected
@@ -3257,27 +3301,21 @@ mod tests {
             .iter()
             .find(|p| p.harness == Harness::Claude)
             .unwrap();
-        let directories = profile.idle_directories.as_ref().unwrap();
-        let ttl = directories[text(&project).as_str()].ttl.as_ref().unwrap();
-        assert_eq!(ttl.main.value, Some(Ttl::FiveMinutes));
-        let catalog = prices();
-        let checks = idle_checks(&IdleOptions {
-            scan: &selected,
-            catalog: &catalog,
-            summaries: &charges(&selected, &catalog),
-            estimates: &IndexMap::new(),
-            ttls: &[],
-            windows: &[],
-            since: selected.since,
-            now: 200 * MINUTE,
-        });
-        assert_eq!(checks.len(), 1);
+        let ttl = &profile.idle_directories.as_ref().unwrap()[text(&project).as_str()].ttl;
+        assert_eq!(ttl.as_ref().unwrap().main.value, Some(Ttl::FiveMinutes));
+        let selected = report(selected, 200.0);
+        let idle = selected
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Idle(c) => Some(c),
+                _ => None,
+            })
+            .expect("an idle-compaction check");
+        let unknown = idle.current_settings.unknown.join(" ");
         assert!(
-            !checks[0]
-                .current_settings
-                .unknown
-                .iter()
-                .any(|u| u.contains("policy changes within a conversation"))
+            !unknown.contains("policy changes within a conversation"),
+            "{unknown}"
         );
     }
 }

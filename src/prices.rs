@@ -1030,6 +1030,12 @@ mod tests {
     use super::*;
     use crate::model::Usage;
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
+    use serde_json::json;
+
+    /// Recorded Codex usage, normalized as the reader does.
+    fn codex(raw: Value) -> Usage {
+        crate::reader::usage(&raw, Harness::Codex).unwrap()
+    }
 
     fn codex_request() -> Request {
         Request {
@@ -1072,16 +1078,19 @@ mod tests {
         let r = codex_request();
         let p = BillingPart {
             model: Some("gpt-6.1-sol".into()),
-            usage: Usage {
-                input: Some(12000),
-                output: Some(100),
-                read: Some(4000),
-                write: Some(7000),
-                write30m: Some(3000),
-                write12h: Some(4000),
-                reasoning: Some(20),
-                ..Usage::default()
-            },
+            usage: codex(json!({
+                "input_tokens": 12000,
+                "output_tokens": 100,
+                "input_tokens_details": {
+                    "cached_tokens": 4000,
+                    "cache_write_tokens": 7000,
+                    "cache_write_tokens_details": {
+                        "ttl_30m_tokens": 3000,
+                        "ttl_12h_tokens": 4000,
+                    },
+                },
+                "output_tokens_details": { "reasoning_tokens": 20 },
+            })),
             ..r.parts[0].clone()
         };
         let result = price_part(&catalog, &r, &p);
@@ -1093,12 +1102,11 @@ mod tests {
             &catalog,
             &r,
             &BillingPart {
-                usage: Usage {
-                    input: Some(12000),
-                    output: Some(100),
-                    read: Some(4000),
-                    ..Usage::default()
-                },
+                usage: codex(json!({
+                    "input_tokens": 12000,
+                    "output_tokens": 100,
+                    "cached_input_tokens": 4000,
+                })),
                 ..p.clone()
             },
         );
@@ -1118,12 +1126,11 @@ mod tests {
         let r = codex_request();
         let p = BillingPart {
             model: Some("gpt-5.4".into()),
-            usage: Usage {
-                input: Some(1000),
-                output: Some(100),
-                read: Some(200),
-                ..Usage::default()
-            },
+            usage: codex(json!({
+                "input_tokens": 1000,
+                "output_tokens": 100,
+                "cached_input_tokens": 200,
+            })),
             ..r.parts[0].clone()
         };
         assert_eq!(
@@ -1143,13 +1150,12 @@ mod tests {
         let r = codex_request();
         let p = BillingPart {
             model: Some("gpt-6.1-sol".into()),
-            usage: Usage {
-                input: Some(250000),
-                output: Some(100),
-                read: Some(0),
-                write: Some(0),
-                ..Usage::default()
-            },
+            usage: codex(json!({
+                "input_tokens": 250000,
+                "output_tokens": 100,
+                "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0,
+            })),
             ..r.parts[0].clone()
         };
         let with_input = |input| BillingPart {

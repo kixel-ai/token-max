@@ -1929,7 +1929,9 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
 mod tests {
     use super::*;
     use crate::model::*;
-    use crate::test_support::{make_profile, make_request};
+    use crate::reader::scan;
+    use crate::replay::{AnalyzeOptions, analyze};
+    use crate::test_support::{Workspace, make_profile, make_request, prices};
 
     const NOV1: Millis = 1_793_491_200_000;
     const DAY_MS: Millis = 86_400_000;
@@ -2586,7 +2588,7 @@ mod tests {
     }
 
     #[test]
-    fn details_order_findings_and_wrap_every_value_completely() {
+    fn every_check_kind_wraps_completely_at_narrow_widths() {
         let mut report = two_profiles();
         report.scan.profiles[0].root = format!(
             "/synthetic/e\u{301}-東京-💻/{}",
@@ -2657,104 +2659,6 @@ mod tests {
     }
 
     #[test]
-    fn terminal_controls_in_metadata_are_escaped() {
-        let mut report = synthetic();
-        let hostile = "synthetic\x1b]8;;https://invalid\x07\r\n\t\u{9b}31m\u{202e}reversed\u{2066}\u{200e}\u{200f}\u{61c}";
-        if let CheckResult::Ttl(t) = &mut report.checks[0] {
-            t.base.owner = hostile.into();
-            t.base.baseline = hostile.into();
-            t.base.assumptions.push(hostile.into());
-        }
-        report.scan.profiles[0].root = hostile.into();
-        report.prices.source = hostile.into();
-        for details in [false, true] {
-            let text = text(&report, None, details);
-            assert!(!text.chars().any(|c| {
-                let code = c as u32;
-                (code < 0x20 && c != '\n')
-                    || (0x7f..=0x9f).contains(&code)
-                    || matches!(
-                        c,
-                        '\u{202e}' | '\u{2066}' | '\u{200e}' | '\u{200f}' | '\u{61c}'
-                    )
-            }));
-            assert!(compact(&text).contains("\\u009b31m\\u202ereversed\\u2066"));
-        }
-    }
-
-    #[test]
-    fn only_vanished_directories_hide_an_unresolved_fast_owner() {
-        let mut report = synthetic();
-        let mut project = check_base(Action::Advisory, None::<String>, None);
-        project.owner = "/synthetic/project/.codex/config.toml".into();
-        report.checks.push(speed_check(
-            project.clone(),
-            "synthetic project override ownership is unresolved",
-        ));
-        project.owner = "/synthetic/gone/.claude/settings.json".into();
-        report.checks.push(speed_check(
-            project,
-            "recorded working directory no longer exists; current ownership unresolved",
-        ));
-        let text = text(&report, Some(200), false);
-        assert!(text.contains("  Fast mode: off."));
-        assert!(
-            text.contains(
-                "Fast mode: unknown. Synthetic project override ownership is unresolved."
-            )
-        );
-        assert!(!text.contains("working directory no longer exists"));
-    }
-
-    #[test]
-    fn short_windows_scale_to_30_days_and_snippets_stay_valid_when_narrow() {
-        let mut report = synthetic();
-        if let CheckResult::Ttl(t) = &mut report.checks[0] {
-            t.base.since = Some(NOV1);
-            t.base.until = Some(NOV1 + 3_600_000);
-            t.base.savings_usd = Some(1.0);
-            t.base.monthly_savings_usd = None;
-            t.base.coverage = None;
-        }
-        assert!(text(&report, Some(200), false).contains("Saves $720."));
-
-        let name = "google-drive:google-drive-comments";
-        report.checks.clear();
-        report.context = vec![context_piece(
-            ContextKind::Skill,
-            name,
-            Some(Control {
-                path: vec!["skillOverrides".into(), name.into()],
-                value: ControlValue::Text("user-invocable-only".into()),
-                append: false,
-            }),
-            Some(5.0),
-            Some(0),
-        )];
-        let narrow = text(&report, Some(40), false);
-        let lines: Vec<&str> = narrow.lines().collect();
-        let start = lines.iter().position(|l| l.trim() == "{").unwrap();
-        let end = start + lines[start..].iter().position(|l| *l == "  }").unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&lines[start..=end].join("\n")).unwrap(),
-            serde_json::json!({"skillOverrides": {name: "user-invocable-only"}})
-        );
-        // The always-sent total uses the same exact scale as every other line.
-        report.scan.since = Some(NOV1 + 30 * DAY_MS - 3_600_000);
-        report.context.push(context_piece(
-            ContextKind::System,
-            "Claude Code system prompt",
-            None,
-            Some(1.0),
-            None,
-        ));
-        assert!(text(&report, Some(200), false).contains("skill and subagent lists: $720."));
-        let details = text(&report, Some(200), true);
-        assert!(details.contains("1 recommended change"));
-        assert!(!details.contains("No applicable"));
-    }
-
-    #[test]
     fn empty_histories_give_a_next_step() {
         let mut report = synthetic();
         report.scan.snapshots.clear();
@@ -2769,5 +2673,366 @@ mod tests {
         let details = text(&report, None, true);
         assert!(details.contains("No applicable setting changes"));
         assert!(!details.contains("What each piece of context costs"));
+    }
+
+    /// The report the CLI builds from the synthetic Claude fixture with an explicit 5m TTL.
+    fn synthetic_report() -> Report {
+        let w = Workspace::new();
+        w.fixture(w.claude.join("projects/project/main.jsonl"), "claude.jsonl");
+        std::fs::write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
+        let mut options = w.scan_options();
+        options.discovery.claude_dirs = vec![w.claude.to_string_lossy().into_owned()];
+        analyze(AnalyzeOptions {
+            scan: scan(&options).unwrap(),
+            catalog: &prices(),
+            since: None,
+            now: instant("2026-11-02T00:00:00Z"),
+            max_cost_per_use_usd: 1.0,
+        })
+        .unwrap()
+    }
+
+    fn instant(text: &str) -> Millis {
+        text.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+    }
+
+    fn ttl_mut(report: &mut Report) -> &mut TtlCheck {
+        report
+            .checks
+            .iter_mut()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) => Some(t),
+                _ => None,
+            })
+            .expect("a claude-cache-ttl check")
+    }
+
+    fn json(report: &Report) -> String {
+        serde_json::to_string(report).unwrap()
+    }
+
+    #[test]
+    fn recommendations_lead_advisory_and_keep_findings_with_separate_baselines_and_complete_narrow_output()
+     {
+        let mut report = synthetic_report();
+        let change = ttl_mut(&mut report);
+        change.base.savings_usd = Some(12.34);
+        change.base.monthly_savings_usd = Some(24.68);
+        let mut advisory = change.clone();
+        advisory.base.action = Action::Advisory;
+        advisory.base.evidence = Evidence::Guidance;
+        advisory.base.current = None;
+        advisory.base.recommended = None;
+        advisory.base.savings_usd = None;
+        advisory.base.monthly_savings_usd = None;
+        advisory.base.baseline =
+            "synthetic recorded profile, holding other settings constant".into();
+        advisory.base.assumptions =
+            vec!["Synthetic provider guidance; review low-use components manually.".into()];
+        advisory.base.uncertainty =
+            vec!["Synthetic incomplete invocation visibility; absence of use is unknown.".into()];
+        let mut keep = change.clone();
+        keep.base.action = Action::Keep;
+        keep.base.current = keep.base.recommended;
+        let mut change = change.clone();
+        let root = format!(
+            "/synthetic/e\u{301}-東京-👩\u{200d}💻/{}",
+            "long-profile-name-".repeat(8)
+        );
+        report.scan.profiles[0].root = root.clone();
+        change.base.owner = format!("{root}/settings.json (env.CLAUDE_CODE_PROMPT_CACHE_TTL)");
+        let other = Profile {
+            id: "another-profile".into(),
+            root: "/synthetic/second-profile".into(),
+            ..report.scan.profiles[0].clone()
+        };
+        report.scan.profiles.push(other.clone());
+        advisory.base.profile = other.id.clone();
+        let values = [
+            root,
+            change.base.owner.clone(),
+            other.root,
+            advisory.base.baseline.clone(),
+        ]
+        .into_iter()
+        .chain(advisory.base.assumptions.clone())
+        .chain(advisory.base.uncertainty.clone());
+        let values: Vec<String> = values.collect();
+        report.checks = vec![
+            CheckResult::Ttl(advisory),
+            CheckResult::Ttl(keep),
+            CheckResult::Ttl(change),
+        ];
+        let before = json(&report);
+        for width in [28, 40, 80] {
+            let text = text(&report, Some(width), true);
+            let at = |s: &str| text.find(s).expect(s);
+            assert!(at("Recommended changes") < at("Advisory findings"));
+            assert!(at("Advisory findings") < at("Keep current settings"));
+            for line in text.lines() {
+                assert!(
+                    unicode_width::UnicodeWidthStr::width(line) <= width,
+                    "{line}"
+                );
+            }
+            let compact = compact(&text);
+            for value in &values {
+                assert!(compact.contains(&super::tests::compact(value)), "{value}");
+            }
+            assert!(text.contains("$12.34") && text.contains("$24.68"));
+            assert!(compact.contains("Current:5m"));
+            assert!(compact.contains("Suggested:1h"));
+            assert!(compact.contains("[guidance]"));
+            assert!(
+                compact.contains("Estimatednetsavingvsbaseline:unknownoverwindow;unknown/30days")
+            );
+            let lower = text.to_lowercase();
+            for forbidden in ["total sav", "synthetic_private", "\x1b", "…"] {
+                assert!(!lower.contains(forbidden), "{forbidden}");
+            }
+            assert!(
+                text.contains("e\u{301}"),
+                "decomposed filename must not be NFC-normalized"
+            );
+        }
+        assert_eq!(
+            json(&report),
+            before,
+            "rendering must not alter JSON or analysis"
+        );
+    }
+
+    #[test]
+    fn details_retain_every_assumption_unknown_cost_witness_and_finding_without_a_top_n_cutoff() {
+        let mut report = synthetic_report();
+        let result = ttl_mut(&mut report);
+        result.cost.one_hour = Cost {
+            known_usd: 9.87,
+            total_usd: None,
+            unknown: vec!["synthetic unknown fixed charge".into()],
+            assumptions: vec!["synthetic price assumption".into()],
+        };
+        result.fixed_cost = Cost {
+            known_usd: 0.0,
+            total_usd: None,
+            unknown: vec!["synthetic unknown fixed charge".into()],
+            assumptions: vec![],
+        };
+        result.base.assumptions = (0..15)
+            .map(|i| format!("synthetic assumption {i}"))
+            .collect();
+        result
+            .base
+            .uncertainty
+            .push("synthetic final uncertainty".into());
+        result.usage_estimates.push(UsageEstimate {
+            request: "synthetic-attempt".into(),
+            evidence: EstimateEvidence::Unknown,
+            basis: vec![],
+            part: None,
+            max_output_tokens: Some(2048),
+            reason: "no supported input estimate".into(),
+            assumptions: vec!["synthetic attempt assumption".into()],
+        });
+        result.cache_evidence.push(CacheReplayEvidence {
+            request: "synthetic-cache-request".into(),
+            part: 0,
+            ttl: Ttl::OneHour,
+            state: KnownState::Unknown,
+            outcome: ReplayOutcome::Unknown,
+            reason: "synthetic unresolved predecessor".into(),
+            predecessors: vec![CachePredecessor {
+                request: "synthetic-cache-predecessor".into(),
+                part: 0,
+                time: 0,
+                state: KnownState::Unknown,
+                prefix_evidence: PrefixEvidence::Unknown,
+                cohort_known: false,
+                reason: "synthetic witness reason".into(),
+            }],
+        });
+        let result = result.clone();
+        for i in 0..12 {
+            let mut copy = result.clone();
+            copy.base.owner = format!("synthetic-advisory-{i}");
+            copy.base.action = Action::Advisory;
+            copy.base.evidence = Evidence::Unknown;
+            copy.base.current = None;
+            copy.base.recommended = None;
+            copy.base.savings_usd = None;
+            copy.base.monthly_savings_usd = None;
+            report.checks.push(CheckResult::Ttl(copy));
+        }
+        let text = text(&report, Some(120), true);
+        let compact = compact(&text);
+        let values = result
+            .base
+            .assumptions
+            .iter()
+            .chain(&result.base.uncertainty)
+            .chain(&result.base.sources)
+            .map(String::as_str)
+            .chain([
+                "synthetic price assumption",
+                "synthetic attempt assumption",
+                "synthetic-advisory-11",
+                "synthetic-attempt: unknown",
+                "2048 (not observed output)",
+                "unknown ($9.87 known subtotal)",
+            ]);
+        for value in values {
+            assert!(compact.contains(&super::tests::compact(value)), "{value}");
+        }
+        assert!(text.contains(&result.cache_evidence[0].request));
+        assert!(text.contains("Predecessor:"));
+        let unknown_fixed = report
+            .checks
+            .iter()
+            .filter(|c| matches!(c, CheckResult::Ttl(t) if t.fixed_cost.total_usd.is_none()))
+            .count();
+        assert_eq!(
+            text.matches("Identical fixed costs remain unknown").count(),
+            unknown_fixed
+        );
+        assert!(format_report(&report, ReportOptions::default()).contains("--details"));
+        let styled = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                width: Some(120),
+                color: true,
+                ..Default::default()
+            },
+        );
+        assert!(styled.contains("\x1b["));
+        assert_eq!(strip_ansi(&styled), text);
+    }
+
+    #[test]
+    fn terminal_controls_in_all_metadata_and_prose_are_escaped_while_json_retains_exact_metadata() {
+        let mut report = synthetic_report();
+        let hostile = "synthetic\x1b]8;;https://invalid\x07\r\n\t\u{9b}31m\u{202e}reversed\u{2066}\u{200e}\u{200f}\u{61c}";
+        let result = ttl_mut(&mut report);
+        result.base.owner = hostile.into();
+        result.base.baseline = hostile.into();
+        result.base.assumptions.push(hostile.into());
+        result.base.uncertainty.push(hostile.into());
+        report.scan.profiles[0].root = hostile.into();
+        report.prices.source = hostile.into();
+        let text = text(&report, None, true);
+        let unsafe_char = |c: char| {
+            let code = c as u32;
+            (code <= 0x1f && c != '\n')
+                || (0x7f..=0x9f).contains(&code)
+                || matches!(
+                    c,
+                    '\u{202e}' | '\u{2066}' | '\u{200e}' | '\u{200f}' | '\u{61c}'
+                )
+        };
+        assert!(!text.chars().any(unsafe_char), "{text:?}");
+        assert!(compact(&text).contains("\\u009b31m\\u202ereversed\\u2066"));
+        let parsed: Value = serde_json::from_str(&json(&report)).unwrap();
+        assert_eq!(parsed["checks"][0]["owner"], hostile);
+    }
+
+    #[test]
+    fn an_unresolved_fast_mode_owner_stays_beside_a_resolved_one_and_only_vanished_directories_are_hidden()
+     {
+        let mut report = synthetic_report();
+        let resolved = report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Speed(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("a fast-mode check");
+        assert_eq!(resolved.base.action, Action::Keep);
+        let mut project = resolved;
+        project.base.action = Action::Advisory;
+        project.base.current = None;
+        project.base.recommended = None;
+        project.base.owner = "/synthetic/project/.codex/config.toml".into();
+        project.reason = "synthetic project override ownership is unresolved".into();
+        let mut vanished = project.clone();
+        vanished.base.owner = "/synthetic/gone/.claude/settings.json".into();
+        vanished.reason =
+            "recorded working directory no longer exists; current ownership unresolved".into();
+        report.checks.push(CheckResult::Speed(project));
+        report.checks.push(CheckResult::Speed(vanished));
+        let text = text(&report, Some(200), false);
+        let keep = text.find("Keep").expect("a Keep section");
+        assert!(text[keep..].contains("Fast mode: off"), "{text}");
+        assert!(
+            text.to_lowercase()
+                .contains("synthetic project override ownership is unresolved"),
+            "{text}"
+        );
+        assert!(!text.contains("working directory no longer exists"));
+    }
+
+    #[test]
+    fn short_windows_scale_to_30_days_snippets_stay_valid_json_when_narrow_and_details_count_feature_changes()
+     {
+        let mut report = synthetic_report();
+        let check = ttl_mut(&mut report);
+        check.base.action = Action::Change;
+        check.base.current = Some(Ttl::FiveMinutes);
+        check.base.recommended = Some(Ttl::OneHour);
+        let since = instant("2026-11-01T00:00:00Z");
+        check.base.since = Some(since);
+        check.base.until = Some(since + 3_600_000);
+        check.base.savings_usd = Some(1.0);
+        check.base.monthly_savings_usd = Some(720.0);
+        assert!(text(&report, Some(200), false).contains("Saves $720."));
+
+        let name = "google-drive:google-drive-comments";
+        report.checks.clear();
+        let skill = ContextCost {
+            profiles: vec![report.scan.profiles[0].id.clone()],
+            kind: ContextKind::Skill,
+            name: name.into(),
+            control: Some(Control {
+                path: vec!["skillOverrides".into(), name.into()],
+                value: ControlValue::Text("user-invocable-only".into()),
+                append: false,
+            }),
+            requests: 10,
+            priced: 10,
+            tokens: Some(100),
+            cost_usd: 5.0,
+            estimated_usd: Some(5.0),
+            calls: Some(0),
+            last_used: None,
+            current: true,
+            cost_per_use_usd: Some(5.0),
+            verdict: Some(Verdict::Off),
+        };
+        report.context = vec![skill.clone()];
+        let narrow = text(&report, Some(40), false);
+        let lines: Vec<&str> = narrow.lines().collect();
+        let start = lines.iter().position(|l| l.trim() == "{").unwrap();
+        let end = start + lines[start..].iter().position(|l| *l == "  }").unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&lines[start..=end].join("\n")).unwrap(),
+            serde_json::json!({"skillOverrides": {name: "user-invocable-only"}})
+        );
+        // The always-sent total uses the same exact scale as every other line.
+        report.scan.since = Some(instant(&report.generated_at) - 3_600_000);
+        report.context.push(ContextCost {
+            kind: ContextKind::System,
+            name: "Claude Code system prompt".into(),
+            control: None,
+            cost_usd: 1.0,
+            estimated_usd: Some(1.0),
+            calls: None,
+            cost_per_use_usd: None,
+            verdict: None,
+            ..skill
+        });
+        assert!(text(&report, Some(200), false).contains("skill and subagent lists: $720."));
+        let details = text(&report, Some(200), true);
+        assert!(details.contains("1 recommended change"));
+        assert!(!details.contains("No applicable"));
     }
 }

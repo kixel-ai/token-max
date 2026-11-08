@@ -1652,7 +1652,6 @@ fn attribute_idle(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::controls::Env;
     use crate::model::{RootState, Ttl};
     use crate::test_support::Workspace;
     use serde_json::json;
@@ -1662,18 +1661,7 @@ mod tests {
     }
 
     fn options(w: &Workspace) -> ScanOptions {
-        ScanOptions {
-            discovery: DiscoveryOptions {
-                home: text(&w.home),
-                env: Env::new(),
-                claude_dirs: vec![],
-                codex_dirs: vec![],
-                managed_settings_file: text(&w.managed_settings_file()),
-                codex_system_config_file: text(&w.home.join("system.toml")),
-                codex_requirements_file: text(&w.home.join("requirements.toml")),
-            },
-            since: None,
-        }
+        w.scan_options()
     }
 
     fn since(options: ScanOptions, instant: &str) -> ScanOptions {

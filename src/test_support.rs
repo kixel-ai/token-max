@@ -6,8 +6,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use indexmap::IndexMap;
 
+use crate::controls::Env;
+use crate::discovery::DiscoveryOptions;
 use crate::model::*;
 use crate::prices::{Catalog, PriceOptions, load_prices};
+use crate::reader::ScanOptions;
 
 /// Adjustable synthetic Claude usage; defaults to a 1000-token 5m write and 10 output tokens.
 #[derive(Clone, Copy, Debug)]
@@ -150,6 +153,22 @@ impl Workspace {
     /// The managed settings file discovery reads in this workspace.
     pub fn managed_settings_file(&self) -> PathBuf {
         self.home.join("managed-settings.json")
+    }
+    /// Discover only this workspace's profiles, with no environment and no time window.
+    pub fn scan_options(&self) -> ScanOptions {
+        let text = |path: PathBuf| path.to_string_lossy().into_owned();
+        ScanOptions {
+            discovery: DiscoveryOptions {
+                home: text(self.home.clone()),
+                env: Env::new(),
+                claude_dirs: vec![],
+                codex_dirs: vec![],
+                managed_settings_file: text(self.managed_settings_file()),
+                codex_system_config_file: text(self.home.join("system.toml")),
+                codex_requirements_file: text(self.home.join("requirements.toml")),
+            },
+            since: None,
+        }
     }
 }
 

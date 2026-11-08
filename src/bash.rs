@@ -162,6 +162,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     }
     let (mut calls, mut long, mut timed_out, mut polling) = (0, 0, 0, 0);
     let mut costs = vec![];
+    let mut priced = std::collections::HashSet::new();
     for start in scan.events.iter().filter(mine) {
         let Some(shell) = start
             .shell
@@ -196,7 +197,10 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
             list.get(list.partition_point(|r| r.time < end.time))
                 .copied()
         });
-        costs.push(miss(catalog, issuing, next));
+        // Parallel waits can share one next request, whose rewrite counts once.
+        if next.is_none_or(|r| priced.insert(r.id.as_str())) {
+            costs.push(miss(catalog, issuing, next));
+        }
     }
     let miss_cost = add_costs(&costs);
 
@@ -483,6 +487,39 @@ mod tests {
         );
         let json = serde_json::to_string(&report).unwrap();
         assert!(!json.contains("SYNTHETIC_PRIVATE") && !text.contains("SYNTHETIC_PRIVATE"));
+    }
+
+    #[test]
+    fn parallel_waits_count_the_shared_rewrite_once() {
+        let w = Workspace::new();
+        std::fs::write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
+        let mut first = assistant(0.0, "a", 0, 100_000, Some(json!({"command": "sleep 360"})));
+        first["message"]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "tool_use", "id": "tool-b", "name": "Bash", "input": {"command": "sleep 360"}}));
+        let records = [
+            first,
+            result(6.0, "a", true),
+            result(6.0, "b", true),
+            assistant(6.1, "next", 0, 100_500, None),
+        ];
+        let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(w.claude.join("projects/project/main.jsonl"), lines).unwrap();
+        let data = scan(&w.scan_options()).unwrap();
+        let checks = bash_checks(&BashInput {
+            scan: &data,
+            catalog: &prices(),
+            ttls: &[],
+            since: None,
+            now: START + 60 * MIN,
+        });
+        let waits = &checks[0].waits;
+        assert_eq!((waits.long, waits.timed_out), (2, 2));
+        let next = data.requests.iter().find(|r| r.time > START).unwrap();
+        let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
+        let expected = 100_000.0 * (rates.write5m - rates.read);
+        assert!((waits.miss_cost.total_usd.unwrap() - expected).abs() < 1e-9);
     }
 
     #[test]

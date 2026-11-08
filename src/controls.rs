@@ -202,10 +202,14 @@ pub fn bash_cap_control(scopes: &[SettingsScope], env: &Env) -> BashCapControl {
     let first = scopes.first().map_or("settings.json", |s| s.file);
     let environment = scoped_environment(scopes, env);
     let resolve = |key: &str, default: Millis| -> (Millis, String) {
-        match environment.values.get(key).and_then(timeout_millis) {
-            Some(value) => (value, environment.owners[key].clone()),
-            None => (default, format!("{first}:env.{key}")),
-        }
+        // An invalid value still owns the setting: it must be fixed where it is set.
+        let owner = environment
+            .owners
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("{first}:env.{key}"));
+        let value = environment.values.get(key).and_then(timeout_millis);
+        (value.unwrap_or(default), owner)
     };
     let (default_timeout, default_owner) = resolve("BASH_DEFAULT_TIMEOUT_MS", 120_000);
     let (maximum, owner) = resolve("BASH_MAX_TIMEOUT_MS", 600_000);
@@ -1021,6 +1025,7 @@ mod tests {
         ] {
             let control = resolve(json!({}), &[("BASH_MAX_TIMEOUT_MS", text)]);
             assert_eq!(control.value, value, "{text}");
+            assert_eq!(control.owner, "BASH_MAX_TIMEOUT_MS", "{text}");
         }
         // A larger default timeout raises the ceiling past the maximum.
         let control = resolve(

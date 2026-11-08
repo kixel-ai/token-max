@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod estimates;
 pub mod exposure;
 pub mod fast;
+pub mod idle;
 pub mod model;
 pub mod prices;
 pub mod reader;

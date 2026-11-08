@@ -1,7 +1,7 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings, and price keepalive pings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -170,7 +170,8 @@ per-piece context costs in `context`, and check results. Each check has a `check
 retains its TTL-specific fields, while `compaction-window` includes candidate
 windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
 current-settings and post-recommendation on/off costs, request/final periods,
-activation cohorts, context-size costs and lifetime/summary/timing sensitivities. Consumers
+activation cohorts, context-size costs and lifetime/summary/timing sensitivities. `keepalive`
+adds the cache lifetime, ping interval and size, and one scenario per cap. Consumers
 should branch on `check` before reading setting-specific fields.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
@@ -239,6 +240,24 @@ cost per resumed summary accompany the recommendation. Missing boundaries never
 prove that discarded or unlogged summaries did not run. Without linked billed
 summary output and full resumed-prefix calibration, affected hypothetical costs
 stay unknown; `postTokens` alone cannot establish the full request.
+
+## Keepalive pings
+
+The `keepalive` check asks whether pinging an idle session just under its cache
+lifetime would cost less than the cache misses it avoids. It compares leaving
+sessions idle, Claude idle compaction where that check recommends it, and
+pinging for each cap on how long to keep going. Claude uses the recommended
+main TTL; Codex uses the documented 30-minute lifetime of models that bill cache
+writes. A ping is the median recorded request, and a session that never came
+back pings for the whole cap, since transcripts do not record when a client
+closed. The details show every cap, the same caps if those sessions closed at
+once, and how soon they would need to close for pinging to pay.
+
+Neither harness has a capped keepalive setting: a `/loop` task pings on a fixed
+schedule until cancelled or for seven days, and Codex cannot schedule pings. A
+winning cap is therefore reported with its saving but never changes the exit
+code. Recorded turns, including scheduled-task turns, are replayed as activity,
+so pings already running are not detected.
 
 ## Fast mode
 

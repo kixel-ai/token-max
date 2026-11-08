@@ -414,6 +414,38 @@ Extra re-read cost per expected resumed summary would erase on's saving; it is a
 fixed-behavior caveat, not an unbounded recommendation input. Context-size totals
 include summary-only final periods.
 
+## Keepalive pings
+
+`keepalive` replays each session's main-conversation request gaps and its final
+period after the last request. Pings fire every five sixths of the cache
+lifetime after the last request: 50 minutes under a 1h TTL, which is also below
+the native idle-compaction trigger at 54 minutes, and 25 minutes under Codex's
+30-minute minimum. A return within the last ping plus the lifetime reads its
+resumed prefix (the smaller of the previous context and the return's input)
+instead of rewriting it at the lifetime's write rate. Each ping reads the
+session's last context, writes the median recorded request's new input and
+produces its output; later pings and the return also read that growth. Prices
+come from the same per-part pricing as recorded requests, at the first and
+second ping's context tier.
+
+Caps are the ping counts that rescue each recorded return, up to seven days,
+when recurring Claude Code tasks expire
+([scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks), checked
+2026-11-08). The best cap's saving is compared with the larger of zero and idle
+compaction's saving from its own check; pinging resets the idle clock, so the two
+never apply to the same idle period and are not added. Without recorded client
+lifetimes, a return within the cap assumes the client stayed open and a final
+period pings for the full cap. A sensitivity closes every final period at once,
+and the break-even says how soon such sessions would need to close.
+
+Codex periods are priced only for models with billed 30-minute writes, whose
+lifetime is documented and refreshed by reads
+([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+checked 2026-11-08); older models' retention is not a lifetime. Unpriced periods
+leave the result standing only when each, bounded by the largest priced period,
+cannot flip it. Neither harness has a capped keepalive mechanism, so a winning
+cap stays advisory, and no change to start or stop pings is emitted.
+
 ## Shared component measurements
 
 `scan.exposure` adds historical component revisions, request views, invocation

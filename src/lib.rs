@@ -10,6 +10,7 @@ pub mod estimates;
 pub mod exposure;
 pub mod fast;
 pub mod idle;
+pub mod keepalive;
 pub mod model;
 pub mod prices;
 pub mod reader;

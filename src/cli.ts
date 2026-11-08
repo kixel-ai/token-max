@@ -18,6 +18,7 @@ Usage: token-max [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show all check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
   --json                  Complete structured report, schema version 1
@@ -65,6 +66,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
         args,
         options: {
           since: { type: "string" },
+          "max-cost-per-use": { type: "string" },
           json: { type: "boolean" },
           offline: { type: "boolean" },
           plain: { type: "boolean" },
@@ -116,6 +118,15 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       )
         throw new ScanError("invalid --since date");
     }
+    let maxCostPerUseUsd: number | undefined;
+    if (values["max-cost-per-use"] !== undefined) {
+      const value = values["max-cost-per-use"].replace(/^\$/, "");
+      maxCostPerUseUsd = /^\d+(?:\.\d+)?$/.test(value) ? Number(value) : NaN;
+      if (!Number.isFinite(maxCostPerUseUsd))
+        throw new ScanError(
+          "--max-cost-per-use requires a dollar amount such as 1 or 0.50",
+        );
+    }
     const interactive =
       !!process.stdout.isTTY &&
       !!process.stderr.isTTY &&
@@ -151,6 +162,7 @@ async function main(args = process.argv.slice(2)): Promise<number> {
       scan: data,
       catalog,
       ...(since === undefined ? {} : { since }),
+      ...(maxCostPerUseUsd === undefined ? {} : { maxCostPerUseUsd }),
     });
     const output = values.json
       ? JSON.stringify(report) + "\n"
@@ -180,7 +192,10 @@ async function main(args = process.argv.slice(2)): Promise<number> {
     await setImmediate();
     cancellation.signal.throwIfAborted();
     process.stdout.write(output);
-    return report.checks.some((c) => c.action === "change") ? 1 : 0;
+    return report.checks.some((c) => c.action === "change") ||
+      report.context.some((c) => c.verdict === "off")
+      ? 1
+      : 0;
   } catch (error) {
     const safe = cancellation.signal.aborted
       ? new ScanError("cancelled; no report produced")

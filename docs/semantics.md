@@ -491,8 +491,12 @@ and `skillOverrides` set to `user-invocable-only` for a skill. Instruction files
 have no switch. Core tools, the system prompt and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
-every row of its tool that shares a profile with it; skill uses count
-Skill calls and typed requests. The cost is gross: removing a piece leaves later
+every row of its tool that shares a profile with it; skill uses count only the
+model's Skill calls, since a hidden skill can still be typed. A piece still sent
+today is recommended off when `estimatedUsd` divided by its uses, counting no
+use as one, exceeds `maxCostPerUseUsd` (default $1, `--max-cost-per-use`);
+otherwise it is kept. The ratio does not depend on the window's length. A piece
+with no priced request gets no verdict. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
 
@@ -512,8 +516,8 @@ estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so automatic
-unused findings remain blocked. The context rows report cost and use for the
-user to weigh, never an unused verdict, and change no local agent settings.
+unused findings remain blocked. Context verdicts rest on cost per recorded use,
+not on a claim that a piece is unused, and change no local agent settings.
 
 Record shapes were checked on 2026-11-07 using local structural metadata only;
 no real transcript text was printed or copied into fixtures. Claude's existing

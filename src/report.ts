@@ -1,6 +1,11 @@
 import { homedir } from "node:os";
 import { wrapText } from "./terminal.js";
-import type { ContextCost } from "./context.js";
+import {
+  controlText,
+  settingsPatch,
+  type Control,
+  type ContextCost,
+} from "./context.js";
 import type {
   CacheReplayEvidence,
   CheckResult,
@@ -101,7 +106,13 @@ export function formatReport(
   }
 
   if (!options.details) {
-    summary(report, { line, section, profileName: shortProfile, arrow });
+    summary(report, {
+      line,
+      section,
+      profileName: shortProfile,
+      arrow,
+      raw: (text) => lines.push(terminalText(text)),
+    });
     return lines.join("\n") + "\n";
   }
 
@@ -137,7 +148,10 @@ export function formatReport(
     ["advisory", "Advisory findings", 33],
     ["keep", "Keep current settings", 0],
   ] as const;
-  const changes = report.checks.filter((c) => c.action === "change").length;
+  // Features recommended off are changes too, and also cause exit 1.
+  const changes =
+    report.checks.filter((c) => c.action === "change").length +
+    report.context.filter((c) => c.verdict === "off").length;
   section(
     changes
       ? `${changes} recommended change${changes === 1 ? "" : "s"}`
@@ -151,7 +165,10 @@ export function formatReport(
     line(
       "No selected requests. Try an earlier --since or select another profile.",
     );
-  else if (!report.checks.length)
+  else if (
+    !report.checks.length &&
+    !report.context.some((c) => c.verdict !== null)
+  )
     line(
       "No applicable checks for the selected requests. Usage coverage does not establish that every setting is optimal.",
     );
@@ -625,9 +642,10 @@ function summary(
     section: (title: string) => void;
     profileName: (id: string) => string;
     arrow: string;
+    raw: (text: string) => void;
   },
 ) {
-  const { line, section, arrow } = out;
+  const { line, section } = out;
   const coverage = report.scan.coverage;
   const requests = report.scan.requests;
   const since = report.scan.since ?? requests[0]?.time ?? null;
@@ -686,73 +704,149 @@ function summary(
   );
   const name = (r: CheckResult) =>
     settingName(r) + (many ? ` [${out.profileName(r.profile)}]` : "");
+  const span = since === null || until <= since ? null : until - since;
+  // Everything is shown per 30 days so lines with different windows compare directly.
+  // Scaled by the real duration, however short, as monthlySavingsUsd is.
+  const monthly = (usd: number, from: number | null, to: number | null) =>
+    from === null || to === null || to <= from
+      ? about(usd)
+      : about((usd * 30 * DAY) / (to - from));
+  const settingsFile = new Map(
+    report.scan.profiles.map((p) => [p.id, home(p.settingsFile)]),
+  );
+  const pieces = report.context.filter((c) => c.verdict !== null);
+  const off = pieces.filter((c) => c.verdict === "off");
   const changes = checks.filter((r) => action(r) === "change");
+  const total = changes.length + off.length;
   line();
   line(
-    changes.length
-      ? `${changes.length} setting change${changes.length === 1 ? "" : "s"} recommended.`
+    total
+      ? `${total} setting change${total === 1 ? "" : "s"} recommended.`
       : "No setting changes recommended.",
     0,
     1,
   );
-  const window = (r: CheckResult) => days(r.since, r.until);
-  const monthly = (r: CheckResult) =>
-    r.monthlySavingsUsd === null
-      ? ""
-      : ` (about ${about(r.monthlySavingsUsd)} per 30 days)`;
-  if (changes.length) {
-    section("Change");
-    for (const r of changes) {
-      line(
-        `${name(r)}: ${settingValue(r, r.current)} ${arrow} ${settingValue(r, r.recommended)}`,
-        2,
-        36,
-      );
-      if (r.savingsUsd !== null)
-        line(
-          `Saves about ${about(r.savingsUsd)} over ${window(r)}${monthly(r)}${coverageNote(r)}.`,
-          6,
-        );
-      else if (r.check === "fast-mode") line(r.reason + ".", 6);
-      line(`Set in ${home(r.owner)}`, 6);
+  line(
+    `Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than ${about(report.maxCostPerUseUsd)} per use (--max-cost-per-use).`,
+  );
+  // One coverage note for every feature line instead of one per line.
+  const carried = pieces.reduce((n, c) => n + c.requests, 0);
+  const priced = pieces.reduce((n, c) => n + c.priced, 0);
+  if (priced < carried)
+    line(
+      `Feature costs are scaled up from the ${percent(priced, carried)}% of their requests that could be priced.`,
+    );
+  const piece = (c: ContextCost) => {
+    const label =
+      pieceLabel(c) +
+      (many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : "");
+    const cost = `Costs ${monthly(c.estimatedUsd!, since, until)}`;
+    const uses =
+      c.calls === 0
+        ? c.kind === "skill"
+          ? "the model never used it"
+          : "never used"
+        : `${c.kind === "skill" ? "the model used it" : "used"} ${count(c.calls!)} time${c.calls === 1 ? "" : "s"} (${about(c.costPerUseUsd!)} each)`;
+    const change =
+      c.kind === "skill"
+        ? `on ${out.arrow} only when you type /${c.name}`
+        : `on ${out.arrow} off`;
+    return c.verdict === "off"
+      ? `${label}: ${change}. ${cost}; ${uses}.`
+      : `${label}: on. ${cost}; ${uses}.`;
+  };
+  const checkLine = (r: CheckResult) => {
+    const head = `${name(r)}: ${settingValue(r, r.current)}`;
+    if (action(r) === "change") {
+      const saves =
+        r.savingsUsd !== null
+          ? ` Saves ${r.monthlySavingsUsd === null ? monthly(r.savingsUsd, r.since, r.until) : about(r.monthlySavingsUsd)}${coverageNote(r)}.`
+          : r.check === "fast-mode"
+            ? ` ${capitalize(r.reason)}.`
+            : "";
+      return `${head} ${out.arrow} ${settingValue(r, r.recommended)}.${saves} Set in ${home(r.owner)}.`;
     }
+    if (action(r) === "advisory") {
+      const sizes =
+        r.check === "compaction-window" ? contextSizes(report, r) : "";
+      return `${head}. ${unresolved(r)}${sizes}`;
+    }
+    if (r.check === "claude-cache-ttl" && r.oneHourSavingsUsd !== 0) {
+      const other = r.current === "1h" ? "5m" : "1h";
+      return `${head}. Saves ${monthly(Math.abs(r.oneHourSavingsUsd), r.since, r.until)} over ${other}${coverageNote(r)}.`;
+    }
+    if (r.check === "compaction-window")
+      return `${head}. No other window was cheaper on recorded sessions.`;
+    if (r.check === "idle-compaction")
+      return `${head}. ${r.current ? "Summarizing idle sessions cost less than re-reading them." : "Summarizing idle sessions would not have saved money."}`;
+    return `${head}.`;
+  };
+  if (total) {
+    section("Change");
+    for (const r of changes) line(checkLine(r), 2, 36);
+    for (const c of off) line(piece(c), 2, 36);
   }
   const keeps = checks.filter((r) => action(r) === "keep");
-  if (keeps.length) {
+  const kept = pieces.filter((c) => c.verdict === "keep");
+  if (keeps.length || kept.length) {
     section("Keep");
-    for (const r of keeps) {
-      line(`${name(r)}: ${settingValue(r, r.current)}`, 2);
-      if (r.check === "claude-cache-ttl" && r.oneHourSavingsUsd !== 0) {
-        const other = r.current === "1h" ? "5m" : "1h";
-        const margin = Math.abs(r.oneHourSavingsUsd);
-        line(
-          `${r.current} costs about ${about(margin)} less than ${other} over ${r.windowBasisKind === "ttl-transition" ? `the ${window(r)} since it last changed` : window(r)}${coverageNote(r)}.`,
-          6,
-        );
-      } else if (r.check === "compaction-window")
-        line("No other window was cheaper on recorded sessions.", 6);
-      else if (r.check === "idle-compaction")
-        line(
-          r.current
-            ? "Summarizing idle sessions cost less than re-reading them."
-            : "Summarizing idle sessions would not have saved money.",
-          6,
-        );
-    }
+    for (const r of keeps) line(checkLine(r), 2);
+    for (const c of kept) line(piece(c), 2);
   }
   const unknown = checks.filter((r) => action(r) === "advisory");
-  if (unknown.length) {
-    section("Not enough evidence");
-    for (const r of unknown) {
-      line(`${name(r)}: ${settingValue(r, r.current)}`, 2);
-      line(unresolved(r), 6);
-    }
-  }
-  contextSection(
-    report,
-    { line, section, profileName: out.profileName },
-    false,
+  // Switchable context still sent today whose requests could not be priced at all.
+  const unpriced = report.context.filter(
+    (c) => c.current && c.control !== null && c.estimatedUsd === null,
   );
+  if (unknown.length || unpriced.length) {
+    section("Not enough evidence");
+    for (const r of unknown) line(checkLine(r), 2);
+    for (const c of unpriced)
+      line(
+        `${pieceLabel(c)}${many ? ` [${out.profileName(c.profiles[0] ?? "")}]` : ""}: on. Cost unknown: none of its requests could be priced.`,
+        2,
+      );
+  }
+  // Context with no switch: worth seeing, but not a setting to change.
+  const fixed = report.context.filter(
+    (c) => c.current && c.control === null && c.estimatedUsd !== 0,
+  );
+  if (fixed.length) {
+    section("No setting turns these off");
+    for (const c of fixed.filter((c) => c.kind === "instructions"))
+      line(
+        `${home(c.name)}: ${c.estimatedUsd === null ? "cost unknown" : `costs ${monthly(c.estimatedUsd, since, until)}`}. Shorten it, or move parts into path-scoped rules or skills.`,
+        2,
+      );
+    const core = fixed.filter((c) => c.kind !== "instructions");
+    // Scaled to 30 days like every other line, without counting unknowns as $0.
+    const scale = span === null ? 1 : (30 * DAY) / span;
+    if (core.length)
+      line(
+        `System prompt, core tools such as Bash and Read, and the skill and subagent lists: ${knownTotal(core.map((c) => ({ ...c, estimatedUsd: c.estimatedUsd === null ? null : c.estimatedUsd * scale })))}.`,
+        2,
+      );
+  }
+  const files = new Map<string, Control[]>();
+  for (const c of off) {
+    const file = settingsFile.get(c.profiles[0] ?? "") ?? "settings.json";
+    files.set(file, [...(files.get(file) ?? []), c.control!]);
+  }
+  for (const [file, controls] of files) {
+    line();
+    line(
+      `To turn these off, merge this into ${file}, adding to any lists already there:`,
+    );
+    // Never wrapped, so the snippet stays valid JSON at any terminal width.
+    for (const row of JSON.stringify(settingsPatch(controls), null, 2).split(
+      "\n",
+    ))
+      out.raw(`  ${row}`);
+  }
+  if (span !== null && pieces.length)
+    line(
+      "Context costs assume nothing else changes when a piece is removed; cache writes and compaction can shift.",
+    );
   line();
   line(
     `Prices: ${report.prices.offline ? "cached" : "fetched"} from ${home(report.prices.source)}${report.prices.fetchedAt ? ` (${report.prices.fetchedAt.slice(0, 10)})` : ""}.`,
@@ -764,12 +858,46 @@ function summary(
     "--details shows the evidence and assumptions behind each line; --json is for scripts.",
   );
 }
+/** Share to one decimal, rounded down so a partial share never reads as 100%. */
+function percent(part: number, whole: number): number {
+  return Math.floor((part / whole) * 1000) / 10;
+}
+function pieceLabel(c: ContextCost): string {
+  return c.kind === "tool"
+    ? `${c.name} tool`
+    : c.kind === "mcp-server"
+      ? `MCP server ${c.name}`
+      : c.kind === "skill"
+        ? `Skill ${c.name}`
+        : c.kind === "instructions"
+          ? home(c.name)
+          : c.name;
+}
+/** How large requests on a compaction check's models got, to judge a window by. */
+function contextSizes(report: Report, r: CheckResult): string {
+  if (r.check !== "compaction-window") return "";
+  const sizes = report.scan.requests
+    .filter(
+      (q) =>
+        q.profiles.includes(r.profile) && r.models.includes(q.model ?? null),
+    )
+    .flatMap((q) => q.parts.map((p) => p.usage.input))
+    .filter((n): n is number => n !== null)
+    .sort((a, b) => a - b);
+  if (!sizes.length) return "";
+  const at = (q: number) =>
+    count(
+      Math.round(
+        sizes[Math.min(sizes.length - 1, Math.floor(q * sizes.length))]! / 1000,
+      ) * 1000,
+    );
+  return ` Its requests carried a median of ${at(0.5)} tokens, and 1 in 10 carried more than ${at(0.9)}. A smaller window makes each request cheaper, but every compaction pays for a summary and drops detail.`;
+}
 function coverageNote(r: CheckResult): string {
   const c = r.coverage;
   if (!c || c.priced === c.total) return "";
   // Percent, because one request can bill several parts.
-  const percent = Math.floor((c.priced / c.total) * 1000) / 10;
-  return `, using the ${percent}% of requests with measured usage`;
+  return `, using the ${percent(c.priced, c.total)}% of requests with measured usage`;
 }
 
 /** A sum of context costs that never turns an unknown piece into $0. */
@@ -815,20 +943,11 @@ export function contextSection(
   );
   section("What each piece of context costs");
   line(
-    "Sent with every request whether or not it is used, priced over the same window. Turning one off saves about its cost and gives up that feature; you decide which are worth it.",
+    `Sent with every request whether or not it is used, priced over the same window. Recommended off when it cost more than ${about(report.maxCostPerUseUsd)} per use.`,
   );
   const shown = details ? rows : rows.slice(0, CONTEXT_SUMMARY_ROWS);
   for (const c of shown) {
-    const label =
-      c.kind === "tool"
-        ? `${c.name} tool`
-        : c.kind === "mcp-server"
-          ? `MCP server ${c.name}`
-          : c.kind === "skill"
-            ? `Skill ${c.name}`
-            : c.kind === "instructions"
-              ? home(c.name)
-              : c.name;
+    const label = pieceLabel(c);
     // Unpriced requests are scaled from the priced ones, never counted as free.
     const cost =
       c.estimatedUsd === null
@@ -857,7 +976,7 @@ export function contextSection(
     const where = settingsFile.get(c.profiles[0] ?? "") ?? "settings.json";
     line(
       c.control
-        ? `Turn off: ${c.control} in ${where}`
+        ? `${c.verdict === "off" ? "Recommended off" : "Turn off"}: ${controlText(c.control)} in ${where}`
         : c.kind === "instructions"
           ? "Turn off: trim or scope this file"
           : "No setting turns this off",

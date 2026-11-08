@@ -9,12 +9,13 @@ from transcripts, and to help the user decide what to enable or disable.
 
 - Some settings don't change the experience, such as the cache TTL. Recommend
   the cheaper value outright.
-- Others trade cost for capability, such as a tool, skill, MCP server or
-  instruction file the user may not use. Report what each one cost over the
-  window and how often it was used, then leave the call to the user. Never
-  claim one is waste just because it was used rarely.
-- Name the setting that turns each one off, and say plainly when a cost can't
-  be measured rather than hiding the setting.
+- Others trade cost for capability, such as a tool, skill or MCP server.
+  Report what each one cost and how often it was used. Recommend turning it
+  off when it cost more than `--max-cost-per-use` (default $1) per recorded
+  use, counting no use as one; otherwise recommend keeping it.
+- Show every setting and feature on its own line with its cost. Name the
+  setting that turns each one off, and say plainly when a cost can't be
+  measured rather than hiding the setting.
 
 Development:
 

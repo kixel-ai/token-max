@@ -445,6 +445,8 @@ export interface Report {
   exposure: { calibration: Calibration[]; assumptions: string[] };
   /** What each piece of always-sent context cost, most expensive first. */
   context: ContextCost[];
+  /** A piece that cost more than this per use is recommended off. */
+  maxCostPerUseUsd: number;
   checks: CheckResult[];
   assumptions: string[];
 }

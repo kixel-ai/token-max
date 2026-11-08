@@ -102,7 +102,8 @@ a billing or agent-policy change. Reports label today's settings applied to
 history and do not invent historical settings. Recommendations name the owning
 setting or environment override and never apply it.
 
-Exit codes are `0` for no applicable change, `1` for a recommended change, and `2`
+Exit codes are `0` for no applicable change, `1` for a recommended setting or
+feature change, and `2`
 for a failed scan, price fetch, invalid argument, or cancellation. JSON errors go to stderr; a failed run emits no
 success report or partial recommendations. Invalid selected usage fails with only
 a file and line. Complete lines that are not JSON objects, which harnesses leave
@@ -111,23 +112,29 @@ JSON `coverage.skippedLines`; their usage counts as missing, and each one counts
 as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
-The default report says what was read, then gives one plain verdict per setting
-under **Change**, **Keep**, or **Not enough evidence**. A change names the current
-and suggested values, the estimated savings over the window and per 30 days, and
-the file that owns the setting. A keep says how much the alternative would have
-cost where that is known. Not enough evidence says why in one sentence, such as
-two options being too close to call. Unresolved current ownership stays there and
-does not cause exit 1.
+The default report says what was read, then puts every setting and feature on
+one line under **Change**, **Keep**, or **Not enough evidence**, with dollar
+amounts per 30 days at the window's rate. Settings that don't change the
+experience, such as the cache TTL, name the current and suggested values, the
+savings, and the file that owns the setting. Not enough evidence says why in one
+sentence, such as two options being too close to call. Unresolved current
+ownership stays there and does not cause exit 1.
 
-After the verdicts, **What each piece of context costs** lists the tools, MCP
-servers, skills and instruction files sent with every request, each with its
-estimated cost over the window and per 30 days, how often it was called, and the
-setting that turns it off (for example `"enableArtifact": false`, a bare tool
-name in `permissions.deny`, or `skillOverrides`). These trade cost for a feature,
-so the report never calls one waste; you decide. The default view lists the
-largest ones still sent today; `--details` lists every piece, including those no
-longer sent. The system prompt, core tools such as Bash and Read, and the skill
-and subagent lists are always sent and are shown as one total.
+Features sent with every request, such as a tool, MCP server or skill, show what
+they cost and how often they were used. One is recommended off when it cost more
+than `--max-cost-per-use` (default $1) per use, counting no use as one; the rest
+are kept. A skill's uses count only the model's own calls, because hiding it
+with `skillOverrides` set to `user-invocable-only` still lets you type `/name`.
+Instruction files and the system prompt, core tools such as Bash and Read, and
+the skill and subagent lists have no switch and are listed after the verdicts.
+The report ends with one `settings.json` snippet per settings file holding every
+recommended change, such as `"enableArtifact": false` or a bare tool name in
+`permissions.deny`; merge it by hand. `--details` lists every piece, including
+those no longer sent.
+
+An auto-compact window without enough evidence also shows how large that
+model's requests got (median and 90th percentile), to judge whether a smaller
+window would matter.
 
 Each piece is sized from the request shapes Claude Code records (tools, then the
 system prompt, then messages) and converted to tokens with a characters-to-tokens
@@ -167,19 +174,32 @@ Estimated with public API prices, not your subscription bill. Nothing was change
 Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
 
-1 setting change recommended.
+3 setting changes recommended.
+Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than $1 per use (--max-cost-per-use).
 
 Change
-  Main-agent prompt cache TTL: 5m -> 1h
-      Saves about $150 over 30 days (about $150 per 30 days).
-      Set in ~/.claude/settings.json:promptCacheTtl
+  Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.
+  Artifact tool: on -> off. Costs $90; never used.
+  Skill example: on -> only when you type /example. Costs $12; the model used it 2 times ($6 each).
 
 Keep
-  Fast mode: off
+  Fast mode: off.
+  Agent tool: on. Costs $40; used 310 times ($0.13 each).
 
 Not enough evidence
-  Idle compaction: on
-      Sessions were never idle long enough for it to trigger, so it made no difference.
+  Idle compaction: on. No idle gaps could be compared with it on and off.
+
+No setting turns these off
+  ~/.claude/CLAUDE.md: costs $5. Shorten it, or move parts into path-scoped rules or skills.
+  System prompt, core tools such as Bash and Read, and the skill and subagent lists: cost $210.
+
+To turn these off, merge this into ~/.claude/settings.json, adding to any lists already there:
+  {
+    "enableArtifact": false,
+    "skillOverrides": {
+      "example": "user-invocable-only"
+    }
+  }
 ```
 
 A run with no histories or no requests in the selected window gives a next step;

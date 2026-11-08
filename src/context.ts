@@ -8,13 +8,20 @@ import {
 import { unitRates, type Catalog } from "./prices.js";
 import { identity } from "./safe.js";
 
+/** One settings.json change: set `path` to `value`, or add `value` to the list at `path`. */
+export interface Control {
+  path: string[];
+  value: string | boolean;
+  append: boolean;
+}
+
 /** What one piece of always-sent context cost over the window, and how to turn it off. */
 export interface ContextCost {
   profiles: string[];
   kind: "tool" | "mcp-server" | "skill" | "instructions" | "system" | "other";
   name: string;
   /** The settings change that removes it, or null when no setting does. */
-  control: string | null;
+  control: Control | null;
   /** Selected requests that carried it, and how many of those could be priced. */
   requests: number;
   priced: number;
@@ -24,18 +31,46 @@ export interface ContextCost {
   costUsd: number;
   /** costUsd scaled to every request that carried it; null when none could be priced. */
   estimatedUsd: number | null;
-  /** Observed uses in the window; null when uses are not observable. */
+  /** Observed uses in the window; null when uses are not observable. Skills count only model calls, since typing one still works when it is hidden. */
   calls: number | null;
   lastUsed: number | null;
   /** Whether the profile's most recent request still carried it. */
   current: boolean;
+  /** estimatedUsd divided by uses, counting no use as one; null without both. */
+  costPerUseUsd: number | null;
+  /** "off" when it cost more per use than the limit; null when it cannot be switched off today or was never priced. */
+  verdict: "off" | "keep" | null;
+}
+
+/** The settings.json fragment for one control, such as `"enableArtifact": false`. */
+export function controlText(control: Control): string {
+  let value: unknown = control.append ? [control.value] : control.value;
+  for (const key of control.path.slice(1).reverse()) value = { [key]: value };
+  return `${json(control.path[0])}: ${JSON.stringify(value, null, 1).replace(/\n\s*/g, " ").replace(/\[ /g, "[").replace(/ \]/g, "]").replace(/\{ /g, "{").replace(/ \}/g, "}")}`;
+}
+
+/** Merge controls into one settings.json object, adding to lists rather than replacing them. */
+export function settingsPatch(controls: Control[]): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  for (const c of controls) {
+    let node = root;
+    for (const key of c.path.slice(0, -1))
+      node = (node[key] ??= {}) as Record<string, unknown>;
+    const last = c.path[c.path.length - 1]!;
+    if (!c.append) node[last] = c.value;
+    else {
+      const list = (node[last] ??= []) as unknown[];
+      if (!list.includes(c.value)) list.push(c.value);
+    }
+  }
+  return root;
 }
 
 interface Piece {
   key: string;
   kind: ContextCost["kind"];
   name: string;
-  control: string | null;
+  control: Control | null;
   characters: number;
 }
 /** A piece as it appears in one request. */
@@ -66,7 +101,7 @@ function tool(name: string): Omit<Piece, "characters"> {
       key: `mcp:${server}`,
       kind: "mcp-server",
       name: server,
-      control: `"permissions": {"deny": [${json(`mcp__${server}`)}]}`,
+      control: deny(`mcp__${server}`),
     };
   }
   // The Artifact tool's helpers (ArtifactComments, ArtifactData) go with it.
@@ -75,23 +110,24 @@ function tool(name: string): Omit<Piece, "characters"> {
       key: "tool:Artifact",
       kind: "tool",
       name: "Artifact",
-      control: `"enableArtifact": false`,
+      control: { path: ["enableArtifact"], value: false, append: false },
     };
   if (name === "Workflow")
     return {
       key: "tool:Workflow",
       kind: "tool",
       name,
-      control: `"enableWorkflows": false`,
+      control: { path: ["enableWorkflows"], value: false, append: false },
     };
   return {
     key: `tool:${name}`,
     kind: "tool",
     name,
-    control: CORE_TOOLS.has(name)
-      ? null
-      : `"permissions": {"deny": [${json(name)}]}`,
+    control: CORE_TOOLS.has(name) ? null : deny(name),
   };
+}
+function deny(rule: string): Control {
+  return { path: ["permissions", "deny"], value: rule, append: true };
 }
 
 /** Split one component into the pieces a user can switch separately. */
@@ -117,7 +153,11 @@ function pieces(
           key: `skill:${m.name}`,
           kind: "skill" as const,
           name: m.name,
-          control: `"skillOverrides": {${json(m.name)}: "user-invocable-only"}`,
+          control: {
+            path: ["skillOverrides", m.name],
+            value: "user-invocable-only",
+            append: false,
+          },
           characters: m.characters!,
         })),
         {
@@ -139,16 +179,18 @@ function pieces(
           characters,
         },
       ];
-    case "plugin-instructions":
+    case "plugin-instructions": {
+      const server = name.replace(/[^A-Za-z0-9_-]/g, "_");
       return [
         {
-          key: `mcp:${name.replace(/[^A-Za-z0-9_-]/g, "_")}`,
+          key: `mcp:${server}`,
           kind: "mcp-server",
-          name: name.replace(/[^A-Za-z0-9_-]/g, "_"),
-          control: `"permissions": {"deny": [${json(`mcp__${name.replace(/[^A-Za-z0-9_-]/g, "_")}`)}]}`,
+          name: server,
+          control: deny(`mcp__${server}`),
           characters,
         },
       ];
+    }
     case "agents":
       return [
         {
@@ -202,6 +244,8 @@ export function contextCosts(input: {
   scan: ExposureScan;
   requests: Request[];
   catalog: Catalog;
+  /** Recommend turning a piece off when it cost more than this per use. */
+  maxCostPerUseUsd: number;
 }): ContextCost[] {
   const { scan, catalog } = input;
   const calibration = new Map(
@@ -270,6 +314,8 @@ export function contextCosts(input: {
         calls: null,
         lastUsed: null,
         current: false,
+        costPerUseUsd: null,
+        verdict: null,
         time: -Infinity,
       };
       row.requests++;
@@ -413,8 +459,10 @@ export function contextCosts(input: {
     if (row.kind === "skill")
       skills.set(identity(`skill:${row.name}`), `skill:${row.name}`);
   for (const i of scan.invocations)
+    // Typed requests keep working when a skill is hidden from the model, so only
+    // the model's own calls show what its listing is for.
     if (
-      (i.kind === "skill-call" || i.kind === "skill-request") &&
+      i.kind === "skill-call" &&
       i.status !== "reference" &&
       skills.has(i.target)
     )
@@ -426,6 +474,13 @@ export function contextCosts(input: {
       : null;
     row.lastUsed = last.get(row) ?? null;
     delete (row as Partial<ContextCost & { time: number }>).time;
+    if (row.calls !== null)
+      row.costPerUseUsd =
+        row.estimatedUsd === null
+          ? null
+          : row.estimatedUsd / Math.max(1, row.calls);
+    if (row.control && row.current && row.costPerUseUsd !== null)
+      row.verdict = row.costPerUseUsd > input.maxCostPerUseUsd ? "off" : "keep";
   }
   return [...rows.values()].sort(
     (a, b) => (b.estimatedUsd ?? -1) - (a.estimatedUsd ?? -1),

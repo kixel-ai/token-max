@@ -564,8 +564,11 @@ export function analyze(options: {
   catalog: Catalog;
   since?: number;
   now?: number;
+  /** Recommend turning off context that cost more than this per use (default $1). */
+  maxCostPerUseUsd?: number;
 }): Report {
   const { scan, catalog } = options;
+  const maxCostPerUseUsd = options.maxCostPerUseUsd ?? 1;
   const now = options.now ?? Date.now();
   if (
     scan.since !== null &&
@@ -656,7 +659,9 @@ export function analyze(options: {
       scan: scan.exposure,
       requests: scan.requests,
       catalog,
+      maxCostPerUseUsd,
     }),
+    maxCostPerUseUsd,
     checks,
     assumptions: [
       "host-local read-only analysis; network access is only for public prices",

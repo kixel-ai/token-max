@@ -303,46 +303,53 @@ export function contextCosts(input: {
         }
         return cost;
       };
-      const head = parts.filter((piece) => piece.prefix);
-      // Attachments are placed only when the session's previous request bounds
-      // them: one it carried lies within its input, and a new one was appended
-      // after it. A cold request writes everything, so position matters little.
-      const bounded = (prior && prior.input !== null) || u!.read === 0;
-      const carried = parts.filter(
-        (piece) => !piece.prefix && prior?.keys.has(revision(piece)),
-      );
-      const fresh = parts.filter(
-        (piece) => !piece.prefix && !prior?.keys.has(revision(piece)),
-      );
-      const sum = (list: Placed[]) => list.reduce((n, x) => n + size(x), 0);
-      const prefixEnd = sum(head);
-      const starts = new Map<Placed, number>();
-      let offset = 0;
-      for (const piece of head) {
-        starts.set(piece, offset);
-        offset += size(piece);
-      }
-      const stack = (list: Placed[], last: number) => {
-        let offset = Math.max(prefixEnd, last - sum(list));
-        for (const piece of list) {
-          starts.set(piece, offset);
-          offset += size(piece);
+      // Tools and the system prompt sit at known offsets. An attachment's offset
+      // is unknown, but its history bounds it: one the previous request carried
+      // lies inside that request's input, and a new one was appended after it.
+      // It is priced only when every offset in those bounds pays the same rate.
+      const slot = (position: number) => {
+        let floor = 0;
+        for (const [index, [length]] of slots.entries()) {
+          if (position < floor + length) return index;
+          floor += length;
         }
+        return slots.length - 1;
       };
-      stack(carried, Math.min(prior?.input ?? end, end));
-      stack(fresh, end);
-      const charged = new Map<string, { tokens: number; cost: number }>();
+      const head = parts.filter((piece) => piece.prefix);
+      const prefixEnd = head.reduce((n, x) => n + size(x), 0);
+      const charged = new Map<
+        string,
+        { tokens: number; cost: number; missing: boolean }
+      >();
+      let offset = 0;
       for (const piece of parts) {
-        if (!piece.prefix && !bounded) continue;
         const key = `${owner}:${piece.key}`;
         const tokens = size(piece);
-        const prior = charged.get(key) ?? { tokens: 0, cost: 0 };
-        charged.set(key, {
-          tokens: prior.tokens + tokens,
-          cost: prior.cost + charge(starts.get(piece)!, tokens),
-        });
+        const entry = charged.get(key) ?? {
+          tokens: 0,
+          cost: 0,
+          missing: false,
+        };
+        entry.tokens += tokens;
+        if (piece.prefix) {
+          entry.cost += charge(offset, tokens);
+          offset += tokens;
+        } else {
+          const known = prior && prior.input !== null && prior.input <= end;
+          const carried = known && prior.keys.has(revision(piece));
+          const from = known && !carried ? prior.input! : prefixEnd;
+          const to = (carried ? prior.input! : end) - tokens;
+          const first = slot(from);
+          if (to >= from && first === slot(to + tokens - 1e-9))
+            entry.cost += tokens * slots[first]![1];
+          else entry.missing = true;
+        }
+        charged.set(key, entry);
       }
       for (const [key, sum] of charged) {
+        // A row with any piece of unknown cost in this request stays unpriced
+        // for it, so a subtotal is never shown as the whole.
+        if (sum.missing) continue;
         const row = rows.get(key)!;
         row.priced++;
         row.costUsd += sum.cost;
@@ -356,7 +363,8 @@ export function contextCosts(input: {
     if (!last || r.time >= last.time) latest.set(owner, { time: r.time, keys });
   }
   // Copied histories can leave a call and the requests around it with different
-  // profile sets, so each call goes to the row whose profiles differ least.
+  // profile sets, and a copy cannot say which profile made the call, so it
+  // counts for every row of its tool that shares a profile with it.
   const families = new Map<string, ContextCost[]>();
   for (const row of rows.values()) {
     if (
@@ -376,19 +384,11 @@ export function contextCosts(input: {
     time: number,
     calls = 1,
   ) => {
-    let best: ContextCost | null = null;
-    let distance = Infinity;
     for (const row of families.get(family) ?? []) {
-      const shared = profiles.filter((p) => row.profiles.includes(p)).length;
-      const d = row.profiles.length + profiles.length - 2 * shared;
-      if (shared && d < distance) {
-        best = row;
-        distance = d;
-      }
+      if (!profiles.some((p) => row.profiles.includes(p))) continue;
+      row.calls! += calls;
+      last.set(row, Math.max(last.get(row) ?? -Infinity, time));
     }
-    if (!best) return;
-    best.calls! += calls;
-    last.set(best, Math.max(last.get(best) ?? -Infinity, time));
   };
   for (const c of scan.toolCalls) {
     const family = c.name.startsWith("mcp__")

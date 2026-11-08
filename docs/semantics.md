@@ -463,12 +463,14 @@ with a recorded `api-request-shape` or full parameters qualify: tool
 definitions, then the system prompt, lead the prompt in recorded order.
 Prefix membership follows each request's own tool list, not where a component
 was first seen. Attachments such as skill listings and instruction files ride in
-messages at no recorded offset, so each is placed only when the session's
-previous request bounds it: a revision that request carried lies within its
-input and takes the latest such position, and a new or changed revision was
-appended after it and takes the end of this request. With no bounding request,
-attachments are priced only when the request read nothing from cache, where
-position barely matters; otherwise they stay unpriced for that request. Each piece's calibrated
+messages at no recorded offset, so their history bounds them instead: a
+revision the session's previous request carried lies between the end of the
+system prompt and the end of that request's input, a new or changed revision was
+appended after it, and with no usable previous request it lies anywhere after
+the system prompt. An attachment is priced only when every offset in its bounds
+falls in the same cache slot; otherwise it stays unpriced for that request. A
+row with any unpriced piece in a request, such as an MCP server whose tool is
+priced but whose instructions are not, is unpriced for that request. Each piece's calibrated
 tokens are charged at the slot they fall in: cached reads, then 1h writes, then
 5m writes, then ordinary input, at the request's model, provider and context
 tier. A request whose calibrated pieces exceed its recorded input is left
@@ -486,8 +488,8 @@ other tools and `mcp__<server>` for a server, which
 and `skillOverrides` set to `user-invocable-only` for a skill. Instruction files
 have no switch. Core tools, the system prompt and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
-transcript files, and go to the row whose profile set differs least from the
-call's, since copies can split a request and its calls across profiles; skill uses count
+transcript files. A copy cannot say which profile made a call, so it counts for
+every row of its tool that shares a profile with it; skill uses count
 Skill calls and typed requests. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.

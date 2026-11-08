@@ -665,11 +665,14 @@ function summary(
   const decided = new Set(
     report.checks.filter((r) => action(r) !== "advisory").map(key),
   );
+  // Only a vanished directory is proven irrelevant; any other unresolved owner,
+  // such as a project override, stays visible beside the resolved verdict.
   const checks = report.checks.filter(
     (r) =>
       !(
         action(r) === "advisory" &&
         r.check === "fast-mode" &&
+        r.reason.includes("working directory no longer exists") &&
         decided.has(key(r))
       ),
   );

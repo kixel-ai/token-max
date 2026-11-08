@@ -122,6 +122,55 @@ test("TTL compares aggregate net cost in either direction and holds new prefix w
   );
 });
 
+test("each iteration of one request keeps its own replayed cache cost", async () => {
+  const base = makeRequest();
+  const part = base.parts[0]!;
+  // A write followed by a read of it in the same request: 1h only makes the write dearer.
+  const s = data([
+    makeRequest({
+      parts: [
+        { ...part, usage: claudeUsage({ write: 1000 }) },
+        { ...part, usage: claudeUsage({ write: 0, read: 1000 }) },
+      ],
+    }),
+  ]);
+  s.profiles[0]!.ttl.main.value = "1h";
+  const check = analyze({ scan: s, catalog: await prices(), now: 1 })
+    .checks[0]!;
+  assert.equal(check.recommended, "5m");
+  assert.equal(check.action, "change");
+  assert.ok(Math.abs(check.savingsUsd! - (1000 * (8 - 5)) / 1e6) < 1e-10);
+});
+
+test("unreadable lines are unknown evidence that can block a TTL recommendation", async () => {
+  const first = makeRequest();
+  const next = makeRequest({
+    id: "next",
+    time: 600000,
+    endTime: 600000,
+    parts: [{ ...first.parts[0]!, usage: claudeUsage({ write: 1100 }) }],
+  });
+  const s = data([first, next]);
+  s.snapshots = [
+    {
+      file: "synthetic",
+      harness: "claude",
+      profiles: ["profile"],
+      bytes: 0,
+      device: 0,
+      inode: 0,
+      deferredBytes: 0,
+      skippedLines: 10000,
+      lines: 0,
+    },
+  ];
+  const check = analyze({ scan: s, catalog: await prices(), now: 1200000 })
+    .checks[0]!;
+  assert.equal(check.recommended, null);
+  assert.equal(check.action, "advisory");
+  assert.equal(check.coverage!.total, check.coverage!.priced + 10000);
+});
+
 test("5m rewrites a 1h read after 5 minutes; sessions and models do not share inferred cache", async () => {
   const c = await prices();
   const first = makeRequest({

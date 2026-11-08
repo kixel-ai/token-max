@@ -107,7 +107,8 @@ for a failed scan, price fetch, invalid argument, or cancellation. JSON errors g
 success report or partial recommendations. Invalid selected usage fails with only
 a file and line. Complete lines that are not JSON objects, which harnesses leave
 after crashes and concurrent writes, are skipped and counted in the report and in
-JSON `coverage.skippedLines`; their usage counts as missing. Unterminated final
+JSON `coverage.skippedLines`; their usage counts as missing, and each one counts
+as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
 The default report says what was read, then gives one plain verdict per setting
@@ -214,7 +215,7 @@ remain unmeasured risks, not zero-cost observations.
 Idle compaction compares on and off over the same window, first with current
 controls and then after applicable TTL and window changes. The latter aggregate
 estimate decides: positive on-minus-off cost favors off, negative favors on, and
-a zero tie retains the current toggle. Final periods incur expected summary cost
+a zero tie, such as when no gap was long enough to trigger, is not enough evidence. Final periods incur expected summary cost
 without an invented return benefit. A sensitivity crossing zero does not veto the
 point estimate. A recommended 5m main TTL or a window at/below the idle threshold
 makes idle compaction inapplicable.

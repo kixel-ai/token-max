@@ -2402,6 +2402,7 @@ mod tests {
             speed: None,
             speed_directories: None,
             idle_directories: None,
+            background: vec![],
         }
     }
 

@@ -1672,6 +1672,7 @@ mod tests {
             speed: None,
             speed_directories: None,
             idle_directories: None,
+            background: vec![],
         };
         let mut first = at("sample-resume", "sample", 1000);
         first.parts[0].usage = writes(20000);

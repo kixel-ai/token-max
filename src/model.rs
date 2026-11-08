@@ -390,6 +390,35 @@ pub struct Profile {
     /// Current project controls observed at recorded working directories.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
+    /// Background generation features and the controls that switch them.
+    pub background: Vec<BackgroundControl>,
+}
+
+/// A model request the client makes on its own, outside the turns the user drives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackgroundFeature {
+    /// Claude's predicted next prompt after each response.
+    PromptSuggestions,
+    /// Claude's recap after the terminal sits unfocused.
+    SessionRecaps,
+    /// Claude's turns that check on background work an active goal waits for.
+    GoalCheckIns,
+    /// Codex's recap while the terminal is unfocused.
+    AutoRecaps,
+}
+
+/// One background feature's current state and the control that owns it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct BackgroundControl {
+    pub feature: BackgroundFeature,
+    pub value: bool,
+    /// The goal check-in interval, when it applies.
+    pub minutes: Option<i64>,
+    /// Where the effective value comes from.
+    pub owner: String,
+    /// The setting that turns it off.
+    pub off: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -708,6 +737,24 @@ pub struct SpeedCheck {
     pub usage_estimates: Vec<UsageEstimate>,
 }
 
+/// What a background feature cost, estimated from the turns where it would have run.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundCheck {
+    /// Current and recommended values: true is on.
+    #[serde(flatten)]
+    pub base: CheckBase<bool>,
+    pub feature: BackgroundFeature,
+    /// The setting that turns it off.
+    pub off: String,
+    /// Turns where it would have run; null when they cannot be found in transcripts.
+    pub generations: Option<u64>,
+    /// Estimated cost of its requests over the window.
+    pub cost: Cost,
+    /// Cache rewrites its cache reads avoided, which turning it off adds back.
+    pub lost_warming: Cost,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PeriodStatus {
@@ -858,6 +905,8 @@ pub enum CheckResult {
     Idle(IdleCheck),
     #[serde(rename = "fast-mode")]
     Speed(SpeedCheck),
+    #[serde(rename = "background-generation")]
+    Background(BackgroundCheck),
 }
 
 impl CheckResult {
@@ -868,6 +917,7 @@ impl CheckResult {
             CheckResult::Compaction(c) => c.base.action,
             CheckResult::Idle(c) => c.base.action,
             CheckResult::Speed(c) => c.base.action,
+            CheckResult::Background(c) => c.base.action,
         }
     }
 }

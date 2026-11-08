@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::background::{BackgroundInput, background_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
@@ -902,12 +903,20 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let background = background_checks(&BackgroundInput {
+        scan: &scan,
+        catalog,
+        since,
+        now,
+        max_cost_per_use_usd,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
         .chain(idle.into_iter().map(CheckResult::Idle))
         .chain(speed.into_iter().map(CheckResult::Speed))
+        .chain(background.into_iter().map(CheckResult::Background))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
@@ -945,6 +954,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             "measured usage is replayed at present public API rates, not historical invoices or subscription savings",
             "compaction summary proxies are separate from recorded request charges",
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",
+            "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",
             "Codex has no user cache-TTL control; its usage is priced but no TTL change is recommended",
             "no summed per-check or joint savings total",
         ]

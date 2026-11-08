@@ -9,8 +9,8 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CompactionSources, Env, SettingsScope, compaction_controls, idle_controls, js_string, members,
-    scoped_environment, speed_controls,
+    CompactionSources, Env, SettingsScope, claude_background, codex_background,
+    compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
     Agent, Harness, Location, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
@@ -1095,6 +1095,11 @@ fn profile(
     } else {
         None
     };
+    let background = if claude {
+        claude_background(&speed_scopes, local_env, provider.is_none())?
+    } else {
+        codex_background(&speed_scopes)?
+    };
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1110,6 +1115,7 @@ fn profile(
         speed: Some(speed),
         speed_directories: None,
         idle_directories: None,
+        background,
     })
 }
 

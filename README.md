@@ -170,7 +170,9 @@ per-piece context costs in `context`, and check results. Each check has a `check
 retains its TTL-specific fields, while `compaction-window` includes candidate
 windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
 current-settings and post-recommendation on/off costs, request/final periods,
-activation cohorts, context-size costs and lifetime/summary/timing sensitivities. Consumers
+activation cohorts, context-size costs and lifetime/summary/timing sensitivities.
+`background-generation` adds the feature, the setting that turns it off, its
+estimated request count and cost, and the cache rewrites it avoided. Consumers
 should branch on `check` before reading setting-specific fields.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
@@ -269,3 +271,16 @@ Claude's separate fast/standard caches mean cache-switch effects are excluded.
 They hold work constant, do not value latency, and make no subscription-bill,
 credit-multiplier or combined savings claim. Fast mode compares with the current
 profile, independently of the TTL/window/idle recommendations.
+
+## Background generation
+
+The `background-generation` check prints one line per feature: Claude prompt
+suggestions, session recaps and goal check-ins, and Codex automatic recaps. Each
+names its current value and the setting that turns it off:
+`promptSuggestionEnabled`, `awaySummaryEnabled`,
+`CLAUDE_CODE_GOAL_CHECKIN_MINUTES=0` or `tui.auto_recap = false`.
+
+Neither client logs these requests, so suggestion and recap costs are estimated
+at each recorded interactive-terminal turn where they would have run, and their
+uses count as one against `--max-cost-per-use`. Goal check-ins and Codex recaps
+cannot be told apart in transcripts, so their cost is shown as unknown.

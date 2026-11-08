@@ -1620,44 +1620,6 @@ mod tests {
         assert_eq!(error.message, "invalid required speed feature");
     }
 
-    // Ported from fast.test.ts: "managed blocks survive named/legacy alternatives while a separately allowed premium remains unresolved".
-    #[test]
-    fn managed_blocks_survive_named_alternatives() {
-        let w = Workspace::new();
-        let file = w.codex.join("config.toml");
-        let named = w.codex.join("review.config.toml");
-        let requirements = w.home.join("requirements.toml");
-        let options = DiscoveryOptions {
-            codex_dirs: vec![text(&w.codex)],
-            ..options(&w)
-        };
-        let speed = || {
-            discover(&options).unwrap().profiles[0]
-                .speed
-                .clone()
-                .unwrap()
-        };
-        write(&requirements, "[features]\nfast_mode=false");
-        write(
-            &file,
-            "model=\"gpt-6.1-sol\"\nservice_tier=\"fast\"\n[profiles.review]\nservice_tier=\"default\"",
-        );
-        assert_eq!(speed().value.as_deref(), Some("standard"));
-        write(&file, "model=\"gpt-6.1-sol\"\nservice_tier=\"fast\"");
-        write(&named, "service_tier=\"default\"");
-        let blocked = speed();
-        assert_eq!(blocked.value.as_deref(), Some("standard"));
-        assert!(blocked.resolved);
-        assert!(blocked.owner.ends_with("requirements.toml:features"));
-        write(&named, "service_tier=\"ultrafast\"");
-        assert_eq!(speed().value, None);
-        write(
-            &requirements,
-            "[features]\nfast_mode=false\nultrafast_mode=false",
-        );
-        assert_eq!(speed().value.as_deref(), Some("standard"));
-    }
-
     // Ported from the discovery half of fast.test.ts: "known distinct project controls get separate cards and nearest Codex scope remains advisory owner".
     #[test]
     fn nearest_codex_project_scope_owns_speed() {

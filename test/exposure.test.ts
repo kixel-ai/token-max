@@ -108,6 +108,128 @@ async function transcript(
   }
 }
 
+test("request-history blobs do not execute archived tools or complete live calls", async () => {
+  const call = {
+    type: "tool_use",
+    id: "live-call",
+    name: "mcp__example__search",
+    input: {},
+  };
+  const result = {
+    type: "tool_result",
+    tool_use_id: "live-call",
+    content: "SYNTHETIC_PRIVATE_RESULT",
+  };
+  const data = await transcript("claude", [
+    assistant(1, [call]),
+    // Blobs store prior messages by digest, without an invocation timestamp.
+    {
+      type: "api-request-blob",
+      sessionId: "session",
+      hash: "archived-assistant",
+      message: { role: "assistant", content: [call] },
+    },
+    {
+      type: "api-request-blob",
+      timestamp: at(2),
+      sessionId: "session",
+      hash: "archived-result",
+      message: { role: "user", content: [result] },
+    },
+    {
+      type: "user",
+      timestamp: at(3),
+      sessionId: "session",
+      message: { role: "user", content: [result] },
+    },
+    assistant(4),
+  ]);
+  assert.equal(data.requests.length, 2);
+  assert.equal(data.exposure.invocations.length, 1);
+  const invocation = data.exposure.invocations[0]!;
+  assert.equal(invocation.status, "completed");
+  assert.equal(invocation.time, Date.parse(at(1)));
+  assert.deepEqual(
+    invocation.locations.map((l) => l.line),
+    [1, 4],
+  );
+  assert.equal(data.exposure.components.length, 1);
+  assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE_RESULT/);
+});
+
+test("unclassified rendered attachments accept text blocks and keep non-text sizes unknown", async () => {
+  const data = await transcript("claude", [
+    {
+      ...attachment(0, { type: "queued_command" }),
+      rendered: [{ content: "one" }],
+    },
+    {
+      ...attachment(1, { type: "queued_command" }),
+      rendered: [
+        {
+          content: [
+            { type: "text", text: "two" },
+            { type: "text", text: "three" },
+          ],
+        },
+      ],
+    },
+    {
+      ...attachment(2, { type: "queued_command" }),
+      rendered: [
+        {
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", data: "SYNTHETIC_PRIVATE_IMAGE" },
+            },
+          ],
+        },
+      ],
+    },
+    assistant(3),
+  ]);
+  assert.deepEqual(
+    data.exposure.components.map((c) => c.characters),
+    [3, 9, null],
+  );
+  assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE_IMAGE/);
+  await assert.rejects(
+    transcript("claude", [
+      {
+        ...attachment(0, { type: "queued_command" }),
+        rendered: [{ content: [{ type: "text", text: 7 }] }],
+      },
+    ]),
+    /invalid context text/,
+  );
+});
+
+test("surfaced tool references retain unknown sizes instead of inventing a schema", async () => {
+  const data = await transcript("claude", [
+    attachment(0, {
+      type: "deferred_tools_delta",
+      surfacedDefinitions: [
+        {
+          name: "mcp__example__search",
+          sameAs: "schema-digest",
+          listing: "SYNTHETIC_PRIVATE_LISTING",
+        },
+      ],
+    }),
+    assistant(1),
+  ]);
+  assert.equal(data.exposure.components.length, 1);
+  assert.equal(
+    data.exposure.components[0]!.provenance,
+    "surfaced-tool-reference",
+  );
+  assert.equal(data.exposure.components[0]!.characters, null);
+  assert.equal(data.exposure.requests[0]!.components.length, 0);
+  assert.equal(data.exposure.requests[0]!.candidates.length, 1);
+  assert.doesNotMatch(JSON.stringify(data), /SYNTHETIC_PRIVATE_LISTING/);
+});
+
 test("world state deltas preserve opaque identities, removals, inheritance and compaction uncertainty", async () => {
   const data = await transcript(
     "codex",

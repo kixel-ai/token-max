@@ -63,8 +63,8 @@ export function formatReport(
     line();
     line(title, 0, 1);
   }
-  function field(name: string, value: string) {
-    line(`${name}: ${value}`, 2);
+  function field(name: string, value: string, style = 0) {
+    line(`${name}: ${value}`, 2, style);
   }
   function notes(name: string, values: string[]) {
     for (const value of new Set(values)) field(name, value);
@@ -95,7 +95,7 @@ export function formatReport(
   }
 
   line("token-max", 0, 1);
-  line("Public API-price estimates, not subscription bills.");
+  line("Public API-price estimates, not subscription bills.", 0, 2);
   const requests = report.scan.requests;
   const earliest = requests[0]?.time ?? null;
   field(
@@ -122,7 +122,7 @@ export function formatReport(
   );
 
   const groups = [
-    ["change", "Recommended changes", 36],
+    ["change", "Recommended changes", 32],
     ["advisory", "Advisory findings", 33],
     ["keep", "Keep current settings", 0],
   ] as const;
@@ -179,8 +179,54 @@ export function formatReport(
           ? "Estimated rate-only saving vs current speed"
           : "Estimated net saving vs baseline",
         `${result.savingsUsd === null ? "unknown" : usd(result.savingsUsd)} over window; ${result.monthlySavingsUsd === null ? "unknown" : usd(result.monthlySavingsUsd)} / 30 days`,
+        result.savingsUsd === null
+          ? 33
+          : result.savingsUsd > 0
+            ? 32
+            : result.savingsUsd < 0
+              ? 31
+              : 2,
       );
       if (result.check === "claude-cache-ttl") {
+        field(
+          "Scope",
+          result.bucket === "main"
+            ? "Main sessions only"
+            : "Outside main: sub-agents, background helpers, compaction and advisors",
+          36,
+        );
+        if (result.current === null) {
+          field(
+            "Switch cost",
+            "unknown; current effective TTL is unresolved",
+            33,
+          );
+        } else {
+          const other = result.current === "5m" ? "1h" : "5m";
+          const current = result.comparisonCost[result.current].totalUsd;
+          const alternate = result.comparisonCost[other].totalUsd;
+          const delta =
+            current === null || alternate === null ? null : alternate - current;
+          const duration =
+            result.since === null || result.until === null
+              ? 0
+              : result.until - result.since;
+          const monthly =
+            delta === null || duration <= 0
+              ? null
+              : (Math.abs(delta) * 30 * 24 * 60 * 60 * 1000) / duration;
+          field(
+            `Switch ${result.current} ${arrow} ${other}`,
+            delta === null
+              ? "unknown; cache comparison is incomplete"
+              : `${delta > 0 ? "adds" : delta < 0 ? "saves" : "no change;"} ${usd(Math.abs(delta))} over window; ${estimate(monthly)} / 30 days`,
+            delta === null ? 33 : delta > 0 ? 31 : delta < 0 ? 32 : 2,
+          );
+        }
+        field(
+          "Switch basis",
+          "Net cache read/write charges, including writes after expiry; same recorded work. One-time transition effects are unmeasured.",
+        );
         field(
           "Replay cost",
           `5m ${money(result.cost["5m"])}; 1h ${money(result.cost["1h"])}`,

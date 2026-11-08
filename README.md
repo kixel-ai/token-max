@@ -116,6 +116,12 @@ a known subtotal is not the total. Measured request usage is distinct from
 estimated replay and unpriced provider guidance. Low-use rankings and unresolved
 current ownership remain advisory; they do not cause exit 1.
 
+Cache-duration cards separate main sessions from sub-agents and other outside-main
+requests. Each shows what switching to the other TTL adds or saves, even when the
+recommendation is to keep the current setting. That net replay includes cache
+read/write charges and rewrites after expiry; one-time transition effects remain
+unmeasured. Green highlights savings and red highlights added costs.
+
 Use `--details` for every check's assumptions, uncertainty, cost components,
 break-evens, sensitivity scenarios, cache witnesses and sources. Nothing is hidden
 behind an interactive prompt or a top-N limit. The layout wraps long paths and
@@ -148,6 +154,10 @@ CHANGE  claude-cache-ttl / main  [estimated]
   available history; no recorded setting change, current settings applied to
   history
   Estimated net saving vs baseline: $1.50 over window; $1.50 / 30 days
+  Scope: Main sessions only
+  Switch 5m -> 1h: saves $1.50 over window; $1.50 / 30 days
+  Switch basis: Net cache read/write charges, including writes after expiry;
+  same recorded work. One-time transition effects are unmeasured.
   Replay cost: 5m $10.50; 1h $9.00
   Cache comparison: 5m $10.50; 1h $9.00
 ```

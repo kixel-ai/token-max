@@ -28,6 +28,60 @@ async function syntheticReport(): Promise<Report> {
   }
 }
 
+test("TTL switch effects separate main/helper scopes and show additions, savings and unknowns", async () => {
+  const report = await syntheticReport();
+  const main = report.checks.find((c) => c.check === "claude-cache-ttl")!;
+  main.bucket = "main";
+  main.current = "1h";
+  main.recommended = "1h";
+  main.action = "keep";
+  main.since = Date.parse("2026-11-01T00:00:00Z");
+  main.until = Date.parse("2026-11-16T00:00:00Z");
+  main.comparisonCost["5m"].totalUsd = 10;
+  main.comparisonCost["1h"].totalUsd = 6;
+  // Unknown identical fixed costs cancel without making the switch unknown.
+  main.fixedCost.totalUsd = null;
+  main.cost["5m"].totalUsd = null;
+  main.cost["1h"].totalUsd = null;
+  const helper = structuredClone(main);
+  helper.bucket = "subagent";
+  helper.current = "5m";
+  helper.recommended = "1h";
+  helper.action = "change";
+  report.checks = [main, helper];
+  const text = formatReport(report, { color: true });
+  assert.match(text, /Scope: Main sessions only/);
+  assert.match(text, /Scope: Outside main: sub-agents, background helpers/);
+  assert.match(
+    text,
+    /\x1b\[31m  Switch 1h -> 5m: adds \$4.00 over window; \$8.00 \/ 30 days/,
+  );
+  assert.match(
+    text,
+    /\x1b\[32m  Switch 5m -> 1h: saves \$4.00 over window; \$8.00 \/ 30 days/,
+  );
+  assert.equal(stripVTControlCharacters(text), formatReport(report));
+
+  main.comparisonCost["5m"].totalUsd = null;
+  helper.current = null;
+  let unknown = formatReport(report);
+  assert.match(
+    unknown,
+    /Switch 1h -> 5m: unknown; cache comparison is incomplete/,
+  );
+  assert.match(
+    unknown,
+    /Switch cost: unknown; current effective TTL is unresolved/,
+  );
+  main.comparisonCost["5m"].totalUsd = 6;
+  main.until = main.since;
+  unknown = formatReport(report);
+  assert.match(
+    unknown,
+    /Switch 1h -> 5m: no change; \$0.00 over window; unknown \/ 30 days/,
+  );
+});
+
 test("recommendations lead advisory/keep findings, with separate baselines and complete narrow output", async () => {
   const report = await syntheticReport();
   const change = report.checks.find((c) => c.check === "claude-cache-ttl")!;

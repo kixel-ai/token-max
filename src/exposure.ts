@@ -400,6 +400,9 @@ export class ExposureCollector {
       this.userAliases = new Map();
       this.invalidated = false;
     }
+    // Content-addressed history snapshots replay prior messages, not live calls.
+    if (snapshot.harness === "claude" && raw.type === "api-request-blob")
+      return;
     const p = object(raw.payload);
     if (snapshot.harness === "claude" && typeof raw.sessionId === "string")
       this.session = /[/\\]subagents[/\\]/.test(snapshot.file)
@@ -597,11 +600,16 @@ export class ExposureCollector {
           const definition = record(v);
           const name = text(definition.name);
           this.remove("mcp-discovery", name);
+          const reference = definition.definition === undefined;
+          if (reference) id(definition.sameAs);
           add(
             "mcp-schema",
             name,
-            JSON.stringify(record(definition.definition)),
-            "surfaced-tool-definition",
+            reference
+              ? definition
+              : JSON.stringify(record(definition.definition)),
+            reference ? "surfaced-tool-reference" : "surfaced-tool-definition",
+            reference,
           );
         }
       } else if (kind === "deferred_tools_record") {
@@ -623,14 +631,29 @@ export class ExposureCollector {
         }
       } else if (raw.rendered !== undefined) {
         // Unknown attachment categories still contribute visible derived evidence.
+        let opaque = false;
         const rendered = array(raw.rendered)
-          .map((v) => text(record(v).content))
+          .map((v) => {
+            const content = record(v).content;
+            if (typeof content === "string") return content;
+            if (content === undefined)
+              throw new ScanError("missing rendered attachment content");
+            return array(content)
+              .map((v) => {
+                const block = record(v);
+                if (block.type === "text") return text(block.text);
+                opaque = true;
+                return "";
+              })
+              .join("\n");
+          })
           .join("\n");
         add(
           "other",
           String(raw.uuid ?? location.line),
-          rendered,
+          opaque ? raw.rendered : rendered,
           "unclassified-rendered-attachment",
+          opaque,
         );
       }
     }

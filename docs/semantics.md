@@ -30,6 +30,12 @@ source and actual request-start time. Unlinked API requests remain explicitly
 unpriced: they might have failed, still be running, or have hidden usage. Their
 absence of assistant usage is not zero spend. Nested subagent filenames distinguish
 separate conversations even when their parent `sessionId` is the same.
+`api-request-blob` entries are content-addressed request-history snapshots. Their
+archived message bodies do not establish new skill/tool invocations, completion
+times, component loads, or request usage.
+Rendered attachment content accepts strings and text blocks; non-text content
+retains an unknown size. A surfaced tool's `sameAs` reference is opaque without a
+verified schema mapping and does not establish a full definition or its size.
 
 Claude's top-level usage overlaps message iterations and omits compaction and
 advisor iterations. An absent or empty iteration list uses the top-level usage;

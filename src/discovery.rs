@@ -780,31 +780,37 @@ fn codex_speed(speed: &mut SpeedControl, sources: &CodexSpeedSources) -> Result<
 /// The file identity that deduplicates hard links and aliases.
 type FileKey = (u64, u64, String);
 
+/// A file's identity and length, read together so a replacement cannot pair one file's length
+/// with another's identity.
 #[cfg(unix)]
-fn file_key(info: &fs::Metadata, _canonical: &str) -> FileKey {
+fn file_key(info: &fs::Metadata, _canonical: &str) -> (FileKey, u64) {
     use std::os::unix::fs::MetadataExt;
-    (info.dev(), info.ino(), String::new())
+    ((info.dev(), info.ino(), String::new()), info.len())
 }
 
-/// The volume serial number and file index Node's `stat` reports as `dev` and `ino` on Windows.
+/// The volume serial number and file index Node's `stat` reports as `dev` and `ino` on Windows,
+/// with the length from the same handle.
 #[cfg(windows)]
-fn file_key(_info: &fs::Metadata, canonical: &str) -> FileKey {
+fn file_key(info: &fs::Metadata, canonical: &str) -> (FileKey, u64) {
     let handle = winapi_util::Handle::from_path_any(canonical);
     match handle.and_then(|h| winapi_util::file::information(&h)) {
-        Ok(info) => (
-            info.volume_serial_number(),
-            info.file_index(),
-            String::new(),
+        Ok(file) => (
+            (
+                file.volume_serial_number(),
+                file.file_index(),
+                String::new(),
+            ),
+            file.file_size(),
         ),
         // An unopenable file fails later at read time with a safe error.
-        Err(_) => (0, 0, canonical.to_string()),
+        Err(_) => ((0, 0, canonical.to_string()), info.len()),
     }
 }
 
 /// Without device and inode numbers, the canonical path is the identity.
 #[cfg(not(any(unix, windows)))]
-fn file_key(_info: &fs::Metadata, canonical: &str) -> FileKey {
-    (0, 0, canonical.to_string())
+fn file_key(info: &fs::Metadata, canonical: &str) -> (FileKey, u64) {
+    ((0, 0, canonical.to_string()), info.len())
 }
 
 /// Snapshots in discovery order, and the directories each profile has already walked.
@@ -836,7 +842,7 @@ impl Walk {
                     (canonical, info)
                 }
             };
-            let key = file_key(&info, &canonical);
+            let (key, length) = file_key(&info, &canonical);
             if info.is_dir() {
                 if !self.visited.insert((key, index)) {
                     continue;
@@ -870,7 +876,7 @@ impl Walk {
                             file: canonical,
                             harness: profile.harness,
                             profiles: vec![id.clone()],
-                            bytes: info.len(),
+                            bytes: length,
                             device: key.0,
                             inode: key.1,
                             deferred_bytes: 0,

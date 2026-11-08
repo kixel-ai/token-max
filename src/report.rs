@@ -1741,14 +1741,24 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.line(&text, 2, 0);
         }
         for c in fixed.iter().filter(|c| c.kind == ContextKind::Skill) {
+            let calls = c.calls.unwrap_or(0);
             let text = format!(
-                "{}{}: {}. {PLUGIN_SKILL}.",
+                "{}{}: {}; {}. {PLUGIN_SKILL}.",
                 piece_label(c, out),
                 suffix(c, out),
                 c.estimated_usd.map_or_else(
                     || "cost unknown".into(),
                     |usd| format!("costs {}", monthly(usd, since, Some(until)))
-                )
+                ),
+                if calls == 0 {
+                    "never used".into()
+                } else {
+                    format!(
+                        "used {} time{}",
+                        count(calls),
+                        if calls == 1 { "" } else { "s" }
+                    )
+                }
             );
             out.line(&text, 2, 0);
         }
@@ -2581,7 +2591,7 @@ mod tests {
             "  Skills synced from claude.ai: on -> off. Costs $30; used 2 times ($15 each)."
         ));
         assert!(has(
-            "  Skill tools:deploy: costs $6. Turn off its plugin with /plugin, or remove the skill from the added directory."
+            "  Skill tools:deploy: costs $6; never used. Turn off its plugin with /plugin, or remove the skill from the added directory."
         ));
         assert!(has(
             "  Agent tool: on. Costs $40; used 310 times ($0.13 each)."

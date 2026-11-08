@@ -489,8 +489,8 @@ other tools and `mcp__<server>` for a server, which
 [remove the tool from context](https://code.claude.com/docs/en/permissions),
 and `skillOverrides` set to `user-invocable-only` for a skill. Skills named
 `anthropic-skills:<name>`, synced from claude.ai, share one row turned off by
-`syncClaudeAiSkills: false`; a short name counts for it only when no other listed
-skill has that name. Other namespaced skills come from a plugin or an added
+`syncClaudeAiSkills: false`; a typed or called short name counts for it only when the invoking
+profile lists no other skill by that name. Other namespaced skills come from a plugin or an added
 directory, which [`skillOverrides` does not
 reach](https://code.claude.com/docs/en/skills#override-skill-visibility-from-settings),
 so they get no settings switch. Instruction files have no switch. Core tools, the system prompt and the listing framing are always

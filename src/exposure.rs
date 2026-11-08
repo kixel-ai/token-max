@@ -10,6 +10,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
+use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Digests, Exposure, ExposureScan,
     ExposureView, Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus,
@@ -833,6 +834,14 @@ impl ExposureCollector {
         self.place(new, &placed.key, &placed.revision, &placed.size, at)
     }
 
+    /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
+    fn know_skill(&mut self, name: &str) {
+        if let Some(short) = synced_short(name) {
+            self.known_skills.insert(short.to_string());
+        }
+        self.known_skills.insert(name.to_string());
+    }
+
     /// A rendered skill listing and one member span per `- name: description` line.
     fn listing(&mut self, key: &str, body: &str, provenance: &'static str, at: &At<'_>) -> Text {
         let aggregate = self.component(
@@ -842,7 +851,7 @@ impl ExposureCollector {
         );
         let mut members = vec![];
         for (name, span) in listing_entries(body) {
-            self.known_skills.insert(name.to_string());
+            self.know_skill(name);
             let new = New {
                 role: Role::Member,
                 ..New::active(Category::SkillListing, name, "rendered-listing-entry-span")
@@ -1070,7 +1079,7 @@ impl ExposureCollector {
         let kind_is = |expected: &str| kind.and_then(Value::as_str) == Some(expected);
         if kind_is("skill_listing") {
             for name in array(a.get("names"))? {
-                self.known_skills.insert(text(Some(name))?.to_string());
+                self.know_skill(text(Some(name))?);
             }
             self.clear(Some(Category::SkillListing));
             self.listing(
@@ -3156,6 +3165,33 @@ mod tests {
         assert_eq!(bodies[0].targets, [target("skill", "plugin:known")]);
         assert_eq!(bodies[0].provenance, "observed-tool-result-not-wire-proof");
         assert_eq!(scan.requests[0].view.candidates.len(), 3);
+    }
+
+    #[test]
+    fn a_typed_short_name_requests_a_listed_synced_skill() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+        feed.all(
+            &mut c,
+            vec![
+                attachment(
+                    0,
+                    json!({ "type": "skill_listing", "content": "x", "names": ["anthropic-skills:pdf"] }),
+                ),
+                user(1, json!("<command-name>/pdf</command-name>")),
+                assistant(2, json!([])),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 3, None)], None);
+        let typed: Vec<_> = scan
+            .invocations
+            .iter()
+            .map(|i| (i.kind, i.target.clone()))
+            .collect();
+        assert_eq!(
+            typed,
+            [(InvocationKind::SkillRequest, target("skill", "pdf"))]
+        );
     }
 
     #[test]

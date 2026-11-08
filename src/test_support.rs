@@ -204,6 +204,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         },
         provider: None,
         settings: IndexMap::new(),
+        mcp_servers: vec![],
         compaction: CompactionControls {
             default: WindowControl {
                 value: None,

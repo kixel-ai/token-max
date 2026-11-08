@@ -766,7 +766,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert!((report.exposure.calibration[0].tokens_per_character - ratio).abs() < 1e-12);
     let artifact = row(&report, "Artifact");
     assert_eq!(
-        control_text(artifact.control.as_ref().unwrap()),
+        control_text(artifact.control.as_ref().unwrap(), Harness::Claude),
         r#""enableArtifact": false"#
     );
     assert_eq!(artifact.calls, Some(0));
@@ -785,7 +785,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     let review = row(&report, "review");
     assert_eq!(review.kind, ContextKind::Skill);
     assert_eq!(
-        control_text(review.control.as_ref().unwrap()),
+        control_text(review.control.as_ref().unwrap(), Harness::Claude),
         r#""skillOverrides": {"review": "user-invocable-only"}"#
     );
     assert!(listing.size.characters.unwrap() > 0);
@@ -1021,17 +1021,19 @@ fn attachments_take_their_latest_cache_position_and_media_or_copied_calls_do_not
     // The file is new in the second request, and its changed revision is new
     // in the third, so both pay the 1h write price rather than a cached read.
     assert!((instructions.cost_usd / (tokens * (8.0 + 8.0) * 1e-6) - 1.0).abs() < 0.001);
-    // In the first request the listing could straddle 1h writes and ordinary
-    // input, so that request stays unpriced; later ones read it from cache.
+    // Claude Code caches through the last message, so the first request's
+    // listing lies in its 1h writes rather than the ordinary input after them;
+    // the next two read it from cache.
+    let write = instructions.cost_usd / (2.0 * tokens);
     assert_eq!(review.requests, 6);
-    assert_eq!(review.priced, 2);
-    assert!((review.cost_usd / (review.tokens.unwrap() as f64 * 2.0 * 0.2e-6) - 1.0).abs() < 0.01);
-    assert_eq!(review.estimated_usd, Some((review.cost_usd * 6.0) / 2.0));
-    // The server row is priced only where both its tool and its instructions
-    // were: not in the first request, where the instructions straddle slots.
+    assert_eq!(review.priced, 3);
+    let listing = review.tokens.unwrap() as f64;
+    assert!((review.cost_usd / (listing * (write + 2.0 * 0.2e-6)) - 1.0).abs() < 0.01);
+    assert_eq!(review.estimated_usd, Some((review.cost_usd * 6.0) / 3.0));
+    // The server row is priced where both its tool and its instructions were.
     let docs = row(&report, "docs");
     assert_eq!(docs.requests, 6);
-    assert_eq!(docs.priced, 2);
+    assert_eq!(docs.priced, 3);
     let nested = row(&report, "/repo/sub/CLAUDE.md");
     assert_eq!(nested.requests, 2);
     assert_eq!(nested.priced, 0);

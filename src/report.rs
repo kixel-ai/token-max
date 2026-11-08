@@ -6,11 +6,11 @@ use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::context::{control_text, settings_patch};
+use crate::context::{config_patch, control_text, settings_patch};
 use crate::model::{
     Action, CacheReplayEvidence, CheckBase, CheckResult, ContextCost, ContextKind, Control, Cost,
-    Coverage, EstimateEvidence, Evidence, Millis, PeriodStatus, Profile, Report, RequestEvidence,
-    Ttl, UsageEstimate, Verdict,
+    Coverage, EstimateEvidence, Evidence, Harness, Millis, PeriodStatus, Profile, Report,
+    RequestEvidence, Scalar, Ttl, UsageEstimate, Verdict,
 };
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
@@ -1317,11 +1317,62 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
 fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
     match c.kind {
         ContextKind::Tool => format!("{} tool", c.name),
+        ContextKind::McpServer if c.harness == Harness::Codex && c.name == "codex_apps" => {
+            "ChatGPT apps".into()
+        }
         ContextKind::McpServer => format!("MCP server {}", c.name),
+        ContextKind::ToolOutput => match c.name.strip_prefix("mcp__") {
+            Some(server) => format!("MCP server {server} output"),
+            None => format!("{} output", c.name),
+        },
         ContextKind::Skill => format!("Skill {}", c.name),
         ContextKind::Instructions => out.home(&c.name),
         ContextKind::System | ContextKind::Other => c.name.clone(),
     }
+}
+
+/// A cap setting's label and the line describing its value.
+type Cap = (&'static str, String);
+
+/// The setting that caps how much of one tool's output stays in context, and its current value.
+fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
+    let profile = report
+        .scan
+        .profiles
+        .iter()
+        .find(|p| p.id == first_profile(c));
+    let number = |key: &str| match profile.and_then(|p| p.settings.get(key)) {
+        Some(Scalar::Number(n)) => Some(count(*n as i64)),
+        _ => None,
+    };
+    Some(match c.harness {
+        Harness::Claude if c.name == "Bash" => (
+            "Bash output",
+            match (
+                number("bashOutputMaxChars"),
+                number("BASH_MAX_OUTPUT_LENGTH"),
+            ) {
+                (Some(n), _) => format!("bashOutputMaxChars is {n} characters"),
+                (None, Some(n)) => format!("BASH_MAX_OUTPUT_LENGTH is {n} characters"),
+                (None, None) => "bashOutputMaxChars is unset, so about 30,000 characters".into(),
+            },
+        ),
+        Harness::Claude if c.name.starts_with("mcp__") => (
+            "MCP output",
+            match number("MAX_MCP_OUTPUT_TOKENS") {
+                Some(n) => format!("MAX_MCP_OUTPUT_TOKENS is {n} tokens"),
+                None => "MAX_MCP_OUTPUT_TOKENS is unset, so 25,000 tokens".into(),
+            },
+        ),
+        Harness::Codex => (
+            "Tool output",
+            match number("tool_output_token_limit") {
+                Some(n) => format!("tool_output_token_limit is {n} tokens"),
+                None => "tool_output_token_limit is unset".into(),
+            },
+        ),
+        Harness::Claude => return None,
+    })
 }
 
 /// How large requests on a compaction check's models got, to judge a window by.
@@ -1718,18 +1769,86 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.line(&text, 2, 0);
         }
     }
+    // Tool output, one line per cap setting, with tools no cap governs together.
+    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::new();
+    for c in report
+        .context
+        .iter()
+        .filter(|c| c.kind == ContextKind::ToolOutput)
+    {
+        outputs
+            .entry((first_profile(c), output_cap(report, c)))
+            .or_default()
+            .push(c);
+    }
+    if !outputs.is_empty() {
+        out.section("Tool output kept in context");
+        // Capped settings first, in the order their most expensive output appeared.
+        let order: Vec<_> = outputs
+            .keys()
+            .filter(|k| k.1.is_some())
+            .chain(outputs.keys().filter(|k| k.1.is_none()))
+            .cloned()
+            .collect();
+        // Scaled to 30 days like every other line, without counting unknowns as $0.
+        let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
+        for key in order {
+            let rows = &outputs[&key];
+            let usd: Vec<Option<f64>> = rows
+                .iter()
+                .map(|c| c.estimated_usd.map(|usd| usd * scale))
+                .collect();
+            let cost = match known_total(&usd) {
+                unknown if usd.iter().all(Option::is_none) => unknown,
+                total => format!("costs {total}"),
+            };
+            let largest = rows.iter().filter_map(|c| c.largest_characters).max();
+            let largest = largest.map_or_else(String::new, |n| {
+                format!("; its largest result was {} characters", count(n))
+            });
+            let suffix = suffix(rows[0], out);
+            let text = match &key.1 {
+                Some((name, cap)) => format!("{name}{suffix}: {cost}{largest}. {cap}."),
+                None => {
+                    let names: Vec<&str> = rows.iter().take(4).map(|c| c.name.as_str()).collect();
+                    let more = rows.len() - names.len();
+                    let more = if more > 0 {
+                        format!(" and {} more", count(more as u64))
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "Other tool output ({}{more}){suffix}: {cost}{largest}. No cap is checked for it.",
+                        names.join(", "),
+                    )
+                }
+            };
+            out.line(&text, 2, 0);
+        }
+        out.line(
+            "A lower cap keeps less output in context but leaves the model to read the rest back, which transcripts cannot price, so no cap change is recommended.",
+            2,
+            0,
+        );
+    }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
         .context
         .iter()
-        .filter(|c| c.current && c.control.is_none() && c.estimated_usd != Some(0.0))
+        .filter(|c| {
+            c.current
+                && c.control.is_none()
+                && c.kind != ContextKind::ToolOutput
+                && c.estimated_usd != Some(0.0)
+        })
         .collect();
     if !fixed.is_empty() {
         out.section("No setting turns these off");
         for c in fixed.iter().filter(|c| c.kind == ContextKind::Instructions) {
             let text = format!(
-                "{}: {}. Shorten it, or move parts into path-scoped rules or skills.",
+                "{}{}: {}. Shorten it, or move parts into path-scoped rules or skills.",
                 out.home(&c.name),
+                suffix(c, out),
                 c.estimated_usd.map_or_else(
                     || "cost unknown".into(),
                     |usd| format!("costs {}", monthly(usd, since, Some(until)))
@@ -1771,9 +1890,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             0,
             0,
         );
-        // Never wrapped, so the snippet stays valid JSON at any terminal width.
-        let patch =
-            serde_json::to_string_pretty(&settings_patch(controls)).expect("JSON values serialize");
+        // Never wrapped, so the snippet stays valid at any terminal width.
+        let patch = if file.ends_with(".toml") {
+            config_patch(controls).trim_end().to_string()
+        } else {
+            serde_json::to_string_pretty(&settings_patch(controls)).expect("JSON values serialize")
+        };
         for row in patch.split('\n') {
             out.raw(&format!("  {row}"));
         }
@@ -1863,6 +1985,12 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         };
         let used = match c.calls {
             None => String::new(),
+            Some(results) if c.kind == ContextKind::ToolOutput => format!(
+                "; {} result{} in the window, the largest {} characters",
+                count(results),
+                if results == 1 { "" } else { "s" },
+                count(c.largest_characters.unwrap_or(0))
+            ),
             Some(0) => "; no recorded use".into(),
             Some(calls) => format!(
                 "; used {} time{}, last {}",
@@ -1913,12 +2041,16 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                     } else {
                         "Turn off"
                     },
-                    control_text(control)
+                    control_text(control, c.harness)
                 )
             }
             None if c.kind == ContextKind::Instructions => {
                 "Turn off: trim or scope this file".into()
             }
+            None if c.kind == ContextKind::ToolOutput => match output_cap(report, c) {
+                Some((_, cap)) => format!("Capped by {cap}"),
+                None => "No cap is checked for it".into(),
+            },
             None => "No setting turns this off".into(),
         };
         out.line(&text, 6, 0);
@@ -2216,6 +2348,8 @@ mod tests {
     ) -> ContextCost {
         let cost_per_use = calls.and_then(|c| estimated.map(|e| e / c.max(1) as f64));
         ContextCost {
+            harness: Harness::Claude,
+            largest_characters: None,
             profiles: vec!["profile".into()],
             kind,
             name: name.into(),
@@ -2585,6 +2719,79 @@ mod tests {
                 "permissions": {"deny": ["mcp__docs"]}
             })
         );
+    }
+
+    #[test]
+    fn tool_output_and_codex_switches() {
+        let mut report = synthetic();
+        report.scan.profiles[0]
+            .settings
+            .insert("MAX_MCP_OUTPUT_TOKENS".into(), Scalar::Number(50_000.0));
+        let mut codex = make_profile("codex", "/synthetic/.codex");
+        codex.harness = Harness::Codex;
+        codex.settings_file = "/synthetic/.codex/config.toml".into();
+        report.scan.profiles.push(codex);
+        let output = |harness, profile: &str, name: &str, usd: f64, largest: i64| ContextCost {
+            harness,
+            profiles: vec![profile.into()],
+            largest_characters: Some(largest),
+            ..context_piece(ContextKind::ToolOutput, name, None, Some(usd), Some(4))
+        };
+        let apps = ContextCost {
+            harness: Harness::Codex,
+            profiles: vec!["codex".into()],
+            ..context_piece(
+                ContextKind::McpServer,
+                "codex_apps",
+                switch(&["features", "apps"], ControlValue::Bool(false)),
+                Some(30.0),
+                Some(0),
+            )
+        };
+        report.context.extend([
+            output(Harness::Claude, "profile", "Bash", 20.0, 30_500),
+            output(Harness::Claude, "profile", "mcp__docs", 6.0, 900),
+            output(Harness::Claude, "profile", "Read", 8.0, 2_000),
+            output(Harness::Codex, "codex", "exec", 50.0, 112_000),
+            apps,
+        ]);
+        let text = text(&report, None, false);
+        let lines: Vec<&str> = text.lines().collect();
+        let has = |line: &str| lines.contains(&line);
+        let (claude, codex) = (
+            "[claude /synthetic/home/.claude]",
+            "[codex /synthetic/.codex]",
+        );
+        assert!(has(&format!(
+            "  ChatGPT apps {codex}: on -> off. Costs $30; never used."
+        )));
+        // One line per cap setting, capped ones first, then everything else together.
+        let start = lines
+            .iter()
+            .position(|l| *l == "Tool output kept in context")
+            .unwrap();
+        assert_eq!(
+            lines[start + 1..start + 5],
+            [
+                format!(
+                    "  Bash output {claude}: costs $20; its largest result was 30,500 characters. bashOutputMaxChars is unset, so about 30,000 characters."
+                ),
+                format!(
+                    "  MCP output {claude}: costs $6; its largest result was 900 characters. MAX_MCP_OUTPUT_TOKENS is 50,000 tokens."
+                ),
+                format!(
+                    "  Tool output {codex}: costs $50; its largest result was 112,000 characters. tool_output_token_limit is unset."
+                ),
+                format!(
+                    "  Other tool output (Read) {claude}: costs $8; its largest result was 2,000 characters. No cap is checked for it."
+                ),
+            ]
+        );
+        // Codex switches go to config.toml as TOML.
+        let snippet = &text[text
+            .find("merge this into /synthetic/.codex/config.toml")
+            .unwrap()..];
+        assert!(snippet.contains("\n  [features]\n  apps = false\n"));
     }
 
     #[test]
@@ -2989,6 +3196,8 @@ mod tests {
         let name = "google-drive:google-drive-comments";
         report.checks.clear();
         let skill = ContextCost {
+            harness: Harness::Claude,
+            largest_characters: None,
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
             name: name.into(),

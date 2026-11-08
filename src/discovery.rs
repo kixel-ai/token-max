@@ -441,7 +441,9 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
 }
 
 /// Settings that current or planned checks consume; anything else is never retained.
-const STRUCTURAL_SETTINGS: [&str; 17] = [
+const STRUCTURAL_SETTINGS: [&str; 19] = [
+    "bashOutputMaxChars",
+    "tool_output_token_limit",
     "promptCacheTtl",
     "subagentPromptCacheTtl",
     "idleCompaction",
@@ -1068,7 +1070,24 @@ fn profile(
         managed_file,
         scopes: None,
     });
-    let settings = structural_settings(config);
+    let mut settings = structural_settings(config);
+    if claude {
+        // Output caps that are environment variables; the shell overrides the settings file.
+        for key in ["BASH_MAX_OUTPUT_LENGTH", "MAX_MCP_OUTPUT_TOKENS"] {
+            let value = match local_env.get(key) {
+                Some(value) => Some(value.as_str()),
+                None => members(config.get("env")).get(key).and_then(Value::as_str),
+            };
+            if let Some(n) = value.and_then(|v| v.trim().parse::<f64>().ok()) {
+                settings.insert(key.into(), Scalar::Number(n));
+            }
+        }
+    }
+    let mcp_servers = if claude {
+        vec![]
+    } else {
+        members(config.get("mcp_servers")).keys().cloned().collect()
+    };
     let compaction = compaction_controls(&CompactionSources {
         harness,
         user: &user,
@@ -1105,6 +1124,7 @@ fn profile(
         ttl,
         provider,
         settings,
+        mcp_servers,
         compaction,
         idle,
         speed: Some(speed),

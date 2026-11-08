@@ -913,7 +913,10 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         calibration: calibrate(&scan.exposure, &scan.requests),
         assumptions: [
             "component tokens are characters times a per-model ratio calibrated against recorded request totals",
+            "Codex records no complete request text to calibrate against, so its components and tool output use OpenAI's rule of thumb of 4 characters per token",
             "each component is priced at the cache state of its position in the prompt prefix: tools, system, then message attachments in arrival order",
+            "tool output stays in the conversation until it compacts; output the previous request held lies within its content, and newer output follows its input and reply",
+            "Claude Code caches through the last message, so a Claude request's content ends at its cached reads plus writes",
             "removing a component is assumed to change nothing else; costs of different components can be added only as an upper bound on the saving",
         ]
         .into_iter()
@@ -923,6 +926,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
+        profiles: &scan.profiles,
         catalog,
         max_cost_per_use_usd,
     });

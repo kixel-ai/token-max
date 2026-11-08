@@ -90,6 +90,8 @@ export interface Exposure {
     items: string[] | null;
   } | null;
   completeCharacters: number | null;
+  /** How many leading components are the recorded tools and system prompt, in cache-prefix order. */
+  prefix: number;
   wireModel: string | null;
   reasons: string[];
 }
@@ -192,28 +194,40 @@ function toolCalls(
 }
 
 /**
- * Characters of one recorded message, or null when it holds images, documents
- * or redacted thinking, whose billed tokens text cannot measure. Thinking
- * signatures are opaque and dropped; every other field, tool input included, counts.
+ * Characters of one recorded message, or null when its content holds images,
+ * documents or redacted thinking, whose billed tokens text cannot measure. Only
+ * a content-level thinking block's opaque signature is dropped; every other
+ * field, tool input included, counts.
  */
 function blobCharacters(message: unknown): number | null {
   let opaque = false;
-  const serialized = JSON.stringify(message, (_key, value: unknown) => {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      return value;
-    const block = value as Record<string, unknown>;
-    if (
-      block.type === "image" ||
-      block.type === "document" ||
-      block.type === "redacted_thinking"
-    )
-      opaque = true;
-    if (block.type === "thinking" && "signature" in block) {
-      const { signature: _, ...rest } = block;
-      return rest;
-    }
-    return value;
-  });
+  const blocks = (content: unknown): unknown =>
+    Array.isArray(content)
+      ? content.map((v: unknown) => {
+          if (!v || typeof v !== "object") return v;
+          const block = v as Record<string, unknown>;
+          if (
+            block.type === "image" ||
+            block.type === "document" ||
+            block.type === "redacted_thinking"
+          )
+            opaque = true;
+          if (block.type === "thinking") {
+            const { signature: _, ...rest } = block;
+            return rest;
+          }
+          return block.type === "tool_result"
+            ? { ...block, content: blocks(block.content) }
+            : block;
+        })
+      : content;
+  const m =
+    message && typeof message === "object"
+      ? (message as Record<string, unknown>)
+      : {};
+  const serialized = JSON.stringify(
+    "content" in m ? { ...m, content: blocks(m.content) } : message,
+  );
   return opaque ? null : characters(serialized);
 }
 
@@ -874,6 +888,11 @@ export class ExposureCollector {
         coverage: completeCharacters === null ? "partial" : "complete-text",
         references: refs,
         completeCharacters,
+        prefix: full
+          ? array(params.tools).length + 1
+          : shape
+            ? shape.tools.length + 1
+            : 0,
         wireModel: label(params.model),
         reasons: shape
           ? [
@@ -1176,6 +1195,7 @@ export class ExposureCollector {
       coverage: current.length ? "partial" : "unknown",
       references: null,
       completeCharacters: null,
+      prefix: 0,
       wireModel: null,
       reasons: [
         "chronological state is not proof of exact request exposure",
@@ -1251,6 +1271,7 @@ export class ExposureCollector {
             coverage: "unknown",
             references: null,
             completeCharacters: null,
+            prefix: 0,
             wireModel: null,
             reasons: [
               views.length

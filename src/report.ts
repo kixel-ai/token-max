@@ -764,6 +764,17 @@ function coverageNote(r: CheckResult): string {
   return `, using the ${percent}% of requests with measured usage`;
 }
 
+/** A sum of context costs that never turns an unknown piece into $0. */
+function knownTotal(rows: ContextCost[]): string {
+  const known = rows.filter((c) => c.estimatedUsd !== null);
+  if (!known.length) return "cost unknown";
+  const total = about(known.reduce((n, c) => n + c.estimatedUsd!, 0));
+  const missing = rows.length - known.length;
+  return missing
+    ? `at least ${total}, with ${count(missing)} piece${missing === 1 ? "" : "s"} that could not be priced`
+    : total;
+}
+
 const CONTEXT_SUMMARY_ROWS = 12;
 /** What each removable piece of context cost; the summary shows the largest current ones. */
 export function contextSection(
@@ -861,7 +872,7 @@ export function contextSection(
     const fixed = report.context.filter((c) => !optional(c) && c.current);
     if (fixed.length)
       line(
-        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${about(fixed.reduce((n, c) => n + (c.estimatedUsd ?? 0), 0))}.`,
+        `Always sent and not worth turning off (system prompt, core tools such as Bash and Read, and the skill and subagent lists): ${knownTotal(fixed)}.`,
       );
   }
 }

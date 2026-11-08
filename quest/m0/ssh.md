@@ -5,8 +5,10 @@
 `token-max` audits explicitly selected SSH hosts with the same analyzer and
 produces one report with host/profile ownership, coverage and cost evidence.
 Conversation, instruction and schema text is processed on its owning host;
-only sanitized derived metadata crosses the SSH connection. No remote
-installation, daemon, setting change or transcript copy is required.
+only sanitized derived metadata crosses the SSH connection. Each destination
+runs its own `token-max`, installed there with `cargo install`; token-max
+installs nothing remotely and needs no daemon, setting change or transcript
+copy.
 
 ## Plan
 
@@ -17,6 +19,14 @@ decrypting its saved catalog). Known feasibility targets are nixos, nixos2
 and kixtop; earlier read-only probes found native histories there, but were
 not complete billing audits or remote runtime checks.
 
+Decided 2026-11-08 (maintainer), after the Rust rewrite removed the streamed
+Node/Bun helper: ✅ each destination runs a `token-max` installed there with
+`cargo install` (rejected: copy the local binary over SSH to a private
+temporary path, run it and delete it). The coordinator runs the remote's
+installed `token-max` over SSH; a missing or mismatched version fails loudly
+with the exact `cargo install` command to run. token-max installs nothing
+remotely itself.
+
 - Support repeatable `--ssh HOST`, using existing OpenSSH configuration,
   authentication and host-key handling. With no host flags, preserve the
   current local default. Explicit SSH hosts select those remote audits;
@@ -25,7 +35,7 @@ not complete billing audits or remote runtime checks.
   Make directory/profile overrides' destination scope unambiguous; local
   paths must not silently acquire a different remote interpretation.
 - Preflight each selected destination's platform and the same-version
-  token-max it will run (see Waiting), and report an unsupported platform
+  token-max it will run, and report an unsupported platform
   or version clearly, without a silent execution fallback. POSIX SSH
   destinations cover the initial Linux/macOS use case; identify other
   remote platforms as unsupported. Require no runtime download, persistent
@@ -69,16 +79,6 @@ prerequisite. Sources checked 2026-11-07:
 [desktop catalog store](https://github.com/pingdotgg/t3code/blob/9c6429d74b59c7a06fb7357526457d192a744a9f/apps/desktop/src/app/DesktopConnectionCatalogStore.ts),
 [environment CLI](https://github.com/pingdotgg/t3code/blob/9c6429d74b59c7a06fb7357526457d192a744a9f/apps/server/src/cli/environment.ts),
 and [OpenSSH command handling](https://man.openbsd.org/ssh.1).
-
-## Waiting
-
-- Maintainer: the Rust rewrite (2026-11-08) removed the plan's streamed
-  Node/Bun helper, so choose how a destination runs the analyzer.
-  Recommended: copy the local binary over the SSH connection to a private
-  temporary path when the destination's OS and architecture match, run it,
-  and delete it afterwards, so nothing stays installed. The alternative,
-  running a same-version `token-max` already installed with `cargo install`,
-  breaks the "no remote installation" goal.
 
 ## Related
 

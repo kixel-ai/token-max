@@ -1064,8 +1064,8 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                             "Idle geometry",
                             &format!(
                                 "{} summary output tokens; {} full resumed prefix tokens; boundaries {}",
-                                js_number(c.summary_tokens),
-                                js_number(c.prefix_tokens),
+                                c.summary_tokens,
+                                c.prefix_tokens,
                                 c.events.join(", ")
                             ),
                         );
@@ -2111,8 +2111,8 @@ mod tests {
             summary_cost: cost(Some(0.875), 0.875),
             calibration: Some(PeriodCalibration {
                 events: vec!["synthetic-boundary".into(), "second".into()],
-                summary_tokens: 1500.5,
-                prefix_tokens: 30000.0,
+                summary_tokens: 1500,
+                prefix_tokens: 30000,
             }),
         }
     }

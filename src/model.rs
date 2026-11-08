@@ -738,8 +738,8 @@ pub enum PeriodOutcome {
 #[serde(rename_all = "camelCase")]
 pub struct PeriodCalibration {
     pub events: Vec<String>,
-    pub summary_tokens: f64,
-    pub prefix_tokens: f64,
+    pub summary_tokens: i64,
+    pub prefix_tokens: i64,
 }
 
 /// One request gap or final observation period, without an assumed session end.

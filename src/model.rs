@@ -309,6 +309,21 @@ pub struct StructuralEvent {
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<Pricing>,
+    /// Claude Bash call details on its tool start and end, without the command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellCall>,
+}
+
+/// What a Claude Bash call asked for and how it ended, never its command or output.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShellCall {
+    /// Started with `run_in_background`, so the model did not wait on it.
+    pub background: bool,
+    /// The command sleeps inside a shell loop, polling something.
+    pub polls: bool,
+    /// The result reports that the call reached its timeout and moved to the background.
+    pub timed_out: bool,
 }
 
 /// A current window control, without inventing a tuned model default.
@@ -367,6 +382,19 @@ pub struct SpeedControl {
     pub reason: String,
 }
 
+/// Claude's effective foreground Bash timeout ceiling and the variables that set it.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashCapControl {
+    /// The larger of `BASH_MAX_TIMEOUT_MS` (default 600000) and `BASH_DEFAULT_TIMEOUT_MS`.
+    pub value: Millis,
+    /// Where `BASH_MAX_TIMEOUT_MS` is set, or the settings file that would set it.
+    pub owner: String,
+    /// The effective `BASH_DEFAULT_TIMEOUT_MS` (default 120000).
+    pub default_timeout: Millis,
+    pub default_owner: String,
+}
+
 /// A selected profile's current settings and their owning controls.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -385,6 +413,8 @@ pub struct Profile {
     pub idle: Option<IdleControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<SpeedControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bash: Option<BashCapControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
@@ -708,6 +738,37 @@ pub struct SpeedCheck {
     pub usage_estimates: Vec<UsageEstimate>,
 }
 
+/// Foreground Bash calls that held the cache idle, and what their misses cost.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashWaits {
+    /// Foreground Bash calls with a recorded result.
+    pub calls: u64,
+    /// Those whose wait reached the cache TTL their request wrote.
+    pub long: u64,
+    /// Long waits that reached their timeout.
+    pub timed_out: u64,
+    /// Long waits that slept in a polling loop.
+    pub polling: u64,
+    /// Rewriting the prefix the next request could have read, priced at write minus read rates.
+    pub miss_cost: Cost,
+}
+
+/// Whether the foreground Bash timeout cap outlasts the cache TTL.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashCapCheck {
+    #[serde(flatten)]
+    pub base: CheckBase<Millis>,
+    /// Always "all".
+    pub bucket: &'static str,
+    /// The main-agent TTL the cap is compared with; None when unresolved.
+    pub ttl: Option<Ttl>,
+    pub ttl_basis: String,
+    pub replacement: String,
+    pub waits: BashWaits,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PeriodStatus {
@@ -858,6 +919,8 @@ pub enum CheckResult {
     Idle(IdleCheck),
     #[serde(rename = "fast-mode")]
     Speed(SpeedCheck),
+    #[serde(rename = "bash-timeout-cap")]
+    BashCap(BashCapCheck),
 }
 
 impl CheckResult {
@@ -868,6 +931,7 @@ impl CheckResult {
             CheckResult::Compaction(c) => c.base.action,
             CheckResult::Idle(c) => c.base.action,
             CheckResult::Speed(c) => c.base.action,
+            CheckResult::BashCap(c) => c.base.action,
         }
     }
 }

@@ -556,7 +556,8 @@ fn the_crate_package_ships_its_license_and_docs() {
         String::from_utf8_lossy(&output.stderr)
     );
     for file in ["LICENSE", "README.md", "docs/semantics.md"] {
-        assert!(list.lines().any(|l| l == file), "{file}");
+        // Windows lists packaged paths with backslashes.
+        assert!(list.lines().any(|l| l.replace('\\', "/") == file), "{file}");
     }
 }
 

@@ -87,11 +87,28 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             }
         }
         if requests.is_empty() {
-            let unscoped = profile
-                .background_directories
-                .get("")
-                .unwrap_or(&profile.background);
-            groups.extend(unscoped.iter().map(|c| (c, (vec![], vec![]))));
+            // Earlier requests still identify current project owners, without billing them.
+            for r in input
+                .scan
+                .cache_context
+                .requests
+                .iter()
+                .chain(&input.scan.requests)
+                .filter(|r| {
+                    r.agent == crate::model::Agent::Main && r.profiles.contains(&profile.id)
+                })
+            {
+                for control in controls(profile, r) {
+                    groups.entry(control).or_default();
+                }
+            }
+            if groups.is_empty() {
+                let unscoped = profile
+                    .background_directories
+                    .get("")
+                    .unwrap_or(&profile.background);
+                groups.extend(unscoped.iter().map(|c| (c, (vec![], vec![]))));
+            }
         }
         for (control, (requests, ends)) in groups {
             result.push(check(input, profile, control, &requests, &ends));
@@ -483,6 +500,23 @@ fn check(
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
     let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
+    let directories: IndexSet<Option<String>> = if requests.is_empty() {
+        input
+            .scan
+            .cache_context
+            .requests
+            .iter()
+            .chain(&input.scan.requests)
+            .filter(|r| {
+                r.agent == crate::model::Agent::Main
+                    && r.profiles.contains(&profile.id)
+                    && controls(profile, r).contains(control)
+            })
+            .map(|r| r.cwd.clone())
+            .collect()
+    } else {
+        requests.iter().map(|r| r.cwd.clone()).collect()
+    };
     BackgroundCheck {
         base: CheckBase {
             profile: profile.id.clone(),
@@ -534,7 +568,7 @@ fn check(
             sources: SOURCES.map(String::from).into(),
         },
         feature,
-        directories: requests.iter().map(|r| r.cwd.clone()).collect::<IndexSet<_>>().into_iter().collect(),
+        directories: directories.into_iter().collect(),
         reason: control.reason.clone(),
         off: control.off.clone(),
         off_file: control.off_file.clone(),

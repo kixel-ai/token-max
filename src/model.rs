@@ -1052,6 +1052,7 @@ pub struct T3IdleComparison {
     pub baseline: String,
     pub ttl: Option<Ttl>,
     pub scenarios: Vec<T3IdleScenario>,
+    /// Shared eligibility; summary cost and calibration describe beforeCacheExpires only.
     pub periods: Vec<IdlePeriod>,
 }
 

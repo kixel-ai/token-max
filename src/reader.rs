@@ -1499,6 +1499,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
     let mut native_ids = crate::t3::NativeIds::default();
+    let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
         since,
         exposure: ExposureCollector::new(since),
@@ -1518,7 +1519,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         let mut file = FileState::new(&view);
         for record in read_snapshot(snapshot)? {
             let (raw, location) = record?;
-            if profiles.iter().any(|p| p.t3.is_some()) {
+            if has_t3 {
                 native_ids.observe(&raw, view.harness);
             }
             reader

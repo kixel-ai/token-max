@@ -70,13 +70,53 @@ enum LegacyIdle {
     Mode(T3IdleMode),
 }
 
-#[derive(Default, Deserialize)]
-#[serde(default)]
+#[derive(Default)]
 struct Instance {
     driver: String,
     enabled: Option<bool>,
     config: Option<Box<RawValue>>,
     environment: Vec<Environment>,
+}
+
+impl<'de> Deserialize<'de> for Instance {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Default, Deserialize)]
+        #[serde(default)]
+        struct Fields {
+            driver: Option<Box<RawValue>>,
+            enabled: Option<Box<RawValue>>,
+            config: Option<Box<RawValue>>,
+            environment: Option<Box<RawValue>>,
+        }
+        let raw = Fields::deserialize(d)?;
+        let driver = raw
+            .driver
+            .and_then(|v| serde_json::from_str::<String>(v.get()).ok())
+            .unwrap_or_default();
+        if !matches!(driver.as_str(), "claudeAgent" | "codex") {
+            return Ok(Self {
+                driver,
+                ..Self::default()
+            });
+        }
+        let enabled = raw
+            .enabled
+            .map(|v| serde_json::from_str(v.get()))
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let environment = raw
+            .environment
+            .map(|v| serde_json::from_str(v.get()))
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        Ok(Self {
+            driver,
+            enabled,
+            environment,
+            config: raw.config,
+        })
+    }
 }
 
 /// Platform policy can replace homes and controls. Do not claim user-file ownership
@@ -281,20 +321,17 @@ pub(crate) fn discover(
             ambiguous_requests: 0,
         };
         for (id, instance) in instances {
-            if !slug(&id) || !slug(&instance.driver) {
-                return Err(fail("invalid T3 provider identity", &file));
-            }
             let harness = match instance.driver.as_str() {
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
                 _ => {
-                    state.exclusions.push(format!(
-                        "T3 instance {id} ({}) is unsupported; its spend is excluded",
-                        instance.driver
-                    ));
+                    state.exclusions.push(if slug(&id) && slug(&instance.driver) {format!("T3 instance {id} ({}) is unsupported; its spend is excluded",instance.driver)} else {"T3 provider instance has an unsupported identity/driver; its spend is excluded".into()});
                     continue;
                 }
             };
+            if !slug(&id) {
+                return Err(fail("invalid supported T3 provider identity", &file));
+            }
             let mut env: Env = options
                 .env
                 .iter()
@@ -497,54 +534,131 @@ pub(crate) fn attribute_compactions(scan: &mut Scan, charges: &[CompactionCharge
 #[derive(Default)]
 pub(crate) struct NativeIds {
     ids: HashMap<String, String>,
-    items: HashMap<String, String>,
+    items: HashMap<String, Vec<String>>,
     events: HashMap<String, String>,
+    last_session: String,
+    last_turn: String,
+    last_message: (String, String),
 }
 impl NativeIds {
     pub(crate) fn observe(&mut self, raw: &Map<String, Value>, harness: Harness) {
         let payload = raw.get("payload").and_then(Value::as_object);
-        for value in [
-            raw.get("sessionId"),
-            payload.and_then(|p| p.get("id")),
-            payload.and_then(|p| p.get("session_id")),
-            payload.and_then(|p| p.get("turn_id")),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
+        let session = if harness == Harness::Claude {
+            raw.get("sessionId").and_then(Value::as_str)
+        } else if raw.get("type").and_then(Value::as_str) == Some("session_meta") {
+            payload.and_then(|p| {
+                p.get("id")
+                    .and_then(Value::as_str)
+                    .or_else(|| p.get("session_id").and_then(Value::as_str))
+            })
+        } else {
+            None
+        };
+        if let Some(session) = session
+            && session != self.last_session
         {
             self.ids
-                .entry(identity(value))
-                .or_insert_with(|| value.to_string());
+                .entry(identity(session))
+                .or_insert_with(|| session.into());
+            self.last_session = session.into();
         }
-        if harness == Harness::Claude
-            && raw.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        if harness == Harness::Codex
+            && let Some(turn) = payload
+                .and_then(|p| p.get("turn_id"))
+                .and_then(Value::as_str)
+            && turn != self.last_turn
+        {
+            self.ids
+                .entry(identity(turn))
+                .or_insert_with(|| turn.into());
+            self.last_turn = turn.into();
+        }
+        if harness != Harness::Claude {
+            return;
+        }
+        if raw.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
             && let Some(uuid) = raw.get("uuid").and_then(Value::as_str)
         {
             self.events
                 .insert(identity(&format!("claude:compaction:{uuid}")), uuid.into());
         }
-        if harness == Harness::Claude
-            && raw.get("type").and_then(Value::as_str) == Some("assistant")
-        {
-            let message = raw.get("message").and_then(Value::as_object);
-            let name = message
-                .and_then(|m| m.get("id"))
-                .or_else(|| raw.get("requestId"))
-                .or_else(|| raw.get("requestRef"))
-                .and_then(Value::as_str);
-            if let (Some(name), Some(uuid)) = (name, raw.get("uuid").and_then(Value::as_str)) {
-                self.items
-                    .insert(format!("claude:{}", identity(name)), uuid.into());
+        if raw.get("type").and_then(Value::as_str) != Some("assistant") {
+            return;
+        }
+        let name = raw
+            .get("message")
+            .and_then(Value::as_object)
+            .and_then(|m| m.get("id"))
+            .filter(|v| !v.is_null())
+            .or_else(|| raw.get("requestId").filter(|v| !v.is_null()))
+            .or_else(|| raw.get("requestRef"))
+            .and_then(Value::as_str);
+        if let (Some(name), Some(uuid)) = (name, raw.get("uuid").and_then(Value::as_str)) {
+            if self.last_message.0 != name {
+                self.last_message = (name.into(), format!("claude:{}", identity(name)));
+            }
+            let items = self.items.entry(self.last_message.1.clone()).or_default();
+            if !items.iter().any(|v| v == uuid) {
+                items.push(uuid.into());
             }
         }
     }
 }
 
+/// Borrow only join keys; native billing parts and locations never need copying.
+struct NativeRequest<'a> {
+    id: &'a str,
+    session: &'a str,
+    native_session: &'a str,
+    native_turns: Vec<&'a str>,
+    harness: Harness,
+    time: Millis,
+    model: Option<&'a str>,
+    profiles: &'a [String],
+}
+fn native_request<'a>(r: &'a Request, ids: &'a NativeIds) -> Option<NativeRequest<'a>> {
+    if r.agent != Agent::Main {
+        return None;
+    }
+    Some(NativeRequest {
+        id: &r.id,
+        session: &r.session,
+        native_session: ids.ids.get(&r.session)?,
+        native_turns: if r.harness == Harness::Codex {
+            r.turn
+                .as_ref()
+                .and_then(|t| ids.ids.get(t))
+                .map(String::as_str)
+                .into_iter()
+                .collect()
+        } else {
+            ids.items
+                .get(&r.id)
+                .into_iter()
+                .flatten()
+                .map(String::as_str)
+                .collect()
+        },
+        harness: r.harness,
+        time: r.time,
+        model: r.model.as_deref(),
+        profiles: &r.profiles,
+    })
+}
+
 // Native identities and the earliest running selection are the join. No Usage totals,
 // messages, prompts, credentials, or arbitrary JSON objects leave SQLite.
-const OWNERS: &str = "SELECT provider_instance_id FROM orchestration_v2_projection_provider_threads
- WHERE driver=?1 AND json_extract(payload_json,'$.nativeThreadRef.nativeId')=?2 AND updated_at<=?3 LIMIT 2";
+const OWNERS: &str =
+    "SELECT pt.provider_instance_id FROM orchestration_v2_projection_provider_threads pt
+ WHERE pt.driver=?1 AND json_extract(pt.payload_json,'$.nativeThreadRef.nativeId')=?2
+ AND (pt.updated_at<=?3 OR EXISTS (
+   SELECT 1 FROM orchestration_events e
+   WHERE e.application_event_version=2 AND e.aggregate_kind='thread'
+     AND e.stream_id=pt.thread_id AND e.event_type='provider-thread.updated' AND e.occurred_at<=?3
+     AND json_extract(e.payload_json,'$.id')=pt.provider_thread_id
+     AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
+     AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=?1
+     AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=?2)) LIMIT 2";
 const TURN: &str = "WITH matched AS (
  SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
  json_extract(a.payload_json,'$.nativeThreadId') AS native_session,
@@ -624,7 +738,36 @@ struct Joined {
 #[derive(Default)]
 struct Projection {
     owners: HashMap<(Harness, String), Vec<String>>,
-    turns: HashMap<String, Vec<Joined>>,
+    turns: HashMap<String, TurnMatch>,
+}
+
+#[derive(Default)]
+struct TurnMatch {
+    count: usize,
+    joined: Option<Joined>,
+}
+
+fn text_column(row: &rusqlite::Row<'_>, index: usize) -> Option<String> {
+    row.get::<_, Option<String>>(index).ok().flatten()
+}
+fn integer_column(row: &rusqlite::Row<'_>, index: usize) -> Option<i64> {
+    use rusqlite::types::ValueRef;
+    match row.get_ref(index).ok()? {
+        ValueRef::Integer(n) => Some(n),
+        ValueRef::Real(n)
+            if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0 =>
+        {
+            Some(n as i64)
+        }
+        _ => None,
+    }
+}
+fn bool_column(row: &rusqlite::Row<'_>, index: usize) -> Option<bool> {
+    match integer_column(row, index) {
+        Some(0) => Some(false),
+        Some(1) => Some(true),
+        _ => None,
+    }
 }
 
 fn instant(s: Option<String>) -> Option<Millis> {
@@ -640,8 +783,7 @@ fn mode(s: Option<String>) -> Option<T3IdleMode> {
 
 fn metadata(
     tx: &Transaction<'_>,
-    requests: &[Request],
-    ids: &NativeIds,
+    requests: &[&NativeRequest<'_>],
     bound: &str,
 ) -> rusqlite::Result<Projection> {
     // Reject views and unknown/missing schemas before issuing any projection queries.
@@ -670,132 +812,141 @@ fn metadata(
     let mut turn_query = tx.prepare(TURN)?;
     let mut result = Projection::default();
     let bound_ms = timestamp(&Value::String(bound.into())).ok_or(rusqlite::Error::InvalidQuery)?;
-    for r in requests.iter().filter(|r| r.agent == Agent::Main) {
-        let Some(session) = ids.ids.get(&r.session) else {
-            continue;
-        };
+    for r in requests {
+        let session = r.native_session;
         let driver = if r.harness == Harness::Claude {
             "claudeAgent"
         } else {
             "codex"
         };
-        let owner_key = (r.harness, r.session.clone());
+        let owner_key = (r.harness, r.session.to_string());
         if let std::collections::hash_map::Entry::Vacant(entry) = result.owners.entry(owner_key) {
             let owners = owner_query
                 .query_map([driver, session, bound], |r| r.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             entry.insert(owners);
         }
-        let native_turn = if r.harness == Harness::Codex {
-            r.turn.as_ref().and_then(|t| ids.ids.get(t))
-        } else {
-            ids.items.get(&r.id).or_else(|| ids.events.get(&r.id))
-        };
-        let Some(native_turn) = native_turn else {
-            continue;
-        };
-        let turn_key = r.id.clone();
-        if result.turns.contains_key(&turn_key) {
+        if r.native_turns.is_empty() || result.turns.contains_key(r.id) {
             continue;
         }
-        let rows = turn_query
-            .query_map([driver, native_turn, bound], |row| {
-                let native_session: Option<String> = row.get(0)?;
-                let instance: Option<String> = row.get(1)?;
-                let model: Option<String> = row.get(12)?;
-                let tier: Option<String> = row.get(13)?;
-                let fast: Option<bool> = row.get(14)?;
-                let tier_count: i64 = row.get(15)?;
-                let fast_count: i64 = row.get(16)?;
-                let event_time = instant(row.get(17)?);
-                let completed_at = instant(row.get(8)?);
-                let usage_updated_at = instant(row.get(9)?);
-                let thread_updated_at = instant(row.get(19)?);
-                let lifecycle: Option<bool> = row.get(20)?;
-                let used_tokens: Option<i64> = row.get(10)?;
-                let requested = if tier_count <= 1
-                    && fast_count <= 1
-                    && model == r.model
-                    && event_time.is_some_and(|t| t <= r.time && t <= bound_ms)
-                {
-                    let tier = tier.filter(|s| {
-                        matches!(
-                            s.as_str(),
-                            "auto"
-                                | "default"
-                                | "standard"
-                                | "fast"
-                                | "priority"
-                                | "ultrafast"
-                                | "flex"
-                                | "scale"
-                        )
-                    });
-                    if tier_count > 0 && tier.is_none() {
-                        None
-                    } else if r.harness == Harness::Codex {
-                        Some(RequestedSpeed {
-                            tier: tier.or_else(|| (fast == Some(true)).then(|| "fast".into())),
-                            speed: None,
-                        })
-                    } else {
-                        fast.map(|v| RequestedSpeed {
-                            tier: None,
-                            speed: Some(if v { "fast" } else { "standard" }.into()),
-                        })
-                    }
+        let mut rows = IndexMap::new();
+        for native_turn in &r.native_turns {
+            let matches = turn_query
+                .query_map([driver, native_turn, bound], |row| {
+                    let parse = || -> Option<Joined> {
+                        let native_session = text_column(row, 0)?;
+                        let instance = text_column(row, 1)?;
+                        let model = text_column(row, 12);
+                        let tier = text_column(row, 13);
+                        let fast = bool_column(row, 14);
+                        let tier_count = integer_column(row, 15)?;
+                        let fast_count = integer_column(row, 16)?;
+                        let event_time = instant(text_column(row, 17));
+                        let completed_at = instant(text_column(row, 8));
+                        let usage_updated_at = instant(text_column(row, 9));
+                        let thread_updated_at = instant(text_column(row, 19));
+                        let lifecycle = bool_column(row, 20);
+                        let used_tokens = integer_column(row, 10);
+                        let requested = if tier_count <= 1
+                            && fast_count <= 1
+                            && model.as_deref() == r.model
+                            && model.is_some()
+                            && event_time.is_some_and(|t| t <= r.time && t <= bound_ms)
+                        {
+                            let tier = tier.filter(|s| {
+                                matches!(
+                                    s.as_str(),
+                                    "auto"
+                                        | "default"
+                                        | "standard"
+                                        | "fast"
+                                        | "priority"
+                                        | "ultrafast"
+                                        | "flex"
+                                        | "scale"
+                                )
+                            });
+                            if (tier_count > 0 && tier.is_none())
+                                || (fast_count > 0 && fast.is_none())
+                            {
+                                None
+                            } else if r.harness == Harness::Codex {
+                                Some(RequestedSpeed {
+                                    tier: tier
+                                        .or_else(|| (fast == Some(true)).then(|| "fast".into())),
+                                    speed: None,
+                                })
+                            } else {
+                                fast.map(|v| RequestedSpeed {
+                                    tier: None,
+                                    speed: Some(if v { "fast" } else { "standard" }.into()),
+                                })
+                            }
+                        } else {
+                            None
+                        };
+                        let evidence = T3Request {
+                            thread: identity(&text_column(row, 2)?),
+                            run: identity(&text_column(row, 3)?),
+                            attempt: identity(&text_column(row, 4)?),
+                            provider_turn: identity(&text_column(row, 5)?),
+                            status: match text_column(row, 6)?.as_str() {
+                                "completed" => "completed",
+                                "running" => "running",
+                                "failed" => "failed",
+                                "interrupted" => "interrupted",
+                                "cancelled" => "cancelled",
+                                _ => "unknown",
+                            }
+                            .into(),
+                            completed_at,
+                            usage_updated_at,
+                            used_tokens: used_tokens.filter(|n| {
+                                (0..=9_007_199_254_740_991).contains(n)
+                                    && usage_updated_at.is_some_and(|t| t <= bound_ms)
+                            }),
+                            cache_expires_at: usage_updated_at
+                                .filter(|t| *t <= bound_ms)
+                                .and(instant(text_column(row, 11))),
+                            idle_mode: mode(text_column(row, 18)),
+                            lifecycle_eligible: thread_updated_at
+                                .filter(|t| *t <= bound_ms)
+                                .and(lifecycle),
+                        };
+                        let valid = native_session == session
+                            && completed_at.is_none_or(|t| t <= bound_ms)
+                            && usage_updated_at.is_none_or(|t| t <= bound_ms)
+                            && instant(text_column(row, 7)).is_some_and(|t| t <= r.time);
+                        (valid && (evidence.status != "completed" || completed_at.is_some()))
+                            .then_some(Joined {
+                                instance,
+                                evidence,
+                                requested,
+                            })
+                    };
+                    Ok((text_column(row, 5).map(|id| identity(&id)), parse()))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (key, joined) in matches {
+                let key = key.unwrap_or_else(|| format!("invalid:{}", rows.len()));
+                rows.entry(key).or_insert(joined);
+            }
+            if rows.len() > 1 {
+                break;
+            }
+        }
+        let count = rows.len();
+        result.turns.insert(
+            r.id.to_string(),
+            TurnMatch {
+                count,
+                joined: if count == 1 {
+                    rows.into_values().next().flatten()
                 } else {
                     None
-                };
-                let evidence = T3Request {
-                    thread: identity(&row.get::<_, String>(2)?),
-                    run: identity(&row.get::<_, String>(3)?),
-                    attempt: identity(&row.get::<_, String>(4)?),
-                    provider_turn: identity(&row.get::<_, String>(5)?),
-                    status: match row.get::<_, String>(6)?.as_str() {
-                        "completed" => "completed",
-                        "running" => "running",
-                        "failed" => "failed",
-                        "interrupted" => "interrupted",
-                        "cancelled" => "cancelled",
-                        _ => "unknown",
-                    }
-                    .into(),
-                    completed_at,
-                    usage_updated_at,
-                    used_tokens: used_tokens.filter(|n| (0..=9_007_199_254_740_991).contains(n)),
-                    cache_expires_at: instant(row.get(11)?),
-                    idle_mode: mode(row.get(18)?),
-                    lifecycle_eligible: thread_updated_at.filter(|t| *t <= bound_ms).and(lifecycle),
-                };
-                let valid = native_session.as_deref() == Some(session)
-                    && completed_at.is_none_or(|t| t <= bound_ms)
-                    && usage_updated_at.is_none_or(|t| t <= bound_ms)
-                    && instant(row.get(7)?).is_some_and(|t| t <= r.time);
-                Ok((valid, instance, evidence, requested))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        // Count invalid/mismatched rows too: a duplicate native turn is ambiguous.
-        let joined = if rows.len() == 1 {
-            rows.into_iter()
-                .filter_map(|(valid, instance, evidence, requested)| {
-                    valid.then_some(Joined {
-                        instance: instance?,
-                        evidence,
-                        requested,
-                    })
-                })
-                .collect()
-        } else {
-            rows.into_iter()
-                .map(|(_, instance, evidence, requested)| Joined {
-                    instance: instance.unwrap_or_default(),
-                    evidence,
-                    requested,
-                })
-                .collect()
-        };
-        result.turns.insert(turn_key, joined);
+                },
+            },
+        );
     }
     Ok(result)
 }
@@ -809,37 +960,26 @@ pub(crate) fn enrich(
     ids: &NativeIds,
     bound: &str,
 ) {
-    let mut projections: Vec<Request> = requests.to_vec();
+    let mut projections: Vec<NativeRequest<'_>> = requests
+        .iter()
+        .filter_map(|r| native_request(r, ids))
+        .collect();
     for e in events.iter().filter(|e| ids.events.contains_key(&e.id)) {
-        projections.push(Request {
-            id: e.id.clone(),
-            session: e.session.to_string(),
-            harness: e.harness,
-            agent: Agent::Main,
-            time: e.time,
-            end_time: e.time,
-            model: e.model.as_deref().map(str::to_string),
-            profiles: e.profiles.clone(),
-            evidence: RequestEvidence::Unknown,
-            provider: None,
-            api: Api::Unknown,
-            source: None,
-            trigger: None,
-            reference: None,
-            turn: None,
-            version: None,
-            client: None,
-            cwd: None,
-            parts: vec![],
-            server_tools: None,
-            locations: vec![],
-            accounting: Accounting::Individual,
-            attempt: None,
-            requested_speed: None,
-            issues: vec![],
-            t3: None,
-        });
+        if let Some(session) = ids.ids.get(e.session.as_ref()) {
+            projections.push(NativeRequest {
+                id: &e.id,
+                session: e.session.as_ref(),
+                native_session: session,
+                native_turns: vec![&ids.events[&e.id]],
+                harness: e.harness,
+                time: e.time,
+                model: e.model.as_deref(),
+                profiles: &e.profiles,
+            });
+        }
     }
+    let harnesses: HashMap<&str, Harness> = projections.iter().map(|r| (r.id, r.harness)).collect();
+    let mut invalid_joins = HashSet::new();
     let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::new();
     let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::new();
     for state in states.iter_mut().filter(|s| s.status == "selected") {
@@ -869,7 +1009,7 @@ pub(crate) fn enrich(
             )?;
             db.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
             let tx = db.transaction()?;
-            let relevant: Vec<Request> = projections
+            let relevant: Vec<&NativeRequest> = projections
                 .iter()
                 .filter(|r| {
                     r.profiles.iter().any(|id| {
@@ -878,9 +1018,8 @@ pub(crate) fn enrich(
                         })
                     })
                 })
-                .cloned()
                 .collect();
-            let result = metadata(&tx, &relevant, ids, bound)?;
+            let result = metadata(&tx, &relevant, bound)?;
             tx.rollback()?;
             Ok::<_, rusqlite::Error>(result)
         })();
@@ -907,34 +1046,28 @@ pub(crate) fn enrich(
                 .map(|p| p.id.clone())
         };
         for ((harness, session), instances) in data.owners {
+            if instances.is_empty() {
+                continue;
+            }
             let target = owners.entry((harness, session)).or_default();
             for instance in instances {
                 // Preserve ambiguity even if a referenced instance was removed from settings.
                 target.push(profile_id(&instance, harness).unwrap_or_default());
             }
         }
-        for r in &projections {
-            let key = if r.harness == Harness::Codex {
-                r.turn.clone()
-            } else {
-                ids.items
-                    .get(&r.id)
-                    .or_else(|| ids.events.get(&r.id))
-                    .map(|s| identity(s))
-            };
-            let Some(_) = key else {
-                continue;
-            };
-            if let Some(rows) = data.turns.get(&r.id) {
-                if rows.len() > 1 {
-                    state.ambiguous_requests += 1;
-                }
-                for row in rows {
-                    joins.entry(r.id.clone()).or_default().push((
-                        profile_id(&row.instance, r.harness).unwrap_or_default(),
-                        row.clone(),
-                    ));
-                }
+        for (request, matched) in data.turns {
+            if matched.count > 1 {
+                state.ambiguous_requests += 1;
+            }
+            if let Some(row) = matched.joined {
+                let harness = harnesses[request.as_str()];
+                joins
+                    .entry(request)
+                    .or_default()
+                    .push((profile_id(&row.instance, harness).unwrap_or_default(), row));
+            } else if matched.count > 0 {
+                // Preserve invalid/duplicate matches as blockers, without inventing metadata.
+                invalid_joins.insert(request);
             }
         }
     }
@@ -950,7 +1083,9 @@ pub(crate) fn enrich(
         let unique = rows
             .filter(|v| v.len() == 1)
             .and_then(|v| v.first())
-            .filter(|(p, _)| !p.is_empty() && r.profiles.contains(p));
+            .filter(|(p, _)| {
+                !invalid_joins.contains(&r.id) && !p.is_empty() && r.profiles.contains(p)
+            });
         let owner = unique.map(|(p, _)| p).or_else(|| {
             session_owners
                 .filter(|o| o.len() == 1)
@@ -992,11 +1127,17 @@ pub(crate) fn enrich(
         } else if r.profiles.iter().any(|p| t3_ids.contains(p)) {
             // REPL provenance excludes the SDK client. T3 can override its entrypoint
             // label, so a different label alone cannot prove a native control owner.
-            if r.harness == Harness::Claude
+            let native_source = (r.harness == Harness::Claude
                 && r.client.as_deref() == Some("cli")
-                && r.source.as_deref() == Some("repl_main_thread")
-                && session_owners.is_none()
-                && rows.is_none()
+                && r.source.as_deref() == Some("repl_main_thread"))
+                || (r.harness == Harness::Codex
+                    && matches!(r.source.as_deref(), Some("cli" | "exec"))
+                    && r.client.as_deref() != Some("T3 Code"));
+            if native_source
+                && r.profiles.iter().any(|p| !t3_ids.contains(p))
+                && session_owners.is_none_or(|o| o.is_empty())
+                && rows.is_none_or(|r| r.is_empty())
+                && !invalid_joins.contains(&r.id)
             {
                 r.profiles.retain(|p| !t3_ids.contains(p));
             } else {
@@ -1016,6 +1157,7 @@ pub(crate) fn enrich(
     for e in events {
         if let Some(rows) = joins.get(&e.id)
             && rows.len() == 1
+            && !invalid_joins.contains(&e.id)
             && !rows[0].0.is_empty()
         {
             let (owner, joined) = &rows[0];
@@ -1391,6 +1533,166 @@ mod tests {
         assert!(result.t3[0].metadata.contains("incompatible"));
     }
     #[test]
+    fn malformed_turn_rows_are_isolated_and_integral_real_counts_are_supported() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        let mut database = db(&root);
+        seed(&database, "codex", "codex");
+        database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
+        let valid = NativeRequest {
+            id: "valid",
+            session: "opaque-session",
+            native_session: "native-session",
+            native_turns: vec!["missing", "native-turn", "native-turn"],
+            harness: Harness::Codex,
+            time: 1_767_225_605_000,
+            model: Some("gpt-6.1-sol"),
+            profiles: &[],
+        };
+        let orphan = NativeRequest {
+            id: "orphan",
+            native_turns: vec!["orphan"],
+            ..valid
+        };
+        let tx = database.transaction().unwrap();
+        let data = metadata(&tx, &[&valid, &orphan], "2026-01-01T00:00:20Z").unwrap();
+        assert_eq!(data.turns["valid"].count, 1);
+        assert_eq!(
+            data.turns["valid"]
+                .joined
+                .as_ref()
+                .unwrap()
+                .evidence
+                .used_tokens,
+            Some(300000)
+        );
+        assert_eq!(
+            data.turns["valid"]
+                .joined
+                .as_ref()
+                .unwrap()
+                .requested
+                .as_ref()
+                .unwrap()
+                .tier
+                .as_deref(),
+            Some("fast")
+        );
+        assert_eq!(data.turns["orphan"].count, 1);
+        assert!(data.turns["orphan"].joined.is_none());
+    }
+
+    #[test]
+    fn native_cli_provenance_survives_readable_t3_database_and_explicit_roots_stay_named() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        db(&root);
+        native(&w);
+        write(
+            w.claude.join("projects/p/native.jsonl"),
+            format!(
+                "{}\n{}\n",
+                json!({"type":"api-request","id":"api","sessionId":"native-claude","timestamp":"2026-01-01T00:00:00Z","querySource":"repl_main_thread","params":{"model":"claude-opus-5-5"}}),
+                json!({"type":"assistant","uuid":"native-uuid","sessionId":"native-claude","timestamp":"2026-01-01T00:00:01Z","entrypoint":"cli","requestRef":"api","message":{"id":"native-message","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+            ),
+        );
+        let data = scan(&w.scan_options()).unwrap();
+        assert_eq!(data.requests.len(), 2);
+        for r in &data.requests {
+            assert_eq!(r.profiles.len(), 1, "{r:?}");
+            let p = data
+                .profiles
+                .iter()
+                .find(|p| p.id == r.profiles[0])
+                .unwrap();
+            assert!(p.t3.is_none(), "{r:?}");
+            assert!(!r.issues.iter().any(|s| s.contains("ambiguous")));
+        }
+        let mut options = w.scan_options();
+        options.discovery.t3_dirs = vec![root.to_string_lossy().into_owned()];
+        let explicit = scan(&options).unwrap();
+        assert_eq!(explicit.requests.len(), 2);
+        for r in &explicit.requests {
+            assert!(!r.profiles.is_empty());
+            assert!(r.issues.iter().any(|s| s.contains("advisory")));
+        }
+    }
+
+    #[test]
+    fn unknown_provider_fields_are_skipped_but_known_settings_fail_loudly() {
+        let w = Workspace::new();
+        let root = state(
+            &w,
+            json!({"providerInstances":{"other.provider":{"driver":"other","enabled":"true","environment":[{"value":"PRIVATE_ENV"},{"name":"CODEX_HOME","value":42}],"config":{"homePath":{"PRIVATE_CONFIG":42}}}}}),
+        );
+        let data = scan(&w.scan_options()).unwrap();
+        assert!(
+            data.t3[0]
+                .exclusions
+                .iter()
+                .any(|s| s.contains("unsupported"))
+        );
+        let serialized = serde_json::to_string(&data).unwrap();
+        assert!(!serialized.contains("PRIVATE_ENV") && !serialized.contains("PRIVATE_CONFIG"));
+        write(
+            root.join("settings.json"),
+            r#"{"idleCompaction":"unsupported-new-mode"}"#,
+        );
+        let error = scan(&w.scan_options()).unwrap_err();
+        assert!(error.message.contains("invalid T3 settings"));
+    }
+
+    #[test]
+    fn owner_updates_after_native_bound_need_a_prior_matching_link_event() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        let mut database = db(&root);
+        seed(&database, "codex", "codex");
+        database.execute("UPDATE orchestration_v2_projection_provider_threads SET updated_at='2026-01-01T00:01:00Z'",[]).unwrap();
+        let request = NativeRequest {
+            id: "request",
+            session: "opaque-session",
+            native_session: "native-session",
+            native_turns: vec![],
+            harness: Harness::Codex,
+            time: 1_767_225_605_000,
+            model: None,
+            profiles: &[],
+        };
+        let tx = database.transaction().unwrap();
+        let data = metadata(&tx, &[&request], "2026-01-01T00:00:20Z").unwrap();
+        assert!(data.owners[&(Harness::Codex, "opaque-session".into())].is_empty());
+        tx.rollback().unwrap();
+        database.execute("INSERT INTO orchestration_events VALUES(2,'thread',2,'thread','provider-thread.updated','2026-01-01T00:00:01Z',?1)",[json!({"id":"pt","providerInstanceId":"codex","nativeThreadRef":{"driver":"codex","nativeId":"native-session"},"private":"PRIVATE_HISTORY"}).to_string()]).unwrap();
+        let tx = database.transaction().unwrap();
+        let data = metadata(&tx, &[&request], "2026-01-01T00:00:20Z").unwrap();
+        assert_eq!(
+            data.owners[&(Harness::Codex, "opaque-session".into())],
+            vec!["codex"]
+        );
+    }
+
+    #[test]
+    fn native_keys_skip_null_message_ids_keep_all_blocks_and_ignore_codex_response_ids() {
+        let mut ids = NativeIds::default();
+        for uuid in ["first", "second", "first"] {
+            ids.observe(json!({"type":"assistant","uuid":uuid,"sessionId":"session","requestId":"request","message":{"id":null}}).as_object().unwrap(),Harness::Claude);
+        }
+        assert_eq!(
+            ids.items[&format!("claude:{}", identity("request"))],
+            vec!["first", "second"]
+        );
+        ids.observe(
+            json!({"type":"response_item","payload":{"id":"PRIVATE_RESPONSE_ID"}})
+                .as_object()
+                .unwrap(),
+            Harness::Codex,
+        );
+        assert!(!ids.ids.values().any(|id| id == "PRIVATE_RESPONSE_ID"));
+    }
+
+    #[test]
     fn evidence_outside_the_native_snapshot_cannot_join() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
@@ -1413,7 +1715,12 @@ mod tests {
         )
         .unwrap();
         let tx = db.transaction().unwrap();
-        let data = metadata(&tx, &[request.clone()], &ids, "2026-01-01T00:00:06Z").unwrap();
-        assert!(data.turns[&request.id].is_empty());
+        let data = metadata(
+            &tx,
+            &[&native_request(&request, &ids).unwrap()],
+            "2026-01-01T00:00:06Z",
+        )
+        .unwrap();
+        assert!(data.turns[&request.id].joined.is_none());
     }
 }

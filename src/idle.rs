@@ -2899,12 +2899,14 @@ fn t3_replay(
                     if options.since.is_none_or(|s| *time >= s) {
                         costs.push(cost.clone());
                     }
-                    periods[*i].summary_cost = cost;
-                    periods[*i].calibration = Some(PeriodCalibration {
-                        events: matches.iter().map(|s| s.event.into()).collect(),
-                        summary_tokens: output,
-                        prefix_tokens: full,
-                    });
+                    if mode == T3IdleMode::BeforeCacheExpires {
+                        periods[*i].summary_cost = cost;
+                        periods[*i].calibration = Some(PeriodCalibration {
+                            events: matches.iter().map(|s| s.event.into()).collect(),
+                            summary_tokens: output,
+                            prefix_tokens: full,
+                        });
+                    }
                     cached_prefix = (full - output)
                         .min(median(
                             matches

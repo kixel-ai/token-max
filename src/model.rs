@@ -1663,6 +1663,7 @@ pub struct PriceSource {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HistoricalCost {
     pub bucket: String,
     pub profiles: Vec<String>,

@@ -73,7 +73,8 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             .collect();
         let mut ends = turn_ends(input.scan, profile);
         // Earlier history only establishes eligibility; charge turns inside the window.
-        ends.retain(|e| input.since.is_none_or(|s| e.request.time >= s));
+        let selected: IndexSet<&str> = requests.iter().map(|r| r.id.as_str()).collect();
+        ends.retain(|e| selected.contains(e.request.id.as_str()));
         let mut groups: indexmap::IndexMap<&BackgroundControl, (Vec<&Request>, Vec<&TurnEnd<'_>>)> =
             indexmap::IndexMap::new();
         for &request in &requests {

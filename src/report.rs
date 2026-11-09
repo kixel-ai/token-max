@@ -18,7 +18,7 @@ use crate::terminal::{WrapOptions, wrap_text};
 
 /// How to lay out the text report; presentation never changes analysis or the JSON report.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ReportOptions {
+pub struct ReportOptions<'a> {
     /// Terminal width to wrap to; None keeps each line whole.
     pub width: Option<usize>,
     /// Style headings and verdicts with ANSI colors.
@@ -27,6 +27,17 @@ pub struct ReportOptions {
     pub unicode: bool,
     /// Show every check's full evidence instead of one line per setting.
     pub details: bool,
+    /// The host a report of several hosts describes; None for a report of this host alone.
+    pub host: Option<Host<'a>>,
+}
+
+/// One host's section of a report covering several hosts.
+#[derive(Clone, Copy, Debug)]
+pub struct Host<'a> {
+    /// The SSH destination, or "this host".
+    pub name: &'a str,
+    /// That host's home directory, shown as `~`.
+    pub home: Option<&'a str>,
 }
 
 const DAY: f64 = 86_400_000.0;
@@ -332,7 +343,7 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
 /// The text being built, one wrapped line at a time.
 struct Out<'a> {
     text: String,
-    options: ReportOptions,
+    options: ReportOptions<'a>,
     arrow: &'static str,
     home: Option<String>,
     profiles: IndexMap<&'a str, &'a Profile>,
@@ -422,6 +433,13 @@ impl<'a> Out<'a> {
             }
         }
     }
+    fn title(&mut self) {
+        let title = match self.options.host {
+            Some(host) => format!("token-max: {}", host.name),
+            None => "token-max".into(),
+        };
+        self.line(&title, 0, 1);
+    }
     fn home(&self, path: &str) -> String {
         match &self.home {
             Some(dir)
@@ -452,7 +470,7 @@ impl<'a> Out<'a> {
 }
 
 /// Render all findings in a wrapping flow, with complete evidence available in details.
-pub fn format_report(report: &Report, options: ReportOptions) -> String {
+pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
     let mut profiles = IndexMap::new();
     for p in &report.scan.profiles {
         profiles.insert(p.id.as_str(), p);
@@ -461,7 +479,10 @@ pub fn format_report(report: &Report, options: ReportOptions) -> String {
         text: String::new(),
         options,
         arrow: if options.unicode { "→" } else { "->" },
-        home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+        home: match options.host {
+            Some(host) => host.home.map(str::to_string),
+            None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+        },
         profiles,
     };
     if options.details {
@@ -478,7 +499,7 @@ fn generated_at(report: &Report) -> Millis {
 
 fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
-    out.line("token-max", 0, 1);
+    out.title();
     out.line("Public API-price estimates, not subscription bills.", 0, 0);
     let requests = &report.scan.requests;
     let earliest = requests.first().map(|r| r.time);
@@ -1563,7 +1584,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let since = report.scan.since.or(requests.first().map(|r| r.time));
     let until = generated_at(report);
     let many = report.scan.profiles.len() > 1;
-    out.line("token-max", 0, 1);
+    out.title();
     out.line(
         "Estimated with public API prices, not your subscription bill. Nothing was changed.",
         0,

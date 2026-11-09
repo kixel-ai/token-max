@@ -4,7 +4,8 @@ use std::io::{self, IsTerminal, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, mpsc};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -15,8 +16,9 @@ use crate::model::{Location, Millis, Report, Verdict};
 use crate::prices::{PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{ReportOptions, format_report};
+use crate::report::{Host, ReportOptions, format_report};
 use crate::safe::{ScanError, display};
+use crate::ssh::{self, Remote};
 use crate::terminal::{WrapOptions, wrap_text};
 
 const HELP: &str = "token-max: cheaper agent settings from local usage
@@ -26,6 +28,8 @@ Usage: token-max [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --ssh HOST              Audit an SSH destination with the token-max installed there (repeatable)
+  --include-local         Also audit this host when --ssh is given
   --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show all check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
@@ -37,7 +41,9 @@ Usage: token-max [options]
   -h, --help              Show this help
 
 Without profile flags, discover local Claude/Codex profiles. Explicit profiles
-limit the entire run. Current settings are applied to the selected history;
+limit the entire run. Directory flags select local profiles only; with --ssh
+they need --include-local. Each SSH destination discovers its own profiles
+and needs this same version installed there; only metadata crosses SSH. Current settings are applied to the selected history;
 checks can use different windows and baselines. Independent savings do not add.
 
 Examples:
@@ -45,6 +51,7 @@ Examples:
   token-max --claude-dir ~/.claude-work --codex-dir ~/.codex --details
   token-max --offline --plain
   token-max --json > report.json
+  token-max --ssh devbox --ssh user@laptop --include-local
 
 Public API-price estimates, not subscription bills. Reads transcripts/settings
 only; never edits settings or retains/prints prompt, reply or component text.
@@ -78,6 +85,10 @@ struct Values {
     help: bool,
     claude_dirs: Vec<String>,
     codex_dirs: Vec<String>,
+    ssh: Vec<String>,
+    include_local: bool,
+    /// Run as an SSH audit destination; the coordinator passes this, not people.
+    ssh_scan: bool,
     prices_file: Option<String>,
     price_cache: Option<String>,
 }
@@ -90,6 +101,7 @@ impl Values {
             "max-cost-per-use" => self.max_cost_per_use = Some(value),
             "claude-dir" => self.claude_dirs.push(value),
             "codex-dir" => self.codex_dirs.push(value),
+            "ssh" => self.ssh.push(value),
             "prices-file" => self.prices_file = Some(value),
             "price-cache" => self.price_cache = Some(value),
             _ => return None,
@@ -105,6 +117,8 @@ impl Values {
             "details" => &mut self.details,
             "version" => &mut self.version,
             "help" => &mut self.help,
+            "include-local" => &mut self.include_local,
+            "ssh-scan" => &mut self.ssh_scan,
             _ => return None,
         })
     }
@@ -116,6 +130,7 @@ impl Values {
                 | "max-cost-per-use"
                 | "claude-dir"
                 | "codex-dir"
+                | "ssh"
                 | "prices-file"
                 | "price-cache"
         )
@@ -406,6 +421,24 @@ fn diagnose(json: bool, error: &ScanError) {
 enum Output {
     Text(String),
     Json(Box<Report>),
+    Hosts(Hosts),
+    /// Already streamed, as an SSH audit destination does.
+    Written,
+}
+
+/// The JSON report of a run with `--ssh`: one schema version 1 report per host.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Hosts {
+    schema_version: u32,
+    hosts: Vec<HostReport>,
+}
+
+#[derive(Serialize)]
+struct HostReport {
+    /// The SSH destination, or null for this host.
+    ssh: Option<String>,
+    report: Report,
 }
 
 fn now() -> Millis {
@@ -433,6 +466,42 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         None => 1.0,
         Some(value) => max_cost_per_use(value)?,
     };
+    if values.ssh_scan {
+        // A destination scans with its own discovery; only the window crosses SSH.
+        let other = values.json
+            || values.offline
+            || values.plain
+            || values.details
+            || values.include_local
+            || values.max_cost_per_use.is_some()
+            || values.prices_file.is_some()
+            || values.price_cache.is_some()
+            || !values.claude_dirs.is_empty()
+            || !values.codex_dirs.is_empty()
+            || !values.ssh.is_empty();
+        if other {
+            return Err(ScanError::new("invalid arguments; use --help"));
+        }
+        return Ok((Output::Written, ssh::serve(since)));
+    }
+    for (index, destination) in values.ssh.iter().enumerate() {
+        ssh::destination(destination)?;
+        if values.ssh[..index].contains(destination) {
+            return Err(ScanError::new(format!(
+                "--ssh {destination} is selected twice"
+            )));
+        }
+    }
+    let remote = !values.ssh.is_empty();
+    if values.include_local && !remote {
+        return Err(ScanError::new("--include-local requires --ssh"));
+    }
+    let local = !remote || values.include_local;
+    if !local && !(values.claude_dirs.is_empty() && values.codex_dirs.is_empty()) {
+        return Err(ScanError::new(
+            "--claude-dir and --codex-dir select local profiles; add --include-local to audit them with --ssh",
+        ));
+    }
     let stdout = io::stdout().is_terminal();
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let interactive = stdout && io::stderr().is_terminal() && !term_dumb;
@@ -442,74 +511,146 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             eprintln!("token-max: {message}...");
         }
     };
-    let mut discovery = DiscoveryOptions::host()?;
-    discovery.claude_dirs = values.claude_dirs;
-    discovery.codex_dirs = values.codex_dirs;
-    phase("Scanning local histories");
-    let data = scan(&ScanOptions { discovery, since })?;
-    phase("Loading public prices");
-    let cache = match values.price_cache {
-        Some(cache) => PathBuf::from(cache),
-        None => {
-            let base = match env("XDG_CACHE_HOME") {
-                Some(base) => PathBuf::from(base),
-                None => std::env::home_dir()
-                    .ok_or_else(|| ScanError::new("cannot discover home directory"))?
-                    .join(".cache"),
-            };
-            base.join("token-max").join("models.json")
+    // Every host scans at once; the first failure stops the rest.
+    let (sender, results) = mpsc::channel();
+    let mut hosts: Vec<Option<String>> = vec![];
+    if local {
+        let mut discovery = DiscoveryOptions::host()?;
+        discovery.claude_dirs = values.claude_dirs;
+        discovery.codex_dirs = values.codex_dirs;
+        let sender = sender.clone();
+        let index = hosts.len();
+        hosts.push(None);
+        thread::spawn(move || {
+            let result = panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(|scan| Remote {
+                    scan,
+                    home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+                });
+            let _ = sender.send((index, result));
+        });
+    }
+    for destination in values.ssh {
+        let sender = sender.clone();
+        let index = hosts.len();
+        hosts.push(Some(destination.clone()));
+        thread::spawn(move || {
+            let result = panic::catch_unwind(|| ssh::audit(&destination, since))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send((index, result));
+        });
+    }
+    drop(sender);
+    phase(match (local, remote) {
+        (true, false) => "Scanning local histories",
+        (true, true) => "Scanning local histories and SSH hosts",
+        (false, _) => "Scanning SSH hosts",
+    });
+    let mut scans: Vec<Option<Remote>> = hosts.iter().map(|_| None).collect();
+    let scanned = (|| {
+        for (index, result) in results {
+            scans[index] = Some(result?);
         }
-    };
-    let catalog = load_prices(&PriceOptions {
-        file: values
-            .prices_file
-            .filter(|file| !file.is_empty())
-            .map(PathBuf::from),
-        cache,
-        offline: values.offline,
-    })?;
+        phase("Loading public prices");
+        let cache = match values.price_cache {
+            Some(cache) => PathBuf::from(cache),
+            None => {
+                let base = match env("XDG_CACHE_HOME") {
+                    Some(base) => PathBuf::from(base),
+                    None => std::env::home_dir()
+                        .ok_or_else(|| ScanError::new("cannot discover home directory"))?
+                        .join(".cache"),
+                };
+                base.join("token-max").join("models.json")
+            }
+        };
+        load_prices(&PriceOptions {
+            file: values
+                .prices_file
+                .filter(|file| !file.is_empty())
+                .map(PathBuf::from),
+            cache,
+            offline: values.offline,
+        })
+    })();
+    let catalog = scanned.inspect_err(|_| ssh::cancel())?;
     phase("Checking settings");
-    let report = analyze(AnalyzeOptions {
-        scan: data,
-        catalog: &catalog,
-        since,
-        now: now(),
-        max_cost_per_use_usd,
-    })?;
-    let code = if report
-        .checks
-        .iter()
-        .any(|c| c.action() == crate::model::Action::Change)
-        || report
-            .context
-            .iter()
-            .any(|c| c.verdict == Some(Verdict::Off))
-    {
-        1
-    } else {
-        0
+    let now = now();
+    let unicode_locale = env_nonempty("LC_ALL")
+        .or_else(|| env_nonempty("LC_CTYPE"))
+        .or_else(|| env_nonempty("LANG"))
+        .is_some_and(|locale| {
+            let locale = locale.to_ascii_lowercase();
+            locale.contains("utf8") || locale.contains("utf-8")
+        });
+    let options = ReportOptions {
+        width: width(),
+        color: stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb,
+        unicode: stdout && !values.plain && !term_dumb && unicode_locale,
+        details: values.details,
+        host: None,
     };
-    let output = if values.json {
-        Output::Json(Box::new(report))
-    } else {
-        let unicode_locale = env_nonempty("LC_ALL")
-            .or_else(|| env_nonempty("LC_CTYPE"))
-            .or_else(|| env_nonempty("LANG"))
-            .is_some_and(|locale| {
-                let locale = locale.to_ascii_lowercase();
-                locale.contains("utf8") || locale.contains("utf-8")
-            });
-        Output::Text(format_report(
+    let sections = hosts.len();
+    let mut code = 0;
+    let mut text = String::new();
+    let mut reports = vec![];
+    for (ssh, scan) in hosts.into_iter().zip(scans) {
+        let Remote { scan, home } = scan.expect("every host sent a result");
+        let report = analyze(AnalyzeOptions {
+            scan,
+            catalog: &catalog,
+            since,
+            now,
+            max_cost_per_use_usd,
+        })?;
+        let change = report
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+            || report
+                .context
+                .iter()
+                .any(|c| c.verdict == Some(Verdict::Off));
+        code = code.max(u8::from(change));
+        if values.json {
+            reports.push(HostReport { ssh, report });
+            continue;
+        }
+        let host = Host {
+            name: ssh.as_deref().unwrap_or("this host"),
+            home: home.as_deref(),
+        };
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format_report(
             &report,
             ReportOptions {
-                width: width(),
-                color: stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb,
-                unicode: stdout && !values.plain && !term_dumb && unicode_locale,
-                details: values.details,
+                host: remote.then_some(host),
+                ..options
             },
-        ))
+        ));
+    }
+    if sections > 1 && !values.json {
+        text.push_str(
+            "\nEach host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",
+        );
+    }
+    let output = match (values.json, remote) {
+        (false, _) => Output::Text(text),
+        (true, false) => Output::Json(Box::new(reports.pop().expect("one host").report)),
+        (true, true) => Output::Hosts(Hosts {
+            schema_version: 1,
+            hosts: reports,
+        }),
     };
     Ok((output, code))
+}
+
+fn json_output(value: &impl Serialize) -> io::Result<()> {
+    panic::catch_unwind(AssertUnwindSafe(|| write_json(io::stdout().lock(), value)))
+        .unwrap_or_else(|_| Err(io::Error::other("serialization failed")))
 }
 
 /// Run the command line and return its exit code: 0 no change, 1 change recommended, 2 failure.
@@ -530,6 +671,7 @@ pub fn main() -> ExitCode {
         // The analysis may be blocked in I/O, so exit now, holding the lock so nothing else
         // is written, after deleting any partial price download it would have cleaned up.
         cancel_downloads();
+        ssh::cancel();
         diagnose(json, &ScanError::new("cancelled; no report produced"));
         std::process::exit(2);
     });
@@ -546,11 +688,9 @@ pub fn main() -> ExitCode {
             .write_all(text.as_bytes())
             .and_then(|()| io::stdout().lock().flush())
             .map(|()| code),
-        Ok((Output::Json(report), code)) => panic::catch_unwind(AssertUnwindSafe(|| {
-            write_json(io::stdout().lock(), &report)
-        }))
-        .unwrap_or_else(|_| Err(io::Error::other("serialization failed")))
-        .map(|()| code),
+        Ok((Output::Json(report), code)) => json_output(&*report).map(|()| code),
+        Ok((Output::Hosts(hosts), code)) => json_output(&hosts).map(|()| code),
+        Ok((Output::Written, code)) => Ok(code),
         Err(error) => {
             diagnose(json, &error);
             return ExitCode::from(2);

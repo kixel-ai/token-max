@@ -677,6 +677,41 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
 
+## SSH hosts
+
+`--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
+commands, a configured remote command or a persisted control master, with
+stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
+the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
+`~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
+snapshots, readers and exposure extraction produce the same scan a local run
+would; it fetches no prices and runs no checks. Its stderr is discarded, so
+login-script output cannot reach the report; failures come from the stream or
+from the exit status of `ssh` (255), the shell (127 when token-max is missing)
+or the platform check.
+
+The stream is private to one build: a header naming the package version and a
+fingerprint of the scan types, then either the scan or the destination's safe
+diagnostic, then the end of the stream. Any other build, a truncated or
+trailing value, a reference to an unsent value, or a nonzero exit fails the
+run. Strings, identifier lists, exposure views, tool-output totals and
+message-digest chains are sent once and then referenced by index, so the stream and the coordinator's
+copy keep the sharing the destination's scan had in memory. The coordinator
+reads the stream as it arrives rather than buffering it, and checks that the
+scan covers the requested window.
+
+Background controls, their owning files and pre-window prompts and requests
+travel with the scan, so background estimates use the destination's settings
+and full eligibility history, just as a local run there would.
+
+Every host's scan is analyzed separately against one price catalog, so cache
+replay, profile ownership, coverage and settings never mix between hosts, and
+paths keep each host's meaning. A history copied between hosts is billed in
+each host's report, which is why amounts across hosts must not be added; no
+cross-host total is reported. The first failed host stops the others: their
+`ssh` processes are killed and reaped, and a destination stops scanning when
+its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
+
 ## Bash timeout cap
 
 The `bash-timeout-cap` check uses `Profile.bash`, resolved from user and

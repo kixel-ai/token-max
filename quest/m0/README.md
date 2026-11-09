@@ -95,6 +95,13 @@ ownership and proven cross-source deduplication. T3's own idle modes are
 distinct from native Claude's. Other T3 providers and automatic discovery
 from its encrypted desktop connection catalog are outside this scope.
 
+Decided 2026-11-08 (maintainer), for SSH audits: ✅ each destination runs a
+`token-max` installed there with `cargo install`, and a missing or different
+version fails with the command to run (rejected: copy the local binary over
+SSH to a temporary path, run it and delete it). As built, each SSH host is
+analyzed in its own section of the report, so a history copied between hosts
+counts on each and amounts across hosts are not added.
+
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
@@ -171,5 +178,4 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds
 - [T3 profiles and settings](/quest/m0/t3.md) - native history discovery, T3 ownership, and T3-specific idle policies without double billing
-- [SSH host audits](/quest/m0/ssh.md) - selected remote audits with the same artifact and a combined privacy-preserving report
 - [Scan large histories](/quest/m0/scale.md) - a default run completes on a host with tens of gigabytes of transcripts, and `--json` and `--details` stay usable

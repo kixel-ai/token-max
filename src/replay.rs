@@ -1153,6 +1153,7 @@ mod tests {
                 color: false,
                 unicode: false,
                 details: true,
+                host: None,
             },
         )
     }

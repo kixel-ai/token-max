@@ -7,7 +7,9 @@ use std::borrow::Cow;
 
 use indexmap::IndexMap;
 
-use crate::cache::{CODEX_CACHE_MILLISECONDS, observed_ttl, ttl_milliseconds};
+use crate::cache::{
+    CODEX_CACHE_MILLISECONDS, CacheBoundaries, CacheChain, Touch, observed_ttl, ttl_milliseconds,
+};
 use crate::compaction::{
     CompactionSamples, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
     replay_windows,
@@ -427,6 +429,41 @@ impl Replayer<'_> {
             .filter(|r| r.evidence == crate::model::RequestEvidence::Measured)
             .map(|r| (r.id.as_str(), *r))
             .collect();
+        // Only the shared TTL replay decides whether recorded Claude reads survive
+        // the chosen policy. The ping simulation separately establishes added warmth.
+        let mut observed_reads = HashMap::new();
+        if let Cache::Claude(ttl) = self.lifetime.cache {
+            let boundaries = CacheBoundaries::new(session.events.iter().copied());
+            let mut chain = CacheChain::new([&boundaries]);
+            for &r in &session.requests {
+                let estimate = self
+                    .options
+                    .estimates
+                    .get(&r.id)
+                    .and_then(|e| e.part.as_ref());
+                let parts = estimate.map_or(r.parts.as_slice(), std::slice::from_ref);
+                let mut message = 0;
+                for (part, p) in parts.iter().enumerate() {
+                    let replayed = chain.replay(&Touch {
+                        request: r,
+                        p,
+                        part,
+                        estimated: estimate.is_some()
+                            || r.evidence != crate::model::RequestEvidence::Measured,
+                        ttl,
+                        cold: false,
+                        selected: p.kind == PartKind::Message,
+                    });
+                    if p.kind == PartKind::Message {
+                        observed_reads.insert(
+                            (r.id.as_str(), message),
+                            replayed.filter(|r| !r.unknown).and_then(|r| r.p.usage.read),
+                        );
+                        message += 1;
+                    }
+                }
+            }
+        }
         for r in simulation.requests.iter().map(AsRef::as_ref) {
             if boundaries.peek().is_some_and(|e| e.time <= r.time) {
                 cache.clear();
@@ -438,7 +475,8 @@ impl Replayer<'_> {
             let mut recorded = original
                 .get(r.id.as_str())
                 .into_iter()
-                .flat_map(|r| message(r));
+                .flat_map(|r| message(r))
+                .enumerate();
             for p in &r.parts {
                 let mut billed = Cow::Borrowed(p);
                 if p.kind == PartKind::Message {
@@ -475,16 +513,20 @@ impl Replayer<'_> {
                         .max()
                         .map(|prefix| cacheable.min(prefix))
                         .unwrap_or(0);
-                    let observed = recorded
-                        .next()
-                        .filter(|p| {
-                            !matches!(billing, Cache::Claude(Ttl::FiveMinutes))
-                                || observed_ttl(p) != Some(Ttl::OneHour)
-                        })
-                        .filter(|source| *source == p);
+                    let observed = recorded.next().filter(|(_, source)| *source == p);
                     // Measured reads can be externally warmed even after the local entry
                     // expires. They prove warmth only for the unchanged recorded context.
-                    let reads = modeled.max(observed.and_then(|p| p.usage.read).unwrap_or(0));
+                    let measured = match observed {
+                        Some((part, source)) => match billing {
+                            Cache::Claude(_) => observed_reads
+                                .get(&(r.id.as_str(), part))
+                                .copied()
+                                .flatten()?,
+                            _ => source.usage.read?,
+                        },
+                        None => 0,
+                    };
+                    let reads = modeled.max(measured);
                     billed = Cow::Owned(BillingPart {
                         usage: billing.usage(reads, cacheable - reads, ordinary, output),
                         ..p.clone()
@@ -1400,6 +1442,18 @@ mod tests {
         let check = run(&scan(one_hour(), requests), 3 * HOUR);
         assert_eq!(check.unpriced, 0);
         assert!(check.scenarios.iter().all(|s| s.rescued == 0));
+    }
+
+    #[test]
+    fn all_read_returns_do_not_inherit_long_warmth_under_a_short_policy() {
+        let mut profile = one_hour();
+        profile.ttl.main.value = Some(Ttl::FiveMinutes);
+        let mut returned = warm_turn("a", 30 * MINUTE);
+        returned.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(101_000, 0, 0, 500);
+        let check = run(&scan(profile, vec![turn("a", 0), returned]), HOUR);
+        assert_eq!(check.lifetime_ms, Some(5 * MINUTE));
+        assert_eq!(check.unpriced, 0);
+        assert!(check.scenarios.iter().any(|s| s.rescued == 1));
     }
 
     #[test]

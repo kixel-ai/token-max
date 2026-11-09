@@ -515,7 +515,9 @@ other tools and `mcp__<server>` for a server, which
 and `skillOverrides` set to `user-invocable-only` for a local or bundled skill.
 Skills named `anthropic-skills:<name>`, synced from claude.ai, share one row
 turned off by `syncClaudeAiSkills: false`; a typed or called short name counts
-for it only while the active catalog lists no other skill by that name.
+for it only while the active catalog lists no other skill by that name and
+no [built-in command, bundled skill, or alias](https://code.claude.com/docs/en/commands)
+reserves it, including commands unavailable in that session.
 Every replacement rebuilds those aliases. Explicit typed-name evidence stays
 separate from catalog membership. Other namespaced skills come from a plugin
 or an added directory, which [`skillOverrides` does not

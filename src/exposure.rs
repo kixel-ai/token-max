@@ -970,7 +970,9 @@ impl ExposureCollector {
 
     /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
     fn know_skill(&mut self, name: &str) {
-        if let Some(short) = synced_short(name) {
+        if let Some(short) = synced_short(name)
+            && !claude_command(short)
+        {
             self.synced_skills
                 .insert(short.to_string(), name.to_string());
         }
@@ -2658,6 +2660,31 @@ fn mentions(text: &str) -> Vec<(usize, &str)> {
     out
 }
 
+/// Built-in commands, bundled skills, and their aliases reserve a synced skill's short name,
+/// even when unavailable. Source checked 2026-11-08: <https://code.claude.com/docs/en/commands>.
+fn claude_command(name: &str) -> bool {
+    const COMMANDS: &str =
+        "add-dir advisor agents allowed-tools android app artifact-capabilities artifact-
+        diagramming artifacts auto-mode-setup autocompact autofix-pr background batch bg
+        branch btw bug cd checkpoint checkup chrome claude-api claude-in-chrome clear
+        code-review color compact config context continue copy cost dataviz debug deep-
+        research design design-login design-sync desktop diff doctor effort exit export
+        fast feedback fewer-permission-prompts focus fork goal heapdump help hooks ide
+        import init insights install-github-app install-slack-app ios keybindings list-
+        agents login logout loop mcp memory mobile model new output-style passes
+        permissions plan plugin plugin-authoring powerup pr-comments privacy-settings
+        proactive quit radio rate-limit-options rc recap release-notes reload-plugins
+        reload-skills remote-control remote-env rename reset restart resume review rewind
+        routines run run-skill-generator sandbox schedule scroll-speed security-review
+        settings setup-bedrock setup-vertex share simplify skill-doctor skills slides
+        stats status statusline stickers stop subtask tasks team-onboarding teleport
+        terminal-setup theme tui ultraplan ultrareview undo update update-config upgrade
+        usage usage-credits verify vim voice web-setup workflow-authoring workflows";
+    COMMANDS
+        .split_ascii_whitespace()
+        .any(|command| command.eq_ignore_ascii_case(name))
+}
+
 /// `/<command-name>\/?([a-zA-Z0-9_:-]+)<\/command-name>/`: the first match's name.
 fn command(text: &str) -> Option<&str> {
     const OPEN: &str = "<command-name>";
@@ -3547,6 +3574,37 @@ mod tests {
             resolved(json!(["pdf", "anthropic-skills:pdf"])),
             both("pdf")
         );
+    }
+
+    #[test]
+    fn synced_aliases_do_not_override_claude_commands() {
+        // A built-in, its alias, and an unavailable bundled skill all reserve their name.
+        for name in ["compact", "reset", "doctor", "Review"] {
+            let full = format!("anthropic-skills:{name}");
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+            feed.all(&mut c, vec![
+                attachment(0, json!({ "type": "skill_listing", "content": "synced listing", "names": [full] })),
+                user(1, json!(format!("<command-name>/{name}</command-name>"))),
+                user(2, json!(format!("<command-name>/{full}</command-name>"))),
+                assistant(3, json!([tool_use("s", "Skill", json!({ "skill": full }))])),
+            ]);
+            let scan = c.finish(&[feed.request("r", 4, None)], None);
+            let uses: Vec<_> = scan
+                .invocations
+                .iter()
+                .map(|i| (i.kind, i.target.clone()))
+                .collect();
+            assert_eq!(
+                uses,
+                [
+                    (InvocationKind::SkillReference, target("skill", name)),
+                    (InvocationKind::SkillRequest, target("skill", &full)),
+                    (InvocationKind::SkillCall, target("skill", &full)),
+                ],
+                "{name}"
+            );
+        }
     }
 
     #[test]

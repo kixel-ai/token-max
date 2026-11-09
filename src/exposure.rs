@@ -11,10 +11,10 @@ use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
 use crate::model::{
-    Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan,
-    ExposureView, Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals,
-    Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
+    Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
+    Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
+    Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals, Scope, Size,
+    Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -1405,7 +1405,10 @@ impl ExposureCollector {
                     .map(|k| k as u64)
                     .filter(|&k| k <= prior.len() as u64)
                     .ok_or_else(|| ScanError::new("invalid request digest prefix length"))?;
-                Some(Ids::new(Some((prior, keep as usize)), tail.iter().cloned().collect()))
+                Some(Ids::new(
+                    Some((prior, keep as usize)),
+                    tail.iter().cloned().collect(),
+                ))
             }
             (Some(_), None) => None,
             (None, _) => Some(Ids::new(None, tail.iter().cloned().collect())),

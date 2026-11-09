@@ -1146,7 +1146,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 out.field(
                     "Idle context sizes",
                     &format!(
-                        "{} distinct sizes ({} unknown); {}; full size and period evidence: --json",
+                        "{} distinct sizes ({} unknown); {}; full size and period evidence: --json-full",
                         scenario.by_context.len(),
                         scenario
                             .by_context
@@ -3234,6 +3234,79 @@ mod tests {
             json(&report),
             before,
             "rendering must not alter JSON or analysis"
+        );
+    }
+
+    #[test]
+    fn compact_json_keeps_every_check_cost_and_unknown_condition() {
+        let mut report = synthetic();
+        for check in &mut report.checks {
+            if let CheckResult::Idle(check) = check {
+                check.after_recommendations.periods[0].summary_cost = cost(None, 0.875);
+            }
+        }
+        let full = serde_json::to_value(&report).unwrap();
+        let compact = crate::compact::report(report);
+        assert_eq!(compact["schemaVersion"], 2);
+        for field in [
+            "context",
+            "historical",
+            "prices",
+            "assumptions",
+            "maxCostPerUseUsd",
+        ] {
+            assert_eq!(compact[field], full[field], "{field}");
+        }
+        assert_eq!(compact["scan"]["coverage"], full["scan"]["coverage"]);
+        assert_eq!(compact["scan"]["profiles"], full["scan"]["profiles"]);
+        let mut expected = full["checks"].clone();
+        let mut actual = compact["checks"].clone();
+        // Only these documented evidence fields change shape. All setting-specific
+        // dollars, missing-cost reasons, coverage and conditional baselines must match.
+        fn remove_evidence(row: &mut serde_json::Value) {
+            let object = row.as_object_mut().unwrap();
+            for key in [
+                "usageEstimates",
+                "cacheEvidence",
+                "periods",
+                "byContext",
+                "added",
+            ] {
+                object.remove(key);
+            }
+            for scenario in ["currentSettings", "afterRecommendations"] {
+                if let Some(s) = object.get_mut(scenario) {
+                    remove_evidence(s);
+                }
+            }
+            if let Some(scenarios) = object.get_mut("scenarios") {
+                for scenario in scenarios.as_array_mut().unwrap() {
+                    remove_evidence(scenario);
+                }
+            }
+        }
+        for (expected, actual) in expected
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(actual.as_array_mut().unwrap())
+        {
+            remove_evidence(expected);
+            remove_evidence(actual);
+        }
+        assert_eq!(actual, expected);
+        let idle = compact["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "idle-compaction")
+            .unwrap();
+        assert!(idle["afterRecommendations"]["periods"]["summaryCost"]["totalUsd"].is_null());
+        assert!(
+            !idle["afterRecommendations"]["periods"]["summaryCost"]["unknown"]
+                .as_array()
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -1701,7 +1701,6 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 .into_iter()
                 .filter(|e| e.kind == EventKind::Compaction)
                 .collect(),
-
         },
         coverage,
     })

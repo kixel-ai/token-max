@@ -5,7 +5,7 @@ any transcript. It streams one newline-terminated JSON record at a time. Raw
 objects live only through that line's normalization; retained data contains
 counts, opaque identities, times, and whitelisted structural metadata. A file
 that changes identity or shrinks fails. Appended bytes are outside the snapshot.
-The JSON result records the discovery interval, each byte boundary, and unfinished
+The full JSON result (`--json-full`) records the discovery interval, each byte boundary, and unfinished
 final-line sizes. Metadata storage grows with requests/events, not transcript text.
 
 Records whose timestamp proves they precede `--since` stay outside selected

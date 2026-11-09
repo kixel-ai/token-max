@@ -432,9 +432,8 @@ impl<'de> Deserialize<'de> for Ids {
                 let mut last = None;
                 while let Some(Node { base, keep, tail }) = seq.next_element()? {
                     let tail = tail.into_iter().map(|e| e.0).collect();
-                    let base: Option<Ids> = base
-                        .map(|index| earlier(index, |d| &d.ids))
-                        .transpose()?;
+                    let base: Option<Ids> =
+                        base.map(|index| earlier(index, |d| &d.ids)).transpose()?;
                     let digests = match &base {
                         Some(base) if keep > 0 && keep <= base.len() => {
                             Ids::new(Some((base, keep)), tail)

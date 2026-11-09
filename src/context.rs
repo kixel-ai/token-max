@@ -695,7 +695,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
         // where messages start in this request's tokens.
-        let prefix = (tokenizer, if codex { vec![] } else { shown.iter().take(view.prefix).copied().collect() });
+        let prefix = (
+            tokenizer,
+            if codex {
+                vec![]
+            } else {
+                shown.iter().take(view.prefix).copied().collect()
+            },
+        );
         // Claude Code marks the last message for caching, so only a few framing
         // tokens follow a request's cached prefix, unless the pieces measured in
         // it do not fit there. Elsewhere content can run to the end of the input.

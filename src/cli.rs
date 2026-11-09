@@ -33,7 +33,8 @@ Usage: token-max [options]
   --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
-  --json                  Complete structured report, schema version 1
+  --json                  Compact aggregate report, schema version 2
+  --json-full             Full per-request evidence, schema version 1
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
@@ -78,6 +79,7 @@ struct Values {
     since: Option<String>,
     max_cost_per_use: Option<String>,
     json: bool,
+    json_full: bool,
     offline: bool,
     plain: bool,
     details: bool,
@@ -112,6 +114,7 @@ impl Values {
     fn flag(&mut self, name: &str) -> Option<&mut bool> {
         Some(match name {
             "json" => &mut self.json,
+            "json-full" => &mut self.json_full,
             "offline" => &mut self.offline,
             "plain" => &mut self.plain,
             "details" => &mut self.details,
@@ -420,13 +423,13 @@ fn diagnose(json: bool, error: &ScanError) {
 /// What a successful run prints, decided before anything is written.
 enum Output {
     Text(String),
-    Json(Box<Report>),
+    Json(Box<JsonReport>),
     Hosts(Hosts),
     /// Already streamed, as an SSH audit destination does.
     Written,
 }
 
-/// The JSON report of a run with `--ssh`: one schema version 1 report per host.
+/// The JSON report of a run with `--ssh`, using the selected schema for every host.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Hosts {
@@ -438,7 +441,14 @@ struct Hosts {
 struct HostReport {
     /// The SSH destination, or null for this host.
     ssh: Option<String>,
-    report: Report,
+    report: JsonReport,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum JsonReport {
+    Full(Box<Report>),
+    Compact(serde_json::Value),
 }
 
 fn now() -> Millis {
@@ -450,13 +460,14 @@ fn now() -> Millis {
 
 /// Run one atomic scan, returning the output and exit code without writing either.
 fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
-    let values = parse(args).ok_or_else(|| ScanError::new("invalid arguments; use --help"))?;
+    let mut values = parse(args).ok_or_else(|| ScanError::new("invalid arguments; use --help"))?;
     if values.help {
         return Ok((Output::Text(help()), 0));
     }
     if values.version {
         return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
     }
+    values.json |= values.json_full;
     // An empty value is absent, as JavaScript treats a falsy option.
     let since = match values.since.as_deref() {
         None | Some("") => None,
@@ -614,6 +625,11 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
                 .any(|c| c.verdict == Some(Verdict::Off));
         code = code.max(u8::from(change));
         if values.json {
+            let report = if values.json_full {
+                JsonReport::Full(Box::new(report))
+            } else {
+                JsonReport::Compact(crate::compact::report(report))
+            };
             reports.push(HostReport { ssh, report });
             continue;
         }
@@ -641,7 +657,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         (false, _) => Output::Text(text),
         (true, false) => Output::Json(Box::new(reports.pop().expect("one host").report)),
         (true, true) => Output::Hosts(Hosts {
-            schema_version: 1,
+            schema_version: if values.json_full { 1 } else { 2 },
             hosts: reports,
         }),
     };
@@ -661,7 +677,9 @@ pub fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let json = args.iter().any(|a| a == "--json");
+    let json = args
+        .iter()
+        .any(|a| matches!(a.as_str(), "--json" | "--json-full"));
     let handler = ctrlc::set_handler(move || {
         let committed = COMMITTED.lock().unwrap_or_else(PoisonError::into_inner);
         if *committed {

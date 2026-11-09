@@ -2323,6 +2323,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: Some(Pricing {
                 model: Some("claude-opus-5-5".into()),
                 provider: Some("anthropic".into()),
@@ -2401,6 +2402,7 @@ mod tests {
                 .unwrap(),
             ),
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
         }

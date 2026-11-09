@@ -1637,6 +1637,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: Some(Pricing {
                 provider: Some("anthropic".into()),
                 model: Some("claude-opus-5-5".into()),
@@ -1671,6 +1672,7 @@ mod tests {
             ),
             idle: None,
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
         };

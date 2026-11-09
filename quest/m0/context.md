@@ -24,66 +24,27 @@ use as one, with `--max-cost-per-use` to change it (rejected: report cost and
 leave every call to the user; a rarely used count threshold). The report ends
 with one settings snippet for the recommended changes. Recorded in AGENTS.md.
 
-Progress 2026-11-07: per-piece costs from recorded Claude request shapes,
-priced at their cache positions, with call counts, controls and cost-per-use
-verdicts, are in the default report. Codex pieces, tool-result context and output-budget checks
-remain.
+Progress 2026-11-08: Claude and Codex pieces, tool output held until
+compaction, and output-cap lines are in the default report. Claude content is
+bounded by its cached reads plus writes, since Claude Code caches through the
+last message. What remains:
 
-- Attribute actual exposed server instructions, discovery names,
-  descriptions, schemas, and loaded CLAUDE.md/AGENTS.md/rule or memory
-  content separately. Separate recurring discovery cost, on-demand schema
-  loading, and tool-result context. Installed/enabled does not imply fully
-  loaded on every request, and a schema hash cannot establish token size.
-- Replay component exposure using recorded snapshots/deltas and request
-  identities. Price marginal before/after tokens at the model's applicable
-  cache and context tiers, stating tokenizer/allocation assumptions. Show
-  attributed overhead separately from estimated net savings; account for
-  changed discovery calls, replacement reads, catalog backfill, or cache
-  invalidation when supported. Missing schemas or loaded-file content
-  yield a coverage warning, not an invented full-schema charge.
-- For each server/tool, show the window, exposed sessions/requests, observed
-  calls, last use, and usage visibility. Include identifiable nested calls
-  through execution wrappers; code references alone do not prove execution
-  or success. With incomplete call visibility, say "no observed use", not
-  "unused". Incomplete visibility and rare use only produce advisory
-  rankings; an automatic unused finding requires complete exposure/call
-  visibility across the window, positive recurring overhead, and a finding
-  that still applies to the current effective configuration. Unused
-  findings for components introduced during the window stay advisory, per
-  the milestone rules.
-- Recommend scoped disabling of unused MCP servers/tools and restoring
-  deferred loading where appropriate. Claude exposes `ENABLE_TOOL_SEARCH`
-  and per-server `alwaysLoad`; check supported models/provider conditions
-  before warning. Codex exposes server/tool enablement; do not recommend
-  retired tool-search switches. A small frequently used toolset can be
-  cheaper upfront once discovery overhead is included.
-  Claude server disabling uses `/mcp`. A bare-name deny rule
-  (`"Artifact"`, `"mcp__server"`) removes the tool from context, while a
-  scoped rule such as `Bash(rm *)` only blocks matching calls
-  ([permissions](https://code.claude.com/docs/en/permissions), checked
-  2026-11-07). Codex has
-  server/tool enablement lists and `mcp_servers.<id>.omit_tools_from` for
-  `direct`, `deferred`, or `code_mode` surfaces; the equivalent app setting
-  combines with server omissions. Omission changes exposure, while
-  `disabled_tools` blocks calls. Name the supported control for each finding.
-- Use applicable provider guidance to warn about oversized always-loaded
-  instructions, duplicate content, or catalogs over documented budgets.
-  Suggest concise descriptions, project/path scoping, and moving detailed
-  workflows to on-demand skills. Cite the guidance and name the affected
-  files/settings, without judging instruction quality from length alone or
-  recommending arbitrary truncation that discards required instructions.
-  Current file sizes can support a current warning but not a claim about
-  historical exposure or dollars.
-  Include agent listings, hooks, and plugin/app/managed instructions in the
-  category breakdown; link shared plugin costs without charging them to
-  both skills and MCPs.
-- Check inline tool-output budgets against observed output sizes and
-  repeated reads: Claude exposes `bashOutputMaxChars` and
-  `MAX_MCP_OUTPUT_TOKENS`; Codex exposes `tool_output_token_limit`. Compare
-  recurring context against extra reads caused by smaller limits, rather
-  than always recommending the lowest cap. Where replay cannot establish
-  the tradeoff, flag an applicable provider-budget or overflow warning and
-  give unknown dollars.
+- Deferred loading: Claude exposes `ENABLE_TOOL_SEARCH` and per-server
+  `alwaysLoad`; check supported models/provider conditions, then price a
+  server's always-loaded schemas against the discovery overhead of deferring
+  them. A small frequently used toolset can be cheaper upfront. Codex exposes
+  `mcp_servers.<id>.omit_tools_from` for `direct`, `deferred`, or `code_mode`
+  surfaces; do not recommend retired tool-search switches.
+- Per-tool Codex controls: `mcp_servers.<id>.enabled_tools`/`disabled_tools`
+  and `apps.<id>.enabled`, once the app id format is documented. Omission
+  changes exposure, while `disabled_tools` blocks calls.
+- Instruction budgets: warn when AGENTS.md exceeds Codex's
+  `project_doc_max_bytes` or CLAUDE.md exceeds Claude's documented guidance,
+  citing it and naming the file, without judging quality from length alone.
+- Output caps: the report lists each cap with the output it held and its
+  largest result, but recommends no value, since replay cannot price the
+  read-back a smaller cap causes. Revisit if transcripts link a truncated
+  result to the reads that followed it.
 
 Sources checked 2026-11-06: [Claude MCP overhead
 guidance](https://code.claude.com/docs/en/costs#reduce-mcp-server-overhead),

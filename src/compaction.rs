@@ -1663,6 +1663,7 @@ mod tests {
             },
             provider: Some("anthropic".into()),
             settings: IndexMap::new(),
+            mcp_servers: vec![],
             compaction: controls(
                 Harness::Claude,
                 json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}}),

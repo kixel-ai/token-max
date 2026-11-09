@@ -886,6 +886,7 @@ mod tests {
             },
             provider: Some("anthropic".into()),
             settings: IndexMap::new(),
+            mcp_servers: vec![],
             compaction,
             idle: None,
             speed: None,

@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Digests, Exposure, ExposureScan,
     ExposureView, Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, Millis, Observed, Owner, References, Request, RequestEvidence, Scope, Size,
-    Snapshot, Text, TextCoverage, ToolCalls, Via, Visibility, Visible,
+    Linkage, Location, Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals,
+    Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -97,7 +97,19 @@ pub struct ExposureCollector {
     since: Option<Millis>,
     // Tool calls by call id, so copies in other transcript files count once.
     calls: IndexMap<String, ToolCall>,
+    // Tool results by call id, for the same reason.
+    results: IndexMap<String, ToolResult>,
     names: HashSet<Text>,
+    // The tool each call id in the current file belongs to.
+    call_tools: HashMap<String, Text>,
+    // Tool output characters the current conversation holds, by tool, and whether any was opaque.
+    held: IndexMap<Text, (i64, bool)>,
+    held_epoch: u64,
+    epochs: u64,
+    // The last snapshot of `held`, shared until it changes.
+    held_snapshot: Option<Arc<ResultTotals>>,
+    // Tools the harness provides for the whole session, which a full world state does not replace.
+    provided: HashSet<Text>,
     components: IndexMap<Text, Component>,
     invocations: IndexMap<String, Invocation>,
     observations: HashMap<Text, FileObservations>,
@@ -147,6 +159,13 @@ struct File {
 struct FileObservations {
     lines: HashMap<u64, Arc<ExposureView>>,
     refs: HashMap<String, Arc<ExposureView>>,
+    results: HashMap<u64, Arc<ResultTotals>>,
+}
+
+struct ToolResult {
+    tool: Text,
+    profiles: Vec<Text>,
+    characters: i64,
 }
 
 /// The leading digests of one list whose blobs are all text, as of a `blob_epoch`.
@@ -331,7 +350,14 @@ impl ExposureCollector {
         Self {
             since,
             calls: IndexMap::new(),
+            results: IndexMap::new(),
             names: HashSet::new(),
+            call_tools: HashMap::new(),
+            held: IndexMap::new(),
+            held_epoch: 0,
+            epochs: 0,
+            held_snapshot: None,
+            provided: HashSet::new(),
             components: IndexMap::new(),
             invocations: IndexMap::new(),
             observations: HashMap::new(),
@@ -414,6 +440,7 @@ impl ExposureCollector {
             self.clear(None);
             self.uncertain = true;
             self.deferred.clear();
+            self.forget_results();
         }
         if kind == Some("world_state") {
             self.world_state(&line)?;
@@ -425,11 +452,13 @@ impl ExposureCollector {
             for v in array(payload.get("tools"))? {
                 let tool = record(Some(v))?;
                 let name = text(tool.get("name"))?;
+                let category = tool_category(name);
                 self.component(
-                    New::active(Category::McpSchema, name, "provided-additional-tools"),
+                    New::active(category, name, "provided-additional-tools"),
                     Content::Json(v),
                     &line.at(),
                 );
+                self.provided.insert(component_key(category, name).into());
             }
         }
         if kind == Some("api-request-shape") {
@@ -485,11 +514,10 @@ impl ExposureCollector {
                 Some(view) => view,
                 None => self.chronological(),
             };
-            self.observations
-                .entry(location.file.clone())
-                .or_default()
-                .lines
-                .insert(location.line, view);
+            let held = self.held_results();
+            let observed = self.observations.entry(location.file.clone()).or_default();
+            observed.lines.insert(location.line, view);
+            observed.results.insert(location.line, held);
             self.pending_removed.clear();
         }
         if !self.active.is_empty() {
@@ -502,6 +530,7 @@ impl ExposureCollector {
     pub fn finish(self, requests: &[Request], since: Option<Millis>) -> ExposureScan {
         let ExposureCollector {
             calls,
+            results,
             components,
             invocations,
             observations,
@@ -583,9 +612,17 @@ impl ExposureCollector {
                     intern_view(&mut views, view)
                 }
             };
+            // Copies hold the same conversation, so the first location's output stands for all.
+            let results = r.locations.iter().find_map(|l| {
+                observations
+                    .get(&*l.file)
+                    .and_then(|file| file.results.get(&l.line))
+                    .cloned()
+            });
             exposures.push(Exposure {
                 request: r.id.clone(),
                 view,
+                results,
             });
         }
         drop(views);
@@ -638,6 +675,89 @@ impl ExposureCollector {
                 .collect(),
             visibility,
             tool_calls: tool_calls(calls.into_values()),
+            tool_results: tool_results(results.into_values()),
+        }
+    }
+
+    /// Start a new conversation with no tool output, as after a compaction or in another file.
+    fn forget_results(&mut self) {
+        self.held.clear();
+        self.epochs += 1;
+        self.held_epoch = self.epochs;
+        self.held_snapshot = None;
+    }
+
+    /// The tool output the conversation holds now, shared while it is unchanged.
+    fn held_results(&mut self) -> Arc<ResultTotals> {
+        let epoch = self.held_epoch;
+        let held = &self.held;
+        self.held_snapshot
+            .get_or_insert_with(|| {
+                Arc::new(ResultTotals {
+                    epoch,
+                    tools: held
+                        .iter()
+                        .map(|(tool, &(characters, opaque))| (tool.clone(), characters, opaque))
+                        .collect(),
+                })
+            })
+            .clone()
+    }
+
+    /// Count a call to `name`, once per call id across copied files.
+    fn call(&mut self, id: &str, name: &str, time: Option<Millis>) {
+        self.call_tools
+            .insert(id.to_string(), intern(&mut self.names, &output_owner(name)));
+        let Some(time) = time.filter(|&t| self.since.is_none_or(|s| t >= s)) else {
+            return;
+        };
+        let file = self.file.as_ref().expect("observing a file");
+        let entry = match self.calls.get_mut(id) {
+            Some(entry) => entry,
+            None => {
+                let name = intern(&mut self.names, name);
+                let entry = ToolCall {
+                    name,
+                    profiles: vec![],
+                    time,
+                };
+                self.calls.entry(id.to_string()).or_insert(entry)
+            }
+        };
+        for profile in &file.profiles {
+            if !entry.profiles.contains(profile) {
+                entry.profiles.push(profile.clone());
+            }
+        }
+    }
+
+    /// Add one tool result to the conversation, and to its tool's window totals.
+    fn result(&mut self, id: &str, output: Option<&Value>, time: Option<Millis>) {
+        let (characters, opaque) = output_characters(output);
+        let tool = match self.call_tools.get(id) {
+            Some(tool) => tool.clone(),
+            None => intern(&mut self.names, UNKNOWN_TOOL),
+        };
+        let held = self.held.entry(tool.clone()).or_insert((0, false));
+        held.0 += characters;
+        held.1 |= opaque;
+        self.held_snapshot = None;
+        if time.is_none_or(|t| self.since.is_some_and(|s| t < s)) {
+            return;
+        }
+        let file = self.file.as_ref().expect("observing a file");
+        let entry = self
+            .results
+            .entry(id.to_string())
+            .or_insert_with(|| ToolResult {
+                tool,
+                profiles: vec![],
+                characters,
+            });
+        for profile in &file.profiles {
+            if !entry.profiles.contains(profile) {
+                entry.profiles.push(profile.clone());
+            }
         }
     }
 
@@ -669,6 +789,9 @@ impl ExposureCollector {
         self.blobs.clear();
         self.prefixes.clear();
         self.invalidated = false;
+        self.call_tools.clear();
+        self.provided.clear();
+        self.forget_results();
     }
 
     fn file(&self) -> &File {
@@ -855,8 +978,9 @@ impl ExposureCollector {
 
     fn clear(&mut self, category: Option<Category>) {
         let pending = &mut self.pending_removed;
-        self.active.retain(|_, (revision, c)| {
-            if category.is_none_or(|category| category == *c) {
+        let provided = &self.provided;
+        self.active.retain(|key, (revision, c)| {
+            if category.is_none_or(|category| category == *c) && !provided.contains(key) {
                 pending.insert(revision.clone());
                 false
             } else {
@@ -1520,6 +1644,7 @@ impl ExposureCollector {
             if is(b, "type", "tool_result")
                 && let Some(Value::String(use_id)) = b.get("tool_use_id")
             {
+                self.result(use_id, b.get("content"), line.time);
                 let key = id(b.get("tool_use_id"))?;
                 if let Some(tool) = self.pending_tools.get(&key).cloned() {
                     let time = line
@@ -1572,28 +1697,7 @@ impl ExposureCollector {
     fn tool_use(&mut self, b: &Map<String, Value>, line: &Line<'_>) -> Result<(), ScanError> {
         let name = text(b.get("name"))?;
         let call = text(b.get("id"))?;
-        if let Some(time) = line.time
-            && self.since.is_none_or(|s| time >= s)
-        {
-            let file = self.file.as_ref().expect("observing a file");
-            let entry = match self.calls.get_mut(call) {
-                Some(entry) => entry,
-                None => {
-                    let name = intern(&mut self.names, name);
-                    let entry = ToolCall {
-                        name,
-                        profiles: vec![],
-                        time,
-                    };
-                    self.calls.entry(call.to_string()).or_insert(entry)
-                }
-            };
-            for profile in &file.profiles {
-                if !entry.profiles.contains(profile) {
-                    entry.profiles.push(profile.clone());
-                }
-            }
-        }
+        self.call(call, name, line.time);
         let args = object(field(b, "input"));
         let (scope, kind, target_name) = if name == "Skill" {
             ("skill", InvocationKind::SkillCall, text(args.get("skill"))?)
@@ -1660,6 +1764,13 @@ impl ExposureCollector {
                 basis: IdentityBasis::Recorded,
             };
             self.invoke(&name, invoke, line)?;
+            // The model sees each server under its sanitized name, as in `mcp__t3_code`.
+            let exposed = format!(
+                "mcp__{}__{}",
+                codex_server(text(item.get("server"))?),
+                text(item.get("tool"))?
+            );
+            self.call(call, &exposed, line.time);
             if let Some(result) = item.get("result") {
                 self.component(
                     New::active(
@@ -1714,22 +1825,34 @@ impl ExposureCollector {
         if kind == Some("response_item")
             && matches!(
                 js_string(p.get("type")).as_str(),
+                "function_call_output" | "custom_tool_call_output"
+            )
+        {
+            // Some outputs carry their own id and tool name instead of a call id.
+            let call = text(present(p.get("call_id")).or(p.get("id")))?;
+            if !self.call_tools.contains_key(call)
+                && let Some(Value::String(bare)) = p.get("name")
+            {
+                let name = codex_tool_name(bare, p.get("namespace").and_then(Value::as_str));
+                let owner = intern(&mut self.names, &output_owner(&name));
+                self.call_tools.insert(call.to_string(), owner);
+            }
+            self.result(call, p.get("output"), line.time);
+        }
+        if kind == Some("response_item")
+            && matches!(
+                js_string(p.get("type")).as_str(),
                 "function_call" | "custom_tool_call"
             )
         {
             let bare = text(p.get("name"))?;
-            let namespace = p.get("namespace").and_then(Value::as_str);
-            let name = if bare.starts_with("mcp__") {
-                bare.to_string()
-            } else if let Some(namespace) = namespace.filter(|n| n.starts_with("mcp__")) {
-                format!("{namespace}__{bare}")
-            } else {
-                match namespace {
-                    Some(namespace) => format!("{namespace}.{bare}"),
-                    None => bare.to_string(),
-                }
-            };
+            let name = codex_tool_name(bare, p.get("namespace").and_then(Value::as_str));
             let call = text(present(p.get("id")).or(p.get("call_id")))?;
+            // Uses count by the id a nested completion shares; outputs name the call by `call_id`.
+            self.call(call, &name, line.time);
+            let output_id = text(present(p.get("call_id")).or(p.get("id")))?;
+            let owner = self.call_tools[call].clone();
+            self.call_tools.insert(output_id.to_string(), owner);
             let kind = if name.starts_with("mcp__") {
                 Some(InvocationKind::McpCall)
             } else if resource_tool(&name) {
@@ -1944,6 +2067,84 @@ fn visibility(
             }
         })
         .collect()
+}
+
+/// A Codex tool's full name from its bare name and namespace.
+fn codex_tool_name(bare: &str, namespace: Option<&str>) -> String {
+    if bare.starts_with("mcp__") {
+        bare.to_string()
+    } else if let Some(namespace) = namespace.filter(|n| n.starts_with("mcp__")) {
+        format!("{namespace}__{bare}")
+    } else {
+        match namespace {
+            Some(namespace) => format!("{namespace}.{bare}"),
+            None => bare.to_string(),
+        }
+    }
+}
+
+/// The owner of output from a tool whose call was not recorded.
+const UNKNOWN_TOOL: &str = "unknown";
+
+/// The tool a result's output is filed under: an MCP server's tools share one owner.
+fn output_owner(name: &str) -> String {
+    match name.strip_prefix("mcp__") {
+        Some(rest) => format!("mcp__{}", rest.split("__").next().unwrap_or(rest)),
+        None => name.to_string(),
+    }
+}
+
+/// A Codex MCP server id as its tool names spell it: anything outside `[A-Za-z0-9_]` becomes `_`.
+pub(crate) fn codex_server(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// Text characters of a tool's output, and whether it also held images or other non-text input.
+fn output_characters(output: Option<&Value>) -> (i64, bool) {
+    match output {
+        None | Some(Value::Null) => (0, false),
+        Some(Value::String(s)) => (s.chars().count() as i64, false),
+        Some(Value::Array(items)) => items.iter().fold((0, false), |(n, opaque), item| match item
+            .get("text")
+        {
+            Some(Value::String(s)) => (n + s.chars().count() as i64, opaque),
+            _ => (n, true),
+        }),
+        Some(other) => (
+            Content::Json(other).measure().characters.unwrap_or(0),
+            false,
+        ),
+    }
+}
+
+/// Count each tool's results and its largest one per profile set, after merging copies.
+fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
+    let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::new();
+    for r in results {
+        let mut profiles = r.profiles;
+        profiles.sort_by(|a, b| js_cmp(a, b));
+        result
+            .entry((r.tool.clone(), profiles.clone()))
+            .and_modify(|prior| {
+                prior.results += 1;
+                prior.largest_characters = prior.largest_characters.max(r.characters);
+            })
+            .or_insert_with(|| ToolResults {
+                name: r.tool.to_string(),
+                profiles: profiles.iter().map(|p| p.to_string()).collect(),
+                results: 1,
+                largest_characters: r.characters,
+            });
+    }
+    result.into_values().collect()
 }
 
 /// Count each tool's calls per profile set, after merging copies of one call.
@@ -3085,6 +3286,108 @@ mod tests {
     }
 
     #[test]
+    fn tool_output_is_held_by_tool_until_compaction() {
+        let result = |id: &str, content: Value| json!([{ "type": "tool_result", "tool_use_id": id, "content": content }]);
+        let mut c = ExposureCollector::new(Some(millis(2)));
+        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+        feed.all(
+            &mut c,
+            vec![
+                assistant(0, json!([tool_use("c1", "Bash", json!({}))])),
+                user(1, result("c1", json!("abcde"))),
+                assistant(2, json!([tool_use("c2", "mcp__docs__read", json!({}))])),
+                user(
+                    3,
+                    result(
+                        "c2",
+                        json!([{ "type": "text", "text": "xy" }, { "type": "image" }]),
+                    ),
+                ),
+                assistant(4, json!([])),
+                json!({ "type": "system", "subtype": "compact_boundary", "timestamp": at(5) }),
+                assistant(6, json!([])),
+            ],
+        );
+        let requests = [1, 3, 5, 7].map(|line| feed.request(&format!("r{line}"), line, None));
+        let scan = c.finish(&requests, Some(millis(2)));
+        type Held<'a> = (u64, Vec<(&'a str, i64, bool)>);
+        let held: Vec<Held> = scan
+            .requests
+            .iter()
+            .map(|e| {
+                let r = e.results.as_ref().unwrap();
+                let tools = r.tools.iter().map(|(t, n, o)| (&**t, *n, *o)).collect();
+                (r.epoch, tools)
+            })
+            .collect();
+        let epoch = held[0].0;
+        assert_eq!(held[1], (epoch, vec![("Bash", 5, false)]));
+        assert_eq!(
+            held[2],
+            (epoch, vec![("Bash", 5, false), ("mcp__docs", 2, true)])
+        );
+        assert!(held[3].0 != epoch && held[3].1.is_empty());
+        // Only output inside the window counts toward a tool's results.
+        let results: Vec<(&str, u64, i64)> = scan
+            .tool_results
+            .iter()
+            .map(|t| (t.name.as_str(), t.results, t.largest_characters))
+            .collect();
+        assert_eq!(results, [("mcp__docs", 1, 2)]);
+    }
+
+    #[test]
+    fn codex_outputs_calls_and_provided_tools() {
+        let item = |second: u32, payload: Value| json!({ "type": "response_item", "timestamp": at(second), "payload": payload });
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
+        feed.all(
+            &mut c,
+            vec![
+                json!({ "type": "session_meta", "timestamp": at(0), "payload": { "id": "s" } }),
+                item(0, json!({ "type": "additional_tools",
+                                "tools": [{ "name": "functions", "description": "run" }] })),
+                // A full world state replaces its own context, not the provided tools.
+                json!({ "type": "world_state", "timestamp": at(0), "payload": { "full": true,
+                    "state": { "tools": { "mcp__t3_code": "threads" } } } }),
+                item(1, json!({ "type": "custom_tool_call", "name": "exec", "call_id": "k1" })),
+                json!({ "type": "event_msg", "timestamp": at(1), "payload": {
+                    "type": "item_completed", "item": {
+                        "type": "McpToolCall", "id": "m1", "server": "t3-code", "tool": "read" } } }),
+                item(2, json!({ "type": "custom_tool_call_output", "call_id": "k1", "output": "12345" })),
+                // Some outputs name their tool instead of a call.
+                item(2, json!({ "type": "function_call_output", "id": "o1",
+                                "name": "send", "namespace": "app", "output": "abc" })),
+                json!({ "type": "token_usage_record", "timestamp": at(3) }),
+            ],
+        );
+        let requests = [feed.request("r", 8, None)];
+        let scan = c.finish(&requests, None);
+        let view = &scan.requests[0].view;
+        let names: Vec<(&str, Category)> = view
+            .candidates
+            .iter()
+            .map(|id| {
+                let c = scan.components.iter().find(|c| c.id == **id).unwrap();
+                (c.name.as_str(), c.category)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("functions", Category::ToolSchema),
+                ("mcp__t3_code", Category::McpDiscovery)
+            ]
+        );
+        let held = scan.requests[0].results.as_ref().unwrap();
+        let held: Vec<(&str, i64)> = held.tools.iter().map(|(t, n, _)| (&**t, *n)).collect();
+        assert_eq!(held, [("exec", 5), ("app.send", 3)]);
+        // Nested MCP calls use the server name the model sees.
+        let calls: Vec<&str> = scan.tool_calls.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(calls, ["exec", "mcp__t3_code__read"]);
+    }
+
+    #[test]
     fn skill_calls_differ_from_requests_references_and_loads() {
         let result = |id: &str, error: bool| json!({ "type": "tool_result", "tool_use_id": id, "content": "body", "is_error": error });
         let mut c = ExposureCollector::new(None);
@@ -3228,6 +3531,7 @@ mod tests {
         let exposure = |request: &str, characters: i64, model: &str| Exposure {
             request: request.into(),
             view: view(characters, model),
+            results: None,
         };
         let request = |id: &str, input: i64| {
             let mut r = Request {

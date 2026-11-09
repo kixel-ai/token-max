@@ -460,17 +460,28 @@ primitive. Without matching calibration, output keeps characters and unknown
 tokens/dollars. Images, opaque blocks, deferred definitions, digest-only requests,
 and multi-iteration totals cannot calibrate partial text.
 
-`report.context` prices each piece of recurring context. Only Claude requests
+`report.context` prices each piece of recurring context. Claude requests
 with a recorded `api-request-shape` or full parameters qualify: tool
-definitions, then the system prompt, lead the prompt in recorded order.
+definitions, then the system prompt, lead the prompt in recorded order. Codex
+requests qualify through their candidate `world_state` and `additional_tools`
+exposure; Codex records no prompt order, so every Codex piece is bounded by its
+history alone, and with no calibration it uses
+[OpenAI's rule of thumb](https://help.openai.com/en/articles/4936856) of 0.25
+tokens per character. A Codex piece recorded only by identity, such as
+metadata-only instructions or a `top_level_tools` hash, stays an unpriced row,
+except that a provided schema of the same tool in the request measures it.
 Prefix membership follows each request's own tool list, not where a component
 was first seen. Attachments such as skill listings and instruction files ride in
 messages at no recorded offset, so their history bounds them instead: a
 revision the session's previous request carried lies between the end of the
-system prompt and the end of that request's input, a new or changed revision was
-appended after it, and with no usable previous request, or when the tools,
+system prompt and the end of that request's content, a new or changed revision was
+appended after that request's input and its reply (output less reasoning), and
+lies within this request's content, and with no usable previous request, or when the tools,
 system prompt or model's tokenizer changed since it, it lies anywhere after the
-system prompt. An attachment is priced only when every offset in its bounds
+system prompt. Claude Code marks the last message for caching, so a Claude
+request's content ends at its cached reads plus writes; the ordinary input after
+them is a few framing tokens. When the measured pieces do not fit there, or for
+Codex, content runs to the end of the input. An attachment is priced only when every offset in its bounds
 falls in the same cache slot; otherwise it stays unpriced for that request. A
 row with any unpriced piece in a request, such as an MCP server whose tool is
 priced but whose instructions are not, is unpriced for that request. Each piece's calibrated
@@ -481,15 +492,31 @@ unpriced rather than clipped. `costUsd` covers priced requests only;
 `estimatedUsd` scales it to every request that carried the piece and is null
 when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
 once. Skill listings split into their member skills plus the listing framing;
-MCP tools group by server. One-off attachments, skill bodies and tool results
-are excluded because no setting removes them up front.
+MCP tools group by server. Codex skill listings stay one `Skill list` row.
+One-off attachments and skill bodies are excluded because no setting removes
+them up front.
+
+Tool results are `tool-output` rows, one per tool and one per MCP server. A
+result stays in the conversation until it compacts: output the previous request
+held is carried, and output beyond it is new, under the bounds above. A result
+that is not plain text, such as an image, leaves its row unpriced for that
+request. `calls` counts results in the window and `largestCharacters` the
+largest one. The report lists each beside the cap that limits it:
+`bashOutputMaxChars` or `BASH_MAX_OUTPUT_LENGTH` for Claude's Bash (about 30,000
+characters when unset), `MAX_MCP_OUTPUT_TOKENS` for Claude MCP servers (25,000
+tokens when unset), and `tool_output_token_limit` for Codex. No cap change is
+recommended: a lower cap leaves the model to read the rest back, which
+transcripts cannot price. Each context row carries its `harness`.
 
 Each row names the setting that removes the piece: `enableArtifact` and
 `enableWorkflows` for those tools, a bare-name `permissions.deny` rule for
 other tools and `mcp__<server>` for a server, which
 [remove the tool from context](https://code.claude.com/docs/en/permissions),
-and `skillOverrides` set to `user-invocable-only` for a skill. Instruction files
-have no switch. Core tools, the system prompt and the listing framing are always
+and `skillOverrides` set to `user-invocable-only` for a skill. For Codex,
+`mcp_servers.<id>.enabled = false` in `config.toml` removes a server the request's own profile
+declares (a request copied into several profiles gets one only when each
+declares it under the same id), and `features.apps = false` removes ChatGPT apps (`codex_apps`); other
+Codex tools have no switch. Instruction files have no switch. Core tools, the system prompt and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
 every row of its tool that shares a profile with it; skill uses count only the

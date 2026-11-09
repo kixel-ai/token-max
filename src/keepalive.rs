@@ -21,7 +21,9 @@ use crate::model::{
     Millis, PartKind, PerBucket, Profile, Request, Scan, ScenarioWindow, StructuralEvent, Ttl,
     TtlCheck, Usage, UsageEstimate,
 };
-use crate::prices::{Catalog, PRICE_SOURCES, price_part, write_billing};
+use crate::prices::{
+    Catalog, PRICE_SOURCES, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
+};
 
 const MINUTE: Millis = 60_000;
 const DAY: Millis = 24 * 60 * MINUTE;
@@ -180,6 +182,7 @@ pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
 /// every cap, so alternatives and sensitivities always compare the same recorded work.
 #[derive(Default)]
 struct Run {
+    conditional: bool,
     recorded: f64,
     pings: Vec<f64>,
     finals: Vec<f64>,
@@ -560,7 +563,9 @@ impl Replayer<'_> {
                     }
                 }
                 if r.time >= self.since {
-                    cost += price_part(self.options.catalog, r, &billed).total_usd?;
+                    let priced = price_part(self.options.catalog, r, &billed);
+                    run.conditional |= tier_sensitive(&priced);
+                    cost += priced.total_usd?;
                 }
             }
             if r.time < self.since {
@@ -579,6 +584,7 @@ impl Replayer<'_> {
             }
         }
         for added in simulation.added {
+            run.conditional |= tier_sensitive(&added.summary_cost);
             let cost = added.summary_cost.total_usd?;
             match positions.get(added.request.as_str()) {
                 Some(&(true, i)) => run.finals[i] += cost,
@@ -792,6 +798,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .collect();
     let mut unpriced = 0;
     let mut priced = 0;
+    let mut conditional = false;
     let mut final_costs: Vec<Vec<f64>> = vec![vec![]; caps.len()];
     let mut uncertainty = vec![
         "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
@@ -868,6 +875,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
                 continue;
             };
             priced += periods;
+            conditional |= baseline.conditional || runs.iter().any(|run| run.conditional);
             for (i, run) in runs.into_iter().enumerate() {
                 let s = &mut scenarios[i];
                 s.pings += run.pings.len() as u64;
@@ -924,7 +932,12 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd));
-    let comparable = unpriced == 0 && (profile.harness == Harness::Codex || idle_savings.is_some());
+    let comparable = !conditional
+        && unpriced == 0
+        && (profile.harness == Harness::Codex || idle_savings.is_some());
+    if conditional {
+        uncertainty.push(TIER_SENSITIVITY.into());
+    }
     if profile.harness == Harness::Claude && idle_savings.is_none() {
         uncertainty.push("an applicable idle-compaction alternative is unpriced, so the aggregate winner is unresolved".into());
     }
@@ -1143,7 +1156,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_prices_only_documented_lifetimes() {
+    fn codex_tiers_price_only_documented_lifetimes() {
         let mut profile = make_profile("profile", "root");
         profile.harness = Harness::Codex;
         let codex = |model: &str, session: &str, time: Millis| {
@@ -1167,6 +1180,23 @@ mod tests {
             codex("gpt-6.1-sol", "a", HOUR),
             codex("gpt-5.4", "b", 0),
         ];
+        let mut conditional = requests[..2].to_vec();
+        conditional[0].parts[0].tier = None;
+        conditional[1].parts[0].tier = Some("priority".into());
+        let conditional = run(&scan(profile.clone(), conditional), 2 * HOUR);
+        assert_eq!(conditional.unpriced, 0);
+        assert!(!conditional.scenarios.is_empty());
+        assert_eq!(conditional.base.recommended, None);
+        assert_eq!(conditional.base.savings_usd, None);
+        assert_eq!(conditional.margin_usd, None);
+        assert_eq!(conditional.base.break_even, None);
+        assert!(
+            conditional
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == crate::prices::TIER_SENSITIVITY)
+        );
         let check = run(&scan(profile, requests), 2 * HOUR);
         assert_eq!(check.lifetime_ms, Some(30 * MINUTE));
         assert_eq!(check.interval_ms, Some(25 * MINUTE));

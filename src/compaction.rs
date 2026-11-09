@@ -18,8 +18,8 @@ use crate::model::{
     WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, add_costs, paired_savings, price_components, price_part, server_cost,
-    unknown_cost, write_billing, zero_cost,
+    Catalog, PRICE_SOURCES, TIER_SENSITIVITY, add_costs, paired_savings, price_components,
+    price_part, server_cost, tier_sensitive, unknown_cost, write_billing, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 
@@ -1404,13 +1404,17 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 }
             }
             let winning = best.filter(|b| b.savings_usd.is_some_and(|s| s > 0.0));
+            let conditional = scenarios.iter().any(|s| {
+                tier_sensitive(&s.baseline_comparison_cost) || tier_sensitive(&s.comparison_cost)
+            });
             let recommended = winning
                 .map(|w| w.window)
                 .or(if priced.len() == scenarios.len() {
                     control.value
                 } else {
                     None
-                });
+                })
+                .filter(|_| !conditional);
             let patch = control.minimum_claude_patch.unwrap_or(288);
             let per_model_supported =
                 !claude || version_supported(recent.version.as_deref(), patch);
@@ -1432,7 +1436,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             let profiles: IndexSet<&String> = selected.iter().flat_map(|r| &r.profiles).collect();
             let savings = winning
                 .and_then(|w| w.savings_usd)
-                .or(recommended.map(|_| 0.0));
+                .or(recommended.map(|_| 0.0))
+                .filter(|_| !conditional);
             let predecessors: HashSet<&str> = baseline
                 .iter()
                 .filter_map(|i| i.evidence.as_ref())
@@ -1446,6 +1451,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             ]
             .map(String::from)
             .into();
+            if conditional {
+                uncertainty.insert(TIER_SENSITIVITY.into());
+            }
             if !control.applicable {
                 uncertainty.insert(control.reason.clone());
             }
@@ -2275,6 +2283,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn missing_codex_tiers_price_scenarios_without_selecting_a_winner() {
+        let mut scan = scenario("codex");
+        for r in &mut scan.requests {
+            for p in &mut r.parts {
+                p.tier = None;
+                p.speed = None;
+            }
+        }
+        let result = &checks(&scan)[0];
+        assert_eq!(result.base.action, Action::Advisory);
+        assert_eq!(result.base.recommended, None);
+        assert_eq!(result.base.savings_usd, None);
+        assert_eq!(result.base.monthly_savings_usd, None);
+        assert_eq!(result.base.break_even, None);
+        assert!(
+            result
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == TIER_SENSITIVITY)
+        );
+        assert!(
+            result
+                .scenarios
+                .iter()
+                .any(|s| s.savings_usd.is_some_and(|v| v > 0.0))
+        );
+        assert!(result.baseline_cost.total_usd.is_some());
+    }
+
+    #[test]
+    fn unused_pre_window_tiers_do_not_block_a_recorded_window() {
+        let mut scan = scenario("codex");
+        let expected = checks_since(&scan, Some(0))[0].base.recommended;
+        assert!(expected.is_some());
+        let mut unrelated = scan.requests.last().unwrap().clone();
+        unrelated.id = "old-unrelated".into();
+        unrelated.session = "old-unrelated".into();
+        unrelated.time = -2000;
+        unrelated.end_time = -2000;
+        unrelated.parts[0].tier = None;
+        scan.requests.insert(0, unrelated);
+        let result = &checks_since(&scan, Some(0))[0];
+        assert_eq!(result.base.recommended, expected);
+        assert!(
+            !result
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == TIER_SENSITIVITY)
+        );
     }
 
     #[test]

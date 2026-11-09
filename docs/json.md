@@ -12,6 +12,16 @@ setting, history profiles, window, costs (including partial known subtotals and
 unknown reasons), coverage, assumptions, uncertainty and sensitivities. Savings
 from independent checks still must not be added.
 
+In both versions, `historical[]` includes `pricedRequests`, `conditionalRequests`
+and `tierSensitivity` (served-tier scenarios with full `Cost` values). A numeric
+conditional estimate does not increase `scan.coverage.tierKnown`. Context rows
+include `conditionalRequests`, `tierUnknownRequests` (including unpriced requests)
+and pricing `assumptions`; their verdict stays null
+when an unrecorded tier could reverse keep/off. Compaction and keepalive scenario
+dollars remain available, but recommendation savings and winners stay unresolved
+when affected costs depend on missing tiers. Unsupported tier
+scenarios have a null total and explicit unknown reasons, never a zero total.
+
 Keepalive checks have the same complete shape in both versions, including every
 cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
 Their period coverage, unknown current ping state, unpriced periods and unresolved

@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -537,6 +537,7 @@ struct Prior<'a> {
 
 struct Row {
     cost: ContextCost,
+    assumptions: IndexSet<String>,
     owner: usize,
     key: usize,
     time: Millis,
@@ -691,12 +692,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let spans = p
             .filter(|_| ratio.is_some())
             .and_then(|p| prefix_spans(catalog, r, p));
-        let assumptions = p.map_or_else(Vec::new, |p| pricing_assumptions(catalog, r, p));
         let size = |piece: &Placed<'_>| piece.characters as f64 * ratio.unwrap_or(0.0);
         let total: f64 = parts.iter().map(size).sum();
         // A calibration that overshoots the recorded input cannot place these pieces.
         let end = u.and_then(|u| u.input);
         let placed = spans.filter(|_| end.is_some_and(|end| total <= end as f64));
+        let assumptions = p
+            .filter(|_| placed.is_some())
+            .map_or_else(Vec::new, |p| pricing_assumptions(catalog, r, p));
         let mut unique: Vec<usize> = vec![];
         {
             let mut seen = HashSet::new();
@@ -734,16 +737,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     owner,
                     key,
                     time: Millis::MIN,
+                    assumptions: IndexSet::new(),
                 }
             });
             row.cost.requests += 1;
-            row.cost.tier_unknown_requests +=
-                u64::from(r.parts.iter().any(|p| conditional_tier(r, p)));
-            for assumption in &assumptions {
-                if !row.cost.assumptions.contains(assumption) {
-                    row.cost.assumptions.push(assumption.clone());
-                }
-            }
+            row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
+            row.assumptions.extend(assumptions.iter().cloned());
         }
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
@@ -981,6 +980,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .enumerate()
         .map(|(index, row)| {
             let mut c = row.cost;
+            c.assumptions = row.assumptions.into_iter().collect();
             c.current = latest
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
@@ -1576,9 +1576,14 @@ mod tests {
         // The skills check owns per-skill findings; the catalog is one piece here.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
-        for mode in ["conditional", "unsupported", "conflicting"] {
+        for mode in ["conditional", "unsupported", "conflicting", "multipart"] {
             let mut requests = requests.clone();
-            if mode != "conflicting" {
+            if mode == "multipart" {
+                let mut summary = requests[1].parts[0].clone();
+                summary.kind = crate::model::PartKind::Compaction;
+                summary.tier = None;
+                requests[1].parts.push(summary);
+            } else if mode != "conflicting" {
                 requests[1].parts[0].tier = None;
             } else {
                 requests[1]
@@ -1602,9 +1607,9 @@ mod tests {
             let apps = row(&rows, "codex_apps");
             assert_eq!(apps.priced, if mode == "conditional" { 2 } else { 1 });
             assert_eq!(apps.conditional_requests, u64::from(mode == "conditional"));
-            assert_eq!(apps.tier_unknown_requests, 1);
+            assert_eq!(apps.tier_unknown_requests, u64::from(mode != "multipart"));
             assert!(apps.estimated_usd.is_some());
-            assert_eq!(apps.verdict, None);
+            assert_eq!(apps.verdict, (mode == "multipart").then_some(Verdict::Keep));
         }
     }
 

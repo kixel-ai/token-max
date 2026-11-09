@@ -2183,7 +2183,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .iter()
         .filter(|c| action(c) == Action::Advisory)
         .collect();
-    // Switchable context still sent today whose requests could not be priced at all.
+    // Switchable context still sent today without enough pricing or use evidence for a verdict.
     let unpriced: Vec<&ContextCost> = report
         .context
         .iter()
@@ -2202,7 +2202,14 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 suffix(c, out),
                 c.estimated_usd.map_or_else(
                     || "Cost unknown: none of its requests could be priced.".into(),
-                    |usd| format!("Conditional cost {}; {} priced requests use assumed tiers; keep/off unresolved because tier sensitivity could reverse it.", monthly(usd, since, Some(until)), c.conditional_requests)
+                    |usd| {
+                        let cost = monthly(usd, since, Some(until));
+                        if c.tier_unknown_requests > 0 {
+                            format!("Estimated cost {cost}; {} requests have unresolved tier evidence ({} priced using assumed tiers); keep/off unresolved because tier sensitivity could reverse it.", c.tier_unknown_requests, c.conditional_requests)
+                        } else {
+                            format!("Estimated cost {cost}; recorded uses are unknown, so keep/off is unresolved.")
+                        }
+                    }
                 ),
                 control_text(c.control.as_ref().expect("switchable context"), c.harness)
             );

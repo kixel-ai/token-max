@@ -17,8 +17,9 @@ and `tierSensitivity` (served-tier scenarios with full `Cost` values). A numeric
 conditional estimate does not increase `scan.coverage.tierKnown`. Context rows
 include `conditionalRequests`, `tierUnknownRequests` (including unpriced requests)
 and pricing `assumptions`; their verdict stays null
-when an unrecorded tier could reverse keep/off. Compaction scenario dollars remain
-available but no winner is claimed for missing-tier histories. Unsupported tier
+when an unrecorded tier could reverse keep/off. Compaction and keepalive scenario
+dollars remain available, but recommendation savings and winners stay unresolved
+when affected costs depend on missing tiers. Unsupported tier
 scenarios have a null total and explicit unknown reasons, never a zero total.
 
 Keepalive checks have the same complete shape in both versions, including every

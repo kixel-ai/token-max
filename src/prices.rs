@@ -40,6 +40,11 @@ pub fn conditional_tier(r: &Request, p: &BillingPart) -> bool {
                 .any(|s| s == "conflicting effective service tiers"))
 }
 
+/// Whether this cost depends on unresolved Codex service-tier evidence.
+pub fn tier_sensitive(cost: &Cost) -> bool {
+    cost.assumptions.iter().any(|s| s == TIER_SENSITIVITY)
+}
+
 /// Normalize documented names for the same pricing tier.
 pub(crate) fn tier_name(tier: &str) -> &str {
     match tier {
@@ -759,31 +764,58 @@ pub fn tier_sensitivity(catalog: &Catalog, requests: &[&Request]) -> Vec<TierSce
     {
         return vec![];
     }
-    ["default", "fast", "ultrafast", "flex", "scale"]
-        .map(|tier| {
-            let costs: Vec<_> = requests.iter().map(|r| {
-                let mut scenario = (*r).clone();
-                for p in &mut scenario.parts {
-                    if conditional_tier(r, p) && selected_rates(catalog, r, p).is_ok() {
-                        p.tier = Some(tier.into());
+    let mut scenarios =
+        ["default", "fast", "ultrafast", "flex", "scale"].map(|tier| TierScenario {
+            tier,
+            cost: zero_cost(),
+        });
+    for r in requests {
+        let parts: Vec<_> = r
+            .parts
+            .iter()
+            .map(|p| {
+                (
+                    price_part(catalog, r, p),
+                    conditional_tier(r, p) && selected_rates(catalog, r, p).is_ok(),
+                )
+            })
+            .collect();
+        let server = server_cost(r);
+        for scenario in &mut scenarios {
+            let costs: Vec<_> = r
+                .parts
+                .iter()
+                .zip(&parts)
+                .map(|(p, (cost, conditional))| {
+                    if !conditional {
+                        return cost.clone();
                     }
-                }
-                price_request(catalog, &scenario)
-            }).collect();
-            let mut cost = add_costs(&costs);
-            cost.assumptions.push("tier sensitivity only: assign this served tier to conditionally priced parts; recorded tiers remain authoritative; these scenarios do not bound actual costs or subscription charges".into());
-            TierScenario { tier, cost }
-        }).into()
+                    if ["flex", "scale"].contains(&scenario.tier) {
+                        return unknown_cost(
+                            "effective service tier has no supported catalog rate",
+                        );
+                    }
+                    let mut p = p.clone();
+                    p.tier = Some(scenario.tier.into());
+                    price_part(catalog, r, &p)
+                })
+                .chain([server.clone()])
+                .collect();
+            let cost = request_evidence(r, add_costs(&costs));
+            scenario.cost = add_costs([&scenario.cost, &cost]);
+        }
+    }
+    for scenario in &mut scenarios {
+        scenario.cost.assumptions.push("tier sensitivity only: assign this served tier to conditionally priced parts; recorded tiers remain authoritative; these scenarios do not bound actual costs or subscription charges".into());
+    }
+    scenarios.into()
 }
 
 /// Pricing assumptions for the same selected rates used to place context pieces.
 pub fn pricing_assumptions(catalog: &Catalog, r: &Request, p: &BillingPart) -> Vec<String> {
-    let mut assumptions = selected_rates(catalog, r, p).map_or_else(
-        |reason| vec![format!("context pricing unavailable: {reason}")],
-        |s| s.assumptions,
-    );
-    assumptions.extend(r.issues.iter().cloned());
-    assumptions
+    selected_rates(catalog, r, p)
+        .map(|s| s.assumptions)
+        .unwrap_or_default()
 }
 
 fn selected_rates(
@@ -1006,7 +1038,10 @@ pub fn price_components(catalog: &Catalog, r: &Request, p: &BillingPart) -> Comp
     let selected = match selected {
         Ok(selected) => selected,
         Err(reason) => {
-            let cost = unknown_cost(reason);
+            let mut cost = unknown_cost(reason);
+            if conditional_tier(r, p) {
+                cost.assumptions.push(TIER_SENSITIVITY.into());
+            }
             return Components {
                 cache: if empty_cache {
                     zero_cost()
@@ -1172,7 +1207,10 @@ pub fn price_request(catalog: &Catalog, r: &Request) -> Cost {
         .map(|p| price_part(catalog, r, p))
         .chain([server_cost(r)])
         .collect();
-    let mut result = add_costs(&parts);
+    request_evidence(r, add_costs(&parts))
+}
+
+fn request_evidence(r: &Request, mut result: Cost) -> Cost {
     let mut assumptions: IndexSet<String> = result.assumptions.drain(..).collect();
     assumptions.extend(r.issues.iter().cloned());
     result.assumptions = assumptions.into_iter().collect();
@@ -1333,6 +1371,12 @@ mod tests {
         assert_eq!(rows[3].cost.total_usd, None);
         assert_eq!(rows[4].cost.total_usd, None);
         assert_eq!(r, original);
+        r.issues.push("usage is absent".into());
+        assert!(
+            tier_sensitivity(&c, &[&r])
+                .iter()
+                .all(|s| s.cost.total_usd.is_none())
+        );
     }
 
     fn close(a: Option<f64>, b: f64) -> bool {

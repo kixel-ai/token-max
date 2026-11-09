@@ -87,10 +87,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
             .as_ref()
             .and_then(|p| p.provider.clone())
             .or_else(|| previous.and_then(|r| r.provider.clone())),
-        api: match event.harness {
-            Harness::Claude => Api::Messages,
-            Harness::Codex => Api::Responses,
-        },
+        api: Api::Messages,
         source: Some("compaction".into()),
         trigger: event.trigger.clone(),
         reference: None,

@@ -1438,18 +1438,20 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
             .parts
             .iter()
             .zip(&r.parts)
-            .any(|(a, b)| conflict(&a.tier, &b.tier))
+            .any(|(a, b)| a.kind == b.kind && a.model == b.model && conflict(&a.tier, &b.tier))
         {
-            previous
-                .issues
-                .push("conflicting effective service tiers".into());
+            union(
+                &mut previous.issues,
+                vec!["conflicting effective service tiers".into()],
+            );
         }
         if let (Some(a), Some(b)) = (&previous.requested_speed, &r.requested_speed)
             && (conflict(&a.tier, &b.tier) || conflict(&a.speed, &b.speed))
         {
-            previous
-                .issues
-                .push("conflicting requested service tiers".into());
+            union(
+                &mut previous.issues,
+                vec!["conflicting requested service tiers".into()],
+            );
         }
         if previous.requested_speed.is_none() {
             previous.requested_speed = r.requested_speed.clone();
@@ -1840,6 +1842,15 @@ mod tests {
         assert_eq!(requests[&r.id].parts[0].tier.as_deref(), Some("priority"));
         r.parts[0].tier = Some("default".into());
         add(&mut requests, r.clone());
+        add(&mut requests, r.clone());
+        assert_eq!(
+            requests[&r.id]
+                .issues
+                .iter()
+                .filter(|s| *s == "conflicting effective service tiers")
+                .count(),
+            1
+        );
         assert!(
             requests[&r.id]
                 .issues
@@ -1864,6 +1875,15 @@ mod tests {
                 .iter()
                 .any(|s| s == "conflicting requested service tiers")
         );
+        requests.clear();
+        r.requested_speed = None;
+        r.parts[0].tier = Some("priority".into());
+        add(&mut requests, r.clone());
+        let mut summary = r.clone();
+        summary.parts[0].kind = PartKind::Compaction;
+        summary.parts[0].tier = Some("default".into());
+        add(&mut requests, summary);
+        assert!(requests[&r.id].issues.is_empty());
     }
 
     fn since(options: ScanOptions, instant: &str) -> ScanOptions {

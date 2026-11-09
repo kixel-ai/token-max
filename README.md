@@ -353,7 +353,7 @@ and both JSON forms show standard, fast and ultrafast served-tier scenarios for
 conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual
-charges. Context keep/off and compaction winners that depend on missing tiers stay
+charges. Context keep/off, compaction and keepalive winners that depend on missing tiers stay
 advisory because tier sensitivity could reverse them. The explicit preference to
 disable premium speed still applies. SSH reports use the same pricing and evidence.
 

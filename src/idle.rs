@@ -3130,6 +3130,8 @@ mod tests {
             speed_directories: None,
             idle_directories: None,
             background: vec![],
+            background_directories: IndexMap::new(),
+            background_requests: IndexMap::new(),
             t3: None,
         }
     }
@@ -4013,40 +4015,61 @@ mod tests {
             error.message
         );
 
-        // A nested directory inherits its project's owner, so it is not a policy change.
+        // Unix inherits this user-owned repository's local file; Windows uses the cwd.
+        // A separate repository has no local override until one is written there.
         let nested = project.join("nested");
-        std::fs::create_dir(&nested).unwrap();
-        let mut moved = request.clone();
-        moved["cwd"] = json!(text(&nested));
-        moved["timestamp"] = json!("1970-01-01T01:00:00.000Z");
-        moved["message"]["id"] = json!("selected");
-        write(&[&request, &moved]);
-        let selected = scan(&ScanOptions {
-            since: Some(MINUTE),
-            ..w.scan_options()
-        })
-        .unwrap();
-        let profile = selected
-            .profiles
-            .iter()
-            .find(|p| p.harness == Harness::Claude)
-            .unwrap();
-        let ttl = &profile.idle_directories.as_ref().unwrap()[text(&project).as_str()].ttl;
-        assert_eq!(ttl.as_ref().unwrap().main.value, Some(Ttl::FiveMinutes));
-        let selected = report(selected, 200.0);
-        let idle = selected
-            .checks
-            .iter()
-            .find_map(|c| match c {
-                CheckResult::Idle(c) => Some(c),
-                _ => None,
-            })
-            .expect("an idle-compaction check");
-        let unknown = idle.current_settings.unknown.join(" ");
-        assert!(
-            !unknown.contains("policy changes within a conversation"),
-            "{unknown}"
-        );
+        let other = w.home.join("other-project");
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        for (cwd, inherits) in [(&nested, !cfg!(windows)), (&other, false)] {
+            std::fs::create_dir_all(cwd.join(".claude")).unwrap();
+            for explicit in [false, true] {
+                if explicit {
+                    std::fs::write(cwd.join(".claude/settings.local.json"), local.to_string())
+                        .unwrap();
+                }
+                let mut moved = request.clone();
+                moved["cwd"] = json!(text(cwd));
+                moved["timestamp"] = json!("1970-01-01T01:00:00.000Z");
+                moved["message"]["id"] = json!("selected");
+                write(&[&request, &moved]);
+                let selected = scan(&ScanOptions {
+                    since: Some(MINUTE),
+                    ..w.scan_options()
+                })
+                .unwrap();
+                let profile = selected
+                    .profiles
+                    .iter()
+                    .find(|p| p.harness == Harness::Claude)
+                    .unwrap();
+                let directories = profile.idle_directories.as_ref().unwrap();
+                let ttl = &directories[text(&project).as_str()].ttl;
+                assert_eq!(ttl.as_ref().unwrap().main.value, Some(Ttl::FiveMinutes));
+                let ttl = &directories[text(cwd).as_str()].ttl;
+                let expected = if inherits || explicit {
+                    Ttl::FiveMinutes
+                } else {
+                    Ttl::OneHour
+                };
+                assert_eq!(ttl.as_ref().unwrap().main.value, Some(expected));
+                let selected = report(selected, 200.0);
+                let idle = selected
+                    .checks
+                    .iter()
+                    .find_map(|c| match c {
+                        CheckResult::Idle(c) => Some(c),
+                        _ => None,
+                    })
+                    .expect("an idle-compaction check");
+                let unknown = idle.current_settings.unknown.join(" ");
+                assert_eq!(
+                    unknown.contains("policy changes within a conversation"),
+                    !inherits && !explicit,
+                    "cwd={}, explicit={explicit}: {unknown}",
+                    text(cwd)
+                );
+            }
+        }
     }
     fn t3_data(target: Vec<Request>, ttl: Ttl, mode: crate::model::T3IdleMode) -> Scan {
         use crate::model::{T3Instance, T3Request};

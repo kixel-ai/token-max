@@ -174,5 +174,4 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 
 ## Required
 
-- [Project-scoped background controls](/quest/m0/background-scopes.md) - resolve each project's current background controls and their owning files
 - [Codex skills catalog](/quest/m0/skills-catalog.md) - a priced line and `config.toml` switch per Codex skill, and duplicate listings flagged

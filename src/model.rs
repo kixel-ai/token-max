@@ -430,6 +430,12 @@ pub struct Profile {
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
     /// Background generation features and the controls that switch them.
     pub background: Vec<BackgroundControl>,
+    /// Background controls at recorded working directories; an empty key means no directory.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub background_directories: IndexMap<String, Vec<BackgroundControl>>,
+    /// Request-specific overrides when session transitions or launch precedence are unresolved.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t3: Option<T3Instance>,
 }
@@ -516,11 +522,14 @@ pub enum BackgroundFeature {
 }
 
 /// One background feature's current state and the control that owns it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundControl {
     pub feature: BackgroundFeature,
-    pub value: bool,
+    /// Current file-based value; null when scope, trust or launch selection is unresolved.
+    pub value: Option<bool>,
+    /// What the current discovery establishes, without claiming historical state.
+    pub reason: String,
     /// The goal check-in interval, when it applies.
     pub minutes: Option<i64>,
     /// Where the effective value comes from.
@@ -855,6 +864,10 @@ pub struct BackgroundCheck {
     #[serde(flatten)]
     pub base: CheckBase<bool>,
     pub feature: BackgroundFeature,
+    /// Recorded directories whose requests this control applies to; null means absent.
+    pub directories: Vec<Option<String>>,
+    /// Current ownership and any unresolved scope or selection.
+    pub reason: String,
     /// The setting that turns it off.
     pub off: String,
     /// The file to set it in; null for an environment variable.

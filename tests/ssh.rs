@@ -570,18 +570,69 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     .unwrap();
     std::fs::write(
         home.join(".claude/settings.json"),
-        r#"{"promptCacheTtl":"5m","promptSuggestionEnabled":true,"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"1","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"7"}}"#,
+        r#"{"promptCacheTtl":"5m","promptSuggestionEnabled":false,"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"0","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0"}}"#,
     )
     .unwrap();
     for (root, enabled) in [(&local, false), (&home, true)] {
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        std::fs::create_dir_all(workspace.join(".claude")).unwrap();
+        std::fs::create_dir_all(workspace.join(".codex")).unwrap();
+        std::fs::write(
+            workspace.join(".claude/settings.json"),
+            serde_json::json!({
+                "promptSuggestionEnabled": enabled,
+                "env": {"CLAUDE_CODE_ENABLE_AWAY_SUMMARY": if enabled {"1"} else {"0"},
+                        "CLAUDE_CODE_GOAL_CHECKIN_MINUTES": if enabled {"7"} else {"0"},
+                        "SECRET": "SYNTHETIC_PRIVATE_SETTINGS"}
+            })
+            .to_string(),
+        )
+        .unwrap();
         let codex = root.join(".codex");
         std::fs::create_dir_all(codex.join("sessions")).unwrap();
-        std::fs::copy(fixture("codex.jsonl"), codex.join("sessions/rollout.jsonl")).unwrap();
+        let history: String = std::fs::read_to_string(fixture("codex.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: Value = serde_json::from_str(line).unwrap();
+                if record["type"] == "session_meta" || record["type"] == "turn_context" {
+                    record["payload"]["cwd"] = workspace.to_str().unwrap().into();
+                }
+                record["timestamp"] = record["timestamp"]
+                    .as_str()
+                    .unwrap()
+                    .replace("T00:00:", "T00:02:")
+                    .into();
+                format!("{record}\n")
+            })
+            .collect();
+        std::fs::write(codex.join("sessions/rollout.jsonl"), history).unwrap();
         std::fs::write(
             codex.join("config.toml"),
+            format!(
+                "[tui]\nauto_recap = {}\n[projects.{}]\ntrust_level = 'trusted'\n",
+                !enabled,
+                serde_json::to_string(&workspace).unwrap()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join(".codex/config.toml"),
             format!("[tui]\nauto_recap = {enabled}\n"),
         )
         .unwrap();
+        let file = root.join(".claude/projects/my project/main.jsonl");
+        let history: String = std::fs::read_to_string(&file)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let mut record: Value = serde_json::from_str(line).unwrap();
+                record["cwd"] = workspace.to_str().unwrap().into();
+                format!("{record}\n")
+            })
+            .collect();
+        std::fs::write(file, history).unwrap();
     }
     let response: Value = std::fs::read_to_string(fixture("claude.jsonl"))
         .unwrap()
@@ -594,12 +645,13 @@ fn background_controls_and_estimates_keep_their_remote_history() {
         let time = format!("2026-11-01T00:{minute:02}:00Z");
         records.push(serde_json::json!({
             "type": "user", "sessionId": "session-a", "uuid": format!("user-{minute}"),
-            "timestamp": time, "entrypoint": "cli",
+            "timestamp": time, "entrypoint": "cli", "cwd": home.join("workspace"),
             "message": {"content": "SYNTHETIC_PRIVATE_PROMPT"}
         }));
         let mut r = response.clone();
         r["timestamp"] = time.into();
         r["entrypoint"] = "cli".into();
+        r["cwd"] = home.join("workspace").to_str().unwrap().into();
         r["message"]["id"] = format!("response-{minute}").into();
         r["message"]["usage"]["cache_read_input_tokens"] = 1000.into();
         r["message"]["content"] = serde_json::json!([
@@ -646,7 +698,9 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert!(
         background(local)
             .iter()
-            .all(|c| c["current"] == false && c["action"] == "keep")
+            .all(|c| c["current"] == false && c["action"] == "keep"),
+        "{:?}",
+        background(local)
     );
     let checks = background(remote);
     assert_eq!(checks.len(), 4);
@@ -659,14 +713,24 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert_eq!(suggestions["off"], "\"promptSuggestionEnabled\": false");
     assert_eq!(
         suggestions["offFile"],
-        home.join(".claude/settings.json").to_str().unwrap()
+        home.join("workspace/.claude/settings.json")
+            .to_str()
+            .unwrap()
     );
     let recaps = feature("session-recaps");
     assert_eq!(recaps["generations"], 1);
     assert!(recaps["cost"]["totalUsd"].as_f64().unwrap() > 0.0);
     assert!(recaps["lostWarming"]["totalUsd"].as_f64().unwrap() > 0.0);
-    assert_eq!(recaps["off"], "CLAUDE_CODE_ENABLE_AWAY_SUMMARY=0");
-    assert_eq!(recaps["offFile"], Value::Null);
+    assert_eq!(
+        recaps["off"],
+        "\"env\": {\"CLAUDE_CODE_ENABLE_AWAY_SUMMARY\": \"0\"}"
+    );
+    assert_eq!(
+        recaps["offFile"],
+        home.join("workspace/.claude/settings.json")
+            .to_str()
+            .unwrap()
+    );
     for name in ["goal-check-ins", "auto-recaps"] {
         let c = feature(name);
         assert_eq!(c["action"], "advisory");
@@ -675,7 +739,10 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     }
     let profiles = remote["scan"]["profiles"].as_array().unwrap();
     let claude = profiles.iter().find(|p| p["harness"] == "claude").unwrap();
-    assert_eq!(claude["background"][2]["minutes"], 7);
+    assert_eq!(
+        claude["backgroundDirectories"][home.join("workspace").to_str().unwrap()][2]["minutes"],
+        7
+    );
     assert_eq!(
         remote["scan"]["cacheContext"]["prompts"]
             .as_array()
@@ -710,7 +777,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     }
     assert!(text.contains("Cost unknown"), "{text}");
     assert!(
-        text.contains("tui.auto_recap = false in ~/.codex/config.toml"),
+        text.contains("tui.auto_recap = false in ~/workspace/.codex/config.toml"),
         "{text}"
     );
 }

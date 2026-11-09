@@ -125,6 +125,7 @@ pub struct ExposureCollector {
     session_cache: Option<(String, Text)>,
     turn: Option<String>,
     turn_from_user: bool,
+    turn_aliases: HashMap<String, String>,
     client: Option<String>,
     version: Option<String>,
     uncertain: bool,
@@ -382,6 +383,7 @@ impl ExposureCollector {
             session_cache: None,
             turn: None,
             turn_from_user: false,
+            turn_aliases: HashMap::new(),
             client: None,
             version: None,
             uncertain: true,
@@ -452,15 +454,23 @@ impl ExposureCollector {
             self.version = label(field(payload, "cli_version"));
         }
         if !claude
-            && !self.turn_from_user
             && (kind == Some("turn_context")
                 || (kind == Some("event_msg") && is(payload, "type", "task_started")))
         {
-            self.turn = payload
+            let recorded = payload
                 .get("turn_id")
                 .filter(|v| !v.is_null())
                 .map(|v| id(Some(v)))
                 .transpose()?;
+            if let Some(recorded) = recorded {
+                if self.turn_from_user
+                    && let Some(inferred) = &self.turn
+                {
+                    self.turn_aliases.insert(inferred.clone(), recorded.clone());
+                }
+                self.turn = Some(recorded);
+                self.turn_from_user = false;
+            }
         }
         let line = Line {
             raw,
@@ -572,6 +582,7 @@ impl ExposureCollector {
             observations,
             mut lists,
             mut views,
+            turn_aliases,
             ..
         } = self;
         let mut previous: Option<Ids> = None;
@@ -716,6 +727,13 @@ impl ExposureCollector {
             invocations: invocations
                 .into_values()
                 .filter(|i| since.is_none_or(|s| i.time >= s))
+                .map(|mut i| {
+                    if let Some(recorded) = i.turn.as_ref().and_then(|turn| turn_aliases.get(turn))
+                    {
+                        i.turn = Some(recorded.clone());
+                    }
+                    i
+                })
                 .collect(),
             visibility,
             tool_calls: tool_calls(calls.into_values()),
@@ -1758,7 +1776,17 @@ impl ExposureCollector {
                 .map(|(_, id)| id)
                 .or_else(|| block_ids.first());
             self.turn = boundary.map(|(call, _)| identity(call));
-            self.turn_from_user = true;
+            self.turn_from_user = self
+                .turn
+                .as_ref()
+                .is_none_or(|turn| !self.turn_aliases.contains_key(turn));
+            if let Some(recorded) = self
+                .turn
+                .as_ref()
+                .and_then(|turn| self.turn_aliases.get(turn))
+            {
+                self.turn = Some(recorded.clone());
+            }
         }
         for (v, (call, basis)) in blocks.iter().zip(block_ids) {
             let b = object(v);

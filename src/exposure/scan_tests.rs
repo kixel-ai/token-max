@@ -1780,6 +1780,8 @@ fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_d
 
 #[test]
 fn unresolved_history_and_case_aliases_keep_one_request_in_its_own_catalog() {
+    let mut next_turn = turn();
+    next_turn["payload"]["turn_id"] = json!("next-user-turn");
     let data = transcript(Harness::Codex, &[
         codex_meta(),
         world(0, json!({"host_skills":{"body":"- pdf: no path recorded"}}), true),
@@ -1789,10 +1791,11 @@ fn unresolved_history_and_case_aliases_keep_one_request_in_its_own_catalog() {
         billed(2),
         world(3, json!({"host_skills":{"body":"- pdf: now resolved (file: /a/pdf/SKILL.md)"}}), false),
         json!({"type":"event_msg", "timestamp":at(4), "payload":{"type":"user_message", "message":"$pdf"}}),
+        turn(),
         skill_load(5, "read", "/a/pdf/SKILL.md", 0),
         // A fresh user turn establishes a separate implicit use, even with a repeated context record.
         json!({"type":"event_msg", "timestamp":at(6), "payload":{"type":"user_message", "message":"continue"}}),
-        turn(),
+        next_turn,
         skill_load(7, "again", "/a/pdf/SKILL.md", 0), billed(8),
     ], None).unwrap();
     let r = report(&data, 1.0);

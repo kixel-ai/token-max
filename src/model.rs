@@ -428,6 +428,9 @@ pub struct Profile {
     /// Background controls at recorded working directories; an empty key means no directory.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub background_directories: IndexMap<String, Vec<BackgroundControl>>,
+    /// Request-specific overrides when session transitions or launch precedence are unresolved.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
 }
 
 /// A model request the client makes on its own, outside the turns the user drives.

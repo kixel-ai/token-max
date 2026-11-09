@@ -811,7 +811,8 @@ its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
 ## Bash timeout cap
 
 The `bash-timeout-cap` check uses `Profile.bash`, resolved from user and
-managed settings `env` and the active profile's shell environment, which wins.
+managed settings `env` and the active profile's shell environment. For a terminal
+launch, settings `env` overrides inherited shell values.
 Like Claude Code, a value parses as a leading integer or an integral exponent
 form, and anything else, zero or negative falls back to the default (600000 ms
 maximum, 120000 ms default timeout). The effective cap is the larger of the two,

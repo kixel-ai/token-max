@@ -97,9 +97,15 @@ fn js_number(n: f64) -> String {
     n.to_string()
 }
 
-/// Merge settings environments in precedence order, preserving each effective key's owner.
+/// Merge terminal environment with settings taking precedence, preserving each effective key's owner.
 pub fn scoped_environment(scopes: &[SettingsScope], env: &Env) -> ScopedEnvironment {
     let mut result = ScopedEnvironment::default();
+    for (key, value) in env {
+        result
+            .values
+            .insert(key.clone(), Value::String(value.clone()));
+        result.owners.insert(key.clone(), key.clone());
+    }
     for scope in scopes {
         for (key, value) in members(scope.config.get("env")) {
             result.values.insert(key.clone(), value.clone());
@@ -107,12 +113,6 @@ pub fn scoped_environment(scopes: &[SettingsScope], env: &Env) -> ScopedEnvironm
                 .owners
                 .insert(key.clone(), format!("{}:env.{key}", scope.file));
         }
-    }
-    for (key, value) in env {
-        result
-            .values
-            .insert(key.clone(), Value::String(value.clone()));
-        result.owners.insert(key.clone(), key.clone());
     }
     result
 }
@@ -224,15 +224,7 @@ pub fn claude_background(
     env: &Env,
 ) -> Result<Vec<BackgroundControl>, ScanError> {
     let first = scopes.first().map_or("settings.json", |s| s.file);
-    let mut environment = scoped_environment(scopes, &Env::new());
-    for (key, value) in env {
-        if !environment.values.contains_key(key) {
-            environment
-                .values
-                .insert(key.clone(), Value::String(value.clone()));
-            environment.owners.insert(key.clone(), key.clone());
-        }
-    }
+    let environment = scoped_environment(scopes, env);
     // These gates stop flag fetching, including nonempty "0" for the traffic switches.
     let flags = ![
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
@@ -946,6 +938,7 @@ mod tests {
             idle_directories: None,
             background: vec![],
             background_directories: IndexMap::new(),
+            background_requests: IndexMap::new(),
         }
     }
 
@@ -1174,8 +1167,11 @@ mod tests {
         let shell = env(&[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")]);
         let p = profile(compaction_controls(&claude_sources(&user, &empty, &shell)).unwrap());
         let current = window_control(&p, Some("claude-opus-5-5"));
-        assert_eq!(current.owner, "CLAUDE_CODE_AUTO_COMPACT_WINDOW");
-        assert_eq!(current.minimum_claude_patch, Some(288));
+        assert_eq!(
+            current.owner,
+            "user.json:env.CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        );
+        assert_eq!(current.minimum_claude_patch, Some(304));
 
         let disabled = map(json!({ "autoCompactEnabled": false }));
         let p = profile(compaction_controls(&claude_sources(&user, &disabled, &none)).unwrap());
@@ -1297,11 +1293,11 @@ mod tests {
         assert_eq!(defaults.default_timeout, 120_000);
         let settings = json!({ "env": { "BASH_MAX_TIMEOUT_MS": 3_300_000 } });
         assert_eq!(resolve(settings.clone(), &[]).value, 3_300_000);
-        // The shell environment wins over settings.
+        // Terminal settings env wins over the inherited shell.
         let shell = resolve(settings, &[("BASH_MAX_TIMEOUT_MS", "200000")]);
         assert_eq!(
             (shell.value, shell.owner.as_str()),
-            (200_000, "BASH_MAX_TIMEOUT_MS")
+            (3_300_000, "user.json:env.BASH_MAX_TIMEOUT_MS")
         );
         for (text, value) in [
             ("3300000ms", 3_300_000),

@@ -603,7 +603,10 @@ fn claude_local_root(root: &str, options: &DiscoveryOptions) -> Result<Option<St
     {
         use std::os::unix::fs::MetadataExt;
         let main = main_checkout(root)?;
-        if main == realpath(&options.home).unwrap_or_else(|_| options.home.clone()) {
+        if realpath(&main).map_err(|_| error("cannot resolve local settings root", &main, 0))?
+            == realpath(&options.home)
+                .map_err(|_| error("cannot resolve home directory", &options.home, 0))?
+        {
             return Ok(None);
         }
         for path in [&main, &join(&[&main, ".git"]), &join(&[&main, ".claude"])] {
@@ -641,6 +644,7 @@ pub fn discover_claude_controls(
     let active = realpath(&resolve(configured)).unwrap_or_default();
     let managed_file = options.managed_settings_file.as_str();
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+        profile.background_requests.clear();
         let user = settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
@@ -731,25 +735,30 @@ pub fn discover_claude_controls(
             ];
             let speed = speed_controls(Harness::Claude, &scopes, local_env)?;
             let mut idle = idle_controls(&scopes, local_env)?;
-            let mut background = claude_background(&scopes, local_env)?;
-            let hosted_conflict = requests.iter().any(|r| {
-                r.agent == Agent::Main
+            let background = claude_background(&scopes, local_env)?;
+            let settings_env = scoped_environment(&scopes, &empty);
+            let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
+                settings_env
+                    .values
+                    .get(*key)
+                    .zip(local_env.get(*key))
+                    .is_some_and(|(setting, inherited)| js_string(Some(setting)) != *inherited)
+            });
+            for request in requests.iter().filter(|r| {
+                launch_conflict
+                    && r.agent == Agent::Main
                     && r.profiles.contains(&profile.id)
                     && r.cwd.as_deref() == Some(cwd)
                     && r.client.as_deref() != Some("cli")
-            }) && scopes.iter().any(|s| {
-                CLAUDE_BACKGROUND_ENV.iter().any(|key| {
-                    members(s.config.get("env"))
-                        .get(*key)
-                        .zip(local_env.get(*key))
-                        .is_some_and(|(setting, inherited)| js_string(Some(setting)) != *inherited)
-                })
-            });
-            if hosted_conflict {
+            }) {
+                let mut controls = background.clone();
                 unresolved_background(
-                    &mut background,
+                    &mut controls,
                     "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
                 );
+                profile
+                    .background_requests
+                    .insert(request.id.clone(), controls);
             }
             let config = merged(&[&user, &project, &legacy, &local, &managed]);
             idle.ttl = Some(ttl_controls(&TtlSources {
@@ -783,16 +792,24 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
         {
-            if let Some(previous) = session_cwds.insert(&request.session, request.cwd.as_deref())
-                && previous != request.cwd.as_deref()
+            let (previous, changed) = session_cwds
+                .entry(&request.session)
+                .or_insert((request.cwd.as_deref(), false));
+            *changed |= *previous != request.cwd.as_deref();
+            *previous = request.cwd.as_deref();
+            if *changed
                 && let Some(controls) = profile
                     .background_directories
-                    .get_mut(request.cwd.as_deref().unwrap_or_default())
+                    .get(request.cwd.as_deref().unwrap_or_default())
             {
+                let mut controls = controls.clone();
                 unresolved_background(
-                    controls,
+                    &mut controls,
                     "session working directory changed; /cd environment carry-over and launch selection are not recorded",
                 );
+                profile
+                    .background_requests
+                    .insert(request.id.clone(), controls);
             }
         }
     }
@@ -1295,11 +1312,15 @@ fn profile(
     } else {
         &empty
     };
-    // The active shell environment overrides the settings environment.
-    let enabled = |key: &str| match local_env.get(key) {
-        Some(value) => value == "1",
-        None => matches!(members(config.get("env")).get(key), Some(Value::String(s)) if s == "1"),
-    };
+    let environment = scoped_environment(
+        &[SettingsScope {
+            config,
+            file: &settings_file,
+        }],
+        local_env,
+    );
+    let enabled =
+        |key: &str| matches!(environment.values.get(key), Some(Value::String(s)) if s == "1");
     let provider = if claude {
         // A custom ANTHROPIC_BASE_URL (gateway or proxy) still speaks the Anthropic API,
         // so its requests are priced as public Anthropic API equivalents.
@@ -1389,12 +1410,9 @@ fn profile(
     });
     let mut settings = structural_settings(config);
     if claude {
-        // Output caps that are environment variables; the shell overrides the settings file.
+        // Output caps use the same terminal environment precedence as other controls.
         for key in ["BASH_MAX_OUTPUT_LENGTH", "MAX_MCP_OUTPUT_TOKENS"] {
-            let value = match local_env.get(key) {
-                Some(value) => Some(value.as_str()),
-                None => members(config.get("env")).get(key).and_then(Value::as_str),
-            };
+            let value = environment.values.get(key).and_then(Value::as_str);
             if let Some(n) = value.and_then(|v| v.trim().parse::<f64>().ok()) {
                 settings.insert(key.into(), Scalar::Number(n));
             }
@@ -1455,6 +1473,7 @@ fn profile(
         idle_directories: None,
         background,
         background_directories: IndexMap::new(),
+        background_requests: IndexMap::new(),
     })
 }
 
@@ -2129,6 +2148,12 @@ mod tests {
             claude(&discover(&options(&w)).unwrap()).provider.as_deref(),
             Some("google-vertex-anthropic")
         );
+        let mut o = options(&w);
+        o.env.insert("CLAUDE_CODE_USE_VERTEX".into(), "0".into());
+        let d = discover(&o).unwrap();
+        let p = claude(&d);
+        assert_eq!(p.provider.as_deref(), Some("google-vertex-anthropic"));
+        assert_eq!(p.background[0].value, Some(false));
     }
 
     #[test]
@@ -2226,10 +2251,106 @@ mod tests {
             client: Some("desktop".into()),
             ..r.clone()
         };
-        discover_claude_controls(&o, &mut d.profiles, &[hosted]).unwrap();
-        let c = &claude(&d).background_directories[&text(&nested)];
+        discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&hosted)).unwrap();
+        let c = &claude(&d).background_requests[&hosted.id];
         assert!(c.iter().all(|c| c.value.is_none()));
         assert!(c[0].reason.contains("launch precedence"));
+    }
+
+    #[test]
+    fn claude_session_uncertainty_does_not_change_other_requests_at_the_same_directory() {
+        let w = Workspace::new();
+        let a = w.home.join("a");
+        let b = w.home.join("b");
+        fs::create_dir_all(a.join(".git")).unwrap();
+        fs::create_dir_all(b.join(".git")).unwrap();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"0"}}"#,
+        );
+        let mut o = options(&w);
+        o.env
+            .insert("CLAUDE_CODE_ENABLE_AWAY_SUMMARY".into(), "1".into());
+        let mut d = discover(&o).unwrap();
+        let p = claude(&d);
+        let requests: Vec<Request> = [
+            ("stable", &b, Some("cli")),
+            ("moving", &a, Some("cli")),
+            ("moving", &b, Some("cli")),
+            ("moving", &b, Some("cli")),
+            ("moving", &a, Some("cli")),
+            ("older", &b, None),
+            ("hosted", &b, Some("desktop")),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (session, cwd, client))| Request {
+            id: format!("r{i}"),
+            session: session.into(),
+            time: i as i64,
+            client: client.map(String::from),
+            ..request(p, Some(cwd))
+        })
+        .collect();
+        discover_claude_controls(&o, &mut d.profiles, &requests).unwrap();
+        let p = claude(&d);
+        assert_eq!(p.background_directories[&text(&b)][1].value, Some(false));
+        assert!(!p.background_requests.contains_key("r0"));
+        assert!(!p.background_requests.contains_key("r1"));
+        for i in 2..7 {
+            assert_eq!(p.background_requests[&format!("r{i}")][1].value, None);
+        }
+        assert!(p.background_requests["r4"][1].reason.contains("carry-over"));
+        assert!(
+            p.background_requests["r5"][1]
+                .reason
+                .contains("recorded client")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_home_repository_exception_compares_canonical_paths() {
+        let w = Workspace::new();
+        let alias = w.home.join("home-alias");
+        std::os::unix::fs::symlink(&w.home, &alias).unwrap();
+        fs::create_dir_all(w.home.join(".git")).unwrap();
+        let nested = alias.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        write(
+            w.home.join(".claude/settings.local.json"),
+            r#"{"awaySummaryEnabled":false}"#,
+        );
+        let local = nested.join(".claude/settings.local.json");
+        write(&local, r#"{"awaySummaryEnabled":true}"#);
+        let o = options(&w);
+        let mut d = discover(&o).unwrap();
+        let r = request(claude(&d), Some(&nested));
+        discover_claude_controls(&o, &mut d.profiles, &[r]).unwrap();
+        let c = &claude(&d).background_directories[&text(&nested)][1];
+        assert_eq!(c.value, Some(true));
+        assert_eq!(c.off_file.as_deref(), Some(text(&local).as_str()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inaccessible_recorded_scopes_fail_instead_of_returning_a_partial_report() {
+        let w = Workspace::new();
+        let cwd = w.home.join("loop");
+        std::os::unix::fs::symlink(&cwd, &cwd).unwrap();
+        let o = options(&w);
+        let mut d = discover(&o).unwrap();
+        let r = request(claude(&d), Some(&cwd));
+        let error = discover_claude_controls(&o, &mut d.profiles, &[r]).unwrap_err();
+        assert_eq!(error.message, "cannot inspect working directory");
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        let r = request(p, Some(&cwd));
+        let error = discover_codex_controls(&o, &mut d.profiles, &[r]).unwrap_err();
+        assert_eq!(error.message, "cannot inspect working directory");
     }
 
     #[cfg(unix)]

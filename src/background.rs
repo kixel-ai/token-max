@@ -104,11 +104,8 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
                 }
             }
             if groups.is_empty() {
-                let unscoped = profile
-                    .background_directories
-                    .get("")
-                    .unwrap_or(&profile.background);
-                groups.extend(unscoped.iter().map(|c| (c, (vec![], vec![]))));
+                // No recorded requests means profile defaults, not a recorded missing cwd.
+                groups.extend(profile.background.iter().map(|c| (c, (vec![], vec![]))));
             }
         }
         for (control, (requests, ends)) in groups {
@@ -121,8 +118,13 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
 /// Discovery keeps absent working directories separate from the profile defaults.
 fn controls<'a>(profile: &'a Profile, request: &Request) -> &'a [BackgroundControl] {
     profile
-        .background_directories
-        .get(request.cwd.as_deref().unwrap_or_default())
+        .background_requests
+        .get(&request.id)
+        .or_else(|| {
+            profile
+                .background_directories
+                .get(request.cwd.as_deref().unwrap_or_default())
+        })
         .map_or(&profile.background, Vec::as_slice)
 }
 
@@ -500,6 +502,7 @@ fn check(
     };
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
+    let uncertainty: IndexSet<String> = uncertainty.into_iter().collect();
     let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
     let directories: IndexSet<Option<String>> = if requests.is_empty() {
         input
@@ -518,6 +521,12 @@ fn check(
     } else {
         requests.iter().map(|r| r.cwd.clone()).collect()
     };
+    let no_history = directories.is_empty();
+    let mut uncertainty: Vec<String> = uncertainty.into_iter().collect();
+    if no_history {
+        uncertainty
+            .push("no recorded requests; showing profile defaults without a project scope".into());
+    }
     BackgroundCheck {
         base: CheckBase {
             profile: profile.id.clone(),
@@ -543,7 +552,11 @@ fn check(
                 "explicit --since; current settings applied to history"
             }
             .into(),
-            baseline: "current owning control applied only to its recorded directories, holding recorded work and all other settings constant; not a measurement of historical enablement".into(),
+            baseline: if no_history {
+                "current profile defaults; no recorded project or usage to apply them to"
+            } else {
+                "current owning control applied only to its recorded directories, holding recorded work and all other settings constant; not a measurement of historical enablement"
+            }.into(),
             requests: requests.len() as u64,
             coverage: (measurable && enabled).then_some(Coverage {
                 priced: paired.priced,
@@ -727,6 +740,15 @@ mod tests {
         assert_eq!(checks[2].base.savings_usd, None);
         assert_eq!(checks[2].generations, None);
         assert_eq!(checks[2].directories, [None]);
+        assert_eq!(
+            checks[2]
+                .base
+                .uncertainty
+                .iter()
+                .filter(|r| **r == checks[2].reason)
+                .count(),
+            1
+        );
         s.cache_context.requests = std::mem::take(&mut s.requests);
         let empty = run(&s, 0.0);
         assert_eq!(empty.len(), 3);
@@ -734,6 +756,45 @@ mod tests {
         assert_eq!(empty[0].base.current, Some(true));
         assert_eq!(empty[0].generations, Some(0));
         assert_eq!(empty[0].directories, [Some("/synthetic/a".into())]);
+    }
+
+    #[test]
+    fn no_history_keeps_profile_defaults_distinct_from_recorded_missing_directories() {
+        let mut s = scan(&[(BackgroundFeature::PromptSuggestions, true)], vec![], &[]);
+        let mut unknown = s.profiles[0].background.clone();
+        unknown[0].value = None;
+        s.profiles[0]
+            .background_directories
+            .insert(String::new(), unknown);
+        let checks = run(&s, 1.0);
+        assert_eq!(checks[0].base.current, Some(true));
+        assert_eq!(checks[0].base.requests, 0);
+        assert_eq!(checks[0].generations, Some(0));
+        assert!(checks[0].directories.is_empty());
+        assert!(checks[0].base.baseline.contains("no recorded project"));
+    }
+
+    #[test]
+    fn request_uncertainty_preserves_other_requests_with_the_same_project_owner() {
+        let mut s = turns(&[(BackgroundFeature::PromptSuggestions, true)]);
+        for r in &mut s.requests {
+            r.cwd = Some("/synthetic/a".into());
+        }
+        let mut unknown = s.profiles[0].background.clone();
+        unknown[0].value = None;
+        unknown[0].reason = "unrecorded session launch precedence".into();
+        s.profiles[0]
+            .background_requests
+            .insert(s.requests[2].id.clone(), unknown);
+        let checks = run(&s, 0.0);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(
+            (checks[0].base.current, checks[0].base.requests),
+            (Some(true), 3)
+        );
+        assert_eq!((checks[1].base.current, checks[1].base.requests), (None, 1));
+        assert_eq!(checks[1].cost.total_usd, None);
+        assert_eq!(checks[0].directories, checks[1].directories);
     }
 
     #[test]

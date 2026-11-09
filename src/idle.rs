@@ -2424,6 +2424,7 @@ mod tests {
             idle_directories: None,
             background: vec![],
             background_directories: IndexMap::new(),
+            background_requests: IndexMap::new(),
         }
     }
 

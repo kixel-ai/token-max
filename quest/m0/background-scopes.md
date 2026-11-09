@@ -14,8 +14,9 @@ Recommended during /quest-complete on 2026-11-08 after
 The maintainer authorized "do anything you recommend". ✅ Plan this in m0
 (rejected: keep user/managed-only discovery; defer beyond first release),
 because project and local settings can override the control the report advises
-changing. The implementation PR for this quest should list PR 23 under
-`Caused by`: it introduced background recommendations without resolving
+changing. The implementation PR for this quest should list the
+[background-generation PR](https://github.com/kixelated/token-max/pull/23)
+under `Caused by`: it introduced recommendations without resolving
 project/local overrides for either harness.
 
 - Reuse the existing project/local ownership discovery and background control

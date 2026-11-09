@@ -4162,6 +4162,59 @@ mod tests {
     }
 
     #[test]
+    fn t3_off_undoes_recorded_idle_replacement_and_does_not_double_charge_summary() {
+        use crate::model::T3IdleMode::*;
+        let baseline = t3_data(
+            vec![request("a", 0.0, 300_000), request("b", 10.0, 300_000)],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        let mut observed = t3_data(
+            vec![
+                request("a", 0.0, 300_000),
+                summary("idle", 3.0, "target"),
+                request("b", 10.0, 20_000),
+            ],
+            Ttl::FiveMinutes,
+            BeforeCacheExpires,
+        );
+        let mut identity = observed
+            .requests
+            .iter()
+            .find(|r| r.id == "a")
+            .unwrap()
+            .t3
+            .clone()
+            .unwrap();
+        identity.run = "idle-run".into();
+        identity.idle_mode = Some(BeforeCacheExpires);
+        observed
+            .requests
+            .iter_mut()
+            .find(|r| r.id == "idle")
+            .unwrap()
+            .t3 = Some(identity.clone());
+        let mut boundary = session_event("idle-boundary", EventKind::Compaction, "target", 4.0);
+        boundary.request = Some("idle".into());
+        boundary.t3 = Some(identity);
+        boundary.idle_attribution = IdleAttribution::T3;
+        observed.events.push(boundary);
+        observed.events.sort_by_key(|e| e.time);
+        let off = t3_check(&observed, 10.0)
+            .current_settings
+            .scenarios
+            .remove(0);
+        near(
+            off.cost.total_usd,
+            t3_check(&baseline, 10.0).current_settings.scenarios[0]
+                .cost
+                .total_usd
+                .unwrap(),
+        );
+        assert_eq!(off.summaries, 0);
+    }
+
+    #[test]
     fn t3_missing_projection_or_calibration_stays_unknown_and_disabled_advisory() {
         use crate::model::T3IdleMode::*;
         let mut scan = t3_data(vec![request("a", 0.0, 300_000)], Ttl::FiveMinutes, Off);

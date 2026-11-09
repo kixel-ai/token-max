@@ -7,7 +7,9 @@ use std::borrow::Cow;
 
 use indexmap::IndexMap;
 
-use crate::cache::{CODEX_CACHE_MILLISECONDS, observed_ttl, ttl_milliseconds};
+use crate::cache::{
+    CODEX_CACHE_MILLISECONDS, CacheBoundaries, CacheChain, Touch, observed_ttl, ttl_milliseconds,
+};
 use crate::compaction::{
     CompactionSamples, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
     replay_windows,
@@ -231,9 +233,6 @@ impl Replayer<'_> {
             })
             .collect();
         for &r in &session.requests {
-            if idle_summaries.contains(&r.id.as_str()) {
-                continue;
-            }
             let order = if message(r).next().is_some() { 2 } else { 0 };
             ticks.push((r.time, order, Tick::Request(r)));
         }
@@ -314,7 +313,18 @@ impl Replayer<'_> {
                                 ..r.clone()
                             },
                         );
+                    if idle_summaries.contains(&r.id.as_str()) {
+                        adjusted.parts.retain(|p| p.kind != PartKind::Compaction);
+                    }
+                    if adjusted.parts.is_empty() {
+                        continue;
+                    }
                     for p in &mut adjusted.parts {
+                        // Advisor calls have their own context; retaining them does not carry
+                        // the main conversation's inserted ping turns into their billing.
+                        if p.kind == PartKind::Advisor {
+                            continue;
+                        }
                         let input = p.usage.input;
                         if p.kind == PartKind::Message
                             && offset != 0
@@ -413,6 +423,47 @@ impl Replayer<'_> {
         let mut cache: HashMap<_, [Option<(Millis, i64)>; 2]> = HashMap::new();
         let mut run = Run::default();
         let mut positions = HashMap::new();
+        let original: HashMap<_, _> = session
+            .requests
+            .iter()
+            .filter(|r| r.evidence == crate::model::RequestEvidence::Measured)
+            .map(|r| (r.id.as_str(), *r))
+            .collect();
+        // Only the shared TTL replay decides whether recorded Claude reads survive
+        // the chosen policy. The ping simulation separately establishes added warmth.
+        let mut observed_reads = HashMap::new();
+        if let Cache::Claude(ttl) = self.lifetime.cache {
+            let boundaries = CacheBoundaries::new(session.events.iter().copied());
+            let mut chain = CacheChain::new([&boundaries]);
+            for &r in &session.requests {
+                let estimate = self
+                    .options
+                    .estimates
+                    .get(&r.id)
+                    .and_then(|e| e.part.as_ref());
+                let parts = estimate.map_or(r.parts.as_slice(), std::slice::from_ref);
+                let mut message = 0;
+                for (part, p) in parts.iter().enumerate() {
+                    let replayed = chain.replay(&Touch {
+                        request: r,
+                        p,
+                        part,
+                        estimated: estimate.is_some()
+                            || r.evidence != crate::model::RequestEvidence::Measured,
+                        ttl,
+                        cold: false,
+                        selected: p.kind == PartKind::Message,
+                    });
+                    if p.kind == PartKind::Message {
+                        observed_reads.insert(
+                            (r.id.as_str(), message),
+                            replayed.filter(|r| !r.unknown).and_then(|r| r.p.usage.read),
+                        );
+                        message += 1;
+                    }
+                }
+            }
+        }
         for r in simulation.requests.iter().map(AsRef::as_ref) {
             if boundaries.peek().is_some_and(|e| e.time <= r.time) {
                 cache.clear();
@@ -421,6 +472,11 @@ impl Replayer<'_> {
                 }
             }
             let mut cost = 0.0;
+            let mut recorded = original
+                .get(r.id.as_str())
+                .into_iter()
+                .flat_map(|r| message(r))
+                .enumerate();
             for p in &r.parts {
                 let mut billed = Cow::Borrowed(p);
                 if p.kind == PartKind::Message {
@@ -445,7 +501,7 @@ impl Replayer<'_> {
                     let billing = self.lifetime.cache.request(p)?;
                     let long = matches!(billing, Cache::CodexLong);
                     let entries = cache.entry(cohort).or_default();
-                    let reads = entries
+                    let modeled = entries
                         .iter()
                         .enumerate()
                         .filter(|(i, _)| !long || *i == 1)
@@ -456,20 +512,21 @@ impl Replayer<'_> {
                         })
                         .max()
                         .map(|prefix| cacheable.min(prefix))
-                        .unwrap_or_else(|| {
-                            if r.id
-                                == session
-                                    .requests
-                                    .iter()
-                                    .find(|r| message(r).next().is_some())
-                                    .unwrap()
-                                    .id
-                            {
-                                read
-                            } else {
-                                0
-                            }
-                        });
+                        .unwrap_or(0);
+                    let observed = recorded.next().filter(|(_, source)| *source == p);
+                    // Measured reads can be externally warmed even after the local entry
+                    // expires. They prove warmth only for the unchanged recorded context.
+                    let measured = match observed {
+                        Some((part, source)) => match billing {
+                            Cache::Claude(_) => observed_reads
+                                .get(&(r.id.as_str(), part))
+                                .copied()
+                                .flatten()?,
+                            _ => source.usage.read?,
+                        },
+                        None => 0,
+                    };
+                    let reads = modeled.max(measured);
                     billed = Cow::Owned(BillingPart {
                         usage: billing.usage(reads, cacheable - reads, ordinary, output),
                         ..p.clone()
@@ -543,7 +600,7 @@ fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
         .filter(|e| e.kind == EventKind::Compaction)
     {
         for session in
-            std::iter::once(e.session.as_str()).chain(e.origins.iter().map(|o| o.session.as_str()))
+            std::iter::once(e.session.as_ref()).chain(e.origins.iter().map(|o| o.session.as_ref()))
         {
             boundaries.entry(session).or_default().push(e.time);
         }
@@ -678,7 +735,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .filter(|e| e.kind == EventKind::Compaction && e.profiles.contains(&profile.id))
     {
         for session in
-            std::iter::once(e.session.as_str()).chain(e.origins.iter().map(|o| o.session.as_str()))
+            std::iter::once(e.session.as_ref()).chain(e.origins.iter().map(|o| o.session.as_ref()))
         {
             let list = events.entry(session).or_default();
             if !list.iter().any(|old| old.id == e.id) {
@@ -913,6 +970,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
             assumptions: vec![
                 lifetime.as_ref().map_or_else(|| "cache lifetime unknown".into(), |l| format!("cache lifetime: {}", l.reason)),
                 "each session is replayed sequentially at each cap and with no pings, carrying cache warmth and ping context; all policies use the same recommended compaction windows and their modeled summary costs".into(),
+                "unchanged recorded context retains measured cache reads, including external warmth; rewritten context uses the modeled session-local cache without assuming unrelated activity warms the changed prefix".into(),
                 "Codex requests retain a measured uniform 12h write lifetime and inherited long coverage; mixed write lifetimes have unresolved prefix geometry".into(),
                 "each ping uses the preceding request's pricing metadata and median new input and output; every later request uses its own provider, model, tier, speed, geography and context tier".into(),
                 "compactions replace prior ping context; pings after a boundary use its recorded post-context and survive into the return; missing geometry leaves the session unpriced".into(),
@@ -983,7 +1041,7 @@ mod tests {
         profile
     }
 
-    /// A main request with a large warm prefix, as in a long session.
+    /// A main request with a large cold prefix; replay may warm it with an earlier turn.
     fn turn(session: &str, time: Millis) -> Request {
         let mut r = make_request();
         r.id = format!("{session}:{time}");
@@ -991,12 +1049,18 @@ mod tests {
         r.time = time;
         r.end_time = time;
         r.parts[0].usage = claude_usage(ClaudeUsage {
-            read: 100_000,
-            write: 1000,
+            read: 0,
+            write: 101_000,
             output: 500,
             ttl: Ttl::OneHour,
             input: 0,
         });
+        r
+    }
+
+    fn warm_turn(session: &str, time: Millis) -> Request {
+        let mut r = turn(session, time);
+        r.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(100_000, 1000, 0, 500);
         r
     }
 
@@ -1092,7 +1156,7 @@ mod tests {
             part.geo = None;
             part.usage.write5m = None;
             part.usage.write1h = None;
-            part.usage.write30m = Some(1000);
+            part.usage.write30m = part.usage.write;
             part.usage.write12h = Some(0);
             r
         };
@@ -1114,7 +1178,7 @@ mod tests {
         let long = |time| {
             let mut r = codex("gpt-6.1-sol", "long", time);
             r.parts[0].usage.write30m = Some(0);
-            r.parts[0].usage.write12h = Some(1000);
+            r.parts[0].usage.write12h = r.parts[0].usage.write;
             r
         };
         let mut profile = make_profile("profile", "root");
@@ -1160,8 +1224,8 @@ mod tests {
         // A return after 30m makes the TTL check keep 1h, which the pings then follow.
         let session = || {
             vec![
-                turn("a", 0),
-                turn("a", 30 * MINUTE),
+                warm_turn("a", 0),
+                warm_turn("a", 30 * MINUTE),
                 turn("a", 150 * MINUTE),
             ]
         };
@@ -1172,7 +1236,7 @@ mod tests {
         );
         assert!(win.ends_with("but a /loop task pings on a fixed schedule with no idle cap, and stops only when cancelled or after seven days."), "{win}");
         let mut requests = session();
-        requests.extend((0..20).map(|i| turn(&format!("gone{i}"), i * MINUTE)));
+        requests.extend((0..20).map(|i| warm_turn(&format!("gone{i}"), i * MINUTE)));
         let lose = line(scan(one_hour(), requests), 30 * DAY);
         assert!(
             lose.starts_with(
@@ -1362,6 +1426,66 @@ mod tests {
     }
 
     #[test]
+    fn observed_cache_hits_do_not_become_hypothetical_ping_rescues() {
+        let requests = vec![turn("a", 0), warm_turn("a", 2 * HOUR)];
+        let (baseline, _) = replay(requests.clone(), vec![], 2);
+        assert_eq!(baseline.reads["a:7200000"], 100_000);
+        let expected: f64 = requests
+            .iter()
+            .flat_map(|r| {
+                r.parts
+                    .iter()
+                    .map(|p| price_part(&prices(), r, p).total_usd.unwrap())
+            })
+            .sum();
+        near(baseline.recorded, expected);
+        let check = run(&scan(one_hour(), requests), 3 * HOUR);
+        assert_eq!(check.unpriced, 0);
+        assert!(check.scenarios.iter().all(|s| s.rescued == 0));
+    }
+
+    #[test]
+    fn all_read_returns_do_not_inherit_long_warmth_under_a_short_policy() {
+        let mut profile = one_hour();
+        profile.ttl.main.value = Some(Ttl::FiveMinutes);
+        let mut returned = warm_turn("a", 30 * MINUTE);
+        returned.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(101_000, 0, 0, 500);
+        let check = run(&scan(profile, vec![turn("a", 0), returned]), HOUR);
+        assert_eq!(check.lifetime_ms, Some(5 * MINUTE));
+        assert_eq!(check.unpriced, 0);
+        assert!(check.scenarios.iter().any(|s| s.rescued == 1));
+    }
+
+    #[test]
+    fn removing_an_idle_summary_keeps_its_message_and_advisor_work() {
+        let mut mixed = turn("a", 55 * MINUTE);
+        let mut summary = mixed.parts[0].clone();
+        summary.kind = PartKind::Compaction;
+        let mut advisor = mixed.parts[0].clone();
+        advisor.kind = PartKind::Advisor;
+        mixed.parts.extend([summary, advisor.clone()]);
+        let mut idle = boundary("a", HOUR, Some(20_000));
+        idle.idle_attribution = IdleAttribution::Notice;
+        idle.pre_tokens = Some(101_000);
+        idle.request = Some(mixed.id.clone());
+        let mut returned = turn("a", 2 * HOUR);
+        returned.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(0, 21_000, 0, 500);
+        let (base, pinged) = replay(
+            vec![turn("a", 0), mixed.clone(), returned.clone()],
+            vec![idle.clone()],
+            2,
+        );
+        assert!(base.reads.contains_key(&mixed.id));
+        assert!(pinged.reads.contains_key(&mixed.id));
+        mixed.parts.pop();
+        let advisor_cost = price_part(&prices(), &mixed, &advisor).total_usd.unwrap();
+        let (without_base, without_pinged) =
+            replay(vec![turn("a", 0), mixed, returned], vec![idle], 2);
+        near(base.recorded - without_base.recorded, advisor_cost);
+        near(pinged.recorded - without_pinged.recorded, advisor_cost);
+    }
+
+    #[test]
     fn later_periods_read_the_accumulated_ping_context() {
         let (_, run) = replay(
             vec![turn("a", 0), turn("a", 2 * HOUR), turn("a", 4 * HOUR)],
@@ -1416,7 +1540,7 @@ mod tests {
         );
         // The 50m ping is replaced at 1h. The 1h40m ping writes the new 20k prefix,
         // and its 1k turn remains present at 2h and in the final period.
-        assert_eq!(baseline.reads["a:7200000"], 0);
+        assert_eq!(baseline.reads["a:7200000"], 20_000);
         assert_eq!(pinged.reads["a:7200000"], 21_000);
         let mut r = turn("a", 100 * MINUTE);
         r.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(0, 21_000, 0, 500);
@@ -1444,6 +1568,7 @@ mod tests {
         b.id = "return".into();
         b.time = 2 * HOUR;
         b.end_time = b.time;
+        b.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(0, 99_000, 0, 500);
         let (base, pinged) = replay(vec![a, b.clone()], vec![], 2);
         let mut expected = b.parts[0].clone();
         expected.usage = Cache::Claude(Ttl::OneHour).usage(102_000, 0, 0, 500);
@@ -1639,6 +1764,8 @@ mod tests {
             r.source = Some("repl_main_thread".into());
             r.parts[0].usage.read = Some(300_000);
             r.parts[0].usage.input = Some(301_000);
+            r.parts[0].usage.write = Some(1000);
+            r.parts[0].usage.write1h = Some(1000);
         }
         let catalog = prices();
         let estimates = IndexMap::new();

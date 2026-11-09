@@ -238,7 +238,7 @@ pub struct Request {
 /// A safe location under one conversation alias.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Origin {
-    pub session: String,
+    pub session: Text,
     pub location: Location,
 }
 
@@ -289,16 +289,16 @@ pub struct StructuralEvent {
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
     pub harness: Harness,
-    pub session: String,
+    pub session: Text,
     pub time: Millis,
     pub kind: EventKind,
     pub profiles: Vec<String>,
     pub location: Location,
     pub request: Option<String>,
-    pub model: Option<String>,
-    pub version: Option<String>,
-    pub client: Option<String>,
-    pub cwd: Option<String>,
+    pub model: Option<Text>,
+    pub version: Option<Text>,
+    pub client: Option<Text>,
+    pub cwd: Option<Text>,
     pub trigger: Option<String>,
     pub precomputed: Option<bool>,
     pub pre_tokens: Option<i64>,
@@ -309,7 +309,7 @@ pub struct StructuralEvent {
     pub settings: IndexMap<String, Scalar>,
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
-    pub pricing: Option<Pricing>,
+    pub pricing: Option<std::sync::Arc<Pricing>>,
     /// Claude Bash call details on its tool start and end, without the command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellCall>,
@@ -1223,48 +1223,90 @@ pub struct References {
     pub keep: Option<i64>,
     #[serde(with = "crate::wire::ids")]
     pub tail: Ids,
-    pub items: Option<Digests>,
+    pub items: Option<Ids>,
 }
 
-/// A shared list of identifiers; equal lists are usually one allocation.
-pub type Ids = std::sync::Arc<[Text]>;
-
-/// A request's message digests, sharing the prefix it keeps from its base request.
+/// A shared list of identifiers that keeps a prefix of an earlier list instead of copying it.
 ///
-/// Each request usually keeps every digest of the one before it, so flat lists
-/// would grow quadratically with conversation length.
+/// Consecutive requests usually carry nearly the same components, and each request's
+/// message digests keep every digest of the one before it, so flat lists would grow
+/// quadratically with conversation length.
 #[derive(Clone)]
-pub struct Digests(std::sync::Arc<DigestNode>);
+pub struct Ids(std::sync::Arc<IdsNode>);
 
-struct DigestNode {
-    /// The base request, whose first `keep` digests lead this list.
-    base: Option<Digests>,
+struct IdsNode {
+    /// The earlier list whose first `keep` identifiers lead this one.
+    base: Option<Ids>,
     keep: usize,
-    tail: Ids,
+    tail: std::sync::Arc<[Text]>,
     len: usize,
+    /// Nodes walked to read the whole list, kept at most `len` so reading stays linear.
+    depth: usize,
+    /// Hashes of the kept prefix and the whole list, independent of its segmentation.
+    prefix_hash: u64,
+    hash: u64,
 }
 
-impl Digests {
-    /// The first `keep` digests of `base` (which must hold that many), then `tail`.
-    pub fn new(base: Option<(&Digests, usize)>, tail: Ids) -> Self {
+fn append_hash(mut hash: u64, ids: &[Text]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    for id in ids {
+        let mut element = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut element);
+        hash = hash
+            .wrapping_mul(0x517c_c1b7_2722_0a95)
+            .wrapping_add(element.finish());
+    }
+    hash
+}
+
+impl Ids {
+    /// The first `keep` identifiers of `base` (which must hold that many), then `tail`.
+    pub fn new(base: Option<(&Ids, usize)>, tail: std::sync::Arc<[Text]>) -> Self {
         let (mut base, keep) = match base {
             Some((b, keep)) if keep > 0 => (Some(b), keep),
             _ => (None, 0),
         };
-        assert!(
-            base.is_none_or(|b| keep <= b.len()),
-            "digest prefix too long"
-        );
+        assert!(base.is_none_or(|b| keep <= b.len()), "id prefix too long");
         // Skip ancestors whose own tail this list does not keep.
         while let Some(b) = base.filter(|b| keep <= b.0.keep) {
             base = b.0.base.as_ref();
         }
-        Digests(std::sync::Arc::new(DigestNode {
+        let len = keep + tail.len();
+        let depth = base.map_or(0, |b| b.0.depth) + 1;
+        if let Some(b) = base
+            && depth > len
+        {
+            // A long chain of short tails: copy instead, which amortizes to one copy per
+            // `len` lists.
+            let tail: std::sync::Arc<[Text]> =
+                b.iter().take(keep).chain(tail.iter()).cloned().collect();
+            return Self::new(None, tail);
+        }
+        let prefix_hash = base.map_or(0, |base| {
+            if keep == base.len() {
+                base.0.hash
+            } else {
+                append_hash(base.0.prefix_hash, &base.0.tail[..keep - base.0.keep])
+            }
+        });
+        let hash = append_hash(prefix_hash, &tail);
+        Ids(std::sync::Arc::new(IdsNode {
             base: base.cloned(),
             keep,
-            len: keep + tail.len(),
             tail,
+            len,
+            depth,
+            prefix_hash,
+            hash,
         }))
+    }
+    /// `ids`, sharing the prefix it has in common with `like`.
+    pub fn sharing(like: Option<&Ids>, ids: Vec<Text>) -> Self {
+        let keep = like.map_or(0, |like| {
+            like.iter().zip(&ids).take_while(|(a, b)| a == b).count()
+        });
+        let tail = ids[keep..].iter().cloned().collect();
+        Self::new(like.map(|like| (like, keep)), tail)
     }
     pub fn len(&self) -> usize {
         self.0.len
@@ -1272,11 +1314,11 @@ impl Digests {
     pub fn is_empty(&self) -> bool {
         self.0.len == 0
     }
-    /// The digests in order.
+    /// The identifiers in order.
     pub fn iter(&self) -> impl Iterator<Item = &Text> {
         self.iter_from(0)
     }
-    /// The digests from index `start` on, without walking the shared prefix before it.
+    /// The identifiers from index `start` on, without walking the shared prefix before it.
     pub fn iter_from(&self, start: usize) -> impl Iterator<Item = &Text> {
         let mut segments = Vec::new();
         let mut node = &*self.0;
@@ -1294,35 +1336,37 @@ impl Digests {
         }
         segments.into_iter().rev().flatten()
     }
-    /// The list whose first digests lead this one, and how many it keeps.
-    pub fn base(&self) -> Option<(&Digests, usize)> {
+    /// The list whose first identifiers lead this one, and how many it keeps.
+    pub fn base(&self) -> Option<(&Ids, usize)> {
         self.0.base.as_ref().map(|b| (b, self.0.keep))
     }
     /// The digests this list adds after the ones it keeps from its base.
-    pub fn tail(&self) -> &Ids {
+    pub fn tail(&self) -> &[Text] {
         &self.0.tail
     }
     /// An identity for this shared list, stable while it is alive.
     pub fn address(&self) -> usize {
         std::sync::Arc::as_ptr(&self.0) as usize
     }
-    fn last(&self) -> Option<&Text> {
-        let mut node = &*self.0;
-        let index = node.len.checked_sub(1)?;
-        loop {
-            if index >= node.keep {
-                return node.tail.get(index - node.keep);
-            }
-            node = &node.base.as_ref()?.0;
-        }
+}
+
+impl From<Vec<Text>> for Ids {
+    fn from(ids: Vec<Text>) -> Self {
+        Self::new(None, ids.into())
     }
 }
 
-impl Drop for DigestNode {
-    // Release long chains iteratively instead of recursing once per request.
+impl FromIterator<Text> for Ids {
+    fn from_iter<I: IntoIterator<Item = Text>>(iter: I) -> Self {
+        Self::new(None, iter.into_iter().collect())
+    }
+}
+
+impl Drop for IdsNode {
+    // Release long chains iteratively instead of recursing once per list.
     fn drop(&mut self) {
         let mut next = self.base.take();
-        while let Some(Digests(node)) = next {
+        while let Some(Ids(node)) = next {
             next = match std::sync::Arc::try_unwrap(node) {
                 Ok(mut node) => node.base.take(),
                 Err(_) => None,
@@ -1331,24 +1375,25 @@ impl Drop for DigestNode {
     }
 }
 
-impl PartialEq for Digests {
+impl PartialEq for Ids {
     fn eq(&self, other: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
             || (self.len() == other.len() && self.iter().eq(other.iter()))
     }
 }
 
-impl Eq for Digests {}
+impl Eq for Ids {}
 
-impl std::hash::Hash for Digests {
-    // Consistent with element-wise equality without walking the whole list.
+impl std::hash::Hash for Ids {
+    // Shared prefixes retain their content hash, so growing histories do not get
+    // rehashed, and changing a middle component does not collide with every revision.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.len().hash(state);
-        self.last().hash(state);
+        self.0.hash.hash(state);
     }
 }
 
-impl std::fmt::Debug for Digests {
+impl std::fmt::Debug for Ids {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
@@ -1645,4 +1690,70 @@ pub struct Report {
     pub max_cost_per_use_usd: f64,
     pub checks: Vec<CheckResult>,
     pub assumptions: Vec<String>,
+}
+
+#[cfg(test)]
+mod ids_tests {
+    use super::{Ids, Text};
+    use std::collections::HashSet;
+
+    #[test]
+    fn branches_keep_their_flat_values_after_ancestors_are_dropped() {
+        let texts = |values: &[&str]| values.iter().copied().map(Text::from).collect::<Vec<_>>();
+        let first = Ids::from(texts(&["a", "b", "c", "d"]));
+        let second = Ids::new(Some((&first, 2)), texts(&["e", "f"]).into());
+        let third = Ids::new(Some((&second, 3)), texts(&["g"]).into());
+        let branch = Ids::new(Some((&third, 1)), texts(&["h"]).into());
+        let last = Ids::sharing(Some(&branch), texts(&["a", "h", "i"]));
+        drop((first, second, third, branch));
+        let flat = texts(&["a", "h", "i"]);
+        for start in 0..=flat.len() + 1 {
+            assert_eq!(
+                last.iter_from(start).cloned().collect::<Vec<_>>(),
+                flat[start.min(flat.len())..]
+            );
+        }
+        assert_eq!(
+            serde_json::to_value(&last).unwrap(),
+            serde_json::to_value(&flat).unwrap()
+        );
+        assert!(HashSet::from([Ids::from(flat)]).contains(&last));
+        assert_ne!(last, Ids::from(texts(&["a", "different", "i"])));
+    }
+
+    #[test]
+    fn content_hashes_match_across_prefix_branches_and_distinguish_middle_revisions() {
+        use std::hash::{Hash, Hasher};
+        let hash = |ids: &Ids| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ids.hash(&mut hasher);
+            hasher.finish()
+        };
+        let flat =
+            |values: &[&str]| Ids::from(values.iter().map(|&s| Text::from(s)).collect::<Vec<_>>());
+        let first = flat(&["a", "b", "c", "d"]);
+        let branch = Ids::new(Some((&first, 2)), vec!["e".into(), "f".into()].into());
+        let end = Ids::new(Some((&branch, 3)), vec!["g".into()].into());
+        let same = flat(&["a", "b", "e", "g"]);
+        assert_eq!(end, same);
+        assert_eq!(hash(&end), hash(&same));
+        assert_ne!(hash(&end), hash(&flat(&["a", "b", "different", "g"])));
+        assert_eq!(hash(&Ids::new(Some((&end, 4)), vec![].into())), hash(&same));
+    }
+
+    #[test]
+    fn long_growing_lists_serialize_and_drop_without_recursion() {
+        let mut ids = Ids::from(vec![]);
+        for n in 0..20_000 {
+            ids = Ids::new(
+                Some((&ids, ids.len())),
+                vec![Text::from(n.to_string())].into(),
+            );
+        }
+        assert_eq!(ids.len(), 20_000);
+        let json = serde_json::to_value(&ids).unwrap();
+        assert_eq!(json[0], "0");
+        assert_eq!(json[19_999], "19999");
+        drop(ids);
+    }
 }

@@ -1,4 +1,4 @@
-//! The terminal report: one verdict per setting by default, every piece of evidence in details.
+//! The terminal report: one verdict per setting by default, summarized evidence in details.
 
 use std::fmt::Write as _;
 
@@ -14,6 +14,7 @@ use crate::model::{
     Harness, KeepaliveCheck, Millis, PeriodStatus, Profile, Report, RequestEvidence, Scalar, Ttl,
     UsageEstimate, Verdict,
 };
+use crate::prices::add_costs;
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
 
@@ -26,7 +27,7 @@ pub struct ReportOptions<'a> {
     pub color: bool,
     /// Use Unicode decorations such as arrows.
     pub unicode: bool,
-    /// Show every check's full evidence instead of one line per setting.
+    /// Show each check's evidence and aggregate repeated periods.
     pub details: bool,
     /// The host a report of several hosts describes; None for a report of this host alone.
     pub host: Option<Host<'a>>,
@@ -347,6 +348,17 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
     }
 }
 
+/// The observed token range, retaining unknown when no size is known.
+fn token_range(mut values: impl Iterator<Item = i64>) -> String {
+    match values.next() {
+        Some(first) => {
+            let (min, max) = values.fold((first, first), |(min, max), n| (min.min(n), max.max(n)));
+            format!("{min} to {max} tokens")
+        }
+        None => "unknown token range".into(),
+    }
+}
+
 /// The text being built, one wrapped line at a time.
 struct Out<'a> {
     text: String,
@@ -403,41 +415,62 @@ impl<'a> Out<'a> {
         self.notes("Assumption", &value.assumptions);
     }
     fn witnesses(&mut self, values: &[CacheReplayEvidence]) {
-        for evidence in values {
+        let mut groups = IndexMap::new();
+        let mut predecessors = IndexMap::new();
+        let mut unrecorded = 0;
+        for e in values {
+            let group = groups
+                .entry((e.ttl, e.state, e.outcome, e.reason.as_str()))
+                .or_insert((0usize, e));
+            group.0 += 1;
+            unrecorded += usize::from(e.predecessors.is_empty());
+            for p in &e.predecessors {
+                let group = predecessors
+                    .entry((
+                        p.state,
+                        p.prefix_evidence,
+                        p.cohort_known,
+                        p.reason.as_str(),
+                    ))
+                    .or_insert((0usize, p));
+                group.0 += 1;
+            }
+        }
+        for (count, e) in groups.into_values() {
             self.field(
                 "Cache evidence",
                 &format!(
-                    "{}/{} {}: {}, {}; {}",
-                    evidence.request,
-                    evidence.part,
-                    evidence.ttl.as_str(),
-                    label(&evidence.state),
-                    label(&evidence.outcome),
-                    evidence.reason
+                    "{count} parts; {}: {}, {}; {}; example {}/{}",
+                    e.ttl.as_str(),
+                    label(&e.state),
+                    label(&e.outcome),
+                    e.reason,
+                    e.request,
+                    e.part
                 ),
             );
-            for p in &evidence.predecessors {
-                self.field(
-                    "Predecessor",
-                    &format!(
-                        "{}/{}: {}, prefix {}, cohort {}, {}; {}",
-                        p.request,
-                        p.part,
-                        label(&p.state),
-                        label(&p.prefix_evidence),
-                        if p.cohort_known {
-                            "known"
-                        } else {
-                            "incomplete"
-                        },
-                        instant(Some(p.time)),
-                        p.reason
-                    ),
-                );
-            }
-            if evidence.predecessors.is_empty() {
-                self.field("Predecessor", "unrecorded");
-            }
+        }
+        for (count, p) in predecessors.into_values() {
+            self.field(
+                "Predecessor",
+                &format!(
+                    "{count} witnesses; {}, prefix {}, cohort {}; {}; example {}/{} at {}",
+                    label(&p.state),
+                    label(&p.prefix_evidence),
+                    if p.cohort_known {
+                        "known"
+                    } else {
+                        "incomplete"
+                    },
+                    p.reason,
+                    p.request,
+                    p.part,
+                    instant(Some(p.time))
+                ),
+            );
+        }
+        if unrecorded > 0 {
+            self.field("Predecessor", &format!("unrecorded for {unrecorded} parts"));
         }
     }
     fn title(&mut self) {
@@ -476,7 +509,7 @@ impl<'a> Out<'a> {
     }
 }
 
-/// Render all findings in a wrapping flow, with complete evidence available in details.
+/// Render all findings in a wrapping flow, with grouped evidence in details.
 pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
     let mut profiles = IndexMap::new();
     for p in &report.scan.profiles {
@@ -760,7 +793,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
     out.notes("Exposure assumption", &report.exposure.assumptions);
     out.blank();
     out.line(
-        "All check evidence shown. --json provides the complete structured report (schema version 1).",
+        "Repeated evidence is grouped; cache and attempt identifiers are examples. --json-full provides every period, witness and modeled compaction in the complete structured report (schema version 1).",
         0,
         0,
     );
@@ -1153,56 +1186,35 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                     "Off adjustment to common recorded baseline",
                     &scenario.adjustment.off,
                 );
-                for size in &scenario.by_context {
-                    out.field(
-                        "Idle by context",
-                        &format!(
-                            "{} tokens; {} periods; on minus off {}",
-                            or_unknown(size.tokens),
-                            size.periods,
-                            estimate(size.delta_usd)
-                        ),
-                    );
-                }
+                out.field(
+                    "Idle context sizes",
+                    &format!(
+                        "{} distinct sizes ({} unknown); {}; full size and period evidence: --json-full",
+                        scenario.by_context.len(),
+                        scenario
+                            .by_context
+                            .iter()
+                            .filter(|s| s.tokens.is_none())
+                            .count(),
+                        token_range(scenario.by_context.iter().filter_map(|s| s.tokens))
+                    ),
+                );
+                let mut groups = IndexMap::new();
                 for p in &scenario.periods {
+                    *groups
+                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .or_insert(0usize) += 1;
+                }
+                for ((status, timing, outcome, reason), count) in groups {
                     out.field(
-                        "Idle period",
+                        "Idle period group",
                         &format!(
-                            "{}; resume {}; context {} tokens; gap {}ms; {}; {}; {}; {}; boundary {}",
-                            p.request,
-                            p.resume.as_deref().unwrap_or("not observed"),
-                            or_unknown(p.context_tokens),
-                            p.gap_ms,
-                            label(&p.status),
-                            label(&p.return_timing),
-                            p.reason,
-                            label(&p.outcome),
-                            p.event.as_deref().unwrap_or("unobserved")
+                            "{count} periods; {}; {}; {}; {reason}",
+                            label(&status),
+                            label(&timing),
+                            label(&outcome)
                         ),
                     );
-                    out.field(
-                        "Activation",
-                        &format!(
-                            "{}; {}; version {}; client {}; flags {}",
-                            or_unknown(p.activation.map(js_number)),
-                            p.activation_basis,
-                            or_unknown(p.version.as_deref()),
-                            or_unknown(p.client.as_deref()),
-                            or_unknown(p.flag_state.as_deref())
-                        ),
-                    );
-                    out.cost("Idle summary", &p.summary_cost);
-                    if let Some(c) = &p.calibration {
-                        out.field(
-                            "Idle geometry",
-                            &format!(
-                                "{} summary output tokens; {} full resumed prefix tokens; boundaries {}",
-                                c.summary_tokens,
-                                c.prefix_tokens,
-                                c.events.join(", ")
-                            ),
-                        );
-                    }
                 }
                 for cohort in &scenario.activation_cohorts {
                     out.field(
@@ -1278,51 +1290,61 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                         estimate(scenario.sensitivity.reread_break_even_usd)
                     ),
                 );
-                for added in &scenario.added {
+                if !scenario.added.is_empty() {
                     out.field(
-                        "Added compaction",
+                        "Added compactions",
                         &format!(
-                            "at {}; {} summary input tokens; {} summary output tokens; {} resumed-prefix tokens",
-                            added.request,
-                            js_number(added.input_tokens as f64),
-                            js_number(added.summary_tokens as f64),
-                            js_number(added.prefix_tokens as f64)
+                            "{} summaries; input {}; output {}; resumed prefix {}",
+                            scenario.added.len(),
+                            token_range(scenario.added.iter().map(|a| a.input_tokens)),
+                            token_range(scenario.added.iter().map(|a| a.summary_tokens)),
+                            token_range(scenario.added.iter().map(|a| a.prefix_tokens))
                         ),
                     );
-                    for basis in &added.basis {
+                    out.cost(
+                        "Added summaries",
+                        &add_costs(scenario.added.iter().map(|a| &a.summary_cost)),
+                    );
+                    out.cost(
+                        "Resumed prefixes",
+                        &add_costs(scenario.added.iter().map(|a| &a.prefix_cost)),
+                    );
+                    let basis: IndexSet<_> = scenario
+                        .added
+                        .iter()
+                        .flat_map(|a| &a.basis)
+                        .map(|b| (&b.event, &b.request))
+                        .collect();
+                    for (event, request) in basis {
                         out.field(
                             "Geometry basis",
-                            &format!(
-                                "boundary {}; resumed request {}",
-                                basis.event, basis.request
-                            ),
+                            &format!("boundary {event}; resumed request {request}"),
                         );
                     }
-                    out.cost("Added summary", &added.summary_cost);
-                    out.cost("Resumed prefix", &added.prefix_cost);
                 }
                 out.witnesses(&scenario.cache_evidence);
             }
         }
     }
+    let mut attempts = IndexMap::new();
     for e in r.usage_estimates {
-        let basis = e.basis.join(", ");
+        let group = attempts
+            .entry((e.evidence, e.max_output_tokens, e.reason.as_str()))
+            .or_insert((0usize, e, IndexSet::new()));
+        group.0 += 1;
+        group.2.extend(&e.assumptions);
+    }
+    for (count, e, assumptions) in attempts.into_values() {
         out.field(
             "Attempt",
             &format!(
-                "{}: {}; basis {}; {}; output budget {} (not observed output)",
-                e.request,
-                label(&e.evidence),
-                if basis.is_empty() {
-                    "unavailable"
-                } else {
-                    &basis
-                },
-                e.reason,
-                or_unknown(e.max_output_tokens)
+                "{count} attempts; example {}: {}; {}; output budget {} (not observed output); full basis: --json-full",
+                e.request, label(&e.evidence), e.reason, or_unknown(e.max_output_tokens)
             ),
         );
-        out.notes("Attempt assumption", &e.assumptions);
+        for assumption in assumptions {
+            out.field("Attempt assumption", assumption);
+        }
     }
     match result {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
@@ -3412,6 +3434,111 @@ mod tests {
             before,
             "rendering must not alter JSON or analysis"
         );
+    }
+
+    #[test]
+    fn compact_json_keeps_every_check_cost_and_unknown_condition() {
+        let mut report = synthetic();
+        for check in &mut report.checks {
+            if let CheckResult::Idle(check) = check {
+                check.after_recommendations.periods[0].summary_cost = cost(None, 0.875);
+            }
+        }
+        let full = serde_json::to_value(&report).unwrap();
+        let compact = crate::compact::report(report);
+        assert_eq!(compact["schemaVersion"], 2);
+        for field in [
+            "context",
+            "historical",
+            "prices",
+            "assumptions",
+            "maxCostPerUseUsd",
+        ] {
+            assert_eq!(compact[field], full[field], "{field}");
+        }
+        assert_eq!(compact["scan"]["coverage"], full["scan"]["coverage"]);
+        assert_eq!(compact["scan"]["profiles"], full["scan"]["profiles"]);
+        let mut expected = full["checks"].clone();
+        let mut actual = compact["checks"].clone();
+        // Only these documented evidence fields change shape. All setting-specific
+        // dollars, missing-cost reasons, coverage and conditional baselines must match.
+        fn remove_evidence(row: &mut serde_json::Value) {
+            let object = row.as_object_mut().unwrap();
+            for key in [
+                "usageEstimates",
+                "cacheEvidence",
+                "periods",
+                "byContext",
+                "added",
+            ] {
+                object.remove(key);
+            }
+            for scenario in ["currentSettings", "afterRecommendations"] {
+                if let Some(s) = object.get_mut(scenario) {
+                    remove_evidence(s);
+                }
+            }
+            if let Some(scenarios) = object.get_mut("scenarios") {
+                for scenario in scenarios.as_array_mut().unwrap() {
+                    remove_evidence(scenario);
+                }
+            }
+        }
+        for (expected, actual) in expected
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(actual.as_array_mut().unwrap())
+        {
+            remove_evidence(expected);
+            remove_evidence(actual);
+        }
+        assert_eq!(actual, expected);
+        let idle = compact["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "idle-compaction")
+            .unwrap();
+        assert!(idle["afterRecommendations"]["periods"]["summaryCost"]["totalUsd"].is_null());
+        assert!(
+            !idle["afterRecommendations"]["periods"]["summaryCost"]["unknown"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn repeated_idle_evidence_is_grouped_without_changing_json() {
+        let mut report = synthetic();
+        let idle = report
+            .checks
+            .iter_mut()
+            .find_map(|c| match c {
+                CheckResult::Idle(i) => Some(i),
+                _ => None,
+            })
+            .unwrap();
+        let eligible = period(PeriodStatus::Eligible, Some("return"));
+        let mut unknown = period(PeriodStatus::Unknown, None);
+        unknown.reason = "unresolved synthetic setting".into();
+        let mut periods = vec![eligible; 100];
+        periods.push(unknown);
+        idle.after_recommendations.periods = periods;
+        idle.current_settings.periods.clear();
+        let before = json(&report);
+        let rendered = text(&report, None, true);
+        assert!(
+            rendered.contains("100 periods; eligible; after-expiry; unobserved; synthetic gap")
+        );
+        assert!(rendered.contains(
+            "1 periods; unknown; after-expiry; unobserved; unresolved synthetic setting"
+        ));
+        assert!(!rendered.contains("Idle period:"));
+        assert!(!rendered.contains("Idle by context:"));
+        assert!(rendered.contains("--json-full provides every period"));
+        assert_eq!(json(&report), before);
     }
 
     #[test]

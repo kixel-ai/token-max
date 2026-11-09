@@ -77,7 +77,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         evidence: RequestEvidence::Estimated,
         id: identity(&event.id),
         harness: event.harness,
-        session: event.session.clone(),
+        session: event.session.to_string(),
         time: event.time,
         end_time: event.time,
         agent: Agent::Subagent,
@@ -92,9 +92,9 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         trigger: event.trigger.clone(),
         reference: None,
         turn: None,
-        version: event.version.clone(),
-        client: event.client.clone(),
-        cwd: event.cwd.clone(),
+        version: event.version.as_deref().map(String::from),
+        client: event.client.as_deref().map(String::from),
+        cwd: event.cwd.as_deref().map(String::from),
         profiles: event.profiles.clone(),
         locations: vec![event.location.clone()],
         accounting: Accounting::Individual,
@@ -209,7 +209,7 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
             .map(|e| {
                 let mut aliases: IndexSet<usize> = IndexSet::new();
                 for origin in &e.origins {
-                    if let Some(&g) = group_of.get(origin.session.as_str()) {
+                    if let Some(&g) = group_of.get(&*origin.session) {
                         aliases.insert(g);
                     }
                 }

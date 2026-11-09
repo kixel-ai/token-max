@@ -531,7 +531,7 @@ struct Prior<'a> {
     reply: i64,
     keys: HashSet<(&'a str, usize)>,
     /// The tokenizer and the leading tools and system prompt by revision.
-    prefix: (String, &'a [Text]),
+    prefix: (String, Vec<&'a Text>),
     results: Option<&'a ResultTotals>,
 }
 
@@ -588,10 +588,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // Claude's recorded request shapes are exact. Codex records each change to
         // the context it sends, so its chronological state is what the model saw.
         // Any other request still prices its tool output, but cannot say what else it sent.
-        let (shown, shaped): (&[Text], bool) = match (r.harness, view.linkage) {
-            (Harness::Claude, Linkage::Wire) => (&view.components, true),
-            (Harness::Codex, Linkage::Chronological) => (&view.candidates, true),
-            _ => (&[], false),
+        let (shown, shaped): (Vec<&Text>, bool) = match (r.harness, view.linkage) {
+            (Harness::Claude, Linkage::Wire) => (view.components.iter().collect(), true),
+            (Harness::Codex, Linkage::Chronological) => (view.candidates.iter().collect(), true),
+            _ => (vec![], false),
         };
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
@@ -737,12 +737,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
         // where messages start in this request's tokens.
-        let prefix = (tokenizer, &shown[..view.prefix.min(shown.len())]);
-        let prefix = if codex {
-            (prefix.0, &shown[..0])
-        } else {
-            prefix
-        };
+        let prefix = (
+            tokenizer,
+            if codex {
+                vec![]
+            } else {
+                shown.iter().take(view.prefix).copied().collect()
+            },
+        );
         // Claude Code marks the last message for caching, so only a few framing
         // tokens follow a request's cached prefix, unless the pieces measured in
         // it do not fit there. Elsewhere content can run to the end of the input.

@@ -161,7 +161,7 @@ fn a_remote_report_matches_running_there() {
         "--ssh",
         "devbox",
         "--include-local",
-        "--json",
+        "--json-full",
         since[0],
         since[1],
     ]);
@@ -176,7 +176,7 @@ fn a_remote_report_matches_running_there() {
     assert_eq!(reports[0]["ssh"], Value::Null);
     assert_eq!(reports[1]["ssh"], "devbox");
     let (_, there, _) = run(hosts
-        .command(&["--json", since[0], since[1]])
+        .command(&["--json-full", since[0], since[1]])
         .env("HOME", &home));
     let there: Value = serde_json::from_str(&there).unwrap();
     assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
@@ -204,6 +204,151 @@ fn a_remote_report_matches_running_there() {
     let (_, alone, _) = hosts.run(&["--ssh", "devbox"]);
     assert!(alone.starts_with("token-max: devbox\n"), "{alone}");
     assert!(!alone.contains("this host") && !alone.contains("across hosts"));
+}
+
+#[test]
+fn keepalive_retains_costs_unknowns_and_caps_in_both_ssh_schemas() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    let fixture: Vec<Value> = std::fs::read_to_string(fixture("claude.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let mut records = vec![];
+    for (i, (session, time, read, write)) in [
+        ("sample", "00:00:00", 19_000, 1000),
+        ("sample", "00:01:00", 20_000, 1500),
+        ("main", "00:10:00", 100_000, 1000),
+        ("main", "00:40:00", 100_000, 1000),
+        ("main", "02:40:00", 0, 101_000),
+        ("unpriced", "00:20:00", 0, 1000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut r = fixture[1].clone();
+        r.as_object_mut().unwrap().remove("requestRef");
+        r["sessionId"] = session.into();
+        r["timestamp"] = format!("2026-11-01T{time}Z").into();
+        r["uuid"] = format!("block-{i}").into();
+        r["message"]["id"] = format!("message-{i}").into();
+        let u = &mut r["message"]["usage"];
+        u["output_tokens"] = 500.into();
+        u["cache_read_input_tokens"] = read.into();
+        u["cache_creation_input_tokens"] = write.into();
+        u["cache_creation"]["ephemeral_5m_input_tokens"] = 0.into();
+        u["cache_creation"]["ephemeral_1h_input_tokens"] = write.into();
+        if session == "unpriced" {
+            r["message"]["model"] = "unknown-model".into();
+        }
+        records.push(r);
+    }
+    std::fs::write(
+        home.join(".claude/projects/my project/main.jsonl"),
+        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let keepalive = |report: &Value| {
+        let mut check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "keepalive")
+            .unwrap()
+            .clone();
+        // Each invocation has its own clock; the replay costs do not depend on it.
+        check.as_object_mut().unwrap().remove("until");
+        check.as_object_mut().unwrap().remove("monthlySavingsUsd");
+        check
+    };
+    let mut full = None;
+    for flag in ["--json-full", "--json"] {
+        let args = [flag, "--since", "2026-11-01T00:10:00Z"];
+        let (status, stdout, stderr) = hosts.run(&[&["--ssh", "devbox"][..], &args].concat());
+        assert_ne!(status, 2, "{stderr}");
+        assert!(stderr.is_empty(), "{stderr}");
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        let combined: Value = serde_json::from_str(&stdout).unwrap();
+        let remote = &combined["hosts"][0]["report"];
+        let check = keepalive(remote);
+        assert_eq!(check["current"], Value::Null);
+        assert_eq!(check["action"], "advisory");
+        assert_eq!(check["savingsUsd"], Value::Null);
+        assert_eq!(check["marginUsd"], Value::Null);
+        assert_eq!(check["pingInputTokens"], 1000);
+        assert!(check["coverage"]["priced"].as_u64().unwrap() > 0);
+        assert!(check["unpriced"].as_u64().unwrap() > 0);
+        let caps = check["scenarios"].as_array().unwrap();
+        assert!(caps.len() >= 2);
+        for cap in caps {
+            assert!(cap["pingCostUsd"].as_f64().unwrap() > 0.0);
+            assert!(
+                cap["closedSavingsUsd"].as_f64().unwrap() > cap["savingsUsd"].as_f64().unwrap()
+            );
+        }
+        let (_, stdout, stderr) = run(hosts.command(&args).env("HOME", &home));
+        assert!(stderr.is_empty(), "{stderr}");
+        let local: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(check, keepalive(&local));
+        if let Some(full) = &full {
+            assert_eq!(&check, full);
+        } else {
+            assert_eq!(
+                remote["scan"]["cacheContext"]["requests"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            full = Some(check);
+        }
+    }
+}
+
+#[test]
+fn compact_ssh_reports_use_the_same_contract_as_local_reports() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert!(stderr.is_empty());
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let combined: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(combined["schemaVersion"], 2);
+    let reports = combined["hosts"].as_array().unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0]["ssh"], Value::Null);
+    assert_eq!(reports[1]["ssh"], "devbox");
+    for host in reports {
+        assert_eq!(host["report"]["schemaVersion"], 2);
+        assert_eq!(host["report"]["scan"]["requests"], 2);
+    }
+    let (_, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+    assert!(stderr.is_empty());
+    let there: Value = serde_json::from_str(&there).unwrap();
+    assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
+    for key in ["context", "historical"] {
+        assert_eq!(reports[1]["report"][key], there[key], "{key}");
+    }
+    let remote = reports[1]["report"]["checks"].as_array().unwrap();
+    let local = there["checks"].as_array().unwrap();
+    assert_eq!(remote.len(), local.len());
+    for (remote, local) in remote.iter().zip(local) {
+        // Each run has its own observation end; compare costs and decisions without
+        // the monthly extrapolation that uses that end.
+        for key in [
+            "check",
+            "action",
+            "owner",
+            "recommended",
+            "cost",
+            "coverage",
+            "comparisonCost",
+        ] {
+            assert_eq!(remote[key], local[key], "{key}");
+        }
+    }
 }
 
 #[test]
@@ -236,7 +381,8 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
     std::fs::write(&transcript, lines).unwrap();
 
-    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
+    let (status, stdout, stderr) =
+        hosts.run(&["--ssh", "devbox", "--include-local", "--json-full"]);
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -263,7 +409,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         assert_eq!(remote["waits"][field], 1, "{field}");
     }
     assert!(remote["waits"]["missCost"]["totalUsd"].as_f64().unwrap() > 0.0);
-    let (status, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+    let (status, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
     let there: Value = serde_json::from_str(&there).unwrap();
     assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
@@ -318,7 +464,8 @@ fn codex_context_and_output_keep_their_remote_controls() {
     let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
     std::fs::write(codex.join("sessions/rollout.jsonl"), lines).unwrap();
 
-    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
+    let (status, stdout, stderr) =
+        hosts.run(&["--ssh", "devbox", "--include-local", "--json-full"]);
     assert_eq!(status, 0, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -346,7 +493,7 @@ fn codex_context_and_output_keep_their_remote_controls() {
     // Native Codex usage has no billed tier, so these costs remain explicitly unknown.
     assert_eq!(output["priced"], 0);
     assert_eq!(output["estimatedUsd"], Value::Null);
-    let (_, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+    let (_, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
     assert_eq!(stderr, "");
     let there: Value = serde_json::from_str(&there).unwrap();
     assert_eq!(timeless(remote), timeless(&there));
@@ -417,7 +564,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
 
     // Two earlier turns establish eligibility for the first selected turn's recap.
     let args = [
-        "--json",
+        "--json-full",
         "--since",
         "2026-11-01T00:02:00Z",
         "--max-cost-per-use",
@@ -576,7 +723,7 @@ fn any_failed_destination_fails_the_whole_report() {
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
     }
-    let (status, _, stderr) = hosts.run(&["--ssh", "broken", "--json"]);
+    let (status, _, stderr) = hosts.run(&["--ssh", "broken", "--json-full"]);
     assert_eq!(status, 2);
     let diagnostic: Value = serde_json::from_str(&stderr).unwrap();
     assert_eq!(diagnostic["location"]["line"], 1);
@@ -648,7 +795,7 @@ fn destinations_and_directory_flags_are_unambiguous() {
         (&["--ssh", "a", "--ssh", "a"], "--ssh a is selected twice"),
         (&["--include-local"], "--include-local requires --ssh"),
         (&["--ssh", "a", "--claude-dir", "x"], "add --include-local"),
-        (&["--ssh-scan", "--json"], "invalid arguments"),
+        (&["--ssh-scan", "--json-full"], "invalid arguments"),
         (&["--ssh", "-x"], "invalid arguments"),
     ] {
         let (status, stdout, stderr) = hosts.run(args);

@@ -116,10 +116,14 @@ usage are left out of both sides, and a recommendation is made only when they
 could not flip it, assuming none differs by more than the largest measured
 difference. The verdict then says what share of requests was measured.
 
-Use `--details` for the full evidence cards: every check's owner, baseline,
-assumptions, uncertainty, cost components,
-break-evens, sensitivity scenarios, cache witnesses and sources. Nothing is hidden
-behind an interactive prompt or a top-N limit. The layout wraps long paths and
+Use `--details` for evidence cards: every check's owner, baseline, assumptions,
+uncertainty, cost components, break-evens, sensitivity scenarios, cache witnesses
+and sources. Repeated idle periods, cache witnesses and attempt estimates are
+grouped by their recorded outcomes and reasons. Token ranges and combined costs
+summarize modeled compactions; geometry sources are listed once. Identifiers in
+grouped cache and attempt evidence are examples. `--json-full` retains every period,
+witness, context-size comparison and modeled compaction. Nothing is hidden behind an interactive prompt
+or a top-N limit. The layout wraps long paths and
 names on narrow terminals. Redirected output keeps each field on one line so
 paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode. Redirected output
@@ -168,7 +172,14 @@ To turn these off, merge this into ~/.claude/settings.json, adding to any lists 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
 
-Text and `--json` share the same analysis. JSON schema version 1 includes profile aliases, snapshots, deduplicated requests, structural events,
+Text and both JSON forms share the same analysis. `--json` now emits compact
+schema version 2. It retains every check's costs, coverage, current and recommended
+values, owning controls, assumptions, uncertainty and sensitivity, plus every
+per-piece cost and use count in `context`. Large evidence arrays become counts
+and groups of distinct conditions; unknown totals remain null with their known
+subtotal and every unknown-cost reason. See [JSON migration](docs/json.md).
+
+Use `--json-full` for the full schema version 1 report. It includes profile aliases, snapshots, deduplicated requests, structural events,
 usage coverage, pre-window cache context, partially known costs, summary estimates,
 component measurements with exposure/invocation coverage, calibration provenance,
 per-piece context costs in `context`, and check results. Each check has a `check` discriminator: `claude-cache-ttl`
@@ -199,7 +210,8 @@ winner, and unknown fixed charges can cancel without pretending they cost zero.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans
-compatible histories; JSON and text retain predecessor witnesses. A comparison
+compatible histories; `--json-full` retains complete predecessor witnesses; compact JSON and text group
+their states and reasons. A comparison
 stays unpriced when those histories imply different cache charges, while invariant
 charges can still be compared.
 
@@ -264,7 +276,7 @@ token-max --ssh devbox --ssh user@laptop --include-local
 
 The destination runs `token-max --ssh-scan`, which discovers that host's own
 profiles from its home and environment, reads its transcripts and settings,
-and streams only the metadata `--json` would show, never prompt, reply or
+and streams only the metadata `--json-full` would show, never prompt, reply or
 component text. It looks for `token-max` on the non-interactive `PATH` and in
 `~/.cargo/bin`. Prices and every check run on this host, with one price
 catalog. `--claude-dir` and `--codex-dir` select local profiles only, so with
@@ -272,8 +284,9 @@ catalog. `--claude-dir` and `--codex-dir` select local profiles only, so with
 
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. With `--ssh`, JSON is
-`{"schemaVersion": 1, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
-report per host and `ssh` null for this host. A history copied between hosts
+`{"schemaVersion": 2, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
+report per host and `ssh` null for this host. `--json-full` uses version 1 for
+both the envelope and its full reports. A history copied between hosts
 counts in each host's report, so don't add amounts across hosts. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination.

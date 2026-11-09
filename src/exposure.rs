@@ -12,10 +12,10 @@ use sha2::{Digest, Sha256};
 
 use crate::context::synced_short;
 use crate::model::{
-    Calibration, CalibrationSample, Category, Component, Digests, Exposure, ExposureScan,
-    ExposureView, Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals,
-    Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
+    Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
+    Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
+    Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals, Scope, Size,
+    Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -125,7 +125,7 @@ pub struct ExposureCollector {
     version: Option<String>,
     uncertain: bool,
     deferred: IndexSet<Text>,
-    digests: HashMap<String, Digests>,
+    digests: HashMap<String, Ids>,
     // Catalog names keyed without ASCII case, retaining their spelling for use attribution.
     known_skills: HashMap<String, String>,
     // Explicit typed skill blocks establish use evidence without claiming catalog membership.
@@ -150,6 +150,8 @@ pub struct ExposureCollector {
     pending_tools: HashMap<String, PendingTool>,
     lists: HashSet<Ids>,
     views: HashSet<Arc<ExposureView>>,
+    // The last view created, whose lists the next one usually extends.
+    previous: Option<Arc<ExposureView>>,
 }
 
 /// The transcript file being observed.
@@ -177,7 +179,7 @@ struct ToolResult {
 /// The leading digests of one list whose blobs are all text, as of a `blob_epoch`.
 struct TextPrefix {
     // Keeps the list, and so its address, alive.
-    _items: Digests,
+    _items: Ids,
     epoch: u64,
     length: usize,
     characters: i64,
@@ -389,6 +391,7 @@ impl ExposureCollector {
             invalidated: false,
             pending_tools: HashMap::new(),
             lists: HashSet::new(),
+            previous: None,
             views: HashSet::new(),
         }
     }
@@ -548,7 +551,8 @@ impl ExposureCollector {
             mut views,
             ..
         } = self;
-        let inherited = |lists: &mut HashSet<Ids>, view: &ExposureView| {
+        let mut previous: Option<Ids> = None;
+        let mut inherited = |lists: &mut HashSet<Ids>, view: &ExposureView| {
             let ids = view
                 .components
                 .iter()
@@ -556,7 +560,9 @@ impl ExposureCollector {
                 .filter(|id| since.is_some_and(|s| components[&***id].first_seen < s))
                 .cloned()
                 .collect();
-            intern_list(lists, ids)
+            let ids = intern_list(lists, previous.as_ref(), ids);
+            previous = Some(ids.clone());
+            ids
         };
         // Final views by the one observed view they derive from.
         let mut settled: HashMap<usize, Arc<ExposureView>> = HashMap::new();
@@ -586,7 +592,7 @@ impl ExposureCollector {
                 Some(first) if found.iter().all(|v| equivalent(v, first)) => {
                     let removed = unique(found.iter().flat_map(|v| v.removed.iter()));
                     let view = ExposureView {
-                        removed: intern_list(&mut lists, removed),
+                        removed: intern_list(&mut lists, None, removed),
                         inherited: inherited(&mut lists, first),
                         ..(**first).clone()
                     };
@@ -601,11 +607,11 @@ impl ExposureCollector {
                     let removed = unique(found.iter().flat_map(|v| v.removed.iter()));
                     let deferred = unique(found.iter().flat_map(|v| v.deferred.iter()));
                     let mut view = ExposureView {
-                        components: intern_list(&mut lists, vec![]),
-                        candidates: intern_list(&mut lists, candidates),
-                        removed: intern_list(&mut lists, removed),
-                        inherited: intern_list(&mut lists, vec![]),
-                        deferred: intern_list(&mut lists, deferred),
+                        components: intern_list(&mut lists, None, vec![]),
+                        candidates: intern_list(&mut lists, None, candidates),
+                        removed: intern_list(&mut lists, None, removed),
+                        inherited: intern_list(&mut lists, None, vec![]),
+                        deferred: intern_list(&mut lists, None, deferred),
                         linkage: Linkage::Unknown,
                         coverage: TextCoverage::Unknown,
                         references: None,
@@ -655,7 +661,7 @@ impl ExposureCollector {
             ];
             for id in lists
                 .into_iter()
-                .filter(|list| seen.insert(list.as_ptr() as usize))
+                .filter(|list| seen.insert(list.address()))
                 .flat_map(|list| list.iter())
             {
                 let index = components.get_index_of(&**id).expect("observed component");
@@ -676,7 +682,12 @@ impl ExposureCollector {
             components: components
                 .into_values()
                 .zip(used)
-                .filter_map(|(c, used)| used.then_some(c))
+                .filter(|&(_, used)| used)
+                .map(|(mut c, _)| {
+                    // One location per sighting, so growth slack adds up over a long history.
+                    c.locations.shrink_to_fit();
+                    c
+                })
                 .collect(),
             requests: exposures,
             invocations: invocations
@@ -828,7 +839,7 @@ impl ExposureCollector {
     }
 
     /// Total characters of a request's message blobs, or None unless every one is known text.
-    fn message_characters(&mut self, items: &Digests) -> Option<i64> {
+    fn message_characters(&mut self, items: &Ids) -> Option<i64> {
         let (mut length, mut characters, mut opaque) = (0, 0, false);
         if let Some((base, keep)) = items.base()
             && let Some(prefix) = self.prefixes.get(&base.address())
@@ -866,8 +877,9 @@ impl ExposureCollector {
         (length == items.len()).then_some(characters)
     }
 
-    fn list(&mut self, ids: Vec<Text>) -> Ids {
-        intern_list(&mut self.lists, ids)
+    /// One shared copy of `ids`, extending the same list of the previous view.
+    fn list(&mut self, field: fn(&ExposureView) -> &Ids, ids: Vec<Text>) -> Ids {
+        intern_list(&mut self.lists, self.previous.as_deref().map(field), ids)
     }
 
     /// Record one sighting of a component revision and return its id.
@@ -1106,7 +1118,9 @@ impl ExposureCollector {
     }
 
     fn view(&mut self, view: ExposureView) -> Arc<ExposureView> {
-        intern_view(&mut self.views, view)
+        let view = intern_view(&mut self.views, view);
+        self.previous = Some(view.clone());
+        view
     }
 
     fn chronological(&mut self) -> Arc<ExposureView> {
@@ -1122,11 +1136,11 @@ impl ExposureCollector {
         let removed = self.pending_removed.iter().cloned().collect();
         let deferred = self.deferred.iter().cloned().collect();
         let view = ExposureView {
-            components: self.list(vec![]),
-            candidates: self.list(current),
-            removed: self.list(removed),
-            inherited: self.list(vec![]),
-            deferred: self.list(deferred),
+            components: self.list(|v| &v.components, vec![]),
+            candidates: self.list(|v| &v.candidates, current),
+            removed: self.list(|v| &v.removed, removed),
+            inherited: self.list(|v| &v.inherited, vec![]),
+            deferred: self.list(|v| &v.deferred, deferred),
             linkage: if any {
                 Linkage::Chronological
             } else {
@@ -1434,7 +1448,7 @@ impl ExposureCollector {
         for v in array(raw.get("tail"))? {
             tail.push(Text::from(safe::id(v)?));
         }
-        let tail: Ids = tail.into();
+        let tail: Arc<[Text]> = tail.into();
         let prior = base.as_ref().and_then(|b| self.digests.get(b));
         let items = match (&base, prior) {
             (Some(_), Some(prior)) => {
@@ -1442,10 +1456,13 @@ impl ExposureCollector {
                     .map(|k| k as u64)
                     .filter(|&k| k <= prior.len() as u64)
                     .ok_or_else(|| ScanError::new("invalid request digest prefix length"))?;
-                Some(Digests::new(Some((prior, keep as usize)), tail.clone()))
+                Some(Ids::new(
+                    Some((prior, keep as usize)),
+                    tail.iter().cloned().collect(),
+                ))
             }
             (Some(_), None) => None,
-            (None, _) => Some(Digests::new(None, tail.clone())),
+            (None, _) => Some(Ids::new(None, tail.iter().cloned().collect())),
         };
         if let Some(Value::String(_)) = raw.get("requestDigest")
             && let Some(items) = &items
@@ -1539,11 +1556,11 @@ impl ExposureCollector {
             DIGEST_REASON
         };
         let view = ExposureView {
-            components: self.list(components),
-            candidates: self.list(candidates),
-            removed: self.list(removed),
-            inherited: self.list(vec![]),
-            deferred: self.list(deferred),
+            components: self.list(|v| &v.components, components),
+            candidates: self.list(|v| &v.candidates, candidates),
+            removed: self.list(|v| &v.removed, removed),
+            inherited: self.list(|v| &v.inherited, vec![]),
+            deferred: self.list(|v| &v.deferred, deferred),
             linkage: if wired {
                 Linkage::Wire
             } else {
@@ -1557,7 +1574,7 @@ impl ExposureCollector {
             references: Some(References {
                 base,
                 keep,
-                tail,
+                tail: Ids::new(None, tail),
                 items,
             }),
             complete_characters: complete,
@@ -1990,8 +2007,8 @@ fn visibility(
             .or_insert(next);
         let key = (
             cohort,
-            e.view.components.as_ptr() as usize,
-            e.view.candidates.as_ptr() as usize,
+            e.view.components.address(),
+            e.view.candidates.address(),
         );
         let g = groups.entry(key).or_insert_with(|| Group {
             r,
@@ -2241,11 +2258,12 @@ fn unique<'a>(ids: impl Iterator<Item = &'a Text>) -> Vec<Text> {
     ids.collect::<IndexSet<_>>().into_iter().cloned().collect()
 }
 
-fn intern_list(lists: &mut HashSet<Ids>, ids: Vec<Text>) -> Ids {
-    if let Some(found) = lists.get(ids.as_slice()) {
+/// One shared copy of `ids`, keeping the prefix it has in common with `like`.
+fn intern_list(lists: &mut HashSet<Ids>, like: Option<&Ids>, ids: Vec<Text>) -> Ids {
+    let ids = Ids::sharing(like, ids);
+    if let Some(found) = lists.get(&ids) {
         return found.clone();
     }
-    let ids: Ids = ids.into();
     lists.insert(ids.clone());
     ids
 }
@@ -3354,15 +3372,21 @@ mod tests {
         assert_eq!(first.coverage, TextCoverage::Partial);
         assert_eq!(first.reasons, [CHRONOLOGICAL]);
         assert_eq!(second.candidates.len(), 1);
-        assert_ne!(second.candidates[0], first.candidates[0]);
-        assert_eq!(&*second.removed, &*first.candidates);
+        assert_ne!(
+            second.candidates.iter().next(),
+            first.candidates.iter().next()
+        );
+        assert_eq!(second.removed, first.candidates);
         assert_eq!(second.deferred.len(), 1);
-        assert_eq!(category(&scan, &second.deferred[0]), Category::McpSchema);
+        assert_eq!(
+            category(&scan, second.deferred.iter().next().unwrap()),
+            Category::McpSchema
+        );
         // A removal is reported once; later requests carry the same revision.
         assert!(third.removed.is_empty());
         assert_eq!(third.candidates, second.candidates);
         // Revisions first seen before the window are inherited.
-        assert_eq!(&*second.inherited, &*second.candidates);
+        assert_eq!(second.inherited, second.candidates);
         assert_eq!(scan.components.len(), 3);
     }
 
@@ -3942,11 +3966,11 @@ mod tests {
     fn calibrate_pools_matching_cohorts() {
         let view = |characters: i64, model: &str| {
             Arc::new(ExposureView {
-                components: Ids::from([]),
-                candidates: Ids::from([]),
-                removed: Ids::from([]),
-                inherited: Ids::from([]),
-                deferred: Ids::from([]),
+                components: Ids::from(vec![]),
+                candidates: Ids::from(vec![]),
+                removed: Ids::from(vec![]),
+                inherited: Ids::from(vec![]),
+                deferred: Ids::from(vec![]),
                 linkage: Linkage::Wire,
                 coverage: TextCoverage::CompleteText,
                 references: None,

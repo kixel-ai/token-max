@@ -347,7 +347,7 @@ impl CacheBoundaries {
             }
             for origin in &event.origins {
                 times
-                    .entry(origin.session.clone())
+                    .entry(origin.session.to_string())
                     .or_default()
                     .push(event.time);
             }

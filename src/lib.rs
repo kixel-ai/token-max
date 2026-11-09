@@ -4,6 +4,7 @@ pub mod background;
 pub mod bash;
 pub mod cache;
 pub mod cli;
+mod compact;
 pub mod compaction;
 pub mod context;
 pub mod controls;

@@ -173,7 +173,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
         let Some(end) = start
             .tool_id
             .as_deref()
-            .and_then(|id| ends.get(&(start.session.as_str(), id)))
+            .and_then(|id| ends.get(&(start.session.as_ref(), id)))
         else {
             continue;
         };
@@ -193,7 +193,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
         long += 1;
         timed_out += u64::from(end.shell.is_some_and(|s| s.timed_out));
         polling += u64::from(shell.polls);
-        let next = sessions.get(start.session.as_str()).and_then(|list| {
+        let next = sessions.get(start.session.as_ref()).and_then(|list| {
             list.get(list.partition_point(|r| r.time < end.time))
                 .copied()
         });

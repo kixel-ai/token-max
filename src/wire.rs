@@ -17,7 +17,7 @@ use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::model::{Digests, Exposure, ExposureView, Ids, Location, ResultTotals, Scan, Text};
+use crate::model::{Exposure, ExposureView, Ids, Location, ResultTotals, Scan, Text};
 
 /// This build's identity: the package version and a fingerprint of the types a stream carries.
 ///
@@ -101,14 +101,13 @@ enum Table {
     Text,
     Ids,
     View,
-    Digests,
     Results,
 }
 
 /// Each table maps a shared value's address to its index, assigned once it has been written.
 #[derive(Default)]
 struct Encoder {
-    tables: [HashMap<usize, u64>; 5],
+    tables: [HashMap<usize, u64>; 4],
 }
 
 /// Values in the order the encoder indexed them.
@@ -117,7 +116,6 @@ struct Decoder {
     text: Vec<Text>,
     ids: Vec<Ids>,
     views: Vec<Arc<ExposureView>>,
-    digests: Vec<Digests>,
     results: Vec<Arc<ResultTotals>>,
 }
 
@@ -241,37 +239,11 @@ pub mod ids {
     use super::*;
 
     pub fn serialize<S: Serializer>(ids: &Ids, serializer: S) -> Result<S::Ok, S::Error> {
-        let address = Arc::as_ptr(ids) as *const u8 as usize;
-        shared(Table::Ids, address, serializer, |s| {
-            s.collect_seq(ids.iter().map(SharedText))
-        })
+        ids.serialize(serializer)
     }
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Ids, D::Error> {
-        struct Element(Text);
-        impl<'de> Deserialize<'de> for Element {
-            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                text::deserialize(d).map(Element)
-            }
-        }
-        struct V;
-        impl<'de> Visitor<'de> for V {
-            type Value = Ids;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("an identifier list or an earlier list's index")
-            }
-            fn visit_u64<E: de::Error>(self, index: u64) -> Result<Ids, E> {
-                earlier(index, |d| &d.ids)
-            }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Ids, A::Error> {
-                let mut ids = Vec::new();
-                while let Some(Element(text)) = seq.next_element()? {
-                    ids.push(text);
-                }
-                remember(Ids::from(ids), |d| &mut d.ids)
-            }
-        }
-        deserializer.deserialize_any(V)
+        Ids::deserialize(deserializer)
     }
 }
 
@@ -379,13 +351,13 @@ impl<'de> Deserialize<'de> for Exposure {
     }
 }
 
-impl Serialize for Digests {
+impl Serialize for Ids {
     /// A flat list in the report. In a stream, an index once sent, and otherwise every unsent
     /// list in its chain, oldest first, each as its base's index, the length it keeps from
     /// that base and its own tail. A chain can be thousands of requests long, so it is sent
     /// as one array rather than nested.
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let index = match sent(Table::Digests, self.address()) {
+        let index = match sent(Table::Ids, self.address()) {
             None => return serializer.collect_seq(self.iter()),
             Some(index) => index,
         };
@@ -394,7 +366,7 @@ impl Serialize for Digests {
         }
         let mut chain = vec![self];
         while let Some((base, _)) = chain[chain.len() - 1].base() {
-            if sent(Table::Digests, base.address()) != Some(None) {
+            if sent(Table::Ids, base.address()) != Some(None) {
                 break;
             }
             chain.push(base);
@@ -405,66 +377,71 @@ impl Serialize for Digests {
 }
 
 /// One list of an unsent chain, whose base was sent before it.
-struct Node<'a>(&'a Digests);
+struct Node<'a>(&'a Ids);
 
 impl Serialize for Node<'_> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        struct Tail<'a>(&'a Ids);
+        struct Tail<'a>(&'a [Text]);
         impl Serialize for Tail<'_> {
             fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-                ids::serialize(self.0, serializer)
+                serializer.collect_seq(self.0.iter().map(SharedText))
             }
         }
         let (base, keep) = match self.0.base() {
             Some((base, keep)) => {
-                let index = sent(Table::Digests, base.address()).flatten();
+                let index = sent(Table::Ids, base.address()).flatten();
                 (Some(index.expect("bases are sent first")), keep)
             }
             None => (None, 0),
         };
-        let mut node = serializer.serialize_struct("Digests", 3)?;
+        let mut node = serializer.serialize_struct("Ids", 3)?;
         node.serialize_field("base", &base)?;
         node.serialize_field("keep", &keep)?;
         node.serialize_field("tail", &Tail(self.0.tail()))?;
         let ok = node.end()?;
-        index(Table::Digests, self.0.address());
+        index(Table::Ids, self.0.address());
         Ok(ok)
     }
 }
 
-impl<'de> Deserialize<'de> for Digests {
+impl<'de> Deserialize<'de> for Ids {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Node {
             base: Option<u64>,
             keep: usize,
-            #[serde(with = "ids")]
-            tail: Ids,
+            tail: Vec<Element>,
+        }
+        struct Element(Text);
+        impl<'de> Deserialize<'de> for Element {
+            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                text::deserialize(d).map(Element)
+            }
         }
         struct V;
         impl<'de> Visitor<'de> for V {
-            type Value = Digests;
+            type Value = Ids;
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str("a digest chain or an earlier list's index")
             }
-            fn visit_u64<E: de::Error>(self, index: u64) -> Result<Digests, E> {
-                earlier(index, |d| &d.digests)
+            fn visit_u64<E: de::Error>(self, index: u64) -> Result<Ids, E> {
+                earlier(index, |d| &d.ids)
             }
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Digests, A::Error> {
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Ids, A::Error> {
                 let mut last = None;
                 while let Some(Node { base, keep, tail }) = seq.next_element()? {
-                    let base: Option<Digests> = base
-                        .map(|index| earlier(index, |d| &d.digests))
-                        .transpose()?;
+                    let tail = tail.into_iter().map(|e| e.0).collect();
+                    let base: Option<Ids> =
+                        base.map(|index| earlier(index, |d| &d.ids)).transpose()?;
                     let digests = match &base {
                         Some(base) if keep > 0 && keep <= base.len() => {
-                            Digests::new(Some((base, keep)), tail)
+                            Ids::new(Some((base, keep)), tail)
                         }
-                        None if keep == 0 => Digests::new(None, tail),
+                        None if keep == 0 => Ids::new(None, tail),
                         _ => return Err(de::Error::custom("invalid digest prefix length")),
                     };
-                    last = Some(remember(digests, |d| &mut d.digests)?);
+                    last = Some(remember(digests, |d| &mut d.ids)?);
                 }
                 last.ok_or_else(|| de::Error::custom("empty digest chain"))
             }
@@ -484,7 +461,7 @@ mod tests {
         names.iter().map(|n| Text::from(*n)).collect()
     }
 
-    fn view(items: Digests) -> Arc<ExposureView> {
+    fn view(items: Ids) -> Arc<ExposureView> {
         Arc::new(ExposureView {
             components: ids(&["tool", "system"]),
             candidates: ids(&[]),
@@ -496,7 +473,7 @@ mod tests {
             references: Some(References {
                 base: None,
                 keep: Some(0),
-                tail: items.tail().clone(),
+                tail: items.tail().to_vec().into(),
                 items: Some(items),
             }),
             complete_characters: Some(10),
@@ -512,8 +489,8 @@ mod tests {
         w.fixture(w.claude.join("projects/project/main.jsonl"), "claude.jsonl");
         w.fixture(w.codex.join("sessions/rollout.jsonl"), "codex.jsonl");
         let mut scan = scan(&w.scan_options()).unwrap();
-        let first = Digests::new(None, ids(&["a", "b"]));
-        let second = Digests::new(Some((&first, 1)), ids(&["c"]));
+        let first = Ids::from(vec!["a".into(), "b".into()]);
+        let second = Ids::new(Some((&first, 1)), vec!["c".into()].into());
         let shared = view(second);
         let results = Arc::new(ResultTotals {
             epoch: 17,
@@ -599,9 +576,9 @@ mod tests {
     #[test]
     fn long_unsent_digest_chains_are_not_nested() {
         let mut scan = sample();
-        let mut items = Digests::new(None, ids(&["0"]));
+        let mut items = Ids::from(vec!["0".into()]);
         for n in 1..1000 {
-            items = Digests::new(Some((&items, n)), ids(&[&n.to_string()]));
+            items = Ids::new(Some((&items, n)), vec![n.to_string().into()].into());
         }
         scan.exposure.requests.push(Exposure {
             request: "late".into(),

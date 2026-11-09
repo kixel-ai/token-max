@@ -1063,7 +1063,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             i.harness == Harness::Codex
                 && i.kind == InvocationKind::McpCall
                 && i.via == Via::Completion
-                && i.status == InvocationStatus::Completed
+                && matches!(
+                    i.status,
+                    InvocationStatus::Completed | InvocationStatus::Failed
+                )
         })
         .flat_map(|i| i.profiles.iter().map(|p| (i.target.as_str(), p.as_str())))
         .collect();
@@ -1114,6 +1117,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for (owner, key, c) in &mut result {
         c.details = details.remove(&(*owner, *key)).unwrap_or_default();
         c.details.sort_by(|a, b| a.name.cmp(&b.name));
+        if c.verdict == Some(Verdict::Off) {
+            for detail in &mut c.details {
+                detail.verdict = None;
+            }
+        }
     }
     let mut result: Vec<_> = result.into_iter().map(|(_, _, c)| c).collect();
     let order = |c: &ContextCost| c.estimated_usd.unwrap_or(-1.0);
@@ -1513,7 +1521,8 @@ mod tests {
             }],
             ..ExposureScan::default()
         };
-        let rows = costs(&scan, &[request("r1", 1, 0, 600, 0)], 1.0);
+        let requests = [request("r1", 1, 0, 600, 0)];
+        let rows = costs(&scan, &requests, 1.0);
         let server = row(&rows, "docs");
         assert_eq!(
             (server.tokens, server.priced, server.calls),
@@ -1529,6 +1538,19 @@ mod tests {
         assert_eq!(
             control_text(read.control.as_ref().unwrap(), Harness::Claude),
             r#""permissions": {"deny": ["mcp__docs__read"]}"#
+        );
+        let off = costs(&scan, &requests, 0.0);
+        let off = row(&off, "docs");
+        assert_eq!(off.verdict, Some(Verdict::Off));
+        assert!(off.details.iter().all(|d| d.verdict.is_none()));
+        assert!(off.details.iter().any(|d| d.control.is_some()));
+        let json = serde_json::to_value(off).unwrap();
+        assert!(
+            json["details"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["verdict"].is_null())
         );
         let discovery = row(&server.details, "mcp__docs");
         assert_eq!(
@@ -1588,11 +1610,12 @@ mod tests {
 
     #[test]
     fn codex_blocks_require_native_raw_tool_identity() {
-        for (exposed, raw) in [
-            ("read", Some("read")),
-            ("read", None),
-            ("read_file", Some("read-file")),
-            ("read_file", Some("read.file")),
+        for (exposed, raw, status) in [
+            ("read", Some("read"), InvocationStatus::Completed),
+            ("read", Some("read"), InvocationStatus::Failed),
+            ("read", None, InvocationStatus::Completed),
+            ("read_file", Some("read-file"), InvocationStatus::Completed),
+            ("read_file", Some("read.file"), InvocationStatus::Completed),
         ] {
             let mut scan = ExposureScan {
                 components: vec![component(
@@ -1618,7 +1641,7 @@ mod tests {
                 let mut invocation = skill_use(InvocationKind::McpCall, "unused", 2);
                 invocation.harness = Harness::Codex;
                 invocation.via = Via::Completion;
-                invocation.status = InvocationStatus::Completed;
+                invocation.status = status;
                 invocation.target = identity(&format!("mcp:mcp__docs-server__{raw}"));
                 scan.invocations.push(invocation);
             }

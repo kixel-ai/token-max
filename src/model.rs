@@ -1590,7 +1590,7 @@ pub struct ContextCost {
     pub profiles: Vec<String>,
     pub kind: ContextKind,
     pub name: String,
-    /// The settings change that removes it, or null when no setting does.
+    /// The settings change that removes it, or null without a resolved control.
     pub control: Option<Control>,
     /// Selected requests that carried it.
     pub requests: u64,
@@ -1609,7 +1609,8 @@ pub struct ContextCost {
     pub current: bool,
     /// estimatedUsd divided by uses, counting no use as one; null without both.
     pub cost_per_use_usd: Option<f64>,
-    /// "off" when it cost more per use than the limit; null when it cannot be switched off or was never priced.
+    /// "off" above the cost-per-use limit; null when unpriced, unswitchable,
+    /// no longer sent, or covered by a server-off verdict.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,

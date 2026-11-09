@@ -19,7 +19,8 @@ Do not sum parent and detail rows. Each estimate uses its own priced-request
 coverage, so differing coverage can also make detail estimates sum to a
 different amount than the parent estimate. A tool's `control` blocks just that
 tool; recommendations to disable a whole server cover its tool recommendations in
-the text report and settings snippet. `instructionSize` is null without
+the text report and settings snippet. A covered tool's `verdict` is null, while
+its cost, use count and control remain available. `instructionSize` is null without
 recorded text, otherwise `{ "bytes": N, "lines": N }` for the latest recorded
 revision. Codex sizes measure rendered text, including any wrappers, and do
 not establish the source-file chain size. These structured fields are retained

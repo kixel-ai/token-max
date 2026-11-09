@@ -1657,34 +1657,63 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
-/// Explain supported alternatives without inventing the counterfactual discovery work.
+/// Shared loading guidance appears once per harness, ahead of the server rows.
+fn mcp_guidance<'a>(costs: impl Iterator<Item = &'a ContextCost>) -> Vec<&'static str> {
+    let mut claude = false;
+    let mut codex = false;
+    let mut any = false;
+    for c in costs.filter(|c| c.kind == ContextKind::McpServer) {
+        any = true;
+        match c.harness {
+            Harness::Claude => claude = true,
+            Harness::Codex if c.name != "codex_apps" => codex = true,
+            _ => {}
+        }
+    }
+    let mut notes = vec![];
+    if claude {
+        notes.push("Claude MCP loading: env.ENABLE_TOOL_SEARCH in settings.json defaults to deferral on supported models. true defers tools; false loads upfront. auto uses a 10% schema threshold; auto:N changes the percentage. A server's alwaysLoad=true loads upfront; alwaysLoad=false overrides tool-author upfront annotations on Claude Code 2.1.287+. A small frequently used toolset can cost less upfront. https://code.claude.com/docs/en/mcp#configure-tool-search");
+        notes.push("Claude tool search needs Opus 4/Sonnet 4/Haiku 4.5 or later; Google Agent Platform needs 4.5 or later. Azure-hosted Foundry deployments do not support it. Experimental-beta restrictions, HIPAA policy, denying ToolSearch, and gateways can prevent deferral.");
+    }
+    if codex {
+        notes.push("Codex MCP loading: omit_tools_from changes exposure on direct (initial tools), deferred (tool search), and code_mode surfaces. Omission does not block calls or guarantee another surface exists. Use enabled_tools to allow tools or disabled_tools to block them; the deny list wins. A per-tool patch requires a native completion proving the raw tool name in every owning profile; exposed names may be sanitized or shortened. https://learn.chatgpt.com/docs/config-file/config-reference");
+    }
+    if any {
+        notes.push("Tool definitions and discovery context are included in their server's cost. Missing discovery records mean unknown overhead, not zero. Search turns, returned definitions, cache changes and repeated loading cannot be attributed completely, so net deferral savings are unknown and no loading change is recommended.");
+    }
+    notes
+}
+
+/// Per-server controls and instruction guidance beneath their owning row.
 fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<String> {
     if c.kind == ContextKind::McpServer {
-        let mut notes = match c.harness {
+        return match c.harness {
             Harness::Claude => vec![format!(
-                "Deferral: review env.ENABLE_TOOL_SEARCH in settings.json and mcpServers.{}.alwaysLoad in its MCP configuration (.mcp.json or the scope that declares it). ENABLE_TOOL_SEARCH=true defers tools; ENABLE_TOOL_SEARCH=false loads upfront. auto uses a 10% schema threshold; auto:N changes the percentage. alwaysLoad=true exempts this server; alwaysLoad=false forces deferral on Claude Code 2.1.287+. A small frequently used toolset can cost less upfront.", c.name
-            ), "Tool search needs Opus 4/Sonnet 4/Haiku 4.5 or later; Google Agent Platform needs 4.5 or later. Azure-hosted Foundry deployments do not support it. Experimental-beta restrictions, HIPAA policy, denying ToolSearch, and gateways can prevent deferral. https://code.claude.com/docs/en/mcp#configure-tool-search".into()],
+                "Server override: mcpServers.{}.alwaysLoad in the MCP configuration that declares it (.mcp.json or that scope's configuration).", c.name
+            )],
             Harness::Codex if c.name == "codex_apps" => vec![
                 "Per-app controls: apps.<id>.enabled=false, apps.<id>.tools.<tool>.enabled=false, and apps.<id>.omit_tools_from=[\"direct\"] use the app id reported by app/installed, not its display name. These transcripts do not establish that id mapping, so per-app costs and settings patches are unavailable. https://learn.chatgpt.com/docs/app-server#apps-connectors".into()
             ],
-            Harness::Codex => {
-                let owner = c.control.as_ref().filter(|control| control.path.first().is_some_and(|p| p == "mcp_servers"));
-                vec![match owner {
-                    Some(control) => {
-                        let mut omission = control.clone();
-                        omission.path[2] = "omit_tools_from".into();
-                        omission.value = ControlValue::Text("direct".into());
-                        omission.append = true;
-                        format!("Exposure: {} omits initial tools; deferred (tool search) and code_mode are other surfaces. Omission does not block calls or guarantee another surface exists. Use enabled_tools to allow tools or disabled_tools to block them; the deny list wins. A per-tool patch requires a native completion proving the raw tool name in every owning profile; exposed names may be sanitized or shortened. https://learn.chatgpt.com/docs/config-file/config-reference", control_text(&omission, Harness::Codex))
-                    }
-                    None => "Exposure controls and per-tool blocks cannot be mapped to a unique config.toml server id here. Configure the plugin or launcher that supplies it; do not guess the id from its sanitized name. https://learn.chatgpt.com/docs/extend/mcp".into(),
-                }]
-            }
+            Harness::Codex => c.control.as_ref()
+                .filter(|control| control.path.first().is_some_and(|p| p == "mcp_servers"))
+                .map(|control| {
+                    let mut omission = control.clone();
+                    omission.path[2] = "omit_tools_from".into();
+                    omission.value = ControlValue::Text("direct".into());
+                    omission.append = true;
+                    vec![format!("Exposure: {} omits this server's initial tools.", control_text(&omission, Harness::Codex))]
+                }).unwrap_or_default(),
         };
-        notes.push("Tool definitions and discovery context below are included in this server's cost. Missing discovery records mean unknown overhead, not zero. Search turns, returned definitions, cache changes and repeated loading cannot be attributed completely, so net deferral savings are unknown and no loading change is recommended.".into());
-        return notes;
     }
     if c.kind != ContextKind::Instructions {
+        return vec![];
+    }
+    let claude_file = c
+        .name
+        .rsplit(['/', '\\'])
+        .next()
+        .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md");
+    if c.harness == Harness::Claude && !claude_file {
         return vec![];
     }
     let Some(size) = c.instruction_size else {
@@ -1694,12 +1723,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
         ];
     };
     match c.harness {
-        Harness::Claude
-            if c.name
-                .rsplit(['/', '\\'])
-                .next()
-                .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md") =>
-        {
+        Harness::Claude => {
             vec![format!(
                 "{}: {} recorded lines, {} UTF-8 bytes; {}Claude recommends under 200 lines per CLAUDE.md. This is guidance, not a quality score or a savings estimate. Prefer path-scoped rules for scoped instructions; imports still load together. https://code.claude.com/docs/en/memory#write-effective-instructions",
                 name,
@@ -1740,7 +1764,6 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
                 )
             )]
         }
-        _ => vec![],
     }
 }
 
@@ -1967,6 +1990,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let monthly = |usd: f64, from: Option<Millis>, to: Option<Millis>| match (from, to) {
         (Some(from), Some(to)) if to > from => about((usd * 30.0 * DAY) / (to - from) as f64),
         _ => about(usd),
+    };
+    let cost_text = |c: &ContextCost| {
+        c.estimated_usd.map_or_else(
+            || "cost unknown".into(),
+            |usd| format!("costs {}", monthly(usd, since, Some(until))),
+        )
     };
     let settings_file: IndexMap<&str, String> = report
         .scan
@@ -2247,23 +2276,26 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         })
         .filter(|(c, notes)| !notes.is_empty() || !c.details.is_empty())
         .collect();
-    if !guided.is_empty() {
+    let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
+    if !guided.is_empty() || !loading.is_empty() {
         out.section("MCP loading and instruction budgets");
+        for note in loading {
+            out.line(note, 2, 0);
+        }
         for (c, notes) in guided {
             out.line(&format!("{}{}:", piece_label(c, out), suffix(c, out)), 2, 0);
             for note in notes {
                 out.line(&note, 4, 0);
             }
             for detail in c.details.iter().filter(|d| d.current) {
-                let cost = detail.estimated_usd.map_or_else(
-                    || "cost unknown".into(),
-                    |usd| format!("costs {}", monthly(usd, since, Some(until))),
-                );
+                let cost = cost_text(detail);
                 let control = if c.verdict == Some(Verdict::Off) {
                     "; covered by the server recommendation".into()
                 } else {
                     detail.control.as_ref().map_or_else(|| {
-                        if detail.harness == Harness::Codex && detail.kind == ContextKind::McpTool {
+                        if c.harness == Harness::Codex && c.name == "codex_apps" {
+                            "; app id mapping is unavailable, so no per-app tool block is generated".into()
+                        } else if detail.harness == Harness::Codex && detail.kind == ContextKind::McpTool {
                             "; raw tool identity or owning server is unresolved, so no per-tool block is generated".into()
                         } else { String::new() }
                     }, |control| format!("; off: {}", control_text(control, detail.harness)))
@@ -2359,10 +2391,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 "{}{}: {}. Shorten it, or move parts into path-scoped rules or skills.",
                 out.home(&c.name),
                 suffix(c, out),
-                c.estimated_usd.map_or_else(
-                    || "cost unknown".into(),
-                    |usd| format!("costs {}", monthly(usd, since, Some(until)))
-                )
+                cost_text(c)
             );
             out.line(&text, 2, 0);
         }
@@ -2372,10 +2401,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 "{}{}: {}; {}. {PLUGIN_SKILL}.",
                 piece_label(c, out),
                 suffix(c, out),
-                c.estimated_usd.map_or_else(
-                    || "cost unknown".into(),
-                    |usd| format!("costs {}", monthly(usd, since, Some(until)))
-                ),
+                cost_text(c),
                 if calls == 0 {
                     "never used".into()
                 } else {
@@ -2389,7 +2415,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.line(&text, 2, 0);
         }
         for c in fixed.iter().filter(|c| c.kind == ContextKind::McpServer) {
-            out.line(&format!("{}{}: {}. Configure the plugin or launcher that supplies it; no unique local server switch was resolved.", piece_label(c, out), suffix(c, out), c.estimated_usd.map_or_else(|| "cost unknown".into(), |usd| format!("costs {}", monthly(usd, since, Some(until))))), 2, 0);
+            let text = format!(
+                "{}{}: {}. Configure the plugin or launcher that supplies it; no unique local server switch was resolved.",
+                piece_label(c, out),
+                suffix(c, out),
+                cost_text(c)
+            );
+            out.line(&text, 2, 0);
         }
         // Scaled to 30 days like every other line, without counting unknowns as $0.
         let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
@@ -2500,11 +2532,17 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         0,
         0,
     );
-    for c in report
-        .context
-        .iter()
-        .flat_map(|c| std::iter::once(c).chain(&c.details))
-    {
+    for note in mcp_guidance(report.context.iter()) {
+        out.line(note, 2, 0);
+    }
+    for (c, covered) in report.context.iter().flat_map(|parent| {
+        std::iter::once((parent, false)).chain(
+            parent
+                .details
+                .iter()
+                .map(|d| (d, parent.verdict == Some(Verdict::Off))),
+        )
+    }) {
         let first = first_profile(c);
         // Unpriced requests are scaled from the priced ones, never counted as free.
         let cost = match c.estimated_usd {
@@ -2573,6 +2611,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             0,
         );
         let text = match &c.control {
+            _ if covered => "Covered by the server-off recommendation".into(),
             Some(control) => {
                 let file = report
                     .scan
@@ -2599,6 +2638,12 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                 Some((_, cap)) => format!("Capped by {cap}"),
                 None => "No cap is checked for it".into(),
             },
+            None if c.kind == ContextKind::McpTool && c.harness == Harness::Codex => {
+                "No per-tool block is generated; see the server's control-mapping limits".into()
+            }
+            None if c.kind == ContextKind::McpServer && c.harness == Harness::Codex => {
+                "Configure the plugin or launcher that supplies it; no unique local server switch was resolved".into()
+            }
             None => "No setting turns this off".into(),
         };
         out.line(&text, 6, 0);
@@ -3358,11 +3403,96 @@ mod tests {
         );
         assert!(!rendered.contains("Not enough evidence"));
         assert!(rendered.contains("Some feature costs are scaled from their priced requests"));
+        let detailed = text(&report, None, true);
+        assert_eq!(detailed.matches("Recommended off:").count(), 1);
+        assert_eq!(
+            detailed
+                .matches("Covered by the server-off recommendation")
+                .count(),
+            2
+        );
+        assert!(!detailed.contains("Recommended off: mcp_servers.docs.disabled_tools"));
         // Both JSON projections retain costs inside the server, without a second top-level row.
         let json = serde_json::to_value(&report.context).unwrap();
         assert_eq!(json.as_array().unwrap().len(), 1);
         assert_eq!(json[0]["details"][0]["estimatedUsd"], 5.0);
         assert!(json[0].get("guidance").is_none());
+    }
+
+    #[test]
+    fn loading_guidance_is_shared_and_control_limits_stay_with_their_owner() {
+        let mut report = synthetic();
+        report.checks.clear();
+        report.context = ["docs", "search"]
+            .map(|name| {
+                context_piece(
+                    ContextKind::McpServer,
+                    name,
+                    switch(
+                        &["permissions", "deny"],
+                        ControlValue::Text(format!("mcp__{name}")),
+                    ),
+                    Some(2.0),
+                    Some(10),
+                )
+            })
+            .into();
+        let mut plugin = context_piece(ContextKind::McpServer, "plugin", None, Some(2.0), Some(10));
+        plugin.harness = Harness::Codex;
+        report.context.push(plugin);
+        let mut apps = context_piece(
+            ContextKind::McpServer,
+            "codex_apps",
+            switch(&["features", "apps"], ControlValue::Bool(false)),
+            Some(2.0),
+            Some(10),
+        );
+        apps.harness = Harness::Codex;
+        let mut tool = context_piece(
+            ContextKind::McpTool,
+            "mcp__codex_apps__query",
+            None,
+            Some(1.0),
+            Some(0),
+        );
+        tool.harness = Harness::Codex;
+        apps.details.push(tool);
+        report.context.push(apps);
+        report.context.push(context_piece(
+            ContextKind::Instructions,
+            "/repo/.claude/rules/foo.md",
+            None,
+            None,
+            None,
+        ));
+        for details in [false, true] {
+            let rendered = text(&report, None, details);
+            assert_eq!(rendered.matches("Claude MCP loading:").count(), 1);
+            assert_eq!(rendered.matches("Claude tool search needs").count(), 1);
+            assert_eq!(
+                rendered.matches("net deferral savings are unknown").count(),
+                1
+            );
+            for name in ["docs", "search"] {
+                assert_eq!(
+                    rendered
+                        .matches(&format!("mcpServers.{name}.alwaysLoad"))
+                        .count(),
+                    1
+                );
+            }
+            assert_eq!(
+                rendered.matches("Configure the plugin or launcher").count(),
+                1
+            );
+            assert!(!rendered.contains("Instruction budget unknown"));
+            assert!(!rendered.contains("raw tool identity or owning server is unresolved"));
+            if !details {
+                assert!(rendered.contains(
+                    "app id mapping is unavailable, so no per-app tool block is generated"
+                ));
+            }
+        }
     }
 
     #[test]

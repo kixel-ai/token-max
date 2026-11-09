@@ -1707,7 +1707,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             .count() as u64,
         tier_known: requests
             .iter()
-            .filter(|r| r.parts.iter().all(|p| p.tier.is_some()))
+            .filter(|r| {
+                r.parts
+                    .iter()
+                    .all(|p| p.tier.is_some() && !crate::prices::conditional_tier(r, p))
+            })
             .count() as u64,
         missing_usage: requests
             .iter()

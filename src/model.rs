@@ -1586,7 +1586,7 @@ pub struct ContextCost {
     pub priced: u64,
     /// Priced requests whose effective Codex tier is unrecorded.
     pub conditional_requests: u64,
-    /// Requests whose Codex tier is unrecorded, including unpriced requests.
+    /// Requests with absent or conflicting Codex tiers, including unpriced requests.
     pub tier_unknown_requests: u64,
     /// Pricing assumptions, including unresolved tier sensitivity.
     pub assumptions: Vec<String>,

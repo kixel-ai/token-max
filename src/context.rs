@@ -1576,11 +1576,17 @@ mod tests {
         // The skills check owns per-skill findings; the catalog is one piece here.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
-        for unsupported in [false, true] {
+        for mode in ["conditional", "unsupported", "conflicting"] {
             let mut requests = requests.clone();
-            requests[1].parts[0].tier = None;
+            if mode != "conflicting" {
+                requests[1].parts[0].tier = None;
+            } else {
+                requests[1]
+                    .issues
+                    .push("conflicting effective service tiers".into());
+            }
             requests[1].parts[0].speed = None;
-            if unsupported {
+            if mode == "unsupported" {
                 requests[1].requested_speed = Some(crate::model::RequestedSpeed {
                     tier: Some("flex".into()),
                     speed: None,
@@ -1594,8 +1600,8 @@ mod tests {
                 max_cost_per_use_usd: 1.0,
             });
             let apps = row(&rows, "codex_apps");
-            assert_eq!(apps.priced, if unsupported { 1 } else { 2 });
-            assert_eq!(apps.conditional_requests, u64::from(!unsupported));
+            assert_eq!(apps.priced, if mode == "conditional" { 2 } else { 1 });
+            assert_eq!(apps.conditional_requests, u64::from(mode == "conditional"));
             assert_eq!(apps.tier_unknown_requests, 1);
             assert!(apps.estimated_usd.is_some());
             assert_eq!(apps.verdict, None);

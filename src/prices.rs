@@ -29,11 +29,15 @@ pub const PRICE_SOURCES: [&str; 7] = [
 ];
 
 /// Why a conditional tier estimate cannot decide a cost comparison.
-pub const TIER_SENSITIVITY: &str = "effective service tier is unrecorded; project defaults and served tiers can differ from requests; tier sensitivity has no verified bounds, so affected cost-based recommendations are withheld";
+pub const TIER_SENSITIVITY: &str = "effective service tier is absent or conflicting; project defaults and served tiers can differ from requests; tier sensitivity has no verified bounds, so affected cost-based recommendations are withheld";
 
-/// Whether pricing this Codex part requires a tier assumption.
+/// Whether this Codex part lacks consistent effective-tier evidence.
 pub fn conditional_tier(r: &Request, p: &BillingPart) -> bool {
-    r.harness == Harness::Codex && p.tier.is_none()
+    r.harness == Harness::Codex
+        && (p.tier.is_none()
+            || r.issues
+                .iter()
+                .any(|s| s == "conflicting effective service tiers"))
 }
 
 /// Normalize documented names for the same pricing tier.

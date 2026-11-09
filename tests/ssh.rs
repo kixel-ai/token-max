@@ -58,6 +58,11 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         let project = home.join(".claude/projects/my project");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::copy(fixture("claude.jsonl"), project.join("main.jsonl")).unwrap();
+        std::fs::write(
+            home.join(".claude/settings.json"),
+            r#"{"promptCacheTtl":"1h"}"#,
+        )
+        .unwrap();
         home
     }
 
@@ -207,7 +212,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let home = hosts.host("devbox");
     std::fs::write(
         home.join(".claude/settings.json"),
-        r#"{"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
+        r#"{"promptCacheTtl":"1h","env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
     )
     .unwrap();
     let transcript = home.join(".claude/projects/my project/main.jsonl");

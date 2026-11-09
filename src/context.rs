@@ -10,7 +10,7 @@ use crate::exposure::{calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
-    Text, Verdict,
+    Text, Verdict, Via,
 };
 use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
@@ -153,6 +153,13 @@ pub struct ContextInput<'a> {
     pub max_cost_per_use_usd: f64,
 }
 
+/// Context setting rows whose controls are not covered by a server recommendation.
+pub fn setting_rows(costs: &[ContextCost]) -> impl Iterator<Item = &ContextCost> {
+    costs.iter().flat_map(|c| {
+        std::iter::once(c).chain(c.details.iter().filter(|_| c.verdict != Some(Verdict::Off)))
+    })
+}
+
 /// OpenAI's rule of thumb for English text, used where no request records the
 /// complete text to calibrate against, as with every Codex request.
 /// <https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them>
@@ -163,6 +170,7 @@ struct Kind {
     kind: ContextKind,
     name: String,
     control: Option<Control>,
+    parent: Option<usize>,
 }
 
 /// Where a piece's history says it sits in the request.
@@ -223,6 +231,7 @@ impl Pieces<'_> {
                 kind,
                 name,
                 control,
+                parent: None,
             });
             next
         })
@@ -571,6 +580,52 @@ fn output_piece(owner: &str, harness: Harness, interned: &mut Pieces<'_>) -> usi
     )
 }
 
+/// Price a schema once at its actual position, crediting its server total too.
+fn mcp_detail(component: &Component, parent: usize, interned: &mut Pieces<'_>) -> usize {
+    let server = &interned.kinds[parent];
+    if server.kind != ContextKind::McpServer {
+        return parent;
+    }
+    let (kind, name, control) = if component.category == Category::McpDiscovery {
+        (ContextKind::McpDiscovery, component.name.clone(), None)
+    } else if matches!(
+        component.category,
+        Category::ToolSchema | Category::McpSchema
+    ) && let Some((_, tool)) = component
+        .name
+        .strip_prefix("mcp__")
+        .and_then(|n| n.split_once("__"))
+        && !tool.is_empty()
+    {
+        let control = match server.control.as_ref() {
+            Some(c) if c.path.first().is_some_and(|p| p == "mcp_servers") => Some(Control {
+                path: vec![
+                    "mcp_servers".into(),
+                    c.path[1].clone(),
+                    "disabled_tools".into(),
+                ],
+                value: ControlValue::Text(tool.into()),
+                append: true,
+            }),
+            Some(c) if c.path.first().is_some_and(|p| p == "permissions") => {
+                deny(component.name.clone())
+            }
+            _ => None,
+        };
+        (ContextKind::McpTool, component.name.clone(), control)
+    } else {
+        return parent;
+    };
+    let key = interned.intern(
+        format!("detail:{parent}:{kind:?}:{name}"),
+        kind,
+        name,
+        control,
+    );
+    interned.kinds[key].parent = Some(parent);
+    key
+}
+
 /// The previous request of a session, which bounds where its attachments sit in the next one.
 struct Prior<'a> {
     input: Option<i64>,
@@ -689,7 +744,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 continue;
             }
             if !interned.of.contains_key(&(id, owner)) {
-                let split = if codex {
+                let mut split = if codex {
                     codex_pieces(component, &servers, &components, &mut interned)
                 } else {
                     pieces(component, &components, &mut interned)
@@ -697,6 +752,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         .map(|(key, characters)| (key, Some(characters)))
                         .collect()
                 };
+                for (key, _) in &mut split {
+                    *key = mcp_detail(component, *key, &mut interned);
+                }
                 interned.of.insert((id, owner), split);
             }
             let prefix = !codex && index < view.prefix;
@@ -767,8 +825,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         {
             let mut seen = HashSet::new();
             for piece in &parts {
-                if seen.insert(piece.key) {
-                    unique.push(piece.key);
+                for key in std::iter::once(piece.key).chain(interned.kinds[piece.key].parent) {
+                    if seen.insert(key) {
+                        unique.push(key);
+                    }
                 }
             }
         }
@@ -804,6 +864,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                                 duplicate_entries: 1,
                                 ..Default::default()
                             }),
+                        details: vec![],
+                        instruction_size: None,
                     },
                     owner,
                     key,
@@ -814,6 +876,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             row.cost.requests += 1;
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
+        }
+        for piece in &parts {
+            if let History::Revision(revision) = piece.history
+                && interned.kinds[piece.key].kind == ContextKind::Instructions
+            {
+                rows.get_mut(&(owner, piece.key))
+                    .expect("piece has a row")
+                    .cost
+                    .instruction_size = component(revision).instruction_size;
+            }
         }
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
@@ -931,6 +1003,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     entry.2 = true;
                 }
             }
+            let parents: Vec<_> = charged
+                .iter()
+                .filter_map(|(&key, &value)| Some((interned.kinds[key].parent?, value)))
+                .collect();
+            for (parent, (tokens, cost, missing)) in parents {
+                let entry = charged.entry(parent).or_insert((0.0, 0.0, false));
+                entry.0 += tokens;
+                entry.1 += cost;
+                entry.2 |= missing;
+            }
             for (key, (tokens, cost, missing)) in charged {
                 // A row with any piece of unknown cost in this request stays unpriced
                 // for it, so a subtotal is never shown as the whole.
@@ -971,6 +1053,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             kind,
             ContextKind::Tool
                 | ContextKind::McpServer
+                | ContextKind::McpTool
                 | ContextKind::Skill
                 | ContextKind::ToolOutput
         ) {
@@ -1070,17 +1153,23 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         } else {
             (ContextKind::Tool, c.name.as_str())
         };
-        credit(
-            families.get(&family),
-            ObservedUse {
-                profiles: &c.profiles,
-                time: c.last_used,
-                calls: c.calls,
-                invocation: None,
-                ambiguous: false,
-                fallback: false,
-            },
-        );
+        for family in std::iter::once(family).chain(
+            c.name
+                .starts_with("mcp__")
+                .then_some((ContextKind::McpTool, c.name.as_str())),
+        ) {
+            credit(
+                families.get(&family),
+                ObservedUse {
+                    profiles: &c.profiles,
+                    time: c.last_used,
+                    calls: c.calls,
+                    invocation: None,
+                    ambiguous: false,
+                    fallback: false,
+                },
+            );
+        }
     }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
@@ -1140,15 +1229,27 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .into_iter()
         .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
         .collect();
-    let row_indices: HashMap<_, _> = rows
-        .keys()
-        .enumerate()
-        .map(|(index, &key)| (key, index))
+    let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::new();
+    // Native MCP completions name the raw server and tool. Model-facing names
+    // can be sanitized or shortened and cannot safely supply a deny-list entry.
+    let raw_tools: HashSet<(&str, &str)> = scan
+        .invocations
+        .iter()
+        .filter(|i| {
+            i.harness == Harness::Codex
+                && i.kind == InvocationKind::McpCall
+                && i.via == Via::Completion
+                && matches!(
+                    i.status,
+                    InvocationStatus::Completed | InvocationStatus::Failed
+                )
+        })
+        .flat_map(|i| i.profiles.iter().map(|p| (i.target.as_str(), p.as_str())))
         .collect();
-    let mut result: Vec<ContextCost> = rows
+    let mut result: Vec<(usize, usize, ContextCost)> = rows
         .into_values()
         .enumerate()
-        .map(|(index, row)| {
+        .filter_map(|(index, row)| {
             let mut c = row.cost;
             c.assumptions = row.assumptions.into_iter().collect();
             c.current = latest
@@ -1158,6 +1259,20 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 (c.priced > 0).then(|| (c.cost_usd * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
             c.largest_characters = largest.get(&index).copied();
+            if c.harness == Harness::Codex
+                && c.kind == ContextKind::McpTool
+                && let Some(control) = &c.control
+                && let ControlValue::Text(tool) = &control.value
+            {
+                let raw = identity(&format!("mcp:mcp__{}__{tool}", control.path[1]));
+                if !c
+                    .profiles
+                    .iter()
+                    .all(|p| raw_tools.contains(&(raw.as_str(), p.as_str())))
+                {
+                    c.control = None;
+                }
+            }
             if let Some(calls) = c.calls {
                 c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
             }
@@ -1170,9 +1285,29 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     Verdict::Keep
                 });
             }
-            c
+            if let Some(parent) = interned.kinds[row.key].parent {
+                details.entry((row.owner, parent)).or_default().push(c);
+                None
+            } else {
+                Some((row.owner, row.key, c))
+            }
         })
         .collect();
+    for (owner, key, c) in &mut result {
+        c.details = details.remove(&(*owner, *key)).unwrap_or_default();
+        c.details.sort_by(|a, b| a.name.cmp(&b.name));
+        if c.verdict == Some(Verdict::Off) {
+            for detail in &mut c.details {
+                detail.verdict = None;
+            }
+        }
+    }
+    let row_indices: HashMap<_, _> = result
+        .iter()
+        .enumerate()
+        .map(|(index, (owner, key, _))| ((*owner, *key), index))
+        .collect();
+    let mut result: Vec<_> = result.into_iter().map(|(_, _, c)| c).collect();
     for (owner, shown) in latest_catalogs {
         let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::new();
         for id in shown {
@@ -1243,6 +1378,7 @@ mod tests {
         members: &[&str],
     ) -> Component {
         Component {
+            instruction_size: None,
             size: Size {
                 characters: Some(characters),
                 recorded_tokens: None,
@@ -1593,6 +1729,224 @@ mod tests {
     }
 
     #[test]
+    fn mcp_details_share_placement_without_double_counting_input() {
+        let scan = ExposureScan {
+            components: vec![
+                component("read", Category::McpSchema, "mcp__docs__read", 400, &[]),
+                component("write", Category::McpSchema, "mcp__docs__write", 100, &[]),
+                component("discovery", Category::McpDiscovery, "mcp__docs", 100, &[]),
+            ],
+            requests: vec![exposure("r1", &["read", "write", "discovery"], 3, 600)],
+            tool_calls: vec![ToolCalls {
+                name: "mcp__docs__read".into(),
+                profiles: vec!["profile".into()],
+                calls: 3,
+                last_used: 5,
+            }],
+            ..ExposureScan::default()
+        };
+        let requests = [request("r1", 1, 0, 600, 0)];
+        let rows = costs(&scan, &requests, 1.0);
+        let server = row(&rows, "docs");
+        assert_eq!(
+            (server.tokens, server.priced, server.calls),
+            (Some(600), 1, Some(3))
+        );
+        assert_eq!(server.details.len(), 3);
+        assert!(close(
+            server.cost_usd,
+            server.details.iter().map(|c| c.cost_usd).sum()
+        ));
+        let read = row(&server.details, "mcp__docs__read");
+        assert_eq!((read.tokens, read.calls), (Some(400), Some(3)));
+        assert_eq!(
+            control_text(read.control.as_ref().unwrap(), Harness::Claude),
+            r#""permissions": {"deny": ["mcp__docs__read"]}"#
+        );
+        let off = costs(&scan, &requests, 0.0);
+        let off = row(&off, "docs");
+        assert_eq!(off.verdict, Some(Verdict::Off));
+        assert!(off.details.iter().all(|d| d.verdict.is_none()));
+        assert!(off.details.iter().any(|d| d.control.is_some()));
+        let json = serde_json::to_value(off).unwrap();
+        assert!(
+            json["details"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|d| d["verdict"].is_null())
+        );
+        let discovery = row(&server.details, "mcp__docs");
+        assert_eq!(
+            (discovery.kind, discovery.tokens, discovery.calls),
+            (ContextKind::McpDiscovery, Some(100), None)
+        );
+    }
+
+    #[test]
+    fn codex_tool_controls_require_an_unambiguous_server_id() {
+        let schema = component(
+            "schema",
+            Category::McpSchema,
+            "mcp__docs_server__read",
+            400,
+            &[],
+        );
+        for (declared, expected) in [
+            (vec![vec!["docs-server".to_string()]], Some("docs-server")),
+            (
+                vec![vec!["docs-server".to_string(), "docs_server".to_string()]],
+                None,
+            ),
+            (
+                vec![
+                    vec!["docs-server".to_string()],
+                    vec!["docs_server".to_string()],
+                ],
+                None,
+            ),
+        ] {
+            let servers: Vec<&[String]> = declared.iter().map(Vec::as_slice).collect();
+            let mut interned = Pieces::default();
+            let parts = codex_pieces(&schema, &servers, &HashMap::new(), &mut interned);
+            let key = mcp_detail(&schema, parts[0].0, &mut interned);
+            let tool = &interned.kinds[key];
+            assert_eq!(tool.kind, ContextKind::McpTool);
+            assert_eq!(
+                tool.control
+                    .as_ref()
+                    .map(|c| control_text(c, Harness::Codex)),
+                expected.map(|id| format!("mcp_servers.{id}.disabled_tools = [\"read\"]"))
+            );
+        }
+        // Discovery with the same exposed name must not consume the schema's identity.
+        let mut interned = Pieces::default();
+        let (key, kind, name, control) = tool(&schema.name);
+        let parent = interned.intern(key, kind, name, control);
+        let mut discovery = schema.clone();
+        discovery.category = Category::McpDiscovery;
+        let found = mcp_detail(&discovery, parent, &mut interned);
+        let loaded = mcp_detail(&schema, parent, &mut interned);
+        assert_ne!(found, loaded);
+        assert_eq!(interned.kinds[found].kind, ContextKind::McpDiscovery);
+        assert_eq!(interned.kinds[loaded].kind, ContextKind::McpTool);
+    }
+
+    #[test]
+    fn codex_blocks_require_native_raw_tool_identity() {
+        for (exposed, raw, status) in [
+            ("read", Some("read"), InvocationStatus::Completed),
+            ("read", Some("read"), InvocationStatus::Failed),
+            ("read", None, InvocationStatus::Completed),
+            ("read_file", Some("read-file"), InvocationStatus::Completed),
+            ("read_file", Some("read.file"), InvocationStatus::Completed),
+        ] {
+            let mut scan = ExposureScan {
+                components: vec![component(
+                    "schema",
+                    Category::McpSchema,
+                    &format!("mcp__docs_server__{exposed}"),
+                    400,
+                    &[],
+                )],
+                requests: vec![Exposure {
+                    request: "r1".into(),
+                    view: Arc::new(ExposureView {
+                        components: ids(&[]),
+                        candidates: ids(&["schema"]),
+                        linkage: Linkage::Chronological,
+                        ..(*exposure("r1", &[], 0, 0).view).clone()
+                    }),
+                    results: None,
+                }],
+                ..ExposureScan::default()
+            };
+            if let Some(raw) = raw {
+                let mut invocation = skill_use(InvocationKind::McpCall, "unused", 2);
+                invocation.harness = Harness::Codex;
+                invocation.via = Via::Completion;
+                invocation.status = status;
+                invocation.target = identity(&format!("mcp:mcp__docs-server__{raw}"));
+                scan.invocations.push(invocation);
+            }
+            let mut r = make_request();
+            r.id = "r1".into();
+            r.harness = Harness::Codex;
+            r.provider = Some("openai".into());
+            r.model = Some("gpt-5.4".into());
+            r.api = crate::model::Api::Responses;
+            r.parts[0].model = r.model.clone();
+            r.parts[0].tier = Some("standard".into());
+            r.parts[0].usage = Usage {
+                input: Some(4000),
+                read: Some(0),
+                write: None,
+                write5m: None,
+                write1h: None,
+                ..r.parts[0].usage
+            };
+            let mut profile = crate::test_support::make_profile("profile", "/codex");
+            profile.harness = Harness::Codex;
+            profile.mcp_servers = vec!["docs-server".into()];
+            for conditional in [false, true] {
+                if conditional {
+                    r.parts[0].tier = None;
+                    r.parts[0].speed = None;
+                }
+                let costs = context_costs(&ContextInput {
+                    scan: &scan,
+                    requests: std::slice::from_ref(&r),
+                    profiles: std::slice::from_ref(&profile),
+                    catalog: &prices(),
+                    max_cost_per_use_usd: 1.0,
+                });
+                let server = &costs[0];
+                let tool = &server.details[0];
+                assert_eq!(tool.control.is_some(), raw == Some(exposed));
+                assert_eq!(tool.verdict.is_some(), raw == Some(exposed) && !conditional);
+                for row in [server, tool] {
+                    assert!(row.estimated_usd.is_some());
+                    assert_eq!(row.conditional_requests, u64::from(conditional));
+                    assert_eq!(row.tier_unknown_requests, u64::from(conditional));
+                    if conditional {
+                        assert_eq!(row.verdict, None);
+                        assert!(!row.assumptions.is_empty());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn instruction_sizes_follow_the_recorded_revision() {
+        let mut claude = component(
+            "claude",
+            Category::Instructions,
+            "/repo/CLAUDE.md",
+            200,
+            &[],
+        );
+        claude.instruction_size = Some(crate::model::InstructionSize {
+            bytes: 401,
+            lines: 200,
+        });
+        let scan = ExposureScan {
+            components: vec![claude],
+            requests: vec![exposure("r1", &["claude"], 0, 300)],
+            ..ExposureScan::default()
+        };
+        let rows = costs(&scan, &[request("r1", 1, 0, 300, 0)], 1.0);
+        let c = row(&rows, "/repo/CLAUDE.md");
+        assert_eq!(
+            c.instruction_size,
+            Some(crate::model::InstructionSize {
+                bytes: 401,
+                lines: 200
+            })
+        );
+    }
+
+    #[test]
     fn copied_calls_and_model_skill_calls_count_as_uses() {
         let (scan, requests) = copied();
         let rows = costs(&scan, &requests, 1.0);
@@ -1924,6 +2278,13 @@ mod tests {
         assert_eq!(of("functions", "b").priced, 0);
         // Another tool's schema of the same server does not measure it.
         assert_eq!(of("other", "a").priced, 0);
+        let other = of("other", "a");
+        assert_eq!(row(&other.details, "mcp__other__read").priced, 1);
+        assert_eq!(
+            row(&other.details, "mcp__other__search").estimated_usd,
+            None
+        );
+        assert_eq!(other.estimated_usd, None);
         // A request copied into profiles that declare the server differently
         // gets no switch.
         assert_eq!(of("docs_server", "a+b").control, None);

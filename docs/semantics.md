@@ -548,13 +548,21 @@ unpriced rather than clipped. `costUsd` covers priced requests only;
 `estimatedUsd` scales it to every request that carried the piece and is null
 when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
 once. Skill listings split into their member skills plus the listing framing;
-MCP tools group by server. Codex rendered catalogs split into path-identified
+Codex rendered catalogs split into path-identified
 skills and framing. Their aggregate revision still determines cache placement:
 every share is priced only when the whole catalog fits one cache rate. The
 shares conserve the aggregate's priced charge without charging it twice.
 Each row scales only its own priced observations; estimates for changing
 membership can have different coverage and must not be summed as a catalog
 counterfactual.
+MCP tools group by server. Each server also has `details`: `mcp-tool` rows
+for individually recorded tool schemas and `mcp-discovery` rows for recorded
+discovery text. Each schema occupies its input position once, while its charge
+also credits the server total. Parent coverage remains unpriced for a request
+with any opaque member even when some detail rows can be priced. Tool calls
+credit both their server and their own schema row. Details and server totals
+must not be added together. A discovery listing and a subsequently surfaced
+schema remain distinct even when their names match.
 One-off attachments and skill bodies are excluded because no setting removes
 them up front.
 
@@ -588,7 +596,15 @@ so they get no settings switch. For Codex, `mcp_servers.<id>.enabled = false`
 in `config.toml` removes a server the request's own profile declares (a request
 copied into several profiles gets one only when each declares it under the same id),
 and `features.apps = false` removes ChatGPT apps (`codex_apps`); other Codex tools
-have no switch. Instruction files have no switch. Core tools, the system prompt
+have no switch. A named MCP tool has its own Claude deny rule or Codex
+`mcp_servers.<id>.disabled_tools` entry when its server id is unambiguous in
+every owning profile. Codex additionally requires a native completion whose raw
+server/tool identity exactly matches the candidate control in each profile;
+model-facing tool names may be sanitized or shortened, so unmatched names get
+no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
+A recommendation to disable the server covers its individual tool changes,
+so the settings snippet does not add redundant per-tool blocks.
+Instruction files have no switch. Core tools, the system prompt
 and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
@@ -664,6 +680,52 @@ These are rendered listing charges, never promised net savings. Codex can
 backfill omitted skills or expand descriptions after a removal. No separate
 listing-budget warning, fixed-space savings estimate, or body-execution
 success is inferred from catalog evidence.
+
+### MCP exposure and instruction budgets
+
+Controls checked against authoritative documentation on 2026-11-08:
+
+- [Claude MCP loading](https://code.claude.com/docs/en/mcp#configure-tool-search):
+  `ENABLE_TOOL_SEARCH` supports `true`, `false`, `auto`, and `auto:N`. Unset
+  now defers tools by default on supported models. Opus 4, Sonnet 4, Haiku 4.5
+  and later support search; Google Agent Platform requires generation 4.5 or
+  later. Azure-hosted Foundry deployments reject it. Experimental-beta and
+  HIPAA restrictions, a denied ToolSearch tool, and gateway capabilities can
+  prevent deferral. Per-server `alwaysLoad=true` opts into upfront loading;
+  `alwaysLoad=false` overrides tool-author upfront annotations on v2.1.287+.
+  This belongs in the MCP configuration that declares the server, not in a
+  settings.json `mcpServers` patch.
+- [Codex exposure controls](https://learn.chatgpt.com/docs/config-file/config-reference):
+  `mcp_servers.<id>.omit_tools_from` names `direct`, `deferred`, and `code_mode`.
+  Omitting one surface neither blocks calls nor enables another surface.
+  Blocking uses `disabled_tools`; no retired tool-search switch is recommended.
+  App equivalents use `apps.<id>.omit_tools_from`, `.enabled`, and
+  `.tools.<tool>.enabled`. The id is the opaque app id from
+  [`app/installed`](https://learn.chatgpt.com/docs/app-server#apps-connectors),
+  not a tool namespace or display name. The parsed transcripts do not establish
+  that mapping, so per-app prices and patches stay unavailable.
+- Recorded schema and discovery context are priced independently where
+  possible. Missing discovery evidence is unknown, not free. ToolSearch's
+  own schema and result context can appear in their existing tool/output rows,
+  but search turns and returned definitions cannot be attributed completely
+  per server. Neither upfront nor deferred loading gets invented net savings.
+  A small server used on most turns can be cheaper upfront. These controls are
+  guidance only and never enter the automatic settings patch.
+- [Claude instruction guidance](https://code.claude.com/docs/en/memory#write-effective-instructions)
+  targets under 200 lines per CLAUDE.md. A recorded file reaching that length
+  gets a note naming it, without judging quality or estimating savings.
+  Path-scoped rules can narrow loading; imports still load together.
+- [Codex instruction loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
+  caps the combined chain at `project_doc_max_bytes`, 32768 UTF-8 bytes by
+  default. The report shows the selected profile value beside recorded rendered
+  bytes, which can include headers and wrappers and cannot establish that the
+  source chain exceeded its budget. Project/CLI overrides and original
+  source-file sizes are unresolved: the recorded chain may already be
+  truncated. It does not claim to locate unseen files or recover lost text.
+
+Instruction sizes retain only byte and line counts for the latest recorded
+revision; no instruction content is retained. Skill-specific costs remain
+owned by the skills catalog check.
 
 Invocation evidence separates typed and mentioned skill requests, command
 wrappers, unresolved references, Skill calls, identified SKILL.md reads, direct MCP calls, actual

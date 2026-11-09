@@ -175,4 +175,3 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 ## Required
 
 - [Project-scoped background controls](/quest/m0/background-scopes.md) - resolve each project's current background controls and their owning files
-- [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings

@@ -1693,6 +1693,109 @@ fn codex_catalog_conditional_prices_preserve_evidence_and_duplicate_controls() {
 }
 
 #[test]
+fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() {
+    let mut usage = billed(4);
+    usage["payload"]["usage"]["cached_input_tokens"] = json!(1000);
+    let mut data = transcript(Harness::Codex, &[
+        codex_meta(), turn(),
+        // MCP rows precede skills, so nesting their details changes the flat row indices.
+        world(0, json!({"tools":{"mcp__docs":"SYNTHETIC_PRIVATE_DISCOVERY"}}), true),
+        json!({"type":"response_item", "timestamp":at(0), "payload":{
+            "type":"additional_tools", "role":"developer", "tools":[{
+                "type":"function", "name":"mcp__docs__read", "description":"SYNTHETIC_PRIVATE_SCHEMA",
+                "parameters":{"type":"object"}
+            }]
+        }}),
+        world(1, json!({
+            "host_skills":{"body":"- same: a (file: /skills/a/SKILL.md)\n- same: b (file: /skills/b/SKILL.md)"},
+            "agents_md":{"text":"SYNTHETIC_PRIVATE_INSTRUCTIONS\nλ"}
+        }), false),
+        json!({"type":"response_item", "timestamp":at(2), "payload":{"type":"message", "role":"user",
+            "content":[{"type":"skill", "name":"same", "path":"/skills/b/SKILL.md"}]}}),
+        skill_load(3, "load", "/skills/b/SKILL.md", 0),
+        json!({"type":"event_msg", "timestamp":at(3), "payload":{
+            "type":"item_completed", "item":{"type":"McpToolCall", "id":"read",
+                "server":"docs", "tool":"read", "status":"completed", "result":{"content":[]}}
+        }}),
+        usage,
+    ], None).unwrap();
+    for profile in &mut data.profiles {
+        if profile.harness == Harness::Codex {
+            profile.mcp_servers = vec!["docs".into()];
+        }
+    }
+    for conditional in [true, false] {
+        if !conditional {
+            data.requests[0].parts[0].tier = Some("standard".into());
+        }
+        let report = report(&data, 1.0);
+        let retained = skill_row(&report, "/skills/b/SKILL.md");
+        let redundant = skill_row(&report, "/skills/a/SKILL.md");
+        let evidence = retained.skill.as_ref().unwrap();
+        assert_eq!(
+            (retained.calls, evidence.requested, evidence.loaded),
+            (Some(1), 1, 1)
+        );
+        assert_eq!(
+            evidence.retained_path.as_deref(),
+            Some("/skills/b/SKILL.md")
+        );
+        assert_eq!(redundant.verdict, Some(Verdict::Off));
+        assert_eq!(retained.verdict, (!conditional).then_some(Verdict::Keep));
+        let server = row(&report, "docs");
+        assert_eq!(server.calls, Some(1));
+        assert_eq!(server.details.len(), 2);
+        let tool = server
+            .details
+            .iter()
+            .find(|c| c.kind == ContextKind::McpTool)
+            .unwrap();
+        assert_eq!(tool.calls, Some(1));
+        assert!(
+            (server.cost_usd - server.details.iter().map(|c| c.cost_usd).sum::<f64>()).abs()
+                < 1e-12
+        );
+        for c in [retained, redundant, server, tool] {
+            assert_eq!(
+                (c.priced, c.conditional_requests, c.tier_unknown_requests),
+                (1, u64::from(conditional), u64::from(conditional))
+            );
+            assert!(c.estimated_usd.is_some());
+            assert_eq!(c.assumptions, retained.assumptions);
+            if conditional {
+                assert!(!c.assumptions.is_empty());
+            }
+        }
+        let patch = crate::context::config_patch([
+            retained.control.as_ref().unwrap(),
+            tool.control.as_ref().unwrap(),
+        ]);
+        let parsed: toml::Value = toml::from_str(&patch).unwrap();
+        assert_eq!(
+            parsed["skills"]["config"][0]["path"].as_str(),
+            Some("/skills/b/SKILL.md")
+        );
+        assert_eq!(
+            parsed["mcp_servers"]["docs"]["disabled_tools"][0].as_str(),
+            Some("read")
+        );
+        assert_eq!(row(&report, "AGENTS.md").instruction_size.unwrap().lines, 2);
+        let output = format_report(
+            &report,
+            ReportOptions {
+                width: None,
+                ..Default::default()
+            },
+        );
+        assert!(output.contains("1 requested; 1 confirmed SKILL.md loads"));
+        assert!(output.contains("Codex MCP loading:"));
+        assert!(output.contains("Recorded rendered AGENTS.md:"));
+        assert!(output.contains("Duplicate skill same"));
+        assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+    }
+}
+
+#[test]
 fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success() {
     let w = Workspace::new();
     let body = "- `r0` = `/skills`\n- same: a (file: r0/a/SKILL.md)\n- same: b (file: r0/b/SKILL.md)\n- plugin:other: c (file: r0/c/SKILL.md)";

@@ -104,6 +104,28 @@ recommended change, such as `"enableArtifact": false` or a bare tool name in
 `permissions.deny`; merge it by hand. `--details` lists every piece, including
 those no longer sent.
 
+MCP servers include separate tool-schema and discovery-context costs. Those
+details are part of the server total. Codex tool recommendations use
+`mcp_servers.<id>.disabled_tools` only when the declaring server id is unambiguous and native completions prove
+the raw tool name in every owning profile;
+`enabled_tools` is the corresponding allow list. The report explains Claude's
+`ENABLE_TOOL_SEARCH` and per-server `alwaysLoad`, and Codex's `omit_tools_from`
+surfaces. These exposure controls do not establish net savings: search turns,
+returned definitions, cache changes and repeated loading are not completely
+attributable. A small frequently used server can be cheaper to load upfront.
+App controls require the actual app id, which these transcripts do not map to
+the exposed app namespaces; the report names the supported controls without
+inventing per-app costs or a settings patch.
+
+Instruction-budget notes compare recorded CLAUDE.md line counts with Claude's
+under-200-line guidance, and show the selected profile's `project_doc_max_bytes`
+(32 KiB by default) beside recorded rendered AGENTS.md bytes. Codex records can
+include headers and wrappers, so these bytes cannot diagnose source-chain truncation. Effective
+project/CLI overrides and original file sizes may be unavailable; recorded
+text can already be truncated. Length alone is not a quality score. Output-cap
+lines still recommend no value because truncation-related read-back cannot be
+priced from these transcripts.
+
 An auto-compact window without enough evidence also shows how large that
 model's requests got (median and 90th percentile), to judge whether a smaller
 window would matter.
@@ -117,8 +139,9 @@ position its history allows pays the same rate. Requests that could not be
 priced are estimated from those that could, and a piece with none is shown as
 unknown.
 Removing a piece can also shift later cache writes and compaction, which this
-does not model. Requests without a recorded shape, and Codex requests, are not
-priced per piece.
+does not model. Claude requests without a recorded shape cannot price their
+context pieces. Codex prices rendered chronological context with a quarter-token
+per-character estimate; metadata-only pieces remain unknown.
 
 Comparisons use the requests priced under both options. Requests with missing
 usage are left out of both sides, and a recommendation is made only when they

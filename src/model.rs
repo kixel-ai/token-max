@@ -1241,6 +1241,16 @@ pub struct Component {
     /// Absolute SKILL.md identity resolved from a rendered Codex catalog, without filesystem reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill_path: Option<String>,
+    /// Recorded instruction text size, without retaining its content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_size: Option<InstructionSize>,
+}
+
+/// UTF-8 bytes and lines of recorded instruction text, including rendered wrappers.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InstructionSize {
+    pub bytes: usize,
+    pub lines: usize,
 }
 
 /// Whether a historical component is still sent; scans never resolve it.
@@ -1670,6 +1680,8 @@ pub struct Control {
 pub enum ContextKind {
     Tool,
     McpServer,
+    McpTool,
+    McpDiscovery,
     Skill,
     Instructions,
     System,
@@ -1710,7 +1722,7 @@ pub struct ContextCost {
     pub profiles: Vec<String>,
     pub kind: ContextKind,
     pub name: String,
-    /// The settings change that removes it, or null when no setting does.
+    /// The settings change that removes it, or null without a resolved control.
     pub control: Option<Control>,
     /// Selected requests that carried it.
     pub requests: u64,
@@ -1735,12 +1747,17 @@ pub struct ContextCost {
     pub current: bool,
     /// estimatedUsd divided by uses, counting no use as one; null without both.
     pub cost_per_use_usd: Option<f64>,
-    /// "off" above the per-use limit; null without a switch, pricing or resolved tier sensitivity.
+    /// "off" above the cost-per-use limit; null when unpriced, unswitchable,
+    /// no longer sent, tier-sensitive, or covered by a server-off verdict.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill: Option<CatalogSkill>,
+    /// MCP tool and discovery costs already included in this server's total.
+    pub details: Vec<ContextCost>,
+    /// Size of the most recent recorded instruction revision.
+    pub instruction_size: Option<InstructionSize>,
 }
 
 // ---------------------------------------------------------------------------

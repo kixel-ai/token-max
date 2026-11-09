@@ -1312,6 +1312,63 @@ mod tests {
         assert_eq!(fs::read(root.join("statev2.sqlite")).unwrap(), before);
     }
     #[test]
+    fn codex_requested_tiers_share_aliases_and_preserve_partial_evidence() {
+        let w = Workspace::new();
+        native(&w);
+        let path = w.codex.join("sessions/test.jsonl");
+        let mut lines: Vec<Value> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let root = state(
+            &w,
+            json!({"providerInstances":{"codex":{"driver":"codex"}}}),
+        );
+        let db = db(&root);
+        seed(&db, "codex", "codex");
+        let catalog = crate::test_support::prices();
+        for (native, selected, expected) in [
+            (None, Some("fast"), Some(0.8803)),
+            (Some("priority"), Some("fast"), Some(0.8803)),
+            (Some("fast"), Some("priority"), Some(0.8803)),
+            (Some("standard"), Some("default"), Some(0.44015)),
+            (Some("fast"), None, Some(0.8803)),
+            (Some("default"), Some("fast"), None),
+        ] {
+            lines[1]["payload"]["service_tier"] = json!(native);
+            write(
+                &path,
+                lines
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            );
+            let options: Vec<Value> = selected
+                .map(|tier| json!({"id":"serviceTier","value":tier}))
+                .into_iter()
+                .collect();
+            db.execute(
+                "UPDATE orchestration_events SET payload_json=?1",
+                [json!({"id":"run","activeAttemptId":"attempt","status":"running","modelSelection":{"model":"gpt-6.1-sol","options":options}}).to_string()],
+            )
+            .unwrap();
+            let scan = scan(&w.scan_options()).unwrap();
+            let r = &scan.requests[0];
+            assert!(r.t3.is_some());
+            assert_eq!(r.parts[0].tier, None);
+            assert_eq!(scan.coverage.tier_known, 0);
+            let cost = crate::prices::price_request(&catalog, r);
+            assert_eq!(
+                cost.total_usd.map(|usd| (usd * 1_000_000.0).round()),
+                expected.map(|usd: f64| (usd * 1_000_000.0).round()),
+                "native={native:?}, T3={selected:?}: {cost:?}"
+            );
+            assert!(crate::prices::tier_sensitive(&cost));
+        }
+    }
+    #[test]
     fn duplicate_turns_and_first_missing_selection_do_not_supply_requested_speed() {
         let w = Workspace::new();
         native(&w);

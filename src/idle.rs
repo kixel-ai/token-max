@@ -2308,11 +2308,29 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         };
         let current_windows = current_windows(&profiled.scopes, &requests);
         let after_windows = recommended_windows(&profiled.scopes, &requests, options.windows);
+        let unresolved_windows: IndexSet<String> = requests
+            .iter()
+            .flat_map(|r| {
+                r.parts
+                    .iter()
+                    .filter(|p| is_conversation(p))
+                    .filter_map(|p| {
+                        profiled
+                            .scopes
+                            .window(profiled.scopes.scope(r), p.model.as_deref())
+                            .comparison_unknown
+                            .clone()
+                    })
+            })
+            .collect();
         let current_ttls = PerBucket {
             main: profile.ttl.main.value,
             subagent: profile.ttl.subagent.value,
         };
-        let current_replay = profiled.replay(&current_ttls, &current_windows);
+        let mut current_replay = profiled.replay(&current_ttls, &current_windows);
+        current_replay
+            .errors
+            .extend(unresolved_windows.iter().cloned());
         let current = t3_comparison(
             options,
             profile,
@@ -2345,7 +2363,10 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 .and_then(|c| c.base.recommended)
                 .or(profile.ttl.subagent.value),
         };
-        let after_replay = profiled.replay(&after_ttls, &after_windows);
+        let mut after_replay = profiled.replay(&after_ttls, &after_windows);
+        after_replay
+            .errors
+            .extend(unresolved_windows.iter().cloned());
         let after = t3_comparison(
             options,
             profile,
@@ -2396,7 +2417,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: None,
                 savings_usd: savings.filter(|_|applicable), monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
                 assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session; 5m and 1h caches both apply".into(), "onReturn is conditional on an offered resume dialog and user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
-                uncertainty: instance.limitations.clone(), sources: vec![crate::t3::SOURCE.into()],
+                uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
         });
     }
@@ -4126,6 +4147,37 @@ mod tests {
         assert_eq!(p.status, PeriodStatus::Eligible);
         assert_eq!(p.return_timing, ReturnTiming::AfterExpiry);
         assert_eq!(p.calibration.as_ref().unwrap().prefix_tokens, 20_000);
+    }
+
+    #[test]
+    fn t3_unresolved_window_baseline_cannot_choose_an_idle_mode() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(
+            vec![request("a", 0.0, 300_000), request("b", 10.0, 320_000)],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        scan.profiles[0].compaction.default.comparison_unknown =
+            Some("T3 launch window fallback is unresolved".into());
+        let check = t3_check(&scan, 10.0);
+        assert_eq!(check.base.action, Action::Advisory);
+        assert_eq!(check.base.recommended, None);
+        assert_eq!(check.base.savings_usd, None);
+        for comparison in [&check.current_settings, &check.after_recommendations] {
+            assert!(
+                comparison
+                    .scenarios
+                    .iter()
+                    .all(|s| s.cost.total_usd.is_none())
+            );
+            assert!(
+                comparison.scenarios.iter().all(|s| s
+                    .cost
+                    .unknown
+                    .iter()
+                    .any(|s| s.contains("window fallback")))
+            );
+        }
     }
 
     #[test]

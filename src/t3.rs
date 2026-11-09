@@ -460,6 +460,11 @@ pub(crate) fn discover(
             if !enabled || unresolved_env || config.launch_args || policy_unresolved {
                 profile.compaction.default.comparison_unknown = Some("T3 instance is disabled or effective environment/launch overrides are unresolved".into());
             }
+            if let Some(reason) = &profile.compaction.default.comparison_unknown {
+                for control in profile.compaction.models.values_mut() {
+                    control.comparison_unknown = Some(reason.clone());
+                }
+            }
             let speed = profile
                 .speed
                 .as_mut()
@@ -822,7 +827,10 @@ fn metadata(
         let owner_key = (r.harness, r.session.to_string());
         if let std::collections::hash_map::Entry::Vacant(entry) = result.owners.entry(owner_key) {
             let owners = owner_query
-                .query_map([driver, session, bound], |r| r.get::<_, String>(0))?
+                .query_map([driver, session, bound], |r| {
+                    // Legacy nullable/malformed owners block uniqueness, not other rows.
+                    Ok(text_column(r, 0).unwrap_or_default())
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             entry.insert(owners);
         }
@@ -1414,7 +1422,7 @@ mod tests {
         let w = Workspace::new();
         write(
             w.claude.join("settings.json"),
-            r#"{"fastMode":true,"autoCompactWindow":400000,"promptCacheTtl":"5m"}"#,
+            r#"{"fastMode":true,"autoCompactWindow":400000,"promptCacheTtl":"5m","modelSettings":{"claude-opus-5-5":{"autoCompactWindow":350000}}}"#,
         );
         let root = state(
             &w,
@@ -1458,6 +1466,17 @@ mod tests {
                 .iter()
                 .filter_map(|p| p.t3.as_ref())
                 .all(|t| t.idle_mode == T3IdleMode::OnReturn)
+        );
+        let inherited = data
+            .profiles
+            .iter()
+            .find(|p| p.t3.is_some() && p.harness == Harness::Claude)
+            .unwrap();
+        assert!(inherited.compaction.default.comparison_unknown.is_some());
+        assert!(
+            inherited.compaction.models["claude-opus-5-5"]
+                .comparison_unknown
+                .is_some()
         );
     }
     #[cfg(unix)]
@@ -1538,6 +1557,7 @@ mod tests {
         let root = state(&w, json!({}));
         let mut database = db(&root);
         seed(&database, "codex", "codex");
+        database.execute("INSERT INTO orchestration_v2_projection_provider_threads SELECT 'legacy',thread_id,driver,NULL,updated_at,payload_json FROM orchestration_v2_projection_provider_threads",[]).unwrap();
         database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
         database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
         let valid = NativeRequest {
@@ -1557,6 +1577,11 @@ mod tests {
         };
         let tx = database.transaction().unwrap();
         let data = metadata(&tx, &[&valid, &orphan], "2026-01-01T00:00:20Z").unwrap();
+        assert_eq!(
+            data.owners[&(Harness::Codex, "opaque-session".into())].len(),
+            2
+        );
+        assert!(data.owners[&(Harness::Codex, "opaque-session".into())].contains(&String::new()));
         assert_eq!(data.turns["valid"].count, 1);
         assert_eq!(
             data.turns["valid"]

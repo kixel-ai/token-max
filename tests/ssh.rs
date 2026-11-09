@@ -362,6 +362,163 @@ fn codex_context_and_output_keep_their_remote_controls() {
 }
 
 #[test]
+fn background_controls_and_estimates_keep_their_remote_history() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    let local = hosts.root.join("homes/local");
+    std::fs::write(
+        local.join(".claude/settings.json"),
+        r#"{"promptSuggestionEnabled":false,"awaySummaryEnabled":false,"env":{"CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0"}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"promptCacheTtl":"5m","promptSuggestionEnabled":true,"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"1","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"7"}}"#,
+    )
+    .unwrap();
+    for (root, enabled) in [(&local, false), (&home, true)] {
+        let codex = root.join(".codex");
+        std::fs::create_dir_all(codex.join("sessions")).unwrap();
+        std::fs::copy(fixture("codex.jsonl"), codex.join("sessions/rollout.jsonl")).unwrap();
+        std::fs::write(
+            codex.join("config.toml"),
+            format!("[tui]\nauto_recap = {enabled}\n"),
+        )
+        .unwrap();
+    }
+    let response: Value = std::fs::read_to_string(fixture("claude.jsonl"))
+        .unwrap()
+        .lines()
+        .nth(2)
+        .map(|line| serde_json::from_str(line).unwrap())
+        .unwrap();
+    let mut records = vec![];
+    for minute in [0, 1, 2, 10] {
+        let time = format!("2026-11-01T00:{minute:02}:00Z");
+        records.push(serde_json::json!({
+            "type": "user", "sessionId": "session-a", "uuid": format!("user-{minute}"),
+            "timestamp": time, "entrypoint": "cli",
+            "message": {"content": "SYNTHETIC_PRIVATE_PROMPT"}
+        }));
+        let mut r = response.clone();
+        r["timestamp"] = time.into();
+        r["entrypoint"] = "cli".into();
+        r["message"]["id"] = format!("response-{minute}").into();
+        r["message"]["usage"]["cache_read_input_tokens"] = 1000.into();
+        r["message"]["content"] = serde_json::json!([
+            {"type": "text", "text": "SYNTHETIC_PRIVATE_REPLY"}
+        ]);
+        records.push(r.clone());
+        r["timestamp"] = format!("2026-11-01T00:{minute:02}:01Z").into();
+        records.push(r);
+    }
+    let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(home.join(".claude/projects/my project/main.jsonl"), lines).unwrap();
+
+    // Two earlier turns establish eligibility for the first selected turn's recap.
+    let args = [
+        "--json",
+        "--since",
+        "2026-11-01T00:02:00Z",
+        "--max-cost-per-use",
+        "0.000001",
+    ];
+    let (status, stdout, stderr) =
+        hosts.run(&[&["--ssh", "devbox", "--include-local"][..], &args].concat());
+    assert_eq!(status, 1, "{stderr}");
+    assert_eq!(stderr, "");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let combined: Value = serde_json::from_str(&stdout).unwrap();
+    let local = &combined["hosts"][0]["report"];
+    let remote = &combined["hosts"][1]["report"];
+    let background = |report: &Value| -> Vec<Value> {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["check"] == "background-generation")
+            .cloned()
+            .map(|mut c| {
+                c.as_object_mut().unwrap().remove("until");
+                c.as_object_mut().unwrap().remove("monthlySavingsUsd");
+                c
+            })
+            .collect()
+    };
+    assert_eq!(background(local).len(), 4);
+    assert!(
+        background(local)
+            .iter()
+            .all(|c| c["current"] == false && c["action"] == "keep")
+    );
+    let checks = background(remote);
+    assert_eq!(checks.len(), 4);
+    assert!(checks.iter().all(|c| c["current"] == true));
+    let feature = |name: &str| checks.iter().find(|c| c["feature"] == name).unwrap();
+    let suggestions = feature("prompt-suggestions");
+    assert_eq!(suggestions["generations"], 2);
+    assert_eq!(suggestions["action"], "change");
+    assert!(suggestions["cost"]["totalUsd"].as_f64().unwrap() > 0.0);
+    assert_eq!(suggestions["off"], "\"promptSuggestionEnabled\": false");
+    assert_eq!(
+        suggestions["offFile"],
+        home.join(".claude/settings.json").to_str().unwrap()
+    );
+    let recaps = feature("session-recaps");
+    assert_eq!(recaps["generations"], 1);
+    assert!(recaps["cost"]["totalUsd"].as_f64().unwrap() > 0.0);
+    assert!(recaps["lostWarming"]["totalUsd"].as_f64().unwrap() > 0.0);
+    assert_eq!(recaps["off"], "CLAUDE_CODE_ENABLE_AWAY_SUMMARY=0");
+    assert_eq!(recaps["offFile"], Value::Null);
+    for name in ["goal-check-ins", "auto-recaps"] {
+        let c = feature(name);
+        assert_eq!(c["action"], "advisory");
+        assert_eq!(c["generations"], Value::Null);
+        assert_eq!(c["cost"]["totalUsd"], Value::Null);
+    }
+    let profiles = remote["scan"]["profiles"].as_array().unwrap();
+    let claude = profiles.iter().find(|p| p["harness"] == "claude").unwrap();
+    assert_eq!(claude["background"][2]["minutes"], 7);
+    assert_eq!(
+        remote["scan"]["cacheContext"]["prompts"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        remote["scan"]["cacheContext"]["requests"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let (status, there, stderr) = run(hosts.command(&args).env("HOME", &home));
+    assert_eq!(status, 1, "{stderr}");
+    assert_eq!(stderr, "");
+    let there: Value = serde_json::from_str(&there).unwrap();
+    assert_eq!(timeless(remote), timeless(&there));
+    assert_eq!(checks, background(&there));
+    let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
+    assert_eq!(stderr, "");
+    assert!(!text.contains("SYNTHETIC_PRIVATE"));
+    for label in [
+        "Prompt suggestions",
+        "Session recaps",
+        "Goal check-ins",
+        "Codex automatic recaps",
+    ] {
+        assert!(text.contains(label), "{text}");
+    }
+    assert!(text.contains("Cost unknown"), "{text}");
+    assert!(
+        text.contains("tui.auto_recap = false in ~/.codex/config.toml"),
+        "{text}"
+    );
+}
+
+#[test]
 fn any_failed_destination_fails_the_whole_report() {
     let hosts = Hosts::new();
     hosts.host("devbox");

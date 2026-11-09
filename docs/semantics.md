@@ -10,7 +10,8 @@ final-line sizes. Metadata storage grows with requests/events, not transcript te
 
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
-separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence.
+separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence,
+and user prompts for per-session thresholds such as a recap's three turns.
 `scan.since` records the billing selection; checks inherit it, and a comparison
 cannot expand an already filtered scan to an earlier billing window.
 Invalid pre-window usage becomes an unknown cache state, never a billed estimate or
@@ -558,6 +559,67 @@ Current provider guidance distinguishes skill discovery from body loading:
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
 
+## Background generation
+
+`background-generation` checks one feature each: Claude `prompt-suggestions`,
+`session-recaps` and `goal-check-ins`, and Codex `auto-recaps`. Controls come
+from the user and managed Claude settings, their `env` blocks and the active
+profile's shell, in that precedence. `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` and
+`CLAUDE_CODE_ENABLE_AWAY_SUMMARY` override their settings when they hold a
+boolean form. Suggestions are off without feature flags, on Bedrock, Vertex or
+Foundry or with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, unless the variable
+turns them on. `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` accepts plain whole minutes up
+to 10,080; `0` turns check-ins off and anything else means the 30-minute default.
+Codex reads `tui.auto_recap`, default true. Project settings are not read.
+
+Claude Code 2.1.319 sends suggestions and recaps as forks of the main
+conversation with `skipTranscript` and `skipCacheWrite`, so no transcript records
+them. Each is estimated at a recorded turn end: the last main-conversation
+response before the next user prompt, or the session's last response. Only
+interactive terminal turns count (`entrypoint` `cli`, `querySource`
+`repl_main_thread` or absent); SDK and desktop clients run suggestions only when
+they ask for them, which transcripts do not record, so those turns are counted
+in the uncertainty instead. A suggestion follows a turn with at least two
+responses whose last response sent and wrote at most 10,000 uncached tokens,
+the client's cold-cache cutoff. A recap follows a turn once the session has three
+user turns and the next prompt came at least three minutes later. Each later
+recap requires two new user turns after the preceding modeled recap. A final
+turn is not counted, since nothing shows the terminal stayed open. Responses,
+prompts and modeled recaps before the window establish eligibility and spacing;
+only turns inside it are charged. Focus and the suggestion throttle after many
+unused suggestions are not recorded and are assumed favorable to running.
+
+A fork writes no cache. Its prefix is priced as a cache read only while live,
+else as ordinary input. Cache age starts at the recorded request's start, so
+streaming output and the three-minute recap delay can exhaust its lifetime.
+The recorded write lifetime takes precedence over the profile's current TTL,
+with five minutes as the default. Its new input is the last response's uncached
+input and output plus the instruction (about 350 tokens for a suggestion, 100
+for a recap), and its output is assumed to be 50 or 100 tokens. Each feature's
+comparison keeps the other feature's current state. A suggestion that reads a
+live prefix refreshes it at response completion, which can keep a later recap
+warm. A recap that reads a live prefix refreshes it at the recap's start. When
+turning a feature off expires the prefix before the other feature or the next
+recorded request reads it, the extra ordinary recap input or cache rewrite is
+subtracted from the saving as `lostWarming`. Only reads
+on the same model, speed and provider count, up to the prefix the recap read. Turns without
+recorded usage are scaled from the priced ones, and with none priced the check
+is unknown.
+
+Uses (an accepted suggestion, a read recap) are not recorded, so the whole
+estimate counts as one use: a feature is recommended off when it cost more than
+`--max-cost-per-use` over the window. Goal check-ins start ordinary-looking task
+notification turns and Codex does not record automatic recaps, so both report an
+unknown cost and stay advisory. Each line names where to turn the feature off:
+the settings file that owns the effective value, managed settings included, or
+the environment variable that forces it. Every other check's recorded baseline omits
+these unlogged requests and their cache refreshes. Sources:
+[background token usage](https://code.claude.com/docs/en/costs#background-token-usage),
+[prompt suggestions and session recap](https://code.claude.com/docs/en/interactive-mode),
+[environment variables](https://code.claude.com/docs/en/env-vars) and
+[Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
+checked 2026-11-08.
+
 ## Speed controls and premiums
 
 `checks` includes the `fast-mode` variant, using the same report, rendering,
@@ -637,6 +699,10 @@ message-digest chains are sent once and then referenced by index, so the stream 
 copy keep the sharing the destination's scan had in memory. The coordinator
 reads the stream as it arrives rather than buffering it, and checks that the
 scan covers the requested window.
+
+Background controls, their owning files and pre-window prompts and requests
+travel with the scan, so background estimates use the destination's settings
+and full eligibility history, just as a local run there would.
 
 Every host's scan is analyzed separately against one price catalog, so cache
 replay, profile ownership, coverage and settings never mix between hosts, and

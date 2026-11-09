@@ -8,9 +8,10 @@ use serde_json::Value;
 
 use crate::context::{config_patch, control_text, settings_patch};
 use crate::model::{
-    Action, BashCapCheck, CacheReplayEvidence, CheckBase, CheckResult, ContextCost, ContextKind,
-    Control, Cost, Coverage, EstimateEvidence, Evidence, Harness, Millis, PeriodStatus, Profile,
-    Report, RequestEvidence, Scalar, Ttl, UsageEstimate, Verdict,
+    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
+    CheckResult, ContextCost, ContextKind, Control, Cost, Coverage, EstimateEvidence, Evidence,
+    Harness, Millis, PeriodStatus, Profile, Report, RequestEvidence, Scalar, Ttl, UsageEstimate,
+    Verdict,
 };
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
@@ -180,6 +181,7 @@ enum Setting<'a> {
     Window(i64),
     Idle(bool),
     Speed(&'a str),
+    Toggle(bool),
     Cap(Millis),
 }
 
@@ -275,6 +277,30 @@ fn common(result: &CheckResult) -> Common<'_> {
         CheckResult::BashCap(c) => base("bash-timeout-cap", c.bucket, &c.base, &[], |n| {
             Setting::Cap(*n)
         }),
+        CheckResult::Background(c) => base(
+            "background-generation",
+            feature_label(c.feature),
+            &c.base,
+            &[],
+            |b| Setting::Toggle(*b),
+        ),
+    }
+}
+
+fn feature_label(feature: BackgroundFeature) -> &'static str {
+    match feature {
+        BackgroundFeature::PromptSuggestions => "prompt-suggestions",
+        BackgroundFeature::SessionRecaps => "session-recaps",
+        BackgroundFeature::GoalCheckIns => "goal-check-ins",
+        BackgroundFeature::AutoRecaps => "auto-recaps",
+    }
+}
+
+/// How to turn a background feature off: an environment variable as is, a setting in its file.
+fn background_off(c: &BackgroundCheck, out: &Out<'_>) -> String {
+    match &c.off_file {
+        Some(file) => format!("Set {} in {}", c.off, out.home(file)),
+        None => format!("Set {}", c.off),
     }
 }
 
@@ -296,6 +322,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::Window(n)) => format!("{n} tokens"),
         Some(Setting::Idle(b)) => b.to_string(),
         Some(Setting::Speed(s)) => s.into(),
+        Some(Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Cap(ms)) => format!("{ms} ms"),
     }
 }
@@ -304,7 +331,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
 fn setting_value(value: Option<Setting<'_>>) -> String {
     match value {
         None => "unknown".into(),
-        Some(Setting::Idle(b)) => if b { "on" } else { "off" }.into(),
+        Some(Setting::Idle(b) | Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Speed("standard")) => "off".into(),
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
@@ -777,6 +804,16 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         ),
     );
     match result {
+        CheckResult::Background(b) => {
+            out.field("Turn off", &background_off(b, out));
+            out.field(
+                "Estimated requests",
+                &b.generations
+                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
+            );
+            out.cost("Estimated request cost", &b.cost);
+            out.cost("Later input costs its reads avoided", &b.lost_warming);
+        }
         CheckResult::Ttl(t) => {
             out.field(
                 "Replay cost",
@@ -998,6 +1035,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         out.field("History profile", &out.profile_name(id));
     }
     match result {
+        CheckResult::Background(_) => {}
         CheckResult::Ttl(t) => {
             for ttl in Ttl::ALL {
                 let name = ttl.as_str();
@@ -1229,7 +1267,10 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
     match result {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
         CheckResult::Compaction(c) => out.witnesses(&c.cache_evidence),
-        CheckResult::Idle(_) | CheckResult::Speed(_) | CheckResult::BashCap(_) => {}
+        CheckResult::Idle(_)
+        | CheckResult::Speed(_)
+        | CheckResult::Background(_)
+        | CheckResult::BashCap(_) => {}
     }
     out.notes("Assumption", r.assumptions);
     out.notes("Uncertainty", r.uncertainty);
@@ -1239,6 +1280,13 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
+        CheckResult::Background(b) => {
+            return match r.action {
+                Action::Advisory => background_unknown(b).into(),
+                _ if r.current == Some(Setting::Toggle(false)) => "Off; it costs nothing.".into(),
+                _ => "Estimated cost against --max-cost-per-use, counting its unrecorded uses as one.".into(),
+            };
+        }
         CheckResult::BashCap(b) => {
             return match (b.ttl, r.action) {
                 (None, _) => "No main-agent cache TTL to compare the cap with.".into(),
@@ -1302,13 +1350,32 @@ fn setting_name(result: &CheckResult) -> String {
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
         CheckResult::BashCap(_) => "Bash timeout cap".into(),
+        CheckResult::Background(b) => match b.feature {
+            BackgroundFeature::PromptSuggestions => "Prompt suggestions".into(),
+            BackgroundFeature::SessionRecaps => "Session recaps".into(),
+            BackgroundFeature::GoalCheckIns => "Goal check-ins".into(),
+            BackgroundFeature::AutoRecaps => "Codex automatic recaps".into(),
+        },
+    }
+}
+
+/// Why a background feature's cost is unknown.
+fn background_unknown(b: &BackgroundCheck) -> &'static str {
+    match b.feature {
+        BackgroundFeature::GoalCheckIns => {
+            "Cost unknown: check-in turns are not marked in transcripts."
+        }
+        BackgroundFeature::AutoRecaps => "Cost unknown: Codex does not record recap requests.",
+        _ => "Cost unknown: none of the turns where it would have run have recorded usage.",
     }
 }
 
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
-    if let CheckResult::Speed(s) = result {
-        return capitalize(&s.reason) + ".";
+    match result {
+        CheckResult::Speed(s) => return capitalize(&s.reason) + ".",
+        CheckResult::Background(b) => return background_unknown(b).into(),
+        _ => {}
     }
     if let CheckResult::BashCap(b) = result {
         return format!(
@@ -1380,7 +1447,9 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             }
             "Idle summaries or resumed sessions could not be priced.".into()
         }
-        CheckResult::Speed(_) | CheckResult::BashCap(_) => unreachable!("handled above"),
+        CheckResult::Speed(_) | CheckResult::Background(_) | CheckResult::BashCap(_) => {
+            unreachable!("handled above")
+        }
     }
 }
 
@@ -1774,6 +1843,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     }
                     (None, _) => String::new(),
                 };
+                if let CheckResult::Background(b) = result {
+                    return format!(
+                        "{head} {arrow} off.{saves} Its uses are not recorded. {}.",
+                        background_off(b, out)
+                    );
+                }
                 return format!(
                     "{head} {arrow} {}.{saves} Set in {}.",
                     setting_value(r.recommended),
@@ -1781,6 +1856,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 );
             }
             Action::Advisory => {
+                if let CheckResult::Background(b) = result {
+                    return format!(
+                        "{head}. {} {} to turn it off.",
+                        background_unknown(b),
+                        background_off(b, out)
+                    );
+                }
                 return format!(
                     "{head}. {}{}",
                     unresolved(result, r),
@@ -1790,6 +1872,22 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             Action::Keep => {}
         }
         match result {
+            CheckResult::Background(_) if r.current != Some(Setting::Toggle(true)) => {
+                format!("{head}. Costs nothing; set in {}.", out.home(r.owner))
+            }
+            CheckResult::Background(b) if b.generations == Some(0) => format!(
+                "{head}. No recorded interactive terminal turn would have run it, so it cost nothing. {} to turn it off.",
+                background_off(b, out)
+            ),
+            CheckResult::Background(b) => format!(
+                "{head}. Costs {}{}; its uses are not recorded. {} to turn it off.",
+                match r.monthly_savings_usd {
+                    Some(m) => about(m),
+                    None => monthly(r.savings_usd.unwrap_or(0.0), r.since, r.until),
+                },
+                coverage_note(r),
+                background_off(b, out)
+            ),
             CheckResult::Ttl(t) if t.one_hour_savings_usd != 0.0 => {
                 let other = if r.current == Some(Setting::Ttl(Ttl::OneHour)) {
                     "5m"

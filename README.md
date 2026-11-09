@@ -1,7 +1,8 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction,
+standard-speed and Bash timeout-cap settings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -174,7 +175,9 @@ per-piece context costs in `context`, and check results. Each check has a `check
 retains its TTL-specific fields, while `compaction-window` includes candidate
 windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
 current-settings and post-recommendation on/off costs, request/final periods,
-activation cohorts, context-size costs and lifetime/summary/timing sensitivities. Consumers
+activation cohorts, context-size costs and lifetime/summary/timing sensitivities.
+`background-generation` adds the feature, the setting that turns it off, its
+estimated request count and cost, and the cache rewrites it avoided. Consumers
 should branch on `check` before reading setting-specific fields.
 IDs are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
@@ -244,6 +247,35 @@ prove that discarded or unlogged summaries did not run. Without linked billed
 summary output and full resumed-prefix calibration, affected hypothetical costs
 stay unknown; `postTokens` alone cannot establish the full request.
 
+## Other hosts over SSH
+
+`--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
+SSH configuration, keys and known hosts without prompting. Add
+`--include-local` to audit this host in the same run. Each destination needs
+the same version of token-max installed with `cargo install`; token-max
+installs nothing there itself. A missing or different version fails with the
+command to run. Linux and macOS destinations are supported.
+
+```sh
+token-max --ssh devbox --ssh user@laptop --include-local
+```
+
+The destination runs `token-max --ssh-scan`, which discovers that host's own
+profiles from its home and environment, reads its transcripts and settings,
+and streams only the metadata `--json` would show, never prompt, reply or
+component text. It looks for `token-max` on the non-interactive `PATH` and in
+`~/.cargo/bin`. Prices and every check run on this host, with one price
+catalog. `--claude-dir` and `--codex-dir` select local profiles only, so with
+`--ssh` they need `--include-local`.
+
+Each host is analyzed on its own and gets its own section, labeled with the
+destination, or `this host`. With `--ssh`, JSON is
+`{"schemaVersion": 1, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
+report per host and `ssh` null for this host. A history copied between hosts
+counts in each host's report, so don't add amounts across hosts. Any failed
+host, connection or stream fails the whole run with exit 2 and no report;
+Ctrl-C stops every destination.
+
 ## Fast mode
 
 The maintainer's cost preference is fast mode off for both harnesses. The
@@ -273,3 +305,38 @@ Claude's separate fast/standard caches mean cache-switch effects are excluded.
 They hold work constant, do not value latency, and make no subscription-bill,
 credit-multiplier or combined savings claim. Fast mode compares with the current
 profile, independently of the TTL/window/idle recommendations.
+
+## Background generation
+
+The `background-generation` check prints one line per feature: Claude prompt
+suggestions, session recaps and goal check-ins, and Codex automatic recaps. Each
+names its current value and the setting that turns it off:
+`promptSuggestionEnabled`, `awaySummaryEnabled`,
+`CLAUDE_CODE_GOAL_CHECKIN_MINUTES=0` or `tui.auto_recap = false`.
+
+Neither client logs these requests, so suggestion and recap costs are estimated
+at each recorded interactive-terminal turn where they would have run, and their
+uses count as one against `--max-cost-per-use`. Goal check-ins and Codex recaps
+cannot be told apart in transcripts, so their cost is shown as unknown.
+
+## Bash timeout cap
+
+Claude Code waits on a foreground Bash call for at most
+`max(BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS)`, 600000 ms by default,
+then moves the command to the background. A wait at least as long as the cache
+TTL lets the cache expire before the model replies, so the next request
+rewrites the whole prefix. The `bash-timeout-cap` check compares the cap with
+the main-agent TTL: the one this report recommends, else the current setting,
+else the lifetime the latest main-agent request wrote. At or above it, the
+check recommends 240000 ms for a 5m cache or 3300000 ms for 1h, which leaves
+room for the model's reply on either side of the wait, and exits 1. Commands
+longer than the cap keep running in the background, where checking on them
+reads the cache instead.
+
+The line also counts foreground Bash waits that outlasted the cache the
+starting request wrote, how many hit their timeout or slept in a polling loop,
+and what their cache misses cost: the prefix the next request wrote instead of
+read, at the write rate minus the read rate. Background commands and the user's
+own processes are unaffected by the cap. Codex's
+`background_terminal_max_timeout` bounds one poll of a background terminal,
+and each poll reads the cache, so it is not checked.

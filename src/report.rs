@@ -6,11 +6,12 @@ use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::context::{control_text, settings_patch};
+use crate::context::{config_patch, control_text, settings_patch};
 use crate::model::{
-    Action, CacheReplayEvidence, CheckBase, CheckResult, ContextCost, ContextKind, Control, Cost,
-    Coverage, EstimateEvidence, Evidence, Millis, PeriodStatus, Profile, Report, RequestEvidence,
-    Ttl, UsageEstimate, Verdict,
+    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
+    CheckResult, ContextCost, ContextKind, Control, Cost, Coverage, EstimateEvidence, Evidence,
+    Harness, Millis, PeriodStatus, Profile, Report, RequestEvidence, Scalar, Ttl, UsageEstimate,
+    Verdict,
 };
 use crate::prices::add_costs;
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -18,7 +19,7 @@ use crate::terminal::{WrapOptions, wrap_text};
 
 /// How to lay out the text report; presentation never changes analysis or the JSON report.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ReportOptions {
+pub struct ReportOptions<'a> {
     /// Terminal width to wrap to; None keeps each line whole.
     pub width: Option<usize>,
     /// Style headings and verdicts with ANSI colors.
@@ -27,6 +28,17 @@ pub struct ReportOptions {
     pub unicode: bool,
     /// Show each check's evidence and aggregate repeated periods.
     pub details: bool,
+    /// The host a report of several hosts describes; None for a report of this host alone.
+    pub host: Option<Host<'a>>,
+}
+
+/// One host's section of a report covering several hosts.
+#[derive(Clone, Copy, Debug)]
+pub struct Host<'a> {
+    /// The SSH destination, or "this host".
+    pub name: &'a str,
+    /// That host's home directory, shown as `~`.
+    pub home: Option<&'a str>,
 }
 
 const DAY: f64 = 86_400_000.0;
@@ -170,6 +182,8 @@ enum Setting<'a> {
     Window(i64),
     Idle(bool),
     Speed(&'a str),
+    Toggle(bool),
+    Cap(Millis),
 }
 
 /// The fields every check shares, whatever its value type.
@@ -261,7 +275,44 @@ fn common(result: &CheckResult) -> Common<'_> {
             &c.usage_estimates,
             |s: &String| Setting::Speed(s),
         ),
+        CheckResult::BashCap(c) => base("bash-timeout-cap", c.bucket, &c.base, &[], |n| {
+            Setting::Cap(*n)
+        }),
+        CheckResult::Background(c) => base(
+            "background-generation",
+            feature_label(c.feature),
+            &c.base,
+            &[],
+            |b| Setting::Toggle(*b),
+        ),
     }
+}
+
+fn feature_label(feature: BackgroundFeature) -> &'static str {
+    match feature {
+        BackgroundFeature::PromptSuggestions => "prompt-suggestions",
+        BackgroundFeature::SessionRecaps => "session-recaps",
+        BackgroundFeature::GoalCheckIns => "goal-check-ins",
+        BackgroundFeature::AutoRecaps => "auto-recaps",
+    }
+}
+
+/// How to turn a background feature off: an environment variable as is, a setting in its file.
+fn background_off(c: &BackgroundCheck, out: &Out<'_>) -> String {
+    match &c.off_file {
+        Some(file) => format!("Set {} in {}", c.off, out.home(file)),
+        None => format!("Set {}", c.off),
+    }
+}
+
+/// A duration in the largest whole unit, such as `55m`.
+fn duration(ms: Millis) -> String {
+    for (unit, size) in [("h", 3_600_000), ("m", 60_000), ("s", 1000)] {
+        if ms % size == 0 {
+            return format!("{}{unit}", ms / size);
+        }
+    }
+    format!("{ms}ms")
 }
 
 /// A value as the evidence cards print it.
@@ -272,6 +323,8 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::Window(n)) => format!("{n} tokens"),
         Some(Setting::Idle(b)) => b.to_string(),
         Some(Setting::Speed(s)) => s.into(),
+        Some(Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
+        Some(Setting::Cap(ms)) => format!("{ms} ms"),
     }
 }
 
@@ -279,11 +332,12 @@ fn setting(value: Option<Setting<'_>>) -> String {
 fn setting_value(value: Option<Setting<'_>>) -> String {
     match value {
         None => "unknown".into(),
-        Some(Setting::Idle(b)) => if b { "on" } else { "off" }.into(),
+        Some(Setting::Idle(b) | Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Speed("standard")) => "off".into(),
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
         Some(Setting::Ttl(t)) => t.as_str().into(),
+        Some(Setting::Cap(ms)) => duration(ms),
     }
 }
 
@@ -301,7 +355,7 @@ fn token_range(mut values: impl Iterator<Item = i64>) -> String {
 /// The text being built, one wrapped line at a time.
 struct Out<'a> {
     text: String,
-    options: ReportOptions,
+    options: ReportOptions<'a>,
     arrow: &'static str,
     home: Option<String>,
     profiles: IndexMap<&'a str, &'a Profile>,
@@ -412,6 +466,13 @@ impl<'a> Out<'a> {
             self.field("Predecessor", &format!("unrecorded for {unrecorded} parts"));
         }
     }
+    fn title(&mut self) {
+        let title = match self.options.host {
+            Some(host) => format!("token-max: {}", host.name),
+            None => "token-max".into(),
+        };
+        self.line(&title, 0, 1);
+    }
     fn home(&self, path: &str) -> String {
         match &self.home {
             Some(dir)
@@ -442,7 +503,7 @@ impl<'a> Out<'a> {
 }
 
 /// Render all findings in a wrapping flow, with grouped evidence in details.
-pub fn format_report(report: &Report, options: ReportOptions) -> String {
+pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
     let mut profiles = IndexMap::new();
     for p in &report.scan.profiles {
         profiles.insert(p.id.as_str(), p);
@@ -451,7 +512,10 @@ pub fn format_report(report: &Report, options: ReportOptions) -> String {
         text: String::new(),
         options,
         arrow: if options.unicode { "→" } else { "->" },
-        home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+        home: match options.host {
+            Some(host) => host.home.map(str::to_string),
+            None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+        },
         profiles,
     };
     if options.details {
@@ -468,7 +532,7 @@ fn generated_at(report: &Report) -> Millis {
 
 fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
-    out.line("token-max", 0, 1);
+    out.title();
     out.line("Public API-price estimates, not subscription bills.", 0, 0);
     let requests = &report.scan.requests;
     let earliest = requests.first().map(|r| r.time);
@@ -773,6 +837,16 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         ),
     );
     match result {
+        CheckResult::Background(b) => {
+            out.field("Turn off", &background_off(b, out));
+            out.field(
+                "Estimated requests",
+                &b.generations
+                    .map_or_else(|| "unknown".into(), |n| n.to_string()),
+            );
+            out.cost("Estimated request cost", &b.cost);
+            out.cost("Later input costs its reads avoided", &b.lost_warming);
+        }
         CheckResult::Ttl(t) => {
             out.field(
                 "Replay cost",
@@ -856,6 +930,21 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
             out.field(
                 "Extra re-read break-even per resumed summary",
                 &estimate(s.reread_break_even_usd_per_resumed_summary),
+            );
+        }
+        CheckResult::BashCap(b) => {
+            out.field(
+                "Compared TTL",
+                &format!("{}; {}", b.ttl.map_or("unknown", Ttl::as_str), b.ttl_basis),
+            );
+            out.field("Replacement", &b.replacement);
+            let w = &b.waits;
+            out.field(
+                "Foreground Bash waits",
+                &format!(
+                    "{} calls; {} reached the cache TTL ({} timed out, {} polling loops)",
+                    w.calls, w.long, w.timed_out, w.polling
+                ),
             );
         }
         CheckResult::Speed(s) => {
@@ -979,6 +1068,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         out.field("History profile", &out.profile_name(id));
     }
     match result {
+        CheckResult::Background(_) => {}
         CheckResult::Ttl(t) => {
             for ttl in Ttl::ALL {
                 let name = ttl.as_str();
@@ -1100,6 +1190,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 out.notes("Idle unknown", &scenario.unknown);
             }
         }
+        CheckResult::BashCap(b) => out.cost("Cache misses after long waits", &b.waits.miss_cost),
         CheckResult::Speed(s) => {
             out.cost("Observed response-tier premium", &s.observed.premium);
             out.cost(
@@ -1198,7 +1289,10 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
     match result {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
         CheckResult::Compaction(c) => out.witnesses(&c.cache_evidence),
-        CheckResult::Idle(_) | CheckResult::Speed(_) => {}
+        CheckResult::Idle(_)
+        | CheckResult::Speed(_)
+        | CheckResult::Background(_)
+        | CheckResult::BashCap(_) => {}
     }
     out.notes("Assumption", r.assumptions);
     out.notes("Uncertainty", r.uncertainty);
@@ -1208,6 +1302,23 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
+        CheckResult::Background(b) => {
+            return match r.action {
+                Action::Advisory => background_unknown(b).into(),
+                _ if r.current == Some(Setting::Toggle(false)) => "Off; it costs nothing.".into(),
+                _ => "Estimated cost against --max-cost-per-use, counting its unrecorded uses as one.".into(),
+            };
+        }
+        CheckResult::BashCap(b) => {
+            return match (b.ttl, r.action) {
+                (None, _) => "No main-agent cache TTL to compare the cap with.".into(),
+                (Some(ttl), Action::Change) => format!(
+                    "A foreground wait as long as the cap outlasts the {} cache; lower it below the TTL.",
+                    ttl.as_str()
+                ),
+                (Some(ttl), _) => format!("The cap is under the {} cache TTL.", ttl.as_str()),
+            };
+        }
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
                 "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
@@ -1260,13 +1371,39 @@ fn setting_name(result: &CheckResult) -> String {
         }
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
+        CheckResult::BashCap(_) => "Bash timeout cap".into(),
+        CheckResult::Background(b) => match b.feature {
+            BackgroundFeature::PromptSuggestions => "Prompt suggestions".into(),
+            BackgroundFeature::SessionRecaps => "Session recaps".into(),
+            BackgroundFeature::GoalCheckIns => "Goal check-ins".into(),
+            BackgroundFeature::AutoRecaps => "Codex automatic recaps".into(),
+        },
+    }
+}
+
+/// Why a background feature's cost is unknown.
+fn background_unknown(b: &BackgroundCheck) -> &'static str {
+    match b.feature {
+        BackgroundFeature::GoalCheckIns => {
+            "Cost unknown: check-in turns are not marked in transcripts."
+        }
+        BackgroundFeature::AutoRecaps => "Cost unknown: Codex does not record recap requests.",
+        _ => "Cost unknown: none of the turns where it would have run have recorded usage.",
     }
 }
 
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
-    if let CheckResult::Speed(s) = result {
-        return capitalize(&s.reason) + ".";
+    match result {
+        CheckResult::Speed(s) => return capitalize(&s.reason) + ".",
+        CheckResult::Background(b) => return background_unknown(b).into(),
+        _ => {}
+    }
+    if let CheckResult::BashCap(b) = result {
+        return format!(
+            "{}, so the cap has nothing to compare with.",
+            capitalize(&b.ttl_basis)
+        );
     }
     if let Some(recommended) = r.recommended {
         return if Some(recommended) == r.current {
@@ -1332,18 +1469,71 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             }
             "Idle summaries or resumed sessions could not be priced.".into()
         }
-        CheckResult::Speed(_) => unreachable!("handled above"),
+        CheckResult::Speed(_) | CheckResult::Background(_) | CheckResult::BashCap(_) => {
+            unreachable!("handled above")
+        }
     }
 }
 
 fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
     match c.kind {
         ContextKind::Tool => format!("{} tool", c.name),
+        ContextKind::McpServer if c.harness == Harness::Codex && c.name == "codex_apps" => {
+            "ChatGPT apps".into()
+        }
         ContextKind::McpServer => format!("MCP server {}", c.name),
+        ContextKind::ToolOutput => match c.name.strip_prefix("mcp__") {
+            Some(server) => format!("MCP server {server} output"),
+            None => format!("{} output", c.name),
+        },
         ContextKind::Skill => format!("Skill {}", c.name),
         ContextKind::Instructions => out.home(&c.name),
         ContextKind::System | ContextKind::Other => c.name.clone(),
     }
+}
+
+/// A cap setting's label and the line describing its value.
+type Cap = (&'static str, String);
+
+/// The setting that caps how much of one tool's output stays in context, and its current value.
+fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
+    let profile = report
+        .scan
+        .profiles
+        .iter()
+        .find(|p| p.id == first_profile(c));
+    let number = |key: &str| match profile.and_then(|p| p.settings.get(key)) {
+        Some(Scalar::Number(n)) => Some(count(*n as i64)),
+        _ => None,
+    };
+    Some(match c.harness {
+        Harness::Claude if c.name == "Bash" => (
+            "Bash output",
+            match (
+                number("bashOutputMaxChars"),
+                number("BASH_MAX_OUTPUT_LENGTH"),
+            ) {
+                (Some(n), _) => format!("bashOutputMaxChars is {n} characters"),
+                (None, Some(n)) => format!("BASH_MAX_OUTPUT_LENGTH is {n} characters"),
+                (None, None) => "bashOutputMaxChars is unset, so about 30,000 characters".into(),
+            },
+        ),
+        Harness::Claude if c.name.starts_with("mcp__") => (
+            "MCP output",
+            match number("MAX_MCP_OUTPUT_TOKENS") {
+                Some(n) => format!("MAX_MCP_OUTPUT_TOKENS is {n} tokens"),
+                None => "MAX_MCP_OUTPUT_TOKENS is unset, so 25,000 tokens".into(),
+            },
+        ),
+        Harness::Codex => (
+            "Tool output",
+            match number("tool_output_token_limit") {
+                Some(n) => format!("tool_output_token_limit is {n} tokens"),
+                None => "tool_output_token_limit is unset".into(),
+            },
+        ),
+        Harness::Claude => return None,
+    })
 }
 
 /// How large requests on a compaction check's models got, to judge a window by.
@@ -1416,7 +1606,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let since = report.scan.since.or(requests.first().map(|r| r.time));
     let until = generated_at(report);
     let many = report.scan.profiles.len() > 1;
-    out.line("token-max", 0, 1);
+    out.title();
     out.line(
         "Estimated with public API prices, not your subscription bill. Nothing was changed.",
         0,
@@ -1625,6 +1815,28 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             format!("{label}: on. {cost}; {uses}.")
         }
     };
+    // What long foreground Bash waits cost, scaled like every other line.
+    let waits = |b: &BashCapCheck, r: &Common<'_>| {
+        let w = &b.waits;
+        if w.long == 0 {
+            return "No foreground Bash wait outlasted the cache.".to_string();
+        }
+        let cost = &w.miss_cost;
+        let cost = match cost.total_usd {
+            Some(usd) => monthly(usd, r.since, r.until),
+            None if cost.known_usd > 0.0 => {
+                format!("at least {}", monthly(cost.known_usd, r.since, r.until))
+            }
+            None => "an unknown amount".into(),
+        };
+        format!(
+            "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost}.",
+            count(w.long),
+            if w.long == 1 { "" } else { "s" },
+            count(w.timed_out),
+            count(w.polling)
+        )
+    };
     let check_line = |c: &(&CheckResult, Common<'_>), out: &Out<'_>| {
         let (result, r) = c;
         let head = format!("{}: {}", name(r, result, out), setting_value(r.current));
@@ -1640,8 +1852,25 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         coverage_note(r)
                     ),
                     (None, CheckResult::Speed(s)) => format!(" {}.", capitalize(&s.reason)),
+                    (None, CheckResult::BashCap(b)) => {
+                        let mut text = format!(
+                            " A wait that long outlasts the {} cache. {}",
+                            b.ttl.map_or("unknown", Ttl::as_str),
+                            waits(b, r)
+                        );
+                        if b.replacement.contains("BASH_DEFAULT_TIMEOUT_MS") {
+                            text += " Lower BASH_DEFAULT_TIMEOUT_MS to match.";
+                        }
+                        text
+                    }
                     (None, _) => String::new(),
                 };
+                if let CheckResult::Background(b) = result {
+                    return format!(
+                        "{head} {arrow} off.{saves} Its uses are not recorded. {}.",
+                        background_off(b, out)
+                    );
+                }
                 return format!(
                     "{head} {arrow} {}.{saves} Set in {}.",
                     setting_value(r.recommended),
@@ -1649,6 +1878,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 );
             }
             Action::Advisory => {
+                if let CheckResult::Background(b) = result {
+                    return format!(
+                        "{head}. {} {} to turn it off.",
+                        background_unknown(b),
+                        background_off(b, out)
+                    );
+                }
                 return format!(
                     "{head}. {}{}",
                     unresolved(result, r),
@@ -1658,6 +1894,22 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             Action::Keep => {}
         }
         match result {
+            CheckResult::Background(_) if r.current != Some(Setting::Toggle(true)) => {
+                format!("{head}. Costs nothing; set in {}.", out.home(r.owner))
+            }
+            CheckResult::Background(b) if b.generations == Some(0) => format!(
+                "{head}. No recorded interactive terminal turn would have run it, so it cost nothing. {} to turn it off.",
+                background_off(b, out)
+            ),
+            CheckResult::Background(b) => format!(
+                "{head}. Costs {}{}; its uses are not recorded. {} to turn it off.",
+                match r.monthly_savings_usd {
+                    Some(m) => about(m),
+                    None => monthly(r.savings_usd.unwrap_or(0.0), r.since, r.until),
+                },
+                coverage_note(r),
+                background_off(b, out)
+            ),
             CheckResult::Ttl(t) if t.one_hour_savings_usd != 0.0 => {
                 let other = if r.current == Some(Setting::Ttl(Ttl::OneHour)) {
                     "5m"
@@ -1673,6 +1925,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             CheckResult::Compaction(_) => {
                 format!("{head}. No other window was cheaper on recorded sessions.")
             }
+            CheckResult::BashCap(b) => format!(
+                "{head}. Under the {} cache TTL. {}",
+                b.ttl.map_or("unknown", Ttl::as_str),
+                waits(b, r)
+            ),
             CheckResult::Idle(_) => format!(
                 "{head}. {}",
                 if r.current == Some(Setting::Idle(true)) {
@@ -1740,18 +1997,86 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.line(&text, 2, 0);
         }
     }
+    // Tool output, one line per cap setting, with tools no cap governs together.
+    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::new();
+    for c in report
+        .context
+        .iter()
+        .filter(|c| c.kind == ContextKind::ToolOutput)
+    {
+        outputs
+            .entry((first_profile(c), output_cap(report, c)))
+            .or_default()
+            .push(c);
+    }
+    if !outputs.is_empty() {
+        out.section("Tool output kept in context");
+        // Capped settings first, in the order their most expensive output appeared.
+        let order: Vec<_> = outputs
+            .keys()
+            .filter(|k| k.1.is_some())
+            .chain(outputs.keys().filter(|k| k.1.is_none()))
+            .cloned()
+            .collect();
+        // Scaled to 30 days like every other line, without counting unknowns as $0.
+        let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
+        for key in order {
+            let rows = &outputs[&key];
+            let usd: Vec<Option<f64>> = rows
+                .iter()
+                .map(|c| c.estimated_usd.map(|usd| usd * scale))
+                .collect();
+            let cost = match known_total(&usd) {
+                unknown if usd.iter().all(Option::is_none) => unknown,
+                total => format!("costs {total}"),
+            };
+            let largest = rows.iter().filter_map(|c| c.largest_characters).max();
+            let largest = largest.map_or_else(String::new, |n| {
+                format!("; its largest result was {} characters", count(n))
+            });
+            let suffix = suffix(rows[0], out);
+            let text = match &key.1 {
+                Some((name, cap)) => format!("{name}{suffix}: {cost}{largest}. {cap}."),
+                None => {
+                    let names: Vec<&str> = rows.iter().take(4).map(|c| c.name.as_str()).collect();
+                    let more = rows.len() - names.len();
+                    let more = if more > 0 {
+                        format!(" and {} more", count(more as u64))
+                    } else {
+                        String::new()
+                    };
+                    format!(
+                        "Other tool output ({}{more}){suffix}: {cost}{largest}. No cap is checked for it.",
+                        names.join(", "),
+                    )
+                }
+            };
+            out.line(&text, 2, 0);
+        }
+        out.line(
+            "A lower cap keeps less output in context but leaves the model to read the rest back, which transcripts cannot price, so no cap change is recommended.",
+            2,
+            0,
+        );
+    }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
         .context
         .iter()
-        .filter(|c| c.current && c.control.is_none() && c.estimated_usd != Some(0.0))
+        .filter(|c| {
+            c.current
+                && c.control.is_none()
+                && c.kind != ContextKind::ToolOutput
+                && c.estimated_usd != Some(0.0)
+        })
         .collect();
     if !fixed.is_empty() {
         out.section("No setting turns these off");
         for c in fixed.iter().filter(|c| c.kind == ContextKind::Instructions) {
             let text = format!(
-                "{}: {}. Shorten it, or move parts into path-scoped rules or skills.",
+                "{}{}: {}. Shorten it, or move parts into path-scoped rules or skills.",
                 out.home(&c.name),
+                suffix(c, out),
                 c.estimated_usd.map_or_else(
                     || "cost unknown".into(),
                     |usd| format!("costs {}", monthly(usd, since, Some(until)))
@@ -1793,9 +2118,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             0,
             0,
         );
-        // Never wrapped, so the snippet stays valid JSON at any terminal width.
-        let patch =
-            serde_json::to_string_pretty(&settings_patch(controls)).expect("JSON values serialize");
+        // Never wrapped, so the snippet stays valid at any terminal width.
+        let patch = if file.ends_with(".toml") {
+            config_patch(controls).trim_end().to_string()
+        } else {
+            serde_json::to_string_pretty(&settings_patch(controls)).expect("JSON values serialize")
+        };
         for row in patch.split('\n') {
             out.raw(&format!("  {row}"));
         }
@@ -1885,6 +2213,12 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         };
         let used = match c.calls {
             None => String::new(),
+            Some(results) if c.kind == ContextKind::ToolOutput => format!(
+                "; {} result{} in the window, the largest {} characters",
+                count(results),
+                if results == 1 { "" } else { "s" },
+                count(c.largest_characters.unwrap_or(0))
+            ),
             Some(0) => "; no recorded use".into(),
             Some(calls) => format!(
                 "; used {} time{}, last {}",
@@ -1935,12 +2269,16 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                     } else {
                         "Turn off"
                     },
-                    control_text(control)
+                    control_text(control, c.harness)
                 )
             }
             None if c.kind == ContextKind::Instructions => {
                 "Turn off: trim or scope this file".into()
             }
+            None if c.kind == ContextKind::ToolOutput => match output_cap(report, c) {
+                Some((_, cap)) => format!("Capped by {cap}"),
+                None => "No cap is checked for it".into(),
+            },
             None => "No setting turns this off".into(),
         };
         out.line(&text, 6, 0);
@@ -2238,6 +2576,8 @@ mod tests {
     ) -> ContextCost {
         let cost_per_use = calls.and_then(|c| estimated.map(|e| e / c.max(1) as f64));
         ContextCost {
+            harness: Harness::Claude,
+            largest_characters: None,
             profiles: vec!["profile".into()],
             kind,
             name: name.into(),
@@ -2607,6 +2947,79 @@ mod tests {
                 "permissions": {"deny": ["mcp__docs"]}
             })
         );
+    }
+
+    #[test]
+    fn tool_output_and_codex_switches() {
+        let mut report = synthetic();
+        report.scan.profiles[0]
+            .settings
+            .insert("MAX_MCP_OUTPUT_TOKENS".into(), Scalar::Number(50_000.0));
+        let mut codex = make_profile("codex", "/synthetic/.codex");
+        codex.harness = Harness::Codex;
+        codex.settings_file = "/synthetic/.codex/config.toml".into();
+        report.scan.profiles.push(codex);
+        let output = |harness, profile: &str, name: &str, usd: f64, largest: i64| ContextCost {
+            harness,
+            profiles: vec![profile.into()],
+            largest_characters: Some(largest),
+            ..context_piece(ContextKind::ToolOutput, name, None, Some(usd), Some(4))
+        };
+        let apps = ContextCost {
+            harness: Harness::Codex,
+            profiles: vec!["codex".into()],
+            ..context_piece(
+                ContextKind::McpServer,
+                "codex_apps",
+                switch(&["features", "apps"], ControlValue::Bool(false)),
+                Some(30.0),
+                Some(0),
+            )
+        };
+        report.context.extend([
+            output(Harness::Claude, "profile", "Bash", 20.0, 30_500),
+            output(Harness::Claude, "profile", "mcp__docs", 6.0, 900),
+            output(Harness::Claude, "profile", "Read", 8.0, 2_000),
+            output(Harness::Codex, "codex", "exec", 50.0, 112_000),
+            apps,
+        ]);
+        let text = text(&report, None, false);
+        let lines: Vec<&str> = text.lines().collect();
+        let has = |line: &str| lines.contains(&line);
+        let (claude, codex) = (
+            "[claude /synthetic/home/.claude]",
+            "[codex /synthetic/.codex]",
+        );
+        assert!(has(&format!(
+            "  ChatGPT apps {codex}: on -> off. Costs $30; never used."
+        )));
+        // One line per cap setting, capped ones first, then everything else together.
+        let start = lines
+            .iter()
+            .position(|l| *l == "Tool output kept in context")
+            .unwrap();
+        assert_eq!(
+            lines[start + 1..start + 5],
+            [
+                format!(
+                    "  Bash output {claude}: costs $20; its largest result was 30,500 characters. bashOutputMaxChars is unset, so about 30,000 characters."
+                ),
+                format!(
+                    "  MCP output {claude}: costs $6; its largest result was 900 characters. MAX_MCP_OUTPUT_TOKENS is 50,000 tokens."
+                ),
+                format!(
+                    "  Tool output {codex}: costs $50; its largest result was 112,000 characters. tool_output_token_limit is unset."
+                ),
+                format!(
+                    "  Other tool output (Read) {claude}: costs $8; its largest result was 2,000 characters. No cap is checked for it."
+                ),
+            ]
+        );
+        // Codex switches go to config.toml as TOML.
+        let snippet = &text[text
+            .find("merge this into /synthetic/.codex/config.toml")
+            .unwrap()..];
+        assert!(snippet.contains("\n  [features]\n  apps = false\n"));
     }
 
     #[test]
@@ -3043,6 +3456,8 @@ mod tests {
         let name = "google-drive:google-drive-comments";
         report.checks.clear();
         let skill = ContextCost {
+            harness: Harness::Claude,
+            largest_characters: None,
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
             name: name.into(),

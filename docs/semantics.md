@@ -555,18 +555,23 @@ they ask for them, which transcripts do not record, so those turns are counted
 in the uncertainty instead. A suggestion follows a turn with at least two
 responses whose last response sent and wrote at most 10,000 uncached tokens,
 the client's cold-cache cutoff. A recap follows a turn once the session has three
-user turns and the next prompt came at least three minutes later; a final turn
-is not counted, since nothing shows the terminal stayed open. Responses and
-prompts before the window count toward both thresholds; only turns inside it are
-charged. Focus and the suggestion throttle after many unused suggestions are not recorded and are
-assumed favorable to running.
+user turns and the next prompt came at least three minutes later. Each later
+recap requires two new user turns after the preceding modeled recap. A final
+turn is not counted, since nothing shows the terminal stayed open. Responses,
+prompts and modeled recaps before the window establish eligibility and spacing;
+only turns inside it are charged. Focus and the suggestion throttle after many
+unused suggestions are not recorded and are assumed favorable to running.
 
-A fork reads the last response's cached prefix and writes nothing. Its new input
-is the last response's uncached input and output plus the instruction (about 350
-tokens for a suggestion, 100 for a recap), and its output is assumed to be 50 or
-100 tokens. A recap's read refreshes the cache; when the next request came after
-the cache lifetime but within three minutes more, turning recaps off would make
-it rewrite its cached prefix, which is subtracted from the saving. Only reads
+A fork writes no cache. Its prefix is priced as a cache read only while live,
+else as ordinary input. Cache age starts at the recorded request's start, so
+streaming output and the three-minute recap delay can exhaust its lifetime.
+The recorded write lifetime takes precedence over the profile's current TTL,
+with five minutes as the default. Its new input is the last response's uncached
+input and output plus the instruction (about 350 tokens for a suggestion, 100
+for a recap), and its output is assumed to be 50 or 100 tokens. A recap that
+reads a live prefix refreshes it at the recap's start. If the next request came
+after the original expiry but before the refreshed expiry, turning recaps off
+would make it rewrite that prefix, which is subtracted from the saving. Only reads
 on the same model, speed and provider count, up to the prefix the recap read. Turns without
 recorded usage are scaled from the priced ones, and with none priced the check
 is unknown.

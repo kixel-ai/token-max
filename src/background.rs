@@ -8,6 +8,7 @@
 
 use indexmap::IndexSet;
 
+use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BackgroundCheck, BackgroundControl, BackgroundFeature, BillingPart, CheckBase, Cost,
     Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
@@ -79,10 +80,10 @@ struct TurnEnd<'a> {
     interactive: bool,
     /// Main-conversation responses in the session so far, including this one.
     responses: usize,
-    /// User turns in the session so far.
-    turns: usize,
-    /// When the next user turn started.
-    prompt: Option<Millis>,
+    /// Whether a recap can run after this turn, including its spacing from earlier recaps.
+    recap: bool,
+    /// The cache lifetime the last response wrote, else the current profile's lifetime.
+    ttl: Ttl,
     /// The next main-conversation request, which a cache refresh could have kept warm.
     next: Option<&'a Request>,
 }
@@ -113,6 +114,7 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
         main.sort_by_key(|r| r.time);
         let mut prompts = starts.get(session).cloned().unwrap_or_default();
         prompts.sort_unstable();
+        let mut recap_turn = 0;
         for (i, &r) in main.iter().enumerate() {
             let next = main.get(i + 1).copied();
             let prompt = prompts.iter().copied().find(|&t| t > r.time);
@@ -125,15 +127,27 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
             if !ends {
                 continue;
             }
+            let interactive = r.client.as_deref() == Some("cli")
+                && r.source
+                    .as_deref()
+                    .is_none_or(|s| s.starts_with("repl_main_thread"));
+            let turns = prompts.iter().filter(|&&t| t <= r.time).count();
+            let recap = interactive
+                && turns >= 3
+                && turns >= recap_turn + 2
+                && prompt.is_some_and(|p| p - r.end_time >= RECAP_DELAY);
+            if recap {
+                recap_turn = turns;
+            }
             result.push(TurnEnd {
                 request: r,
-                interactive: r.client.as_deref() == Some("cli")
-                    && r.source
-                        .as_deref()
-                        .is_none_or(|s| s.starts_with("repl_main_thread")),
+                interactive,
                 responses: i + 1,
-                turns: prompts.iter().filter(|&&t| t <= r.time).count(),
-                prompt,
+                recap,
+                ttl: last_message(r)
+                    .and_then(observed_ttl)
+                    .or(profile.ttl.main.value)
+                    .unwrap_or(Ttl::FiveMinutes),
                 next,
             });
         }
@@ -156,19 +170,25 @@ fn uncached(p: &BillingPart) -> Option<(i64, i64, i64, i64)> {
     Some((input - read - write, read, write, output))
 }
 
-/// One forked request after `r`: its cached prefix read back, the last response and
-/// `prompt` as new input, and `output` tokens.
-fn fork_cost(catalog: &Catalog, r: &Request, prompt: i64, output: i64) -> Cost {
+/// A fork reads the prefix while it is warm, else sends it as ordinary input without writing cache.
+fn fork_cost(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature) -> Cost {
+    let r = end.request;
+    let (prompt, output, delay) = match feature {
+        BackgroundFeature::PromptSuggestions => (SUGGESTION_PROMPT, SUGGESTION_OUTPUT, 0),
+        BackgroundFeature::SessionRecaps => (RECAP_PROMPT, RECAP_OUTPUT, RECAP_DELAY),
+        _ => unreachable!("only suggestions and recaps have estimable requests"),
+    };
     let Some((part, (ordinary, read, write, last))) =
         last_message(r).and_then(|p| Some((p, uncached(p)?)))
     else {
         return unknown_cost("the turn's last response has no recorded usage");
     };
     let fresh = ordinary + last + prompt;
+    let cached = r.end_time - r.time + delay < ttl_milliseconds(end.ttl);
     let usage = Usage {
         input: Some(read + write + fresh),
         output: Some(output),
-        read: Some(read + write),
+        read: Some(if cached { read + write } else { 0 }),
         write: Some(0),
         write5m: Some(0),
         write1h: Some(0),
@@ -186,20 +206,18 @@ fn fork_cost(catalog: &Catalog, r: &Request, prompt: i64, output: i64) -> Cost {
 }
 
 /// The rewrite the next request would pay if a recap had not refreshed the cache.
-fn lost_warming(catalog: &Catalog, profile: &Profile, end: &TurnEnd<'_>) -> Cost {
+fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
     let Some(next) = end.next else {
         return zero_cost();
     };
-    let ttl = match last_message(end.request).and_then(|p| p.usage.write1h) {
-        Some(w) if w > 0 => Ttl::OneHour,
-        _ => profile.ttl.main.value.unwrap_or(Ttl::FiveMinutes),
-    };
-    let lifetime = match ttl {
-        Ttl::FiveMinutes => 5 * MINUTE,
-        Ttl::OneHour => 60 * MINUTE,
-    };
-    let gap = next.time - end.request.end_time;
-    if gap <= lifetime || gap > RECAP_DELAY + lifetime {
+    let lifetime = ttl_milliseconds(end.ttl);
+    let recap_time = end.request.end_time + RECAP_DELAY;
+    // A read can refresh only a live prefix. The original touch precedes streamed output;
+    // the refresh happens when the recap starts, not when that output finished.
+    if recap_time - end.request.time >= lifetime
+        || next.time - end.request.time < lifetime
+        || next.time - recap_time >= lifetime
+    {
         return zero_cost();
     }
     let Some(part) = next
@@ -228,7 +246,7 @@ fn lost_warming(catalog: &Catalog, profile: &Profile, end: &TurnEnd<'_>) -> Cost
     let (Some(read), Some(rates)) = (read, unit_rates(catalog, next, part)) else {
         return unknown_cost("the request after the recap has no priced cache reads");
     };
-    let write = match ttl {
+    let write = match end.ttl {
         Ttl::FiveMinutes => rates.write5m,
         Ttl::OneHour => rates.write1h,
     };
@@ -242,7 +260,6 @@ fn lost_warming(catalog: &Catalog, profile: &Profile, end: &TurnEnd<'_>) -> Cost
 /// The estimated (on, off) cost of each turn where the feature would have run.
 fn generations(
     catalog: &Catalog,
-    profile: &Profile,
     feature: BackgroundFeature,
     ends: &[TurnEnd<'_>],
 ) -> Vec<(Cost, Cost)> {
@@ -261,22 +278,13 @@ fn generations(
                 if cold == Some(true) {
                     continue;
                 }
-                result.push((
-                    fork_cost(catalog, end.request, SUGGESTION_PROMPT, SUGGESTION_OUTPUT),
-                    zero_cost(),
-                ));
+                result.push((fork_cost(catalog, end, feature), zero_cost()));
             }
             BackgroundFeature::SessionRecaps => {
-                let away = end
-                    .prompt
-                    .is_some_and(|p| p - end.request.end_time >= RECAP_DELAY);
-                if end.turns < 3 || !away {
+                if !end.recap {
                     continue;
                 }
-                result.push((
-                    fork_cost(catalog, end.request, RECAP_PROMPT, RECAP_OUTPUT),
-                    lost_warming(catalog, profile, end),
-                ));
+                result.push((fork_cost(catalog, end, feature), lost_warming(catalog, end)));
             }
             BackgroundFeature::GoalCheckIns | BackgroundFeature::AutoRecaps => {}
         }
@@ -297,7 +305,7 @@ fn check(
         BackgroundFeature::PromptSuggestions | BackgroundFeature::SessionRecaps
     );
     let pairs = if measurable && control.value {
-        generations(input.catalog, profile, feature, ends)
+        generations(input.catalog, feature, ends)
     } else {
         vec![]
     };
@@ -391,8 +399,9 @@ fn check(
             break_even: None,
             assumptions: [
                 "the client does not log these requests; each is estimated at a recorded turn where it would have run",
-                "a fork reads the conversation's cached prefix and sends the last response and its instruction as new input, without writing cache",
-                "recaps refresh the cache; a request that arrived within that refresh would rewrite its cached prefix with the feature off",
+                "a fork sends the conversation's prefix as a cache read before expiry or ordinary input after expiry, plus the last response and its instruction as new input, without writing cache",
+                "recaps require two new user turns after the previous modeled recap, including recaps before the analysis window",
+                "a recap that reads a live prefix refreshes it; a later request after the original expiry but before the refresh expires would rewrite that prefix with the feature off",
                 "uses are not recorded, so the whole cost counts as one use against --max-cost-per-use",
             ]
             .map(String::from)
@@ -521,9 +530,8 @@ mod tests {
         assert_eq!(c.generations, Some(3));
         let one = fork_cost(
             &prices(),
-            &s.requests[0],
-            SUGGESTION_PROMPT,
-            SUGGESTION_OUTPUT,
+            &turn_ends(&s, &s.profiles[0])[0],
+            BackgroundFeature::PromptSuggestions,
         );
         let expected = one.total_usd.unwrap() * 3.0;
         assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
@@ -576,13 +584,101 @@ mod tests {
         let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
         let lost = 100_000.0 * (rates.write5m - rates.read);
         assert!((c.lost_warming.total_usd.unwrap() - lost).abs() < 1e-12);
-        let recap = fork_cost(&prices(), &s.requests[2], RECAP_PROMPT, RECAP_OUTPUT);
+        let recap = fork_cost(
+            &prices(),
+            &turn_ends(&s, &s.profiles[0])[2],
+            BackgroundFeature::SessionRecaps,
+        );
         let net = recap.total_usd.unwrap() - lost;
         assert!((c.base.savings_usd.unwrap() - net).abs() < 1e-12);
         // A request on another model reads a cache the recap never touched.
         let mut other = s.clone();
         other.requests[3].parts[0].model = Some("claude-sonnet-5".into());
         assert_eq!(run(&other, 1.0)[0].lost_warming.total_usd, Some(0.0));
+    }
+
+    #[test]
+    fn streamed_responses_can_expire_the_cache_before_background_generation() {
+        for (feature, duration, prompt, output) in [
+            (BackgroundFeature::PromptSuggestions, 6, 350, 50),
+            (BackgroundFeature::SessionRecaps, 4, 100, 100),
+        ] {
+            let mut s = turns(&[(feature, true)]);
+            for i in [0, 1, 3] {
+                s.requests[i].client = Some("sdk-ts".into());
+            }
+            let r = &mut s.requests[2];
+            r.end_time = r.time + duration * MINUTE;
+            let expected = price_components(
+                &prices(),
+                r,
+                &BillingPart {
+                    usage: claude_usage(ClaudeUsage {
+                        input: 100_100 + 10 + 20 + prompt,
+                        output,
+                        write: 0,
+                        ..ClaudeUsage::default()
+                    }),
+                    ..r.parts[0].clone()
+                },
+            )
+            .total()
+            .total_usd
+            .unwrap();
+            let c = &run(&s, 1.0)[0];
+            assert_eq!(c.generations, Some(1));
+            assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
+            assert_eq!(c.lost_warming.total_usd, Some(0.0));
+        }
+    }
+
+    #[test]
+    fn recaps_skip_the_next_turn_even_when_the_previous_recap_is_before_the_window() {
+        let times = [0, 1, 2, 6, 10, 14];
+        let mut s = scan(
+            &[(BackgroundFeature::SessionRecaps, true)],
+            times.map(|t| response(t, 1000)).into(),
+            &times,
+        );
+        // Eligible gaps after turns three, four and five allow recaps on three and five.
+        assert_eq!(run(&s, 1.0)[0].generations, Some(2));
+        let window = |s: &Scan| {
+            background_checks(&BackgroundInput {
+                scan: s,
+                catalog: &prices(),
+                since: Some(6 * MINUTE),
+                now: 30 * 24 * 60 * MINUTE,
+                max_cost_per_use_usd: 1.0,
+            })[0]
+                .generations
+        };
+        assert_eq!(window(&s), Some(1));
+        s.cache_context.requests = s.requests.drain(..3).collect();
+        let (earlier, events) = s.events.drain(..).partition(|e| e.time < 6 * MINUTE);
+        (s.cache_context.prompts, s.events) = (earlier, events);
+        assert_eq!(window(&s), Some(1));
+    }
+
+    #[test]
+    fn recap_warming_uses_request_start_and_only_a_live_prefix_can_refresh() {
+        for (next, expected_reads) in [(8, 100_000), (11, 0)] {
+            let mut s = scan(
+                &[(BackgroundFeature::SessionRecaps, true)],
+                vec![
+                    response(0, 100_000),
+                    response(1, 100_000),
+                    response(2, 100_000),
+                    response(next, 100_000),
+                ],
+                &[0, 1, 2, next],
+            );
+            s.requests[2].end_time = 3 * MINUTE;
+            let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
+            let expected = expected_reads as f64 * (rates.write5m - rates.read);
+            let c = &run(&s, 1.0)[0];
+            assert_eq!(c.generations, Some(1));
+            assert!((c.lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
+        }
     }
 
     #[test]
@@ -641,9 +737,8 @@ mod tests {
         assert_eq!((coverage.priced, coverage.total), (2, 3));
         let one = fork_cost(
             &prices(),
-            &s.requests[0],
-            SUGGESTION_PROMPT,
-            SUGGESTION_OUTPUT,
+            &turn_ends(&s, &s.profiles[0])[0],
+            BackgroundFeature::PromptSuggestions,
         );
         assert!((c.base.savings_usd.unwrap() - one.total_usd.unwrap() * 3.0).abs() < 1e-12);
         for r in &mut s.requests {

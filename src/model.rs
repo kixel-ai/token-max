@@ -961,6 +961,54 @@ pub struct IdleCheck {
     pub usage_estimates: Vec<UsageEstimate>,
 }
 
+/// Pinging every interval for up to one cap, against leaving sessions idle.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepaliveScenario {
+    /// How long after the last request pings continue.
+    pub cap_ms: Millis,
+    /// Pings in gaps that ended with a return, and in final periods that never did.
+    pub pings: u64,
+    pub final_pings: u64,
+    /// Returns that would have read a warm cache instead of rewriting it.
+    pub rescued: u64,
+    pub ping_cost_usd: f64,
+    /// Cache rewrites avoided on rescued returns, less the extra ping context they read.
+    pub avoided_usd: f64,
+    /// Avoided minus ping cost, relative to leaving sessions idle.
+    pub savings_usd: f64,
+    /// The same, if every final period closed right after its last request.
+    pub closed_savings_usd: f64,
+}
+
+/// Capped cache keepalive pings, against leaving sessions idle and idle compaction.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeepaliveCheck {
+    #[serde(flatten)]
+    pub base: CheckBase<String>,
+    /// Always "main".
+    pub bucket: &'static str,
+    /// The cache lifetime pings must beat; null when unknown.
+    pub lifetime_ms: Option<Millis>,
+    pub interval_ms: Option<Millis>,
+    /// Modeled new input and output per ping: the median recorded request.
+    pub ping_input_tokens: Option<i64>,
+    pub ping_output_tokens: Option<i64>,
+    /// Gaps longer than the interval that ended with a return.
+    pub returns: u64,
+    /// Sessions' last requests, after which pings run the full cap.
+    pub finals: u64,
+    /// Periods whose ping or cache cost could not be priced.
+    pub unpriced: u64,
+    /// Idle compaction's estimated saving where it is recommended; null where unsupported.
+    pub idle_compaction_savings_usd: Option<f64>,
+    /// The best cap's saving minus the best alternative's; negative when pinging loses.
+    pub margin_usd: Option<f64>,
+    /// One scenario per cap that rescues another return, shortest first.
+    pub scenarios: Vec<KeepaliveScenario>,
+}
+
 /// Setting-specific evidence accompanies one common recommendation model.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -978,6 +1026,8 @@ pub enum CheckResult {
     Background(BackgroundCheck),
     #[serde(rename = "bash-timeout-cap")]
     BashCap(BashCapCheck),
+    #[serde(rename = "keepalive")]
+    Keepalive(KeepaliveCheck),
 }
 
 impl CheckResult {
@@ -990,6 +1040,7 @@ impl CheckResult {
             CheckResult::Speed(c) => c.base.action,
             CheckResult::Background(c) => c.base.action,
             CheckResult::BashCap(c) => c.base.action,
+            CheckResult::Keepalive(c) => c.base.action,
         }
     }
 }

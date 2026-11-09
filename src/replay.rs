@@ -13,6 +13,7 @@ use crate::estimates::estimate_usage;
 use crate::exposure::calibrate;
 use crate::fast::{SpeedInput, speed_checks};
 use crate::idle::{IdleOptions, idle_checks};
+use crate::keepalive::{KeepaliveOptions, keepalive_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
@@ -898,6 +899,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let idle_refs: Vec<_> = idle.iter().collect();
+    let keepalive = keepalive_checks(&KeepaliveOptions {
+        scan: &scan,
+        catalog,
+        ttls: &ttl_refs,
+        idle: &idle_refs,
+        since,
+        now,
+    });
     let speed = speed_checks(&SpeedInput {
         scan: &scan,
         catalog,
@@ -923,6 +933,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
         .chain(idle.into_iter().map(CheckResult::Idle))
+        .chain(keepalive.into_iter().map(CheckResult::Keepalive))
         .chain(speed.into_iter().map(CheckResult::Speed))
         .chain(background.into_iter().map(CheckResult::Background))
         .chain(bash.into_iter().map(CheckResult::BashCap))

@@ -16,7 +16,7 @@ use crate::model::{
     Evidence, Harness, KeepaliveCheck, Millis, PeriodStatus, Profile, Report, RequestEvidence,
     Scalar, Ttl, UsageEstimate, Verdict,
 };
-use crate::prices::add_costs;
+use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
 
@@ -731,6 +731,23 @@ fn details(report: &Report, out: &mut Out<'_>) {
         );
         out.notes("Unknown", &group.cost.unknown);
         out.notes("Pricing assumption", &group.cost.assumptions);
+        if !group.tier_sensitivity.is_empty() {
+            out.field(
+                "Tier coverage",
+                &format!(
+                    "{} of {} requests priced; {} use conditional service tiers",
+                    group.priced_requests, group.requests, group.conditional_requests
+                ),
+            );
+            for scenario in &group.tier_sensitivity {
+                out.field(
+                    "Served-tier scenario",
+                    &format!("{}: {}", scenario.tier, money(&scenario.cost)),
+                );
+                out.notes("Unknown", &scenario.cost.unknown);
+            }
+            out.line("Tier scenarios replace only conditionally priced tiers, preserve recorded billing, and are not bounds on actual charges.", 0, 0);
+        }
     }
     if report.historical.is_empty() {
         out.line(
@@ -1412,6 +1429,9 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
         );
     }
     if r.recommended.is_none() {
+        if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
+            return "Conditional API estimates are available, but missing effective tiers could reverse the winner.".into();
+        }
         return "No priced winner established; missing evidence is unknown, never zero.".into();
     }
     if r.action == Action::Advisory {
@@ -1546,6 +1566,24 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
 
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
+    if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
+        let baseline = match result {
+            CheckResult::Compaction(c) => c
+                .baseline_cost
+                .total_usd
+                .map(|usd| {
+                    format!(
+                        "Conditional baseline cost {}. ",
+                        per_month(usd, r.since, r.until)
+                    )
+                })
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        return format!(
+            "{baseline}The winning setting is unresolved because effective service tiers could reverse it."
+        );
+    }
     match result {
         CheckResult::Speed(s) => return capitalize(&s.reason) + ".",
         CheckResult::Background(b) => return background_unknown(b).into(),
@@ -1911,6 +1949,15 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     for p in &report.scan.profiles {
         out.line(&out.short_profile(&p.id), 2, 0);
     }
+    for group in &report.historical {
+        if !group.tier_sensitivity.is_empty() {
+            out.line(&format!(
+                "Conditional Codex pricing [{}]: {} of {} requests priced; {} use assumed service tiers (supported historical requests, otherwise standard for omitted/auto). {}",
+                group.profiles.iter().map(|p| out.short_profile(p)).collect::<Vec<_>>().join(", "),
+                group.priced_requests, group.requests, group.conditional_requests, TIER_SENSITIVITY
+            ), 0, 0);
+        }
+    }
     if coverage.missing_usage > 0 {
         out.line(
             &format!(
@@ -2245,9 +2292,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .iter()
         .filter(|c| action(c) == Action::Advisory)
         .collect();
-    // Switchable context still sent today whose requests could not be priced at all.
+    // Switchable context still sent today without enough pricing or use evidence for a verdict.
     let unpriced: Vec<&ContextCost> = setting_rows(&report.context)
-        .filter(|c| c.current && c.control.is_some() && c.estimated_usd.is_none())
+        .filter(|c| c.current && c.control.is_some() && c.verdict.is_none())
         .collect();
     if !unknown.is_empty() || !unpriced.is_empty() {
         out.section("Not enough evidence");
@@ -2257,9 +2304,21 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         for c in unpriced {
             let text = format!(
-                "{}{}: on. Cost unknown: none of its requests could be priced.",
+                "{}{}: on. {} Turn off: {}.",
                 piece_label(c, out),
-                suffix(c, out)
+                suffix(c, out),
+                c.estimated_usd.map_or_else(
+                    || "Cost unknown: none of its requests could be priced.".into(),
+                    |usd| {
+                        let cost = monthly(usd, since, Some(until));
+                        if c.tier_unknown_requests > 0 {
+                            format!("Estimated cost {cost}; {} requests have unresolved tier evidence ({} priced using assumed tiers); keep/off unresolved because tier sensitivity could reverse it.", c.tier_unknown_requests, c.conditional_requests)
+                        } else {
+                            format!("Estimated cost {cost}; recorded uses are unknown, so keep/off is unresolved.")
+                        }
+                    }
+                ),
+                control_text(c.control.as_ref().expect("switchable context"), c.harness)
             );
             out.line(&text, 2, 0);
         }
@@ -2591,6 +2650,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         for note in context_guidance(c, &report.scan.profiles, &out.home(&c.name)) {
             out.line(&note, 6, 0);
         }
+        out.notes("Pricing assumption", &c.assumptions);
         let size = c.tokens.map_or_else(String::new, |tokens| {
             format!("{} tokens in {} requests", count(tokens), count(c.requests))
         });
@@ -2950,6 +3010,9 @@ mod tests {
             name: name.into(),
             requests: 100,
             priced: if estimated.is_some() { 90 } else { 0 },
+            conditional_requests: 0,
+            tier_unknown_requests: 0,
+            assumptions: vec![],
             tokens: estimated.map(|_| 12_345),
             cost_usd: estimated.map_or(0.0, |e| e * 0.9),
             estimated_usd: estimated,
@@ -3170,6 +3233,9 @@ mod tests {
                 bucket: "profile".into(),
                 profiles: vec!["profile".into()],
                 requests: 2000,
+                priced_requests: 1000,
+                conditional_requests: 0,
+                tier_sensitivity: vec![],
                 evidence: "estimated",
                 cost: cost(None, 1500.0),
             }],
@@ -3302,7 +3368,7 @@ mod tests {
         assert!(has("  Fast mode: off."));
         assert!(has("  Subagent prompt cache TTL: 1h. Saves $4.20 over 5m."));
         assert!(has(
-            "  Workflow tool: on. Cost unknown: none of its requests could be priced."
+            "  Workflow tool: on. Cost unknown: none of its requests could be priced. Turn off: \"enableWorkflows\": false."
         ));
         assert!(has(
             "  Idle compaction: on. On and off cost the same on recorded idle gaps, so neither is cheaper."
@@ -3392,6 +3458,45 @@ mod tests {
                 );
             }
         }
+
+        let mut conditional = report.clone();
+        let server = &mut conditional.context[0];
+        let mark_conditional = |row: &mut ContextCost| {
+            row.verdict = None;
+            row.tier_unknown_requests = 100;
+            row.conditional_requests = row.priced;
+            row.assumptions = vec!["conditional tool-tier estimate".into()];
+        };
+        mark_conditional(server);
+        for row in &mut server.details {
+            mark_conditional(row);
+        }
+        let rendered = text(&conditional, None, false);
+        let advisory = rendered
+            .split("Not enough evidence")
+            .nth(1)
+            .unwrap()
+            .split("MCP loading")
+            .next()
+            .unwrap();
+        assert!(advisory.contains("MCP server docs: on. Estimated cost"));
+        assert!(
+            advisory.contains(
+                "MCP tool mcp__docs__write (included in server total): on. Estimated cost"
+            )
+        );
+        assert_eq!(
+            advisory
+                .matches("tier sensitivity could reverse it")
+                .count(),
+            2
+        );
+        assert!(!rendered.contains("To turn these off"));
+        let detailed = text(&conditional, None, true);
+        assert_eq!(
+            detailed.matches("conditional tool-tier estimate").count(),
+            3
+        );
 
         report.context[0].verdict = Some(Verdict::Off);
         let rendered = text(&report, None, false);
@@ -4125,6 +4230,9 @@ mod tests {
             }),
             requests: 10,
             priced: 10,
+            conditional_requests: 0,
+            tier_unknown_requests: 0,
+            assumptions: vec![],
             tokens: Some(100),
             cost_usd: 5.0,
             estimated_usd: Some(5.0),

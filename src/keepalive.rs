@@ -543,7 +543,7 @@ fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
         .filter(|e| e.kind == EventKind::Compaction)
     {
         for session in
-            std::iter::once(e.session.as_str()).chain(e.origins.iter().map(|o| o.session.as_str()))
+            std::iter::once(e.session.as_ref()).chain(e.origins.iter().map(|o| o.session.as_ref()))
         {
             boundaries.entry(session).or_default().push(e.time);
         }
@@ -678,7 +678,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .filter(|e| e.kind == EventKind::Compaction && e.profiles.contains(&profile.id))
     {
         for session in
-            std::iter::once(e.session.as_str()).chain(e.origins.iter().map(|o| o.session.as_str()))
+            std::iter::once(e.session.as_ref()).chain(e.origins.iter().map(|o| o.session.as_ref()))
         {
             let list = events.entry(session).or_default();
             if !list.iter().any(|old| old.id == e.id) {

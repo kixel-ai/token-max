@@ -207,6 +207,106 @@ fn a_remote_report_matches_running_there() {
 }
 
 #[test]
+fn keepalive_retains_costs_unknowns_and_caps_in_both_ssh_schemas() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    let fixture: Vec<Value> = std::fs::read_to_string(fixture("claude.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let mut records = vec![];
+    for (i, (session, time, read, write)) in [
+        ("sample", "00:00:00", 19_000, 1000),
+        ("sample", "00:01:00", 20_000, 1500),
+        ("main", "00:10:00", 100_000, 1000),
+        ("main", "00:40:00", 100_000, 1000),
+        ("main", "02:40:00", 0, 101_000),
+        ("unpriced", "00:20:00", 0, 1000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut r = fixture[1].clone();
+        r.as_object_mut().unwrap().remove("requestRef");
+        r["sessionId"] = session.into();
+        r["timestamp"] = format!("2026-11-01T{time}Z").into();
+        r["uuid"] = format!("block-{i}").into();
+        r["message"]["id"] = format!("message-{i}").into();
+        let u = &mut r["message"]["usage"];
+        u["output_tokens"] = 500.into();
+        u["cache_read_input_tokens"] = read.into();
+        u["cache_creation_input_tokens"] = write.into();
+        u["cache_creation"]["ephemeral_5m_input_tokens"] = 0.into();
+        u["cache_creation"]["ephemeral_1h_input_tokens"] = write.into();
+        if session == "unpriced" {
+            r["message"]["model"] = "unknown-model".into();
+        }
+        records.push(r);
+    }
+    std::fs::write(
+        home.join(".claude/projects/my project/main.jsonl"),
+        records.iter().map(|r| format!("{r}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let keepalive = |report: &Value| {
+        let mut check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["check"] == "keepalive")
+            .unwrap()
+            .clone();
+        // Each invocation has its own clock; the replay costs do not depend on it.
+        check.as_object_mut().unwrap().remove("until");
+        check.as_object_mut().unwrap().remove("monthlySavingsUsd");
+        check
+    };
+    let mut full = None;
+    for flag in ["--json-full", "--json"] {
+        let args = [flag, "--since", "2026-11-01T00:10:00Z"];
+        let (status, stdout, stderr) = hosts.run(&[&["--ssh", "devbox"][..], &args].concat());
+        assert_ne!(status, 2, "{stderr}");
+        assert!(stderr.is_empty(), "{stderr}");
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        let combined: Value = serde_json::from_str(&stdout).unwrap();
+        let remote = &combined["hosts"][0]["report"];
+        let check = keepalive(remote);
+        assert_eq!(check["current"], Value::Null);
+        assert_eq!(check["action"], "advisory");
+        assert_eq!(check["savingsUsd"], Value::Null);
+        assert_eq!(check["marginUsd"], Value::Null);
+        assert_eq!(check["pingInputTokens"], 1000);
+        assert!(check["coverage"]["priced"].as_u64().unwrap() > 0);
+        assert!(check["unpriced"].as_u64().unwrap() > 0);
+        let caps = check["scenarios"].as_array().unwrap();
+        assert!(caps.len() >= 2);
+        for cap in caps {
+            assert!(cap["pingCostUsd"].as_f64().unwrap() > 0.0);
+            assert!(
+                cap["closedSavingsUsd"].as_f64().unwrap() > cap["savingsUsd"].as_f64().unwrap()
+            );
+        }
+        let (_, stdout, stderr) = run(hosts.command(&args).env("HOME", &home));
+        assert!(stderr.is_empty(), "{stderr}");
+        let local: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(check, keepalive(&local));
+        if let Some(full) = &full {
+            assert_eq!(&check, full);
+        } else {
+            assert_eq!(
+                remote["scan"]["cacheContext"]["requests"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            full = Some(check);
+        }
+    }
+}
+
+#[test]
 fn compact_ssh_reports_use_the_same_contract_as_local_reports() {
     let hosts = Hosts::new();
     let home = hosts.host("devbox");

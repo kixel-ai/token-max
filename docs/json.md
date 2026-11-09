@@ -12,6 +12,12 @@ setting, history profiles, window, costs (including partial known subtotals and
 unknown reasons), coverage, assumptions, uncertainty and sensitivities. Savings
 from independent checks still must not be added.
 
+Keepalive checks have the same complete shape in both versions, including every
+cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
+Their period coverage, unknown current ping state, unpriced periods and unresolved
+comparisons remain explicit. The sequential replay uses complete historical inputs
+before either output projection, including when the scan came from SSH.
+
 These evidence fields change shape:
 
 | Field | Version 2 |

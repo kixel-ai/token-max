@@ -152,7 +152,7 @@ fn check(mut check: CheckResult) -> Value {
                 estimates(&std::mem::take(&mut c.usage_estimates)),
             ));
         }
-        CheckResult::Background(_) | CheckResult::BashCap(_) => {}
+        CheckResult::Background(_) | CheckResult::BashCap(_) | CheckResult::Keepalive(_) => {}
     }
     let mut result = value(check);
     for (key, replacement) in replacements {

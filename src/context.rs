@@ -1737,7 +1737,7 @@ mod tests {
             (ContextKind::Instructions, None)
         );
         assert!(close(agents.cost_usd, 500.0 * input + 500.0 * read));
-        // The skills check owns per-skill findings; the catalog is one piece here.
+        // A catalog without parsed member spans remains one piece with no per-skill control.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
     }

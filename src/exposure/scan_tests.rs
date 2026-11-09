@@ -498,7 +498,7 @@ fn image_inputs_and_unlinked_requests_never_calibrate_from_partial_text() {
 }
 
 #[test]
-fn typed_and_mentioned_skills_nested_completions_and_script_references_stay_distinct() {
+fn typed_skill_aliases_deduplicate_while_nested_calls_and_script_references_stay_distinct() {
     let data = transcript(
         Harness::Codex,
         &[
@@ -551,7 +551,12 @@ fn typed_and_mentioned_skills_nested_completions_and_script_references_stay_dist
     )
     .unwrap();
     let e = &data.exposure;
-    assert_eq!(kinds(e, InvocationKind::SkillRequest).len(), 2);
+    assert_eq!(kinds(e, InvocationKind::SkillRequest).len(), 1);
+    assert_eq!(kinds(e, InvocationKind::SkillRequest)[0].via, Via::Typed);
+    assert_eq!(
+        kinds(e, InvocationKind::SkillRequest)[0].target,
+        target("skill", "/synthetic/SKILL.md")
+    );
     assert_eq!(
         kinds(e, InvocationKind::McpCall)[0].status,
         InvocationStatus::Completed
@@ -1539,13 +1544,18 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         record["payload"]["usage"]["cached_input_tokens"] = json!(cached);
         record
     };
-    let data = transcript(Harness::Codex, &[
+    let mut data = transcript(Harness::Codex, &[
         codex_meta(), turn(), world(0, json!({"host_skills": {"body": body}}), true),
         // Mixed cache regions leave the whole first catalog unpriced.
         billed(1), usage(2, 1000),
         world(3, json!({"host_skills": {"body": body.replace("SYNTHETIC_PRIVATE_DESCRIPTION", "expanded description with unicode λ")}}), false),
         usage(4, 0), usage(5, 1000),
     ], None).unwrap();
+    // Native records omit billed tiers. Inject a known synthetic tier to test
+    // allocation independently of the missing-tier pricing quest.
+    for r in &mut data.requests {
+        r.parts[0].tier = Some("standard".into());
+    }
     let split = report(&data, 0.0);
     let mut aggregate_data = data.clone();
     for c in &mut aggregate_data.exposure.components {
@@ -1728,12 +1738,17 @@ fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_d
     let replacement = "- `r0` = `/new`\n- same: a (file: r0/a/SKILL.md)";
     let mut warm = billed(5);
     warm["payload"]["usage"]["cached_input_tokens"] = json!(1000);
-    let data = transcript(Harness::Codex, &[
+    let mut data = transcript(Harness::Codex, &[
         codex_meta(), turn(), world(0, json!({"host_skills":{"body":body}}), true), billed(1),
         world(2, json!({"host_skills":{"body":replacement}}), false),
         json!({"type":"event_msg", "timestamp":at(3), "payload":{"type":"user_message", "message":"$same"}}),
         billed(4), warm,
     ], None).unwrap();
+    // Native records omit billed tiers. Inject a known synthetic tier to test
+    // allocation independently of the missing-tier pricing quest.
+    for r in &mut data.requests {
+        r.parts[0].tier = Some("standard".into());
+    }
     let r = report(&data, 0.0);
     assert_eq!(skill_row(&r, "/new/a/SKILL.md").calls, Some(1));
     assert_eq!(skill_row(&r, "/new/a/SKILL.md").verdict, Some(Verdict::Off));

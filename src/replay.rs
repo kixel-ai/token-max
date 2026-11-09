@@ -4,6 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
@@ -902,12 +903,20 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let bash = bash_checks(&BashInput {
+        scan: &scan,
+        catalog,
+        ttls: &ttl_refs,
+        since,
+        now,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
         .chain(idle.into_iter().map(CheckResult::Idle))
         .chain(speed.into_iter().map(CheckResult::Speed))
+        .chain(bash.into_iter().map(CheckResult::BashCap))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
@@ -1117,6 +1126,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         }
     }

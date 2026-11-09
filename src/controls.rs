@@ -6,7 +6,8 @@ use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::model::{
-    CompactionControls, Harness, IdleControl, Location, Profile, SpeedControl, WindowControl,
+    BashCapControl, CompactionControls, Harness, IdleControl, Location, Millis, Profile,
+    SpeedControl, WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -173,6 +174,51 @@ pub fn idle_controls(scopes: &[SettingsScope], env: &Env) -> Result<IdleControl,
         ttl: None,
         compaction: None,
     })
+}
+
+/// A positive millisecond count as Claude Code parses it: a leading integer, or an integral exponent form.
+fn timeout_millis(value: &Value) -> Option<Millis> {
+    let text = js_string(Some(value));
+    let text = text.trim();
+    let parsed = if text.contains(['e', 'E']) {
+        text.parse::<f64>()
+            .ok()
+            .filter(|n| n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER)
+            .map(|n| n as i64)
+    } else {
+        let number = text.strip_prefix('+').unwrap_or(text);
+        let end = number
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(number.len());
+        number[..end].parse::<i64>().ok()
+    };
+    parsed.filter(|n| *n > 0)
+}
+
+/// Resolve Claude's foreground Bash ceiling, `max(BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS)`.
+///
+/// Invalid or non-positive values fall back to the defaults, as Claude Code does.
+pub fn bash_cap_control(scopes: &[SettingsScope], env: &Env) -> BashCapControl {
+    let first = scopes.first().map_or("settings.json", |s| s.file);
+    let environment = scoped_environment(scopes, env);
+    let resolve = |key: &str, default: Millis| -> (Millis, String) {
+        // An invalid value still owns the setting: it must be fixed where it is set.
+        let owner = environment
+            .owners
+            .get(key)
+            .cloned()
+            .unwrap_or_else(|| format!("{first}:env.{key}"));
+        let value = environment.values.get(key).and_then(timeout_millis);
+        (value.unwrap_or(default), owner)
+    };
+    let (default_timeout, default_owner) = resolve("BASH_DEFAULT_TIMEOUT_MS", 120_000);
+    let (maximum, owner) = resolve("BASH_MAX_TIMEOUT_MS", 600_000);
+    BashCapControl {
+        value: maximum.max(default_timeout),
+        owner,
+        default_timeout,
+        default_owner,
+    }
 }
 
 /// Documented minimum Claude settings and environment window.
@@ -716,6 +762,7 @@ mod tests {
             compaction,
             idle: None,
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
         }
@@ -945,6 +992,50 @@ mod tests {
         assert_eq!(window_override("1e5"), None);
         assert_eq!(window_override(".5k"), None);
         assert_eq!(window_override("k"), None);
+    }
+
+    #[test]
+    fn bash_cap_follows_claude_code_parsing_and_precedence() {
+        let resolve = |config: Value, pairs: &[(&str, &str)]| {
+            let config = map(config);
+            let scopes = [SettingsScope {
+                config: &config,
+                file: "user.json",
+            }];
+            bash_cap_control(&scopes, &env(pairs))
+        };
+        let defaults = resolve(json!({}), &[]);
+        assert_eq!(defaults.value, 600_000);
+        assert_eq!(defaults.owner, "user.json:env.BASH_MAX_TIMEOUT_MS");
+        assert_eq!(defaults.default_timeout, 120_000);
+        let settings = json!({ "env": { "BASH_MAX_TIMEOUT_MS": 3_300_000 } });
+        assert_eq!(resolve(settings.clone(), &[]).value, 3_300_000);
+        // The shell environment wins over settings.
+        let shell = resolve(settings, &[("BASH_MAX_TIMEOUT_MS", "200000")]);
+        assert_eq!(
+            (shell.value, shell.owner.as_str()),
+            (200_000, "BASH_MAX_TIMEOUT_MS")
+        );
+        for (text, value) in [
+            ("3300000ms", 3_300_000),
+            (" 3.3e6 ", 3_300_000),
+            ("0", 600_000),
+            ("-5", 600_000),
+            ("soon", 600_000),
+        ] {
+            let control = resolve(json!({}), &[("BASH_MAX_TIMEOUT_MS", text)]);
+            assert_eq!(control.value, value, "{text}");
+            assert_eq!(control.owner, "BASH_MAX_TIMEOUT_MS", "{text}");
+        }
+        // A larger default timeout raises the ceiling past the maximum.
+        let control = resolve(
+            json!({}),
+            &[
+                ("BASH_MAX_TIMEOUT_MS", "200000"),
+                ("BASH_DEFAULT_TIMEOUT_MS", "900000"),
+            ],
+        );
+        assert_eq!(control.value, 900_000);
     }
 
     #[test]

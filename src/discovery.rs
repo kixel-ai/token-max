@@ -9,8 +9,8 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CompactionSources, Env, SettingsScope, compaction_controls, idle_controls, js_string, members,
-    scoped_environment, speed_controls,
+    CompactionSources, Env, SettingsScope, bash_cap_control, compaction_controls, idle_controls,
+    js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
     Agent, Harness, Location, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
@@ -1033,6 +1033,7 @@ fn profile(
         settings(requirements_file, Harness::Codex)?
     };
     let mut speed = speed_controls(harness, &speed_scopes, local_env)?;
+    let bash = claude.then(|| bash_cap_control(&speed_scopes, local_env));
     if !claude {
         codex_speed(
             &mut speed,
@@ -1108,6 +1109,7 @@ fn profile(
         compaction,
         idle,
         speed: Some(speed),
+        bash,
         speed_directories: None,
         idle_directories: None,
     })

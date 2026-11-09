@@ -618,3 +618,38 @@ each host's report, which is why amounts across hosts must not be added; no
 cross-host total is reported. The first failed host stops the others: their
 `ssh` processes are killed and reaped, and a destination stops scanning when
 its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
+
+## Bash timeout cap
+
+The `bash-timeout-cap` check uses `Profile.bash`, resolved from user and
+managed settings `env` and the active profile's shell environment, which wins.
+Like Claude Code, a value parses as a leading integer or an integral exponent
+form, and anything else, zero or negative falls back to the default (600000 ms
+maximum, 120000 ms default timeout). The effective cap is the larger of the two,
+so lowering only the maximum cannot override a larger default; the replacement
+names both when needed. Project and local settings are not read for this check.
+
+The compared TTL is the main-agent TTL check's verdict when it has one, else the
+current `promptCacheTtl`, else the write lifetime of the latest selected
+main-agent request; with none, the check is advisory. Claude Code 2.1.319 moves
+commands in async subagents with a 5m cache to the background after 3 minutes
+on its own, so the subagent TTL does not set the cap.
+
+The reader keeps three facts per Claude `Bash` call in `StructuralEvent.shell`:
+`background` from `run_in_background`, `polls` when the command's words include
+`sleep`, `do` and a `while`, `until` or `for` loop, and `timedOut` when the
+result's `toolUseResult.timedOutAfterMs` is a number and the message holds one
+tool result. The command and its output are never retained. A wait runs from
+the request that started the call to its result. It is long when it reaches the
+lifetime that request wrote, else the compared TTL. Its miss is
+`min(write, prefix - read)` tokens of the next request in the same session,
+where `prefix` is the starting request's total input, priced at its recorded
+write lifetime's rate minus the read rate. A missing next request, usage, write
+split or price leaves that wait's cost unknown, and the known subtotal is kept.
+The check makes no savings estimate: a lower cap adds background polls whose
+reads the transcripts cannot predict.
+
+Sources, checked 2026-11-08:
+[Claude environment variables](https://code.claude.com/docs/en/env-vars),
+[tools reference](https://code.claude.com/docs/en/tools-reference) and
+[prompt caching](https://code.claude.com/docs/en/prompt-caching).

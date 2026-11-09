@@ -5,12 +5,13 @@ any transcript. It streams one newline-terminated JSON record at a time. Raw
 objects live only through that line's normalization; retained data contains
 counts, opaque identities, times, and whitelisted structural metadata. A file
 that changes identity or shrinks fails. Appended bytes are outside the snapshot.
-The JSON result records the discovery interval, each byte boundary, and unfinished
+The full JSON result (`--json-full`) records the discovery interval, each byte boundary, and unfinished
 final-line sizes. Metadata storage grows with requests/events, not transcript text.
 
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
-separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence.
+separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence,
+and user prompts for per-session thresholds such as a recap's three turns.
 `scan.since` records the billing selection; checks inherit it, and a comparison
 cannot expand an already filtered scan to an earlier billing window.
 Invalid pre-window usage becomes an unknown cache state, never a billed estimate or
@@ -414,6 +415,62 @@ Extra re-read cost per expected resumed summary would erase on's saving; it is a
 fixed-behavior caveat, not an unbounded recommendation input. Context-size totals
 include summary-only final periods.
 
+## Keepalive pings
+
+`keepalive` replays each session sequentially for no pings and every candidate
+cap. Pings fire every five sixths of the cache lifetime after a main request:
+50 minutes under a 1h TTL, below the estimated native idle-compaction trigger at
+54 minutes, and 25 minutes under Codex's documented 30-minute minimum. Each ping
+uses the preceding main request's pricing metadata, reads its accumulated context,
+and adds a prompt and reply. Prompt size is the median growth between compatible
+consecutive inputs minus the preceding reply, excluding compaction boundaries;
+a cold rewrite is not new input. Reply size is the median recorded output. Both
+prompt and reply remain in later context. Missing incremental geometry leaves
+ping size unresolved. Recorded requests
+use their own provider, model, tier, speed, geography and context size.
+Measured reads remain warm for unchanged recorded context, even after a local
+entry expires: another session may have warmed that prefix. Changed context uses
+the sequential session-local cache model, without assuming unrelated activity
+also warms the changed prefix.
+
+The shared window replay applies the same recommended compaction controls used
+by the idle check to every policy, including compactions caused by added ping
+context and their summary costs. Cache warmth and added context travel through
+later pings and requests. A compaction removes preceding ping context; pings
+sent after it read or write its recorded post-context and remain in later turns.
+Missing post-context leaves affected sessions unpriced. Recorded known idle
+compactions are undone on both the no-ping and ping paths, which keep idle
+compaction off. Only the linked compaction billing parts are removed; ordinary
+messages and advisor work in the same request remain billed and messages still
+update the conversation and ping schedule. Its own check supplies the competing on policy's saving at the
+same recommended TTL and window. The two policies' savings are never added.
+
+Caps include one ping and the counts that could rescue recorded returns, up to
+the seven-day expiry of recurring Claude Code tasks
+([scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks), checked
+2026-11-08). Without recorded client lifetimes, returning sessions are assumed
+to stay open and awake. Each final period pings for the full cap, including
+beyond the observation window. Details show every cap's cost and saving, the
+same cap with final sessions closing immediately, and a break-even closure time
+when that sensitivity can reverse a losing result. Added summaries triggered
+by final pings are included in their cost and removed in the closed sensitivity.
+
+Codex periods are priced only for models with billed 30-minute writes, whose
+lifetime is documented and refreshed by reads
+([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
+checked 2026-11-08). Recorded uniform 12-hour writes keep their actual write
+rate and long coverage; a 30-minute ping preserves that existing expiry.
+Mixed write lifetimes leave prefix geometry unresolved. Older models' retention
+is a range. Every cap compares the
+same fully priced sessions; unresolved sessions leave the aggregate winner
+unknown, without bounding their cost by unrelated priced sessions.
+
+Current ping state is unknown (`current: null`): scheduled-task metadata does
+not establish a task's purpose, and recorded turns remain ordinary activity.
+There are no task-ID flags or text heuristics. Every result stays advisory and
+never changes the exit code, including a priced recommendation for no pings.
+Neither harness has a native mechanism for capped idle pings.
+
 ## Shared component measurements
 
 `scan.exposure` adds historical component revisions, request views, invocation
@@ -459,17 +516,28 @@ primitive. Without matching calibration, output keeps characters and unknown
 tokens/dollars. Images, opaque blocks, deferred definitions, digest-only requests,
 and multi-iteration totals cannot calibrate partial text.
 
-`report.context` prices each piece of recurring context. Only Claude requests
+`report.context` prices each piece of recurring context. Claude requests
 with a recorded `api-request-shape` or full parameters qualify: tool
-definitions, then the system prompt, lead the prompt in recorded order.
+definitions, then the system prompt, lead the prompt in recorded order. Codex
+requests qualify through their candidate `world_state` and `additional_tools`
+exposure; Codex records no prompt order, so every Codex piece is bounded by its
+history alone, and with no calibration it uses
+[OpenAI's rule of thumb](https://help.openai.com/en/articles/4936856) of 0.25
+tokens per character. A Codex piece recorded only by identity, such as
+metadata-only instructions or a `top_level_tools` hash, stays an unpriced row,
+except that a provided schema of the same tool in the request measures it.
 Prefix membership follows each request's own tool list, not where a component
 was first seen. Attachments such as skill listings and instruction files ride in
 messages at no recorded offset, so their history bounds them instead: a
 revision the session's previous request carried lies between the end of the
-system prompt and the end of that request's input, a new or changed revision was
-appended after it, and with no usable previous request, or when the tools,
+system prompt and the end of that request's content, a new or changed revision was
+appended after that request's input and its reply (output less reasoning), and
+lies within this request's content, and with no usable previous request, or when the tools,
 system prompt or model's tokenizer changed since it, it lies anywhere after the
-system prompt. An attachment is priced only when every offset in its bounds
+system prompt. Claude Code marks the last message for caching, so a Claude
+request's content ends at its cached reads plus writes; the ordinary input after
+them is a few framing tokens. When the measured pieces do not fit there, or for
+Codex, content runs to the end of the input. An attachment is priced only when every offset in its bounds
 falls in the same cache slot; otherwise it stays unpriced for that request. A
 row with any unpriced piece in a request, such as an MCP server whose tool is
 priced but whose instructions are not, is unpriced for that request. Each piece's calibrated
@@ -480,20 +548,42 @@ unpriced rather than clipped. `costUsd` covers priced requests only;
 `estimatedUsd` scales it to every request that carried the piece and is null
 when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
 once. Skill listings split into their member skills plus the listing framing;
-MCP tools group by server. One-off attachments, skill bodies and tool results
-are excluded because no setting removes them up front.
+MCP tools group by server. Codex skill listings stay one `Skill list` row.
+One-off attachments and skill bodies are excluded because no setting removes
+them up front.
+
+Tool results are `tool-output` rows, one per tool and one per MCP server. A
+result stays in the conversation until it compacts: output the previous request
+held is carried, and output beyond it is new, under the bounds above. A result
+that is not plain text, such as an image, leaves its row unpriced for that
+request. `calls` counts results in the window and `largestCharacters` the
+largest one. The report lists each beside the cap that limits it:
+`bashOutputMaxChars` or `BASH_MAX_OUTPUT_LENGTH` for Claude's Bash (about 30,000
+characters when unset), `MAX_MCP_OUTPUT_TOKENS` for Claude MCP servers (25,000
+tokens when unset), and `tool_output_token_limit` for Codex. No cap change is
+recommended: a lower cap leaves the model to read the rest back, which
+transcripts cannot price. Each context row carries its `harness`.
 
 Each row names the setting that removes the piece: `enableArtifact` and
 `enableWorkflows` for those tools, a bare-name `permissions.deny` rule for
 other tools and `mcp__<server>` for a server, which
 [remove the tool from context](https://code.claude.com/docs/en/permissions),
-and `skillOverrides` set to `user-invocable-only` for a skill. Skills named
-`anthropic-skills:<name>`, synced from claude.ai, share one row turned off by
-`syncClaudeAiSkills: false`; a typed or called short name counts for it only while the
-session knows no other skill by that name. Other namespaced skills come from a plugin or an added
-directory, which [`skillOverrides` does not
+and `skillOverrides` set to `user-invocable-only` for a local or bundled skill.
+Skills named `anthropic-skills:<name>`, synced from claude.ai, share one row
+turned off by `syncClaudeAiSkills: false`; a typed or called short name counts
+for it only while the active catalog lists no other skill by that name and
+no [built-in command, bundled skill, or alias](https://code.claude.com/docs/en/commands)
+reserves it, including commands unavailable in that session.
+Every replacement rebuilds those aliases. Explicit typed-name evidence stays
+separate from catalog membership. Other namespaced skills come from a plugin
+or an added directory, which [`skillOverrides` does not
 reach](https://code.claude.com/docs/en/skills#override-skill-visibility-from-settings),
-so they get no settings switch. Instruction files have no switch. Core tools, the system prompt and the listing framing are always
+so they get no settings switch. For Codex, `mcp_servers.<id>.enabled = false`
+in `config.toml` removes a server the request's own profile declares (a request
+copied into several profiles gets one only when each declares it under the same id),
+and `features.apps = false` removes ChatGPT apps (`codex_apps`); other Codex tools
+have no switch. Instruction files have no switch. Core tools, the system prompt
+and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
 every row of its tool that shares a profile with it; skill uses count only the
@@ -536,6 +626,67 @@ Current provider guidance distinguishes skill discovery from body loading:
 [Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
+
+## Background generation
+
+`background-generation` checks one feature each: Claude `prompt-suggestions`,
+`session-recaps` and `goal-check-ins`, and Codex `auto-recaps`. Controls come
+from the user and managed Claude settings, their `env` blocks and the active
+profile's shell, in that precedence. `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` and
+`CLAUDE_CODE_ENABLE_AWAY_SUMMARY` override their settings when they hold a
+boolean form. Suggestions are off without feature flags, on Bedrock, Vertex or
+Foundry or with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, unless the variable
+turns them on. `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` accepts plain whole minutes up
+to 10,080; `0` turns check-ins off and anything else means the 30-minute default.
+Codex reads `tui.auto_recap`, default true. Project settings are not read.
+
+Claude Code 2.1.319 sends suggestions and recaps as forks of the main
+conversation with `skipTranscript` and `skipCacheWrite`, so no transcript records
+them. Each is estimated at a recorded turn end: the last main-conversation
+response before the next user prompt, or the session's last response. Only
+interactive terminal turns count (`entrypoint` `cli`, `querySource`
+`repl_main_thread` or absent); SDK and desktop clients run suggestions only when
+they ask for them, which transcripts do not record, so those turns are counted
+in the uncertainty instead. A suggestion follows a turn with at least two
+responses whose last response sent and wrote at most 10,000 uncached tokens,
+the client's cold-cache cutoff. A recap follows a turn once the session has three
+user turns and the next prompt came at least three minutes later. Each later
+recap requires two new user turns after the preceding modeled recap. A final
+turn is not counted, since nothing shows the terminal stayed open. Responses,
+prompts and modeled recaps before the window establish eligibility and spacing;
+only turns inside it are charged. Focus and the suggestion throttle after many
+unused suggestions are not recorded and are assumed favorable to running.
+
+A fork writes no cache. Its prefix is priced as a cache read only while live,
+else as ordinary input. Cache age starts at the recorded request's start, so
+streaming output and the three-minute recap delay can exhaust its lifetime.
+The recorded write lifetime takes precedence over the profile's current TTL,
+with five minutes as the default. Its new input is the last response's uncached
+input and output plus the instruction (about 350 tokens for a suggestion, 100
+for a recap), and its output is assumed to be 50 or 100 tokens. Each feature's
+comparison keeps the other feature's current state. A suggestion that reads a
+live prefix refreshes it at response completion, which can keep a later recap
+warm. A recap that reads a live prefix refreshes it at the recap's start. When
+turning a feature off expires the prefix before the other feature or the next
+recorded request reads it, the extra ordinary recap input or cache rewrite is
+subtracted from the saving as `lostWarming`. Only reads
+on the same model, speed and provider count, up to the prefix the recap read. Turns without
+recorded usage are scaled from the priced ones, and with none priced the check
+is unknown.
+
+Uses (an accepted suggestion, a read recap) are not recorded, so the whole
+estimate counts as one use: a feature is recommended off when it cost more than
+`--max-cost-per-use` over the window. Goal check-ins start ordinary-looking task
+notification turns and Codex does not record automatic recaps, so both report an
+unknown cost and stay advisory. Each line names where to turn the feature off:
+the settings file that owns the effective value, managed settings included, or
+the environment variable that forces it. Every other check's recorded baseline omits
+these unlogged requests and their cache refreshes. Sources:
+[background token usage](https://code.claude.com/docs/en/costs#background-token-usage),
+[prompt suggestions and session recap](https://code.claude.com/docs/en/interactive-mode),
+[environment variables](https://code.claude.com/docs/en/env-vars) and
+[Codex configuration](https://learn.chatgpt.com/docs/config-file/config-reference),
+checked 2026-11-08.
 
 ## Speed controls and premiums
 
@@ -593,3 +744,73 @@ Current primary guidance: [Claude fast mode](https://code.claude.com/docs/en/fas
 [API ultrafast](https://developers.openai.com/api/docs/guides/ultrafast-mode),
 checked 2026-11-07. Synthetic metadata follows these schemas; no real session
 content is stored or tested.
+
+## SSH hosts
+
+`--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
+commands, a configured remote command or a persisted control master, with
+stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
+the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
+`~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
+snapshots, readers and exposure extraction produce the same scan a local run
+would; it fetches no prices and runs no checks. Its stderr is discarded, so
+login-script output cannot reach the report; failures come from the stream or
+from the exit status of `ssh` (255), the shell (127 when token-max is missing)
+or the platform check.
+
+The stream is private to one build: a header naming the package version and a
+fingerprint of the scan types, then either the scan or the destination's safe
+diagnostic, then the end of the stream. Any other build, a truncated or
+trailing value, a reference to an unsent value, or a nonzero exit fails the
+run. Strings, identifier lists, exposure views, tool-output totals and
+message-digest chains are sent once and then referenced by index, so the stream and the coordinator's
+copy keep the sharing the destination's scan had in memory. The coordinator
+reads the stream as it arrives rather than buffering it, and checks that the
+scan covers the requested window.
+
+Background controls, their owning files and pre-window prompts and requests
+travel with the scan, so background estimates use the destination's settings
+and full eligibility history, just as a local run there would.
+
+Every host's scan is analyzed separately against one price catalog, so cache
+replay, profile ownership, coverage and settings never mix between hosts, and
+paths keep each host's meaning. A history copied between hosts is billed in
+each host's report, which is why amounts across hosts must not be added; no
+cross-host total is reported. The first failed host stops the others: their
+`ssh` processes are killed and reaped, and a destination stops scanning when
+its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
+
+## Bash timeout cap
+
+The `bash-timeout-cap` check uses `Profile.bash`, resolved from user and
+managed settings `env` and the active profile's shell environment, which wins.
+Like Claude Code, a value parses as a leading integer or an integral exponent
+form, and anything else, zero or negative falls back to the default (600000 ms
+maximum, 120000 ms default timeout). The effective cap is the larger of the two,
+so lowering only the maximum cannot override a larger default; the replacement
+names both when needed. Project and local settings are not read for this check.
+
+The compared TTL is the main-agent TTL check's verdict when it has one, else the
+current `promptCacheTtl`, else the write lifetime of the latest selected
+main-agent request; with none, the check is advisory. Claude Code 2.1.319 moves
+commands in async subagents with a 5m cache to the background after 3 minutes
+on its own, so the subagent TTL does not set the cap.
+
+The reader keeps three facts per Claude `Bash` call in `StructuralEvent.shell`:
+`background` from `run_in_background`, `polls` when the command's words include
+`sleep`, `do` and a `while`, `until` or `for` loop, and `timedOut` when the
+result's `toolUseResult.timedOutAfterMs` is a number and the message holds one
+tool result. The command and its output are never retained. A wait runs from
+the request that started the call to its result. It is long when it reaches the
+lifetime that request wrote, else the compared TTL. Its miss is
+`min(write, prefix - read)` tokens of the next request in the same session,
+where `prefix` is the starting request's total input, priced at its recorded
+write lifetime's rate minus the read rate. A missing next request, usage, write
+split or price leaves that wait's cost unknown, and the known subtotal is kept.
+The check makes no savings estimate: a lower cap adds background polls whose
+reads the transcripts cannot predict.
+
+Sources, checked 2026-11-08:
+[Claude environment variables](https://code.claude.com/docs/en/env-vars),
+[tools reference](https://code.claude.com/docs/en/tools-reference) and
+[prompt caching](https://code.claude.com/docs/en/prompt-caching).

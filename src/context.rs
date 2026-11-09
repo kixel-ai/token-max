@@ -6,16 +6,31 @@ use indexmap::IndexMap;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{calibrate, cohort};
+use crate::exposure::{calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
-    InvocationKind, InvocationStatus, Linkage, Millis, Request, Text, Verdict,
+    InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals, Text,
+    Verdict,
 };
-use crate::prices::{Catalog, unit_rates};
+use crate::prices::{Catalog, prefix_spans};
 use crate::safe::identity;
 
-/// The settings.json fragment for one control, such as `"enableArtifact": false`.
-pub fn control_text(control: &Control) -> String {
+/// The settings fragment for one control: settings.json's `"enableArtifact": false`,
+/// or config.toml's `features.apps = false`.
+pub fn control_text(control: &Control, harness: Harness) -> String {
+    if harness == Harness::Codex {
+        let path: Vec<String> = control.path.iter().map(|key| toml_key(key)).collect();
+        let value = match &control.value {
+            ControlValue::Text(text) => toml::Value::String(text.clone()),
+            ControlValue::Bool(b) => toml::Value::Boolean(*b),
+        };
+        let value = if control.append {
+            toml::Value::Array(vec![value])
+        } else {
+            value
+        };
+        return format!("{} = {value}", path.join("."));
+    }
     let mut value = json_value(&control.value);
     if control.append {
         value = Value::Array(vec![value]);
@@ -94,6 +109,24 @@ pub fn settings_patch<'a>(controls: impl IntoIterator<Item = &'a Control>) -> Ma
     root
 }
 
+/// A TOML key, quoted unless it is bare.
+fn toml_key(key: &str) -> String {
+    let bare = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if bare {
+        key.into()
+    } else {
+        toml::Value::String(key.into()).to_string()
+    }
+}
+
+/// Merge controls into one config.toml fragment, as `settings_patch` does for settings.json.
+pub fn config_patch<'a>(controls: impl IntoIterator<Item = &'a Control>) -> String {
+    toml::to_string(&Value::Object(settings_patch(controls))).expect("controls are TOML tables")
+}
+
 fn json_value(value: &ControlValue) -> Value {
     match value {
         ControlValue::Text(text) => Value::String(text.clone()),
@@ -107,17 +140,35 @@ pub struct ContextInput<'a> {
     pub scan: &'a ExposureScan,
     /// The selected requests whose usage prices those shapes.
     pub requests: &'a [Request],
+    /// The selected profiles, whose settings files name the switches.
+    pub profiles: &'a [Profile],
     /// Public prices.
     pub catalog: &'a Catalog,
     /// Recommend turning a piece off when it cost more than this per use.
     pub max_cost_per_use_usd: f64,
 }
 
+/// OpenAI's rule of thumb for English text, used where no request records the
+/// complete text to calibrate against, as with every Codex request.
+/// <https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them>
+pub const CODEX_TOKENS_PER_CHARACTER: f64 = 0.25;
+
 /// What a piece is, shared by every revision that produces it.
 struct Kind {
     kind: ContextKind,
     name: String,
     control: Option<Control>,
+}
+
+/// Where a piece's history says it sits in the request.
+#[derive(Clone, Copy)]
+enum History<'a> {
+    /// A component revision, carried when the session's previous request had the same one.
+    Revision(&'a str),
+    /// Tool output the previous request already held.
+    Carried,
+    /// Tool output returned since the previous request.
+    New,
 }
 
 /// A piece as it appears in one request.
@@ -127,8 +178,9 @@ struct Placed<'a> {
     characters: i64,
     /// Tools and the system prompt lead the request in recorded order; everything else rides in messages.
     prefix: bool,
-    /// The component revision it came from, so changed content is not mistaken for carried content.
-    revision: &'a str,
+    history: History<'a>,
+    /// Images or other input whose tokens characters cannot measure.
+    opaque: bool,
 }
 
 /// Pieces by key, interned so each request compares indices rather than strings.
@@ -136,11 +188,17 @@ struct Placed<'a> {
 struct Pieces<'a> {
     ids: HashMap<String, usize>,
     kinds: Vec<Kind>,
-    of: HashMap<&'a str, Vec<(usize, i64)>>,
+    /// By component and owning profile set, since a Codex server's switch
+    /// depends on the profiles that declare it.
+    of: HashMap<(&'a str, usize), Vec<Split>>,
     /// The row a skill invocation counts for, by hashed `skill:<name>` target. The
     /// scan already resolved a short name to the synced skill it reached.
-    skills: HashMap<String, String>,
+    skills: HashMap<String, usize>,
 }
+
+/// One component's share of a piece: its characters, or None when only its
+/// identity is recorded.
+type Split = (usize, Option<i64>);
 
 impl Pieces<'_> {
     fn intern(
@@ -173,6 +231,9 @@ const CORE_TOOLS: [&str; 7] = [
     "DeferredToolPlaceholder",
 ];
 
+/// The MCP server whose tools Codex lists as ChatGPT apps, all switched by `features.apps`.
+const CODEX_APPS: &str = "codex_apps";
+
 fn deny(rule: String) -> Option<Control> {
     Some(Control {
         path: vec!["permissions".into(), "deny".into()],
@@ -181,40 +242,48 @@ fn deny(rule: String) -> Option<Control> {
     })
 }
 
-fn disable(setting: &str) -> Option<Control> {
+fn disable(path: &[&str]) -> Option<Control> {
     Some(Control {
-        path: vec![setting.into()],
+        path: path.iter().map(|p| p.to_string()).collect(),
         value: ControlValue::Bool(false),
         append: false,
     })
 }
 
-/// The namespace Claude Code reserves for skills synced from a claude.ai account.
-pub const SYNCED_SKILLS: &str = "anthropic-skills";
+/// The report name for skills switched together by `syncClaudeAiSkills`.
+pub const SYNCED_SKILLS: &str = "claude.ai synced skills";
+
+const SYNCED_NAMESPACE: &str = "anthropic-skills";
+const SYNCED_SKILLS_KEY: &str = "setting:syncClaudeAiSkills";
 
 /// The row and setting for one skill listing entry. `skillOverrides` hides a local or
 /// bundled skill from the model and keeps `/name` working, but it does not apply to
 /// plugin skills, and synced skills only turn off together through `syncClaudeAiSkills`.
-fn skill(member: &str) -> (String, Option<Control>) {
+fn skill(member: &str) -> (String, String, Option<Control>) {
     if synced_short(member).is_some() {
-        return (SYNCED_SKILLS.into(), disable("syncClaudeAiSkills"));
+        return (
+            SYNCED_SKILLS_KEY.into(),
+            SYNCED_SKILLS.into(),
+            disable(&["syncClaudeAiSkills"]),
+        );
     }
+    let key = format!("skill:{member}");
     // A plugin's skill, or an added directory's same-named one: no settings key turns
     // off just that skill.
     if member.contains(':') {
-        return (member.into(), None);
+        return (key, member.into(), None);
     }
     let control = Control {
         path: vec!["skillOverrides".into(), member.into()],
         value: ControlValue::Text("user-invocable-only".into()),
         append: false,
     };
-    (member.into(), Some(control))
+    (key, member.into(), Some(control))
 }
 
 /// The short name of a skill synced from claude.ai, such as `pdf` for `anthropic-skills:pdf`.
 pub fn synced_short(name: &str) -> Option<&str> {
-    name.strip_prefix(SYNCED_SKILLS)?.strip_prefix(':')
+    name.strip_prefix(SYNCED_NAMESPACE)?.strip_prefix(':')
 }
 
 /// Whether a control hides a skill from the model only, leaving typed uses working.
@@ -227,7 +296,7 @@ fn mcp_server(name: &str) -> &str {
     name.split("__").nth(1).unwrap_or(name)
 }
 
-/// The setting that owns a tool, grouping a tool family under one switch.
+/// The setting that owns a Claude tool, grouping a tool family under one switch.
 fn tool(name: &str) -> (String, ContextKind, String, Option<Control>) {
     if name.starts_with("mcp__") {
         let server = mcp_server(name);
@@ -244,7 +313,7 @@ fn tool(name: &str) -> (String, ContextKind, String, Option<Control>) {
             "tool:Artifact".into(),
             ContextKind::Tool,
             "Artifact".into(),
-            disable("enableArtifact"),
+            disable(&["enableArtifact"]),
         );
     }
     if name == "Workflow" {
@@ -252,7 +321,7 @@ fn tool(name: &str) -> (String, ContextKind, String, Option<Control>) {
             "tool:Workflow".into(),
             ContextKind::Tool,
             name.into(),
-            disable("enableWorkflows"),
+            disable(&["enableWorkflows"]),
         );
     }
     let control = if CORE_TOOLS.contains(&name) {
@@ -268,7 +337,42 @@ fn tool(name: &str) -> (String, ContextKind, String, Option<Control>) {
     )
 }
 
-/// Split one component into the pieces a user can switch separately.
+/// The config.toml switch that owns a Codex tool. Built-in tools have none; an MCP
+/// server has one only where a selected config.toml declares it, since a server
+/// a plugin or launcher adds is switched where it is added. Ids that differ only
+/// in punctuation expose the same server name, so the piece is keyed by the
+/// declaring id. A request copied into several profiles gets a switch only when
+/// each of them declares the server under the same single id.
+fn codex_tool(name: &str, servers: &[&[String]]) -> (String, ContextKind, String, Option<Control>) {
+    let Some(rest) = name.strip_prefix("mcp__") else {
+        return (
+            format!("codex:tool:{name}"),
+            ContextKind::Tool,
+            name.into(),
+            None,
+        );
+    };
+    let server = rest.split("__").next().unwrap_or(rest);
+    let mut key = format!("codex:mcp:{server}");
+    let control = if server == CODEX_APPS {
+        disable(&["features", "apps"])
+    } else {
+        let declared: Vec<Vec<&String>> = servers
+            .iter()
+            .map(|ids| ids.iter().filter(|id| codex_server(id) == server).collect())
+            .collect();
+        match declared.first().map(Vec::as_slice) {
+            Some(&[id]) if declared.iter().all(|d| d[..] == [id]) => {
+                key = format!("{key}@{id}");
+                disable(&["mcp_servers", id, "enabled"])
+            }
+            _ => None,
+        }
+    };
+    (key, ContextKind::McpServer, server.into(), control)
+}
+
+/// Split one Claude component into the pieces a user can switch separately.
 fn pieces(
     component: &Component,
     components: &HashMap<&str, &Component>,
@@ -301,12 +405,11 @@ fn pieces(
             let mut result: Vec<(usize, i64)> = members
                 .into_iter()
                 .map(|(member, n)| {
-                    let (name, control) = skill(member);
+                    let (key, name, control) = skill(member);
+                    let id = interned.intern(key, ContextKind::Skill, name, control);
                     interned
                         .skills
-                        .insert(identity(&format!("skill:{member}")), name.clone());
-                    let key = format!("skill:{name}");
-                    let id = interned.intern(key, ContextKind::Skill, name, control);
+                        .insert(identity(&format!("skill:{member}")), id);
                     (id, n)
                 })
                 .collect();
@@ -368,12 +471,68 @@ fn pieces(
     }
 }
 
+/// Split one Codex world-state or provided-tool component into switchable pieces.
+fn codex_pieces(
+    component: &Component,
+    servers: &[&[String]],
+    interned: &mut Pieces<'_>,
+) -> Vec<Split> {
+    let characters = component.size.characters;
+    let (key, kind, name, control) = match component.category {
+        Category::ToolSchema | Category::McpSchema | Category::McpDiscovery => {
+            codex_tool(&component.name, servers)
+        }
+        // The skills check owns per-skill findings, so the catalog is one piece here.
+        Category::SkillListing => (
+            "codex:other:skill-list".into(),
+            ContextKind::Other,
+            "Skill list".into(),
+            None,
+        ),
+        Category::Instructions => (
+            "codex:instructions".into(),
+            ContextKind::Instructions,
+            "AGENTS.md".into(),
+            None,
+        ),
+        Category::ManagedInstructions => (
+            "codex:other:managed".into(),
+            ContextKind::Other,
+            "Managed developer instructions".into(),
+            None,
+        ),
+        _ => return vec![],
+    };
+    vec![(interned.intern(key, kind, name, control), characters)]
+}
+
+/// The piece for one tool's output, filed under the tool, or its MCP server.
+fn output_piece(owner: &str, harness: Harness, interned: &mut Pieces<'_>) -> usize {
+    let prefix = if harness == Harness::Codex {
+        "codex:"
+    } else {
+        ""
+    };
+    interned.intern(
+        format!("{prefix}output:{owner}"),
+        ContextKind::ToolOutput,
+        owner.into(),
+        None,
+    )
+}
+
 /// The previous request of a session, which bounds where its attachments sit in the next one.
 struct Prior<'a> {
     input: Option<i64>,
+    /// Where the content it carried ends.
+    content_end: Option<i64>,
+    /// Reply tokens that stay in the conversation: output less reasoning, which a
+    /// harness may drop, and zero where reasoning is not counted apart.
+    reply: i64,
     keys: HashSet<(&'a str, usize)>,
     /// The tokenizer and the leading tools and system prompt by revision.
-    prefix: (String, &'a [Text]),
+    prefix: (String, Vec<&'a Text>),
+    results: Option<&'a ResultTotals>,
 }
 
 struct Row {
@@ -383,12 +542,13 @@ struct Row {
     time: Millis,
 }
 
-/// Price each piece of context in every selected request that recorded its exact
+/// Price each piece of context in every selected request that recorded its
 /// shape. A piece is charged at the cache state of its position in the prompt:
-/// tools and the system prompt lead in recorded order. Message attachments have
-/// no recorded offset, so each takes the latest position its history allows:
-/// the end of the session's previous request when that request carried it too,
-/// else the end of this request, where newly added content goes.
+/// Claude's tools and system prompt lead in recorded order. Message attachments,
+/// Codex's context and tool output have no recorded offset, so each takes the
+/// latest position its history allows: the end of the session's previous request
+/// when that request carried it too, else the end of this request, where newly
+/// added content goes.
 pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let ContextInput { scan, catalog, .. } = *input;
     let calibration: HashMap<String, f64> = calibrate(scan, input.requests)
@@ -408,11 +568,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
-        .filter_map(|exposure| {
-            let r = *requests.get(exposure.request.as_str())?;
-            (exposure.view.linkage == Linkage::Wire && r.harness == Harness::Claude)
-                .then_some((exposure, r))
-        })
+        .filter_map(|exposure| Some((exposure, *requests.get(exposure.request.as_str())?)))
         .collect();
     ordered.sort_by_key(|(_, r)| r.time);
     for (exposure, r) in ordered {
@@ -428,23 +584,98 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             }
         };
         let view = &exposure.view;
+        let codex = r.harness == Harness::Codex;
+        // Claude's recorded request shapes are exact. Codex records each change to
+        // the context it sends, so its chronological state is what the model saw.
+        // Any other request still prices its tool output, but cannot say what else it sent.
+        let (shown, shaped): (Vec<&Text>, bool) = match (r.harness, view.linkage) {
+            (Harness::Claude, Linkage::Wire) => (view.components.iter().collect(), true),
+            (Harness::Codex, Linkage::Chronological) => (view.candidates.iter().collect(), true),
+            _ => (vec![], false),
+        };
+        // The MCP servers each of this request's own Codex profiles declares.
+        let servers: Vec<&[String]> = input
+            .profiles
+            .iter()
+            .filter(|p| p.harness == Harness::Codex && r.profiles.contains(&p.id))
+            .map(|p| p.mcp_servers.as_slice())
+            .collect();
+        let component = |id: &str| {
+            *components
+                .get(id)
+                .expect("exposures reference recorded components")
+        };
+        // Codex names its top-level tools by an opaque identity; a provided
+        // schema of the same tool already measures it.
+        let measured: HashSet<&str> = shown
+            .iter()
+            .map(|id| component(id))
+            .filter(|c| {
+                c.size.characters.is_some()
+                    && matches!(c.category, Category::ToolSchema | Category::McpSchema)
+            })
+            .map(|c| c.name.as_str())
+            .collect();
         let mut parts: Vec<Placed<'_>> = vec![];
-        for (index, id) in view.components.iter().enumerate() {
+        for (index, id) in shown.iter().enumerate() {
             let id: &str = id;
-            if !interned.of.contains_key(id) {
-                let component = components
-                    .get(id)
-                    .expect("exposures reference recorded components");
-                let split = pieces(component, &components, &mut interned);
-                interned.of.insert(id, split);
+            let component = component(id);
+            if codex
+                && component.size.characters.is_none()
+                && measured.contains(component.name.as_str())
+            {
+                continue;
             }
-            let prefix = index < view.prefix;
-            parts.extend(interned.of[id].iter().map(|&(key, characters)| Placed {
-                key,
-                characters,
-                prefix,
-                revision: id,
-            }));
+            if !interned.of.contains_key(&(id, owner)) {
+                let split = if codex {
+                    codex_pieces(component, &servers, &mut interned)
+                } else {
+                    pieces(component, &components, &mut interned)
+                        .into_iter()
+                        .map(|(key, characters)| (key, Some(characters)))
+                        .collect()
+                };
+                interned.of.insert((id, owner), split);
+            }
+            let prefix = !codex && index < view.prefix;
+            parts.extend(
+                interned.of[&(id, owner)]
+                    .iter()
+                    .map(|&(key, characters)| Placed {
+                        key,
+                        characters: characters.unwrap_or(0),
+                        prefix,
+                        history: History::Revision(id),
+                        opaque: characters.is_none(),
+                    }),
+            );
+        }
+        let prior_results = previous
+            .get(r.session.as_str())
+            .and_then(|p| p.results)
+            .filter(|p| {
+                exposure
+                    .results
+                    .as_ref()
+                    .is_some_and(|r| r.epoch == p.epoch)
+            });
+        for (owner_name, characters, opaque) in exposure.results.iter().flat_map(|r| &r.tools) {
+            let key = output_piece(owner_name, r.harness, &mut interned);
+            let carried = prior_results
+                .and_then(|p| p.tools.iter().find(|(t, _, _)| t == owner_name))
+                .map_or(0, |(_, n, _)| (*n).min(*characters));
+            for (history, characters) in [
+                (History::Carried, carried),
+                (History::New, characters - carried),
+            ] {
+                parts.push(Placed {
+                    key,
+                    characters,
+                    prefix: false,
+                    history,
+                    opaque: *opaque,
+                });
+            }
         }
         let p = if r.parts.len() == 1 {
             Some(&r.parts[0])
@@ -453,23 +684,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         };
         let u = p.map(|p| &p.usage);
         let tokenizer = cohort(r);
-        let ratio = calibration.get(&tokenizer).copied();
-        let rates = p.and_then(|p| unit_rates(catalog, r, p));
-        let priced = match (u, ratio, rates) {
-            (Some(u), Some(_), Some(rates))
-                if u.input.is_some()
-                    && u.read.is_some()
-                    && u.write.is_some()
-                    && (u.write == Some(0) || (u.write1h.is_some() && u.write5m.is_some())) =>
-            {
-                Some((u, rates))
-            }
-            _ => None,
-        };
+        let ratio = calibration
+            .get(&tokenizer)
+            .copied()
+            .or(codex.then_some(CODEX_TOKENS_PER_CHARACTER));
+        let spans = p
+            .filter(|_| ratio.is_some())
+            .and_then(|p| prefix_spans(catalog, r, p));
         let size = |piece: &Placed<'_>| piece.characters as f64 * ratio.unwrap_or(0.0);
         let total: f64 = parts.iter().map(size).sum();
         // A calibration that overshoots the recorded input cannot place these pieces.
-        let placed = priced.filter(|(u, _)| total <= u.input.expect("priced") as f64);
+        let end = u.and_then(|u| u.input);
+        let placed = spans.filter(|_| end.is_some_and(|end| total <= end as f64));
         let mut unique: Vec<usize> = vec![];
         {
             let mut seen = HashSet::new();
@@ -484,6 +710,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let kind = &interned.kinds[key];
                 Row {
                     cost: ContextCost {
+                        harness: r.harness,
                         profiles: owner_profiles[owner].clone(),
                         kind: kind.kind,
                         name: kind.name.clone(),
@@ -498,6 +725,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         current: false,
                         cost_per_use_usd: None,
                         verdict: None,
+                        largest_characters: None,
                     },
                     owner,
                     key,
@@ -511,40 +739,45 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // where messages start in this request's tokens.
         let prefix = (
             tokenizer,
-            &view.components[..view.prefix.min(view.components.len())],
+            if codex {
+                vec![]
+            } else {
+                shown.iter().take(view.prefix).copied().collect()
+            },
         );
+        // Claude Code marks the last message for caching, so only a few framing
+        // tokens follow a request's cached prefix, unless the pieces measured in
+        // it do not fit there. Elsewhere content can run to the end of the input.
+        let content_end = u
+            .filter(|_| !codex)
+            .and_then(|u| Some(u.read? + u.write?))
+            .filter(|&cached| cached > 0 && total <= cached as f64)
+            .or(end);
         let prior = previous.insert(
             r.session.as_str(),
             Prior {
-                input: u.and_then(|u| u.input),
+                input: end,
+                content_end,
+                reply: u
+                    .and_then(|u| Some(u.output? - u.reasoning?))
+                    .unwrap_or(0)
+                    .max(0),
                 keys: parts
                     .iter()
-                    .filter(|x| !x.prefix)
-                    .map(|x| (x.revision, x.key))
+                    .filter_map(|x| match x.history {
+                        History::Revision(revision) if !x.prefix => Some((revision, x.key)),
+                        _ => None,
+                    })
                     .collect(),
                 prefix: prefix.clone(),
+                results: exposure.results.as_deref(),
             },
         );
-        if let Some((u, rates)) = placed {
-            let end = u.input.expect("priced");
-            let write = |tokens: Option<i64>| {
-                if u.write == Some(0) {
-                    0.0
-                } else {
-                    tokens.expect("priced") as f64
-                }
-            };
-            // Cache slots in prefix order: reads, then 1h writes, then 5m writes, then ordinary input.
-            let slots: [(f64, f64); 4] = [
-                (u.read.expect("priced") as f64, rates.read),
-                (write(u.write1h), rates.write1h),
-                (write(u.write5m), rates.write5m),
-                (f64::INFINITY, rates.ordinary),
-            ];
+        if let (Some(slots), Some(end)) = (placed, end) {
             let charge = |start: f64, tokens: f64| {
                 let mut cost = 0.0;
                 let mut floor = 0.0;
-                for (length, price) in slots {
+                for &(length, price) in &slots {
                     cost +=
                         0f64.max((floor + length).min(start + tokens) - floor.max(start)) * price;
                     floor += length;
@@ -581,20 +814,31 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let tokens = size(piece);
                 let entry = charged.entry(piece.key).or_insert((0.0, 0.0, false));
                 entry.0 += tokens;
+                if piece.opaque {
+                    entry.2 = true;
+                    continue;
+                }
                 if piece.prefix {
                     entry.1 += charge(offset, tokens);
                     offset += tokens;
                     continue;
                 }
-                let carried =
-                    known.filter(|(_, prior)| prior.keys.contains(&(piece.revision, piece.key)));
+                if tokens == 0.0 {
+                    continue;
+                }
+                let carried = known.filter(|(_, prior)| match piece.history {
+                    History::Revision(revision) => prior.keys.contains(&(revision, piece.key)),
+                    History::Carried => true,
+                    History::New => false,
+                });
                 let from = match (known, carried) {
-                    (Some((input, _)), None) => input as f64,
+                    // New content follows the previous request and its reply.
+                    (Some((input, prior)), None) => (input + prior.reply) as f64,
                     _ => prefix_end,
                 };
                 let to = match carried {
-                    Some((input, _)) => input as f64,
-                    None => end as f64,
+                    Some((input, prior)) => prior.content_end.unwrap_or(input) as f64,
+                    None => content_end.unwrap_or(end) as f64,
                 } - tokens;
                 let first = slot(from);
                 if to >= from && first == slot(to + tokens - 1e-9) {
@@ -619,6 +863,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             }
         }
         match latest.get(&owner) {
+            _ if !shaped => {}
             Some((time, _)) if r.time < *time => {}
             _ => {
                 latest.insert(owner, (r.time, unique));
@@ -629,22 +874,30 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     // profile sets, and a copy cannot say which profile made the call, so it
     // counts for every row of its tool that shares a profile with it.
     let mut families: HashMap<(ContextKind, &str), Vec<usize>> = HashMap::new();
+    let mut skill_families: HashMap<usize, Vec<usize>> = HashMap::new();
     for (index, row) in rows.values_mut().enumerate() {
         let kind = row.cost.kind;
         if !matches!(
             kind,
-            ContextKind::Tool | ContextKind::McpServer | ContextKind::Skill
+            ContextKind::Tool
+                | ContextKind::McpServer
+                | ContextKind::Skill
+                | ContextKind::ToolOutput
         ) {
             continue;
         }
         row.cost.calls = Some(0);
-        let name = interned.kinds[row.key].name.as_str();
-        families.entry((kind, name)).or_default().push(index);
+        if kind == ContextKind::Skill {
+            skill_families.entry(row.key).or_default().push(index);
+        } else {
+            let name = interned.kinds[row.key].name.as_str();
+            families.entry((kind, name)).or_default().push(index);
+        }
     }
     let mut last: HashMap<usize, Millis> = HashMap::new();
     let mut credit =
-        |family: (ContextKind, &str), profiles: &[String], time: Millis, calls: u64| {
-            for &index in families.get(&family).into_iter().flatten() {
+        |indices: Option<&Vec<usize>>, profiles: &[String], time: Millis, calls: u64| {
+            for &index in indices.into_iter().flatten() {
                 let row = &mut rows[index].cost;
                 if !profiles.iter().any(|p| row.profiles.contains(p)) {
                     continue;
@@ -662,16 +915,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         } else {
             (ContextKind::Tool, c.name.as_str())
         };
-        credit(family, &c.profiles, c.last_used, c.calls);
+        credit(families.get(&family), &c.profiles, c.last_used, c.calls);
     }
-    let typed: HashMap<&str, bool> = interned
-        .kinds
-        .iter()
-        .filter(|k| k.kind == ContextKind::Skill)
-        .map(|k| (k.name.as_str(), typed_only(k.control.as_ref())))
-        .collect();
+    let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
-        let Some(name) = interned.skills.get(&i.target) else {
+        // A namespace-wide switch also removes recorded uses of members whose
+        // listing was not measured. Other skill controls apply only to their own target.
+        let key = if i.harness == Harness::Claude && i.group.as_ref() == Some(&synced_group) {
+            interned.ids.get(SYNCED_SKILLS_KEY)
+        } else {
+            interned.skills.get(&i.target)
+        };
+        let Some(&key) = key else {
             continue;
         };
         // Typed requests keep working when a skill is hidden from the model, so only
@@ -679,11 +934,28 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // the skill entirely takes typed requests away too, so those count as uses.
         let counts = match i.kind {
             InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
-            InvocationKind::SkillRequest => !typed[name.as_str()],
+            InvocationKind::SkillRequest => !typed_only(interned.kinds[key].control.as_ref()),
             _ => false,
         };
         if counts {
-            credit((ContextKind::Skill, name), &i.profiles, i.time, 1);
+            credit(skill_families.get(&key), &i.profiles, i.time, 1);
+        }
+    }
+    // Results count as their tool's uses, and the largest one sizes its output cap.
+    let mut largest: HashMap<usize, i64> = HashMap::new();
+    for t in &scan.tool_results {
+        for &index in families
+            .get(&(ContextKind::ToolOutput, t.name.as_str()))
+            .into_iter()
+            .flatten()
+        {
+            let row = &mut rows[index].cost;
+            if !t.profiles.iter().any(|p| row.profiles.contains(p)) {
+                continue;
+            }
+            *row.calls.as_mut().expect("family rows count calls") += t.results;
+            let entry = largest.entry(index).or_insert(0);
+            *entry = (*entry).max(t.largest_characters);
         }
     }
     let latest: HashMap<usize, HashSet<usize>> = latest
@@ -701,6 +973,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.estimated_usd =
                 (c.priced > 0).then(|| (c.cost_usd * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
+            c.largest_characters = largest.get(&index).copied();
             if let Some(calls) = c.calls {
                 c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
             }
@@ -730,7 +1003,7 @@ mod tests {
     use super::*;
     use crate::model::{
         Exposure, ExposureView, IdentityBasis, Ids, Invocation, Owner, Scope, Size, TextCoverage,
-        ToolCalls, Usage, Via,
+        ToolCalls, ToolResults, Usage, Via,
     };
     use crate::test_support::{make_request, prices};
 
@@ -760,7 +1033,7 @@ mod tests {
             provenance: "synthetic".into(),
             locations: vec![],
             first_seen: 0,
-            current: "unresolved",
+            current: crate::model::Current::Unresolved,
             scope: if members.is_empty() {
                 Scope::Component
             } else {
@@ -789,6 +1062,7 @@ mod tests {
                 wire_model: Some("claude-opus-5-5".into()),
                 reasons: vec![],
             }),
+            results: None,
         }
     }
 
@@ -812,6 +1086,7 @@ mod tests {
         context_costs(&ContextInput {
             scan,
             requests,
+            profiles: &[],
             catalog: &prices(),
             max_cost_per_use_usd: limit,
         })
@@ -1100,7 +1375,7 @@ mod tests {
         assert_eq!(artifact.profiles, ["a", "b"]);
         assert_eq!((artifact.calls, artifact.last_used), (Some(3), Some(9)));
         assert_eq!(
-            control_text(artifact.control.as_ref().unwrap()),
+            control_text(artifact.control.as_ref().unwrap(), Harness::Claude),
             r#""enableArtifact": false"#
         );
         // Only the model's own call counts; references and typed requests do not.
@@ -1113,6 +1388,312 @@ mod tests {
         // The latest request dropped the tool and plugin, so neither gets a verdict.
         assert!(!artifact.current && artifact.verdict.is_none());
         assert!(!plugin.current);
+    }
+
+    /// Tool output a conversation holds, as `(tool, characters, opaque)`.
+    fn held(epoch: u64, tools: &[(&str, i64, bool)]) -> Option<Arc<ResultTotals>> {
+        Some(Arc::new(ResultTotals {
+            epoch,
+            tools: tools.iter().map(|&(t, n, o)| (t.into(), n, o)).collect(),
+        }))
+    }
+
+    #[test]
+    fn tool_output_is_carried_until_compaction() {
+        // One token per character: each request's complete text equals its input.
+        let mut exposures = vec![
+            exposure("r1", &[], 0, 1500),
+            exposure("r2", &[], 0, 1800),
+            exposure("r3", &[], 0, 500),
+            exposure("r4", &[], 0, 600),
+        ];
+        let results = [
+            held(1, &[("Bash", 1000, false)]),
+            // 1,000 carried characters, then 300 new ones.
+            held(1, &[("Bash", 1300, false)]),
+            // A compaction started a new conversation.
+            held(2, &[("Bash", 200, false)]),
+            held(2, &[("Bash", 200, false), ("Read", 100, true)]),
+        ];
+        for (e, r) in exposures.iter_mut().zip(results) {
+            e.results = r;
+        }
+        let scan = ExposureScan {
+            requests: exposures,
+            tool_results: vec![ToolResults {
+                name: "Bash".into(),
+                profiles: vec!["profile".into()],
+                results: 3,
+                largest_characters: 1000,
+            }],
+            ..ExposureScan::default()
+        };
+        let requests = vec![
+            // New output follows the empty prefix, all inside the 1h writes.
+            request("r1", 1, 0, 1500, 0),
+            // Carried output lies within the previous 1,500 tokens, all cached reads;
+            // the new output follows them, inside the 1h writes.
+            request("r2", 2, 1500, 300, 0),
+            // After a compaction the previous input no longer bounds anything, but
+            // every position is ordinary input.
+            request("r3", 3, 0, 0, 500),
+            // An image has no measurable size, so Read stays unpriced.
+            request("r4", 4, 500, 0, 100),
+        ];
+        let rows = costs(&scan, &requests, 1.0);
+        let bash = row(&rows, "Bash");
+        assert_eq!(bash.kind, ContextKind::ToolOutput);
+        assert_eq!((bash.requests, bash.priced), (4, 4));
+        assert!(close(
+            bash.cost_usd,
+            1000.0 * WRITE1H + (1000.0 * READ + 300.0 * WRITE1H) + 200.0 * ORDINARY + 200.0 * READ
+        ));
+        assert_eq!(
+            (bash.calls, bash.largest_characters, bash.verdict),
+            (Some(3), Some(1000), None)
+        );
+        let read = row(&rows, "Read");
+        assert_eq!(
+            (read.requests, read.priced, read.estimated_usd),
+            (1, 0, None)
+        );
+    }
+
+    #[test]
+    fn codex_context_uses_config_switches() {
+        let codex = |id: &str, time: Millis, input: i64, read: i64| {
+            let mut r = make_request();
+            r.id = id.into();
+            r.time = time;
+            r.harness = Harness::Codex;
+            r.provider = Some("openai".into());
+            r.model = Some("gpt-6.1-sol".into());
+            r.api = crate::model::Api::Responses;
+            r.parts[0].model = r.model.clone();
+            r.parts[0].tier = Some("standard".into());
+            r.parts[0].usage = Usage {
+                input: Some(input),
+                output: Some(100),
+                read: Some(read),
+                write: Some(0),
+                write5m: None,
+                write1h: None,
+                reasoning: Some(60),
+                ..r.parts[0].usage
+            };
+            r
+        };
+        let state = ["apps", "docs", "agents", "skills"];
+        let chronological = |id: &str| Exposure {
+            view: Arc::new(ExposureView {
+                components: ids(&[]),
+                candidates: ids(&state),
+                linkage: Linkage::Chronological,
+                coverage: TextCoverage::Partial,
+                complete_characters: None,
+                prefix: 0,
+                wire_model: None,
+                ..(*exposure(id, &[], 0, 0).view).clone()
+            }),
+            ..exposure(id, &[], 0, 0)
+        };
+        let scan = ExposureScan {
+            components: vec![
+                component(
+                    "apps",
+                    Category::McpDiscovery,
+                    "mcp__codex_apps__github",
+                    400,
+                    &[],
+                ),
+                component("docs", Category::McpDiscovery, "mcp__docs_server", 800, &[]),
+                component("agents", Category::Instructions, "agents_md", 2000, &[]),
+                component("skills", Category::SkillListing, "host_skills", 4000, &[]),
+            ],
+            requests: vec![chronological("r1"), chronological("r2")],
+            tool_calls: vec![ToolCalls {
+                name: "mcp__codex_apps__github.fetch".into(),
+                profiles: vec!["profile".into()],
+                calls: 2,
+                last_used: 5,
+            }],
+            ..ExposureScan::default()
+        };
+        let mut profile = crate::test_support::make_profile("profile", "/codex");
+        profile.harness = Harness::Codex;
+        profile.mcp_servers = vec!["docs-server".into(), "unused".into()];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &[codex("r1", 1, 4000, 0), codex("r2", 2, 5000, 4100)],
+            profiles: &[profile],
+            catalog: &prices(),
+            max_cost_per_use_usd: 1.0,
+        });
+        // A quarter token per character. The first request read nothing from cache;
+        // the second read past everything the first one sent.
+        let (input, read) = (2e-6, 0.1e-6);
+        let apps = row(&rows, "codex_apps");
+        assert_eq!(
+            (apps.harness, apps.kind),
+            (Harness::Codex, ContextKind::McpServer)
+        );
+        assert!(close(apps.cost_usd, 100.0 * input + 100.0 * read));
+        assert_eq!(
+            control_text(apps.control.as_ref().unwrap(), Harness::Codex),
+            "features.apps = false"
+        );
+        assert_eq!((apps.calls, apps.verdict), (Some(2), Some(Verdict::Keep)));
+        // The model sees `docs-server` as `docs_server`.
+        let docs = row(&rows, "docs_server");
+        assert_eq!(
+            control_text(docs.control.as_ref().unwrap(), Harness::Codex),
+            "mcp_servers.docs-server.enabled = false"
+        );
+        assert_eq!(docs.verdict, Some(Verdict::Keep));
+        let agents = row(&rows, "AGENTS.md");
+        assert_eq!(
+            (agents.kind, agents.control.as_ref()),
+            (ContextKind::Instructions, None)
+        );
+        assert!(close(agents.cost_usd, 500.0 * input + 500.0 * read));
+        // The skills check owns per-skill findings; the catalog is one piece here.
+        assert_eq!(row(&rows, "Skill list").control, None);
+        assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
+    }
+
+    #[test]
+    fn codex_opaque_pieces_and_switches_per_profile() {
+        // gpt-5.4 bills no cache writes, so its usage may omit them.
+        let codex = |id: &str, profiles: &[&str]| {
+            let mut r = make_request();
+            r.id = id.into();
+            r.session = id.into();
+            r.profiles = profiles.iter().map(|p| p.to_string()).collect();
+            r.harness = Harness::Codex;
+            r.provider = Some("openai".into());
+            r.model = Some("gpt-5.4".into());
+            r.api = crate::model::Api::Responses;
+            r.parts[0].model = r.model.clone();
+            r.parts[0].tier = Some("standard".into());
+            r.parts[0].usage = Usage {
+                input: Some(4000),
+                output: Some(100),
+                read: Some(0),
+                write: None,
+                write5m: None,
+                write1h: None,
+                reasoning: Some(60),
+                ..r.parts[0].usage
+            };
+            r
+        };
+        let chronological = |id: &str, state: &[&str]| Exposure {
+            view: Arc::new(ExposureView {
+                components: ids(&[]),
+                candidates: ids(state),
+                linkage: Linkage::Chronological,
+                coverage: TextCoverage::Partial,
+                complete_characters: None,
+                prefix: 0,
+                wire_model: None,
+                ..(*exposure(id, &[], 0, 0).view).clone()
+            }),
+            ..exposure(id, &[], 0, 0)
+        };
+        let opaque = |id: &str, category: Category, name: &str| {
+            let mut c = component(id, category, name, 0, &[]);
+            c.size.characters = None;
+            c
+        };
+        let scan = ExposureScan {
+            components: vec![
+                component("docs", Category::McpDiscovery, "mcp__docs_server", 800, &[]),
+                opaque("top", Category::McpSchema, "functions"),
+                component("provided", Category::ToolSchema, "functions", 400, &[]),
+                opaque("agents", Category::Instructions, "agents_md"),
+                opaque("search", Category::McpSchema, "mcp__other__search"),
+                component("read", Category::ToolSchema, "mcp__other__read", 400, &[]),
+            ],
+            requests: vec![
+                chronological(
+                    "r1",
+                    &["docs", "top", "provided", "agents", "search", "read"],
+                ),
+                chronological("r2", &["docs", "top"]),
+                chronological("r3", &["docs"]),
+            ],
+            ..ExposureScan::default()
+        };
+        // Both ids expose the server as `docs_server`.
+        let profile = |id: &str, server: &str| {
+            let mut p = crate::test_support::make_profile(id, &format!("/{id}"));
+            p.harness = Harness::Codex;
+            p.mcp_servers = vec![server.into()];
+            p
+        };
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &[
+                codex("r1", &["a"]),
+                codex("r2", &["b"]),
+                codex("r3", &["a", "b"]),
+            ],
+            profiles: &[profile("a", "docs-server"), profile("b", "docs_server")],
+            catalog: &prices(),
+            max_cost_per_use_usd: 1.0,
+        });
+        let of = |name: &str, profile: &str| {
+            rows.iter()
+                .find(|c| c.name == name && c.profiles.join("+") == profile)
+                .expect(name)
+        };
+        for (profile, id) in [("a", "docs-server"), ("b", "docs_server")] {
+            let docs = of("docs_server", profile);
+            assert_eq!(
+                control_text(docs.control.as_ref().unwrap(), Harness::Codex),
+                format!("mcp_servers.{id}.enabled = false")
+            );
+            // Unrecorded writes on a model that bills none leave the input ordinary.
+            assert_eq!(docs.priced, 1);
+        }
+        // A provided schema measures the opaque top-level identity beside it;
+        // without one, the tools' size is unknown.
+        assert_eq!(of("functions", "a").priced, 1);
+        assert_eq!(of("functions", "b").priced, 0);
+        // Another tool's schema of the same server does not measure it.
+        assert_eq!(of("other", "a").priced, 0);
+        // A request copied into profiles that declare the server differently
+        // gets no switch.
+        assert_eq!(of("docs_server", "a+b").control, None);
+        // Metadata-only instructions stay visible, unpriced.
+        let agents = of("AGENTS.md", "a");
+        assert_eq!((agents.requests, agents.priced), (1, 0));
+    }
+
+    fn skill_use(kind: InvocationKind, target: &str, time: Millis) -> Invocation {
+        Invocation {
+            id: format!("i{time}"),
+            target: identity(&format!("skill:{target}")),
+            group: target
+                .split_once(':')
+                .map(|(namespace, _)| identity(&format!("plugin:{namespace}"))),
+            kind,
+            status: if kind == InvocationKind::SkillCall {
+                InvocationStatus::Called
+            } else {
+                InvocationStatus::Requested
+            },
+            via: Via::Tool,
+            session: "session".into(),
+            sessions: vec!["session".into()],
+            identity_basis: IdentityBasis::Recorded,
+            harness: Harness::Claude,
+            client: None,
+            version: None,
+            time,
+            profiles: vec!["profile".into()],
+            locations: vec![],
+        }
     }
 
     #[test]
@@ -1135,36 +1716,19 @@ mod tests {
             500,
             &members,
         ));
-        let invocation = |kind, target: &str, time| Invocation {
-            id: format!("i{time}"),
-            target: identity(&format!("skill:{target}")),
-            group: None,
-            kind,
-            status: if kind == InvocationKind::SkillCall {
-                InvocationStatus::Called
-            } else {
-                InvocationStatus::Requested
-            },
-            via: Via::Tool,
-            session: "session".into(),
-            sessions: vec!["session".into()],
-            identity_basis: IdentityBasis::Recorded,
-            harness: Harness::Claude,
-            client: None,
-            version: None,
-            time,
-            profiles: vec!["profile".into()],
-            locations: vec![],
-        };
         let scan = ExposureScan {
             components,
             requests: vec![exposure("r1", &["listing"], 0, 500)],
             invocations: vec![
                 // The scan resolved this short name to the local skill that owns it.
-                invocation(InvocationKind::SkillRequest, "pdf", 1),
-                invocation(InvocationKind::SkillRequest, "anthropic-skills:xlsx", 2),
-                invocation(InvocationKind::SkillCall, "anthropic-skills:pdf", 3),
-                invocation(InvocationKind::SkillRequest, "tools:deploy", 4),
+                skill_use(InvocationKind::SkillRequest, "pdf", 1),
+                skill_use(InvocationKind::SkillRequest, "anthropic-skills:xlsx", 2),
+                skill_use(InvocationKind::SkillCall, "anthropic-skills:pdf", 3),
+                skill_use(InvocationKind::SkillRequest, "tools:deploy", 4),
+                // Uses of the shared switch count even when that member's listing is absent.
+                skill_use(InvocationKind::SkillCall, "anthropic-skills:slides", 5),
+                skill_use(InvocationKind::SkillRequest, "anthropic-skills:slides", 6),
+                skill_use(InvocationKind::SkillReference, "anthropic-skills:other", 7),
             ],
             ..ExposureScan::default()
         };
@@ -1172,22 +1736,70 @@ mod tests {
         // Typing /pdf still works when the model cannot see it, so it is no model use.
         let pdf = row(&rows, "pdf");
         assert_eq!(
-            control_text(pdf.control.as_ref().unwrap()),
+            control_text(pdf.control.as_ref().unwrap(), Harness::Claude),
             r#""skillOverrides": {"pdf": "user-invocable-only"}"#
         );
         assert_eq!(pdf.calls, Some(0));
         // Synced skills share one switch that removes typed uses too.
         let synced = row(&rows, SYNCED_SKILLS);
         assert_eq!(
-            control_text(synced.control.as_ref().unwrap()),
+            control_text(synced.control.as_ref().unwrap(), Harness::Claude),
             r#""syncClaudeAiSkills": false"#
         );
-        assert_eq!((synced.calls, synced.last_used), (Some(2), Some(3)));
+        assert_eq!((synced.calls, synced.last_used), (Some(4), Some(6)));
         assert_eq!(synced.tokens, Some(200));
         // skillOverrides does not reach a plugin's skill, so no verdict names it.
         let plugin = row(&rows, "tools:deploy");
         assert_eq!(plugin.control, None);
         assert_eq!((plugin.calls, plugin.verdict), (Some(1), None));
+    }
+
+    #[test]
+    fn local_and_synced_skills_keep_separate_controls() {
+        for members in [
+            ["anthropic-skills", "anthropic-skills:pdf"],
+            ["anthropic-skills:pdf", "anthropic-skills"],
+        ] {
+            let mut components: Vec<_> = members
+                .iter()
+                .map(|m| component(m, Category::SkillListing, m, 100, &[]))
+                .collect();
+            components.push(component(
+                "listing",
+                Category::SkillListing,
+                "skills",
+                200,
+                &members,
+            ));
+            let scan = ExposureScan {
+                components,
+                requests: vec![exposure("r1", &["listing"], 0, 200)],
+                invocations: vec![
+                    skill_use(InvocationKind::SkillCall, "anthropic-skills", 1),
+                    skill_use(InvocationKind::SkillCall, "anthropic-skills:pdf", 2),
+                ],
+                ..ExposureScan::default()
+            };
+            let rows = costs(&scan, &[request("r1", 1, 0, 0, 200)], 1.0);
+            assert_eq!(
+                rows.iter().filter(|r| r.kind == ContextKind::Skill).count(),
+                2
+            );
+            let local = row(&rows, "anthropic-skills");
+            let synced = row(&rows, "claude.ai synced skills");
+            assert_eq!(
+                control_text(local.control.as_ref().unwrap(), Harness::Claude),
+                r#""skillOverrides": {"anthropic-skills": "user-invocable-only"}"#
+            );
+            assert_eq!(
+                control_text(synced.control.as_ref().unwrap(), Harness::Claude),
+                r#""syncClaudeAiSkills": false"#
+            );
+            for cost in [local, synced] {
+                assert_eq!(cost.tokens, Some(100));
+                assert_eq!(cost.calls, Some(1));
+            }
+        }
     }
 
     #[test]
@@ -1197,29 +1809,59 @@ mod tests {
             value,
             append,
         };
+        let claude = |path: &[&str], value: ControlValue, append: bool| {
+            control_text(&control(path, value, append), Harness::Claude)
+        };
         assert_eq!(
-            control_text(&control(
-                &["enableArtifact"],
-                ControlValue::Bool(false),
-                false
-            )),
+            claude(&["enableArtifact"], ControlValue::Bool(false), false),
             r#""enableArtifact": false"#
         );
         assert_eq!(
-            control_text(&control(
+            claude(
                 &["skillOverrides", "review"],
                 ControlValue::Text("user-invocable-only".into()),
                 false
-            )),
+            ),
             r#""skillOverrides": {"review": "user-invocable-only"}"#
         );
         assert_eq!(
-            control_text(&control(
+            claude(
                 &["permissions", "deny"],
                 ControlValue::Text("mcp__docs".into()),
                 true
-            )),
+            ),
             r#""permissions": {"deny": ["mcp__docs"]}"#
+        );
+        // config.toml takes dotted keys, quoting any that are not bare.
+        assert_eq!(
+            control_text(
+                &control(
+                    &["mcp_servers", "my.server", "enabled"],
+                    ControlValue::Bool(false),
+                    false
+                ),
+                Harness::Codex
+            ),
+            r#"mcp_servers."my.server".enabled = false"#
+        );
+    }
+
+    #[test]
+    fn config_patch_renders_toml_tables() {
+        let off = |path: &[&str]| Control {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            value: ControlValue::Bool(false),
+            append: false,
+        };
+        let patch = config_patch([
+            &off(&["features", "apps"]),
+            &off(&["mcp_servers", "t3-code", "enabled"]),
+        ]);
+        let parsed: toml::Table = toml::from_str(&patch).expect("valid TOML");
+        assert_eq!(parsed["features"]["apps"], toml::Value::Boolean(false));
+        assert_eq!(
+            parsed["mcp_servers"]["t3-code"]["enabled"],
+            toml::Value::Boolean(false)
         );
     }
 

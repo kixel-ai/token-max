@@ -120,7 +120,7 @@ fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
     let before = std::fs::read(w.transcript()).unwrap();
     let base = prices_args(&w);
     let invoke = || {
-        let mut c = command(&w, &args(&base, &["--json"]));
+        let mut c = command(&w, &args(&base, &["--json-full"]));
         c.env("CLAUDE_CONFIG_DIR", &w.claude)
             .env("CODEX_HOME", &w.codex);
         run(&mut c)
@@ -147,6 +147,39 @@ fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
     assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("recommended"));
     let diagnostic: Value = serde_json::from_str(&stderr).unwrap();
     assert_eq!(diagnostic["location"]["line"], 1);
+}
+
+#[test]
+fn compact_json_preserves_the_full_reports_decisions_without_request_arrays() {
+    let w = Workspace::new();
+    w.fixture();
+    w.settings(r#"{"promptCacheTtl":"5m"}"#);
+    let before = std::fs::read(w.transcript()).unwrap();
+    let base = prices_args(&w);
+    let (status, full, stderr) = run(&mut command(&w, &args(&base, &["--json-full"])));
+    assert_eq!(status, 1, "{stderr}");
+    let full: Value = serde_json::from_str(&full).unwrap();
+    let (status, compact, stderr) = run(&mut command(&w, &args(&base, &["--json"])));
+    assert_eq!(status, 1, "{stderr}");
+    assert!(stderr.is_empty());
+    assert!(!compact.contains("SYNTHETIC_PRIVATE"));
+    let compact: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(compact["schemaVersion"], 2);
+    assert_eq!(
+        compact["scan"]["requests"],
+        full["scan"]["requests"].as_array().unwrap().len()
+    );
+    for key in ["historical", "context", "maxCostPerUseUsd", "assumptions"] {
+        assert_eq!(compact[key], full[key], "{key}");
+    }
+    assert_eq!(compact["scan"]["coverage"], full["scan"]["coverage"]);
+    assert_eq!(compact["scan"]["profiles"], full["scan"]["profiles"]);
+    assert_eq!(std::fs::read(w.transcript()).unwrap(), before);
+    let (_, _, diagnostic) = run(&mut command(&w, &args(&base, &["--json", "--bogus"])));
+    assert_eq!(
+        serde_json::from_str::<Value>(&diagnostic).unwrap()["error"],
+        "invalid arguments; use --help"
+    );
 }
 
 /// The synthetic fixture rewritten so one recorded summary precedes four large writes.
@@ -214,7 +247,7 @@ fn renders_priced_compaction_windows_alongside_ttl_checks() {
     std::fs::write(w.transcript(), compaction_transcript()).unwrap();
     w.settings(r#"{"promptCacheTtl":"5m","autoCompactWindow":400000}"#);
     let base = prices_args(&w);
-    let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &["--json"])));
+    let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &["--json-full"])));
     assert_eq!(status, 1, "{stderr}");
     let report: Value = serde_json::from_str(&stdout).unwrap();
     let result = report["checks"]
@@ -335,7 +368,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
         "--codex-dir",
         "--details",
         "--plain",
-        "--json",
+        "--json-full",
         "NO_COLOR",
         "Exit 0",
         "Exit 1",
@@ -368,7 +401,7 @@ fn arguments_follow_strict_parse_args() {
             "{extra:?}"
         );
     }
-    let (status, _, stderr) = invoke(&["--json", "--bogus"]);
+    let (status, _, stderr) = invoke(&["--json-full", "--bogus"]);
     assert_eq!(status, 2);
     assert_eq!(stderr, "{\"error\":\"invalid arguments; use --help\"}\n");
     let (status, stdout, _) = invoke(&["-hv"]);
@@ -408,7 +441,7 @@ fn json_numbers_print_like_javascript() {
     w.fixture();
     w.settings(r#"{"promptCacheTtl":"5m"}"#);
     let base = prices_args(&w);
-    let (_, stdout, _) = run(&mut command(&w, &args(&base, &["--json"])));
+    let (_, stdout, _) = run(&mut command(&w, &args(&base, &["--json-full"])));
     assert!(stdout.contains(r#""maxCostPerUseUsd":1,"#));
     assert!(!stdout.contains(".0,") && !stdout.contains(".0}"));
     assert!(stdout.ends_with("}\n") && stdout.matches('\n').count() == 1);
@@ -523,12 +556,12 @@ fn explicit_windows_match_the_library_replay() {
                 &window,
                 "--prices-file",
                 &prices,
-                "--json",
+                "--json-full",
             ],
         );
         c.env("CLAUDE_CONFIG_DIR", &w.claude);
         let (status, stdout, stderr) = run(&mut c);
-        let expected = i32::from(check.base.action == Action::Change);
+        let expected = i32::from(report.checks.iter().any(|c| c.action() == Action::Change));
         assert_eq!(status, expected, "{mode}: {stderr}");
         let cli: Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(
@@ -611,7 +644,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
         text.contains("Saves $") || text.contains("Saves <$"),
         "{text}"
     );
-    let (status, json, json_err) = invoke(&with("--json"));
+    let (status, json, json_err) = invoke(&with("--json-full"));
     assert_eq!(status, 1, "{json_err}");
     let report: Value = serde_json::from_str(&json).unwrap();
     assert_eq!(report["schemaVersion"], 1);
@@ -646,13 +679,13 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     );
 
     std::fs::write(&settings, r#"{"promptCacheTtl":"1h"}"#).unwrap();
-    let (status, clear, stderr) = invoke(&with("--json"));
+    let (status, clear, stderr) = invoke(&with("--json-full"));
     assert_eq!(status, 0, "{stderr}");
     let clear: Value = serde_json::from_str(&clear).unwrap();
     let checks = clear["checks"].as_array().unwrap();
     assert!(checks.iter().all(|c| c["action"] != "change"));
 
-    let (status, stdout, stderr) = invoke(&["--bogus", "--json"]);
+    let (status, stdout, stderr) = invoke(&["--bogus", "--json-full"]);
     assert_eq!(status, 2, "{stderr}");
     assert_eq!(stdout, "");
     let error = last_line(&stderr)["error"].as_str().unwrap().to_string();
@@ -664,7 +697,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
 "#,
     )
     .unwrap();
-    let (status, stdout, stderr) = invoke(&with("--json"));
+    let (status, stdout, stderr) = invoke(&with("--json-full"));
     assert_eq!(status, 2, "{stderr}");
     assert_eq!(stdout, "");
     assert_eq!(last_line(&stderr)["location"]["line"], 1);
@@ -693,7 +726,7 @@ fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_l
         text(&w.codex),
         "--prices-file".into(),
         text(&fixture("prices.json")),
-        "--json".into(),
+        "--json-full".into(),
     ];
     let invoke = || {
         let mut c = command(&w, &args(&base, &[]));
@@ -862,7 +895,7 @@ mod unix {
         let both = format!("{stdout}{stderr}");
         assert!(!both.contains('\x1b') && !both.contains('→'));
         assert!(stdout.contains("Uncertainty:"));
-        let (status, stdout, stderr) = invoke(&["--json", "--details", "--plain"], &[]);
+        let (status, stdout, stderr) = invoke(&["--json-full", "--details", "--plain"], &[]);
         assert_eq!(status, 1, "{stderr}");
         assert_eq!(stderr, "");
         let report: Value = serde_json::from_str(&stdout).unwrap();
@@ -911,7 +944,7 @@ mod unix {
                 let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
                 let mut args = vec!["--claude-dir", &claude, "--price-cache", &cache];
                 if json {
-                    args.push("--json");
+                    args.push("--json-full");
                 }
                 let mut c = command(&w, &args);
                 c.env(

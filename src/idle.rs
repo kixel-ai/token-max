@@ -210,7 +210,7 @@ fn settings_control(profile: &Profile) -> IdleControl {
 
 /// One profile's idle controls by working directory, with window controls memoized per scope
 /// and model because every request of every replay asks for them.
-struct Scopes<'p> {
+pub(crate) struct Scopes<'p> {
     profile: &'p Profile,
     fallback: OnceCell<IdleControl>,
     /// The profile without its per-directory controls, for scoped window overrides.
@@ -219,7 +219,7 @@ struct Scopes<'p> {
 }
 
 impl<'p> Scopes<'p> {
-    fn new(profile: &'p Profile) -> Self {
+    pub(crate) fn new(profile: &'p Profile) -> Self {
         Self {
             profile,
             fallback: OnceCell::new(),
@@ -228,7 +228,7 @@ impl<'p> Scopes<'p> {
         }
     }
 
-    fn scope(&self, r: &Request) -> Scope {
+    pub(crate) fn scope(&self, r: &Request) -> Scope {
         let cwd = r.cwd.as_deref().filter(|c| !c.is_empty())?;
         self.profile.idle_directories.as_ref()?.get_index_of(cwd)
     }
@@ -247,7 +247,7 @@ impl<'p> Scopes<'p> {
     }
 
     /// The scenario TTLs where the profile owns them; a project-owned TTL keeps its value.
-    fn ttls(&self, scope: Scope, ttls: &Ttls) -> Ttls {
+    pub(crate) fn ttls(&self, scope: Scope, ttls: &Ttls) -> Ttls {
         let profile = &self.profile.ttl;
         let current = self.control(scope).ttl.as_ref().unwrap_or(profile);
         PerBucket {
@@ -265,7 +265,7 @@ impl<'p> Scopes<'p> {
     }
 
     /// The window control for `model` under the scope's compaction controls.
-    fn window(&self, scope: Scope, model: Option<&str>) -> Rc<WindowControl> {
+    pub(crate) fn window(&self, scope: Scope, model: Option<&str>) -> Rc<WindowControl> {
         // window_control treats a missing model as the empty string.
         let key = model.unwrap_or("");
         if let Some(w) = self.windows.borrow().get(&scope).and_then(|m| m.get(key)) {
@@ -413,8 +413,8 @@ impl<'r> ReplayIndex<'r> {
                 index.selected_events.insert(e.id.as_str());
             }
             for (i, origin) in e.origins.iter().enumerate() {
-                let session = origin.session.as_str();
-                if e.origins[..i].iter().any(|o| o.session == session) {
+                let session = &*origin.session;
+                if e.origins[..i].iter().any(|o| &*o.session == session) {
                     continue;
                 }
                 index.events.entry(session).or_default().push(e);
@@ -1928,7 +1928,7 @@ fn historically_available(events: &[&StructuralEvent], r: &Request) -> bool {
             break;
         }
         if e.kind == EventKind::Settings
-            && e.origins.iter().any(|o| o.session == r.session)
+            && e.origins.iter().any(|o| *o.session == *r.session)
             && let Some(v) = e.settings.get("idleCompactionAvailable")
         {
             value = Some(v);
@@ -1946,6 +1946,58 @@ pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
         }
     }
     checks
+}
+
+/// Window controls shared by the idle and keepalive policy baselines.
+fn current_windows(scopes: &Scopes, main: &[&Request]) -> Vec<ScenarioWindow> {
+    let models: IndexSet<Option<&str>> = main
+        .iter()
+        .flat_map(|r| r.parts.iter().filter(|p| is_conversation(p)))
+        .map(|p| p.model.as_deref())
+        .collect();
+    // A request whose scope was already seen adds no new (owner, model) pair.
+    let main_scopes: IndexSet<Scope> = main.iter().map(|r| scopes.scope(r)).collect();
+    let mut current_windows: Vec<ScenarioWindow> = vec![];
+    let mut seen: HashSet<(String, Option<&str>)> = HashSet::new();
+    for &scope in &main_scopes {
+        for &model in &models {
+            let c = scopes.window(scope, model);
+            if seen.insert((c.owner.clone(), model)) {
+                current_windows.push(ScenarioWindow {
+                    owner: c.owner.clone(),
+                    models: vec![model.map(str::to_string)],
+                    value: c.value,
+                });
+            }
+        }
+    }
+    current_windows
+}
+
+/// Apply exactly the same window recommendations to idle compaction and keepalive.
+pub(crate) fn recommended_windows(
+    scopes: &Scopes,
+    main: &[&Request],
+    checks: &[&CompactionCheck],
+) -> Vec<ScenarioWindow> {
+    let profile = scopes.profile;
+    let current_windows = current_windows(scopes, main);
+    let recommended_windows: Vec<ScenarioWindow> = current_windows
+        .iter()
+        .map(|w| {
+            let check = checks
+                .iter()
+                .find(|c| c.base.profile == profile.id && c.base.owner == w.owner);
+            ScenarioWindow {
+                value: match check {
+                    Some(c) if c.base.action == Action::Change => c.base.recommended,
+                    _ => w.value,
+                },
+                ..w.clone()
+            }
+        })
+        .collect();
+    recommended_windows
 }
 
 /// Idle checks for each owning idle control of one Claude profile.
@@ -2015,43 +2067,8 @@ fn profile_checks<'a>(
         calibration: compaction_samples(&requests, &events, options.summaries),
     };
     let scopes = &profiled.scopes;
-    let models: IndexSet<Option<&str>> = main
-        .iter()
-        .flat_map(|r| r.parts.iter().filter(|p| is_conversation(p)))
-        .map(|p| p.model.as_deref())
-        .collect();
-    // A request whose scope was already seen adds no new (owner, model) pair.
-    let main_scopes: IndexSet<Scope> = main.iter().map(|r| scopes.scope(r)).collect();
-    let mut current_windows: Vec<ScenarioWindow> = vec![];
-    let mut seen: HashSet<(String, Option<&str>)> = HashSet::new();
-    for &scope in &main_scopes {
-        for &model in &models {
-            let c = scopes.window(scope, model);
-            if seen.insert((c.owner.clone(), model)) {
-                current_windows.push(ScenarioWindow {
-                    owner: c.owner.clone(),
-                    models: vec![model.map(str::to_string)],
-                    value: c.value,
-                });
-            }
-        }
-    }
-    let recommended_windows: Vec<ScenarioWindow> = current_windows
-        .iter()
-        .map(|w| {
-            let check = options
-                .windows
-                .iter()
-                .find(|c| c.base.profile == profile.id && c.base.owner == w.owner);
-            ScenarioWindow {
-                value: match check {
-                    Some(c) if c.base.action == Action::Change => c.base.recommended,
-                    _ => w.value,
-                },
-                ..w.clone()
-            }
-        })
-        .collect();
+    let current_windows = current_windows(scopes, &main);
+    let recommended_windows = recommended_windows(scopes, &main, options.windows);
     let current_ttls = PerBucket {
         main: profile.ttl.main.value,
         subagent: profile.ttl.subagent.value,
@@ -2323,13 +2340,14 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
-            pricing: Some(Pricing {
+            shell: None,
+            pricing: Some(std::sync::Arc::new(Pricing {
                 model: Some("claude-opus-5-5".into()),
                 provider: Some("anthropic".into()),
                 tier: Some("standard".into()),
                 speed: Some("standard".into()),
                 geo: Some("global".into()),
-            }),
+            })),
         }
     }
 
@@ -2379,6 +2397,7 @@ mod tests {
             },
             provider: Some("anthropic".into()),
             settings: IndexMap::from([("idleCompaction".to_string(), Scalar::Bool(false))]),
+            mcp_servers: vec![],
             compaction: compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
                 user: &user,
@@ -2400,8 +2419,10 @@ mod tests {
                 .unwrap(),
             ),
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
+            background: vec![],
         }
     }
 

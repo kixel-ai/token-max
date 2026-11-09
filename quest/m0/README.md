@@ -95,6 +95,13 @@ ownership and proven cross-source deduplication. T3's own idle modes are
 distinct from native Claude's. Other T3 providers and automatic discovery
 from its encrypted desktop connection catalog are outside this scope.
 
+Decided 2026-11-08 (maintainer), for SSH audits: ✅ each destination runs a
+`token-max` installed there with `cargo install`, and a missing or different
+version fails with the command to run (rejected: copy the local binary over
+SSH to a temporary path, run it and delete it). As built, each SSH host is
+analyzed in its own section of the report, so a history copied between hosts
+counts on each and amounts across hosts are not added.
+
 Recommendations for every check:
 
 - A replay assumes sessions would behave the same under the other setting.
@@ -167,11 +174,8 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 
 ## Required
 
-- [Background-generation check](/quest/m0/background-generation.md) - attributes recap, suggestion, and goal-check-in costs when observable, with guidance and explicit unknowns otherwise
-- [Bash cap check](/quest/m0/bash-cap.md) - flags a Bash timeout cap at or above the cache TTL, and waits that hit the cap or poll
+- [Codex costs without recorded billing tiers](/quest/m0/codex-tier.md) - conditional API-equivalent estimates keep missing tier evidence from suppressing every cost check
+- [Project-scoped background controls](/quest/m0/background-scopes.md) - resolve each project's current background controls and their owning files
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Codex skills catalog](/quest/m0/skills-catalog.md) - a priced line and `config.toml` switch per Codex skill, and duplicate listings flagged
-- [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds
 - [T3 profiles and settings](/quest/m0/t3.md) - native history discovery, T3 ownership, and T3-specific idle policies without double billing
-- [SSH host audits](/quest/m0/ssh.md) - selected remote audits with the same artifact and a combined privacy-preserving report
-- [Scan large histories](/quest/m0/scale.md) - a default run completes on a host with tens of gigabytes of transcripts, and `--json` and `--details` stay usable

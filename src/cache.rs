@@ -347,7 +347,7 @@ impl CacheBoundaries {
             }
             for origin in &event.origins {
                 times
-                    .entry(origin.session.clone())
+                    .entry(origin.session.to_string())
                     .or_default()
                     .push(event.time);
             }
@@ -821,6 +821,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         };
         for session in ["original", "copy"] {

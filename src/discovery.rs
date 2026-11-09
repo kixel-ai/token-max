@@ -9,8 +9,8 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CompactionSources, Env, SettingsScope, compaction_controls, idle_controls, js_string, members,
-    scoped_environment, speed_controls,
+    CompactionSources, Env, SettingsScope, bash_cap_control, claude_background, codex_background,
+    compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
     Agent, Harness, Location, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
@@ -441,7 +441,9 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
 }
 
 /// Settings that current or planned checks consume; anything else is never retained.
-const STRUCTURAL_SETTINGS: [&str; 17] = [
+const STRUCTURAL_SETTINGS: [&str; 19] = [
+    "bashOutputMaxChars",
+    "tool_output_token_limit",
     "promptCacheTtl",
     "subagentPromptCacheTtl",
     "idleCompaction",
@@ -1033,6 +1035,7 @@ fn profile(
         settings(requirements_file, Harness::Codex)?
     };
     let mut speed = speed_controls(harness, &speed_scopes, local_env)?;
+    let bash = claude.then(|| bash_cap_control(&speed_scopes, local_env));
     if !claude {
         codex_speed(
             &mut speed,
@@ -1068,7 +1071,24 @@ fn profile(
         managed_file,
         scopes: None,
     });
-    let settings = structural_settings(config);
+    let mut settings = structural_settings(config);
+    if claude {
+        // Output caps that are environment variables; the shell overrides the settings file.
+        for key in ["BASH_MAX_OUTPUT_LENGTH", "MAX_MCP_OUTPUT_TOKENS"] {
+            let value = match local_env.get(key) {
+                Some(value) => Some(value.as_str()),
+                None => members(config.get("env")).get(key).and_then(Value::as_str),
+            };
+            if let Some(n) = value.and_then(|v| v.trim().parse::<f64>().ok()) {
+                settings.insert(key.into(), Scalar::Number(n));
+            }
+        }
+    }
+    let mcp_servers = if claude {
+        vec![]
+    } else {
+        members(config.get("mcp_servers")).keys().cloned().collect()
+    };
     let compaction = compaction_controls(&CompactionSources {
         harness,
         user: &user,
@@ -1095,6 +1115,11 @@ fn profile(
     } else {
         None
     };
+    let background = if claude {
+        claude_background(&speed_scopes, local_env, provider.is_none())?
+    } else {
+        codex_background(&speed_scopes)?
+    };
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1105,11 +1130,14 @@ fn profile(
         ttl,
         provider,
         settings,
+        mcp_servers,
         compaction,
         idle,
         speed: Some(speed),
+        bash,
         speed_directories: None,
         idle_directories: None,
+        background,
     })
 }
 

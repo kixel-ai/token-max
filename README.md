@@ -204,7 +204,8 @@ winner, and unknown fixed charges can cancel without pretending they cost zero.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans
-compatible histories; JSON and text retain predecessor witnesses. A comparison
+compatible histories; `--json-full` retains complete predecessor witnesses; compact JSON and text group
+their states and reasons. A comparison
 stays unpriced when those histories imply different cache charges, while invariant
 charges can still be compared.
 

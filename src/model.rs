@@ -1191,6 +1191,21 @@ struct IdsNode {
     len: usize,
     /// Nodes walked to read the whole list, kept at most `len` so reading stays linear.
     depth: usize,
+    /// Hashes of the kept prefix and the whole list, independent of its segmentation.
+    prefix_hash: u64,
+    hash: u64,
+}
+
+fn append_hash(mut hash: u64, ids: &[Text]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    for id in ids {
+        let mut element = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut element);
+        hash = hash
+            .wrapping_mul(0x517c_c1b7_2722_0a95)
+            .wrapping_add(element.finish());
+    }
+    hash
 }
 
 impl Ids {
@@ -1216,12 +1231,22 @@ impl Ids {
                 b.iter().take(keep).chain(tail.iter()).cloned().collect();
             return Self::new(None, tail);
         }
+        let prefix_hash = base.map_or(0, |base| {
+            if keep == base.len() {
+                base.0.hash
+            } else {
+                append_hash(base.0.prefix_hash, &base.0.tail[..keep - base.0.keep])
+            }
+        });
+        let hash = append_hash(prefix_hash, &tail);
         Ids(std::sync::Arc::new(IdsNode {
             base: base.cloned(),
             keep,
             tail,
             len,
             depth,
+            prefix_hash,
+            hash,
         }))
     }
     /// `ids`, sharing the prefix it has in common with `like`.
@@ -1272,16 +1297,6 @@ impl Ids {
     pub fn address(&self) -> usize {
         std::sync::Arc::as_ptr(&self.0) as usize
     }
-    fn last(&self) -> Option<&Text> {
-        let mut node = &*self.0;
-        let index = node.len.checked_sub(1)?;
-        loop {
-            if index >= node.keep {
-                return node.tail.get(index - node.keep);
-            }
-            node = &node.base.as_ref()?.0;
-        }
-    }
 }
 
 impl From<Vec<Text>> for Ids {
@@ -1319,10 +1334,11 @@ impl PartialEq for Ids {
 impl Eq for Ids {}
 
 impl std::hash::Hash for Ids {
-    // Consistent with element-wise equality without walking the whole list.
+    // Shared prefixes retain their content hash, so growing histories do not get
+    // rehashed, and changing a middle component does not collide with every revision.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.len().hash(state);
-        self.last().hash(state);
+        self.0.hash.hash(state);
     }
 }
 
@@ -1652,6 +1668,26 @@ mod ids_tests {
         );
         assert!(HashSet::from([Ids::from(flat)]).contains(&last));
         assert_ne!(last, Ids::from(texts(&["a", "different", "i"])));
+    }
+
+    #[test]
+    fn content_hashes_match_across_prefix_branches_and_distinguish_middle_revisions() {
+        use std::hash::{Hash, Hasher};
+        let hash = |ids: &Ids| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            ids.hash(&mut hasher);
+            hasher.finish()
+        };
+        let flat =
+            |values: &[&str]| Ids::from(values.iter().map(|&s| Text::from(s)).collect::<Vec<_>>());
+        let first = flat(&["a", "b", "c", "d"]);
+        let branch = Ids::new(Some((&first, 2)), vec!["e".into(), "f".into()].into());
+        let end = Ids::new(Some((&branch, 3)), vec!["g".into()].into());
+        let same = flat(&["a", "b", "e", "g"]);
+        assert_eq!(end, same);
+        assert_eq!(hash(&end), hash(&same));
+        assert_ne!(hash(&end), hash(&flat(&["a", "b", "different", "g"])));
+        assert_eq!(hash(&Ids::new(Some((&end, 4)), vec![].into())), hash(&same));
     }
 
     #[test]

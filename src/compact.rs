@@ -161,6 +161,23 @@ fn check(mut check: CheckResult) -> Value {
     result
 }
 
+fn visibility(scan: &ExposureScan) -> Value {
+    let components = scan
+        .components
+        .iter()
+        .map(|c| (c.id.as_str(), c))
+        .collect::<std::collections::HashMap<_, _>>();
+    groups(scan.visibility.iter().map(|v| json!({
+        "component": v.component.as_ref().map(|id| {
+            let c = components[id.as_str()];
+            json!({"name": c.name, "category": c.category})
+        }),
+        "harness": v.harness, "client": v.client, "version": v.version, "profiles": v.profiles,
+        "exposure": v.exposure, "directCalls": v.direct_calls, "nestedCalls": v.nested_calls,
+        "typedSkills": v.typed_skills, "automaticUnused": v.automatic_unused, "reasons": v.reasons
+    })))
+}
+
 /// Consume the full analysis, releasing raw evidence before serializing its compact shape.
 pub(crate) fn report(mut report: Report) -> Value {
     let checks = std::mem::take(&mut report.checks)
@@ -195,11 +212,7 @@ pub(crate) fn report(mut report: Report) -> Value {
     let cache_counts = json!({"requests": cache.requests.len(), "boundaries": cache.boundaries.len(), "prompts": cache.prompts.len()});
     drop(cache);
     let exposure = std::mem::take(&mut scan.exposure);
-    let visibility = groups(exposure.visibility.iter().map(|v| json!({
-        "harness": v.harness, "client": v.client, "version": v.version, "profiles": v.profiles,
-        "exposure": v.exposure, "directCalls": v.direct_calls, "nestedCalls": v.nested_calls,
-        "typedSkills": v.typed_skills, "automaticUnused": v.automatic_unused, "reasons": v.reasons
-    })));
+    let visibility = visibility(&exposure);
     let exposure = json!({
         "components": exposure.components.len(), "requests": exposure.requests.len(),
         "invocations": exposure.invocations.len(), "visibility": visibility,
@@ -217,4 +230,69 @@ pub(crate) fn report(mut report: Report) -> Value {
     scan["cacheContext"] = cache_counts;
     scan["exposure"] = exposure;
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visibility_groups_keep_component_identity_and_unknown_reasons() {
+        let component = |id: &str, name: &str| Component {
+            size: Size {
+                characters: None,
+                recorded_tokens: None,
+                fingerprint: id.into(),
+            },
+            id: id.into(),
+            key: name.into(),
+            name: name.into(),
+            category: Category::ToolSchema,
+            owner: Owner::Context,
+            group: None,
+            provenance: "synthetic".into(),
+            locations: vec![],
+            first_seen: 0,
+            current: Current::Unresolved,
+            scope: Scope::Component,
+            members: vec![],
+            targets: vec![],
+        };
+        let row = |id: &str| Visibility {
+            harness: Harness::Claude,
+            client: None,
+            version: None,
+            profiles: vec!["profile".into()],
+            component: Some(id.into()),
+            since: 0,
+            until: 1,
+            exposure: Visible::Unknown,
+            direct_calls: Observed::Unknown,
+            nested_calls: Visible::Unknown,
+            typed_skills: Observed::Unknown,
+            automatic_unused: false,
+            reasons: vec!["synthetic incomplete exposure".into()],
+        };
+        let scan = ExposureScan {
+            components: vec![
+                component("a", "Tool A"),
+                component("b", "Tool B"),
+                component("a2", "Tool A"),
+            ],
+            visibility: vec![row("a"), row("b"), row("a2")],
+            ..ExposureScan::default()
+        };
+        let compact = visibility(&scan);
+        assert_eq!(compact["count"], 3);
+        let groups = compact["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 2);
+        let a = groups
+            .iter()
+            .find(|g| g["component"]["name"] == "Tool A")
+            .unwrap();
+        assert_eq!(a["count"], 2);
+        assert_eq!(a["component"]["category"], "tool-schema");
+        assert_eq!(a["directCalls"], "unknown");
+        assert_eq!(a["reasons"], json!(["synthetic incomplete exposure"]));
+    }
 }

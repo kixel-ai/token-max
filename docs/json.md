@@ -20,7 +20,7 @@ These evidence fields change shape:
 | `scan.cacheContext.requests`, `.boundaries`, `.prompts` | Pre-window record counts |
 | `scan.snapshots` | File count, frozen bytes, deferred bytes and skipped lines |
 | `scan.exposure.components`, `.requests`, `.invocations` | Record counts |
-| `scan.exposure.visibility` | Groups of coverage conditions across components/windows |
+| `scan.exposure.visibility` | Groups by component name/category and coverage conditions across revisions/windows |
 | `exposure.calibration[].samples` | Sample count; cohort, ratio, range and assumptions remain |
 | `compactions` | Evidence groups and aggregate cost, separately for each TTL |
 | Check `usageEstimates` | Groups by evidence, reason and assumptions |
@@ -36,7 +36,8 @@ summed delta or cost stays null if any contributing value is unknown. Empty
 cost aggregates are known zero; empty ranges have null endpoints. No fixed
 row limit drops distinct conditions. Request/event identifiers, individual file
 boundaries, component catalogs/locations and calibration witnesses remain in
-`--json-full`. Compact visibility groups count coverage records, not requests;
+`--json-full`. Compact visibility groups identify each component by name/category and count
+coverage records, not requests;
 per-setting request coverage stays in `context` and checks.
 
 Full evidence is streamed to stdout without building a serialized copy of the

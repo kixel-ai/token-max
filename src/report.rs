@@ -786,7 +786,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
     out.notes("Exposure assumption", &report.exposure.assumptions);
     out.blank();
     out.line(
-        "Repeated evidence is grouped; cache and attempt identifiers are examples. --json provides every period, witness and modeled compaction in the complete structured report (schema version 1).",
+        "Repeated evidence is grouped; cache and attempt identifiers are examples. --json-full provides every period, witness and modeled compaction in the complete structured report (schema version 1).",
         0,
         0,
     );
@@ -1278,7 +1278,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         out.field(
             "Attempt",
             &format!(
-                "{count} attempts; example {}: {}; {}; output budget {} (not observed output); full basis: --json",
+                "{count} attempts; example {}: {}; {}; output budget {} (not observed output); full basis: --json-full",
                 e.request, label(&e.evidence), e.reason, or_unknown(e.max_output_tokens)
             ),
         );
@@ -3338,7 +3338,7 @@ mod tests {
         ));
         assert!(!rendered.contains("Idle period:"));
         assert!(!rendered.contains("Idle by context:"));
-        assert!(rendered.contains("--json provides every period"));
+        assert!(rendered.contains("--json-full provides every period"));
         assert_eq!(json(&report), before);
     }
 

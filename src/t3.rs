@@ -583,7 +583,7 @@ const TURN: &str = "WITH matched AS (
    THEN COALESCE(json_extract(msg.payload_json,'$.idleCompaction'),
      CASE WHEN json_extract(msg.payload_json,'$.createdBy')='agent'
        AND json_extract(msg.payload_json,'$.creationSource')='server' THEN 'beforeCacheExpires' END) END,
- th.updated_at,
+ MAX(th.updated_at, pt.updated_at),
  (th.archived_at IS NULL AND th.deleted_at IS NULL
    AND json_extract(th.payload_json,'$.settledAt') IS NULL
    AND COALESCE(json_extract(th.payload_json,'$.settledOverride'),'')!='settled'
@@ -990,10 +990,11 @@ pub(crate) fn enrich(
                 r.issues.push("T3 native session owner is unique; per-request run/speed/idle metadata is unavailable".into());
             }
         } else if r.profiles.iter().any(|p| t3_ids.contains(p)) {
-            // An explicit native Claude entrypoint excludes T3. Codex's app-server source
-            // is shared with other clients, so it cannot disambiguate ownership.
+            // REPL provenance excludes the SDK client. T3 can override its entrypoint
+            // label, so a different label alone cannot prove a native control owner.
             if r.harness == Harness::Claude
-                && r.client.as_deref().is_some_and(|c| c != "t3-code")
+                && r.client.as_deref() == Some("cli")
+                && r.source.as_deref() == Some("repl_main_thread")
                 && session_owners.is_none()
                 && rows.is_none()
             {

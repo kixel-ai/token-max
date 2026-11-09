@@ -448,7 +448,10 @@ by final pings are included in their cost and removed in the closed sensitivity.
 Codex periods are priced only for models with billed 30-minute writes, whose
 lifetime is documented and refreshed by reads
 ([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
-checked 2026-11-08). Older models' retention is a range. Every cap compares the
+checked 2026-11-08). Recorded uniform 12-hour writes keep their actual write
+rate and long coverage; a 30-minute ping preserves that existing expiry.
+Mixed write lifetimes leave prefix geometry unresolved. Older models' retention
+is a range. Every cap compares the
 same fully priced sessions; unresolved sessions leave the aggregate winner
 unknown, without bounding their cost by unrelated priced sessions.
 

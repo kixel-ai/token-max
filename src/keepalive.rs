@@ -81,14 +81,34 @@ enum Cache {
     Claude(Ttl),
     /// A documented 30m minimum lifetime, refreshed by reads, with billed writes.
     Codex,
+    CodexLong,
 }
 
 impl Cache {
+    /// Preserve a request's measured write lifetime instead of substituting ping pricing.
+    fn request(self, p: &BillingPart) -> Option<Self> {
+        match self {
+            Cache::Claude(_) => Some(self),
+            Cache::Codex | Cache::CodexLong => {
+                let (short, long) = (p.usage.write30m?, p.usage.write12h?);
+                if short + long != p.usage.write? || (short > 0 && long > 0) {
+                    return None;
+                }
+                Some(if long > 0 {
+                    Cache::CodexLong
+                } else {
+                    Cache::Codex
+                })
+            }
+        }
+    }
+
     fn usage(self, read: i64, write: i64, ordinary: i64, output: i64) -> Usage {
         let (write5m, write1h, write30m, write12h) = match self {
             Cache::Claude(Ttl::FiveMinutes) => (Some(write), Some(0), None, None),
             Cache::Claude(Ttl::OneHour) => (Some(0), Some(write), None, None),
             Cache::Codex => (None, None, Some(write), Some(0)),
+            Cache::CodexLong => (None, None, Some(0), Some(write)),
         };
         Usage {
             input: Some(read + write + ordinary),
@@ -301,6 +321,7 @@ impl Replayer<'_> {
                         {
                             return None;
                         }
+                        let cache = self.lifetime.cache.request(p);
                         if offset != 0 {
                             if !matches!(p.kind, PartKind::Message | PartKind::Compaction) {
                                 return None;
@@ -308,9 +329,12 @@ impl Replayer<'_> {
                             p.usage.input = Some(input? + offset);
                             p.usage.write = Some(p.usage.write? + offset);
                             match self.lifetime.cache {
-                                Cache::Codex => {
-                                    p.usage.write30m = Some(p.usage.write30m? + offset);
-                                }
+                                Cache::Codex | Cache::CodexLong => match cache? {
+                                    Cache::CodexLong => {
+                                        p.usage.write12h = Some(p.usage.write12h? + offset)
+                                    }
+                                    _ => p.usage.write30m = Some(p.usage.write30m? + offset),
+                                },
                                 Cache::Claude(_) => {
                                     let ttl = if p.kind == PartKind::Compaction {
                                         session.ttls.subagent?
@@ -379,7 +403,7 @@ impl Replayer<'_> {
         events.sort_by_key(|e| e.time);
         let mut boundaries = events.into_iter().peekable();
         // Cache entries survive a temporary switch back to another pricing cohort.
-        let mut cache = HashMap::new();
+        let mut cache: HashMap<_, [Option<(Millis, i64)>; 2]> = HashMap::new();
         let mut run = Run::default();
         let mut positions = HashMap::new();
         for r in simulation.requests.iter().map(AsRef::as_ref) {
@@ -411,34 +435,48 @@ impl Replayer<'_> {
                         p.speed.as_deref(),
                         p.geo.as_deref(),
                     );
-                    let reads = match cache.get(&cohort) {
-                        Some(&(time, prefix))
-                            if r.time >= time && r.time - time < self.lifetime.ms =>
-                        {
-                            cacheable.min(prefix)
-                        }
-                        None if r.id
-                            == session
-                                .requests
-                                .iter()
-                                .find(|r| message(r).next().is_some())?
-                                .id =>
-                        {
-                            read
-                        }
-                        _ => 0,
-                    };
+                    let billing = self.lifetime.cache.request(p)?;
+                    let long = matches!(billing, Cache::CodexLong);
+                    let entries = cache.entry(cohort).or_default();
+                    let reads = entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, _)| !long || *i == 1)
+                        .filter_map(|(_, entry)| {
+                            entry
+                                .filter(|(until, _)| r.time < *until)
+                                .map(|(_, prefix)| prefix)
+                        })
+                        .max()
+                        .map(|prefix| cacheable.min(prefix))
+                        .unwrap_or_else(|| {
+                            if r.id
+                                == session
+                                    .requests
+                                    .iter()
+                                    .find(|r| message(r).next().is_some())
+                                    .unwrap()
+                                    .id
+                            {
+                                read
+                            } else {
+                                0
+                            }
+                        });
                     billed = Cow::Owned(BillingPart {
-                        usage: self.lifetime.cache.usage(
-                            reads,
-                            cacheable - reads,
-                            ordinary,
-                            output,
-                        ),
+                        usage: billing.usage(reads, cacheable - reads, ordinary, output),
                         ..p.clone()
                     });
                     run.reads.insert(r.id.clone(), reads);
-                    cache.insert(cohort, (r.end_time, cacheable));
+                    entries[usize::from(long)] = Some((
+                        r.end_time
+                            + if long {
+                                12 * 60 * MINUTE
+                            } else {
+                                self.lifetime.ms
+                            },
+                        cacheable,
+                    ));
                 } else if p.kind == PartKind::Compaction {
                     cache.clear();
                     if let Cache::Claude(_) = self.lifetime.cache {
@@ -807,6 +845,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
             assumptions: vec![
                 lifetime.as_ref().map_or_else(|| "cache lifetime unknown".into(), |l| format!("cache lifetime: {}", l.reason)),
                 "each session is replayed sequentially at each cap and with no pings, carrying cache warmth and ping context; all policies use the same recommended compaction windows and their modeled summary costs".into(),
+                "Codex requests retain a measured uniform 12h write lifetime and inherited long coverage; mixed write lifetimes have unresolved prefix geometry".into(),
                 "each ping uses the preceding request's pricing metadata and median new input and output; every later request uses its own provider, model, tier, speed, geography and context tier".into(),
                 "compactions replace prior ping context; pings after a boundary use its recorded post-context and survive into the return; missing geometry leaves the session unpriced".into(),
                 "pinging competes with idle compaction rather than adding its savings; compaction after the cap is not combined with pings".into(),
@@ -973,6 +1012,20 @@ mod tests {
         assert_eq!(check.idle_compaction_savings_usd, None);
         // Pings at 25m and 50m keep the cache warm past the 1h return.
         assert_eq!(check.scenarios[1].cap_ms, 50 * MINUTE);
+
+        // A measured 12h write remains warm for a two-hour return. Pings use 30m,
+        // preserve that long coverage, and cannot claim a rewrite rescue.
+        let long = |time| {
+            let mut r = codex("gpt-6.1-sol", "long", time);
+            r.parts[0].usage.write30m = Some(0);
+            r.parts[0].usage.write12h = Some(1000);
+            r
+        };
+        let mut profile = make_profile("profile", "root");
+        profile.harness = Harness::Codex;
+        let long = run(&scan(profile, vec![long(0), long(2 * HOUR)]), 3 * HOUR);
+        assert_eq!(long.unpriced, 0);
+        assert!(long.scenarios.iter().all(|s| s.rescued == 0 && s.avoided_usd < 0.0));
     }
 
     /// The default report's keepalive line.

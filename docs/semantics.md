@@ -562,15 +562,27 @@ Each row names the setting that removes the piece: `enableArtifact` and
 `enableWorkflows` for those tools, a bare-name `permissions.deny` rule for
 other tools and `mcp__<server>` for a server, which
 [remove the tool from context](https://code.claude.com/docs/en/permissions),
-and `skillOverrides` set to `user-invocable-only` for a skill. For Codex,
-`mcp_servers.<id>.enabled = false` in `config.toml` removes a server the request's own profile
-declares (a request copied into several profiles gets one only when each
-declares it under the same id), and `features.apps = false` removes ChatGPT apps (`codex_apps`); other
-Codex tools have no switch. Instruction files have no switch. Core tools, the system prompt and the listing framing are always
+and `skillOverrides` set to `user-invocable-only` for a local or bundled skill.
+Skills named `anthropic-skills:<name>`, synced from claude.ai, share one row
+turned off by `syncClaudeAiSkills: false`; a typed or called short name counts
+for it only while the active catalog lists no other skill by that name and
+no [built-in command, bundled skill, or alias](https://code.claude.com/docs/en/commands)
+reserves it, including commands unavailable in that session.
+Every replacement rebuilds those aliases. Explicit typed-name evidence stays
+separate from catalog membership. Other namespaced skills come from a plugin
+or an added directory, which [`skillOverrides` does not
+reach](https://code.claude.com/docs/en/skills#override-skill-visibility-from-settings),
+so they get no settings switch. For Codex, `mcp_servers.<id>.enabled = false`
+in `config.toml` removes a server the request's own profile declares (a request
+copied into several profiles gets one only when each declares it under the same id),
+and `features.apps = false` removes ChatGPT apps (`codex_apps`); other Codex tools
+have no switch. Instruction files have no switch. Core tools, the system prompt
+and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
 every row of its tool that shares a profile with it; skill uses count only the
-model's Skill calls, since a hidden skill can still be typed. A piece still sent
+model's Skill calls, since a hidden skill can still be typed, except where the
+switch removes the skill entirely, where typed requests count too. A piece still sent
 today is recommended off when `estimatedUsd` divided by its uses, counting no
 use as one, exceeds `maxCostPerUseUsd` (default $1, `--max-cost-per-use`);
 otherwise it is kept. The ratio does not depend on the window's length. A piece

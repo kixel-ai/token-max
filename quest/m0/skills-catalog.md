@@ -1,27 +1,24 @@
-# [M] Skills catalog and usage check
+# [M] Codex skills catalog
 
 ## Goal
 
-`token-max` reports the recurring discovery-context cost and observed usage
-of Claude Code and Codex skills. It flags duplicate entries and over-budget
-catalogs, and ranks unused or rarely used skills for disabling, reducing
-visibility, or scoping to relevant projects. Each finding shows exposure,
-usage coverage, the setting's owner, and estimated dollars where supportable;
-otherwise it gives an applicable provider-guidance warning.
+`token-max` gives each skill in a Codex catalog its own line with its
+recurring listing cost, observed uses and the `config.toml` entry that turns
+it off, under the same cost-per-use verdict Claude skills get. It flags a
+catalog that lists the same skill more than once.
 
 ## Plan
 
 Expanded 2026-11-06 (maintainer, /quest-plan): ✅ usage and recurring cost
-for both harnesses in m0 (rejected: defer to m1). The maintainer wants
-unused/rarely used skills identified and the cost of leaving them enabled
-quantified where possible. Recommendations stay read-only.
+for both harnesses in m0 (rejected: defer to m1). Decided 2026-11-07
+(maintainer): ✅ recommend hiding a skill whose listing cost more than $1
+per recorded use, counting no use as one, with `--max-cost-per-use` to
+change the default $1 threshold, per the [context quest](/quest/m0/context.md).
 
-Decided 2026-11-07 (maintainer): ✅ recommend `skillOverrides` set to
-`user-invocable-only` for a skill whose listing cost more than $1 per model
-call (rejected: leave the call to the user), per the
-[context quest](/quest/m0/context.md). Typed uses still work when hidden, so
-only model calls count. Progress: Claude listing members are priced and judged
-per skill; Codex catalogs, duplicates and budget checks remain.
+Done for Claude: listing members are priced per skill with a verdict;
+`skillOverrides` applies only to local and bundled skills, synced
+`anthropic-skills:*` skills share one `syncClaudeAiSkills` line, and plugin
+skills get no settings switch. What remains is Codex.
 
 The 2026-11-05 audit found Codex listing 182 skills per request, 104 of them
 four copies of the claude.ai skills Claude Code syncs into
@@ -30,49 +27,43 @@ four copies of the claude.ai skills Claude Code syncs into
 fixed it). At Sol's cached input price that was about $130 a month, but the
 catalog has a fixed token budget, so duplicates can push useful skills out.
 
+Codex chronological exposure pricing and `config.toml` rendering landed in
+[kixelated/token-max#26](https://github.com/kixelated/token-max/pull/26).
+`src/context.rs` still prices the Codex catalog as one unswitchable "Skill
+list" row. This quest splits it into per-skill rows, links observed uses,
+adds path-based `[[skills.config]]` controls, and detects duplicate listings.
+Reuse that pricing and TOML rendering; the context quest's remaining work
+on deferred loading, per-tool controls and instruction budgets does not
+block this quest.
+
+Decided 2026-11-08 (maintainer, [settled choices on the Claude control
+PR](https://github.com/kixelated/token-max/pull/28#issuecomment-6730699066)):
+✅ drop separate listing-budget checks (`skills.max_context_tokens`,
+`skillListingBudgetFraction`, `skillListingMaxDescChars`)
+(rejected: retain guidance-only budget warnings). Per-skill prices already
+reflect the listing after any applied limits; a separate warning adds no
+dollar estimate. Duplicate detection remains in scope.
+
 Recommendations for the implementer:
 
-- Track each skill's actual rendered listing, exposed sessions/requests,
-  observed invocations or loads, and last observed use in the selected
-  window. Resolve names, paths, namespaces, and duplicate sources. Direct
-  Skill calls and explicit typed invocations are strong evidence; shell
-  reads of SKILL.md or inherited instructions may be weaker evidence.
-  Requested use, confirmed loads, and successful invocations stay distinct.
-  Count deduplicated calls and explain
-  gaps, rather than interpreting a missing invocation event as never used.
-- Report "no observed use during N exposed sessions" and the window, not
-  "never used". Show use count/rate and recurring cost to rank infrequent
-  skills without an arbitrary rarity threshold. Recently installed skills,
-  unknown historical catalogs, and incomplete invocation visibility need
-  separate labels. A useful rare skill may belong in a project or remain
-  manually invocable instead of being disabled everywhere.
-  Automatic unused recommendations require complete exposure and invocation
-  visibility across the window, positive recurring overhead, and a finding
-  that still applies to the current effective configuration. Unused
-  findings for components introduced during the window and all other
-  low-use rankings are advisory under the milestone's exit-code rules.
-- Price the listing actually sent, including name, description, and path
-  where present, across its request exposures. Skill bodies and references
-  loaded on use are a separate attributed cost. Use marginal before/after
-  catalog token counts: budget backfill or description expansion can consume
-  freed space, so removed entries' gross cost is not always net savings.
-  Include relevant cache behavior and disclose unmeasured extra work.
-- Keep the existing duplicate-folder and Codex
-  `skills.max_context_tokens` checks, including its documented maximum.
-  Include Claude `skillListingBudgetFraction` and
-  `skillListingMaxDescChars`. Use the harness's effective budget and
-  truncation/omission evidence; do not assume every installed skill is sent
-  or the full skill body is loaded on every request.
-- Recommend supported visibility controls: Claude `skillOverrides` can use
-  `name-only`, `user-invocable-only`, or `off`; plugin skills are controlled
-  through the plugin, not that setting. Codex supports per-skill enablement
-  and catalog budgets. Name the owning file/tool and supported version, and
-  do not claim disabling implicit invocation saves catalog tokens unless
-  that harness actually removes the metadata.
-
-Sources checked 2026-11-06: [Claude skills and unused-skill
-reports](https://code.claude.com/docs/en/skills#find-unused-skills),
-[Codex skill loading and budgets](https://learn.chatgpt.com/docs/build-skills),
-and [Codex metadata guidance](https://learn.chatgpt.com/blog/rethinking-skills-and-prompts-for-gpt-6-astra).
-Claude's `/skill-doctor` already reports unused skills and context cost;
-this check adds cross-harness transcript replay and API-price estimates.
+- Codex records the rendered catalog as `world_state.state.host_skills.body`
+  when skills are on (`includeInstructions: true`), as of Codex 0.167. Its
+  entries end in `(file: rN/<dir>/SKILL.md)`, where the body's leading
+  `` - `rN` = `/abs/root` `` lines define the root aliases; plugin skills are
+  named `<plugin>:<skill>`. Resolve each entry to its absolute `SKILL.md`.
+- The control is `[[skills.config]]` with `path` set to that file and
+  `enabled = false`
+  ([build skills](https://learn.chatgpt.com/docs/build-skills)). It removes
+  the skill entirely, so typed `$name` requests count as uses alongside the
+  model's SKILL.md loads. `allow_implicit_invocation: false` is not
+  documented to remove the catalog entry; do not claim it saves tokens.
+- Keep requested use, confirmed SKILL.md loads, and successful invocation
+  evidence distinct, deduplicate copied transcript events, and disclose
+  incomplete visibility. Preserve the aggregate catalog cost when splitting
+  its rendered entries and framing, without charging both. Report rendered
+  listing cost rather than promising net savings when budget backfill or
+  description expansion can consume the freed space.
+- Codex does not merge same-named skills; both copies are listed. A name
+  listed more than once is a duplicate: recommend disabling every copy but
+  one by path, even when the dollars are unknown, and note that a symlinked
+  copy is better removed at its source.

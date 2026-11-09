@@ -1112,13 +1112,22 @@ pub(crate) fn enrich(
                     }
                 }
                 if let Some(requested) = &joined.requested {
-                    if r.requested_speed
-                        .as_ref()
-                        .is_some_and(|s| (s.tier.is_some() || s.speed.is_some()) && s != requested)
-                    {
+                    let native = r.requested_speed.get_or_insert_with(|| requested.clone());
+                    let conflict = [
+                        (&native.tier, &requested.tier),
+                        (&native.speed, &requested.speed),
+                    ]
+                    .into_iter()
+                    .any(|(a, b)| {
+                        a.as_deref().zip(b.as_deref()).is_some_and(|(a, b)| {
+                            crate::prices::tier_name(a) != crate::prices::tier_name(b)
+                        })
+                    });
+                    if conflict {
                         r.issues.push("conflicting requested service tiers".into());
                     } else {
-                        r.requested_speed = Some(requested.clone());
+                        native.tier = native.tier.take().or_else(|| requested.tier.clone());
+                        native.speed = native.speed.take().or_else(|| requested.speed.clone());
                     }
                 }
                 if let Some(state) = profiles
@@ -1339,11 +1348,14 @@ mod tests {
             lines[1]["payload"]["service_tier"] = json!(native);
             write(
                 &path,
-                lines
-                    .iter()
-                    .map(Value::to_string)
-                    .collect::<Vec<_>>()
-                    .join("\n"),
+                format!(
+                    "{}\n",
+                    lines
+                        .iter()
+                        .map(Value::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
             );
             let options: Vec<Value> = selected
                 .map(|tier| json!({"id":"serviceTier","value":tier}))

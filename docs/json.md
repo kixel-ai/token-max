@@ -15,10 +15,10 @@ from independent checks still must not be added.
 Each `context[]` row now also has `details`, `instructionSize`, and `guidance`.
 MCP server `details` contain `mcp-tool` and `mcp-discovery` rows with the same
 cost and coverage fields; these costs are already included in the server total.
-Do not sum parent and detail rows. A tool's `control` blocks just that tool;
-each estimate uses its own priced-request coverage, so differing coverage can
-also make detail estimates sum to a different amount than the parent estimate.
-recommendations to disable a whole server cover its tool recommendations in
+Do not sum parent and detail rows. Each estimate uses its own priced-request
+coverage, so differing coverage can also make detail estimates sum to a
+different amount than the parent estimate. A tool's `control` blocks just that
+tool; recommendations to disable a whole server cover its tool recommendations in
 the text report and settings snippet. `instructionSize` is null without
 recorded text, otherwise `{ "bytes": N, "lines": N }` for the latest recorded
 revision. `guidance` contains supported controls, documented budget comparisons,

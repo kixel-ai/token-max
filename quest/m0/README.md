@@ -171,7 +171,3 @@ interleaved lines, several recent). ✅ price a custom `ANTHROPIC_BASE_URL` as
 the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
-
-## Required
-
-- [Project-scoped background controls](/quest/m0/background-scopes.md) - resolve each project's current background controls and their owning files

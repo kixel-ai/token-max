@@ -899,6 +899,14 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
     );
     match result {
         CheckResult::Background(b) => {
+            out.field("Ownership", &b.reason);
+            for cwd in &b.directories {
+                out.field(
+                    "Recorded directory",
+                    &cwd.as_ref()
+                        .map_or_else(|| "absent".into(), |d| out.home(d)),
+                );
+            }
             out.field("Turn off", &background_off(b, out));
             out.field(
                 "Estimated requests",
@@ -1457,7 +1465,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::Speed(s) => return s.reason.clone(),
         CheckResult::Background(b) => {
             return match r.action {
-                Action::Advisory => background_unknown(b).into(),
+                Action::Advisory => format!("{} {}", background_unknown(b), b.reason),
                 _ if r.current == Some(Setting::Toggle(false)) => "Off; it costs nothing.".into(),
                 _ => "Estimated cost against --max-cost-per-use, counting its unrecorded uses as one.".into(),
             };
@@ -1550,6 +1558,9 @@ fn setting_name(result: &CheckResult) -> String {
 
 /// Why a background feature's cost is unknown.
 fn background_unknown(b: &BackgroundCheck) -> &'static str {
+    if b.base.current.is_none() {
+        return "Cost unknown: current scope or launch selection is unresolved.";
+    }
     match b.feature {
         BackgroundFeature::GoalCheckIns => {
             "Cost unknown: check-in turns are not marked in transcripts."
@@ -2155,6 +2166,19 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .collect();
     let name = |r: &Common<'_>, result: &CheckResult, out: &Out<'_>| {
         let mut name = setting_name(result);
+        if let CheckResult::Background(b) = result {
+            let directories: Vec<String> = b
+                .directories
+                .iter()
+                .map(|d| {
+                    d.as_ref()
+                        .map_or_else(|| "directory absent".into(), |d| out.home(d))
+                })
+                .collect();
+            if !directories.is_empty() {
+                let _ = write!(name, " [{}]", directories.join(", "));
+            }
+        }
         if many {
             let _ = write!(name, " [{}]", out.short_profile(r.profile));
         }
@@ -2220,6 +2244,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         0,
         0,
     );
+    if report
+        .checks
+        .iter()
+        .any(|c| matches!(c, CheckResult::Background(_)))
+    {
+        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, 0);
+    }
     // Parent and detail coverage overlap; do not combine them into a percentage.
     if pieces.iter().any(|c| c.priced < c.requests) {
         out.line("Some feature costs are scaled from their priced requests; --details shows each row's coverage.", 0, 0);
@@ -2332,6 +2363,15 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             }
             Action::Advisory => {
                 if let CheckResult::Background(b) = result {
+                    if r.current.is_none() {
+                        return format!(
+                            "{head}. {} {} Candidate owner: {}. Verify ownership before using: {}.",
+                            background_unknown(b),
+                            b.reason,
+                            out.home(r.owner),
+                            background_off(b, out)
+                        );
+                    }
                     return format!(
                         "{head}. {} {} to turn it off.",
                         background_unknown(b),

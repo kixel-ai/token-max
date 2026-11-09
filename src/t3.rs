@@ -1214,6 +1214,8 @@ pub(crate) fn enrich(
                 ttl.reason = "shared native history has unresolved T3 control ownership".into();
             }
             p.background.clear();
+            p.background_directories.clear();
+            p.background_requests.clear();
         }
     }
 }
@@ -1675,6 +1677,87 @@ mod tests {
         );
         assert_eq!(data.turns["orphan"].count, 1);
         assert!(data.turns["orphan"].joined.is_none());
+    }
+
+    #[test]
+    fn shared_history_ambiguity_clears_scoped_terminal_background_controls() {
+        let w = Workspace::new();
+        let cwd = w.home.join("project");
+        fs::create_dir_all(cwd.join(".git")).unwrap();
+        write(
+            cwd.join(".claude/settings.local.json"),
+            r#"{"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"1"}}"#,
+        );
+        write(
+            cwd.join(".codex/config.toml"),
+            "[tui]\nauto_recap = false\n",
+        );
+        native(&w);
+        let claude = w.claude.join("projects/project/native.jsonl");
+        w.fixture(&claude, "claude.jsonl");
+        let mut options = w.scan_options();
+        options
+            .discovery
+            .env
+            .insert("CLAUDE_CODE_ENABLE_AWAY_SUMMARY".into(), "0".into());
+        let codex = w.codex.join("sessions/test.jsonl");
+        for path in [&claude, &codex] {
+            let rows: Vec<Value> = fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| {
+                    let mut row: Value = serde_json::from_str(line).unwrap();
+                    if path == &claude {
+                        row["cwd"] = json!(cwd);
+                        row["entrypoint"] = json!("t3-code");
+                    } else {
+                        row["payload"]["cwd"] = json!(cwd);
+                        if row["type"] == "session_meta" {
+                            row["payload"]["source"] = json!("app-server");
+                        }
+                    }
+                    row
+                })
+                .collect();
+            write(
+                path,
+                rows.iter()
+                    .map(|row| format!("{row}\n"))
+                    .collect::<String>(),
+            );
+        }
+        let native = scan(&options).unwrap();
+        assert!(
+            native
+                .profiles
+                .iter()
+                .all(|p| !p.background_directories.is_empty())
+        );
+        assert!(
+            native
+                .profiles
+                .iter()
+                .any(|p| !p.background_requests.is_empty())
+        );
+        let root = state(&w, json!({}));
+        db(&root);
+        let data = scan(&options).unwrap();
+        assert_eq!(data.requests.len(), 3);
+        assert!(data.requests.iter().all(|r| r.profiles.len() == 2));
+        let catalog = crate::test_support::prices();
+        let checks = crate::background::background_checks(&crate::background::BackgroundInput {
+            scan: &data,
+            catalog: &catalog,
+            since: None,
+            now: timestamp(&json!("2026-11-02T00:00:00Z")).unwrap(),
+            max_cost_per_use_usd: 1.0,
+        });
+        assert!(checks.is_empty(), "{checks:?}");
+        for profile in &data.profiles {
+            assert!(profile.background.is_empty());
+            assert!(profile.background_directories.is_empty());
+            assert!(profile.background_requests.is_empty());
+        }
     }
 
     #[test]

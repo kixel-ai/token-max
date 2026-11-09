@@ -438,6 +438,12 @@ names its current value and the setting that turns it off:
 `promptSuggestionEnabled`, `awaySummaryEnabled`,
 `CLAUDE_CODE_GOAL_CHECKIN_MINUTES=0` or `tui.auto_recap = false`.
 
+Separate lines retain distinct owners across recorded projects and charge only
+their requests. Claude project/local settings and their `env` blocks participate;
+Codex uses trusted project config layers, closest to the working directory first.
+Missing directories, unknown trust and unrecorded profile selection stay advisory.
+Current files are applied to history as an estimate, not proof of past settings.
+
 Neither client logs these requests, so suggestion and recap costs are estimated
 at each recorded interactive-terminal turn where they would have run, and their
 uses count as one against `--max-cost-per-use`. Goal check-ins and Codex recaps

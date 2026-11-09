@@ -762,14 +762,42 @@ documents provided tool definitions. All guidance was checked on 2026-11-07.
 
 `background-generation` checks one feature each: Claude `prompt-suggestions`,
 `session-recaps` and `goal-check-ins`, and Codex `auto-recaps`. Controls come
-from the user and managed Claude settings, their `env` blocks and the active
-profile's shell, in that precedence. `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` and
+from user, shared project, local and managed Claude settings, in ascending
+precedence, and the active profile's inherited environment. Shared settings are
+read at the recorded session directory. On user-owned Unix git repositories,
+the local file is read at the repository root, or the main checkout for a
+worktree, with a legacy session-directory local file underneath it. Outside
+these repositories, including a repository rooted at home and Windows,
+the local file stays in the session directory. These paths also feed the shared
+idle, speed, cache and compaction ownership resolver.
+
+In terminal sessions, merged settings `env` entries replace inherited shell
+values. Hosting environments can instead preserve their launch environment;
+unrecorded launch overrides and historical files remain explicit uncertainty.
+The background variables are feature toggles or limits that can load before
+Claude's workspace trust prompt. `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION` and
 `CLAUDE_CODE_ENABLE_AWAY_SUMMARY` override their settings when they hold a
 boolean form. Suggestions are off without feature flags, on Bedrock, Vertex or
 Foundry or with `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, unless the variable
 turns them on. `CLAUDE_CODE_GOAL_CHECKIN_MINUTES` accepts plain whole minutes up
 to 10,080; `0` turns check-ins off and anything else means the 30-minute default.
-Codex reads `tui.auto_recap`, default true. Project settings are not read.
+Codex reads `tui.auto_recap`, default true, from system and user config, then
+trusted project `.codex/config.toml` layers from root down to the recorded cwd.
+Root discovery honors `project_root_markers`, including an empty list. Current
+trust is read only from the explicit cwd or project-root trust entry; absent
+trust never becomes trusted because a transcript exists. Untrusted projects
+skip project layers. Named profiles that may change the control or root
+discovery stay advisory when selection is not recorded; a known trusted project
+recap override wins over named-profile recap values. A worktree's `.git` file is
+a root marker, so discovery never walks into its parent checkout.
+
+Each distinct control retains only its applicable main requests, working
+directories, owner, disable snippet and pricing coverage. Missing or relative
+working directories, unknown trust with project overrides and unresolved
+selection have a null current value, unknown cost and no recommendation.
+Current values model the selected history; they do not prove historical enablement.
+Only allowlisted control metadata is retained or sent through SSH, never other
+settings, environment values or file contents.
 
 Claude Code 2.1.319 sends suggestions and recaps as forks of the main
 conversation with `skipTranscript` and `skipCacheWrite`, so no transcript records
@@ -914,7 +942,8 @@ its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
 ## Bash timeout cap
 
 The `bash-timeout-cap` check uses `Profile.bash`, resolved from user and
-managed settings `env` and the active profile's shell environment, which wins.
+managed settings `env` and the active profile's shell environment. For a terminal
+launch, settings `env` overrides inherited shell values.
 Like Claude Code, a value parses as a leading integer or an integral exponent
 form, and anything else, zero or negative falls back to the default (600000 ms
 maximum, 120000 ms default timeout). The effective cap is the larger of the two,

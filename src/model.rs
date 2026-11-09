@@ -316,7 +316,7 @@ pub struct StructuralEvent {
 }
 
 /// What a Claude Bash call asked for and how it ended, never its command or output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellCall {
     /// Started with `run_in_background`, so the model did not wait on it.
@@ -384,7 +384,7 @@ pub struct SpeedControl {
 }
 
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashCapControl {
     /// The larger of `BASH_MAX_TIMEOUT_MS` (default 600000) and `BASH_DEFAULT_TIMEOUT_MS`.

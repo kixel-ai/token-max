@@ -202,6 +202,72 @@ fn a_remote_report_matches_running_there() {
 }
 
 #[test]
+fn bash_caps_and_waits_keep_their_host_ownership() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    std::fs::write(
+        home.join(".claude/settings.json"),
+        r#"{"env":{"BASH_MAX_TIMEOUT_MS":"7200000"}}"#,
+    )
+    .unwrap();
+    let transcript = home.join(".claude/projects/my project/main.jsonl");
+    let mut records: Vec<Value> = std::fs::read_to_string(&transcript)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    records[1]["message"]["content"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "type": "tool_use", "id": "wait", "name": "Bash",
+            "input": {"command": "until test -f SYNTHETIC_PRIVATE; do sleep 30; done"}
+        }));
+    records.insert(3, serde_json::json!({
+        "type": "user", "sessionId": "session-a", "timestamp": "2026-11-01T00:06:00Z",
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "wait", "content": "SYNTHETIC_PRIVATE_OUTPUT"}]},
+        "toolUseResult": {"timedOutAfterMs": 360000}
+    }));
+    let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(&transcript, lines).unwrap();
+
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
+    assert_eq!(status, 1, "{stderr}");
+    assert_eq!(stderr, "");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let combined: Value = serde_json::from_str(&stdout).unwrap();
+    let reports = combined["hosts"].as_array().unwrap();
+    let cap = |report: &Value| -> Value {
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["check"] == "bash-timeout-cap")
+            .unwrap()
+            .clone()
+    };
+    let local = cap(&reports[0]["report"]);
+    let remote = cap(&reports[1]["report"]);
+    assert_eq!(local["current"], 600000);
+    assert_eq!(local["action"], "keep");
+    assert_eq!(local["waits"]["calls"], 0);
+    assert_eq!(remote["current"], 7200000);
+    assert_eq!(remote["recommended"], 3300000);
+    assert_eq!(remote["action"], "change");
+    for field in ["calls", "long", "timedOut", "polling"] {
+        assert_eq!(remote["waits"][field], 1, "{field}");
+    }
+    assert!(remote["waits"]["missCost"]["totalUsd"].as_f64().unwrap() > 0.0);
+    let (status, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+    assert_eq!(status, 1, "{stderr}");
+    let there: Value = serde_json::from_str(&there).unwrap();
+    assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
+    let there = cap(&there);
+    assert_eq!(remote["waits"], there["waits"]);
+    assert_eq!(remote["recommended"], there["recommended"]);
+}
+
+#[test]
 fn any_failed_destination_fails_the_whole_report() {
     let hosts = Hosts::new();
     hosts.host("devbox");

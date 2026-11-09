@@ -44,8 +44,10 @@ for protected publication and remaining owner setup.
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and recognizable `~/.claude*` and `~/.codex*`
 profiles. Codex includes archived sessions; Claude includes nested subagents.
-Repeatable `--claude-dir` and `--codex-dir` flags select only those roots across
-both harnesses. `--details` and JSON show every discovered root's selection. A missing or
+T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
+and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir` and
+`--t3-dir` flags select only those roots across both harnesses. `--t3-dir`
+takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` and JSON show every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
 
 The first online run fetches only `https://models.dev/api.json`, caching validated
@@ -268,6 +270,47 @@ prove that discarded or unlogged summaries did not run. Without linked billed
 summary output and full resumed-prefix calibration, affected hypothetical costs
 stay unknown; `postTokens` alone cannot establish the full request.
 
+## T3 Code
+
+T3's Claude Code and Codex instances reuse their native histories, including
+retained histories of disabled instances. Shared homes, Codex shadow-home
+symlinks and request identities are deduplicated. T3 Usage aggregates are never
+added to native billed requests. Unsupported providers and helper generation
+(titles, branches, PR text and other potentially ephemeral sessions) are explicit
+coverage gaps with unmeasured cost. Native terminal suggestions, recaps, goal
+check-ins and keepalive guidance do not control those helpers.
+
+The report names T3's `providerInstances.<id>.config.autoCompactWindow` when
+it overrides a native Claude window. Thread speed selection belongs to
+`modelSelection.options.fastMode` or `.serviceTier`, with Codex's native fallback
+when omitted. Current browser/new-thread selections are unavailable and remain
+advisory. A uniquely joined historical requested tier never fills a billed tier.
+Disabled instances and unresolved environment, launch or machine-policy overrides
+keep historical cost but receive advisory current guidance.
+
+Optional SQLite metadata uses the bundled SQLite library; no system SQLite
+executable is needed. One read-only transaction supplies a consistent WAL view,
+then closes before analysis. Queries return allowlisted native identities, run
+state, token counts, timestamps, requested speed and lifecycle predicates only.
+No message text, credentials or connection catalog is exported. Schema, size,
+query-budget and read-only WAL failures leave native usage intact with an
+explicit metadata gap. The native file and database snapshot bounds are reported
+separately; later or ambiguous evidence cannot supply a historical join.
+
+`t3-idle-compaction` compares `off`, `onReturn` and `beforeCacheExpires`
+under current and recommended TTL/window controls using the shared cache,
+compaction calibration and API pricing. The proactive timer starts two minutes
+before the observed cache expiry, for eligible completed main threads with at
+least 200,000 tokens. Five-minute and one-hour caches both apply. In-memory
+timers disappear on server restart, so generation remains conditional on server
+liveness. `onReturn` assumes the SDK offers a resume dialog on a cold return and
+the user accepts it; the adapter does not infer an unrecorded acceptance. `off`
+also suppresses that dialog. Summaries pay warm or cold input plus output; later
+requests pay their full changed prefixes, and final proactive summaries have no
+invented return benefit. Missing lifecycle or compatible full-prefix calibration
+stays unpriced. Current lifecycle guards do not reconstruct prior guard states.
+See [T3 evidence and sources](docs/t3.md) for supported schema and limits.
+
 ## Other hosts over SSH
 
 `--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
@@ -286,7 +329,7 @@ profiles from its home and environment, reads its transcripts and settings,
 and streams only the metadata `--json-full` would show, never prompt, reply or
 component text. It looks for `token-max` on the non-interactive `PATH` and in
 `~/.cargo/bin`. Prices and every check run on this host, with one price
-catalog. `--claude-dir` and `--codex-dir` select local profiles only, so with
+catalog. `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 
 Each host is analyzed on its own and gets its own section, labeled with the

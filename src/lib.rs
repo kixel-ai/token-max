@@ -23,6 +23,7 @@ pub mod safe;
 pub mod scenarios;
 mod skills;
 pub mod ssh;
+pub mod t3;
 pub mod terminal;
 pub mod wire;
 

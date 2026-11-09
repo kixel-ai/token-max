@@ -727,7 +727,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     }
     assert!(text.contains("Cost unknown"), "{text}");
     assert!(
-        text.contains("tui.auto_recap = false in ~/.codex/config.toml"),
+        text.contains("tui.auto_recap = false in ~/workspace/.codex/config.toml"),
         "{text}"
     );
 }

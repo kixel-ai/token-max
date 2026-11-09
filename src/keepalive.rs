@@ -1025,7 +1025,11 @@ mod tests {
         profile.harness = Harness::Codex;
         let long = run(&scan(profile, vec![long(0), long(2 * HOUR)]), 3 * HOUR);
         assert_eq!(long.unpriced, 0);
-        assert!(long.scenarios.iter().all(|s| s.rescued == 0 && s.avoided_usd < 0.0));
+        assert!(
+            long.scenarios
+                .iter()
+                .all(|s| s.rescued == 0 && s.avoided_usd < 0.0)
+        );
     }
 
     /// The default report's keepalive line.

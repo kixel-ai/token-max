@@ -126,8 +126,8 @@ pub struct ExposureCollector {
     uncertain: bool,
     deferred: IndexSet<Text>,
     digests: HashMap<String, Digests>,
-    // Names in the active catalog, replaced with that catalog.
-    known_skills: HashSet<String>,
+    // Catalog names keyed without ASCII case, retaining their spelling for use attribution.
+    known_skills: HashMap<String, String>,
     // Explicit typed skill blocks establish use evidence without claiming catalog membership.
     typed_skills: HashSet<String>,
     // Short names of listed synced skills: `/pdf` reaches `anthropic-skills:pdf` while no
@@ -377,7 +377,7 @@ impl ExposureCollector {
             uncertain: true,
             deferred: IndexSet::new(),
             digests: HashMap::new(),
-            known_skills: HashSet::new(),
+            known_skills: HashMap::new(),
             typed_skills: HashSet::new(),
             synced_skills: HashMap::new(),
             user_aliases: HashMap::new(),
@@ -970,27 +970,30 @@ impl ExposureCollector {
 
     /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
     fn know_skill(&mut self, name: &str) {
-        if let Some(short) = synced_short(name)
+        let key = name.to_ascii_lowercase();
+        if let Some(short) = synced_short(&key)
             && !claude_command(short)
         {
             self.synced_skills
                 .insert(short.to_string(), name.to_string());
         }
-        self.known_skills.insert(name.to_string());
+        self.known_skills.insert(key, name.to_string());
     }
 
     fn knows_skill(&self, name: &str) -> bool {
-        self.known_skills.contains(name)
-            || self.synced_skills.contains_key(name)
-            || self.typed_skills.contains(name)
+        let key = name.to_ascii_lowercase();
+        self.known_skills.contains_key(&key)
+            || self.synced_skills.contains_key(&key)
+            || self.typed_skills.contains(&key)
     }
 
     /// The skill a name reaches in the current catalog: another skill keeps its short name.
     fn skill_name<'a>(&'a self, name: &'a str) -> &'a str {
-        match self.synced_skills.get(name) {
-            Some(full) if !self.known_skills.contains(name) => full,
-            _ => name,
-        }
+        let key = name.to_ascii_lowercase();
+        self.known_skills
+            .get(&key)
+            .or_else(|| self.synced_skills.get(&key))
+            .map_or(name, String::as_str)
     }
 
     /// A rendered skill listing and one member span per `- name: description` line.
@@ -1636,7 +1639,7 @@ impl ExposureCollector {
             }
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
-                self.typed_skills.insert(name.to_string());
+                self.typed_skills.insert(name.to_ascii_lowercase());
                 let invoke = Invoke {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
@@ -3573,6 +3576,14 @@ mod tests {
         assert_eq!(
             resolved(json!(["pdf", "anthropic-skills:pdf"])),
             both("pdf")
+        );
+        assert_eq!(
+            resolved(json!(["PDF", "anthropic-skills:pdf"])),
+            both("PDF")
+        );
+        assert_eq!(
+            resolved(json!(["anthropic-skills:PDF"])),
+            both("anthropic-skills:PDF")
         );
     }
 

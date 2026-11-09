@@ -282,16 +282,17 @@ lifetime would cost less than the cache misses it avoids. It compares leaving
 sessions idle, Claude idle compaction where that check recommends it, and
 pinging for each cap on how long to keep going. Claude uses the recommended
 main TTL; Codex uses the documented 30-minute lifetime of models that bill cache
-writes. A ping is the median recorded request, and a session that never came
+writes. Each cap replays the entire session with the same recommended compaction
+window as the idle alternative, carrying ping context and cache warmth forward. A ping is the median recorded request, and a session that never came
 back pings for the whole cap, since transcripts do not record when a client
 closed. The details show every cap, the same caps if those sessions closed at
 once, and how soon they would need to close for pinging to pay.
 
 Neither harness has a capped keepalive setting: a `/loop` task pings on a fixed
 schedule until cancelled or for seven days, and Codex cannot schedule pings. A
-winning cap is therefore reported with its saving but never changes the exit
-code. Recorded turns, including scheduled-task turns, are replayed as activity,
-so pings already running are not detected.
+priced result is therefore advisory and never changes the exit code. Current
+ping state stays unknown: recorded turns, including scheduled-task turns, are
+activity, and their metadata does not establish whether they are keepalive pings.
 
 ## Fast mode
 

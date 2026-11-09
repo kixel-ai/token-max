@@ -905,6 +905,9 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         catalog,
         ttls: &ttl_refs,
         idle: &idle_refs,
+        windows: &window_refs,
+        summaries: &compactions,
+        estimates: &estimates,
         since,
         now,
     });

@@ -417,38 +417,46 @@ include summary-only final periods.
 
 ## Keepalive pings
 
-`keepalive` replays each session's main-conversation request gaps and its final
-period after the last request. Pings fire every five sixths of the cache
-lifetime after the last request: 50 minutes under a 1h TTL, which is also below
-the native idle-compaction trigger at 54 minutes, and 25 minutes under Codex's
-30-minute minimum. A return within the last ping plus the lifetime reads its
-resumed prefix (the smaller of the previous request's input and the return's
-cacheable input) instead of rewriting it at the lifetime's write rate. A
-compaction, or a model, speed or provider change, between the two leaves nothing
-for pings to keep warm. Each ping reads the previous request's whole input and
-writes the median recorded request's new input, which already carries the
-previous reply, plus its output. Later pings, the return and every later request
-before a compaction read those turns, and a return that stays cold writes them.
-Pings and returns are priced with the same per-part pricing as recorded
-requests, each at its own context tier.
+`keepalive` replays each session sequentially for no pings and every candidate
+cap. Pings fire every five sixths of the cache lifetime after a main request:
+50 minutes under a 1h TTL, below the estimated native idle-compaction trigger at
+54 minutes, and 25 minutes under Codex's documented 30-minute minimum. Each ping
+uses the preceding main request's pricing metadata, reads its accumulated context,
+and adds the median recorded request's new input and output. Recorded requests
+use their own provider, model, tier, speed, geography and context size.
 
-Caps are the ping counts that rescue each recorded return, up to seven days,
-when recurring Claude Code tasks expire
+The shared window replay applies the same recommended compaction controls used
+by the idle check to every policy, including compactions caused by added ping
+context and their summary costs. Cache warmth and added context travel through
+later pings and requests. A compaction removes preceding ping context; pings
+sent after it read or write its recorded post-context and remain in later turns.
+Missing post-context leaves affected sessions unpriced. Recorded known idle
+compactions are undone on both the no-ping and ping paths, which keep idle
+compaction off. Its own check supplies the competing on policy's saving at the
+same recommended TTL and window. The two policies' savings are never added.
+
+Caps include one ping and the counts that could rescue recorded returns, up to
+the seven-day expiry of recurring Claude Code tasks
 ([scheduled tasks](https://code.claude.com/docs/en/scheduled-tasks), checked
-2026-11-08). The best cap's saving is compared with the larger of zero and idle
-compaction's saving from its own check; pinging resets the idle clock, so the two
-never apply to the same idle period and are not added. Without recorded client
-lifetimes, a return within the cap assumes the client stayed open and a final
-period pings for the full cap. A sensitivity closes every final period at once,
-and the break-even says how soon such sessions would need to close.
+2026-11-08). Without recorded client lifetimes, returning sessions are assumed
+to stay open and awake. Each final period pings for the full cap, including
+beyond the observation window. Details show every cap's cost and saving, the
+same cap with final sessions closing immediately, and a break-even closure time
+when that sensitivity can reverse a losing result. Added summaries triggered
+by final pings are included in their cost and removed in the closed sensitivity.
 
 Codex periods are priced only for models with billed 30-minute writes, whose
 lifetime is documented and refreshed by reads
 ([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
-checked 2026-11-08); older models' retention is not a lifetime. Unpriced periods
-leave the result standing only when each, bounded by the largest priced period,
-cannot flip it. Neither harness has a capped keepalive mechanism, so a winning
-cap stays advisory, and no change to start or stop pings is emitted.
+checked 2026-11-08). Older models' retention is a range. Every cap compares the
+same fully priced sessions; unresolved sessions leave the aggregate winner
+unknown, without bounding their cost by unrelated priced sessions.
+
+Current ping state is unknown (`current: null`): scheduled-task metadata does
+not establish a task's purpose, and recorded turns remain ordinary activity.
+There are no task-ID flags or text heuristics. Every result stays advisory and
+never changes the exit code, including a priced recommendation for no pings.
+Neither harness has a native mechanism for capped idle pings.
 
 ## Shared component measurements
 

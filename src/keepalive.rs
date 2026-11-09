@@ -3,13 +3,21 @@
 
 use std::collections::HashMap;
 
+use std::borrow::Cow;
+
 use indexmap::IndexMap;
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, observed_ttl, ttl_milliseconds};
+use crate::compaction::{
+    CompactionSamples, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
+    replay_windows,
+};
+use crate::idle::{Scopes, recommended_windows};
 use crate::model::{
-    Action, Agent, BillingPart, Bucket, CheckBase, Coverage, EventKind, Evidence, Harness,
-    IdleCheck, KeepaliveCheck, KeepaliveScenario, Millis, PartKind, Profile, Request, Scan, Ttl,
-    TtlCheck, Usage,
+    Action, Agent, BillingPart, Bucket, CheckBase, CompactionCharge, CompactionCheck, Coverage,
+    EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck, KeepaliveScenario,
+    Millis, PartKind, PerBucket, Profile, Request, Scan, ScenarioWindow, StructuralEvent, Ttl,
+    TtlCheck, Usage, UsageEstimate,
 };
 use crate::prices::{Catalog, PRICE_SOURCES, price_part, write_billing};
 
@@ -28,6 +36,9 @@ pub struct KeepaliveOptions<'a> {
     pub scan: &'a Scan,
     pub catalog: &'a Catalog,
     pub ttls: &'a [&'a TtlCheck],
+    pub windows: &'a [&'a CompactionCheck],
+    pub summaries: &'a [CompactionCharge],
+    pub estimates: &'a IndexMap<String, UsageEstimate>,
     pub idle: &'a [&'a IdleCheck],
     pub since: Option<Millis>,
     pub now: Millis,
@@ -93,110 +104,6 @@ impl Cache {
     }
 }
 
-/// A price at each step of growing context: a line where the context tier holds, else every value.
-enum Steps {
-    Line { first: f64, step: f64 },
-    Exact(Vec<f64>),
-}
-
-impl Steps {
-    /// Prices `f(0)..f(n - 1)`. Rates only rise with the context tier, so a line through the
-    /// first two steps meets the last one only when no tier boundary lies between them.
-    fn new(n: u64, f: impl Fn(i64) -> Option<f64>) -> Option<Self> {
-        let first = f(0)?;
-        if n <= 1 {
-            return Some(Steps::Line { first, step: 0.0 });
-        }
-        let step = f(1)? - first;
-        let last = f(n as i64 - 1)?;
-        if (first + step * (n - 1) as f64 - last).abs() <= 1e-9 * last.abs().max(1.0) {
-            return Some(Steps::Line { first, step });
-        }
-        (0..n as i64)
-            .map(f)
-            .collect::<Option<Vec<f64>>>()
-            .map(Steps::Exact)
-    }
-    fn at(&self, k: u64) -> f64 {
-        match self {
-            Steps::Line { first, step } => first + step * k as f64,
-            Steps::Exact(values) => values[k as usize],
-        }
-    }
-    /// The first `n` values added up.
-    fn sum(&self, n: u64) -> f64 {
-        match self {
-            Steps::Line { first, step } => {
-                let n = n as f64;
-                n * first + step * n * (n - 1.0) / 2.0
-            }
-            Steps::Exact(values) => values[..n as usize].iter().sum(),
-        }
-    }
-}
-
-/// How a return resumes after an idle gap.
-struct Return {
-    /// Pings that fit before it.
-    room: u64,
-    /// Pings that would keep its cache warm, or None when its cache was already warm or no
-    /// ping can help, such as after a compaction or a model switch.
-    needed: Option<u64>,
-    /// Whether it read a warm cache with no pings.
-    warm: bool,
-    /// Its price after `k` pings' turns, reading a warm or rewriting a cold prefix.
-    warm_price: Steps,
-    cold_price: Steps,
-    /// Later requests before a compaction that found the cache warm and cold, which also
-    /// read or write the pings' turns.
-    later: (u64, u64),
-}
-
-/// One idle gap or final period.
-struct Period {
-    /// The cost of each successive ping.
-    pings: Steps,
-    /// None for a final period, which pings for the whole cap.
-    resume: Option<Return>,
-}
-
-impl Period {
-    /// Pings sent under a cap of `cap` pings.
-    fn sent(&self, cap: u64) -> u64 {
-        self.resume.as_ref().map_or(cap, |r| r.room.min(cap))
-    }
-    fn rescued(&self, cap: u64) -> bool {
-        self.resume
-            .as_ref()
-            .is_some_and(|r| r.needed.is_some_and(|n| cap >= n))
-    }
-    /// The return's cost with no pings minus with them, including later reads of ping turns.
-    fn avoided(&self, cap: u64) -> f64 {
-        let Some(r) = &self.resume else {
-            return 0.0;
-        };
-        let sent = self.sent(cap);
-        let price = |warm: bool, k: u64| {
-            if warm {
-                r.warm_price.at(k)
-            } else {
-                r.cold_price.at(k)
-            }
-        };
-        let (warm, cold) = r.later;
-        let carried = warm as f64 * (r.warm_price.at(sent) - r.warm_price.at(0))
-            + cold as f64 * (r.cold_price.at(sent) - r.cold_price.at(0));
-        price(r.warm, 0) - price(r.warm || self.rescued(cap), sent) - carried
-    }
-    /// Net saving under a cap of `cap` pings; finals count only when `open`.
-    fn net(&self, cap: u64, open: bool) -> f64 {
-        if self.resume.is_none() && !open {
-            return 0.0;
-        }
-        self.avoided(cap) - self.pings.sum(self.sent(cap))
-    }
-}
-
 struct Lifetime {
     ms: Millis,
     cache: Cache,
@@ -246,43 +153,373 @@ pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
         .collect()
 }
 
+/// One session's complete replay at a cap. Unknown geometry excludes the session from
+/// every cap, so alternatives and sensitivities always compare the same recorded work.
+#[derive(Default)]
+struct Run {
+    recorded: f64,
+    pings: Vec<f64>,
+    finals: Vec<f64>,
+    reads: HashMap<String, i64>,
+}
+
+struct Session<'a> {
+    requests: Vec<&'a Request>,
+    events: Vec<&'a StructuralEvent>,
+    windows: Vec<ScenarioWindow>,
+    ttls: PerBucket<Option<Ttl>>,
+}
+
+struct Replayer<'a> {
+    options: &'a KeepaliveOptions<'a>,
+    samples: &'a CompactionSamples<'a>,
+    events: &'a WindowEvents<'a>,
+    lifetime: &'a Lifetime,
+    interval: Millis,
+    new: i64,
+    output: i64,
+    since: Millis,
+}
+
+impl Replayer<'_> {
+    /// Add ping turns to the recorded geometry before running the shared window replay.
+    /// Its modeled summaries then remove that context from subsequent pings and requests.
+    fn expand(&self, session: &Session, cap: u64) -> Option<(Vec<Request>, HashMap<String, bool>)> {
+        enum Tick<'a> {
+            Request(&'a Request),
+            Boundary(&'a StructuralEvent),
+            Ping(&'a Request, u64, bool),
+        }
+        let main: Vec<_> = session
+            .requests
+            .iter()
+            .copied()
+            .filter(|r| message(r).next().is_some())
+            .collect();
+        let mut ticks = vec![];
+        let idle_summaries: Vec<_> = session
+            .events
+            .iter()
+            .filter(|e| e.idle_attribution == IdleAttribution::Notice)
+            .filter_map(|e| {
+                self.options
+                    .summaries
+                    .iter()
+                    .find(|s| s.event == e.id)
+                    .and_then(|s| s.request.as_deref())
+                    .or(e.request.as_deref())
+            })
+            .collect();
+        for &r in &session.requests {
+            if idle_summaries.contains(&r.id.as_str()) {
+                continue;
+            }
+            let order = if message(r).next().is_some() { 2 } else { 0 };
+            ticks.push((r.time, order, Tick::Request(r)));
+        }
+        ticks.extend(
+            session
+                .events
+                .iter()
+                .map(|&e| (e.time, 1, Tick::Boundary(e))),
+        );
+        for (i, &r) in main
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.time >= self.since)
+        {
+            let next = main.get(i + 1).copied();
+            for n in 1..=cap {
+                let time = r.end_time + n as Millis * self.interval;
+                if next.is_some_and(|b| time >= b.time) {
+                    break;
+                }
+                ticks.push((time, 3, Tick::Ping(r, n, next.is_none())));
+            }
+        }
+        ticks.sort_by_key(|(time, order, _)| (*time, *order));
+        let mut requests = vec![];
+        let mut ping_ids = HashMap::new();
+        let mut offset = 0;
+        let mut context = None;
+        for (time, _, tick) in ticks {
+            match tick {
+                Tick::Boundary(e) => {
+                    if e.idle_attribution == IdleAttribution::Notice {
+                        // Both pinging and leaving the client idle disable idle compaction.
+                        // Undo the recorded replacement before the shared window simulation.
+                        let pre = e.pre_tokens?;
+                        let next = main.iter().find(|r| r.time >= e.time);
+                        if let Some(next) = next {
+                            let p = message(next).next()?;
+                            let full = p.usage.read? + p.usage.write?;
+                            offset += pre - full;
+                            context = Some(full);
+                        } else {
+                            context = Some(pre);
+                        }
+                    } else {
+                        offset = 0;
+                        context = e.post_tokens;
+                    }
+                }
+                Tick::Ping(r, n, final_period) => {
+                    let part = message(r).next_back()?;
+                    let prefix = context? + offset;
+                    let id = format!("keepalive:{}:{n}", r.id);
+                    requests.push(Request {
+                        id: id.clone(),
+                        time,
+                        end_time: time,
+                        parts: vec![BillingPart {
+                            usage: self.lifetime.cache.usage(prefix, self.new, 0, self.output),
+                            ..part.clone()
+                        }],
+                        ..r.clone()
+                    });
+                    ping_ids.insert(id, final_period);
+                    offset += self.new;
+                }
+                Tick::Request(r) => {
+                    let mut adjusted = self
+                        .options
+                        .estimates
+                        .get(&r.id)
+                        .and_then(|e| e.part.as_ref())
+                        .map_or_else(
+                            || r.clone(),
+                            |p| Request {
+                                parts: vec![p.clone()],
+                                ..r.clone()
+                            },
+                        );
+                    for p in &mut adjusted.parts {
+                        let input = p.usage.input;
+                        if p.kind == PartKind::Message
+                            && offset != 0
+                            && matches!((context, input), (Some(before), Some(now)) if now < before)
+                        {
+                            return None;
+                        }
+                        if offset != 0 {
+                            if !matches!(p.kind, PartKind::Message | PartKind::Compaction) {
+                                return None;
+                            }
+                            p.usage.input = Some(input? + offset);
+                            p.usage.write = Some(p.usage.write? + offset);
+                            match self.lifetime.cache {
+                                Cache::Codex => {
+                                    p.usage.write30m = Some(p.usage.write30m? + offset);
+                                }
+                                Cache::Claude(_) => {
+                                    let ttl = if p.kind == PartKind::Compaction {
+                                        session.ttls.subagent?
+                                    } else {
+                                        session.ttls.main?
+                                    };
+                                    let write = p.usage.write?;
+                                    p.usage.write5m =
+                                        Some(if ttl == Ttl::FiveMinutes { write } else { 0 });
+                                    p.usage.write1h =
+                                        Some(if ttl == Ttl::OneHour { write } else { 0 });
+                                }
+                            }
+                        }
+                        if p.kind == PartKind::Message {
+                            context = input;
+                        }
+                        if p.kind == PartKind::Compaction {
+                            offset = 0;
+                            context = None;
+                        }
+                    }
+                    requests.push(adjusted);
+                }
+            }
+        }
+        Some((requests, ping_ids))
+    }
+
+    fn run(&self, session: &Session, cap: u64) -> Option<Run> {
+        let (requests, ping_ids) = self.expand(session, cap)?;
+        let active_events: Vec<_> = session
+            .events
+            .iter()
+            .copied()
+            .filter(|e| e.idle_attribution != IdleAttribution::Notice)
+            .collect();
+        let settings: Vec<_> = session
+            .windows
+            .iter()
+            .map(|w| WindowSetting {
+                value: w.value,
+                models: &w.models,
+            })
+            .collect();
+        let simulation = replay_windows(
+            &requests,
+            &settings,
+            &WindowOptions {
+                events: self.events,
+                estimates: &IndexMap::new(),
+                catalog: self.options.catalog,
+                samples: self.samples,
+                since: self.since,
+                ttls: session.ttls.clone(),
+            },
+        );
+        if !simulation.errors.is_empty() {
+            return None;
+        }
+        let mut events: Vec<_> = active_events
+            .iter()
+            .copied()
+            .chain(&simulation.events)
+            .collect();
+        events.sort_by_key(|e| e.time);
+        let mut boundaries = events.into_iter().peekable();
+        // Cache entries survive a temporary switch back to another pricing cohort.
+        let mut cache = HashMap::new();
+        let mut run = Run::default();
+        let mut positions = HashMap::new();
+        for r in simulation.requests.iter().map(AsRef::as_ref) {
+            if boundaries.peek().is_some_and(|e| e.time <= r.time) {
+                cache.clear();
+                while boundaries.peek().is_some_and(|e| e.time <= r.time) {
+                    boundaries.next();
+                }
+            }
+            let mut cost = 0.0;
+            for p in &r.parts {
+                let mut billed = Cow::Borrowed(p);
+                if p.kind == PartKind::Message {
+                    if r.harness == Harness::Codex
+                        && write_billing(p.model.as_deref()?) != Some(true)
+                    {
+                        return None;
+                    }
+                    let u = p.usage;
+                    let (input, read, write, output) = (u.input?, u.read?, u.write?, u.output?);
+                    let ordinary = input - read - write;
+                    if ordinary < 0 || read < 0 || write < 0 {
+                        return None;
+                    }
+                    let cacheable = read + write;
+                    let cohort = (
+                        r.provider.as_deref(),
+                        p.model.as_deref(),
+                        p.speed.as_deref(),
+                        p.geo.as_deref(),
+                    );
+                    let reads = match cache.get(&cohort) {
+                        Some(&(time, prefix))
+                            if r.time >= time && r.time - time < self.lifetime.ms =>
+                        {
+                            cacheable.min(prefix)
+                        }
+                        None if r.id
+                            == session
+                                .requests
+                                .iter()
+                                .find(|r| message(r).next().is_some())?
+                                .id =>
+                        {
+                            read
+                        }
+                        _ => 0,
+                    };
+                    billed = Cow::Owned(BillingPart {
+                        usage: self.lifetime.cache.usage(
+                            reads,
+                            cacheable - reads,
+                            ordinary,
+                            output,
+                        ),
+                        ..p.clone()
+                    });
+                    run.reads.insert(r.id.clone(), reads);
+                    cache.insert(cohort, (r.end_time, cacheable));
+                } else if p.kind == PartKind::Compaction {
+                    cache.clear();
+                    if let Cache::Claude(_) = self.lifetime.cache {
+                        let write = p.usage.write?;
+                        let ttl = session.ttls.subagent?;
+                        billed = Cow::Owned(BillingPart {
+                            usage: Usage {
+                                write5m: Some(if ttl == Ttl::FiveMinutes { write } else { 0 }),
+                                write1h: Some(if ttl == Ttl::OneHour { write } else { 0 }),
+                                ..p.usage
+                            },
+                            ..p.clone()
+                        });
+                    }
+                }
+                if r.time >= self.since {
+                    cost += price_part(self.options.catalog, r, &billed).total_usd?;
+                }
+            }
+            if r.time < self.since {
+                continue;
+            }
+            match ping_ids.get(&r.id) {
+                Some(true) => {
+                    positions.insert(r.id.as_str(), (true, run.finals.len()));
+                    run.finals.push(cost);
+                }
+                Some(false) => {
+                    positions.insert(r.id.as_str(), (false, run.pings.len()));
+                    run.pings.push(cost);
+                }
+                None => run.recorded += cost,
+            }
+        }
+        for added in simulation.added {
+            let cost = added.summary_cost.total_usd?;
+            match positions.get(added.request.as_str()) {
+                Some(&(true, i)) => run.finals[i] += cost,
+                Some(&(false, i)) => run.pings[i] += cost,
+                None => run.recorded += cost,
+            }
+        }
+        Some(run)
+    }
+}
+
 fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck> {
-    let catalog = options.catalog;
-    let mut requests: Vec<&Request> = options
+    let mut requests: Vec<_> = options
         .scan
+        .cache_context
         .requests
         .iter()
+        .chain(&options.scan.requests)
         .filter(|r| {
             r.profiles.contains(&profile.id)
                 && r.harness == profile.harness
-                && options.since.is_none_or(|s| r.time >= s)
-                && match r.harness {
+                && ((match r.harness {
                     Harness::Claude => r.agent == Agent::Main,
                     Harness::Codex => r.agent != Agent::Subagent,
-                }
-                && r.parts
-                    .iter()
-                    .any(|p| matches!(p.kind, PartKind::Message | PartKind::Compaction))
+                }) || r.parts.iter().any(|p| p.kind == PartKind::Compaction))
         })
         .collect();
-    let first = requests.iter().map(|r| r.time).min()?;
     requests.sort_by_key(|r| r.time);
+    let main: Vec<_> = requests
+        .iter()
+        .copied()
+        .filter(|r| message(r).next().is_some() && options.since.is_none_or(|s| r.time >= s))
+        .collect();
+    let first = main.first()?.time;
     let since = options.since.unwrap_or(first);
-    let now = options.now;
     let lifetime = match profile.harness {
-        Harness::Claude => claude_lifetime(profile, options.ttls, &requests),
+        Harness::Claude => claude_lifetime(profile, options.ttls, &main),
         Harness::Codex => Some(Lifetime {
             ms: CODEX_CACHE_MILLISECONDS,
             cache: Cache::Codex,
             reason: "documented 30m minimum cache lifetime, refreshed by reads".into(),
         }),
     };
-    // Below the lifetime, and below Claude's idle-compaction trigger at 90% of it,
-    // so pinging keeps idle compaction from firing while it runs.
     let interval = lifetime.as_ref().map(|l| l.ms / 6 * 5);
     let new_tokens = median(
-        requests
-            .iter()
+        main.iter()
             .filter_map(|r| {
                 let p = message(r).next_back()?;
                 Some(p.usage.input? - p.usage.read?)
@@ -290,385 +527,294 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
             .collect(),
     );
     let output_tokens = median(
-        requests
-            .iter()
+        main.iter()
             .filter_map(|r| message(r).next_back()?.usage.output)
             .collect(),
     );
-
-    let mut compactions: HashMap<&str, Vec<Millis>> = HashMap::new();
-    for e in &options.scan.events {
-        if e.kind == EventKind::Compaction && e.profiles.contains(&profile.id) {
-            // A copied history keeps the boundary under every conversation alias.
-            let aliases = e.origins.iter().map(|o| o.session.as_str());
-            for session in std::iter::once(e.session.as_str()).chain(aliases) {
-                compactions.entry(session).or_default().push(e.time);
-            }
-        }
-    }
-    let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::new();
-    for &r in &requests {
-        sessions.entry(r.session.as_str()).or_default().push(r);
-    }
-    let compacts = |r: &Request| r.parts.iter().any(|p| p.kind == PartKind::Compaction);
-
-    /// An idle period before its pings are priced.
-    struct Gap<'r> {
-        a: &'r Request,
-        /// The return, its gap, whether a compaction came between, and how many later
-        /// requests before the next compaction found the cache warm and cold.
-        b: Option<(&'r Request, Millis, bool, (u64, u64))>,
-    }
-    let mut gaps: Vec<Gap> = vec![];
-    if let (Some(lifetime), Some(interval)) = (&lifetime, interval) {
-        for (session, list) in &sessions {
-            let times = compactions.get(session);
-            // A compaction between two requests replaces the cached prefix.
-            let boundary: Vec<bool> = (0..list.len())
-                .map(|k| {
-                    k > 0
-                        && (compacts(list[k - 1])
-                            || times.is_some_and(|t| {
-                                t.iter().any(|&t| t > list[k - 1].time && t <= list[k].time)
-                            }))
-                })
-                .collect();
-            let mut later = vec![(0u64, 0u64); list.len()];
-            for k in (0..list.len().saturating_sub(1)).rev() {
-                if !boundary[k + 1] {
-                    let (warm, cold) = later[k + 1];
-                    later[k] = if list[k + 1].time - list[k].end_time <= lifetime.ms {
-                        (warm + 1, cold)
-                    } else {
-                        (warm, cold + 1)
-                    };
-                }
-            }
-            for (i, &a) in list.iter().enumerate() {
-                let b = list.get(i + 1).map(|&b| {
-                    (
-                        b,
-                        (b.time - a.end_time).max(0),
-                        boundary[i + 1],
-                        later[i + 1],
-                    )
-                });
-                if b.is_none_or(|(_, gap, _, _)| gap > interval) {
-                    gaps.push(Gap { a, b });
-                }
-            }
-        }
-    }
-    let (returns, finals) = gaps.iter().fold((0, 0), |(r, f), g| {
-        if g.b.is_some() {
-            (r + 1, f)
-        } else {
-            (r, f + 1)
-        }
-    });
-    let longest = interval.map_or(0, |i| (LONGEST_CAP / i) as u64);
-    let needed = |gap: Millis| match (&lifetime, interval) {
-        (Some(l), Some(i)) if gap > l.ms => Some(((gap - l.ms + i - 1) / i) as u64),
-        _ => None,
+    let scopes = Scopes::new(profile);
+    let windows = recommended_windows(&scopes, &main, options.windows);
+    let mut ttls = PerBucket {
+        main: profile.ttl.main.value,
+        subagent: profile.ttl.subagent.value,
     };
-    // Pricing every ping up to the longest useful cap covers every candidate.
-    let most = gaps
+    for c in options
+        .ttls
         .iter()
-        .filter_map(|g| needed(g.b?.1))
-        .filter(|&n| n <= longest)
-        .max()
-        .unwrap_or(0);
-    let mut periods: Vec<Period> = vec![];
-    let (mut unpriced, mut unpriced_returns) = (0u64, 0u64);
-    if let (Some(lifetime), Some(interval)) = (&lifetime, interval) {
-        let cache = lifetime.cache;
-        let price = |r: &Request, p: &BillingPart, usage: Usage| {
-            price_part(catalog, r, &BillingPart { usage, ..p.clone() }).total_usd
-        };
-        let documented = |p: &BillingPart| match (cache, &p.model) {
-            // Older Codex models' retention is not a documented lifetime.
-            (Cache::Codex, Some(model)) => write_billing(model) == Some(true),
-            (Cache::Codex, None) => false,
-            (Cache::Claude(_), _) => true,
-        };
-        for g in &gaps {
-            let priced = (|| {
-                let part = message(g.a).next_back().filter(|p| documented(p))?;
-                // The first ping reads everything the last request sent; its own reply is part
-                // of the median new input, as it is for recorded requests.
-                let context = part.usage.input?;
-                let (new, output) = (new_tokens?, output_tokens?);
-                let room = g.b.map(|(_, gap, _, _)| ((gap - 1) / interval) as u64);
-                let sent = room.map_or(most, |room| room.min(most));
-                let pings = Steps::new(sent.max(1), |k| {
-                    price(g.a, part, cache.usage(context + k * new, new, 0, output))
-                })?;
-                let resume = match g.b {
-                    None => None,
-                    Some((b, gap, compacted, later)) => {
-                        let resumed = b
-                            .parts
-                            .iter()
-                            .find(|p| matches!(p.kind, PartKind::Message | PartKind::Compaction))
-                            .filter(|p| documented(p))?;
-                        let u = &resumed.usage;
-                        let ordinary = u.input? - u.read? - u.write?;
-                        let cacheable = u.input? - ordinary;
-                        let reusable = !compacted
-                            && resumed.model == part.model
-                            && resumed.speed == part.speed
-                            && b.provider == g.a.provider;
-                        let prefix = if reusable { context.min(cacheable) } else { 0 };
-                        let output = u.output?;
-                        // A compaction between them replaced the pings' turns too.
-                        let added = |k: i64| if compacted { 0 } else { k * new };
-                        Some(Return {
-                            room: room?,
-                            needed: needed(gap).filter(|_| reusable),
-                            warm: reusable && gap <= lifetime.ms,
-                            warm_price: Steps::new(sent + 1, |k| {
-                                let read = prefix + added(k);
-                                price(
-                                    b,
-                                    resumed,
-                                    cache.usage(
-                                        read,
-                                        cacheable + added(k) - read,
-                                        ordinary,
-                                        output,
-                                    ),
-                                )
-                            })?,
-                            cold_price: Steps::new(sent + 1, |k| {
-                                price(
-                                    b,
-                                    resumed,
-                                    cache.usage(0, cacheable + added(k), ordinary, output),
-                                )
-                            })?,
-                            later,
-                        })
-                    }
-                };
-                Some(Period { pings, resume })
-            })();
-            match priced {
-                Some(p) => periods.push(p),
-                None => {
-                    unpriced += 1;
-                    if g.b.is_some_and(|(_, gap, _, _)| gap > lifetime.ms) {
-                        unpriced_returns += 1;
+        .filter(|c| c.base.profile == profile.id && c.base.action == Action::Change)
+    {
+        *ttls.get_mut(c.bucket) = c.base.recommended;
+    }
+    if let Some(Lifetime {
+        cache: Cache::Claude(ttl),
+        ..
+    }) = &lifetime
+    {
+        ttls.main = Some(*ttl);
+    }
+    let all_events: Vec<_> = options
+        .scan
+        .cache_context
+        .boundaries
+        .iter()
+        .chain(&options.scan.events)
+        .filter(|e| e.kind == EventKind::Compaction && e.profiles.contains(&profile.id))
+        .collect();
+    let samples = compaction_samples(&requests, &all_events, options.summaries);
+    let mut window_events = WindowEvents::new(all_events.iter().copied());
+    window_events.suppress_idle();
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    for &r in &requests {
+        groups.entry(&r.session).or_default().push(r);
+    }
+    let mut events: HashMap<&str, Vec<&StructuralEvent>> = HashMap::new();
+    for e in options
+        .scan
+        .cache_context
+        .boundaries
+        .iter()
+        .chain(&options.scan.events)
+        .filter(|e| e.kind == EventKind::Compaction && e.profiles.contains(&profile.id))
+    {
+        for session in
+            std::iter::once(e.session.as_str()).chain(e.origins.iter().map(|o| o.session.as_str()))
+        {
+            let list = events.entry(session).or_default();
+            if !list.iter().any(|old| old.id == e.id) {
+                list.push(e);
+            }
+        }
+    }
+    for list in events.values_mut() {
+        list.sort_by_key(|e| e.time);
+    }
+    let mut caps = vec![1];
+    let mut returns = 0;
+    let mut finals = 0;
+    for list in groups.values() {
+        let selected: Vec<_> = list
+            .iter()
+            .copied()
+            .filter(|r| r.time >= since && message(r).next().is_some())
+            .collect();
+        if selected.is_empty() {
+            continue;
+        }
+        finals += 1;
+        for pair in selected.windows(2) {
+            let gap = pair[1].time - pair[0].end_time;
+            if let (Some(l), Some(i)) = (&lifetime, interval) {
+                if gap > i {
+                    returns += 1;
+                }
+                if gap >= l.ms {
+                    let n = ((gap - l.ms) / i + 1) as u64;
+                    if n as Millis * i <= LONGEST_CAP {
+                        caps.push(n);
                     }
                 }
             }
         }
     }
-
-    let mut caps: Vec<u64> = periods
-        .iter()
-        .filter_map(|p| p.resume.as_ref()?.needed)
-        .filter(|&n| n <= most)
-        .collect();
     caps.sort_unstable();
     caps.dedup();
-    let interval_ms = interval.unwrap_or(0);
-    let scenarios: Vec<KeepaliveScenario> = caps
+    let mut scenarios: Vec<_> = caps
         .iter()
-        .map(|&cap| {
-            let (mut pings, mut final_pings, mut rescued) = (0, 0, 0);
-            let (mut ping_cost, mut avoided, mut savings, mut closed) = (0.0, 0.0, 0.0, 0.0);
-            for p in &periods {
-                let sent = p.sent(cap);
-                if p.resume.is_some() {
-                    pings += sent;
-                } else {
-                    final_pings += sent;
-                }
-                ping_cost += p.pings.sum(sent);
-                rescued += u64::from(p.rescued(cap));
-                avoided += p.avoided(cap);
-                savings += p.net(cap, true);
-                closed += p.net(cap, false);
-            }
-            KeepaliveScenario {
-                cap_ms: cap as Millis * interval_ms,
-                pings,
-                final_pings,
-                rescued,
-                ping_cost_usd: ping_cost,
-                avoided_usd: avoided,
-                savings_usd: savings,
-                closed_savings_usd: closed,
-            }
+        .map(|&cap| KeepaliveScenario {
+            cap_ms: cap as Millis * interval.unwrap_or(0),
+            pings: 0,
+            final_pings: 0,
+            rescued: 0,
+            ping_cost_usd: 0.0,
+            avoided_usd: 0.0,
+            savings_usd: 0.0,
+            closed_savings_usd: 0.0,
         })
         .collect();
-
-    // Idle compaction competes only where its own check recommends it; the two never
-    // run in the same idle period, so their savings are never added.
-    let idle: Vec<&&IdleCheck> = options
+    let mut unpriced = 0;
+    let mut priced = 0;
+    let mut final_costs: Vec<Vec<f64>> = vec![vec![]; caps.len()];
+    let mut uncertainty = vec![
+        "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
+        "transcripts do not record when clients close or sleep; returning sessions stay awake and final periods ping for the full cap, including beyond the observation window".into(),
+    ];
+    if let (Some(l), Some(interval), Some(new), Some(output)) =
+        (&lifetime, interval, new_tokens, output_tokens)
+    {
+        let replayer = Replayer {
+            options,
+            samples: &samples,
+            events: &window_events,
+            lifetime: l,
+            interval,
+            new,
+            output,
+            since,
+        };
+        for (session, list) in groups {
+            if !list
+                .iter()
+                .any(|r| r.time >= since && message(r).next().is_some())
+            {
+                continue;
+            }
+            let main_list: Vec<_> = list
+                .iter()
+                .copied()
+                .filter(|r| message(r).next().is_some())
+                .collect();
+            let periods = 1 + main_list
+                .windows(2)
+                .filter(|pair| pair[0].time >= since && pair[1].time - pair[0].end_time > interval)
+                .count() as u64;
+            let scope = scopes.scope(main_list[0]);
+            let policy = scopes.ttls(scope, &ttls);
+            let owned: Vec<_> = windows
+                .iter()
+                .filter(|w| {
+                    w.models
+                        .iter()
+                        .any(|m| scopes.window(scope, m.as_deref()).owner == w.owner)
+                })
+                .cloned()
+                .collect();
+            let changes = matches!(l.cache, Cache::Claude(ttl) if policy.main != Some(ttl))
+                || main_list.iter().any(|r| {
+                    let s = scopes.scope(r);
+                    scopes.ttls(s, &ttls) != policy
+                        || owned.iter().any(|w| {
+                            w.models
+                                .iter()
+                                .any(|m| scopes.window(s, m.as_deref()).owner != w.owner)
+                        })
+                });
+            let prepared = Session {
+                requests: list,
+                events: events.remove(session).unwrap_or_default(),
+                windows: owned,
+                ttls: policy,
+            };
+            let runs = (!changes)
+                .then(|| {
+                    let baseline = replayer.run(&prepared, 0)?;
+                    let candidates: Vec<_> = caps
+                        .iter()
+                        .map(|&cap| replayer.run(&prepared, cap))
+                        .collect::<Option<_>>()?;
+                    Some((baseline, candidates))
+                })
+                .flatten();
+            let Some((baseline, runs)) = runs else {
+                unpriced += periods;
+                continue;
+            };
+            priced += periods;
+            for (i, run) in runs.into_iter().enumerate() {
+                let s = &mut scenarios[i];
+                s.pings += run.pings.len() as u64;
+                s.final_pings += run.finals.len() as u64;
+                s.rescued += run
+                    .reads
+                    .iter()
+                    .filter(|(id, read)| {
+                        baseline
+                            .reads
+                            .get(*id)
+                            .is_some_and(|b| *b == 0 && **read > 0)
+                    })
+                    .count() as u64;
+                s.avoided_usd += baseline.recorded - run.recorded;
+                s.ping_cost_usd += run.pings.iter().chain(&run.finals).sum::<f64>();
+                s.closed_savings_usd +=
+                    baseline.recorded - run.recorded - run.pings.iter().sum::<f64>();
+                let size = run.finals.len().max(final_costs[i].len());
+                final_costs[i].resize(size, 0.0);
+                for (n, cost) in run.finals.into_iter().enumerate() {
+                    final_costs[i][n] += cost;
+                }
+            }
+        }
+    } else {
+        unpriced = returns + finals;
+    }
+    for s in &mut scenarios {
+        s.savings_usd = s.avoided_usd - s.ping_cost_usd;
+    }
+    if priced == 0 {
+        scenarios.clear();
+    }
+    let idle_checks: Vec<_> = options
         .idle
         .iter()
         .filter(|c| c.base.profile == profile.id)
         .collect();
-    let idle_savings = (profile.harness == Harness::Claude).then(|| {
-        idle.iter()
+    // A partial keepalive replay cannot be compared to an all-session idle aggregate.
+    let idle_savings = if profile.harness == Harness::Claude {
+        idle_checks
+            .iter()
             .filter(|c| c.base.recommended == Some(true))
-            .filter_map(|c| c.after_recommendations.delta_usd)
-            .map(|d| (-d).max(0.0))
-            .sum::<f64>()
-    });
-    let alternative = idle_savings.unwrap_or(0.0).max(0.0);
+            .try_fold(0.0, |sum, c| {
+                Some(sum + (-c.after_recommendations.delta_usd?).max(0.0))
+            })
+    } else {
+        None
+    };
+    let alternative = idle_savings.unwrap_or(0.0);
     let best = scenarios
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd))
-        .map(|(i, s)| (caps[i], s));
-    let margin = best.map(|(_, s)| s.savings_usd - alternative);
-    // Unpriced periods cannot flip the result when each is bounded by the largest priced one.
-    let largest = periods
-        .iter()
-        .map(|p| match best {
-            Some((cap, _)) => p.net(cap, true).abs(),
-            None => p.pings.sum(p.sent(1)),
-        })
-        .fold(0.0, f64::max);
-    let decided = |margin: f64| {
-        unpriced == 0 || (!periods.is_empty() && margin.abs() > unpriced as f64 * largest)
-    };
-    let mechanism = match profile.harness {
-        Harness::Claude => {
-            "no setting: a /loop task pings on a fixed schedule with no idle cap, and stops only when cancelled or after seven days"
+        .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd));
+    let comparable = unpriced == 0 && (profile.harness == Harness::Codex || idle_savings.is_some());
+    let margin = best
+        .filter(|_| comparable)
+        .map(|(_, s)| s.savings_usd - alternative);
+    let savings = margin.filter(|_| unpriced == 0).map(|s| s.max(0.0));
+    let recommended = margin.filter(|_| unpriced == 0).map(|m| {
+        if m > 0.0 {
+            policy(interval.unwrap(), best.unwrap().1.cap_ms)
+        } else {
+            "off".into()
         }
-        Harness::Codex => "no setting: Codex has no way to schedule pings",
-    };
-    let (action, recommended, savings) = if lifetime.is_none() || periods.is_empty() {
-        (Action::Advisory, None, None)
-    } else {
-        match margin {
-            Some(m) if m > 0.0 && decided(m) => {
-                let (cap, _) = best.expect("a margin comes from a scenario");
-                (
-                    Action::Advisory,
-                    Some(policy(interval_ms, cap as Millis * interval_ms)),
-                    Some(m),
-                )
-            }
-            Some(m) if !decided(m) => (Action::Advisory, None, None),
-            // No priced return outlasted the cache, so pings could only add cost, unless an
-            // unpriced one did.
-            None if unpriced_returns > 0 => (Action::Advisory, None, None),
-            _ => (Action::Keep, Some("off".to_string()), Some(0.0)),
-        }
-    };
-    let elapsed = now - since;
-    let break_even = best.and_then(|(cap, s)| {
-        // How long final periods could stay open on average before pinging stops paying.
-        let spare = s.closed_savings_usd - alternative;
-        if spare <= 0.0 || s.savings_usd > alternative {
-            return None;
-        }
-        let finals: Vec<&Period> = periods.iter().filter(|p| p.resume.is_none()).collect();
-        // The most pings each such session can send before pinging stops paying.
-        let open = (0..cap)
-            .take_while(|&n| finals.iter().map(|p| p.pings.sum(n)).sum::<f64>() <= spare)
-            .last()?;
-        // Closing before ping `open + 1` keeps it paying.
-        Some(format!(
-            "pinging {} wins only if sessions that never came back close within {} of their last request",
-            policy(interval_ms, cap as Millis * interval_ms),
-            duration((open + 1) as Millis * interval_ms)
-        ))
     });
-    let mut history_profiles: Vec<String> = vec![];
-    for r in &requests {
-        for p in &r.profiles {
-            if !history_profiles.contains(p) {
-                history_profiles.push(p.clone());
-            }
-        }
-    }
-    let mut uncertainty = vec![
-        "native transcripts do not record when a client closed or slept; returns within the cap assume it stayed open and awake, and final periods ping for the full cap".to_string(),
-        "recorded turns, including any scheduled-task turns, are replayed as activity; pings are added on top, so pings already running are not detected".to_string(),
-    ];
-    if lifetime.is_none() {
-        uncertainty.push("the main cache TTL is unknown, so no ping interval can be priced".into());
-    }
-    if new_tokens.is_none() || output_tokens.is_none() {
-        uncertainty.push("no recorded request gives a ping size".into());
-    }
+    let break_even = scenarios.iter().enumerate()
+        .filter(|(_, s)| comparable && margin.is_none_or(|m| m <= 0.0) && s.closed_savings_usd > alternative && s.savings_usd <= alternative)
+        .max_by(|(_, a), (_, b)| a.closed_savings_usd.total_cmp(&b.closed_savings_usd))
+        .and_then(|(i, s)| {
+        let spare = s.closed_savings_usd - alternative;
+        if spare <= 0.0 || s.savings_usd > alternative {return None;}
+        let mut total = 0.0;
+        let count = final_costs[i].iter().take_while(|&&cost| {total += cost; total <= spare}).count();
+        Some(format!("pinging {} wins only if sessions that never came back close within {} of their last request",
+            policy(interval.unwrap(), s.cap_ms), duration((count + 1) as Millis * interval.unwrap())))
+    });
     if unpriced > 0 {
-        uncertainty.push(format!(
-            "{unpriced} periods could not be priced; each is bounded by the largest priced period"
-        ));
+        uncertainty.push(format!("{unpriced} periods have unresolved pricing or context geometry; priced-session savings cannot establish the aggregate winner"));
     }
+    let elapsed = options.now - since;
     Some(KeepaliveCheck {
         base: CheckBase {
-            profile: profile.id.clone(),
-            history_profiles,
-            evidence: if savings.is_some() {
-                Evidence::Estimated
-            } else {
-                Evidence::Unknown
-            },
-            action,
-            current: Some("off".into()),
-            recommended,
-            owner: mechanism.into(),
-            since: Some(since),
-            until: Some(now),
-            window_basis: if options.since.is_none() {
-                "available transcript window"
-            } else {
-                "explicit --since window"
-            }
-            .into(),
-            baseline: if alternative > 0.0 {
-                "idle compaction as recommended, with no pings"
-            } else {
-                "sessions left idle, with no pings"
-            }
-            .into(),
-            requests: requests.len() as u64,
-            coverage: Some(Coverage {
-                priced: periods.len() as u64,
-                total: periods.len() as u64 + unpriced,
-            }),
-            savings_usd: savings,
-            monthly_savings_usd: savings
-                .filter(|_| elapsed > 0)
-                .map(|s| s * 30.0 * DAY as f64 / elapsed as f64),
-            break_even,
+            profile: profile.id.clone(), history_profiles: main.iter().flat_map(|r| r.profiles.clone()).collect::<indexmap::IndexSet<_>>().into_iter().collect(),
+            evidence: if priced > 0 {Evidence::Estimated} else {Evidence::Unknown},
+            action: Action::Advisory, current: None, recommended,
+            owner: match profile.harness {
+                Harness::Claude => "no setting: a /loop task pings on a fixed schedule with no idle cap, and stops only when cancelled or after seven days",
+                Harness::Codex => "no setting: Codex has no way to schedule pings",
+            }.into(),
+            since: Some(since), until: Some(options.now),
+            window_basis: if options.since.is_some() {"explicit --since window"} else {"available transcript window"}.into(),
+            baseline: if alternative > 0.0 {"idle compaction as recommended, with no pings"} else {"sessions left idle, with no pings"}.into(),
+            requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced}),
+            savings_usd: savings, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| s * 30.0 * DAY as f64 / elapsed as f64), break_even,
             assumptions: vec![
-                lifetime.as_ref().map_or_else(
-                    || "cache lifetime unknown".into(),
-                    |l| format!("cache lifetime: {}", l.reason),
-                ),
-                "a ping fires each interval after the last request, five sixths of the lifetime, which is also below Claude's idle-compaction trigger at 90% of one hour".into(),
-                "each ping reads the last request's whole input and writes the median recorded request's new input, which includes the previous reply, plus its output; later pings, the return and later requests before a compaction read those turns".into(),
-                "a return within the last ping plus the lifetime reads its resumed prefix instead of rewriting it at the lifetime's write rate, unless a compaction or a model, speed or provider change came between; the whole return is repriced, including its context tier".into(),
-                "pinging prevents idle compaction while it runs, so caps are priced with idle compaction off and compete with it rather than adding to it; idle compaction's saving comes from its own check, after any window recommendation, while pings replay recorded contexts".into(),
-                "caps are the ping counts that rescue each recorded return, up to the seven-day expiry of recurring Claude Code tasks".into(),
-                "every ping and return is priced at its own context tier; ping turns do not grow later periods' pings, and growth past an auto-compact window is not modeled".into(),
-            ],
-            uncertainty,
-            sources: SOURCES
-                .iter()
-                .chain(PRICE_SOURCES.iter())
-                .map(|s| s.to_string())
-                .collect(),
-        },
-        bucket: "main",
-        lifetime_ms: lifetime.as_ref().map(|l| l.ms),
-        interval_ms: interval,
-        ping_input_tokens: new_tokens,
-        ping_output_tokens: output_tokens,
-        returns,
-        finals,
-        unpriced,
-        idle_compaction_savings_usd: idle_savings,
-        margin_usd: margin.filter(|_| !periods.is_empty()),
-        scenarios,
+                lifetime.as_ref().map_or_else(|| "cache lifetime unknown".into(), |l| format!("cache lifetime: {}", l.reason)),
+                "each session is replayed sequentially at each cap and with no pings, carrying cache warmth and ping context; all policies use the same recommended compaction windows and their modeled summary costs".into(),
+                "each ping uses the preceding request's pricing metadata and median new input and output; every later request uses its own provider, model, tier, speed, geography and context tier".into(),
+                "compactions replace prior ping context; pings after a boundary use its recorded post-context and survive into the return; missing geometry leaves the session unpriced".into(),
+                "pinging competes with idle compaction rather than adding its savings; compaction after the cap is not combined with pings".into(),
+                "caps include one ping and the counts needed to rescue recorded returns, up to the seven-day scheduled-task lifetime".into(),
+            ], uncertainty, sources: SOURCES.into_iter().map(String::from).chain(PRICE_SOURCES.into_iter().map(String::from)).collect(),
+        }, bucket: "main", lifetime_ms: lifetime.as_ref().map(|l| l.ms), interval_ms: interval,
+        ping_input_tokens: new_tokens, ping_output_tokens: output_tokens,
+        returns, finals, unpriced, idle_compaction_savings_usd: idle_savings, margin_usd: margin, scenarios,
     })
 }
 
@@ -725,6 +871,9 @@ mod tests {
             catalog: &prices(),
             ttls: &[],
             idle: &[],
+            windows: &[],
+            summaries: &[],
+            estimates: &IndexMap::new(),
             since: None,
             now,
         });
@@ -739,8 +888,8 @@ mod tests {
         assert_eq!(check.interval_ms, Some(50 * MINUTE));
         assert_eq!((check.returns, check.finals, check.unpriced), (1, 1, 0));
         // Two pings at 50m and 1h40m keep the cache warm until 2h40m.
-        assert_eq!(check.scenarios.len(), 1);
-        let s = &check.scenarios[0];
+        assert_eq!(check.scenarios.len(), 2);
+        let s = &check.scenarios[1];
         assert_eq!(
             (s.cap_ms, s.pings, s.final_pings, s.rescued),
             (100 * MINUTE, 2, 2, 1)
@@ -761,7 +910,8 @@ mod tests {
         let check = run(&scan(one_hour(), requests), 3 * HOUR);
         assert_eq!(check.finals, 21);
         assert!(check.margin_usd.unwrap() < 0.0);
-        assert_eq!(check.base.action, Action::Keep);
+        assert_eq!(check.base.action, Action::Advisory);
+        assert_eq!(check.base.current, None);
         assert_eq!(check.base.recommended.as_deref(), Some("off"));
         assert!(check.base.break_even.unwrap().contains("close within"));
     }
@@ -772,8 +922,11 @@ mod tests {
         let check = run(&scan(one_hour(), requests), 2 * HOUR);
         // The 55m gap still pays one unneeded ping; no cap rescues anything.
         assert_eq!((check.returns, check.finals), (1, 1));
-        assert!(check.scenarios.is_empty() && check.margin_usd.is_none());
-        assert_eq!(check.base.action, Action::Keep);
+        assert_eq!(check.scenarios.len(), 1);
+        assert!(check.margin_usd.unwrap() < 0.0);
+        assert_eq!(check.scenarios[0].rescued, 0);
+        assert_eq!(check.base.action, Action::Advisory);
+        assert_eq!(check.base.current, None);
     }
 
     #[test]
@@ -819,7 +972,7 @@ mod tests {
         assert_eq!((check.returns, check.finals, check.unpriced), (1, 2, 1));
         assert_eq!(check.idle_compaction_savings_usd, None);
         // Pings at 25m and 50m keep the cache warm past the 1h return.
-        assert_eq!(check.scenarios[0].cap_ms, 50 * MINUTE);
+        assert_eq!(check.scenarios[1].cap_ms, 50 * MINUTE);
     }
 
     /// The default report's keepalive line.
@@ -839,6 +992,7 @@ mod tests {
                 color: false,
                 unicode: false,
                 details: false,
+                host: None,
             },
         );
         text.lines()
@@ -860,7 +1014,7 @@ mod tests {
         };
         let win = line(scan(one_hour(), session()), 30 * DAY);
         assert!(
-            win.starts_with("Keepalive pings: off. Pinging idle sessions every 50m for up to 1h 40m would save $"),
+            win.starts_with("Keepalive pings: unknown. Pinging idle sessions every 50m for up to 1h 40m would save $"),
             "{win}"
         );
         assert!(win.ends_with("but a /loop task pings on a fixed schedule with no idle cap, and stops only when cancelled or after seven days."), "{win}");
@@ -868,7 +1022,9 @@ mod tests {
         requests.extend((0..20).map(|i| turn(&format!("gone{i}"), i * MINUTE)));
         let lose = line(scan(one_hour(), requests), 30 * DAY);
         assert!(
-            lose.starts_with("Keepalive pings: off. Pinging idle sessions every 50m would cost $"),
+            lose.starts_with(
+                "Keepalive pings: unknown. Pinging idle sessions every 50m would cost $"
+            ),
             "{lose}"
         );
         assert!(lose.ends_with("more than leaving them idle."), "{lose}");
@@ -886,7 +1042,7 @@ mod tests {
         switched.parts[0].model = Some("claude-haiku-5-5".into());
         let check = run(&scan(one_hour(), vec![turn("a", 0), switched]), 3 * HOUR);
         assert_eq!((check.returns, check.unpriced), (1, 0));
-        assert!(check.scenarios.is_empty());
+        assert!(check.scenarios.iter().all(|s| s.rescued == 0));
 
         let mut compacted = scan(one_hour(), vec![turn("b", 0), turn("b", 2 * HOUR)]);
         compacted.events.push(crate::model::StructuralEvent {
@@ -922,6 +1078,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         });
         assert!(run(&compacted, 3 * HOUR).scenarios.is_empty());
@@ -932,7 +1089,7 @@ mod tests {
         let rescued = |extra: Vec<Request>| {
             let mut requests = vec![turn("a", 0), turn("a", 2 * HOUR)];
             requests.extend(extra);
-            run(&scan(one_hour(), requests), 3 * HOUR).scenarios[0].avoided_usd
+            run(&scan(one_hour(), requests), 3 * HOUR).scenarios[1].avoided_usd
         };
         let alone = rescued(vec![]);
         // Two later requests read the two pings' turns again.
@@ -957,14 +1114,325 @@ mod tests {
         assert_eq!(check.base.recommended, None);
     }
 
+    fn boundary(session: &str, time: Millis, post: Option<i64>) -> StructuralEvent {
+        StructuralEvent {
+            id: format!("boundary:{session}:{time}"),
+            session: "other-alias".into(),
+            origins: vec![crate::model::Origin {
+                session: session.into(),
+                location: crate::model::Location {
+                    file: "synthetic".into(),
+                    line: 1,
+                },
+            }],
+            harness: Harness::Claude,
+            time,
+            kind: EventKind::Compaction,
+            profiles: vec!["profile".into()],
+            location: crate::model::Location {
+                file: "synthetic".into(),
+                line: 1,
+            },
+            request: None,
+            model: None,
+            version: None,
+            client: None,
+            cwd: None,
+            trigger: None,
+            precomputed: None,
+            pre_tokens: None,
+            post_tokens: post,
+            duration_ms: None,
+            tool: None,
+            tool_id: None,
+            settings: IndexMap::new(),
+            idle_attribution: IdleAttribution::Unknown,
+            shell: None,
+            pricing: None,
+        }
+    }
+
+    /// Run a complete session with an explicit window and cap, using public fixture prices.
+    fn replay(requests: Vec<Request>, events: Vec<StructuralEvent>, cap: u64) -> (Run, Run) {
+        let profile = one_hour();
+        let scan = scan(profile.clone(), requests);
+        let catalog = prices();
+        let estimates = IndexMap::new();
+        let options = KeepaliveOptions {
+            scan: &scan,
+            catalog: &catalog,
+            ttls: &[],
+            windows: &[],
+            summaries: &[],
+            estimates: &estimates,
+            idle: &[],
+            since: None,
+            now: 30 * DAY,
+        };
+        let requests: Vec<_> = scan.requests.iter().collect();
+        let events: Vec<_> = events.iter().collect();
+        let samples = compaction_samples(&requests, &events, &[]);
+        let mut window_events = WindowEvents::new(events.iter().copied());
+        window_events.suppress_idle();
+        let lifetime = Lifetime {
+            ms: HOUR,
+            cache: Cache::Claude(Ttl::OneHour),
+            reason: "test".into(),
+        };
+        let replayer = Replayer {
+            options: &options,
+            samples: &samples,
+            events: &window_events,
+            lifetime: &lifetime,
+            interval: 50 * MINUTE,
+            new: 1000,
+            output: 500,
+            since: 0,
+        };
+        let session = Session {
+            requests,
+            events,
+            windows: vec![],
+            ttls: PerBucket {
+                main: Some(Ttl::OneHour),
+                subagent: Some(Ttl::FiveMinutes),
+            },
+        };
+        (
+            replayer.run(&session, 0).unwrap(),
+            replayer.run(&session, cap).unwrap(),
+        )
+    }
+
+    fn near(actual: f64, expected: f64) {
+        assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
+    }
+
     #[test]
-    fn steps_price_every_value_across_a_tier_boundary() {
-        let line = Steps::new(4, |k| Some(1.0 + k as f64)).unwrap();
-        assert!(matches!(line, Steps::Line { .. }));
-        assert_eq!(line.sum(3), 6.0);
-        let tiered = Steps::new(4, |k| Some(if k < 2 { 1.0 } else { 3.0 })).unwrap();
-        assert!(matches!(tiered, Steps::Exact(_)));
-        assert_eq!((tiered.sum(4), tiered.at(2)), (8.0, 3.0));
+    fn later_periods_read_the_accumulated_ping_context() {
+        let (_, run) = replay(
+            vec![turn("a", 0), turn("a", 2 * HOUR), turn("a", 4 * HOUR)],
+            vec![],
+            2,
+        );
+        assert_eq!(run.pings.len(), 4);
+        // The second gap's two pings read the preceding gap's 2,000 added tokens.
+        near(run.pings[2] - run.pings[0], 2000.0 * 0.2 / 1e6);
+        near(run.pings[3] - run.pings[1], 2000.0 * 0.2 / 1e6);
+        assert_eq!(run.reads["a:14400000"], 105_000);
+    }
+
+    #[test]
+    fn each_later_request_uses_its_actual_model_speed_geography_and_tier() {
+        let mut later = turn("a", 2 * HOUR + MINUTE);
+        later.parts[0].model = Some("claude-haiku-5-5".into());
+        later.parts[0].speed = Some("standard".into());
+        later.parts[0].geo = Some("us".into());
+        let original = later.clone();
+        let (base, pinged) = replay(vec![turn("a", 0), turn("a", 2 * HOUR), later], vec![], 2);
+        let (short_base, short_pinged) = replay(vec![turn("a", 0), turn("a", 2 * HOUR)], vec![], 2);
+        let mut expected = original.parts[0].clone();
+        expected.usage = Cache::Claude(Ttl::OneHour).usage(0, 103_000, 0, 500);
+        let mut before = original.parts[0].clone();
+        before.usage = Cache::Claude(Ttl::OneHour).usage(0, 101_000, 0, 500);
+        let cost = |p: &BillingPart| price_part(&prices(), &original, p).total_usd.unwrap();
+        near(
+            (pinged.recorded - base.recorded) - (short_pinged.recorded - short_base.recorded),
+            cost(&expected) - cost(&before),
+        );
+        assert_eq!(pinged.reads[&original.id], 0);
+    }
+
+    #[test]
+    fn only_pre_boundary_pings_are_replaced_and_post_boundary_pings_warm_the_return() {
+        let mut returned = turn("a", 2 * HOUR);
+        returned.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 20_000,
+            ..ClaudeUsage::default()
+        });
+        let (baseline, pinged) = replay(
+            vec![turn("a", 0), returned],
+            vec![boundary("a", HOUR, Some(20_000))],
+            2,
+        );
+        // The 50m ping is replaced at 1h. The 1h40m ping writes the new 20k prefix,
+        // and its 1k turn remains present at 2h and in the final period.
+        assert_eq!(baseline.reads["a:7200000"], 0);
+        assert_eq!(pinged.reads["a:7200000"], 21_000);
+        let mut r = turn("a", 100 * MINUTE);
+        r.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(0, 21_000, 0, 500);
+        near(
+            pinged.pings[1],
+            price_part(&prices(), &r, &r.parts[0]).total_usd.unwrap(),
+        );
+        let mut compacted = scan(one_hour(), vec![turn("a", 0), turn("a", 2 * HOUR)]);
+        compacted.events = vec![boundary("a", HOUR, None)];
+        assert_eq!(run(&compacted, 3 * HOUR).unpriced, 2);
+    }
+
+    #[test]
+    fn added_context_reprices_the_whole_later_request_at_its_context_tier() {
+        let mut a = turn("a", 0);
+        a.parts[0].model = Some("claude-haiku-5-5".into());
+        a.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 98_000,
+            write: 1000,
+            output: 500,
+            ttl: Ttl::OneHour,
+            input: 0,
+        });
+        let mut b = a.clone();
+        b.id = "return".into();
+        b.time = 2 * HOUR;
+        b.end_time = b.time;
+        let (base, pinged) = replay(vec![a, b.clone()], vec![], 2);
+        let mut expected = b.parts[0].clone();
+        expected.usage = Cache::Claude(Ttl::OneHour).usage(101_000, 0, 0, 500);
+        let mut before = b.parts[0].clone();
+        before.usage = Cache::Claude(Ttl::OneHour).usage(0, 99_000, 0, 500);
+        near(
+            pinged.recorded - base.recorded,
+            price_part(&prices(), &b, &expected).total_usd.unwrap()
+                - price_part(&prices(), &b, &before).total_usd.unwrap(),
+        );
+    }
+
+    #[test]
+    fn recorded_idle_compaction_is_removed_from_both_no_ping_and_ping_paths() {
+        let mut returned = turn("a", 2 * HOUR);
+        returned.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 20_000,
+            write: 1000,
+            ttl: Ttl::OneHour,
+            output: 500,
+            input: 0,
+        });
+        let mut idle = boundary("a", HOUR, Some(20_000));
+        idle.idle_attribution = IdleAttribution::Notice;
+        idle.pre_tokens = Some(101_000);
+        let (base, pinged) = replay(vec![turn("a", 0), returned], vec![idle], 2);
+        assert_eq!(base.reads["a:7200000"], 0);
+        assert_eq!(pinged.reads["a:7200000"], 103_000);
+        assert!(base.recorded > pinged.recorded);
+    }
+
+    #[test]
+    fn ping_and_idle_alternatives_apply_the_same_recommended_window_and_samples() {
+        let mut profile = one_hour();
+        profile.compaction =
+            crate::controls::compaction_controls(&crate::controls::CompactionSources {
+                harness: Harness::Claude,
+                user: &serde_json::from_value(serde_json::json!({"autoCompactWindow": 400_000}))
+                    .unwrap(),
+                managed: &serde_json::Map::new(),
+                env: &crate::controls::Env::new(),
+                file: "settings.json",
+                managed_file: "managed.json",
+                scopes: None,
+            })
+            .unwrap();
+        let mut summary = turn("sample", MINUTE);
+        summary.id = "summary".into();
+        summary.agent = Agent::Subagent;
+        summary.parts[0].kind = PartKind::Compaction;
+        summary.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 300_000,
+            write: 0,
+            output: 2000,
+            ttl: Ttl::FiveMinutes,
+            input: 0,
+        });
+        let mut sample = turn("sample", 3 * MINUTE);
+        sample.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 0,
+            write: 20_000,
+            output: 500,
+            ttl: Ttl::OneHour,
+            input: 0,
+        });
+        let mut event = boundary("sample", 2 * MINUTE, Some(2000));
+        event.model = Some("claude-opus-5-5".into());
+        event.request = Some("summary".into());
+        event.pre_tokens = Some(300_000);
+        let target = |time: Millis, prefix: i64| {
+            let mut r = turn("target", time);
+            r.parts[0].usage = claude_usage(ClaudeUsage {
+                read: if time == 220 * MINUTE {
+                    0
+                } else {
+                    prefix - 1000
+                },
+                write: if time == 220 * MINUTE { prefix } else { 1000 },
+                output: 500,
+                ttl: Ttl::OneHour,
+                input: 0,
+            });
+            r
+        };
+        let mut scan = scan(
+            profile,
+            vec![
+                summary,
+                sample,
+                target(100 * MINUTE, 150_000),
+                target(220 * MINUTE, 151_000),
+                target(221 * MINUTE, 152_000),
+            ],
+        );
+        scan.events = vec![event];
+        let catalog = prices();
+        let summaries = crate::replay::compaction_charges(&mut scan, &catalog);
+        let estimates = IndexMap::new();
+        let since = Some(100 * MINUTE);
+        let windows = crate::compaction::compaction_checks(&crate::compaction::CompactionOptions {
+            scan: &scan,
+            catalog: &catalog,
+            summaries: &summaries,
+            estimates: &estimates,
+            ttls: &[],
+            since,
+            now: 30 * DAY,
+        });
+        assert_eq!(windows[0].base.recommended, Some(100_000));
+        assert_eq!(windows[0].base.action, Action::Change);
+        let refs: Vec<_> = windows.iter().collect();
+        let idle = crate::idle::idle_checks(&crate::idle::IdleOptions {
+            scan: &scan,
+            catalog: &catalog,
+            summaries: &summaries,
+            estimates: &estimates,
+            ttls: &[],
+            windows: &refs,
+            since,
+            now: 30 * DAY,
+        });
+        let idle_refs: Vec<_> = idle.iter().collect();
+        assert!(idle.iter().all(|c| {
+            c.after_recommendations
+                .windows
+                .iter()
+                .all(|w| w.value == Some(100_000))
+        }));
+        let options = KeepaliveOptions {
+            scan: &scan,
+            catalog: &catalog,
+            ttls: &[],
+            windows: &refs,
+            summaries: &summaries,
+            estimates: &estimates,
+            idle: &idle_refs,
+            since,
+            now: 30 * DAY,
+        };
+        let smaller = keepalive_checks(&options).remove(0);
+        assert_eq!(smaller.unpriced, 0);
+        let original = keepalive_checks(&KeepaliveOptions {
+            windows: &[],
+            ..options
+        })
+        .remove(0);
+        assert_eq!(original.unpriced, 0);
+        assert!(smaller.scenarios[1].avoided_usd < original.scenarios[1].avoided_usd);
     }
 
     #[test]

@@ -1227,7 +1227,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 out.field(
                     &format!("Cap {}", keepalive_duration(s.cap_ms)),
                     &format!(
-                        "{} return pings and {} final pings cost {}; {} rescued returns avoid {}; net {}; {} if final sessions closed at once",
+                        "{} return pings and {} final pings cost {}; {} rescued returns; recorded work saves {}; net {}; {} if final sessions closed at once",
                         s.pings,
                         s.final_pings,
                         usd(s.ping_cost_usd),

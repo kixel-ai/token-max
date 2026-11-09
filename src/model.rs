@@ -973,7 +973,7 @@ pub struct KeepaliveScenario {
     /// Returns that would have read a warm cache instead of rewriting it.
     pub rescued: u64,
     pub ping_cost_usd: f64,
-    /// Cache rewrites avoided on rescued returns, less the extra ping context they read.
+    /// Recorded-work savings, including later context and modeled compactions, before ping costs.
     pub avoided_usd: f64,
     /// Avoided minus ping cost, relative to leaving sessions idle.
     pub savings_usd: f64,
@@ -999,13 +999,13 @@ pub struct KeepaliveCheck {
     pub returns: u64,
     /// Sessions' last requests, after which pings run the full cap.
     pub finals: u64,
-    /// Periods whose ping or cache cost could not be priced.
+    /// Periods in sessions whose complete policy comparison could not be priced.
     pub unpriced: u64,
-    /// Idle compaction's estimated saving where it is recommended; null where unsupported.
+    /// Idle compaction's estimated saving where recommended; null when unknown or unsupported.
     pub idle_compaction_savings_usd: Option<f64>,
     /// The best cap's saving minus the best alternative's; negative when pinging loses.
     pub margin_usd: Option<f64>,
-    /// One scenario per cap that rescues another return, shortest first.
+    /// One-ping and recorded rescue-threshold caps, shortest first.
     pub scenarios: Vec<KeepaliveScenario>,
 }
 

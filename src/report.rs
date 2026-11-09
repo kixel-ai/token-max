@@ -1566,12 +1566,21 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
         let baseline = match result {
-            CheckResult::Compaction(c) => c.baseline_cost.total_usd.map(|usd| format!(
-                "Conditional baseline cost {}. ", per_month(usd, r.since, r.until)
-            )).unwrap_or_default(),
+            CheckResult::Compaction(c) => c
+                .baseline_cost
+                .total_usd
+                .map(|usd| {
+                    format!(
+                        "Conditional baseline cost {}. ",
+                        per_month(usd, r.since, r.until)
+                    )
+                })
+                .unwrap_or_default(),
             _ => String::new(),
         };
-        return format!("{baseline}The winning setting is unresolved because effective service tiers could reverse it.");
+        return format!(
+            "{baseline}The winning setting is unresolved because effective service tiers could reverse it."
+        );
     }
     match result {
         CheckResult::Speed(s) => return capitalize(&s.reason) + ".",

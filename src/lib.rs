@@ -22,6 +22,7 @@ pub mod report;
 pub mod safe;
 pub mod scenarios;
 pub mod ssh;
+pub mod t3;
 pub mod terminal;
 pub mod wire;
 

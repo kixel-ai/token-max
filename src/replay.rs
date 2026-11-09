@@ -101,6 +101,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         attempt: None,
         server_tools: Some(IndexMap::new()),
         requested_speed: None,
+        t3: event.t3.clone(),
         parts: vec![BillingPart {
             model: model.clone(),
             tier: tier.clone(),
@@ -824,6 +825,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     }
     let since = since.or(scan.since);
     let compactions = compaction_charges(&mut scan, catalog);
+    crate::t3::attribute_compactions(&mut scan, &compactions);
     let scan = scan;
     let estimates = estimate_usage(&scan);
     let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::new();
@@ -887,8 +889,11 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             ttls.extend(ttl_check(&input, profile, &requests, bucket));
         }
     }
+    for check in &mut ttls {
+        crate::t3::constrain(&mut check.base, &scan.profiles);
+    }
     let ttl_refs: Vec<&TtlCheck> = ttls.iter().collect();
-    let windows = compaction_checks(&CompactionOptions {
+    let mut windows = compaction_checks(&CompactionOptions {
         scan: &scan,
         catalog,
         summaries: &compactions,
@@ -897,6 +902,9 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    for check in &mut windows {
+        crate::t3::constrain(&mut check.base, &scan.profiles);
+    }
     let window_refs: Vec<_> = windows.iter().collect();
     let idle = idle_checks(&IdleOptions {
         scan: &scan,
@@ -933,10 +941,23 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         now,
         max_cost_per_use_usd,
     });
-    let bash = bash_checks(&BashInput {
+    let mut bash = bash_checks(&BashInput {
         scan: &scan,
         catalog,
         ttls: &ttl_refs,
+        since,
+        now,
+    });
+    for check in &mut bash {
+        crate::t3::constrain(&mut check.base, &scan.profiles);
+    }
+    let t3_idle = crate::idle::t3_idle_checks(&IdleOptions {
+        scan: &scan,
+        catalog,
+        summaries: &compactions,
+        estimates: &estimates,
+        ttls: &ttl_refs,
+        windows: &window_refs,
         since,
         now,
     });
@@ -945,6 +966,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
         .chain(idle.into_iter().map(CheckResult::Idle))
+        .chain(t3_idle.into_iter().map(CheckResult::T3Idle))
         .chain(keepalive.into_iter().map(CheckResult::Keepalive))
         .chain(speed.into_iter().map(CheckResult::Speed))
         .chain(background.into_iter().map(CheckResult::Background))
@@ -1040,6 +1062,7 @@ mod tests {
         window.applicable = false;
         let n = requests.len() as u64;
         Scan {
+            t3: vec![],
             snapshot_started_at: iso(0),
             snapshot_finished_at: iso(0),
             since: None,
@@ -1164,6 +1187,7 @@ mod tests {
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: None,
         }
     }

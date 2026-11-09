@@ -256,6 +256,7 @@ mod tests {
             exposure: ExposureScan::default(),
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
+            t3: vec![],
         }
     }
 

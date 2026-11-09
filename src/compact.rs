@@ -146,6 +146,17 @@ fn check(mut check: CheckResult) -> Value {
                 replacements.push((name, result));
             }
         }
+        CheckResult::T3Idle(c) => {
+            for (name, scenario) in [
+                ("currentSettings", &mut c.current_settings),
+                ("afterRecommendations", &mut c.after_recommendations),
+            ] {
+                let periods = periods(&std::mem::take(&mut scenario.periods));
+                let mut result = value(scenario);
+                result["periods"] = periods;
+                replacements.push((name, result));
+            }
+        }
         CheckResult::Speed(c) => {
             replacements.push((
                 "usageEstimates",

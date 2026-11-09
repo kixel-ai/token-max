@@ -88,3 +88,11 @@ for this host) and `report` in that same schema. The private SSH scan protocol
 still transfers the complete metadata required for analysis with shared values;
 the output choice is applied by the coordinator. Destinations need the same
 build, including its scan-schema fingerprint. Costs are independent per host.
+
+T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
+instance ownership, plus opaque `requests[].t3`/`events[].t3` historical run
+metadata in full JSON. `requestedSpeed` remains separate from each billing
+part's `tier`/`speed`. The `t3-idle-compaction` check keeps all three policy costs
+in both JSON forms; its `currentSettings.periods` and
+`afterRecommendations.periods` use the same compact grouping as native idle
+periods. Unsupported providers and auxiliary costs remain explicit exclusions.

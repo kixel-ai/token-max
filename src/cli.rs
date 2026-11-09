@@ -28,6 +28,7 @@ Usage: token-max [options]
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Audit an SSH destination with the token-max installed there (repeatable)
   --include-local         Also audit this host when --ssh is given
   --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
@@ -41,7 +42,7 @@ Usage: token-max [options]
   -v, --version           Show the package version
   -h, --help              Show this help
 
-Without profile flags, discover local Claude/Codex profiles. Explicit profiles
+Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
 and needs this same version installed there; only metadata crosses SSH. Current settings are applied to the selected history;
@@ -87,6 +88,7 @@ struct Values {
     help: bool,
     claude_dirs: Vec<String>,
     codex_dirs: Vec<String>,
+    t3_dirs: Vec<String>,
     ssh: Vec<String>,
     include_local: bool,
     /// Run as an SSH audit destination; the coordinator passes this, not people.
@@ -103,6 +105,7 @@ impl Values {
             "max-cost-per-use" => self.max_cost_per_use = Some(value),
             "claude-dir" => self.claude_dirs.push(value),
             "codex-dir" => self.codex_dirs.push(value),
+            "t3-dir" => self.t3_dirs.push(value),
             "ssh" => self.ssh.push(value),
             "prices-file" => self.prices_file = Some(value),
             "price-cache" => self.price_cache = Some(value),
@@ -133,6 +136,7 @@ impl Values {
                 | "max-cost-per-use"
                 | "claude-dir"
                 | "codex-dir"
+                | "t3-dir"
                 | "ssh"
                 | "prices-file"
                 | "price-cache"
@@ -489,6 +493,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             || values.price_cache.is_some()
             || !values.claude_dirs.is_empty()
             || !values.codex_dirs.is_empty()
+            || !values.t3_dirs.is_empty()
             || !values.ssh.is_empty();
         if other {
             return Err(ScanError::new("invalid arguments; use --help"));
@@ -508,9 +513,13 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         return Err(ScanError::new("--include-local requires --ssh"));
     }
     let local = !remote || values.include_local;
-    if !local && !(values.claude_dirs.is_empty() && values.codex_dirs.is_empty()) {
+    if !local
+        && !(values.claude_dirs.is_empty()
+            && values.codex_dirs.is_empty()
+            && values.t3_dirs.is_empty())
+    {
         return Err(ScanError::new(
-            "--claude-dir and --codex-dir select local profiles; add --include-local to audit them with --ssh",
+            "--claude-dir, --codex-dir and --t3-dir select local profiles; add --include-local to audit them with --ssh",
         ));
     }
     let stdout = io::stdout().is_terminal();
@@ -529,6 +538,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         let mut discovery = DiscoveryOptions::host()?;
         discovery.claude_dirs = values.claude_dirs;
         discovery.codex_dirs = values.codex_dirs;
+        discovery.t3_dirs = values.t3_dirs;
         let sender = sender.clone();
         let index = hosts.len();
         hosts.push(None);

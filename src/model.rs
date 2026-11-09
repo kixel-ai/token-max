@@ -233,6 +233,8 @@ pub struct Request {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
     pub issues: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t3: Option<T3Request>,
 }
 
 /// A safe location under one conversation alias.
@@ -260,6 +262,7 @@ pub enum EventKind {
 pub enum IdleAttribution {
     Unknown,
     Notice,
+    T3,
 }
 
 /// A scalar settings value as recorded.
@@ -313,6 +316,8 @@ pub struct StructuralEvent {
     /// Claude Bash call details on its tool start and end, without the command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellCall>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t3: Option<T3Request>,
 }
 
 /// What a Claude Bash call asked for and how it ended, never its command or output.
@@ -425,6 +430,75 @@ pub struct Profile {
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
     /// Background generation features and the controls that switch them.
     pub background: Vec<BackgroundControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub t3: Option<T3Instance>,
+}
+
+/// T3's three idle policies, independent of native Claude's interactive idle setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum T3IdleMode {
+    #[serde(rename = "onReturn")]
+    OnReturn,
+    #[serde(rename = "beforeCacheExpires")]
+    BeforeCacheExpires,
+    #[serde(rename = "off")]
+    Off,
+}
+
+impl T3IdleMode {
+    /// The setting value accepted by T3.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OnReturn => "onReturn",
+            Self::BeforeCacheExpires => "beforeCacheExpires",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// An instance's allowlisted current controls; disabled instances retain historical usage.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3Instance {
+    pub state: String,
+    pub instance: String,
+    pub enabled: bool,
+    pub idle_mode: T3IdleMode,
+    pub idle_owner: String,
+    pub ownership_resolved: bool,
+    pub limitations: Vec<String>,
+}
+
+/// Coverage of one selected T3 state, without aggregate usage or connection credentials.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3State {
+    pub path: String,
+    pub status: String,
+    pub exclusions: Vec<String>,
+    pub metadata: String,
+    pub snapshot_started_at: Option<String>,
+    pub snapshot_finished_at: Option<String>,
+    pub joined_requests: u64,
+    pub ambiguous_requests: u64,
+}
+
+/// Historical projection evidence uniquely linked to a captured native request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3Request {
+    pub thread: String,
+    pub run: String,
+    pub attempt: String,
+    pub provider_turn: String,
+    pub status: String,
+    pub completed_at: Option<Millis>,
+    pub usage_updated_at: Option<Millis>,
+    pub used_tokens: Option<i64>,
+    pub cache_expires_at: Option<Millis>,
+    pub idle_mode: Option<T3IdleMode>,
+    /// Current lifecycle guards, not proof that a lost in-memory timer fired.
+    pub lifecycle_eligible: Option<bool>,
 }
 
 /// A model request the client makes on its own, outside the turns the user drives.
@@ -961,6 +1035,37 @@ pub struct IdleCheck {
     pub usage_estimates: Vec<UsageEstimate>,
 }
 
+/// The changed cost of one T3 idle mode at a named TTL/window baseline.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3IdleScenario {
+    pub mode: T3IdleMode,
+    pub cost: Cost,
+    pub summaries: u64,
+    pub final_summaries: u64,
+}
+
+/// One T3 comparison preserves the conditional native TTL/window baseline.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3IdleComparison {
+    pub baseline: String,
+    pub ttl: Option<Ttl>,
+    pub scenarios: Vec<T3IdleScenario>,
+    /// Shared eligibility; summary cost and calibration describe beforeCacheExpires only.
+    pub periods: Vec<IdlePeriod>,
+}
+
+/// T3 idle modes use observed expiry and lifecycle evidence, independently of native interactive eligibility.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3IdleCheck {
+    #[serde(flatten)]
+    pub base: CheckBase<T3IdleMode>,
+    pub current_settings: T3IdleComparison,
+    pub after_recommendations: T3IdleComparison,
+}
+
 /// Pinging every interval for up to one cap, against leaving sessions idle.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1020,6 +1125,8 @@ pub enum CheckResult {
     Compaction(CompactionCheck),
     #[serde(rename = "idle-compaction")]
     Idle(IdleCheck),
+    #[serde(rename = "t3-idle-compaction")]
+    T3Idle(T3IdleCheck),
     #[serde(rename = "fast-mode")]
     Speed(SpeedCheck),
     #[serde(rename = "background-generation")]
@@ -1037,6 +1144,7 @@ impl CheckResult {
             CheckResult::Ttl(c) => c.base.action,
             CheckResult::Compaction(c) => c.base.action,
             CheckResult::Idle(c) => c.base.action,
+            CheckResult::T3Idle(c) => c.base.action,
             CheckResult::Speed(c) => c.base.action,
             CheckResult::Background(c) => c.base.action,
             CheckResult::BashCap(c) => c.base.action,
@@ -1669,6 +1777,8 @@ pub struct Scan {
     pub exposure: ExposureScan,
     pub cache_context: CacheContext,
     pub coverage: ScanCoverage,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub t3: Vec<T3State>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

@@ -39,7 +39,3 @@ measured usage and public model prices.
 Sources checked 2026-11-08:
 [OpenAI project tier defaults](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects/subresources/service_tier_settings/methods/retrieve)
 and [Responses service tier](https://developers.openai.com/api/reference/resources/responses/methods/create).
-
-## Related
-
-- [T3 profiles and settings](/quest/m0/t3.md) - owns requested selections and native request joins

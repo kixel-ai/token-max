@@ -992,7 +992,7 @@ pub struct KeepaliveCheck {
     /// The cache lifetime pings must beat; null when unknown.
     pub lifetime_ms: Option<Millis>,
     pub interval_ms: Option<Millis>,
-    /// Modeled new input and output per ping: the median recorded request.
+    /// Median incremental prompt input and recorded reply output per ping.
     pub ping_input_tokens: Option<i64>,
     pub ping_output_tokens: Option<i64>,
     /// Gaps longer than the interval that ended with a return.

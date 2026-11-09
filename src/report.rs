@@ -938,7 +938,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
             out.field(
                 "Ping size",
                 &format!(
-                    "{} new input and {} output tokens, the median recorded request",
+                    "{} prompt and {} reply tokens; prompt size from consecutive context growth and reply size from median recorded output",
                     or_unknown(k.ping_input_tokens),
                     or_unknown(k.ping_output_tokens)
                 ),
@@ -1486,7 +1486,7 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     if k.lifetime_ms.is_none() {
         "The main cache TTL is unknown, so pings could not be priced.".into()
     } else if k.ping_input_tokens.is_none() || k.ping_output_tokens.is_none() {
-        "No recorded request gives a ping size.".into()
+        "No consecutive request geometry establishes a ping input size.".into()
     } else if r.coverage.is_none_or(|c| c.priced == 0) {
         "No idle period could be priced.".into()
     } else if let (Some(best), Some(interval)) = (
@@ -1495,6 +1495,18 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
             .max_by(|a, b| a.savings_usd.total_cmp(&b.savings_usd)),
         k.interval_ms,
     ) {
+        if k.unpriced == 0 && k.idle_compaction_savings_usd.is_none() {
+            return format!(
+                "Pinging {} would {} {} compared with no pings, but idle compaction could not be priced.",
+                crate::keepalive::policy(interval, best.cap_ms),
+                if best.savings_usd > 0.0 {
+                    "save"
+                } else {
+                    "cost"
+                },
+                per_month(best.savings_usd.abs(), r.since, r.until)
+            );
+        }
         let margin = k.margin_usd.unwrap_or(best.savings_usd);
         format!(
             "On fully priced sessions, pinging {} would {} {} compared with no pings, but {} unpriced periods leave the aggregate comparison unresolved.",

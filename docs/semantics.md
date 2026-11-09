@@ -422,7 +422,11 @@ cap. Pings fire every five sixths of the cache lifetime after a main request:
 50 minutes under a 1h TTL, below the estimated native idle-compaction trigger at
 54 minutes, and 25 minutes under Codex's documented 30-minute minimum. Each ping
 uses the preceding main request's pricing metadata, reads its accumulated context,
-and adds the median recorded request's new input and output. Recorded requests
+and adds a prompt and reply. Prompt size is the median growth between compatible
+consecutive inputs minus the preceding reply, excluding compaction boundaries;
+a cold rewrite is not new input. Reply size is the median recorded output. Both
+prompt and reply remain in later context. Missing incremental geometry leaves
+ping size unresolved. Recorded requests
 use their own provider, model, tier, speed, geography and context size.
 
 The shared window replay applies the same recommended compaction controls used

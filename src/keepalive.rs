@@ -274,18 +274,19 @@ impl Replayer<'_> {
                             let p = message(next).next()?;
                             let full = p.usage.read? + p.usage.write?;
                             offset += pre - full;
-                            context = Some(full);
+                            context = Some((full, 0));
                         } else {
-                            context = Some(pre);
+                            context = Some((pre, 0));
                         }
                     } else {
                         offset = 0;
-                        context = e.post_tokens;
+                        context = e.post_tokens.map(|n| (n, 0));
                     }
                 }
                 Tick::Ping(r, n, final_period) => {
                     let part = message(r).next_back()?;
-                    let prefix = context? + offset;
+                    let (input, reply) = context?;
+                    let prefix = input + reply + offset;
                     let id = format!("keepalive:{}:{n}", r.id);
                     requests.push(Request {
                         id: id.clone(),
@@ -298,7 +299,7 @@ impl Replayer<'_> {
                         ..r.clone()
                     });
                     ping_ids.insert(id, final_period);
-                    offset += self.new;
+                    offset += self.new + self.output;
                 }
                 Tick::Request(r) => {
                     let mut adjusted = self
@@ -317,7 +318,7 @@ impl Replayer<'_> {
                         let input = p.usage.input;
                         if p.kind == PartKind::Message
                             && offset != 0
-                            && matches!((context, input), (Some(before), Some(now)) if now < before)
+                            && matches!((context, input), (Some((before, _)), Some(now)) if now < before)
                         {
                             return None;
                         }
@@ -327,30 +328,36 @@ impl Replayer<'_> {
                                 return None;
                             }
                             p.usage.input = Some(input? + offset);
-                            p.usage.write = Some(p.usage.write? + offset);
-                            match self.lifetime.cache {
-                                Cache::Codex | Cache::CodexLong => match cache? {
-                                    Cache::CodexLong => {
-                                        p.usage.write12h = Some(p.usage.write12h? + offset)
+                            let ordinary_summary = p.kind == PartKind::Compaction
+                                && p.usage.read == Some(0)
+                                && p.usage.write == Some(0);
+                            if !ordinary_summary {
+                                let observed = observed_ttl(p);
+                                p.usage.write = Some(p.usage.write? + offset);
+                                match self.lifetime.cache {
+                                    Cache::Codex | Cache::CodexLong => match cache? {
+                                        Cache::CodexLong => {
+                                            p.usage.write12h = Some(p.usage.write12h? + offset)
+                                        }
+                                        _ => p.usage.write30m = Some(p.usage.write30m? + offset),
+                                    },
+                                    Cache::Claude(_) => {
+                                        let ttl = if p.kind == PartKind::Compaction {
+                                            session.ttls.subagent.or(observed)?
+                                        } else {
+                                            session.ttls.main?
+                                        };
+                                        let write = p.usage.write?;
+                                        p.usage.write5m =
+                                            Some(if ttl == Ttl::FiveMinutes { write } else { 0 });
+                                        p.usage.write1h =
+                                            Some(if ttl == Ttl::OneHour { write } else { 0 });
                                     }
-                                    _ => p.usage.write30m = Some(p.usage.write30m? + offset),
-                                },
-                                Cache::Claude(_) => {
-                                    let ttl = if p.kind == PartKind::Compaction {
-                                        session.ttls.subagent?
-                                    } else {
-                                        session.ttls.main?
-                                    };
-                                    let write = p.usage.write?;
-                                    p.usage.write5m =
-                                        Some(if ttl == Ttl::FiveMinutes { write } else { 0 });
-                                    p.usage.write1h =
-                                        Some(if ttl == Ttl::OneHour { write } else { 0 });
                                 }
                             }
                         }
                         if p.kind == PartKind::Message {
-                            context = input;
+                            context = input.zip(p.usage.output);
                         }
                         if p.kind == PartKind::Compaction {
                             offset = 0;
@@ -479,9 +486,11 @@ impl Replayer<'_> {
                     ));
                 } else if p.kind == PartKind::Compaction {
                     cache.clear();
-                    if let Cache::Claude(_) = self.lifetime.cache {
+                    if let Cache::Claude(_) = self.lifetime.cache
+                        && p.usage.write != Some(0)
+                    {
                         let write = p.usage.write?;
-                        let ttl = session.ttls.subagent?;
+                        let ttl = session.ttls.subagent.or_else(|| observed_ttl(p))?;
                         billed = Cow::Owned(BillingPart {
                             usage: Usage {
                                 write5m: Some(if ttl == Ttl::FiveMinutes { write } else { 0 }),
@@ -523,6 +532,68 @@ impl Replayer<'_> {
     }
 }
 
+/// New prompt input from consecutive un-compacted turns, excluding the preceding reply.
+fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
+    let mut boundaries: HashMap<&str, Vec<Millis>> = HashMap::new();
+    for e in scan
+        .cache_context
+        .boundaries
+        .iter()
+        .chain(&scan.events)
+        .filter(|e| e.kind == EventKind::Compaction)
+    {
+        for session in
+            std::iter::once(e.session.as_str()).chain(e.origins.iter().map(|o| o.session.as_str()))
+        {
+            boundaries.entry(session).or_default().push(e.time);
+        }
+    }
+    for times in boundaries.values_mut() {
+        times.sort_unstable();
+        times.dedup();
+    }
+    let mut previous: HashMap<&str, &Request> = HashMap::new();
+    let mut growth = vec![];
+    for &r in requests {
+        let before = previous.insert(&r.session, r);
+        let Some(a) = before else {
+            continue;
+        };
+        let mut parts = message(a);
+        let (Some(ap), None) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let mut parts = message(r);
+        let (Some(p), None) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if a.provider != r.provider
+            || ap.model != p.model
+            || ap.speed != p.speed
+            || ap.geo != p.geo
+            || a.parts
+                .iter()
+                .chain(&r.parts)
+                .any(|p| p.kind == PartKind::Compaction)
+            || boundaries.get(r.session.as_str()).is_some_and(|times| {
+                times
+                    .get(times.partition_point(|&time| time <= a.time))
+                    .is_some_and(|&time| time <= r.time)
+            })
+        {
+            continue;
+        }
+        if let (Some(before), Some(after), Some(reply)) =
+            (ap.usage.input, p.usage.input, ap.usage.output)
+            && let Some(new) = after.checked_sub(before).and_then(|n| n.checked_sub(reply))
+            && new >= 0
+        {
+            growth.push(new);
+        }
+    }
+    median(growth)
+}
+
 fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck> {
     let mut requests: Vec<_> = options
         .scan
@@ -556,14 +627,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         }),
     };
     let interval = lifetime.as_ref().map(|l| l.ms / 6 * 5);
-    let new_tokens = median(
-        main.iter()
-            .filter_map(|r| {
-                let p = message(r).next_back()?;
-                Some(p.usage.input? - p.usage.read?)
-            })
-            .collect(),
-    );
+    let new_tokens = ping_input(&requests, options.scan);
     let output_tokens = median(
         main.iter()
             .filter_map(|r| message(r).next_back()?.usage.output)
@@ -787,12 +851,13 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .collect();
     // A partial keepalive replay cannot be compared to an all-session idle aggregate.
     let idle_savings = if profile.harness == Harness::Claude {
-        idle_checks
-            .iter()
-            .filter(|c| c.base.recommended == Some(true))
-            .try_fold(0.0, |sum, c| {
-                Some(sum + (-c.after_recommendations.delta_usd?).max(0.0))
-            })
+        idle_checks.iter().try_fold(0.0_f64, |sum, c| {
+            let scenario = &c.after_recommendations;
+            if !scenario.applicable {
+                return Some(sum);
+            }
+            Some(sum + (-scenario.delta_usd?).max(0.0))
+        })
     } else {
         None
     };
@@ -802,6 +867,9 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .enumerate()
         .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd));
     let comparable = unpriced == 0 && (profile.harness == Harness::Codex || idle_savings.is_some());
+    if profile.harness == Harness::Claude && idle_savings.is_none() {
+        uncertainty.push("an applicable idle-compaction alternative is unpriced, so the aggregate winner is unresolved".into());
+    }
     let margin = best
         .filter(|_| comparable)
         .map(|(_, s)| s.savings_usd - alternative);
@@ -866,17 +934,45 @@ mod tests {
     const HOUR: Millis = 60 * MINUTE;
 
     fn scan(profile: Profile, requests: Vec<Request>) -> Scan {
+        let cache_context = requests
+            .iter()
+            .find(|r| message(r).next().is_some())
+            .map(|source| {
+                let mut before = source.clone();
+                before.id = "ping-size-before".into();
+                before.session = "ping-size".into();
+                before.time = -2 * MINUTE;
+                before.end_time = before.time;
+                let cache = match source.harness {
+                    Harness::Claude => Cache::Claude(Ttl::OneHour),
+                    Harness::Codex => Cache::Codex,
+                };
+                before.parts = vec![BillingPart {
+                    usage: cache.usage(19_000, 1000, 0, 500),
+                    ..source.parts[0].clone()
+                }];
+                let mut after = before.clone();
+                after.id = "ping-size-after".into();
+                after.time = -MINUTE;
+                after.end_time = after.time;
+                after.parts[0].usage = cache.usage(20_000, 1500, 0, 500);
+                CacheContext {
+                    requests: vec![before, after],
+                    ..CacheContext::default()
+                }
+            })
+            .unwrap_or_default();
         Scan {
             snapshot_started_at: String::new(),
             snapshot_finished_at: String::new(),
-            since: None,
+            since: Some(0),
             roots: vec![],
             profiles: vec![profile],
             snapshots: vec![],
             requests,
             events: vec![],
             exposure: ExposureScan::default(),
-            cache_context: CacheContext::default(),
+            cache_context,
             coverage: ScanCoverage::default(),
         }
     }
@@ -913,7 +1009,7 @@ mod tests {
             windows: &[],
             summaries: &[],
             estimates: &IndexMap::new(),
-            since: None,
+            since: scan.since,
             now,
         });
         assert_eq!(checks.len(), 1);
@@ -1274,9 +1370,9 @@ mod tests {
         );
         assert_eq!(run.pings.len(), 4);
         // The second gap's two pings read the preceding gap's 2,000 added tokens.
-        near(run.pings[2] - run.pings[0], 2000.0 * 0.2 / 1e6);
-        near(run.pings[3] - run.pings[1], 2000.0 * 0.2 / 1e6);
-        assert_eq!(run.reads["a:14400000"], 105_000);
+        near(run.pings[2] - run.pings[0], 3000.0 * 0.2 / 1e6);
+        near(run.pings[3] - run.pings[1], 3000.0 * 0.2 / 1e6);
+        assert_eq!(run.reads["a:14400000"], 107_000);
     }
 
     #[test]
@@ -1294,7 +1390,7 @@ mod tests {
             let (short_base, short_pinged) =
                 replay(vec![turn("a", 0), turn("a", 2 * HOUR)], vec![], 2);
             let mut expected = original.parts[0].clone();
-            expected.usage = Cache::Claude(Ttl::OneHour).usage(0, 103_000, 0, 500);
+            expected.usage = Cache::Claude(Ttl::OneHour).usage(0, 104_000, 0, 500);
             let mut before = original.parts[0].clone();
             before.usage = Cache::Claude(Ttl::OneHour).usage(0, 101_000, 0, 500);
             let cost = |p: &BillingPart| price_part(&prices(), &original, p).total_usd.unwrap();
@@ -1350,7 +1446,7 @@ mod tests {
         b.end_time = b.time;
         let (base, pinged) = replay(vec![a, b.clone()], vec![], 2);
         let mut expected = b.parts[0].clone();
-        expected.usage = Cache::Claude(Ttl::OneHour).usage(101_000, 0, 0, 500);
+        expected.usage = Cache::Claude(Ttl::OneHour).usage(102_000, 0, 0, 500);
         let mut before = b.parts[0].clone();
         before.usage = Cache::Claude(Ttl::OneHour).usage(0, 99_000, 0, 500);
         near(
@@ -1375,7 +1471,7 @@ mod tests {
         idle.pre_tokens = Some(101_000);
         let (base, pinged) = replay(vec![turn("a", 0), returned], vec![idle], 2);
         assert_eq!(base.reads["a:7200000"], 0);
-        assert_eq!(pinged.reads["a:7200000"], 103_000);
+        assert_eq!(pinged.reads["a:7200000"], 103_500);
         assert!(base.recorded > pinged.recorded);
     }
 
@@ -1508,7 +1604,114 @@ mod tests {
             2,
         );
         assert_eq!(base.reads["a:9540000"], 0);
-        assert_eq!(pinged.reads["a:9540000"], 103_000);
+        assert_eq!(pinged.reads["a:9540000"], 104_000);
+    }
+
+    #[test]
+    fn cold_cache_rewrites_are_not_new_ping_input() {
+        let requests = (0..4)
+            .map(|i| {
+                let mut r = turn("a", i * 2 * HOUR);
+                r.parts[0].usage = claude_usage(ClaudeUsage {
+                    read: 0,
+                    write: 100_000 + i * 1500,
+                    output: 500,
+                    ttl: Ttl::OneHour,
+                    input: 0,
+                });
+                r
+            })
+            .collect();
+        let mut scan = scan(one_hour(), requests);
+        scan.cache_context.requests.clear();
+        assert_eq!(run(&scan, 8 * HOUR).ping_input_tokens, Some(1000));
+        scan.requests.truncate(1);
+        let check = run(&scan, 8 * HOUR);
+        assert_eq!(check.ping_input_tokens, None);
+        assert_eq!(check.base.recommended, None);
+    }
+
+    #[test]
+    fn an_unpriced_applicable_idle_policy_remains_an_unknown_alternative() {
+        let mut scan = scan(one_hour(), vec![turn("a", 0), turn("a", 2 * HOUR)]);
+        for r in &mut scan.requests {
+            r.client = Some("cli".into());
+            r.source = Some("repl_main_thread".into());
+        }
+        let catalog = prices();
+        let estimates = IndexMap::new();
+        let idle = crate::idle::idle_checks(&crate::idle::IdleOptions {
+            scan: &scan,
+            catalog: &catalog,
+            summaries: &[],
+            estimates: &estimates,
+            ttls: &[],
+            windows: &[],
+            since: Some(0),
+            now: 3 * HOUR,
+        });
+        assert!(idle[0].after_recommendations.applicable);
+        assert_eq!(idle[0].after_recommendations.delta_usd, None);
+        let refs: Vec<_> = idle.iter().collect();
+        let check = keepalive_checks(&KeepaliveOptions {
+            scan: &scan,
+            catalog: &catalog,
+            ttls: &[],
+            windows: &[],
+            summaries: &[],
+            estimates: &estimates,
+            idle: &refs,
+            since: Some(0),
+            now: 3 * HOUR,
+        })
+        .remove(0);
+        assert_eq!(check.unpriced, 0);
+        assert!(!check.scenarios.is_empty());
+        assert_eq!(check.idle_compaction_savings_usd, None);
+        assert_eq!(check.margin_usd, None);
+        assert_eq!(check.base.recommended, None);
+        assert!(
+            check
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s.contains("idle-compaction alternative is unpriced"))
+        );
+    }
+
+    #[test]
+    fn carried_context_uses_the_recorded_compactions_ordinary_input_rate() {
+        let first = turn("a", 0);
+        let mut summary = turn("a", 80 * MINUTE);
+        summary.agent = Agent::Subagent;
+        summary.parts[0].kind = PartKind::Compaction;
+        summary.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 0,
+            write: 0,
+            input: 101_500,
+            output: 500,
+            ttl: Ttl::FiveMinutes,
+        });
+        let mut returned = turn("a", 2 * HOUR);
+        returned.parts[0].usage = claude_usage(ClaudeUsage {
+            read: 20_000,
+            write: 1000,
+            input: 0,
+            output: 500,
+            ttl: Ttl::OneHour,
+        });
+        let (_, pinged) = replay(
+            vec![first.clone(), summary.clone(), returned.clone()],
+            vec![boundary("a", 81 * MINUTE, Some(20_000))],
+            2,
+        );
+        summary.parts[0].usage.input = Some(103_000);
+        returned.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(21_000, 1500, 0, 500);
+        let expected: f64 = [&first, &summary, &returned]
+            .into_iter()
+            .map(|r| price_part(&prices(), r, &r.parts[0]).total_usd.unwrap())
+            .sum();
+        near(pinged.recorded, expected);
     }
 
     #[test]

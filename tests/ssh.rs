@@ -549,6 +549,11 @@ fn background_controls_and_estimates_keep_their_remote_history() {
                 if record["type"] == "session_meta" || record["type"] == "turn_context" {
                     record["payload"]["cwd"] = workspace.to_str().unwrap().into();
                 }
+                record["timestamp"] = record["timestamp"]
+                    .as_str()
+                    .unwrap()
+                    .replace("T00:00:", "T00:02:")
+                    .into();
                 format!("{record}\n")
             })
             .collect();
@@ -643,7 +648,9 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert!(
         background(local)
             .iter()
-            .all(|c| c["current"] == false && c["action"] == "keep")
+            .all(|c| c["current"] == false && c["action"] == "keep"),
+        "{:?}",
+        background(local)
     );
     let checks = background(remote);
     assert_eq!(checks.len(), 4);

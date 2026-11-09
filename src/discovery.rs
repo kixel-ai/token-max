@@ -822,7 +822,15 @@ pub fn discover_codex_controls(
             },
         ];
         let mut base = codex_background(&base_scopes)?;
-        let mut marker_selection = false;
+        let legacy_selection =
+            user.contains_key("profile") || !members(user.get("profiles")).is_empty();
+        if legacy_selection {
+            unresolved_background(
+                &mut base,
+                "legacy profile configuration exists; current Codex removed it in 0.134.0, but installed version and launch selection are unresolved",
+            );
+        }
+        let mut marker_selection = legacy_selection;
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
@@ -950,7 +958,11 @@ pub fn discover_codex_controls(
             if marker_selection {
                 unresolved_background(
                     &mut controls,
-                    "named profiles can change project root discovery; --profile and CLI/session selection are not recorded",
+                    if legacy_selection {
+                        "legacy profile configuration exists; installed version and launch selection are unresolved"
+                    } else {
+                        "named profiles can change project root or trust discovery; --profile and CLI/session selection are not recorded"
+                    },
                 );
             }
             if trust == Some("untrusted") {
@@ -2343,6 +2355,18 @@ mod tests {
             None,
             "parent checkout trust is not worktree trust"
         );
+        write(
+            w.codex.join("config.toml"),
+            "profile = 'quiet'\n[profiles.quiet.tui]\nauto_recap = false\n",
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        assert_eq!(p.background[0].value, None);
+        assert!(p.background[0].reason.contains("legacy profile"));
     }
 
     #[test]

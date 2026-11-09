@@ -726,6 +726,13 @@ mod tests {
         assert_eq!(checks[2].base.savings_usd, None);
         assert_eq!(checks[2].generations, None);
         assert_eq!(checks[2].directories, [None]);
+        s.cache_context.requests = std::mem::take(&mut s.requests);
+        let empty = run(&s, 0.0);
+        assert_eq!(empty.len(), 3);
+        assert!(empty.iter().all(|c| c.base.requests == 0));
+        assert_eq!(empty[0].base.current, Some(true));
+        assert_eq!(empty[0].generations, Some(0));
+        assert_eq!(empty[0].directories, [Some("/synthetic/a".into())]);
     }
 
     #[test]

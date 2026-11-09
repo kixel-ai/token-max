@@ -788,7 +788,7 @@ pub struct BackgroundCheck {
     pub generations: Option<u64>,
     /// Estimated cost of its requests over the window.
     pub cost: Cost,
-    /// Cache rewrites its cache reads avoided, which turning it off adds back.
+    /// Later input costs its cache reads avoided, including recaps and cache rewrites.
     pub lost_warming: Cost,
 }
 

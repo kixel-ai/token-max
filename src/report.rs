@@ -791,7 +791,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                     .map_or_else(|| "unknown".into(), |n| n.to_string()),
             );
             out.cost("Estimated request cost", &b.cost);
-            out.cost("Cache rewrites its reads avoided", &b.lost_warming);
+            out.cost("Later input costs its reads avoided", &b.lost_warming);
         }
         CheckResult::Ttl(t) => {
             out.field(

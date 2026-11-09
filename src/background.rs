@@ -79,8 +79,8 @@ struct TurnEnd<'a> {
     request: &'a Request,
     /// Whether it came from the interactive terminal, where suggestions and recaps run.
     interactive: bool,
-    /// Main-conversation responses in the session so far, including this one.
-    responses: usize,
+    /// Whether the enabled suggestion feature can run after this turn.
+    suggestion: bool,
     /// Whether a recap can run after this turn, including its spacing from earlier recaps.
     recap: bool,
     /// The cache lifetime the last response wrote, else the current profile's lifetime.
@@ -89,12 +89,36 @@ struct TurnEnd<'a> {
     next: Option<&'a Request>,
 }
 
+impl TurnEnd<'_> {
+    /// The latest live-prefix read when the selected background features run.
+    fn cache_touch(&self, suggestions: bool, recaps: bool) -> Millis {
+        let mut touch = self.request.time;
+        let lifetime = ttl_milliseconds(self.ttl);
+        if suggestions && self.suggestion && self.request.end_time - touch < lifetime {
+            touch = self.request.end_time;
+        }
+        let recap_time = self.request.end_time + RECAP_DELAY;
+        if recaps && self.recap && recap_time - touch < lifetime {
+            touch = recap_time;
+        }
+        touch
+    }
+}
+
 /// Every turn-ending main-conversation response of a Claude profile, in session order,
 /// counting responses and prompts from before the scanned window too.
 fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
     if profile.harness != Harness::Claude {
         return vec![];
     }
+    let enabled = |feature| {
+        profile
+            .background
+            .iter()
+            .any(|c| c.feature == feature && c.value)
+    };
+    let suggestions = enabled(BackgroundFeature::PromptSuggestions);
+    let recaps = enabled(BackgroundFeature::SessionRecaps);
     let mut sessions: indexmap::IndexMap<&str, Vec<&'a Request>> = indexmap::IndexMap::new();
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
         if r.harness == Harness::Claude
@@ -133,7 +157,12 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
                     .as_deref()
                     .is_none_or(|s| s.starts_with("repl_main_thread"));
             let turns = prompts.iter().filter(|&&t| t <= r.time).count();
-            let recap = interactive
+            let cold = last_message(r)
+                .and_then(uncached)
+                .is_some_and(|(ordinary, _, write, output)| ordinary + output + write > COLD);
+            let suggestion = suggestions && interactive && i >= 1 && !cold;
+            let recap = recaps
+                && interactive
                 && turns >= 3
                 && turns >= recap_turn + 2
                 && prompt.is_some_and(|p| p - r.end_time >= RECAP_DELAY);
@@ -143,7 +172,7 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
             result.push(TurnEnd {
                 request: r,
                 interactive,
-                responses: i + 1,
+                suggestion,
                 recap,
                 ttl: last_message(r)
                     .and_then(observed_ttl)
@@ -185,7 +214,12 @@ fn fork_cost(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature) -
         return unknown_cost("the turn's last response has no recorded usage");
     };
     let fresh = ordinary + last + prompt;
-    let cached = r.end_time - r.time + delay < ttl_milliseconds(end.ttl);
+    let touch = if feature == BackgroundFeature::SessionRecaps {
+        end.cache_touch(true, false)
+    } else {
+        r.time
+    };
+    let cached = r.end_time + delay - touch < ttl_milliseconds(end.ttl);
     let usage = Usage {
         input: Some(read + write + fresh),
         output: Some(output),
@@ -206,19 +240,18 @@ fn fork_cost(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature) -
     .total()
 }
 
-/// The rewrite the next request would pay if a recap had not refreshed the cache.
-fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
+/// The rewrite the next request would pay without this feature's cache refreshes.
+fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature) -> Cost {
     let Some(next) = end.next else {
         return zero_cost();
     };
     let lifetime = ttl_milliseconds(end.ttl);
-    let recap_time = end.request.end_time + RECAP_DELAY;
-    // A read can refresh only a live prefix. The original touch precedes streamed output;
-    // the refresh happens when the recap starts, not when that output finished.
-    if recap_time - end.request.time >= lifetime
-        || next.time - end.request.time < lifetime
-        || next.time - recap_time >= lifetime
-    {
+    let on = end.cache_touch(true, true);
+    let off = end.cache_touch(
+        feature != BackgroundFeature::PromptSuggestions,
+        feature != BackgroundFeature::SessionRecaps,
+    );
+    if next.time - on >= lifetime || next.time - off < lifetime {
         return zero_cost();
     }
     let Some(part) = next
@@ -229,17 +262,16 @@ fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
     else {
         return unknown_cost("the request after the recap has no recorded usage");
     };
-    // Only reads of the cache the recap refreshed: same model, speed and provider, and no
-    // more than the prefix it read.
-    let Some(recap) = last_message(end.request) else {
+    // Only reads of this turn's prefix in the same model, speed and provider cohort.
+    let Some(source) = last_message(end.request) else {
         return unknown_cost("the turn's last response has no recorded usage");
     };
     if (&part.model, &part.speed, &next.provider)
-        != (&recap.model, &recap.speed, &end.request.provider)
+        != (&source.model, &source.speed, &end.request.provider)
     {
         return zero_cost();
     }
-    let prefix = match (recap.usage.read, recap.usage.write) {
+    let prefix = match (source.usage.read, source.usage.write) {
         (Some(read), Some(write)) => read + write,
         _ => return unknown_cost("the turn's last response has no recorded cache usage"),
     };
@@ -258,6 +290,44 @@ fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
     }
 }
 
+/// The extra ordinary input a recap would pay without a suggestion refreshing its prefix.
+fn recap_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
+    let time = end.request.end_time + RECAP_DELAY;
+    let lifetime = ttl_milliseconds(end.ttl);
+    if !end.recap
+        || time - end.cache_touch(true, false) >= lifetime
+        || time - end.request.time < lifetime
+    {
+        return zero_cost();
+    }
+    let Some(part) = last_message(end.request) else {
+        return unknown_cost("the turn's last response has no recorded usage");
+    };
+    let (Some(read), Some(write), Some(rates)) = (
+        part.usage.read,
+        part.usage.write,
+        unit_rates(catalog, end.request, part),
+    ) else {
+        return unknown_cost("the recap's cached prefix has no priced usage");
+    };
+    let usd = (read + write) as f64 * (rates.ordinary - rates.read);
+    Cost {
+        known_usd: usd,
+        total_usd: Some(usd),
+        ..zero_cost()
+    }
+}
+
+/// Later input costs avoided by this feature's cache reads, with other features held constant.
+fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature) -> Cost {
+    let recap = if feature == BackgroundFeature::PromptSuggestions {
+        recap_warming(catalog, end)
+    } else {
+        zero_cost()
+    };
+    add_costs(&[request_warming(catalog, end, feature), recap])
+}
+
 /// The estimated (on, off) cost of each turn where the feature would have run.
 fn generations(
     catalog: &Catalog,
@@ -268,24 +338,22 @@ fn generations(
     for end in ends.iter().filter(|e| e.interactive) {
         match feature {
             BackgroundFeature::PromptSuggestions => {
-                if end.responses < 2 {
+                if !end.suggestion {
                     continue;
                 }
-                let cold = last_message(end.request).and_then(uncached).map(
-                    |(ordinary, _, write, output)| {
-                        ordinary + output > COLD || ordinary + output + write > COLD
-                    },
-                );
-                if cold == Some(true) {
-                    continue;
-                }
-                result.push((fork_cost(catalog, end, feature), zero_cost()));
+                result.push((
+                    fork_cost(catalog, end, feature),
+                    lost_warming(catalog, end, feature),
+                ));
             }
             BackgroundFeature::SessionRecaps => {
                 if !end.recap {
                     continue;
                 }
-                result.push((fork_cost(catalog, end, feature), lost_warming(catalog, end)));
+                result.push((
+                    fork_cost(catalog, end, feature),
+                    lost_warming(catalog, end, feature),
+                ));
             }
             BackgroundFeature::GoalCheckIns | BackgroundFeature::AutoRecaps => {}
         }
@@ -402,7 +470,7 @@ fn check(
                 "the client does not log these requests; each is estimated at a recorded turn where it would have run",
                 "a fork sends the conversation's prefix as a cache read before expiry or ordinary input after expiry, plus the last response and its instruction as new input, without writing cache",
                 "recaps require two new user turns after the previous modeled recap, including recaps before the analysis window",
-                "a recap that reads a live prefix refreshes it; a later request after the original expiry but before the refresh expires would rewrite that prefix with the feature off",
+                "live-prefix reads by enabled suggestions and recaps refresh the cache; turning one feature off keeps the other's modeled requests and refreshes, including any extra recap input or later cache rewrite",
                 "uses are not recorded, so the whole cost counts as one use against --max-cost-per-use",
             ]
             .map(String::from)
@@ -679,6 +747,59 @@ mod tests {
             let c = &run(&s, 1.0)[0];
             assert_eq!(c.generations, Some(1));
             assert!((c.lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn suggestion_refreshes_keep_recaps_warm_and_reduce_recaps_warming_credit() {
+        let features = [
+            (BackgroundFeature::PromptSuggestions, true),
+            (BackgroundFeature::SessionRecaps, true),
+        ];
+        let mut s = scan(
+            &features,
+            vec![
+                response(0, 100_000),
+                response(1, 100_000),
+                response(2, 100_000),
+                response(9, 100_000),
+            ],
+            &[0, 1, 2, 9],
+        );
+        let warm_recap = run(&s, 1.0)[1].cost.total_usd.unwrap();
+        // The suggestion at minute five keeps the prefix warm for the recap at eight.
+        s.requests[2].end_time = 5 * MINUTE;
+        let checks = run(&s, 1.0);
+        assert!((checks[1].cost.total_usd.unwrap() - warm_recap).abs() < 1e-12);
+        // The prompt at nine is still inside the suggestion's lifetime without a recap.
+        assert_eq!(checks[1].lost_warming.total_usd, Some(0.0));
+        // Without suggestions the recap loses its read, and the next request loses warming.
+        let rates = unit_rates(&prices(), &s.requests[2], &s.requests[2].parts[0]).unwrap();
+        let extra =
+            100_100.0 * (rates.ordinary - rates.read) + 100_000.0 * (rates.write5m - rates.read);
+        assert!((checks[0].lost_warming.total_usd.unwrap() - extra).abs() < 1e-12);
+    }
+
+    #[test]
+    fn recap_warming_starts_when_the_other_features_refresh_expires() {
+        for (next, reads) in [(7, 0), (8, 100_000), (11, 0)] {
+            let mut s = scan(
+                &[
+                    (BackgroundFeature::PromptSuggestions, true),
+                    (BackgroundFeature::SessionRecaps, true),
+                ],
+                vec![
+                    response(0, 100_000),
+                    response(1, 100_000),
+                    response(2, 100_000),
+                    response(next, 100_000),
+                ],
+                &[0, 1, 2, next],
+            );
+            s.requests[2].end_time = 3 * MINUTE;
+            let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
+            let expected = reads as f64 * (rates.write5m - rates.read);
+            assert!((run(&s, 1.0)[1].lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
         }
     }
 

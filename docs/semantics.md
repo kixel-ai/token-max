@@ -595,10 +595,13 @@ streaming output and the three-minute recap delay can exhaust its lifetime.
 The recorded write lifetime takes precedence over the profile's current TTL,
 with five minutes as the default. Its new input is the last response's uncached
 input and output plus the instruction (about 350 tokens for a suggestion, 100
-for a recap), and its output is assumed to be 50 or 100 tokens. A recap that
-reads a live prefix refreshes it at the recap's start. If the next request came
-after the original expiry but before the refreshed expiry, turning recaps off
-would make it rewrite that prefix, which is subtracted from the saving. Only reads
+for a recap), and its output is assumed to be 50 or 100 tokens. Each feature's
+comparison keeps the other feature's current state. A suggestion that reads a
+live prefix refreshes it at response completion, which can keep a later recap
+warm. A recap that reads a live prefix refreshes it at the recap's start. When
+turning a feature off expires the prefix before the other feature or the next
+recorded request reads it, the extra ordinary recap input or cache rewrite is
+subtracted from the saving as `lostWarming`. Only reads
 on the same model, speed and provider count, up to the prefix the recap read. Turns without
 recorded usage are scaled from the priced ones, and with none priced the check
 is unknown.

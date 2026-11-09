@@ -7,11 +7,12 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::context::{SYNCED_SKILLS, config_patch, control_text, settings_patch, typed_only};
+use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, Control, Cost, Coverage, EstimateEvidence, Evidence,
-    Harness, Millis, PeriodStatus, Profile, Report, RequestEvidence, Scalar, Ttl, UsageEstimate,
-    Verdict,
+    Harness, KeepaliveCheck, Millis, PeriodStatus, Profile, Report, RequestEvidence, Scalar, Ttl,
+    UsageEstimate, Verdict,
 };
 use crate::prices::add_costs;
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -184,6 +185,7 @@ enum Setting<'a> {
     Speed(&'a str),
     Toggle(bool),
     Cap(Millis),
+    Keepalive(&'a str),
 }
 
 /// The fields every check shares, whatever its value type.
@@ -285,6 +287,9 @@ fn common(result: &CheckResult) -> Common<'_> {
             &[],
             |b| Setting::Toggle(*b),
         ),
+        CheckResult::Keepalive(c) => base("keepalive", c.bucket, &c.base, &[], |s: &String| {
+            Setting::Keepalive(s)
+        }),
     }
 }
 
@@ -325,6 +330,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Cap(ms)) => format!("{ms} ms"),
+        Some(Setting::Keepalive(s)) => s.into(),
     }
 }
 
@@ -338,6 +344,7 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Cap(ms)) => duration(ms),
+        Some(Setting::Keepalive(s)) => s.into(),
     }
 }
 
@@ -947,6 +954,42 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 ),
             );
         }
+        CheckResult::Keepalive(k) => {
+            out.field(
+                "Cache lifetime",
+                &match (k.lifetime_ms, k.interval_ms) {
+                    (Some(l), Some(i)) => {
+                        format!(
+                            "{}; pings every {}",
+                            keepalive_duration(l),
+                            keepalive_duration(i)
+                        )
+                    }
+                    _ => "unknown".into(),
+                },
+            );
+            out.field(
+                "Ping size",
+                &format!(
+                    "{} prompt and {} reply tokens; prompt size from consecutive context growth and reply size from median recorded output",
+                    or_unknown(k.ping_input_tokens),
+                    or_unknown(k.ping_output_tokens)
+                ),
+            );
+            out.field(
+                "Idle periods",
+                &format!(
+                    "{} returns after a gap longer than the interval; {} final periods; {} unpriced",
+                    k.returns, k.finals, k.unpriced
+                ),
+            );
+            out.field(
+                "Idle compaction saving",
+                &k.idle_compaction_savings_usd
+                    .map_or_else(|| "unknown or unsupported".into(), usd),
+            );
+            out.field("Best cap over best alternative", &estimate(k.margin_usd));
+        }
         CheckResult::Speed(s) => {
             out.field("Standard-speed replacement", &s.replacement);
             out.field(
@@ -1191,6 +1234,23 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
             }
         }
         CheckResult::BashCap(b) => out.cost("Cache misses after long waits", &b.waits.miss_cost),
+        CheckResult::Keepalive(k) => {
+            for s in &k.scenarios {
+                out.field(
+                    &format!("Cap {}", keepalive_duration(s.cap_ms)),
+                    &format!(
+                        "{} return pings and {} final pings cost {}; {} rescued returns; recorded work saves {}; net {}; {} if final sessions closed at once",
+                        s.pings,
+                        s.final_pings,
+                        usd(s.ping_cost_usd),
+                        s.rescued,
+                        usd(s.avoided_usd),
+                        usd(s.savings_usd),
+                        usd(s.closed_savings_usd)
+                    ),
+                );
+            }
+        }
         CheckResult::Speed(s) => {
             out.cost("Observed response-tier premium", &s.observed.premium);
             out.cost(
@@ -1292,7 +1352,8 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         CheckResult::Idle(_)
         | CheckResult::Speed(_)
         | CheckResult::Background(_)
-        | CheckResult::BashCap(_) => {}
+        | CheckResult::BashCap(_)
+        | CheckResult::Keepalive(_) => {}
     }
     out.notes("Assumption", r.assumptions);
     out.notes("Uncertainty", r.uncertainty);
@@ -1318,6 +1379,14 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
                 ),
                 (Some(ttl), _) => format!("The cap is under the {} cache TTL.", ttl.as_str()),
             };
+        }
+        CheckResult::Keepalive(_) => {
+            return if r.recommended.is_none() {
+                "The cache lifetime, ping size or too many idle periods could not be priced."
+            } else {
+                "Lowest estimated aggregate net cost among no pings, each cap and recommended idle compaction; final periods ping for the full cap."
+            }
+            .into();
         }
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
@@ -1371,6 +1440,7 @@ fn setting_name(result: &CheckResult) -> String {
         }
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
+        CheckResult::Keepalive(_) => "Keepalive pings".into(),
         CheckResult::BashCap(_) => "Bash timeout cap".into(),
         CheckResult::Background(b) => match b.feature {
             BackgroundFeature::PromptSuggestions => "Prompt suggestions".into(),
@@ -1392,6 +1462,86 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
     }
 }
 
+/// A dollar amount per 30 days at the window's rate.
+fn per_month(usd: f64, since: Option<Millis>, until: Option<Millis>) -> String {
+    match (since, until) {
+        (Some(from), Some(to)) if to > from => about((usd * 30.0 * DAY) / (to - from) as f64),
+        _ => about(usd),
+    }
+}
+
+/// Why keepalive pings stay off.
+fn keepalive_keep(k: &KeepaliveCheck, r: &Common<'_>) -> String {
+    let interval = k.interval_ms.map(keepalive_duration).unwrap_or_default();
+    match k.margin_usd {
+        Some(m) => format!(
+            "Pinging idle sessions every {interval} would cost {} more than {}.",
+            per_month(-m, r.since, r.until),
+            if k.idle_compaction_savings_usd.is_some_and(|s| s > 0.0) {
+                "idle compaction"
+            } else {
+                "leaving them idle"
+            }
+        ),
+        None => format!(
+            "No session sat idle past its {} cache and came back, so pings would only add cost.",
+            k.lifetime_ms.map(keepalive_duration).unwrap_or_default()
+        ),
+    }
+}
+
+/// Why a keepalive check gives no actionable verdict.
+fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
+    if r.recommended == Some(Setting::Keepalive("off")) {
+        return keepalive_keep(k, r);
+    }
+    if let Some(Setting::Keepalive(policy)) = r.recommended {
+        return format!(
+            "Pinging idle sessions {policy} would save {}, but {}.",
+            r.monthly_savings_usd.map_or_else(
+                || per_month(r.savings_usd.unwrap_or(0.0), r.since, r.until),
+                about
+            ),
+            r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
+        );
+    }
+    if k.lifetime_ms.is_none() {
+        "The main cache TTL is unknown, so pings could not be priced.".into()
+    } else if k.ping_input_tokens.is_none() || k.ping_output_tokens.is_none() {
+        "No consecutive request geometry establishes a ping input size.".into()
+    } else if r.coverage.is_none_or(|c| c.priced == 0) {
+        "No idle period could be priced.".into()
+    } else if let (Some(best), Some(interval)) = (
+        k.scenarios
+            .iter()
+            .max_by(|a, b| a.savings_usd.total_cmp(&b.savings_usd)),
+        k.interval_ms,
+    ) {
+        if k.unpriced == 0 && k.idle_compaction_savings_usd.is_none() {
+            return format!(
+                "Pinging {} would {} {} compared with no pings, but idle compaction could not be priced.",
+                crate::keepalive::policy(interval, best.cap_ms),
+                if best.savings_usd > 0.0 {
+                    "save"
+                } else {
+                    "cost"
+                },
+                per_month(best.savings_usd.abs(), r.since, r.until)
+            );
+        }
+        let margin = k.margin_usd.unwrap_or(best.savings_usd);
+        format!(
+            "On fully priced sessions, pinging {} would {} {} compared with no pings, but {} unpriced periods leave the aggregate comparison unresolved.",
+            crate::keepalive::policy(interval, best.cap_ms),
+            if margin > 0.0 { "save" } else { "cost" },
+            per_month(margin.abs(), r.since, r.until),
+            k.unpriced,
+        )
+    } else {
+        "Too many idle periods could not be priced to tell whether pings pay off.".into()
+    }
+}
+
 /// One plain sentence on why a check could not reach a verdict.
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
@@ -1404,6 +1554,9 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             "{}, so the cap has nothing to compare with.",
             capitalize(&b.ttl_basis)
         );
+    }
+    if let CheckResult::Keepalive(k) = result {
+        return keepalive_unresolved(k, r);
     }
     if let Some(recommended) = r.recommended {
         return if Some(recommended) == r.current {
@@ -1469,7 +1622,10 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             }
             "Idle summaries or resumed sessions could not be priced.".into()
         }
-        CheckResult::Speed(_) | CheckResult::Background(_) | CheckResult::BashCap(_) => {
+        CheckResult::Speed(_)
+        | CheckResult::Background(_)
+        | CheckResult::BashCap(_)
+        | CheckResult::Keepalive(_) => {
             unreachable!("handled above")
         }
     }
@@ -1933,6 +2089,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 b.ttl.map_or("unknown", Ttl::as_str),
                 waits(b, r)
             ),
+            CheckResult::Keepalive(k) => format!("{head}. {}", keepalive_keep(k, r)),
             CheckResult::Idle(_) => format!(
                 "{head}. {}",
                 if r.current == Some(Setting::Idle(true)) {

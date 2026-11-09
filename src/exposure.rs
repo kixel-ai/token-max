@@ -2666,25 +2666,149 @@ fn mentions(text: &str) -> Vec<(usize, &str)> {
 /// Built-in commands, bundled skills, and their aliases reserve a synced skill's short name,
 /// even when unavailable. Source checked 2026-11-08: <https://code.claude.com/docs/en/commands>.
 fn claude_command(name: &str) -> bool {
-    const COMMANDS: &str =
-        "add-dir advisor agents allowed-tools android app artifact-capabilities artifact-
-        diagramming artifacts auto-mode-setup autocompact autofix-pr background batch bg
-        branch btw bug cd checkpoint checkup chrome claude-api claude-in-chrome clear
-        code-review color compact config context continue copy cost dataviz debug deep-
-        research design design-login design-sync desktop diff doctor effort exit export
-        fast feedback fewer-permission-prompts focus fork goal heapdump help hooks ide
-        import init insights install-github-app install-slack-app ios keybindings list-
-        agents login logout loop mcp memory mobile model new output-style passes
-        permissions plan plugin plugin-authoring powerup pr-comments privacy-settings
-        proactive quit radio rate-limit-options rc recap release-notes reload-plugins
-        reload-skills remote-control remote-env rename reset restart resume review rewind
-        routines run run-skill-generator sandbox schedule scroll-speed security-review
-        settings setup-bedrock setup-vertex share simplify skill-doctor skills slides
-        stats status statusline stickers stop subtask tasks team-onboarding teleport
-        terminal-setup theme tui ultraplan ultrareview undo update update-config upgrade
-        usage usage-credits verify vim voice web-setup workflow-authoring workflows";
+    const COMMANDS: &[&str] = &[
+        "add-dir",
+        "advisor",
+        "agents",
+        "allowed-tools",
+        "android",
+        "app",
+        "artifact-capabilities",
+        "artifact-diagramming",
+        "artifacts",
+        "auto-mode-setup",
+        "autocompact",
+        "autofix-pr",
+        "background",
+        "batch",
+        "bg",
+        "branch",
+        "btw",
+        "bug",
+        "cd",
+        "checkpoint",
+        "checkup",
+        "chrome",
+        "claude-api",
+        "claude-in-chrome",
+        "clear",
+        "code-review",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "continue",
+        "copy",
+        "cost",
+        "dataviz",
+        "debug",
+        "deep-research",
+        "design",
+        "design-login",
+        "design-sync",
+        "desktop",
+        "diff",
+        "doctor",
+        "effort",
+        "exit",
+        "export",
+        "fast",
+        "feedback",
+        "fewer-permission-prompts",
+        "focus",
+        "fork",
+        "goal",
+        "heapdump",
+        "help",
+        "hooks",
+        "ide",
+        "import",
+        "init",
+        "insights",
+        "install-github-app",
+        "install-slack-app",
+        "ios",
+        "keybindings",
+        "list-agents",
+        "login",
+        "logout",
+        "loop",
+        "mcp",
+        "memory",
+        "mobile",
+        "model",
+        "new",
+        "output-style",
+        "passes",
+        "peers",
+        "permissions",
+        "plan",
+        "plugin",
+        "plugin-authoring",
+        "powerup",
+        "pr-comments",
+        "privacy-settings",
+        "proactive",
+        "quit",
+        "radio",
+        "rate-limit-options",
+        "rc",
+        "recap",
+        "release-notes",
+        "reload-plugins",
+        "reload-skills",
+        "remote-control",
+        "remote-env",
+        "rename",
+        "reset",
+        "restart",
+        "resume",
+        "review",
+        "rewind",
+        "routines",
+        "run",
+        "run-skill-generator",
+        "sandbox",
+        "schedule",
+        "scroll-speed",
+        "security-review",
+        "settings",
+        "setup-bedrock",
+        "setup-vertex",
+        "share",
+        "simplify",
+        "skill-doctor",
+        "skills",
+        "slides",
+        "stats",
+        "status",
+        "statusline",
+        "stickers",
+        "stop",
+        "subtask",
+        "tasks",
+        "team-onboarding",
+        "teleport",
+        "terminal-setup",
+        "theme",
+        "tui",
+        "ultraplan",
+        "ultrareview",
+        "undo",
+        "update",
+        "update-config",
+        "upgrade",
+        "usage",
+        "usage-credits",
+        "verify",
+        "vim",
+        "voice",
+        "web-setup",
+        "workflow-authoring",
+        "workflows",
+    ];
     COMMANDS
-        .split_ascii_whitespace()
+        .iter()
         .any(|command| command.eq_ignore_ascii_case(name))
 }
 
@@ -3589,8 +3713,19 @@ mod tests {
 
     #[test]
     fn synced_aliases_do_not_override_claude_commands() {
-        // A built-in, its alias, and an unavailable bundled skill all reserve their name.
-        for name in ["compact", "reset", "doctor", "Review"] {
+        // Only whole command names are reserved, including aliases and bundled skills.
+        for (name, reserved) in [
+            ("compact", true),
+            ("reset", true),
+            ("doctor", true),
+            ("Review", true),
+            ("artifact-diagramming", true),
+            ("deep-research", true),
+            ("list-agents", true),
+            ("peers", true),
+            ("diagramming", false),
+            ("research", false),
+        ] {
             let full = format!("anthropic-skills:{name}");
             let mut c = ExposureCollector::new(None);
             let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
@@ -3606,10 +3741,15 @@ mod tests {
                 .iter()
                 .map(|i| (i.kind, i.target.clone()))
                 .collect();
+            let short = if reserved {
+                (InvocationKind::SkillReference, target("skill", name))
+            } else {
+                (InvocationKind::SkillRequest, target("skill", &full))
+            };
             assert_eq!(
                 uses,
                 [
-                    (InvocationKind::SkillReference, target("skill", name)),
+                    short,
                     (InvocationKind::SkillRequest, target("skill", &full)),
                     (InvocationKind::SkillCall, target("skill", &full)),
                 ],

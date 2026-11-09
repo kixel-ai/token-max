@@ -10,6 +10,8 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
+use crate::skills::skill_file;
+
 use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
@@ -121,6 +123,8 @@ pub struct ExposureCollector {
     session: Text,
     // The last raw Claude session id and the session derived from it.
     session_cache: Option<(String, Text)>,
+    turn: Option<String>,
+    turn_from_user: bool,
     client: Option<String>,
     version: Option<String>,
     uncertain: bool,
@@ -376,6 +380,8 @@ impl ExposureCollector {
             pending_removed: IndexSet::new(),
             session: Text::from(""),
             session_cache: None,
+            turn: None,
+            turn_from_user: false,
             client: None,
             version: None,
             uncertain: true,
@@ -411,6 +417,8 @@ impl ExposureCollector {
         self.typed_skills.clear();
         self.synced_skills.clear();
         self.uncertain = true;
+        self.turn = None;
+        self.turn_from_user = false;
         self.invalidated = true;
     }
 
@@ -442,6 +450,17 @@ impl ExposureCollector {
             self.session = id(present(payload.get("id")).or(payload.get("session_id")))?.into();
             self.client = label(field(payload, "originator")).or(label(field(payload, "source")));
             self.version = label(field(payload, "cli_version"));
+        }
+        if !claude
+            && !self.turn_from_user
+            && (kind == Some("turn_context")
+                || (kind == Some("event_msg") && is(payload, "type", "task_started")))
+        {
+            self.turn = payload
+                .get("turn_id")
+                .filter(|v| !v.is_null())
+                .map(|v| id(Some(v)))
+                .transpose()?;
         }
         let line = Line {
             raw,
@@ -802,6 +821,8 @@ impl ExposureCollector {
         self.pending_removed.clear();
         self.session = identity(&snapshot.file).into();
         self.session_cache = None;
+        self.turn = None;
+        self.turn_from_user = false;
         self.client = None;
         self.version = None;
         self.uncertain = true;
@@ -1109,7 +1130,7 @@ impl ExposureCollector {
                 } else {
                     "skill"
                 },
-                name,
+                &crate::skills::normalize(name),
             )
         } else {
             target("mcp", name)
@@ -1159,6 +1180,9 @@ impl ExposureCollector {
             session: self.session.to_string(),
             sessions: vec![self.session.to_string()],
             identity_basis: input.basis,
+            turn: (file.harness == Harness::Codex)
+                .then(|| self.turn.clone())
+                .flatten(),
             harness: file.harness,
             client: self.client.clone(),
             version: self.version.clone(),
@@ -1714,11 +1738,27 @@ impl ExposureCollector {
             if codex && let Some(t) = block_text {
                 for (offset, name) in mentions(t) {
                     typed_aliases
-                        .entry(name.to_string())
+                        .entry(name.to_ascii_lowercase())
                         .or_insert_with(|| (format!("{call}:{offset}"), basis));
                 }
             }
+            if user && is(b, "type", "skill") {
+                self.typed_skills
+                    .insert(text(b.get("name"))?.to_ascii_lowercase());
+            }
             block_ids.push((call, basis));
+        }
+        if user && codex {
+            // Text aliases share their inferred turn, so a request and a later load
+            // count as one use even when native records lack a turn id.
+            let boundary = blocks
+                .iter()
+                .zip(&block_ids)
+                .find(|(v, _)| object(v).get("text").is_some_and(Value::is_string))
+                .map(|(_, id)| id)
+                .or_else(|| block_ids.first());
+            self.turn = boundary.map(|(call, _)| identity(call));
+            self.turn_from_user = true;
         }
         for (v, (call, basis)) in blocks.iter().zip(block_ids) {
             let b = object(v);
@@ -1731,17 +1771,17 @@ impl ExposureCollector {
                     via: Via::Typed,
                     status: InvocationStatus::Requested,
                     call: typed_aliases
-                        .get(name)
+                        .get(&name.to_ascii_lowercase())
                         .map_or_else(|| call.clone(), |(call, _)| call.clone()),
                     group: group(name),
                     basis: typed_aliases
-                        .get(name)
+                        .get(&name.to_ascii_lowercase())
                         .map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
                 };
                 let selected = if codex {
                     b.get("path")
                         .and_then(Value::as_str)
-                        .filter(|p| crate::skills::absolute(p) && crate::skills::skill_file(p))
+                        .filter(|p| crate::skills::absolute(p) && skill_file(p))
                         .unwrap_or(name)
                 } else {
                     name
@@ -2642,11 +2682,6 @@ fn is_subagent(path: &str) -> bool {
 
 fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or("")
-}
-
-/// `/[/\\]SKILL\.md$/`
-fn skill_file(path: &str) -> bool {
-    path.ends_with("/SKILL.md") || path.ends_with("\\SKILL.md")
 }
 
 /// `/^(?:(?:mcp|functions)\.)?(?:read_resource|...|get_prompt)$/`

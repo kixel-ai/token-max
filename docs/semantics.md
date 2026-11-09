@@ -617,9 +617,12 @@ row, with requests counted once. Replacing aliases also changes member identity.
 
 `context[].skill` publishes the resolved path, requested and loaded evidence,
 ambiguous requests, duplicate entry count, and preferred retained path.
-`calls` is the sum of attributable request and confirmed-load observations,
-not a count of successful executions: a request and a later load can describe
-the same use. Only a successful single parsed file-read command confirms a
+`calls` counts distinct observed user turns per skill, coalescing requests and
+loads in that turn so they cannot inflate the cost-per-use denominator.
+Native user-message aliases establish inferred boundaries; recorded turn IDs
+are used where no user message is visible. Without a boundary, evidence is
+conservatively grouped within its session. These are observed uses, not
+successful executions. Only a successful single parsed file-read command confirms a
 load; failed or compound commands do not. Typed `skill` input with an absolute
 path identifies its copy. Name-only requests resolve against the active catalog
 only when every copy resolves to the same path. Otherwise they are excluded
@@ -640,8 +643,9 @@ invocation policy and is not claimed to remove listing cost.
 Duplicate detection is by exact name within the latest catalog for each owning
 profile set, independent of pricing. Retain the identifiable path with the
 most recorded observations, breaking ties in listing order, and recommend
-disabling other paths even without prices. That preference overrides the
-cost-per-use verdict to retain one copy. Repeated discovery of the same path
+disabling other paths even without prices. The preferred copy keeps its
+cost-per-use verdict, so all copies may be off when even that copy exceeds
+the threshold; without prices its verdict remains unknown. Repeated discovery of the same path
 cannot be removed with a path control while keeping that path enabled; remove
 the redundant discovery source. For symlinked duplicates, remove the redundant
 link at its source; transcripts do not establish filesystem equivalence.

@@ -1196,6 +1196,9 @@ pub struct Invocation {
     pub session: String,
     pub sessions: Vec<String>,
     pub identity_basis: IdentityBasis,
+    /// Opaque Codex user-turn boundary, recorded or inferred from native user-message aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<String>,
     pub harness: Harness,
     pub client: Option<String>,
     pub version: Option<String>,

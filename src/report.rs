@@ -1688,7 +1688,7 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
     if !report.context.iter().any(|c| c.skill.is_some()) {
         return;
     }
-    out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. Uses count request and confirmed-load observations, which can describe the same use. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, 0);
+    out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. A request and confirmed loads in one user turn count as one use; absent turn boundaries, evidence is conservatively grouped within its session. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, 0);
     let mut seen = IndexSet::new();
     for c in report
         .context
@@ -1701,7 +1701,7 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
             || "an unresolved path; resolve the listed paths before disabling copies".into(),
             |p| out.home(p),
         );
-        out.line(&format!("Duplicate skill {}: {} same-named catalog entries. Retain {retained}; disable other paths. Repeated entries of the same path need their duplicate discovery source removed. If a copy is symlinked, remove the redundant link at its source; transcripts cannot establish symlink identity.", c.name, count(s.duplicate_entries)), 2, 0);
+        out.line(&format!("Duplicate skill {}: {} same-named catalog entries. Preferred copy: {retained}; disable redundant paths. The preferred copy still follows --max-cost-per-use. Repeated entries of the same path need their duplicate discovery source removed. If a copy is symlinked, remove the redundant link at its source; transcripts cannot establish symlink identity.", c.name, count(s.duplicate_entries)), 2, 0);
     }
 }
 
@@ -2002,7 +2002,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         let typed = typed_only(c.control.as_ref());
         let uses = if c.skill.is_some() {
             format!(
-                "{} use observations ({} per use, counting zero as one); {}. {}",
+                "{} observed skill turns ({} per use, counting zero as one); {}. {}",
                 count(calls),
                 c.cost_per_use_usd
                     .map_or_else(|| "cost unknown".into(), about),
@@ -2478,7 +2478,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                 count(c.largest_characters.unwrap_or(0))
             ),
             _ if c.skill.is_some() => format!(
-                "; {} use observations; {}",
+                "; {} observed skill turns; {}",
                 count(c.calls.unwrap_or(0)),
                 catalog_evidence(c)
             ),

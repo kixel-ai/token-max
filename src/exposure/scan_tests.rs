@@ -1600,7 +1600,13 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         parsed["skills"]["config"][0]["enabled"].as_bool(),
         Some(false)
     );
-    assert!(control_text(control, Harness::Codex).contains("[[skills.config]]"));
+    let inline = control_text(control, Harness::Codex);
+    assert!(!inline.contains('\n'));
+    let inline: toml::Value = toml::from_str(&inline).unwrap();
+    assert_eq!(
+        inline["skills"]["config"][0]["enabled"].as_bool(),
+        Some(false)
+    );
     assert!(!leaks(&split, &["SYNTHETIC_PRIVATE"]));
 }
 
@@ -1640,7 +1646,7 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
     let a = skill_row(&r, "/skills/a/SKILL.md");
     let b = skill_row(&r, "/skills/b/SKILL.md");
     assert_eq!(a.calls, Some(0));
-    assert_eq!(b.calls, Some(2));
+    assert_eq!(b.calls, Some(1));
     let evidence = b.skill.as_ref().unwrap();
     assert_eq!(
         (
@@ -1657,9 +1663,23 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
         evidence.retained_path.as_deref(),
         Some("/skills/b/SKILL.md")
     );
+    assert_eq!((a.verdict, b.verdict), (Some(Verdict::Off), None));
+    let mut priced = data.clone();
+    for request in &mut priced.requests {
+        request.parts[0].tier = Some("standard".into());
+        request.parts[0].usage.read = Some(1000);
+    }
+    let cost = skill_row(&report(&priced, 1.0), "/skills/b/SKILL.md")
+        .estimated_usd
+        .unwrap();
+    let threshold = report(&priced, cost * 0.75);
     assert_eq!(
-        (a.verdict, b.verdict),
-        (Some(Verdict::Off), Some(Verdict::Keep))
+        skill_row(&threshold, "/skills/b/SKILL.md").verdict,
+        Some(Verdict::Off)
+    );
+    assert_eq!(
+        skill_row(&threshold, "/skills/b/SKILL.md").cost_per_use_usd,
+        Some(cost)
     );
     let output = text(&r);
     assert!(output.contains("Duplicate skill same"), "{output}");
@@ -1693,16 +1713,10 @@ fn codex_duplicates_are_actionable_without_prices_and_same_path_repeats_keep_one
     )
     .unwrap();
     let r = report(&data, 0.0);
-    assert_eq!(
-        skill_row(&r, "/skills/a/SKILL.md").verdict,
-        Some(Verdict::Keep)
-    );
+    assert_eq!(skill_row(&r, "/skills/a/SKILL.md").verdict, None);
     let off = skill_row(&r, "/skills/b/SKILL.md");
     assert_eq!((off.estimated_usd, off.verdict), (None, Some(Verdict::Off)));
-    assert_eq!(
-        skill_row(&r, "/skills/c/SKILL.md").verdict,
-        Some(Verdict::Keep)
-    );
+    assert_eq!(skill_row(&r, "/skills/c/SKILL.md").verdict, None);
     assert_eq!(
         skill_row(&r, "/skills/c/SKILL.md")
             .skill
@@ -1761,5 +1775,64 @@ fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_d
     assert_eq!(
         skill_row(&keep, "/new/a/SKILL.md").verdict,
         Some(Verdict::Keep)
+    );
+}
+
+#[test]
+fn unresolved_history_and_case_aliases_keep_one_request_in_its_own_catalog() {
+    let data = transcript(Harness::Codex, &[
+        codex_meta(),
+        world(0, json!({"host_skills":{"body":"- pdf: no path recorded"}}), true),
+        json!({"type":"response_item", "timestamp":at(1), "payload":{"type":"message", "role":"user", "content":[
+            {"type":"input_text", "text":"$PDF"}, {"type":"skill", "name":"pdf"}
+        ]}}),
+        billed(2),
+        world(3, json!({"host_skills":{"body":"- pdf: now resolved (file: /a/pdf/SKILL.md)"}}), false),
+        json!({"type":"event_msg", "timestamp":at(4), "payload":{"type":"user_message", "message":"$pdf"}}),
+        skill_load(5, "read", "/a/pdf/SKILL.md", 0),
+        // A fresh user turn establishes a separate implicit use, even with a repeated context record.
+        json!({"type":"event_msg", "timestamp":at(6), "payload":{"type":"user_message", "message":"continue"}}),
+        turn(),
+        skill_load(7, "again", "/a/pdf/SKILL.md", 0), billed(8),
+    ], None).unwrap();
+    let r = report(&data, 1.0);
+    let old = r
+        .context
+        .iter()
+        .find(|c| c.name == "pdf" && c.skill.as_ref().is_some_and(|s| s.path.is_none()))
+        .unwrap();
+    assert_eq!(old.calls, Some(1));
+    assert_eq!(old.skill.as_ref().unwrap().ambiguous_requests, 0);
+    let new = skill_row(&r, "/a/pdf/SKILL.md");
+    assert_eq!(new.calls, Some(2));
+    let s = new.skill.as_ref().unwrap();
+    assert_eq!((s.requested, s.loaded, s.ambiguous_requests), (1, 2, 0));
+}
+
+#[test]
+fn windows_aliases_match_loads_and_detail_controls_remain_single_line() {
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(),
+        world(0, json!({"host_skills":{"body":"- `r0` = `C:\\skills\\`\n- pdf: x (file: r0/pdf/SKILL.md)"}}), true),
+        skill_load(1, "read", r"C:\skills\pdf\SKILL.md", 0), billed(2),
+    ], None).unwrap();
+    let r = report(&data, 1.0);
+    let c = skill_row(&r, r"C:\skills\pdf\SKILL.md");
+    assert_eq!(c.calls, Some(1));
+    let rendered = format_report(
+        &r,
+        ReportOptions {
+            width: None,
+            details: true,
+            ..Default::default()
+        },
+    );
+    assert!(!rendered.contains("enabled = false in"));
+    assert!(rendered.contains("Turn off: skills.config = ["));
+    let control = control_text(c.control.as_ref().unwrap(), Harness::Codex);
+    assert!(!control.contains('\n'));
+    assert_eq!(
+        toml::from_str::<toml::Value>(&control).unwrap()["skills"]["config"][0]["path"].as_str(),
+        Some(r"C:\skills\pdf\SKILL.md")
     );
 }

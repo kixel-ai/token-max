@@ -19,14 +19,12 @@ use crate::safe::identity;
 /// or config.toml's `features.apps = false`.
 pub fn control_text(control: &Control, harness: Harness) -> String {
     if harness == Harness::Codex {
-        if matches!(control.value, ControlValue::Skill { .. }) {
-            return config_patch([control]).trim_end().to_string();
-        }
         let path: Vec<String> = control.path.iter().map(|key| toml_key(key)).collect();
         let value = match &control.value {
             ControlValue::Text(text) => toml::Value::String(text.clone()),
             ControlValue::Bool(b) => toml::Value::Boolean(*b),
-            ControlValue::Skill { .. } => unreachable!("skill entries rendered above"),
+            ControlValue::Skill { .. } => toml::Value::try_from(json_value(&control.value))
+                .expect("skill controls are tables"),
         };
         let value = if control.append {
             toml::Value::Array(vec![value])
@@ -615,7 +613,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut owners: HashMap<Vec<String>, usize> = HashMap::new();
     let mut owner_profiles: Vec<Vec<String>> = vec![];
     let mut rows: IndexMap<(usize, usize), Row> = IndexMap::new();
-    let mut duplicate_catalogs: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
+    let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::new();
     let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::new();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::new();
     let mut ordered: Vec<_> = scan
@@ -932,23 +930,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             _ if !shaped => {}
             Some((time, _)) if r.time < *time => {}
             _ => {
-                let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::new();
-                for id in &shown {
-                    let c = component(id);
-                    if codex && c.category == Category::SkillListing {
-                        for member in &c.members {
-                            let m = component(member);
-                            let key = format!("codex:skill:{}@{:?}", m.name, m.skill_path);
-                            if let Some(&key) = interned.ids.get(&key) {
-                                duplicates.entry(&m.name).or_default().push(key);
-                            }
-                        }
-                    }
+                if codex {
+                    latest_catalogs.insert(owner, shown);
                 }
-                duplicate_catalogs.insert(
-                    owner,
-                    duplicates.into_values().filter(|v| v.len() > 1).collect(),
-                );
                 latest.insert(owner, (r.time, unique));
             }
         }
@@ -1027,38 +1011,33 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             credit(skill_families.get(&key), &i.profiles, i.time, 1);
         }
     }
-    // A name alone does not identify one of several historical paths. Path evidence
-    // remains attributable even when that copy is absent from the latest catalog.
+    let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut ambiguous_targets = HashSet::new();
+    for (index, row) in rows.values().enumerate() {
+        let Some(skill) = &row.cost.skill else {
+            continue;
+        };
+        let target = identity(&format!(
+            "skill:{}",
+            skill.path.as_deref().unwrap_or(&row.cost.name)
+        ));
+        targets.entry(target).or_default().push(index);
+        let ambiguous = identity(&format!("skill-ambiguous:{}", row.cost.name));
+        targets.entry(ambiguous.clone()).or_default().push(index);
+        ambiguous_targets.insert(ambiguous);
+    }
+    let mut turns = HashSet::new();
     for i in scan
         .invocations
         .iter()
         .filter(|i| i.harness == Harness::Codex)
     {
-        let candidates: Vec<usize> = rows
-            .values()
-            .enumerate()
-            .filter_map(|(index, row)| {
-                let skill = row.cost.skill.as_ref()?;
-                if !i.profiles.iter().any(|p| row.cost.profiles.contains(p)) {
-                    return None;
-                }
-                let name = identity(&format!("skill:{}", row.cost.name));
-                let path = skill.path.as_ref().map(|p| identity(&format!("skill:{p}")));
-                let ambiguous = identity(&format!("skill-ambiguous:{}", row.cost.name));
-                (i.target == name || i.target == ambiguous || path.as_ref() == Some(&i.target))
-                    .then_some(index)
-            })
-            .collect();
-        let paths: HashSet<_> = candidates
-            .iter()
-            .map(|&index| rows[index].cost.skill.as_ref().unwrap().path.as_ref())
-            .collect();
-        let ambiguous = paths.len() > 1
-            || candidates.iter().any(|&index| {
-                i.target == identity(&format!("skill-ambiguous:{}", rows[index].cost.name))
-            });
-        for index in candidates {
+        let ambiguous = ambiguous_targets.contains(&i.target);
+        for &index in targets.get(&i.target).into_iter().flatten() {
             let c = &mut rows[index].cost;
+            if !i.profiles.iter().any(|p| c.profiles.contains(p)) {
+                continue;
+            }
             let skill = c.skill.as_mut().unwrap();
             match i.kind {
                 InvocationKind::SkillRequest
@@ -1075,7 +1054,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 _ => continue,
             }
-            *c.calls.as_mut().unwrap() += 1;
+            // Request/load evidence in one user turn describes one use. With no
+            // recorded boundary, conservatively coalesce the session's evidence.
+            if turns.insert((index, i.session.as_str(), i.turn.as_deref())) {
+                *c.calls.as_mut().unwrap() += 1;
+            }
             let time = last.entry(index).or_insert(Millis::MIN);
             *time = (*time).max(i.time);
         }
@@ -1126,8 +1109,21 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c
         })
         .collect();
-    for (owner, groups) in duplicate_catalogs {
-        for keys in groups {
+    for (owner, shown) in latest_catalogs {
+        let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::new();
+        for id in shown {
+            let c = components[id.as_str()];
+            if c.category != Category::SkillListing {
+                continue;
+            }
+            for (member, (key, _)) in c.members.iter().zip(&interned.of[&(id.as_str(), owner)]) {
+                duplicates
+                    .entry(&components[member.as_str()].name)
+                    .or_default()
+                    .push(*key);
+            }
+        }
+        for keys in duplicates.into_values().filter(|v| v.len() > 1) {
             let indices: Vec<_> = keys
                 .iter()
                 .filter_map(|key| {
@@ -1157,12 +1153,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let skill = c.skill.as_mut().unwrap();
                 skill.duplicate_entries = keys.len() as u64;
                 skill.retained_path = retained.clone();
-                if retained.is_some() && c.control.is_some() {
-                    c.verdict = Some(if skill.path == retained {
-                        Verdict::Keep
-                    } else {
-                        Verdict::Off
-                    });
+                if retained.is_some() && c.control.is_some() && skill.path != retained {
+                    c.verdict = Some(Verdict::Off);
                 }
             }
         }
@@ -1530,6 +1522,7 @@ mod tests {
                 session: "session".into(),
                 sessions: vec!["session".into()],
                 identity_basis: IdentityBasis::Recorded,
+                turn: None,
                 harness: Harness::Claude,
                 client: None,
                 version: None,
@@ -1868,6 +1861,7 @@ mod tests {
             session: "session".into(),
             sessions: vec!["session".into()],
             identity_basis: IdentityBasis::Recorded,
+            turn: None,
             harness: Harness::Claude,
             client: None,
             version: None,

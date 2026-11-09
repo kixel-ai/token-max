@@ -28,7 +28,7 @@ pub(crate) fn paths<'a>(body: &'a str, entries: &[(&str, &'a str)]) -> Vec<Optio
             let (_, suffix) = span.rsplit_once("(file: ")?;
             let path = suffix.trim_end_matches('\r').strip_suffix(')')?;
             if absolute(path) && skill_file(path) {
-                return Some(path.into());
+                return Some(normalize(path));
             }
             let (alias, rest) = path.split_once('/')?;
             // Root aliases are a rendered transport convention, not filesystem paths.
@@ -40,9 +40,21 @@ pub(crate) fn paths<'a>(body: &'a str, entries: &[(&str, &'a str)]) -> Vec<Optio
             {
                 return None;
             }
-            Some(format!("{}/{rest}", root.trim_end_matches('/')))
+            Some(normalize(&format!(
+                "{}/{rest}",
+                root.trim_end_matches(['/', '\\'])
+            )))
         })
         .collect()
+}
+
+/// Windows roots and read events must hash the same lexical separator form.
+pub(crate) fn normalize(path: &str) -> String {
+    if path.starts_with("\\\\") || path.as_bytes().get(1) == Some(&b':') {
+        path.replace('/', "\\")
+    } else {
+        path.into()
+    }
 }
 
 pub(crate) fn absolute(path: &str) -> bool {

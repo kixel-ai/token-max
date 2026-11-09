@@ -1637,6 +1637,8 @@ mod tests {
         for r in &mut scan.requests {
             r.client = Some("cli".into());
             r.source = Some("repl_main_thread".into());
+            r.parts[0].usage.read = Some(300_000);
+            r.parts[0].usage.input = Some(301_000);
         }
         let catalog = prices();
         let estimates = IndexMap::new();

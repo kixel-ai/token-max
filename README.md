@@ -340,6 +340,23 @@ They hold work constant, do not value latency, and make no subscription-bill,
 credit-multiplier or combined savings claim. Fast mode compares with the current
 profile, independently of the TTL/window/idle recommendations.
 
+Measured Codex usage without a billed tier receives a **conditional API equivalent**
+in the shared pricing layer. It uses a supported historical requested tier, or
+standard rates when the request omits a tier or says `auto`. Omitted and `auto`
+can inherit a nonstandard OpenAI project default; requests can also be served at
+a different tier. Today's config never establishes a historical tier. Unsupported
+requested tiers, conflicting evidence, missing usage and unavailable prices stay
+unknown. Recorded effective tiers always take precedence.
+
+Reports count conditional requests separately from recorded tier coverage. Details
+and both JSON forms show standard, fast and ultrafast served-tier scenarios for
+conditionally priced parts, preserving recorded tiers and all context/cache
+categories. Unsupported scenarios, including Flex and Scale without verified
+rates, remain unknown. These are sensitivity examples, not bounds on actual
+charges. Context keep/off, compaction and keepalive winners that depend on missing tiers stay
+advisory because tier sensitivity could reverse them. The explicit preference to
+disable premium speed still applies. SSH reports use the same pricing and evidence.
+
 ## Background generation
 
 The `background-generation` check prints one line per feature: Claude prompt

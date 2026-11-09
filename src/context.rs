@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -12,7 +12,7 @@ use crate::model::{
     InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals, Text,
     Verdict,
 };
-use crate::prices::{Catalog, prefix_spans};
+use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
 
 /// The settings fragment for one control: settings.json's `"enableArtifact": false`,
@@ -537,6 +537,7 @@ struct Prior<'a> {
 
 struct Row {
     cost: ContextCost,
+    assumptions: IndexSet<String>,
     owner: usize,
     key: usize,
     time: Millis,
@@ -696,6 +697,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // A calibration that overshoots the recorded input cannot place these pieces.
         let end = u.and_then(|u| u.input);
         let placed = spans.filter(|_| end.is_some_and(|end| total <= end as f64));
+        let assumptions = p
+            .filter(|_| placed.is_some())
+            .map_or_else(Vec::new, |p| pricing_assumptions(catalog, r, p));
         let mut unique: Vec<usize> = vec![];
         {
             let mut seen = HashSet::new();
@@ -717,6 +721,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         control: kind.control.clone(),
                         requests: 0,
                         priced: 0,
+                        conditional_requests: 0,
+                        tier_unknown_requests: 0,
+                        assumptions: vec![],
                         tokens: None,
                         cost_usd: 0.0,
                         estimated_usd: None,
@@ -730,9 +737,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     owner,
                     key,
                     time: Millis::MIN,
+                    assumptions: IndexSet::new(),
                 }
             });
             row.cost.requests += 1;
+            row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
+            row.assumptions.extend(assumptions.iter().cloned());
         }
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
@@ -856,6 +866,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let row = &mut rows[&(owner, key)];
                 row.cost.priced += 1;
                 row.cost.cost_usd += cost;
+                if let Some(p) = p {
+                    row.cost.conditional_requests += u64::from(conditional_tier(r, p));
+                }
                 if r.time >= row.time {
                     row.time = r.time;
                     row.cost.tokens = Some(tokens.round() as i64);
@@ -967,6 +980,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .enumerate()
         .map(|(index, row)| {
             let mut c = row.cost;
+            c.assumptions = row.assumptions.into_iter().collect();
             c.current = latest
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
@@ -977,7 +991,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             if let Some(calls) = c.calls {
                 c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
             }
-            if let (Some(_), true, Some(per_use)) = (&c.control, c.current, c.cost_per_use_usd) {
+            if let (Some(_), true, Some(per_use)) = (&c.control, c.current, c.cost_per_use_usd)
+                && c.tier_unknown_requests == 0
+            {
                 c.verdict = Some(if per_use > input.max_cost_per_use_usd {
                     Verdict::Off
                 } else {
@@ -1522,10 +1538,11 @@ mod tests {
         let mut profile = crate::test_support::make_profile("profile", "/codex");
         profile.harness = Harness::Codex;
         profile.mcp_servers = vec!["docs-server".into(), "unused".into()];
+        let requests = [codex("r1", 1, 4000, 0), codex("r2", 2, 5000, 4100)];
         let rows = context_costs(&ContextInput {
             scan: &scan,
-            requests: &[codex("r1", 1, 4000, 0), codex("r2", 2, 5000, 4100)],
-            profiles: &[profile],
+            requests: &requests,
+            profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
             max_cost_per_use_usd: 1.0,
         });
@@ -1559,6 +1576,41 @@ mod tests {
         // The skills check owns per-skill findings; the catalog is one piece here.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
+        for mode in ["conditional", "unsupported", "conflicting", "multipart"] {
+            let mut requests = requests.clone();
+            if mode == "multipart" {
+                let mut summary = requests[1].parts[0].clone();
+                summary.kind = crate::model::PartKind::Compaction;
+                summary.tier = None;
+                requests[1].parts.push(summary);
+            } else if mode != "conflicting" {
+                requests[1].parts[0].tier = None;
+            } else {
+                requests[1]
+                    .issues
+                    .push("conflicting effective service tiers".into());
+            }
+            requests[1].parts[0].speed = None;
+            if mode == "unsupported" {
+                requests[1].requested_speed = Some(crate::model::RequestedSpeed {
+                    tier: Some("flex".into()),
+                    speed: None,
+                });
+            }
+            let rows = context_costs(&ContextInput {
+                scan: &scan,
+                requests: &requests,
+                profiles: std::slice::from_ref(&profile),
+                catalog: &prices(),
+                max_cost_per_use_usd: 1.0,
+            });
+            let apps = row(&rows, "codex_apps");
+            assert_eq!(apps.priced, if mode == "conditional" { 2 } else { 1 });
+            assert_eq!(apps.conditional_requests, u64::from(mode == "conditional"));
+            assert_eq!(apps.tier_unknown_requests, u64::from(mode != "multipart"));
+            assert!(apps.estimated_usd.is_some());
+            assert_eq!(apps.verdict, (mode == "multipart").then_some(Verdict::Keep));
+        }
     }
 
     #[test]

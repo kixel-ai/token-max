@@ -113,6 +113,73 @@ fn args<'a>(base: &'a [String], extra: &[&'a str]) -> Vec<&'a str> {
 }
 
 #[test]
+fn conditional_codex_prices_keep_assumptions_in_both_json_projections() {
+    let w = Workspace::new();
+    // Today's premium setting must not price a past request with no selection.
+    std::fs::write(w.codex.join("config.toml"), "service_tier = 'ultrafast'\n").unwrap();
+    let path = w.codex.join("sessions/rollout.jsonl");
+    let mut context = json!({"type": "turn_context", "timestamp": "2026-11-01T00:00:00Z",
+        "payload": {"turn_id": "turn-a", "model": "gpt-6.1-sol"}});
+    let meta = json!({"type": "session_meta", "timestamp": "2026-11-01T00:00:00Z",
+        "payload": {"id": "thread-a", "model_provider": "openai"}});
+    let usage = json!({"type": "token_usage_record", "timestamp": "2026-11-01T00:00:01Z",
+        "payload": {"response_id": "response-a", "turn_id": "turn-a", "usage": {
+            "input_tokens": 1000, "output_tokens": 100, "cached_input_tokens": 0,
+            "cache_write_input_tokens": 0}}});
+    for (tier, expected) in [
+        (None, Some(0.003)),
+        (Some("auto"), Some(0.003)),
+        (Some("fast"), Some(0.006)),
+        (Some("flex"), None),
+    ] {
+        context["payload"]["service_tier"] = json!(tier);
+        std::fs::write(&path, format!("{meta}\n{context}\n{usage}\n")).unwrap();
+        let base = vec![
+            "--codex-dir".into(),
+            text(&w.codex),
+            "--prices-file".into(),
+            text(&fixture("prices.json")),
+        ];
+        let mut historical = Value::Null;
+        for projection in ["--json-full", "--json"] {
+            let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &[projection])));
+            assert!((0..=1).contains(&status), "{stderr}");
+            let report: Value = serde_json::from_str(&stdout).unwrap();
+            let row = &report["historical"][0];
+            assert_eq!(row["cost"]["totalUsd"], json!(expected), "{tier:?}");
+            assert_eq!(row["conditionalRequests"], u64::from(expected.is_some()));
+            assert_eq!(report["scan"]["coverage"]["tierKnown"], 0);
+            if projection == "--json-full" {
+                assert_eq!(
+                    report["scan"]["requests"][0]["parts"][0]["tier"],
+                    Value::Null
+                );
+                historical = report["historical"].clone();
+            } else {
+                assert_eq!(historical, report["historical"]);
+            }
+            if expected.is_some() {
+                assert!(
+                    row["cost"]["assumptions"]
+                        .to_string()
+                        .contains("conditional")
+                );
+                assert!(
+                    row["tierSensitivity"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|s| s["tier"] == "flex" && s["cost"]["totalUsd"].is_null())
+                );
+            }
+        }
+        let (_, stdout, _) = run(&mut command(&w, &args(&base, &[])));
+        assert!(stdout.contains("Conditional Codex pricing"), "{stdout}");
+        assert!(stdout.contains("tier sensitivity"), "{stdout}");
+    }
+}
+
+#[test]
 fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
     let w = Workspace::new();
     w.fixture();

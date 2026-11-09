@@ -1428,6 +1428,47 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
     previous.locations.append(&mut r.locations);
     previous.time = previous.time.min(r.time);
     previous.end_time = previous.end_time.max(r.end_time);
+    if previous.harness == Harness::Codex {
+        let conflict = |a: &Option<String>, b: &Option<String>| {
+            a.as_ref()
+                .zip(b.as_ref())
+                .is_some_and(|(a, b)| crate::prices::tier_name(a) != crate::prices::tier_name(b))
+        };
+        if previous
+            .parts
+            .iter()
+            .zip(&r.parts)
+            .any(|(a, b)| a.kind == b.kind && a.model == b.model && conflict(&a.tier, &b.tier))
+        {
+            union(
+                &mut previous.issues,
+                vec!["conflicting effective service tiers".into()],
+            );
+        }
+        if let (Some(a), Some(b)) = (&previous.requested_speed, &r.requested_speed)
+            && (conflict(&a.tier, &b.tier) || conflict(&a.speed, &b.speed))
+        {
+            union(
+                &mut previous.issues,
+                vec!["conflicting requested service tiers".into()],
+            );
+        }
+        if previous.requested_speed.is_none() {
+            previous.requested_speed = r.requested_speed.clone();
+        } else if let (Some(old), Some(new)) = (&mut previous.requested_speed, &r.requested_speed) {
+            if old.tier.is_none() {
+                old.tier = new.tier.clone();
+            }
+            if old.speed.is_none() {
+                old.speed = new.speed.clone();
+            }
+        }
+        for (old, new) in previous.parts.iter_mut().zip(&r.parts) {
+            if old.kind == new.kind && old.model == new.model && old.tier.is_none() {
+                old.tier = new.tier.clone();
+            }
+        }
+    }
     // A streamed message's usage is a running snapshot, never an increment.
     let output =
         |parts: &[BillingPart]| -> i64 { parts.iter().map(|p| p.usage.output.unwrap_or(0)).sum() };
@@ -1444,6 +1485,9 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
                 && old.model == p.model
             {
                 fill(&mut p.usage, &old.usage);
+                if p.tier.is_none() {
+                    p.tier = old.tier.clone();
+                }
             }
         }
         previous.parts = r.parts;
@@ -1665,7 +1709,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             .count() as u64,
         tier_known: requests
             .iter()
-            .filter(|r| r.parts.iter().all(|p| p.tier.is_some()))
+            .filter(|r| {
+                r.parts
+                    .iter()
+                    .all(|p| p.tier.is_some() && !crate::prices::conditional_tier(r, p))
+            })
             .count() as u64,
         missing_usage: requests
             .iter()
@@ -1775,6 +1823,67 @@ mod tests {
 
     fn options(w: &Workspace) -> ScanOptions {
         w.scan_options()
+    }
+
+    #[test]
+    fn copied_codex_tier_evidence_is_preserved_or_marked_conflicting() {
+        let mut r = crate::test_support::make_request();
+        r.harness = Harness::Codex;
+        r.parts[0].tier = Some("priority".into());
+        let mut missing = r.clone();
+        missing.parts[0].tier = None;
+        let mut requests = IndexMap::new();
+        add(&mut requests, r.clone());
+        add(&mut requests, missing.clone());
+        assert_eq!(requests[&r.id].parts[0].tier.as_deref(), Some("priority"));
+        requests.clear();
+        add(&mut requests, missing);
+        add(&mut requests, r.clone());
+        assert_eq!(requests[&r.id].parts[0].tier.as_deref(), Some("priority"));
+        r.parts[0].tier = Some("default".into());
+        add(&mut requests, r.clone());
+        add(&mut requests, r.clone());
+        assert_eq!(
+            requests[&r.id]
+                .issues
+                .iter()
+                .filter(|s| *s == "conflicting effective service tiers")
+                .count(),
+            1
+        );
+        assert!(
+            requests[&r.id]
+                .issues
+                .iter()
+                .any(|s| s == "conflicting effective service tiers")
+        );
+        requests.clear();
+        r.parts[0].tier = None;
+        r.requested_speed = Some(RequestedSpeed {
+            tier: Some("fast".into()),
+            speed: None,
+        });
+        add(&mut requests, r.clone());
+        r.requested_speed.as_mut().unwrap().tier = Some("priority".into());
+        add(&mut requests, r.clone());
+        assert!(requests[&r.id].issues.is_empty());
+        r.requested_speed.as_mut().unwrap().tier = Some("default".into());
+        add(&mut requests, r.clone());
+        assert!(
+            requests[&r.id]
+                .issues
+                .iter()
+                .any(|s| s == "conflicting requested service tiers")
+        );
+        requests.clear();
+        r.requested_speed = None;
+        r.parts[0].tier = Some("priority".into());
+        add(&mut requests, r.clone());
+        let mut summary = r.clone();
+        summary.parts[0].kind = PartKind::Compaction;
+        summary.parts[0].tier = Some("default".into());
+        add(&mut requests, summary);
+        assert!(requests[&r.id].issues.is_empty());
     }
 
     fn since(options: ScanOptions, instant: &str) -> ScanOptions {

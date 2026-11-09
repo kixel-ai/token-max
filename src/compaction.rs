@@ -18,8 +18,8 @@ use crate::model::{
     WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, add_costs, paired_savings, price_components, price_part, server_cost,
-    unknown_cost, write_billing, zero_cost,
+    Catalog, PRICE_SOURCES, TIER_SENSITIVITY, add_costs, conditional_tier, paired_savings,
+    price_components, price_part, server_cost, unknown_cost, write_billing, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 
@@ -1404,13 +1404,17 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 }
             }
             let winning = best.filter(|b| b.savings_usd.is_some_and(|s| s > 0.0));
+            let conditional = selected
+                .iter()
+                .any(|r| r.parts.iter().any(|p| conditional_tier(r, p)));
             let recommended = winning
                 .map(|w| w.window)
                 .or(if priced.len() == scenarios.len() {
                     control.value
                 } else {
                     None
-                });
+                })
+                .filter(|_| !conditional);
             let patch = control.minimum_claude_patch.unwrap_or(288);
             let per_model_supported =
                 !claude || version_supported(recent.version.as_deref(), patch);
@@ -1446,6 +1450,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             ]
             .map(String::from)
             .into();
+            if conditional {
+                uncertainty.insert(TIER_SENSITIVITY.into());
+            }
             if !control.applicable {
                 uncertainty.insert(control.reason.clone());
             }
@@ -2271,6 +2278,34 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn missing_codex_tiers_price_scenarios_without_selecting_a_winner() {
+        let mut scan = scenario("codex");
+        for r in &mut scan.requests {
+            for p in &mut r.parts {
+                p.tier = None;
+                p.speed = None;
+            }
+        }
+        let result = &checks(&scan)[0];
+        assert_eq!(result.base.action, Action::Advisory);
+        assert_eq!(result.base.recommended, None);
+        assert!(
+            result
+                .base
+                .uncertainty
+                .iter()
+                .any(|s| s == TIER_SENSITIVITY)
+        );
+        assert!(
+            result
+                .scenarios
+                .iter()
+                .any(|s| s.savings_usd.is_some_and(|v| v > 0.0))
+        );
+        assert!(result.baseline_cost.total_usd.is_some());
     }
 
     #[test]

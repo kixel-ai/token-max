@@ -1584,6 +1584,12 @@ pub struct ContextCost {
     pub requests: u64,
     /// How many of those requests could be priced.
     pub priced: u64,
+    /// Priced requests whose effective Codex tier is unrecorded.
+    pub conditional_requests: u64,
+    /// Requests whose Codex tier is unrecorded, including unpriced requests.
+    pub tier_unknown_requests: u64,
+    /// Pricing assumptions, including unresolved tier sensitivity.
+    pub assumptions: Vec<String>,
     /// Tokens it took in the most recent request that carried it.
     pub tokens: Option<i64>,
     /// API-price equivalent over the priced requests only.
@@ -1661,8 +1667,22 @@ pub struct HistoricalCost {
     pub bucket: String,
     pub profiles: Vec<String>,
     pub requests: u64,
+    /// Requests with a complete numeric API equivalent, including conditional estimates.
+    pub priced_requests: u64,
+    /// Priced requests that required a service-tier assumption.
+    pub conditional_requests: u64,
+    /// Alternative served tiers for missing-tier parts only; these are scenarios, not bounds.
+    pub tier_sensitivity: Vec<TierScenario>,
     /// Always "estimated".
     pub evidence: &'static str,
+    pub cost: Cost,
+}
+
+/// One hypothetical served tier, preserving every recorded effective tier.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TierScenario {
+    pub tier: &'static str,
     pub cost: Cost,
 }
 

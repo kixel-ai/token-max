@@ -12,17 +12,82 @@ use indexmap::IndexSet;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
-use crate::model::{Api, BillingPart, Cost, Harness, PartKind, Request};
+use crate::model::{Api, BillingPart, Cost, Harness, PartKind, Request, TierScenario};
 use crate::safe::{ScanError, iso, label, object};
 
 const PRICE_URL: &str = "https://models.dev/api.json";
 
 /// Dated provider rules used to interpret catalog fields.
-pub const PRICE_SOURCES: [&str; 3] = [
+pub const PRICE_SOURCES: [&str; 7] = [
     "https://developers.openai.com/api/docs/guides/prompt-caching (2026-11-07)",
     "https://developers.openai.com/api/docs/pricing (2026-11-07)",
     "https://platform.claude.com/docs/en/about-claude/pricing (2026-11-07)",
+    "https://developers.openai.com/api/reference/python/resources/responses (2026-11-08)",
+    "https://developers.openai.com/api/docs/guides/fast-mode (2026-11-08)",
+    "https://learn.chatgpt.com/docs/agent-configuration/speed (2026-11-08)",
+    "https://learn.chatgpt.com/docs/config-file/config-reference (2026-11-08)",
 ];
+
+/// Why a conditional tier estimate cannot decide a cost comparison.
+pub const TIER_SENSITIVITY: &str = "effective service tier is unrecorded; project defaults and served tiers can differ from requests; tier sensitivity has no verified bounds, so affected cost-based recommendations are withheld";
+
+/// Whether pricing this Codex part requires a tier assumption.
+pub fn conditional_tier(r: &Request, p: &BillingPart) -> bool {
+    r.harness == Harness::Codex && p.tier.is_none()
+}
+
+/// Normalize documented names for the same pricing tier.
+pub(crate) fn tier_name(tier: &str) -> &str {
+    match tier {
+        "standard" => "default",
+        "priority" => "fast",
+        other => other,
+    }
+}
+
+/// Choose a pricing scenario without promoting requested controls into billing evidence.
+fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'static str> {
+    if r.issues
+        .iter()
+        .any(|s| s == "conflicting effective service tiers")
+    {
+        return Err("conflicting effective service tiers");
+    }
+    if let Some(tier) = p.tier.as_deref() {
+        return Ok(tier);
+    }
+    if r.harness != Harness::Codex
+        || r.provider.as_deref() != Some("openai")
+        || r.api != Api::Responses
+    {
+        return Err("effective service tier is not recorded");
+    }
+    if r.issues
+        .iter()
+        .any(|s| s == "conflicting requested service tiers")
+    {
+        return Err("conflicting requested service tiers");
+    }
+    if p.speed.is_some() {
+        return Err("recorded response speed without an effective service tier is unsupported");
+    }
+    if p.geo.as_deref().is_some_and(|geo| geo != "global") {
+        return Err("regional rate is unsupported");
+    }
+    let requested = r.requested_speed.as_ref();
+    let tier = requested.and_then(|s| s.tier.as_deref());
+    let speed = requested.and_then(|s| s.speed.as_deref());
+    if let (Some(tier), Some(speed)) = (tier, speed)
+        && tier != "auto"
+        && tier_name(tier) != tier_name(speed)
+    {
+        return Err("contradictory requested service tier and speed");
+    }
+    Ok(match tier.filter(|t| *t != "auto").or(speed) {
+        None | Some("auto") => "default",
+        Some(tier) => tier,
+    })
+}
 
 /// Dollars per million tokens; absent rates stay unknown.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -682,6 +747,41 @@ struct Selected {
     assumptions: Vec<String>,
 }
 
+/// Alternative tier totals for missing-tier Codex usage; unsupported alternatives stay unknown.
+pub fn tier_sensitivity(catalog: &Catalog, requests: &[&Request]) -> Vec<TierScenario> {
+    if !requests
+        .iter()
+        .any(|r| r.parts.iter().any(|p| conditional_tier(r, p)))
+    {
+        return vec![];
+    }
+    ["default", "fast", "ultrafast", "flex", "scale"]
+        .map(|tier| {
+            let costs: Vec<_> = requests.iter().map(|r| {
+                let mut scenario = (*r).clone();
+                for p in &mut scenario.parts {
+                    if conditional_tier(r, p) && selected_rates(catalog, r, p).is_ok() {
+                        p.tier = Some(tier.into());
+                    }
+                }
+                price_request(catalog, &scenario)
+            }).collect();
+            let mut cost = add_costs(&costs);
+            cost.assumptions.push("tier sensitivity only: assign this served tier to conditionally priced parts; recorded tiers remain authoritative; these scenarios do not bound actual costs or subscription charges".into());
+            TierScenario { tier, cost }
+        }).into()
+}
+
+/// Pricing assumptions for the same selected rates used to place context pieces.
+pub fn pricing_assumptions(catalog: &Catalog, r: &Request, p: &BillingPart) -> Vec<String> {
+    let mut assumptions = selected_rates(catalog, r, p).map_or_else(
+        |reason| vec![format!("context pricing unavailable: {reason}")],
+        |s| s.assumptions,
+    );
+    assumptions.extend(r.issues.iter().cloned());
+    assumptions
+}
+
 fn selected_rates(
     catalog: &Catalog,
     r: &Request,
@@ -734,9 +834,16 @@ fn selected_rates(
         }
     }
     let mut factor = 1.0;
-    let Some(tier) = p.tier.as_deref() else {
-        return Err("effective service tier is not recorded");
-    };
+    let tier = service_tier(r, p)?;
+    if conditional_tier(r, p) {
+        assumptions.push(format!(
+            "conditional {tier}-rate OpenAI API equivalent: effective service tier is unrecorded; requested tier/speed is a scenario, not billing evidence; omitted/auto can inherit nonstandard project defaults; current config is not historical evidence; not a subscription bill"
+        ));
+        assumptions.push(TIER_SENSITIVITY.into());
+        if p.geo.is_none() {
+            assumptions.push("unrecorded geography assumed global API equivalent".into());
+        }
+    }
     if provider == "openai" && ["fast", "priority", "ultrafast"].contains(&tier) {
         let Some(multiplier) = premium_multiplier(tier, model_name, p.usage.input) else {
             return Err("premium tier lacks verified model/context rates");
@@ -1095,6 +1202,133 @@ mod tests {
             api: Api::Responses,
             ..make_request()
         }
+    }
+
+    #[test]
+    fn missing_codex_tiers_are_conditional_without_changing_billing_evidence() {
+        let c = prices();
+        let mut r = codex_request();
+        r.parts[0] = BillingPart {
+            model: Some("gpt-6.1-sol".into()),
+            tier: None,
+            speed: None,
+            geo: None,
+            usage: codex(json!({"input_tokens": 272001, "output_tokens": 100,
+                "cached_input_tokens": 200, "cache_write_input_tokens": 100,
+                "cache_creation_30m_input_tokens": 100})),
+            ..r.parts[0].clone()
+        };
+        let original = r.clone();
+        let standard = price_request(&c, &r);
+        assert!(standard.total_usd.is_some());
+        assert!(standard.assumptions.join(" ").contains("conditional"));
+        for tier in ["default", "fast", "priority", "ultrafast"] {
+            r.requested_speed = Some(crate::model::RequestedSpeed {
+                tier: Some(tier.into()),
+                speed: None,
+            });
+            let cost = price_request(&c, &r);
+            let multiplier = match tier {
+                "default" => 1.0,
+                "ultrafast" => 6.0,
+                _ => 2.0,
+            };
+            assert!(close(
+                cost.total_usd,
+                standard.total_usd.unwrap() * multiplier
+            ));
+            assert_eq!(r.parts, original.parts);
+        }
+        r.parts[0].tier = Some("default".into());
+        assert_eq!(price_request(&c, &r).total_usd, standard.total_usd);
+        assert!(
+            !price_request(&c, &r)
+                .assumptions
+                .join(" ")
+                .contains("conditional")
+        );
+    }
+
+    #[test]
+    fn conditional_tiers_keep_unsupported_and_contradictory_dimensions_unknown() {
+        let c = prices();
+        let mut r = codex_request();
+        r.parts[0] = BillingPart {
+            model: Some("gpt-5.4".into()),
+            tier: None,
+            speed: None,
+            geo: None,
+            usage: codex(json!({"input_tokens": 1000, "output_tokens": 100,
+                "cached_input_tokens": 200})),
+            ..r.parts[0].clone()
+        };
+        for tier in [None, Some("auto"), Some("default")] {
+            r.requested_speed = Some(crate::model::RequestedSpeed {
+                tier: tier.map(str::to_string),
+                speed: None,
+            });
+            assert!(close(price_request(&c, &r).total_usd, 0.00355));
+        }
+        for tier in ["flex", "scale", "unknown", "ultrafast"] {
+            r.requested_speed.as_mut().unwrap().tier = Some(tier.into());
+            assert_eq!(price_request(&c, &r).total_usd, None, "{tier}");
+        }
+        r.requested_speed = Some(crate::model::RequestedSpeed {
+            tier: Some("default".into()),
+            speed: Some("fast".into()),
+        });
+        assert_eq!(price_request(&c, &r).total_usd, None);
+        r.parts[0].tier = Some("default".into());
+        assert!(price_request(&c, &r).total_usd.is_some());
+        r.parts[0].tier = Some("auto".into());
+        assert_eq!(price_request(&c, &r).total_usd, None);
+        r.parts[0].tier = None;
+        r.requested_speed = None;
+        for issue in [
+            "conflicting effective service tiers",
+            "conflicting requested service tiers",
+        ] {
+            r.issues = vec![issue.into()];
+            assert_eq!(price_request(&c, &r).total_usd, None);
+        }
+        r.issues.clear();
+        r.provider = Some("custom".into());
+        assert_eq!(price_request(&c, &r).total_usd, None);
+        r.provider = Some("openai".into());
+        r.parts[0].model = Some("unknown".into());
+        assert_eq!(price_request(&c, &r).total_usd, None);
+        r.parts[0].model = Some("gpt-6.1-sol".into());
+        // This generation bills cache writes separately; absent writes stay unknown.
+        assert_eq!(price_request(&c, &r).total_usd, None);
+        r.parts[0].usage = Usage::default();
+        assert_eq!(price_request(&c, &r).total_usd, None);
+    }
+
+    #[test]
+    fn tier_scenarios_preserve_recorded_parts_and_unknown_alternatives() {
+        let c = prices();
+        let mut r = codex_request();
+        r.parts[0] = BillingPart {
+            model: Some("gpt-6.1-sol".into()),
+            tier: None,
+            speed: None,
+            geo: None,
+            usage: codex(json!({"input_tokens": 272000, "output_tokens": 100,
+                "cached_input_tokens": 200, "cache_write_input_tokens": 100})),
+            ..r.parts[0].clone()
+        };
+        let mut recorded = r.parts[0].clone();
+        recorded.tier = Some("priority".into());
+        r.parts.push(recorded);
+        let original = r.clone();
+        let rows = tier_sensitivity(&c, &[&r]);
+        let unit = price_part(&c, &r, &r.parts[0]).total_usd.unwrap();
+        assert!(close(rows[0].cost.total_usd, unit * 3.0));
+        assert!(close(rows[1].cost.total_usd, unit * 4.0));
+        assert!(close(rows[2].cost.total_usd, unit * 8.0));
+        assert_eq!(rows[3].cost.total_usd, None);
+        assert_eq!(rows[4].cost.total_usd, None);
+        assert_eq!(r, original);
     }
 
     fn close(a: Option<f64>, b: f64) -> bool {

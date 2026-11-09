@@ -481,6 +481,11 @@ fn codex_context_and_output_keep_their_remote_controls() {
         server["control"]["path"],
         serde_json::json!(["mcp_servers", "docs", "enabled"])
     );
+    assert!(server["estimatedUsd"].as_f64().is_some());
+    assert_eq!(server["conditionalRequests"], server["priced"]);
+    assert!(server["assumptions"].to_string().contains("conditional"));
+    assert_eq!(server["verdict"], Value::Null);
+    assert_eq!(remote["scan"]["coverage"]["tierKnown"], 0);
     let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
     assert_eq!(output["name"], "mcp__docs");
     // Both requests retain the result; compaction removes it before the third.
@@ -490,7 +495,7 @@ fn codex_context_and_output_keep_their_remote_controls() {
         output["largestCharacters"],
         "SYNTHETIC_PRIVATE_OUTPUT".len()
     );
-    // Native Codex usage has no billed tier, so these costs remain explicitly unknown.
+    // This output's possible offsets cross cache categories, so its cost stays unknown.
     assert_eq!(output["priced"], 0);
     assert_eq!(output["estimatedUsd"], Value::Null);
     let (_, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
@@ -498,10 +503,21 @@ fn codex_context_and_output_keep_their_remote_controls() {
     let there: Value = serde_json::from_str(&there).unwrap();
     assert_eq!(timeless(remote), timeless(&there));
     assert_eq!(remote["context"], there["context"]);
+    assert_eq!(remote["historical"], there["historical"]);
+    let (_, compact, stderr) = hosts.run(&["--ssh", "devbox", "--json"]);
+    assert_eq!(stderr, "");
+    let compact: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(
+        compact["hosts"][0]["report"]["historical"],
+        remote["historical"]
+    );
+    assert_eq!(compact["hosts"][0]["report"]["context"], remote["context"]);
 
     let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
     assert_eq!(stderr, "");
     assert!(!text.contains("SYNTHETIC_PRIVATE"));
+    assert!(text.contains("Conditional Codex pricing"), "{text}");
+    assert!(text.contains("keep/off unresolved"), "{text}");
     assert!(
         text.contains("tool_output_token_limit is 7,000 tokens"),
         "{text}"

@@ -12,7 +12,7 @@ use crate::model::{
     InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals, Text,
     Verdict,
 };
-use crate::prices::{Catalog, prefix_spans};
+use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
 
 /// The settings fragment for one control: settings.json's `"enableArtifact": false`,
@@ -691,6 +691,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         let spans = p
             .filter(|_| ratio.is_some())
             .and_then(|p| prefix_spans(catalog, r, p));
+        let assumptions = p.map_or_else(Vec::new, |p| pricing_assumptions(catalog, r, p));
         let size = |piece: &Placed<'_>| piece.characters as f64 * ratio.unwrap_or(0.0);
         let total: f64 = parts.iter().map(size).sum();
         // A calibration that overshoots the recorded input cannot place these pieces.
@@ -717,6 +718,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         control: kind.control.clone(),
                         requests: 0,
                         priced: 0,
+                        conditional_requests: 0,
+                        tier_unknown_requests: 0,
+                        assumptions: vec![],
                         tokens: None,
                         cost_usd: 0.0,
                         estimated_usd: None,
@@ -733,6 +737,13 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
             });
             row.cost.requests += 1;
+            row.cost.tier_unknown_requests +=
+                u64::from(r.parts.iter().any(|p| conditional_tier(r, p)));
+            for assumption in &assumptions {
+                if !row.cost.assumptions.contains(assumption) {
+                    row.cost.assumptions.push(assumption.clone());
+                }
+            }
         }
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
@@ -856,6 +867,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let row = &mut rows[&(owner, key)];
                 row.cost.priced += 1;
                 row.cost.cost_usd += cost;
+                if let Some(p) = p {
+                    row.cost.conditional_requests += u64::from(conditional_tier(r, p));
+                }
                 if r.time >= row.time {
                     row.time = r.time;
                     row.cost.tokens = Some(tokens.round() as i64);
@@ -977,7 +991,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             if let Some(calls) = c.calls {
                 c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
             }
-            if let (Some(_), true, Some(per_use)) = (&c.control, c.current, c.cost_per_use_usd) {
+            if let (Some(_), true, Some(per_use)) = (&c.control, c.current, c.cost_per_use_usd)
+                && c.tier_unknown_requests == 0
+            {
                 c.verdict = Some(if per_use > input.max_cost_per_use_usd {
                     Verdict::Off
                 } else {
@@ -1522,10 +1538,11 @@ mod tests {
         let mut profile = crate::test_support::make_profile("profile", "/codex");
         profile.harness = Harness::Codex;
         profile.mcp_servers = vec!["docs-server".into(), "unused".into()];
+        let requests = [codex("r1", 1, 4000, 0), codex("r2", 2, 5000, 4100)];
         let rows = context_costs(&ContextInput {
             scan: &scan,
-            requests: &[codex("r1", 1, 4000, 0), codex("r2", 2, 5000, 4100)],
-            profiles: &[profile],
+            requests: &requests,
+            profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
             max_cost_per_use_usd: 1.0,
         });
@@ -1559,6 +1576,30 @@ mod tests {
         // The skills check owns per-skill findings; the catalog is one piece here.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
+        for unsupported in [false, true] {
+            let mut requests = requests.clone();
+            requests[1].parts[0].tier = None;
+            requests[1].parts[0].speed = None;
+            if unsupported {
+                requests[1].requested_speed = Some(crate::model::RequestedSpeed {
+                    tier: Some("flex".into()),
+                    speed: None,
+                });
+            }
+            let rows = context_costs(&ContextInput {
+                scan: &scan,
+                requests: &requests,
+                profiles: std::slice::from_ref(&profile),
+                catalog: &prices(),
+                max_cost_per_use_usd: 1.0,
+            });
+            let apps = row(&rows, "codex_apps");
+            assert_eq!(apps.priced, if unsupported { 1 } else { 2 });
+            assert_eq!(apps.conditional_requests, u64::from(!unsupported));
+            assert_eq!(apps.tier_unknown_requests, 1);
+            assert!(apps.estimated_usd.is_some());
+            assert_eq!(apps.verdict, None);
+        }
     }
 
     #[test]

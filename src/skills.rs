@@ -27,34 +27,58 @@ pub(crate) fn paths<'a>(body: &'a str, entries: &[(&str, &'a str)]) -> Vec<Optio
         .map(|(_, span)| {
             let (_, suffix) = span.rsplit_once("(file: ")?;
             let path = suffix.trim_end_matches('\r').strip_suffix(')')?;
-            if absolute(path) && skill_file(path) {
+            if absolute(path) && skill_file(path) && plain(path) {
                 return Some(normalize(path));
             }
             let (alias, rest) = path.split_once('/')?;
             // Root aliases are a rendered transport convention, not filesystem paths.
             let root = roots.get(alias).copied().flatten()?;
-            if !skill_file(rest)
-                || rest
-                    .split('/')
-                    .any(|p| p == ".." || p == "." || p.is_empty())
-            {
+            if !skill_file(rest) || !plain(rest) {
                 return None;
             }
-            Some(normalize(&format!(
-                "{}/{rest}",
+            if !plain(root) {
+                return None;
+            }
+            let root = if windows(root) {
                 root.trim_end_matches(['/', '\\'])
-            )))
+            } else {
+                root.trim_end_matches('/')
+            };
+            Some(normalize(&format!("{root}/{rest}")))
         })
         .collect()
 }
 
 /// Windows roots and read events must hash the same lexical separator form.
 pub(crate) fn normalize(path: &str) -> String {
-    if path.starts_with("\\\\") || path.as_bytes().get(1) == Some(&b':') {
-        path.replace('/', "\\")
+    if windows(path) {
+        let mut normalized = path.replace('/', "\\");
+        if normalized.as_bytes().get(1) == Some(&b':') {
+            normalized.replace_range(..1, &normalized[..1].to_ascii_uppercase());
+        }
+        normalized
     } else {
         path.into()
     }
+}
+
+fn windows(path: &str) -> bool {
+    path.starts_with("\\\\") || path.as_bytes().get(1) == Some(&b':')
+}
+
+// `..` can cross a symlink. Historical transcripts cannot prove its resolved identity.
+fn plain(path: &str) -> bool {
+    let separators: &[char] = if windows(path) { &['/', '\\'] } else { &['/'] };
+    let body = if path.starts_with("\\\\") {
+        &path[2..]
+    } else {
+        path.strip_prefix('/').unwrap_or(path)
+    }
+    .trim_end_matches(separators);
+    !body
+        .split(separators)
+        .any(|part| part == "." || part == ".." || part.is_empty())
+        || path == "/"
 }
 
 pub(crate) fn absolute(path: &str) -> bool {

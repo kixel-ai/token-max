@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 use crate::exposure::{calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
-    InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals, Text,
-    Verdict,
+    Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
+    Text, Verdict,
 };
 use crate::prices::{Catalog, prefix_spans};
 use crate::safe::identity;
@@ -592,6 +592,16 @@ struct Row {
     time: Millis,
 }
 
+/// Evidence credited through the same profile and last-used rules for every harness.
+struct ObservedUse<'a> {
+    profiles: &'a [String],
+    time: Millis,
+    calls: u64,
+    invocation: Option<&'a Invocation>,
+    ambiguous: bool,
+    fallback: bool,
+}
+
 /// Price each piece of context in every selected request that recorded its
 /// shape. A piece is charged at the cache state of its position in the prompt:
 /// Claude's tools and system prompt lead in recorded order. Message attachments,
@@ -961,19 +971,84 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             families.entry((kind, name)).or_default().push(index);
         }
     }
-    let mut last: HashMap<usize, Millis> = HashMap::new();
-    let mut credit =
-        |indices: Option<&Vec<usize>>, profiles: &[String], time: Millis, calls: u64| {
-            for &index in indices.into_iter().flatten() {
-                let row = &mut rows[index].cost;
-                if !profiles.iter().any(|p| row.profiles.contains(p)) {
-                    continue;
-                }
-                *row.calls.as_mut().expect("family rows count calls") += calls;
-                let entry = last.entry(index).or_insert(Millis::MIN);
-                *entry = (*entry).max(time);
-            }
+    let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut ambiguous_targets = HashSet::new();
+    let mut fallback_targets = HashSet::new();
+    for (index, row) in rows.values().enumerate() {
+        let Some(skill) = &row.cost.skill else {
+            continue;
         };
+        if let Some(path) = &skill.path {
+            targets
+                .entry(identity(&format!("skill:{path}")))
+                .or_default()
+                .push(index);
+        } else {
+            targets
+                .entry(identity(&format!("skill-unresolved:{}", row.cost.name)))
+                .or_default()
+                .push(index);
+        }
+        // Without an active catalog, a name is usable only when the matching
+        // history has one path identity. Never guess between multiple copies.
+        let fallback = identity(&format!("skill:{}", row.cost.name));
+        targets.entry(fallback.clone()).or_default().push(index);
+        fallback_targets.insert(fallback);
+        let ambiguous = identity(&format!("skill-ambiguous:{}", row.cost.name));
+        targets.entry(ambiguous.clone()).or_default().push(index);
+        ambiguous_targets.insert(ambiguous);
+    }
+    let mut last: HashMap<usize, Millis> = HashMap::new();
+    let mut turns = HashSet::new();
+    let mut credit = |indices: Option<&Vec<usize>>, observed: ObservedUse<'_>| {
+        let ambiguous = observed.ambiguous
+            || (observed.fallback
+                && indices
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|&index| {
+                        let c = &rows[index].cost;
+                        observed
+                            .profiles
+                            .iter()
+                            .any(|p| c.profiles.contains(p))
+                            .then(|| c.skill.as_ref().unwrap().path.as_deref())
+                    })
+                    .collect::<HashSet<_>>()
+                    .len()
+                    > 1);
+        for &index in indices.into_iter().flatten() {
+            let c = &mut rows[index].cost;
+            if !observed.profiles.iter().any(|p| c.profiles.contains(p)) {
+                continue;
+            }
+            let mut calls = observed.calls;
+            if let Some(i) = observed.invocation {
+                let skill = c.skill.as_mut().unwrap();
+                match i.kind {
+                    InvocationKind::SkillRequest
+                        if i.status == InvocationStatus::Requested && ambiguous =>
+                    {
+                        skill.ambiguous_requests += 1;
+                        continue;
+                    }
+                    InvocationKind::SkillRequest if i.status == InvocationStatus::Requested => {
+                        skill.requested += 1
+                    }
+                    InvocationKind::SkillLoad if i.status == InvocationStatus::Completed => {
+                        skill.loaded += 1
+                    }
+                    _ => continue,
+                }
+                // Request/load evidence in one user turn describes one use. With
+                // no recorded boundary, coalesce the session's evidence.
+                calls = u64::from(turns.insert((index, i.session.clone(), i.turn.clone())));
+            }
+            *c.calls.as_mut().expect("family rows count calls") += calls;
+            let entry = last.entry(index).or_insert(Millis::MIN);
+            *entry = (*entry).max(observed.time);
+        }
+    };
     for c in &scan.tool_calls {
         let family = if c.name.starts_with("mcp__") {
             (ContextKind::McpServer, mcp_server(&c.name))
@@ -982,86 +1057,54 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         } else {
             (ContextKind::Tool, c.name.as_str())
         };
-        credit(families.get(&family), &c.profiles, c.last_used, c.calls);
+        credit(
+            families.get(&family),
+            ObservedUse {
+                profiles: &c.profiles,
+                time: c.last_used,
+                calls: c.calls,
+                invocation: None,
+                ambiguous: false,
+                fallback: false,
+            },
+        );
     }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
-        if i.harness == Harness::Codex {
-            continue;
-        }
-        // A namespace-wide switch also removes recorded uses of members whose
-        // listing was not measured. Other skill controls apply only to their own target.
-        let key = if i.harness == Harness::Claude && i.group.as_ref() == Some(&synced_group) {
-            interned.ids.get(SYNCED_SKILLS_KEY)
+        let indices = if i.harness == Harness::Codex {
+            targets.get(&i.target)
         } else {
-            interned.skills.get(&i.target)
-        };
-        let Some(&key) = key else {
-            continue;
-        };
-        // Typed requests keep working when a skill is hidden from the model, so only
-        // the model's own calls show what its listing is for. A setting that removes
-        // the skill entirely takes typed requests away too, so those count as uses.
-        let counts = match i.kind {
-            InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
-            InvocationKind::SkillRequest => !typed_only(interned.kinds[key].control.as_ref()),
-            _ => false,
-        };
-        if counts {
-            credit(skill_families.get(&key), &i.profiles, i.time, 1);
-        }
-    }
-    let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut ambiguous_targets = HashSet::new();
-    for (index, row) in rows.values().enumerate() {
-        let Some(skill) = &row.cost.skill else {
-            continue;
-        };
-        let target = identity(&format!(
-            "skill:{}",
-            skill.path.as_deref().unwrap_or(&row.cost.name)
-        ));
-        targets.entry(target).or_default().push(index);
-        let ambiguous = identity(&format!("skill-ambiguous:{}", row.cost.name));
-        targets.entry(ambiguous.clone()).or_default().push(index);
-        ambiguous_targets.insert(ambiguous);
-    }
-    let mut turns = HashSet::new();
-    for i in scan
-        .invocations
-        .iter()
-        .filter(|i| i.harness == Harness::Codex)
-    {
-        let ambiguous = ambiguous_targets.contains(&i.target);
-        for &index in targets.get(&i.target).into_iter().flatten() {
-            let c = &mut rows[index].cost;
-            if !i.profiles.iter().any(|p| c.profiles.contains(p)) {
+            // A namespace switch also removes uses of unmeasured members.
+            let key = if i.group.as_ref() == Some(&synced_group) {
+                interned.ids.get(SYNCED_SKILLS_KEY)
+            } else {
+                interned.skills.get(&i.target)
+            };
+            let Some(&key) = key else {
+                continue;
+            };
+            // Typed requests still work when only the model listing is hidden.
+            let counts = match i.kind {
+                InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
+                InvocationKind::SkillRequest => !typed_only(interned.kinds[key].control.as_ref()),
+                _ => false,
+            };
+            if !counts {
                 continue;
             }
-            let skill = c.skill.as_mut().unwrap();
-            match i.kind {
-                InvocationKind::SkillRequest
-                    if i.status == InvocationStatus::Requested && ambiguous =>
-                {
-                    skill.ambiguous_requests += 1;
-                    continue;
-                }
-                InvocationKind::SkillRequest if i.status == InvocationStatus::Requested => {
-                    skill.requested += 1
-                }
-                InvocationKind::SkillLoad if i.status == InvocationStatus::Completed => {
-                    skill.loaded += 1
-                }
-                _ => continue,
-            }
-            // Request/load evidence in one user turn describes one use. With no
-            // recorded boundary, conservatively coalesce the session's evidence.
-            if turns.insert((index, i.session.as_str(), i.turn.as_deref())) {
-                *c.calls.as_mut().unwrap() += 1;
-            }
-            let time = last.entry(index).or_insert(Millis::MIN);
-            *time = (*time).max(i.time);
-        }
+            skill_families.get(&key)
+        };
+        credit(
+            indices,
+            ObservedUse {
+                profiles: &i.profiles,
+                time: i.time,
+                calls: 1,
+                invocation: (i.harness == Harness::Codex).then_some(i),
+                ambiguous: ambiguous_targets.contains(&i.target),
+                fallback: fallback_targets.contains(&i.target),
+            },
+        );
     }
     // Results count as their tool's uses, and the largest one sizes its output cap.
     let mut largest: HashMap<usize, i64> = HashMap::new();
@@ -1083,6 +1126,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let latest: HashMap<usize, HashSet<usize>> = latest
         .into_iter()
         .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
+        .collect();
+    let row_indices: HashMap<_, _> = rows
+        .keys()
+        .enumerate()
+        .map(|(index, &key)| (key, index))
         .collect();
     let mut result: Vec<ContextCost> = rows
         .into_values()
@@ -1126,28 +1174,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         for keys in duplicates.into_values().filter(|v| v.len() > 1) {
             let indices: Vec<_> = keys
                 .iter()
-                .filter_map(|key| {
-                    let name = &interned.kinds[*key].name;
-                    let path = &interned.catalog[key];
-                    result.iter().position(|c| {
-                        c.profiles == owner_profiles[owner]
-                            && &c.name == name
-                            && c.skill.as_ref().is_some_and(|s| &s.path == path)
-                    })
-                })
+                .filter_map(|key| row_indices.get(&(owner, *key)).copied())
                 .collect();
             // Retain the most-used identifiable copy, breaking ties by listing order.
             let retained = indices
                 .iter()
                 .copied()
-                .filter(|&i| result[i].control.is_some())
-                .max_by_key(|&i| {
-                    (
-                        result[i].calls.unwrap_or(0),
-                        std::cmp::Reverse(indices.iter().position(|&j| j == i).unwrap()),
-                    )
-                })
-                .and_then(|i| result[i].skill.as_ref().unwrap().path.clone());
+                .enumerate()
+                .filter(|&(_, i)| result[i].control.is_some())
+                .max_by_key(|&(order, i)| (result[i].calls.unwrap_or(0), std::cmp::Reverse(order)))
+                .and_then(|(_, i)| result[i].skill.as_ref().unwrap().path.clone());
             for index in indices {
                 let c = &mut result[index];
                 let skill = c.skill.as_mut().unwrap();

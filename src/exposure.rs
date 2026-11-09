@@ -125,6 +125,7 @@ pub struct ExposureCollector {
     session_cache: Option<(String, Text)>,
     turn: Option<String>,
     turn_from_user: bool,
+    turn_available: bool,
     turn_aliases: HashMap<String, String>,
     client: Option<String>,
     version: Option<String>,
@@ -383,6 +384,7 @@ impl ExposureCollector {
             session_cache: None,
             turn: None,
             turn_from_user: false,
+            turn_available: false,
             turn_aliases: HashMap::new(),
             client: None,
             version: None,
@@ -421,6 +423,7 @@ impl ExposureCollector {
         self.uncertain = true;
         self.turn = None;
         self.turn_from_user = false;
+        self.turn_available = false;
         self.invalidated = true;
     }
 
@@ -459,14 +462,17 @@ impl ExposureCollector {
         {
             let recorded = payload
                 .get("turn_id")
-                .filter(|v| !v.is_null())
-                .map(|v| id(Some(v)))
-                .transpose()?;
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(identity);
             if let Some(recorded) = recorded {
                 if self.turn_from_user
                     && let Some(inferred) = &self.turn
                 {
                     self.turn_aliases.insert(inferred.clone(), recorded.clone());
+                    self.turn_available = false;
+                } else if self.turn.as_ref() != Some(&recorded) {
+                    self.turn_available = true;
                 }
                 self.turn = Some(recorded);
                 self.turn_from_user = false;
@@ -841,6 +847,7 @@ impl ExposureCollector {
         self.session_cache = None;
         self.turn = None;
         self.turn_from_user = false;
+        self.turn_available = false;
         self.client = None;
         self.version = None;
         self.uncertain = true;
@@ -1141,10 +1148,12 @@ impl ExposureCollector {
             let name = selected
                 .and_then(|(path, _)| path.as_deref())
                 .unwrap_or(name);
-            input.group = group(name).or(input.group);
+            input.group = input.group.or_else(|| group(name));
             target(
                 if ambiguous {
                     "skill-ambiguous"
+                } else if selected.is_some_and(|(path, _)| path.is_none()) {
+                    "skill-unresolved"
                 } else {
                     "skill"
                 },
@@ -1724,6 +1733,19 @@ impl ExposureCollector {
             }
             _ => array(contents)?,
         };
+        let native_user = is(p, "type", "user_message") || is(item, "type", "UserMessage");
+        let user = user
+            && raw.get("isMeta") != Some(&Value::Bool(true))
+            && (!codex
+                || native_user
+                || blocks.iter().any(|v| {
+                    let b = object(v);
+                    is(b, "type", "skill")
+                        || b.get("text").and_then(Value::as_str).is_some_and(|t| {
+                            let t = t.trim_start();
+                            !t.starts_with("<skill>") && !t.starts_with("<user_shell_command>")
+                        })
+                }));
         let mut block_ids = vec![];
         let mut typed_aliases = HashMap::new();
         for (index, v) in blocks.iter().enumerate() {
@@ -1775,41 +1797,43 @@ impl ExposureCollector {
                 .find(|(v, _)| object(v).get("text").is_some_and(Value::is_string))
                 .map(|(_, id)| id)
                 .or_else(|| block_ids.first());
-            self.turn = boundary.map(|(call, _)| identity(call));
-            self.turn_from_user = self
-                .turn
-                .as_ref()
-                .is_none_or(|turn| !self.turn_aliases.contains_key(turn));
-            if let Some(recorded) = self
-                .turn
+            let inferred = boundary.map(|(call, _)| identity(call));
+            let recorded = inferred
                 .as_ref()
                 .and_then(|turn| self.turn_aliases.get(turn))
-            {
-                self.turn = Some(recorded.clone());
+                .cloned()
+                .or_else(|| self.turn_available.then(|| self.turn.clone()).flatten());
+            if let (Some(inferred), Some(recorded)) = (&inferred, &recorded) {
+                self.turn_aliases.insert(inferred.clone(), recorded.clone());
             }
+            self.turn_from_user = recorded.is_none();
+            self.turn_available = false;
+            self.turn = recorded.or(inferred);
         }
         for (v, (call, basis)) in blocks.iter().zip(block_ids) {
             let b = object(v);
             let block_text = b.get("text").and_then(Value::as_str);
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
-                self.typed_skills.insert(name.to_ascii_lowercase());
+                let alias = typed_aliases.get(&name.to_ascii_lowercase());
                 let invoke = Invoke {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
                     status: InvocationStatus::Requested,
-                    call: typed_aliases
-                        .get(&name.to_ascii_lowercase())
-                        .map_or_else(|| call.clone(), |(call, _)| call.clone()),
+                    call: alias.map_or_else(|| call.clone(), |(call, _)| call.clone()),
                     group: group(name),
-                    basis: typed_aliases
-                        .get(&name.to_ascii_lowercase())
-                        .map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
+                    basis: alias.map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
                 };
                 let selected = if codex {
                     b.get("path")
                         .and_then(Value::as_str)
                         .filter(|p| crate::skills::absolute(p) && skill_file(p))
+                        .filter(|_| {
+                            !self
+                                .codex_skill_paths
+                                .get(self.skill_name(name))
+                                .is_some_and(|(path, count)| path.is_none() && *count == 1)
+                        })
                         .unwrap_or(name)
                 } else {
                     name
@@ -2731,6 +2755,9 @@ fn resource_tool(name: &str) -> bool {
 
 /// A plugin (`name:`) or MCP server (`mcp__server__`) owner identity.
 fn group(value: &str) -> Option<String> {
+    if crate::skills::absolute(value) || skill_file(value) {
+        return None;
+    }
     // /^(?:mcp__)?([^:]+):/
     let plugin = value.find(':').and_then(|colon| {
         if value.starts_with("mcp__") && colon > 5 {
@@ -3920,7 +3947,7 @@ mod tests {
                 (InvocationKind::SkillReference, target("skill", "pdf")),
                 (
                     InvocationKind::SkillRequest,
-                    target("skill", "anthropic-skills:pdf")
+                    target("skill-unresolved", "anthropic-skills:pdf")
                 ),
             ]
         );
@@ -4285,5 +4312,24 @@ mod tests {
         assert!(!is_subagent("/p/subagents.jsonl"));
         assert!(resource_tool("functions.list_mcp_resources"));
         assert!(!resource_tool("mcp.mcp.get_prompt"));
+    }
+
+    #[test]
+    fn malformed_optional_codex_turn_ids_do_not_discard_exposure_records() {
+        for turn_id in [json!(""), json!(42)] {
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
+            feed.all(&mut c, vec![
+                json!({"type":"session_meta", "timestamp":at(0), "payload":{"id":"s"}}),
+                json!({"type":"turn_context", "timestamp":at(0), "payload":{"turn_id":turn_id}}),
+                json!({"type":"event_msg", "timestamp":at(0), "payload":{"type":"task_started", "turn_id":turn_id}}),
+                json!({"type":"world_state", "timestamp":at(0), "payload":{"full":true,
+                    "state":{"host_skills":{"body":"- foo: x (file: /skills/foo/SKILL.md)"}}}}),
+                json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$foo"}}),
+            ]);
+            let scan = c.finish(&[feed.request("r", 2, None)], None);
+            assert_eq!(scan.invocations.len(), 1);
+            assert_eq!(scan.invocations[0].kind, InvocationKind::SkillRequest);
+        }
     }
 }

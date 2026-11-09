@@ -1817,11 +1817,13 @@ fn windows_aliases_match_loads_and_detail_controls_remain_single_line() {
     let data = transcript(Harness::Codex, &[
         codex_meta(), turn(),
         world(0, json!({"host_skills":{"body":"- `r0` = `C:\\skills\\`\n- pdf: x (file: r0/pdf/SKILL.md)"}}), true),
-        skill_load(1, "read", r"C:\skills\pdf\SKILL.md", 0), billed(2),
+        skill_load(1, "read", "c:/skills/pdf/SKILL.md", 0), billed(2),
     ], None).unwrap();
     let r = report(&data, 1.0);
     let c = skill_row(&r, r"C:\skills\pdf\SKILL.md");
     assert_eq!(c.calls, Some(1));
+    assert_eq!(c.skill.as_ref().unwrap().loaded, 1);
+    assert!(data.exposure.invocations.iter().all(|i| i.group.is_none()));
     let rendered = format_report(
         &r,
         ReportOptions {
@@ -1838,4 +1840,130 @@ fn windows_aliases_match_loads_and_detail_controls_remain_single_line() {
         toml::from_str::<toml::Value>(&control).unwrap()["skills"]["config"][0]["path"].as_str(),
         Some(r"C:\skills\pdf\SKILL.md")
     );
+}
+
+#[test]
+fn injected_codex_user_role_messages_do_not_create_turns_or_skill_requests() {
+    let injected = |second, content| {
+        json!({"type":"response_item", "timestamp":at(second),
+        "payload":{"type":"message", "role":"user", "content": content}})
+    };
+    let mut next = turn();
+    next["payload"]["turn_id"] = json!("next");
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(),
+        world(0, json!({"host_skills":{"body":"- foo: x (file: /skills/foo/SKILL.md)"}}), true),
+        json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$foo"}}),
+        // These are model-visible injections, not new user requests.
+        injected(2, json!([{"type":"input_text", "text":"<skill>body mentions $foo</skill>"}])),
+        injected(3, json!([{"type":"input_image", "image_url":"synthetic"}])),
+        injected(4, json!([{"type":"input_text", "text":"<user_shell_command>$foo</user_shell_command>"}])),
+        skill_load(5, "load", "/skills/foo/SKILL.md", 0),
+        next, billed(6),
+    ], None).unwrap();
+    let r = report(&data, 1.0);
+    let c = skill_row(&r, "/skills/foo/SKILL.md");
+    assert_eq!(c.calls, Some(1));
+    let skill = c.skill.as_ref().unwrap();
+    assert_eq!((skill.requested, skill.loaded), (1, 1));
+    let evidence: Vec<_> = data
+        .exposure
+        .invocations
+        .iter()
+        .filter(|i| {
+            matches!(
+                i.kind,
+                InvocationKind::SkillRequest | InvocationKind::SkillLoad
+            )
+        })
+        .collect();
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(evidence[0].turn, evidence[1].turn);
+    assert_ne!(evidence[0].turn, Some(identity("next")));
+}
+
+#[test]
+fn name_only_requests_without_an_active_catalog_use_only_unique_historical_paths() {
+    for copies in [1, 2] {
+        let mut body = "- foo: x (file: /skills/foo/SKILL.md)".to_string();
+        if copies == 2 {
+            body += "\n- foo: y (file: /other/foo/SKILL.md)";
+        }
+        let data = transcript(Harness::Codex, &[
+            codex_meta(), turn(), world(0, json!({"host_skills":{"body":body}}), true), billed(1),
+            json!({"type":"compacted", "timestamp":at(2), "payload":{}}),
+            json!({"type":"response_item", "timestamp":at(3), "payload":{"type":"message", "role":"user",
+                "content":[{"type":"input_text", "text":"$foo"}, {"type":"skill", "name":"foo"}]}}), billed(4),
+        ], None).unwrap();
+        let r = report(&data, 1.0);
+        let c = skill_row(&r, "/skills/foo/SKILL.md");
+        let skill = c.skill.as_ref().unwrap();
+        if copies == 1 {
+            assert_eq!(c.calls, Some(1));
+            assert_eq!((skill.requested, skill.ambiguous_requests), (1, 0));
+        } else {
+            assert_eq!(c.calls, Some(0));
+            assert_eq!((skill.requested, skill.ambiguous_requests), (0, 1));
+        }
+    }
+}
+
+#[test]
+fn explicit_paths_do_not_lose_requests_to_an_unresolved_catalog_alias() {
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(),
+        world(0, json!({"host_skills":{"body":"- foo: x (file: r9/foo/SKILL.md)"}}), true),
+        json!({"type":"response_item", "timestamp":at(1), "payload":{"type":"message", "role":"user",
+            "content":[{"type":"input_text", "text":"$foo"}, {"type":"skill", "name":"foo", "path":"/skills/foo/SKILL.md"}]}}),
+        billed(2),
+    ], None).unwrap();
+    let r = report(&data, 1.0);
+    let c = r.context.iter().find(|c| c.name == "foo").unwrap();
+    assert_eq!(c.calls, Some(1));
+    assert_eq!(c.skill.as_ref().unwrap().requested, 1);
+    assert_eq!(c.skill.as_ref().unwrap().path, None);
+    assert!(c.control.is_none());
+}
+
+#[test]
+fn noncanonical_paths_do_not_produce_duplicate_disable_controls() {
+    let body = "- foo: x (file: /a/foo/SKILL.md)\n- foo: x (file: /a/x/../foo/SKILL.md)\n- dot: x (file: /a/./dot/SKILL.md)\n- empty: x (file: /a//empty/SKILL.md)";
+    let data = transcript(
+        Harness::Codex,
+        &[
+            codex_meta(),
+            turn(),
+            world(0, json!({"host_skills":{"body":body}}), true),
+            billed(1),
+        ],
+        None,
+    )
+    .unwrap();
+    let r = report(&data, 1.0);
+    for c in r.context.iter().filter(|c| c.skill.is_some()) {
+        assert_ne!(c.verdict, Some(Verdict::Off));
+        if c.skill.as_ref().unwrap().path.is_none() {
+            assert!(c.control.is_none());
+        }
+    }
+}
+
+#[test]
+fn resolved_paths_with_colons_preserve_the_skill_plugin_group() {
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(),
+        world(0, json!({"host_skills":{"body":"- tools:foo: x (file: C:\\skills\\foo\\SKILL.md)\n- other: x (file: /home/a:b/other/SKILL.md)"}}), true),
+        json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$tools:foo $other"}}),
+        billed(2),
+    ], None).unwrap();
+    let requests = kinds(&data.exposure, InvocationKind::SkillRequest);
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|i| i.group == Some(identity("plugin:tools")))
+            .count(),
+        1
+    );
+    assert_eq!(requests.iter().filter(|i| i.group.is_none()).count(), 1);
 }

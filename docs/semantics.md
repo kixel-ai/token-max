@@ -609,7 +609,9 @@ Codex skill controls and behavior were verified on 2026-11-08 against the
 Each rendered `- name: description (file: ...)` span gets its own recurring
 listing cost. Root alias declarations resolve the file to its absolute
 `SKILL.md` without inspecting today's filesystem. An unresolved/conflicting
-alias leaves the path and disable control unknown. Root declarations and
+alias, dot segment, or repeated separator leaves the path and disable control
+unknown. Symlink equivalence is not inferred. Windows separators and drive-letter
+case are normalized without folding case-sensitive path components. Root declarations and
 unparsed framing remain in the framing charge. Descriptions and bodies are
 never retained. Different paths sharing a name remain separate rows; repeated
 identical entries contribute all of their rendered characters to that path's
@@ -619,14 +621,19 @@ row, with requests counted once. Replacing aliases also changes member identity.
 ambiguous requests, duplicate entry count, and preferred retained path.
 `calls` counts distinct observed user turns per skill, coalescing requests and
 loads in that turn so they cannot inflate the cost-per-use denominator.
-Native user-message aliases establish inferred boundaries; recorded turn IDs
-are used where no user message is visible. Without a boundary, evidence is
+Native user-message aliases establish inferred boundaries and reconcile with
+recorded turn IDs before or after the message. Injected skill bodies, images,
+and shell-command echoes do not establish user turns. Without a boundary, evidence is
 conservatively grouped within its session. These are observed uses, not
 successful executions. Only a successful single parsed file-read command confirms a
 load; failed or compound commands do not. Typed `skill` input with an absolute
-path identifies its copy. Name-only requests resolve against the active catalog
-only when every copy resolves to the same path. Otherwise they are excluded
-from each copy's uses and disclosed as ambiguous. Successful skill invocation
+path identifies its copy when that path is known. A unique unresolved catalog
+entry still receives requested-use evidence by name, without inventing a path
+control from the typed input. Name-only requests resolve against the active catalog
+only when every copy resolves to the same path. Without an active catalog, a
+unique historical path can receive a name-only request. Multiple possible paths
+are excluded from each copy's uses and disclosed as ambiguous. Alternate symlink
+paths are not guessed equivalent. Successful skill invocation
 remains unknown. Existing invocation IDs and content-occurrence aliases
 deduplicate copied events; a typed skill and its text mention share a request
 ID when the same message contains both. Unknown recording coverage and zero

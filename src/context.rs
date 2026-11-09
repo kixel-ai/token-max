@@ -191,6 +191,9 @@ struct Pieces<'a> {
     /// By component and owning profile set, since a Codex server's switch
     /// depends on the profiles that declare it.
     of: HashMap<(&'a str, usize), Vec<Split>>,
+    /// The row a skill invocation counts for, by hashed `skill:<name>` target. The
+    /// scan already resolved a short name to the synced skill it reached.
+    skills: HashMap<String, usize>,
 }
 
 /// One component's share of a piece: its characters, or None when only its
@@ -245,6 +248,47 @@ fn disable(path: &[&str]) -> Option<Control> {
         value: ControlValue::Bool(false),
         append: false,
     })
+}
+
+/// The report name for skills switched together by `syncClaudeAiSkills`.
+pub const SYNCED_SKILLS: &str = "claude.ai synced skills";
+
+const SYNCED_NAMESPACE: &str = "anthropic-skills";
+const SYNCED_SKILLS_KEY: &str = "setting:syncClaudeAiSkills";
+
+/// The row and setting for one skill listing entry. `skillOverrides` hides a local or
+/// bundled skill from the model and keeps `/name` working, but it does not apply to
+/// plugin skills, and synced skills only turn off together through `syncClaudeAiSkills`.
+fn skill(member: &str) -> (String, String, Option<Control>) {
+    if synced_short(member).is_some() {
+        return (
+            SYNCED_SKILLS_KEY.into(),
+            SYNCED_SKILLS.into(),
+            disable(&["syncClaudeAiSkills"]),
+        );
+    }
+    let key = format!("skill:{member}");
+    // A plugin's skill, or an added directory's same-named one: no settings key turns
+    // off just that skill.
+    if member.contains(':') {
+        return (key, member.into(), None);
+    }
+    let control = Control {
+        path: vec!["skillOverrides".into(), member.into()],
+        value: ControlValue::Text("user-invocable-only".into()),
+        append: false,
+    };
+    (key, member.into(), Some(control))
+}
+
+/// The short name of a skill synced from claude.ai, such as `pdf` for `anthropic-skills:pdf`.
+pub fn synced_short(name: &str) -> Option<&str> {
+    name.strip_prefix(SYNCED_NAMESPACE)?.strip_prefix(':')
+}
+
+/// Whether a control hides a skill from the model only, leaving typed uses working.
+pub fn typed_only(control: Option<&Control>) -> bool {
+    control.is_some_and(|c| c.path.first().is_some_and(|p| p == "skillOverrides"))
 }
 
 /// The MCP server a tool belongs to: the text between the first and second `__`.
@@ -361,13 +405,11 @@ fn pieces(
             let mut result: Vec<(usize, i64)> = members
                 .into_iter()
                 .map(|(member, n)| {
-                    let control = Control {
-                        path: vec!["skillOverrides".into(), member.into()],
-                        value: ControlValue::Text("user-invocable-only".into()),
-                        append: false,
-                    };
-                    let key = format!("skill:{member}");
-                    let id = interned.intern(key, ContextKind::Skill, member.into(), Some(control));
+                    let (key, name, control) = skill(member);
+                    let id = interned.intern(key, ContextKind::Skill, name, control);
+                    interned
+                        .skills
+                        .insert(identity(&format!("skill:{member}")), id);
                     (id, n)
                 })
                 .collect();
@@ -489,7 +531,7 @@ struct Prior<'a> {
     reply: i64,
     keys: HashSet<(&'a str, usize)>,
     /// The tokenizer and the leading tools and system prompt by revision.
-    prefix: (String, &'a [Text]),
+    prefix: (String, Vec<&'a Text>),
     results: Option<&'a ResultTotals>,
 }
 
@@ -546,10 +588,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // Claude's recorded request shapes are exact. Codex records each change to
         // the context it sends, so its chronological state is what the model saw.
         // Any other request still prices its tool output, but cannot say what else it sent.
-        let (shown, shaped): (&[Text], bool) = match (r.harness, view.linkage) {
-            (Harness::Claude, Linkage::Wire) => (&view.components, true),
-            (Harness::Codex, Linkage::Chronological) => (&view.candidates, true),
-            _ => (&[], false),
+        let (shown, shaped): (Vec<&Text>, bool) = match (r.harness, view.linkage) {
+            (Harness::Claude, Linkage::Wire) => (view.components.iter().collect(), true),
+            (Harness::Codex, Linkage::Chronological) => (view.candidates.iter().collect(), true),
+            _ => (vec![], false),
         };
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
@@ -695,12 +737,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
         // where messages start in this request's tokens.
-        let prefix = (tokenizer, &shown[..view.prefix.min(shown.len())]);
-        let prefix = if codex {
-            (prefix.0, &shown[..0])
-        } else {
-            prefix
-        };
+        let prefix = (
+            tokenizer,
+            if codex {
+                vec![]
+            } else {
+                shown.iter().take(view.prefix).copied().collect()
+            },
+        );
         // Claude Code marks the last message for caching, so only a few framing
         // tokens follow a request's cached prefix, unless the pieces measured in
         // it do not fit there. Elsewhere content can run to the end of the input.
@@ -830,6 +874,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     // profile sets, and a copy cannot say which profile made the call, so it
     // counts for every row of its tool that shares a profile with it.
     let mut families: HashMap<(ContextKind, &str), Vec<usize>> = HashMap::new();
+    let mut skill_families: HashMap<usize, Vec<usize>> = HashMap::new();
     for (index, row) in rows.values_mut().enumerate() {
         let kind = row.cost.kind;
         if !matches!(
@@ -842,13 +887,17 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             continue;
         }
         row.cost.calls = Some(0);
-        let name = interned.kinds[row.key].name.as_str();
-        families.entry((kind, name)).or_default().push(index);
+        if kind == ContextKind::Skill {
+            skill_families.entry(row.key).or_default().push(index);
+        } else {
+            let name = interned.kinds[row.key].name.as_str();
+            families.entry((kind, name)).or_default().push(index);
+        }
     }
     let mut last: HashMap<usize, Millis> = HashMap::new();
     let mut credit =
-        |family: (ContextKind, &str), profiles: &[String], time: Millis, calls: u64| {
-            for &index in families.get(&family).into_iter().flatten() {
+        |indices: Option<&Vec<usize>>, profiles: &[String], time: Millis, calls: u64| {
+            for &index in indices.into_iter().flatten() {
                 let row = &mut rows[index].cost;
                 if !profiles.iter().any(|p| row.profiles.contains(p)) {
                     continue;
@@ -866,22 +915,30 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         } else {
             (ContextKind::Tool, c.name.as_str())
         };
-        credit(family, &c.profiles, c.last_used, c.calls);
+        credit(families.get(&family), &c.profiles, c.last_used, c.calls);
     }
-    let skills: HashMap<String, &str> = interned
-        .kinds
-        .iter()
-        .filter(|k| k.kind == ContextKind::Skill)
-        .map(|k| (identity(&format!("skill:{}", k.name)), k.name.as_str()))
-        .collect();
+    let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
-        // Typed requests keep working when a skill is hidden from the model, so only
-        // the model's own calls show what its listing is for.
-        if i.kind != InvocationKind::SkillCall || i.status == InvocationStatus::Reference {
+        // A namespace-wide switch also removes recorded uses of members whose
+        // listing was not measured. Other skill controls apply only to their own target.
+        let key = if i.harness == Harness::Claude && i.group.as_ref() == Some(&synced_group) {
+            interned.ids.get(SYNCED_SKILLS_KEY)
+        } else {
+            interned.skills.get(&i.target)
+        };
+        let Some(&key) = key else {
             continue;
-        }
-        if let Some(&name) = skills.get(&i.target) {
-            credit((ContextKind::Skill, name), &i.profiles, i.time, 1);
+        };
+        // Typed requests keep working when a skill is hidden from the model, so only
+        // the model's own calls show what its listing is for. A setting that removes
+        // the skill entirely takes typed requests away too, so those count as uses.
+        let counts = match i.kind {
+            InvocationKind::SkillCall => i.status != InvocationStatus::Reference,
+            InvocationKind::SkillRequest => !typed_only(interned.kinds[key].control.as_ref()),
+            _ => false,
+        };
+        if counts {
+            credit(skill_families.get(&key), &i.profiles, i.time, 1);
         }
     }
     // Results count as their tool's uses, and the largest one sizes its output cap.
@@ -976,7 +1033,7 @@ mod tests {
             provenance: "synthetic".into(),
             locations: vec![],
             first_seen: 0,
-            current: "unresolved",
+            current: crate::model::Current::Unresolved,
             scope: if members.is_empty() {
                 Scope::Component
             } else {
@@ -1611,6 +1668,138 @@ mod tests {
         // Metadata-only instructions stay visible, unpriced.
         let agents = of("AGENTS.md", "a");
         assert_eq!((agents.requests, agents.priced), (1, 0));
+    }
+
+    fn skill_use(kind: InvocationKind, target: &str, time: Millis) -> Invocation {
+        Invocation {
+            id: format!("i{time}"),
+            target: identity(&format!("skill:{target}")),
+            group: target
+                .split_once(':')
+                .map(|(namespace, _)| identity(&format!("plugin:{namespace}"))),
+            kind,
+            status: if kind == InvocationKind::SkillCall {
+                InvocationStatus::Called
+            } else {
+                InvocationStatus::Requested
+            },
+            via: Via::Tool,
+            session: "session".into(),
+            sessions: vec!["session".into()],
+            identity_basis: IdentityBasis::Recorded,
+            harness: Harness::Claude,
+            client: None,
+            version: None,
+            time,
+            profiles: vec!["profile".into()],
+            locations: vec![],
+        }
+    }
+
+    #[test]
+    fn skills_take_the_setting_their_source_supports() {
+        let members = [
+            "review",
+            "pdf",
+            "anthropic-skills:pdf",
+            "anthropic-skills:xlsx",
+            "tools:deploy",
+        ];
+        let mut components: Vec<Component> = members
+            .iter()
+            .map(|m| component(m, Category::SkillListing, m, 100, &[]))
+            .collect();
+        components.push(component(
+            "listing",
+            Category::SkillListing,
+            "skills",
+            500,
+            &members,
+        ));
+        let scan = ExposureScan {
+            components,
+            requests: vec![exposure("r1", &["listing"], 0, 500)],
+            invocations: vec![
+                // The scan resolved this short name to the local skill that owns it.
+                skill_use(InvocationKind::SkillRequest, "pdf", 1),
+                skill_use(InvocationKind::SkillRequest, "anthropic-skills:xlsx", 2),
+                skill_use(InvocationKind::SkillCall, "anthropic-skills:pdf", 3),
+                skill_use(InvocationKind::SkillRequest, "tools:deploy", 4),
+                // Uses of the shared switch count even when that member's listing is absent.
+                skill_use(InvocationKind::SkillCall, "anthropic-skills:slides", 5),
+                skill_use(InvocationKind::SkillRequest, "anthropic-skills:slides", 6),
+                skill_use(InvocationKind::SkillReference, "anthropic-skills:other", 7),
+            ],
+            ..ExposureScan::default()
+        };
+        let rows = costs(&scan, &[request("r1", 1, 0, 0, 500)], 1.0);
+        // Typing /pdf still works when the model cannot see it, so it is no model use.
+        let pdf = row(&rows, "pdf");
+        assert_eq!(
+            control_text(pdf.control.as_ref().unwrap(), Harness::Claude),
+            r#""skillOverrides": {"pdf": "user-invocable-only"}"#
+        );
+        assert_eq!(pdf.calls, Some(0));
+        // Synced skills share one switch that removes typed uses too.
+        let synced = row(&rows, SYNCED_SKILLS);
+        assert_eq!(
+            control_text(synced.control.as_ref().unwrap(), Harness::Claude),
+            r#""syncClaudeAiSkills": false"#
+        );
+        assert_eq!((synced.calls, synced.last_used), (Some(4), Some(6)));
+        assert_eq!(synced.tokens, Some(200));
+        // skillOverrides does not reach a plugin's skill, so no verdict names it.
+        let plugin = row(&rows, "tools:deploy");
+        assert_eq!(plugin.control, None);
+        assert_eq!((plugin.calls, plugin.verdict), (Some(1), None));
+    }
+
+    #[test]
+    fn local_and_synced_skills_keep_separate_controls() {
+        for members in [
+            ["anthropic-skills", "anthropic-skills:pdf"],
+            ["anthropic-skills:pdf", "anthropic-skills"],
+        ] {
+            let mut components: Vec<_> = members
+                .iter()
+                .map(|m| component(m, Category::SkillListing, m, 100, &[]))
+                .collect();
+            components.push(component(
+                "listing",
+                Category::SkillListing,
+                "skills",
+                200,
+                &members,
+            ));
+            let scan = ExposureScan {
+                components,
+                requests: vec![exposure("r1", &["listing"], 0, 200)],
+                invocations: vec![
+                    skill_use(InvocationKind::SkillCall, "anthropic-skills", 1),
+                    skill_use(InvocationKind::SkillCall, "anthropic-skills:pdf", 2),
+                ],
+                ..ExposureScan::default()
+            };
+            let rows = costs(&scan, &[request("r1", 1, 0, 0, 200)], 1.0);
+            assert_eq!(
+                rows.iter().filter(|r| r.kind == ContextKind::Skill).count(),
+                2
+            );
+            let local = row(&rows, "anthropic-skills");
+            let synced = row(&rows, "claude.ai synced skills");
+            assert_eq!(
+                control_text(local.control.as_ref().unwrap(), Harness::Claude),
+                r#""skillOverrides": {"anthropic-skills": "user-invocable-only"}"#
+            );
+            assert_eq!(
+                control_text(synced.control.as_ref().unwrap(), Harness::Claude),
+                r#""syncClaudeAiSkills": false"#
+            );
+            for cost in [local, synced] {
+                assert_eq!(cost.tokens, Some(100));
+                assert_eq!(cost.calls, Some(1));
+            }
+        }
     }
 
     #[test]

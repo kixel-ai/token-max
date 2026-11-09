@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::background::{BackgroundInput, background_checks};
+use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
@@ -11,6 +13,7 @@ use crate::estimates::estimate_usage;
 use crate::exposure::calibrate;
 use crate::fast::{SpeedInput, speed_checks};
 use crate::idle::{IdleOptions, idle_checks};
+use crate::keepalive::{KeepaliveOptions, keepalive_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
@@ -74,7 +77,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         evidence: RequestEvidence::Estimated,
         id: identity(&event.id),
         harness: event.harness,
-        session: event.session.clone(),
+        session: event.session.to_string(),
         time: event.time,
         end_time: event.time,
         agent: Agent::Subagent,
@@ -89,9 +92,9 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         trigger: event.trigger.clone(),
         reference: None,
         turn: None,
-        version: event.version.clone(),
-        client: event.client.clone(),
-        cwd: event.cwd.clone(),
+        version: event.version.as_deref().map(String::from),
+        client: event.client.as_deref().map(String::from),
+        cwd: event.cwd.as_deref().map(String::from),
         profiles: event.profiles.clone(),
         locations: vec![event.location.clone()],
         accounting: Accounting::Individual,
@@ -206,7 +209,7 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
             .map(|e| {
                 let mut aliases: IndexSet<usize> = IndexSet::new();
                 for origin in &e.origins {
-                    if let Some(&g) = group_of.get(origin.session.as_str()) {
+                    if let Some(&g) = group_of.get(&*origin.session) {
                         aliases.insert(g);
                     }
                 }
@@ -896,9 +899,35 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let idle_refs: Vec<_> = idle.iter().collect();
+    let keepalive = keepalive_checks(&KeepaliveOptions {
+        scan: &scan,
+        catalog,
+        ttls: &ttl_refs,
+        idle: &idle_refs,
+        windows: &window_refs,
+        summaries: &compactions,
+        estimates: &estimates,
+        since,
+        now,
+    });
     let speed = speed_checks(&SpeedInput {
         scan: &scan,
         catalog,
+        since,
+        now,
+    });
+    let background = background_checks(&BackgroundInput {
+        scan: &scan,
+        catalog,
+        since,
+        now,
+        max_cost_per_use_usd,
+    });
+    let bash = bash_checks(&BashInput {
+        scan: &scan,
+        catalog,
+        ttls: &ttl_refs,
         since,
         now,
     });
@@ -907,7 +936,10 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
         .chain(idle.into_iter().map(CheckResult::Idle))
+        .chain(keepalive.into_iter().map(CheckResult::Keepalive))
         .chain(speed.into_iter().map(CheckResult::Speed))
+        .chain(background.into_iter().map(CheckResult::Background))
+        .chain(bash.into_iter().map(CheckResult::BashCap))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
@@ -949,6 +981,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             "measured usage is replayed at present public API rates, not historical invoices or subscription savings",
             "compaction summary proxies are separate from recorded request charges",
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",
+            "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",
             "Codex has no user cache-TTL control; its usage is priced but no TTL change is recommended",
             "no summed per-check or joint savings total",
         ]
@@ -1121,6 +1154,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         }
     }
@@ -1133,6 +1167,7 @@ mod tests {
                 color: false,
                 unicode: false,
                 details: true,
+                host: None,
             },
         )
     }

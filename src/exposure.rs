@@ -10,11 +10,12 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
+use crate::context::synced_short;
 use crate::model::{
-    Calibration, CalibrationSample, Category, Component, Digests, Exposure, ExposureScan,
-    ExposureView, Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals,
-    Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
+    Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
+    Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
+    Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals, Scope, Size,
+    Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -124,9 +125,14 @@ pub struct ExposureCollector {
     version: Option<String>,
     uncertain: bool,
     deferred: IndexSet<Text>,
-    digests: HashMap<String, Digests>,
-    // Skill names from listings; a mention only requests a skill the catalog knows.
-    known_skills: HashSet<String>,
+    digests: HashMap<String, Ids>,
+    // Catalog names keyed without ASCII case, retaining their spelling for use attribution.
+    known_skills: HashMap<String, String>,
+    // Explicit typed skill blocks establish use evidence without claiming catalog membership.
+    typed_skills: HashSet<String>,
+    // Short names of listed synced skills: `/pdf` reaches `anthropic-skills:pdf` while no
+    // other known skill is named `pdf`.
+    synced_skills: HashMap<String, String>,
     user_aliases: HashMap<String, HashMap<String, u64>>,
     // Surfaced tool definitions by attachment uuid and name, for later `sameAs` references.
     surfaced: HashMap<(String, String), Text>,
@@ -144,6 +150,8 @@ pub struct ExposureCollector {
     pending_tools: HashMap<String, PendingTool>,
     lists: HashSet<Ids>,
     views: HashSet<Arc<ExposureView>>,
+    // The last view created, whose lists the next one usually extends.
+    previous: Option<Arc<ExposureView>>,
 }
 
 /// The transcript file being observed.
@@ -171,7 +179,7 @@ struct ToolResult {
 /// The leading digests of one list whose blobs are all text, as of a `blob_epoch`.
 struct TextPrefix {
     // Keeps the list, and so its address, alive.
-    _items: Digests,
+    _items: Ids,
     epoch: u64,
     length: usize,
     characters: i64,
@@ -371,7 +379,9 @@ impl ExposureCollector {
             uncertain: true,
             deferred: IndexSet::new(),
             digests: HashMap::new(),
-            known_skills: HashSet::new(),
+            known_skills: HashMap::new(),
+            typed_skills: HashSet::new(),
+            synced_skills: HashMap::new(),
             user_aliases: HashMap::new(),
             surfaced: HashMap::new(),
             shapes: HashMap::new(),
@@ -381,6 +391,7 @@ impl ExposureCollector {
             invalidated: false,
             pending_tools: HashMap::new(),
             lists: HashSet::new(),
+            previous: None,
             views: HashSet::new(),
         }
     }
@@ -393,6 +404,8 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.typed_skills.clear();
+        self.synced_skills.clear();
         self.uncertain = true;
         self.invalidated = true;
     }
@@ -538,7 +551,8 @@ impl ExposureCollector {
             mut views,
             ..
         } = self;
-        let inherited = |lists: &mut HashSet<Ids>, view: &ExposureView| {
+        let mut previous: Option<Ids> = None;
+        let mut inherited = |lists: &mut HashSet<Ids>, view: &ExposureView| {
             let ids = view
                 .components
                 .iter()
@@ -546,7 +560,9 @@ impl ExposureCollector {
                 .filter(|id| since.is_some_and(|s| components[&***id].first_seen < s))
                 .cloned()
                 .collect();
-            intern_list(lists, ids)
+            let ids = intern_list(lists, previous.as_ref(), ids);
+            previous = Some(ids.clone());
+            ids
         };
         // Final views by the one observed view they derive from.
         let mut settled: HashMap<usize, Arc<ExposureView>> = HashMap::new();
@@ -576,7 +592,7 @@ impl ExposureCollector {
                 Some(first) if found.iter().all(|v| equivalent(v, first)) => {
                     let removed = unique(found.iter().flat_map(|v| v.removed.iter()));
                     let view = ExposureView {
-                        removed: intern_list(&mut lists, removed),
+                        removed: intern_list(&mut lists, None, removed),
                         inherited: inherited(&mut lists, first),
                         ..(**first).clone()
                     };
@@ -591,11 +607,11 @@ impl ExposureCollector {
                     let removed = unique(found.iter().flat_map(|v| v.removed.iter()));
                     let deferred = unique(found.iter().flat_map(|v| v.deferred.iter()));
                     let mut view = ExposureView {
-                        components: intern_list(&mut lists, vec![]),
-                        candidates: intern_list(&mut lists, candidates),
-                        removed: intern_list(&mut lists, removed),
-                        inherited: intern_list(&mut lists, vec![]),
-                        deferred: intern_list(&mut lists, deferred),
+                        components: intern_list(&mut lists, None, vec![]),
+                        candidates: intern_list(&mut lists, None, candidates),
+                        removed: intern_list(&mut lists, None, removed),
+                        inherited: intern_list(&mut lists, None, vec![]),
+                        deferred: intern_list(&mut lists, None, deferred),
                         linkage: Linkage::Unknown,
                         coverage: TextCoverage::Unknown,
                         references: None,
@@ -645,7 +661,7 @@ impl ExposureCollector {
             ];
             for id in lists
                 .into_iter()
-                .filter(|list| seen.insert(list.as_ptr() as usize))
+                .filter(|list| seen.insert(list.address()))
                 .flat_map(|list| list.iter())
             {
                 let index = components.get_index_of(&**id).expect("observed component");
@@ -666,7 +682,12 @@ impl ExposureCollector {
             components: components
                 .into_values()
                 .zip(used)
-                .filter_map(|(c, used)| used.then_some(c))
+                .filter(|&(_, used)| used)
+                .map(|(mut c, _)| {
+                    // One location per sighting, so growth slack adds up over a long history.
+                    c.locations.shrink_to_fit();
+                    c
+                })
                 .collect(),
             requests: exposures,
             invocations: invocations
@@ -784,6 +805,8 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.typed_skills.clear();
+        self.synced_skills.clear();
         self.user_aliases.clear();
         self.surfaced.clear();
         self.blobs.clear();
@@ -816,7 +839,7 @@ impl ExposureCollector {
     }
 
     /// Total characters of a request's message blobs, or None unless every one is known text.
-    fn message_characters(&mut self, items: &Digests) -> Option<i64> {
+    fn message_characters(&mut self, items: &Ids) -> Option<i64> {
         let (mut length, mut characters, mut opaque) = (0, 0, false);
         if let Some((base, keep)) = items.base()
             && let Some(prefix) = self.prefixes.get(&base.address())
@@ -854,8 +877,9 @@ impl ExposureCollector {
         (length == items.len()).then_some(characters)
     }
 
-    fn list(&mut self, ids: Vec<Text>) -> Ids {
-        intern_list(&mut self.lists, ids)
+    /// One shared copy of `ids`, extending the same list of the previous view.
+    fn list(&mut self, field: fn(&ExposureView) -> &Ids, ids: Vec<Text>) -> Ids {
+        intern_list(&mut self.lists, self.previous.as_deref().map(field), ids)
     }
 
     /// Record one sighting of a component revision and return its id.
@@ -903,7 +927,7 @@ impl ExposureCollector {
                     provenance: new.provenance.to_string(),
                     locations: vec![at.location.clone()],
                     first_seen: at.time,
-                    current: "unresolved",
+                    current: crate::model::Current::Unresolved,
                     scope: if !member
                         && matches!(category, Category::SkillListing | Category::Other)
                     {
@@ -956,6 +980,35 @@ impl ExposureCollector {
         self.place(new, &placed.key, &placed.revision, &placed.size, at)
     }
 
+    /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
+    fn know_skill(&mut self, name: &str) {
+        let key = name.to_ascii_lowercase();
+        if self.file.as_ref().expect("observing a file").harness == Harness::Claude
+            && let Some(short) = synced_short(&key)
+            && !claude_command(short)
+        {
+            self.synced_skills
+                .insert(short.to_string(), name.to_string());
+        }
+        self.known_skills.insert(key, name.to_string());
+    }
+
+    fn knows_skill(&self, name: &str) -> bool {
+        let key = name.to_ascii_lowercase();
+        self.known_skills.contains_key(&key)
+            || self.synced_skills.contains_key(&key)
+            || self.typed_skills.contains(&key)
+    }
+
+    /// The skill a name reaches in the current catalog: another skill keeps its short name.
+    fn skill_name<'a>(&'a self, name: &'a str) -> &'a str {
+        let key = name.to_ascii_lowercase();
+        self.known_skills
+            .get(&key)
+            .or_else(|| self.synced_skills.get(&key))
+            .map_or(name, String::as_str)
+    }
+
     /// A rendered skill listing and one member span per `- name: description` line.
     fn listing(&mut self, key: &str, body: &str, provenance: &'static str, at: &At<'_>) -> Text {
         let aggregate = self.component(
@@ -965,7 +1018,7 @@ impl ExposureCollector {
         );
         let mut members = vec![];
         for (name, span) in listing_entries(body) {
-            self.known_skills.insert(name.to_string());
+            self.know_skill(name);
             let new = New {
                 role: Role::Member,
                 ..New::active(Category::SkillListing, name, "rendered-listing-entry-span")
@@ -977,6 +1030,10 @@ impl ExposureCollector {
     }
 
     fn clear(&mut self, category: Option<Category>) {
+        if category.is_none_or(|category| category == Category::SkillListing) {
+            self.known_skills.clear();
+            self.synced_skills.clear();
+        }
         let pending = &mut self.pending_removed;
         let provided = &self.provided;
         self.active.retain(|key, (revision, c)| {
@@ -998,12 +1055,18 @@ impl ExposureCollector {
         }
     }
 
-    fn invoke(&mut self, name: &str, input: Invoke, line: &Line<'_>) -> Result<(), ScanError> {
+    fn invoke(&mut self, name: &str, mut input: Invoke, line: &Line<'_>) -> Result<(), ScanError> {
         let time = line
             .time
             .ok_or_else(|| ScanError::new("missing invocation timestamp"))?;
-        let scope = if is_skill(input.kind) { "skill" } else { "mcp" };
-        let target = target(scope, name);
+        let target = if is_skill(input.kind) {
+            let name = self.skill_name(name);
+            input.group = group(name).or(input.group);
+            target("skill", name)
+        } else {
+            target("mcp", name)
+        };
+
         self.invocation(target, input, time, line.location);
         Ok(())
     }
@@ -1055,7 +1118,9 @@ impl ExposureCollector {
     }
 
     fn view(&mut self, view: ExposureView) -> Arc<ExposureView> {
-        intern_view(&mut self.views, view)
+        let view = intern_view(&mut self.views, view);
+        self.previous = Some(view.clone());
+        view
     }
 
     fn chronological(&mut self) -> Arc<ExposureView> {
@@ -1071,11 +1136,11 @@ impl ExposureCollector {
         let removed = self.pending_removed.iter().cloned().collect();
         let deferred = self.deferred.iter().cloned().collect();
         let view = ExposureView {
-            components: self.list(vec![]),
-            candidates: self.list(current),
-            removed: self.list(removed),
-            inherited: self.list(vec![]),
-            deferred: self.list(deferred),
+            components: self.list(|v| &v.components, vec![]),
+            candidates: self.list(|v| &v.candidates, current),
+            removed: self.list(|v| &v.removed, removed),
+            inherited: self.list(|v| &v.inherited, vec![]),
+            deferred: self.list(|v| &v.deferred, deferred),
             linkage: if any {
                 Linkage::Chronological
             } else {
@@ -1193,10 +1258,10 @@ impl ExposureCollector {
         let kind = a.get("type");
         let kind_is = |expected: &str| kind.and_then(Value::as_str) == Some(expected);
         if kind_is("skill_listing") {
-            for name in array(a.get("names"))? {
-                self.known_skills.insert(text(Some(name))?.to_string());
-            }
             self.clear(Some(Category::SkillListing));
+            for name in array(a.get("names"))? {
+                self.know_skill(text(Some(name))?);
+            }
             self.listing(
                 "listing",
                 text(a.get("content"))?,
@@ -1383,7 +1448,7 @@ impl ExposureCollector {
         for v in array(raw.get("tail"))? {
             tail.push(Text::from(safe::id(v)?));
         }
-        let tail: Ids = tail.into();
+        let tail: Arc<[Text]> = tail.into();
         let prior = base.as_ref().and_then(|b| self.digests.get(b));
         let items = match (&base, prior) {
             (Some(_), Some(prior)) => {
@@ -1391,10 +1456,13 @@ impl ExposureCollector {
                     .map(|k| k as u64)
                     .filter(|&k| k <= prior.len() as u64)
                     .ok_or_else(|| ScanError::new("invalid request digest prefix length"))?;
-                Some(Digests::new(Some((prior, keep as usize)), tail.clone()))
+                Some(Ids::new(
+                    Some((prior, keep as usize)),
+                    tail.iter().cloned().collect(),
+                ))
             }
             (Some(_), None) => None,
-            (None, _) => Some(Digests::new(None, tail.clone())),
+            (None, _) => Some(Ids::new(None, tail.iter().cloned().collect())),
         };
         if let Some(Value::String(_)) = raw.get("requestDigest")
             && let Some(items) = &items
@@ -1488,11 +1556,11 @@ impl ExposureCollector {
             DIGEST_REASON
         };
         let view = ExposureView {
-            components: self.list(components),
-            candidates: self.list(candidates),
-            removed: self.list(removed),
-            inherited: self.list(vec![]),
-            deferred: self.list(deferred),
+            components: self.list(|v| &v.components, components),
+            candidates: self.list(|v| &v.candidates, candidates),
+            removed: self.list(|v| &v.removed, removed),
+            inherited: self.list(|v| &v.inherited, vec![]),
+            deferred: self.list(|v| &v.deferred, deferred),
             linkage: if wired {
                 Linkage::Wire
             } else {
@@ -1506,7 +1574,7 @@ impl ExposureCollector {
             references: Some(References {
                 base,
                 keep,
-                tail,
+                tail: Ids::new(None, tail),
                 items,
             }),
             complete_characters: complete,
@@ -1591,7 +1659,7 @@ impl ExposureCollector {
             }
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
-                self.known_skills.insert(name.to_string());
+                self.typed_skills.insert(name.to_ascii_lowercase());
                 let invoke = Invoke {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
@@ -1614,7 +1682,7 @@ impl ExposureCollector {
                     }
                 };
                 for (offset, name) in mentions(t) {
-                    let (kind, status) = requested(self.known_skills.contains(name));
+                    let (kind, status) = requested(self.knows_skill(name));
                     let invoke = Invoke {
                         kind,
                         via: Via::Mention,
@@ -1626,7 +1694,7 @@ impl ExposureCollector {
                     self.invoke(name, invoke, line)?;
                 }
                 if let Some(name) = command(t) {
-                    let (kind, status) = requested(self.known_skills.contains(name));
+                    let (kind, status) = requested(self.knows_skill(name));
                     let invoke = Invoke {
                         kind,
                         via: Via::Wrapper,
@@ -1720,6 +1788,11 @@ impl ExposureCollector {
             basis: IdentityBasis::Recorded,
         };
         self.invoke(target_name, invoke, line)?;
+        let target_name = if scope == "skill" {
+            self.skill_name(target_name)
+        } else {
+            target_name
+        };
         let pending = PendingTool {
             target: target(scope, target_name),
             group: group(target_name),
@@ -1934,8 +2007,8 @@ fn visibility(
             .or_insert(next);
         let key = (
             cohort,
-            e.view.components.as_ptr() as usize,
-            e.view.candidates.as_ptr() as usize,
+            e.view.components.address(),
+            e.view.candidates.address(),
         );
         let g = groups.entry(key).or_insert_with(|| Group {
             r,
@@ -2185,11 +2258,12 @@ fn unique<'a>(ids: impl Iterator<Item = &'a Text>) -> Vec<Text> {
     ids.collect::<IndexSet<_>>().into_iter().cloned().collect()
 }
 
-fn intern_list(lists: &mut HashSet<Ids>, ids: Vec<Text>) -> Ids {
-    if let Some(found) = lists.get(ids.as_slice()) {
+/// One shared copy of `ids`, keeping the prefix it has in common with `like`.
+fn intern_list(lists: &mut HashSet<Ids>, like: Option<&Ids>, ids: Vec<Text>) -> Ids {
+    let ids = Ids::sharing(like, ids);
+    if let Some(found) = lists.get(&ids) {
         return found.clone();
     }
-    let ids: Ids = ids.into();
     lists.insert(ids.clone());
     ids
 }
@@ -2609,6 +2683,158 @@ fn mentions(text: &str) -> Vec<(usize, &str)> {
         offset += c.len_utf16();
     }
     out
+}
+
+/// Built-in commands, bundled skills, and their aliases reserve a synced skill's short name,
+/// even when unavailable. Source checked 2026-11-08: <https://code.claude.com/docs/en/commands>.
+fn claude_command(name: &str) -> bool {
+    const COMMANDS: &[&str] = &[
+        "add-dir",
+        "advisor",
+        "agents",
+        "allowed-tools",
+        "android",
+        "app",
+        "artifact-capabilities",
+        "artifact-diagramming",
+        "artifacts",
+        "auto-mode-setup",
+        "autocompact",
+        "autofix-pr",
+        "background",
+        "bashes",
+        "batch",
+        "bg",
+        "branch",
+        "btw",
+        "bug",
+        "cd",
+        "checkpoint",
+        "checkup",
+        "chrome",
+        "claude-api",
+        "claude-in-chrome",
+        "clear",
+        "code-review",
+        "color",
+        "compact",
+        "config",
+        "context",
+        "continue",
+        "copy",
+        "cost",
+        "dataviz",
+        "debug",
+        "deep-research",
+        "design",
+        "design-login",
+        "design-sync",
+        "desktop",
+        "diff",
+        "doctor",
+        "effort",
+        "exit",
+        "export",
+        "extra-usage",
+        "fast",
+        "feedback",
+        "fewer-permission-prompts",
+        "focus",
+        "fork",
+        "goal",
+        "heapdump",
+        "help",
+        "hooks",
+        "ide",
+        "import",
+        "init",
+        "insights",
+        "install-github-app",
+        "install-slack-app",
+        "ios",
+        "keybindings",
+        "list-agents",
+        "login",
+        "logout",
+        "loop",
+        "mcp",
+        "memory",
+        "mobile",
+        "model",
+        "new",
+        "output-style",
+        "passes",
+        "peers",
+        "permissions",
+        "plan",
+        "plugin",
+        "plugin-authoring",
+        "powerup",
+        "pr-comments",
+        "privacy-settings",
+        "proactive",
+        "quit",
+        "radio",
+        "rate-limit-options",
+        "rc",
+        "recap",
+        "release-notes",
+        "reload-plugins",
+        "reload-skills",
+        "remote-control",
+        "remote-env",
+        "rename",
+        "reset",
+        "restart",
+        "resume",
+        "review",
+        "rewind",
+        "routines",
+        "run",
+        "run-skill-generator",
+        "sandbox",
+        "schedule",
+        "scroll-speed",
+        "security-review",
+        "settings",
+        "setup-bedrock",
+        "setup-vertex",
+        "share",
+        "simplify",
+        "skill-doctor",
+        "skills",
+        "slides",
+        "stats",
+        "status",
+        "statusline",
+        "stickers",
+        "stop",
+        "subtask",
+        "tasks",
+        "team-onboarding",
+        "teleport",
+        "terminal-setup",
+        "theme",
+        "tp",
+        "tui",
+        "ultraplan",
+        "ultrareview",
+        "undo",
+        "update",
+        "update-config",
+        "upgrade",
+        "usage",
+        "usage-credits",
+        "verify",
+        "vim",
+        "voice",
+        "web-setup",
+        "workflow-authoring",
+        "workflows",
+    ];
+    COMMANDS
+        .iter()
+        .any(|command| command.eq_ignore_ascii_case(name))
 }
 
 /// `/<command-name>\/?([a-zA-Z0-9_:-]+)<\/command-name>/`: the first match's name.
@@ -3146,15 +3372,21 @@ mod tests {
         assert_eq!(first.coverage, TextCoverage::Partial);
         assert_eq!(first.reasons, [CHRONOLOGICAL]);
         assert_eq!(second.candidates.len(), 1);
-        assert_ne!(second.candidates[0], first.candidates[0]);
-        assert_eq!(&*second.removed, &*first.candidates);
+        assert_ne!(
+            second.candidates.iter().next(),
+            first.candidates.iter().next()
+        );
+        assert_eq!(second.removed, first.candidates);
         assert_eq!(second.deferred.len(), 1);
-        assert_eq!(category(&scan, &second.deferred[0]), Category::McpSchema);
+        assert_eq!(
+            category(&scan, second.deferred.iter().next().unwrap()),
+            Category::McpSchema
+        );
         // A removal is reported once; later requests carry the same revision.
         assert!(third.removed.is_empty());
         assert_eq!(third.candidates, second.candidates);
         // Revisions first seen before the window are inherited.
-        assert_eq!(&*second.inherited, &*second.candidates);
+        assert_eq!(second.inherited, second.candidates);
         assert_eq!(scan.components.len(), 3);
     }
 
@@ -3462,6 +3694,226 @@ mod tests {
     }
 
     #[test]
+    fn a_short_name_reaches_a_synced_skill_unless_another_skill_owns_it() {
+        let resolved = |names: Value| {
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+            feed.all(
+                &mut c,
+                vec![
+                    attachment(
+                        0,
+                        json!({ "type": "skill_listing", "content": "x", "names": names }),
+                    ),
+                    user(1, json!("<command-name>/pdf</command-name>")),
+                    assistant(
+                        2,
+                        json!([tool_use("s", "Skill", json!({ "skill": "pdf" }))]),
+                    ),
+                ],
+            );
+            let scan = c.finish(&[feed.request("r", 3, None)], None);
+            scan.invocations
+                .iter()
+                .map(|i| (i.kind, i.target.clone(), i.group.clone()))
+                .collect::<Vec<_>>()
+        };
+        let both = |name: &str| {
+            let namespace = name
+                .starts_with("anthropic-skills:")
+                .then(|| identity("plugin:anthropic-skills"));
+            [
+                (
+                    InvocationKind::SkillRequest,
+                    target("skill", name),
+                    namespace.clone(),
+                ),
+                (InvocationKind::SkillCall, target("skill", name), namespace),
+            ]
+        };
+        assert_eq!(
+            resolved(json!(["anthropic-skills:pdf"])),
+            both("anthropic-skills:pdf")
+        );
+        assert_eq!(
+            resolved(json!(["pdf", "anthropic-skills:pdf"])),
+            both("pdf")
+        );
+        assert_eq!(
+            resolved(json!(["PDF", "anthropic-skills:pdf"])),
+            both("PDF")
+        );
+        assert_eq!(
+            resolved(json!(["anthropic-skills:PDF"])),
+            both("anthropic-skills:PDF")
+        );
+    }
+
+    #[test]
+    fn codex_skill_names_do_not_gain_claude_aliases() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
+        feed.all(
+            &mut c,
+            vec![
+                json!({ "type": "session_meta", "timestamp": at(0), "payload": { "id": "s" } }),
+                json!({ "type": "world_state", "timestamp": at(0), "payload": { "full": true,
+                "state": { "host_skills": { "body": "- anthropic-skills:pdf: synced" } } } }),
+                json!({ "type": "event_msg", "timestamp": at(1), "payload": {
+                "type": "user_message", "message": "$pdf $anthropic-skills:pdf" } }),
+                json!({ "type": "token_usage_record", "timestamp": at(2) }),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 4, None)], None);
+        let uses: Vec<_> = scan
+            .invocations
+            .iter()
+            .map(|i| (i.kind, i.target.clone()))
+            .collect();
+        assert_eq!(
+            uses,
+            [
+                (InvocationKind::SkillReference, target("skill", "pdf")),
+                (
+                    InvocationKind::SkillRequest,
+                    target("skill", "anthropic-skills:pdf")
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn synced_aliases_do_not_override_claude_commands() {
+        // Only whole command names are reserved, including aliases and bundled skills.
+        for (name, reserved) in [
+            ("compact", true),
+            ("reset", true),
+            ("doctor", true),
+            ("Review", true),
+            ("artifact-diagramming", true),
+            ("deep-research", true),
+            ("list-agents", true),
+            ("peers", true),
+            ("bashes", true),
+            ("tp", true),
+            ("extra-usage", true),
+            ("diagramming", false),
+            ("research", false),
+        ] {
+            let full = format!("anthropic-skills:{name}");
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+            feed.all(&mut c, vec![
+                attachment(0, json!({ "type": "skill_listing", "content": "synced listing", "names": [full] })),
+                user(1, json!(format!("<command-name>/{name}</command-name>"))),
+                user(2, json!(format!("<command-name>/{full}</command-name>"))),
+                assistant(3, json!([tool_use("s", "Skill", json!({ "skill": full }))])),
+            ]);
+            let scan = c.finish(&[feed.request("r", 4, None)], None);
+            let uses: Vec<_> = scan
+                .invocations
+                .iter()
+                .map(|i| (i.kind, i.target.clone()))
+                .collect();
+            let short = if reserved {
+                (InvocationKind::SkillReference, target("skill", name))
+            } else {
+                (InvocationKind::SkillRequest, target("skill", &full))
+            };
+            assert_eq!(
+                uses,
+                [
+                    short,
+                    (InvocationKind::SkillRequest, target("skill", &full)),
+                    (InvocationKind::SkillCall, target("skill", &full)),
+                ],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn replacing_a_catalog_refreshes_synced_aliases() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+        feed.all(
+            &mut c,
+            vec![
+                attachment(0, json!({ "type": "skill_listing", "content": "- pdf: local\n- anthropic-skills:pdf: synced", "names": [] })),
+                user(1, json!("<command-name>/pdf</command-name>")),
+                attachment(2, json!({ "type": "skill_listing", "content": "synced listing", "names": ["anthropic-skills:pdf"] })),
+                user(3, json!("<command-name>/pdf</command-name>")),
+                assistant(4, json!([tool_use("s", "Skill", json!({ "skill": "pdf" }))])),
+                user(5, json!([{ "type": "tool_result", "tool_use_id": "s", "content": "skill body" }])),
+                attachment(6, json!({ "type": "skill_listing", "content": "", "names": [] })),
+                user(7, json!("<command-name>/pdf</command-name>")),
+                assistant(8, json!([])),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 9, None)], None);
+        let calls: Vec<_> = scan
+            .invocations
+            .iter()
+            .map(|i| (i.kind, i.target.clone()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (InvocationKind::SkillRequest, target("skill", "pdf")),
+                (
+                    InvocationKind::SkillRequest,
+                    target("skill", "anthropic-skills:pdf")
+                ),
+                (
+                    InvocationKind::SkillCall,
+                    target("skill", "anthropic-skills:pdf")
+                ),
+                (InvocationKind::SkillReference, target("skill", "pdf")),
+            ]
+        );
+        let body = scan
+            .components
+            .iter()
+            .find(|c| c.category == Category::SkillBody)
+            .unwrap();
+        assert_eq!(body.targets, [target("skill", "anthropic-skills:pdf")]);
+    }
+
+    #[test]
+    fn explicit_typed_names_are_evidence_separate_from_the_catalog() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+        feed.all(
+            &mut c,
+            vec![
+                user(0, json!([{ "type": "skill", "name": "pdf" }, { "type": "skill", "name": "manual" }])),
+                attachment(1, json!({ "type": "skill_listing", "content": "- anthropic-skills:pdf: synced", "names": [] })),
+                user(2, json!("<command-name>/pdf</command-name>")),
+                user(3, json!("<command-name>/manual</command-name>")),
+                attachment(4, json!({ "type": "skill_listing", "content": "", "names": [] })),
+                user(5, json!("<command-name>/pdf</command-name>")),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 6, None)], None);
+        assert!(
+            scan.invocations
+                .iter()
+                .all(|i| i.kind == InvocationKind::SkillRequest)
+        );
+        let targets: Vec<_> = scan.invocations.iter().map(|i| i.target.clone()).collect();
+        assert_eq!(
+            targets,
+            [
+                target("skill", "pdf"),
+                target("skill", "manual"),
+                target("skill", "anthropic-skills:pdf"),
+                target("skill", "manual"),
+                target("skill", "pdf"),
+            ]
+        );
+    }
+
+    #[test]
     fn copies_agree_or_stay_unknown() {
         let records = |body: &str| {
             vec![
@@ -3514,11 +3966,11 @@ mod tests {
     fn calibrate_pools_matching_cohorts() {
         let view = |characters: i64, model: &str| {
             Arc::new(ExposureView {
-                components: Ids::from([]),
-                candidates: Ids::from([]),
-                removed: Ids::from([]),
-                inherited: Ids::from([]),
-                deferred: Ids::from([]),
+                components: Ids::from(vec![]),
+                candidates: Ids::from(vec![]),
+                removed: Ids::from(vec![]),
+                inherited: Ids::from(vec![]),
+                deferred: Ids::from(vec![]),
                 linkage: Linkage::Wire,
                 coverage: TextCoverage::CompleteText,
                 references: None,

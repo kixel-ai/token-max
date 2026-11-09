@@ -176,7 +176,7 @@ impl SessionBoundaries {
             }
             for origin in &event.origins {
                 times
-                    .entry(origin.session.clone())
+                    .entry(origin.session.to_string())
                     .or_default()
                     .push(event.time);
             }
@@ -221,6 +221,20 @@ impl<'a> WindowEvents<'a> {
             boundaries: SessionBoundaries::new(events.iter().copied()),
             cache: CacheBoundaries::new(events.iter().copied()),
         }
+    }
+
+    /// Keep calibration identities while removing idle boundaries from an idle-off policy.
+    pub(crate) fn suppress_idle(&mut self, since: Millis) {
+        let events: Vec<_> = self
+            .by_id
+            .values()
+            .copied()
+            .filter(|e| {
+                e.idle_attribution != crate::model::IdleAttribution::Notice || e.time < since
+            })
+            .collect();
+        self.boundaries = SessionBoundaries::new(events.iter().copied());
+        self.cache = CacheBoundaries::new(events);
     }
 }
 
@@ -302,7 +316,7 @@ pub fn compaction_samples<'a>(
         list.push(index);
     }
     for &event in events.iter().filter(|e| e.kind == EventKind::Compaction) {
-        let aliases: IndexSet<&str> = event.origins.iter().map(|o| o.session.as_str()).collect();
+        let aliases: IndexSet<&str> = event.origins.iter().map(|o| &*o.session).collect();
         let next_boundary = aliases
             .iter()
             .filter_map(|alias| boundaries.first_after(alias, event.time))
@@ -324,7 +338,7 @@ pub fn compaction_samples<'a>(
         };
         // An event without its own model or pricing metadata matches no part, even a model-less one.
         let model = match (&event.model, &event.pricing) {
-            (Some(model), _) => Some(Some(model.as_str())),
+            (Some(model), _) => Some(Some(&**model)),
             (None, Some(pricing)) => Some(pricing.model.as_deref()),
             (None, None) => None,
         };
@@ -667,12 +681,12 @@ fn simulate<'r>(
                             result.events.push(StructuralEvent {
                                 id: format!("modeled:{}:{index}", req.id),
                                 time: req.time,
-                                session: req.session.clone(),
+                                session: req.session.as_str().into(),
                                 origins: req
                                     .locations
                                     .iter()
                                     .map(|location| Origin {
-                                        session: req.session.clone(),
+                                        session: req.session.as_str().into(),
                                         location: location.clone(),
                                     })
                                     .collect(),
@@ -881,9 +895,9 @@ impl Replayer<'_> {
             estimated_parts,
             attempt_scenario: Default::default(),
         };
-        let mut result = replay_parts(requests, iter::once(self.cache).chain(extra), &options);
-        result.retain(|i| i.selected);
-        result
+        replay_parts(requests, iter::once(self.cache).chain(extra), &options)
+            .filter(|i| i.selected)
+            .collect()
     }
 
     /// Replay a simulated window and total it with the fixed charges and added summaries.
@@ -1410,7 +1424,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     && e.time >= since
                     && matches!(e.settings.get(window_key), Some(Scalar::Number(n))
                         if control.value.is_none_or(|v| *n != v as f64))
-                    && (e.model.is_none() || models.contains(&e.model))
+                    && (e.model.is_none()
+                        || models.iter().any(|m| m.as_deref() == e.model.as_deref()))
             });
             let applicable =
                 control.applicable && per_model_supported && (!claude || !models.contains(&None));
@@ -1637,13 +1652,14 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
-            pricing: Some(Pricing {
+            shell: None,
+            pricing: Some(std::sync::Arc::new(Pricing {
                 provider: Some("anthropic".into()),
                 model: Some("claude-opus-5-5".into()),
                 tier: Some("standard".into()),
                 speed: Some("standard".into()),
                 geo: Some("global".into()),
-            }),
+            })),
         }
     }
 
@@ -1671,8 +1687,10 @@ mod tests {
             ),
             idle: None,
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
+            background: vec![],
         };
         let mut first = at("sample-resume", "sample", 1000);
         first.parts[0].usage = writes(20000);
@@ -1741,12 +1759,12 @@ mod tests {
                 });
                 continue;
             }
-            let pricing = e.pricing.clone().unwrap();
+            let pricing = Pricing::clone(e.pricing.as_ref().unwrap());
             let proxy = Request {
                 evidence: RequestEvidence::Estimated,
                 id: identity(&e.id),
                 harness: e.harness,
-                session: e.session.clone(),
+                session: e.session.to_string(),
                 time: e.time,
                 end_time: e.time,
                 agent: Agent::Subagent,
@@ -1757,9 +1775,9 @@ mod tests {
                 trigger: e.trigger.clone(),
                 reference: None,
                 turn: None,
-                version: e.version.clone(),
-                client: e.client.clone(),
-                cwd: e.cwd.clone(),
+                version: e.version.as_deref().map(String::from),
+                client: e.client.as_deref().map(String::from),
+                cwd: e.cwd.as_deref().map(String::from),
                 profiles: e.profiles.clone(),
                 locations: vec![e.location.clone()],
                 accounting: Accounting::Individual,
@@ -2011,11 +2029,12 @@ mod tests {
                 }
                 let mut event = s.events[0].clone();
                 event.id = "haiku-boundary".into();
-                event.session = other.session.clone();
-                event.origins[0].session = other.session.clone();
+                event.session = other.session.as_str().into();
+                event.origins[0].session = other.session.as_str().into();
                 event.model = Some(model.into());
                 event.request = Some(other.id.clone());
-                event.pricing.as_mut().unwrap().model = Some(model.into());
+                std::sync::Arc::make_mut(event.pricing.as_mut().unwrap()).model =
+                    Some(model.into());
                 s.requests.push(other);
                 s.events.push(event);
                 for i in 0..3 {
@@ -2429,14 +2448,11 @@ mod tests {
             .filter(|e| e.kind == EventKind::Compaction)
             .collect();
         for event in &boundaries {
-            let aliases: HashSet<&str> = event.origins.iter().map(|o| o.session.as_str()).collect();
+            let aliases: HashSet<&str> = event.origins.iter().map(|o| &*o.session).collect();
             let next_boundary = boundaries
                 .iter()
                 .filter(|e| {
-                    e.time > event.time
-                        && e.origins
-                            .iter()
-                            .any(|o| aliases.contains(o.session.as_str()))
+                    e.time > event.time && e.origins.iter().any(|o| aliases.contains(&*o.session))
                 })
                 .map(|e| e.time)
                 .min();
@@ -2894,14 +2910,15 @@ mod tests {
             assert!(compact.contains("ConditionalTTLbaseline:main5m;subagent5m"));
             for scenario in &check.scenarios {
                 assert!(compact.contains(&format!("Candidatewindow:{}tokens", scenario.window)));
-                for added in &scenario.added {
+                if !scenario.added.is_empty() {
                     assert!(compact.contains(&format!(
-                        "at{};{}summaryinputtokens;{}summaryoutputtokens;{}resumed-prefixtokens",
-                        added.request,
-                        added.input_tokens,
-                        added.summary_tokens,
-                        added.prefix_tokens
+                        "Addedcompactions:{}summaries;input",
+                        scenario.added.len()
                     )));
+                    assert!(compact.contains("Addedsummaries:"));
+                    assert!(compact.contains("Resumedprefixes:"));
+                }
+                for added in &scenario.added {
                     for basis in &added.basis {
                         assert!(compact.contains(&format!(
                             "boundary{};resumedrequest{}",
@@ -3303,6 +3320,7 @@ mod tests {
             s.cache_context = CacheContext {
                 requests: vec![summary],
                 boundaries: vec![event],
+                prompts: vec![],
             };
             s.since = Some(1000);
             let report = report(&s);
@@ -3345,11 +3363,12 @@ mod tests {
                 }
                 let mut event = s.events[0].clone();
                 event.id = "haiku-boundary".into();
-                event.session = other.session.clone();
-                event.origins[0].session = other.session.clone();
+                event.session = other.session.as_str().into();
+                event.origins[0].session = other.session.as_str().into();
                 event.model = Some(model.into());
                 event.request = Some(other.id.clone());
-                event.pricing.as_mut().unwrap().model = Some(model.into());
+                std::sync::Arc::make_mut(event.pricing.as_mut().unwrap()).model =
+                    Some(model.into());
                 s.requests.push(other);
                 s.events.push(event);
                 for i in 0..3 {

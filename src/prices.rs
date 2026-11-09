@@ -790,6 +790,30 @@ fn selected_rates(
     })
 }
 
+/// Claude per-token prices for one part's cache reads, writes and ordinary input.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitRates {
+    pub read: f64,
+    pub write5m: f64,
+    pub write1h: f64,
+    pub ordinary: f64,
+}
+
+/// Claude per-token prices for one part's cache reads, writes and ordinary input; None when unpriced.
+pub fn unit_rates(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<UnitRates> {
+    if r.harness != Harness::Claude {
+        return None;
+    }
+    let rates = selected_rates(catalog, r, p).ok()?.rates;
+    let (input, read, write) = (rates.input?, rates.read?, rates.write?);
+    Some(UnitRates {
+        read: read / 1e6,
+        write5m: write / 1e6,
+        write1h: (input * 2.0) / 1e6,
+        ordinary: input / 1e6,
+    })
+}
+
 /// One part's input as consecutive spans of its prompt prefix, each with its
 /// token count and per-token price: cache reads, then cache writes, then
 /// ordinary input, which runs to the end. None when usage or a price is missing,

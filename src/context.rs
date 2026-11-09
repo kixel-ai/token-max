@@ -1711,14 +1711,14 @@ mod tests {
         // Typing /pdf still works when the model cannot see it, so it is no model use.
         let pdf = row(&rows, "pdf");
         assert_eq!(
-            control_text(pdf.control.as_ref().unwrap()),
+            control_text(pdf.control.as_ref().unwrap(), Harness::Claude),
             r#""skillOverrides": {"pdf": "user-invocable-only"}"#
         );
         assert_eq!(pdf.calls, Some(0));
         // Synced skills share one switch that removes typed uses too.
         let synced = row(&rows, SYNCED_SKILLS);
         assert_eq!(
-            control_text(synced.control.as_ref().unwrap()),
+            control_text(synced.control.as_ref().unwrap(), Harness::Claude),
             r#""syncClaudeAiSkills": false"#
         );
         assert_eq!((synced.calls, synced.last_used), (Some(2), Some(3)));

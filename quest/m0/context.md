@@ -56,4 +56,4 @@ and [Codex MCP settings](https://learn.chatgpt.com/docs/config-file/config-refer
 
 ## Related
 
-- [Codex skills catalog](/quest/m0/skills-catalog.md) - owns skill-specific Codex lines and duplicate listings on top of the Codex pricing here
+- [Codex skills catalog](/quest/m0/skills-catalog.md) - owns per-skill Codex lines and duplicate listings, reusing the existing context pricing

@@ -126,8 +126,10 @@ pub struct ExposureCollector {
     uncertain: bool,
     deferred: IndexSet<Text>,
     digests: HashMap<String, Digests>,
-    // Skill names from listings; a mention only requests a skill the catalog knows.
+    // Names in the active catalog, replaced with that catalog.
     known_skills: HashSet<String>,
+    // Explicit typed skill blocks establish use evidence without claiming catalog membership.
+    typed_skills: HashSet<String>,
     // Short names of listed synced skills: `/pdf` reaches `anthropic-skills:pdf` while no
     // other known skill is named `pdf`.
     synced_skills: HashMap<String, String>,
@@ -376,6 +378,7 @@ impl ExposureCollector {
             deferred: IndexSet::new(),
             digests: HashMap::new(),
             known_skills: HashSet::new(),
+            typed_skills: HashSet::new(),
             synced_skills: HashMap::new(),
             user_aliases: HashMap::new(),
             surfaced: HashMap::new(),
@@ -398,6 +401,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.typed_skills.clear();
         self.synced_skills.clear();
         self.uncertain = true;
         self.invalidated = true;
@@ -790,6 +794,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.typed_skills.clear();
         self.synced_skills.clear();
         self.user_aliases.clear();
         self.surfaced.clear();
@@ -973,7 +978,9 @@ impl ExposureCollector {
     }
 
     fn knows_skill(&self, name: &str) -> bool {
-        self.known_skills.contains(name) || self.synced_skills.contains_key(name)
+        self.known_skills.contains(name)
+            || self.synced_skills.contains_key(name)
+            || self.typed_skills.contains(name)
     }
 
     /// The skill a name reaches in the current catalog: another skill keeps its short name.
@@ -1005,6 +1012,10 @@ impl ExposureCollector {
     }
 
     fn clear(&mut self, category: Option<Category>) {
+        if category.is_none_or(|category| category == Category::SkillListing) {
+            self.known_skills.clear();
+            self.synced_skills.clear();
+        }
         let pending = &mut self.pending_removed;
         let provided = &self.provided;
         self.active.retain(|key, (revision, c)| {
@@ -1225,10 +1236,10 @@ impl ExposureCollector {
         let kind = a.get("type");
         let kind_is = |expected: &str| kind.and_then(Value::as_str) == Some(expected);
         if kind_is("skill_listing") {
+            self.clear(Some(Category::SkillListing));
             for name in array(a.get("names"))? {
                 self.know_skill(text(Some(name))?);
             }
-            self.clear(Some(Category::SkillListing));
             self.listing(
                 "listing",
                 text(a.get("content"))?,
@@ -1623,9 +1634,7 @@ impl ExposureCollector {
             }
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
-                if !self.knows_skill(name) {
-                    self.known_skills.insert(name.to_string());
-                }
+                self.typed_skills.insert(name.to_string());
                 let invoke = Invoke {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
@@ -3537,6 +3546,87 @@ mod tests {
         assert_eq!(
             resolved(json!(["pdf", "anthropic-skills:pdf"])),
             both("pdf")
+        );
+    }
+
+    #[test]
+    fn replacing_a_catalog_refreshes_synced_aliases() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+        feed.all(
+            &mut c,
+            vec![
+                attachment(0, json!({ "type": "skill_listing", "content": "- pdf: local\n- anthropic-skills:pdf: synced", "names": [] })),
+                user(1, json!("<command-name>/pdf</command-name>")),
+                attachment(2, json!({ "type": "skill_listing", "content": "synced listing", "names": ["anthropic-skills:pdf"] })),
+                user(3, json!("<command-name>/pdf</command-name>")),
+                assistant(4, json!([tool_use("s", "Skill", json!({ "skill": "pdf" }))])),
+                user(5, json!([{ "type": "tool_result", "tool_use_id": "s", "content": "skill body" }])),
+                attachment(6, json!({ "type": "skill_listing", "content": "", "names": [] })),
+                user(7, json!("<command-name>/pdf</command-name>")),
+                assistant(8, json!([])),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 9, None)], None);
+        let calls: Vec<_> = scan
+            .invocations
+            .iter()
+            .map(|i| (i.kind, i.target.clone()))
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                (InvocationKind::SkillRequest, target("skill", "pdf")),
+                (
+                    InvocationKind::SkillRequest,
+                    target("skill", "anthropic-skills:pdf")
+                ),
+                (
+                    InvocationKind::SkillCall,
+                    target("skill", "anthropic-skills:pdf")
+                ),
+                (InvocationKind::SkillReference, target("skill", "pdf")),
+            ]
+        );
+        let body = scan
+            .components
+            .iter()
+            .find(|c| c.category == Category::SkillBody)
+            .unwrap();
+        assert_eq!(body.targets, [target("skill", "anthropic-skills:pdf")]);
+    }
+
+    #[test]
+    fn explicit_typed_names_are_evidence_separate_from_the_catalog() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+        feed.all(
+            &mut c,
+            vec![
+                user(0, json!([{ "type": "skill", "name": "pdf" }, { "type": "skill", "name": "manual" }])),
+                attachment(1, json!({ "type": "skill_listing", "content": "- anthropic-skills:pdf: synced", "names": [] })),
+                user(2, json!("<command-name>/pdf</command-name>")),
+                user(3, json!("<command-name>/manual</command-name>")),
+                attachment(4, json!({ "type": "skill_listing", "content": "", "names": [] })),
+                user(5, json!("<command-name>/pdf</command-name>")),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 6, None)], None);
+        assert!(
+            scan.invocations
+                .iter()
+                .all(|i| i.kind == InvocationKind::SkillRequest)
+        );
+        let targets: Vec<_> = scan.invocations.iter().map(|i| i.target.clone()).collect();
+        assert_eq!(
+            targets,
+            [
+                target("skill", "pdf"),
+                target("skill", "manual"),
+                target("skill", "anthropic-skills:pdf"),
+                target("skill", "manual"),
+                target("skill", "pdf"),
+            ]
         );
     }
 

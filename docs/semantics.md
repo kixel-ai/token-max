@@ -428,6 +428,10 @@ a cold rewrite is not new input. Reply size is the median recorded output. Both
 prompt and reply remain in later context. Missing incremental geometry leaves
 ping size unresolved. Recorded requests
 use their own provider, model, tier, speed, geography and context size.
+Measured reads remain warm for unchanged recorded context, even after a local
+entry expires: another session may have warmed that prefix. Changed context uses
+the sequential session-local cache model, without assuming unrelated activity
+also warms the changed prefix.
 
 The shared window replay applies the same recommended compaction controls used
 by the idle check to every policy, including compactions caused by added ping
@@ -436,7 +440,9 @@ later pings and requests. A compaction removes preceding ping context; pings
 sent after it read or write its recorded post-context and remain in later turns.
 Missing post-context leaves affected sessions unpriced. Recorded known idle
 compactions are undone on both the no-ping and ping paths, which keep idle
-compaction off. Its own check supplies the competing on policy's saving at the
+compaction off. Only the linked compaction billing parts are removed; ordinary
+messages and advisor work in the same request remain billed and messages still
+update the conversation and ping schedule. Its own check supplies the competing on policy's saving at the
 same recommended TTL and window. The two policies' savings are never added.
 
 Caps include one ping and the counts that could rescue recorded returns, up to

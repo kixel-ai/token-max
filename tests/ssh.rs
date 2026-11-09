@@ -500,7 +500,24 @@ fn codex_context_and_output_keep_their_remote_controls() {
         assert_eq!(server["conditionalRequests"], server["priced"]);
         assert!(server["assumptions"].to_string().contains("conditional"));
         assert_eq!(server["verdict"], Value::Null);
-        assert_eq!(remote["scan"]["coverage"]["tierKnown"], 0);
+        // The remote keeps the same two recorded Claude tiers as this host.
+        // Adding Codex estimates must not increase that billing-evidence coverage.
+        assert_eq!(
+            remote["scan"]["coverage"]["tierKnown"],
+            local["scan"]["coverage"]["tierKnown"]
+        );
+        assert!(
+            remote["scan"]["requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|r| r["harness"] == "codex")
+                .all(|r| r["parts"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|p| p["tier"].is_null()))
+        );
         let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
         assert_eq!(output["name"], "mcp__docs");
         // Both requests retain the result; compaction removes it before the third.

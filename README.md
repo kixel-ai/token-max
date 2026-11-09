@@ -97,7 +97,8 @@ those no longer sent.
 
 MCP servers include separate tool-schema and discovery-context costs. Those
 details are part of the server total. Codex tool recommendations use
-`mcp_servers.<id>.disabled_tools` only when the declaring server id is unambiguous;
+`mcp_servers.<id>.disabled_tools` only when the declaring server id is unambiguous and native completions prove
+the raw tool name in every owning profile;
 `enabled_tools` is the corresponding allow list. The report explains Claude's
 `ENABLE_TOOL_SEARCH` and per-server `alwaysLoad`, and Codex's `omit_tools_from`
 surfaces. These exposure controls do not establish net savings: search turns,
@@ -108,8 +109,9 @@ the exposed app namespaces; the report names the supported controls without
 inventing per-app costs or a settings patch.
 
 Instruction-budget notes compare recorded CLAUDE.md line counts with Claude's
-under-200-line guidance, and the recorded AGENTS.md chain's UTF-8 bytes with the
-selected profile's `project_doc_max_bytes` (32 KiB by default). Effective
+under-200-line guidance, and show the selected profile's `project_doc_max_bytes`
+(32 KiB by default) beside recorded rendered AGENTS.md bytes. Codex records can
+include headers and wrappers, so these bytes cannot diagnose source-chain truncation. Effective
 project/CLI overrides and original file sizes may be unavailable; recorded
 text can already be truncated. Length alone is not a quality score. Output-cap
 lines still recommend no value because truncation-related read-back cannot be

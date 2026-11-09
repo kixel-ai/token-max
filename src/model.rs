@@ -1135,7 +1135,7 @@ pub struct Component {
     pub instruction_size: Option<InstructionSize>,
 }
 
-/// UTF-8 bytes and lines of a recorded instruction file or combined chain.
+/// UTF-8 bytes and lines of recorded instruction text, including rendered wrappers.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstructionSize {
     pub bytes: usize,
@@ -1617,8 +1617,6 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
-    /// Supported controls and limitations that the evidence cannot turn into savings.
-    pub guidance: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

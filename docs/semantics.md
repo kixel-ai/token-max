@@ -592,7 +592,10 @@ copied into several profiles gets one only when each declares it under the same 
 and `features.apps = false` removes ChatGPT apps (`codex_apps`); other Codex tools
 have no switch. A named MCP tool has its own Claude deny rule or Codex
 `mcp_servers.<id>.disabled_tools` entry when its server id is unambiguous in
-every owning profile. The Codex deny list applies after `enabled_tools`.
+every owning profile. Codex additionally requires a native completion whose raw
+server/tool identity exactly matches the candidate control in each profile;
+model-facing tool names may be sanitized or shortened, so unmatched names get
+no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
 A recommendation to disable the server covers its individual tool changes,
 so the settings snippet does not add redundant per-tool blocks.
 Instruction files have no switch. Core tools, the system prompt
@@ -645,8 +648,9 @@ Controls checked against authoritative documentation on 2026-11-08:
   Path-scoped rules can narrow loading; imports still load together.
 - [Codex instruction loading](https://learn.chatgpt.com/docs/agent-configuration/agents-md)
   caps the combined chain at `project_doc_max_bytes`, 32768 UTF-8 bytes by
-  default. The report compares measured bytes with the selected profile value
-  and flags text reaching or exceeding it. Project/CLI overrides and original
+  default. The report shows the selected profile value beside recorded rendered
+  bytes, which can include headers and wrappers and cannot establish that the
+  source chain exceeded its budget. Project/CLI overrides and original
   source-file sizes are unresolved: the recorded chain may already be
   truncated. It does not claim to locate unseen files or recover lost text.
 

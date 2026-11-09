@@ -619,9 +619,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             .checks
             .iter()
             .any(|c| c.action() == crate::model::Action::Change)
-            || report
-                .context
-                .iter()
+            || crate::context::setting_rows(&report.context)
                 .any(|c| c.verdict == Some(Verdict::Off));
         code = code.max(u8::from(change));
         if values.json {

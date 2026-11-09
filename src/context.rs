@@ -10,7 +10,7 @@ use crate::exposure::{calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals, Text,
-    Verdict,
+    Verdict, Via,
 };
 use crate::prices::{Catalog, prefix_spans};
 use crate::safe::identity;
@@ -146,6 +146,13 @@ pub struct ContextInput<'a> {
     pub catalog: &'a Catalog,
     /// Recommend turning a piece off when it cost more than this per use.
     pub max_cost_per_use_usd: f64,
+}
+
+/// Context setting rows whose controls are not covered by a server recommendation.
+pub fn setting_rows(costs: &[ContextCost]) -> impl Iterator<Item = &ContextCost> {
+    costs.iter().flat_map(|c| {
+        std::iter::once(c).chain(c.details.iter().filter(|_| c.verdict != Some(Verdict::Off)))
+    })
 }
 
 /// OpenAI's rule of thumb for English text, used where no request records the
@@ -781,7 +788,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         largest_characters: None,
                         details: vec![],
                         instruction_size: None,
-                        guidance: vec![],
                     },
                     owner,
                     key,
@@ -1048,6 +1054,19 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
         .collect();
     let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::new();
+    // Native MCP completions name the raw server and tool. Model-facing names
+    // can be sanitized or shortened and cannot safely supply a deny-list entry.
+    let raw_tools: HashSet<(&str, &str)> = scan
+        .invocations
+        .iter()
+        .filter(|i| {
+            i.harness == Harness::Codex
+                && i.kind == InvocationKind::McpCall
+                && i.via == Via::Completion
+                && i.status == InvocationStatus::Completed
+        })
+        .flat_map(|i| i.profiles.iter().map(|p| (i.target.as_str(), p.as_str())))
+        .collect();
     let mut result: Vec<(usize, usize, ContextCost)> = rows
         .into_values()
         .enumerate()
@@ -1060,6 +1079,20 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 (c.priced > 0).then(|| (c.cost_usd * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
             c.largest_characters = largest.get(&index).copied();
+            if c.harness == Harness::Codex
+                && c.kind == ContextKind::McpTool
+                && let Some(control) = &c.control
+                && let ControlValue::Text(tool) = &control.value
+            {
+                let raw = identity(&format!("mcp:mcp__{}__{tool}", control.path[1]));
+                if !c
+                    .profiles
+                    .iter()
+                    .all(|p| raw_tools.contains(&(raw.as_str(), p.as_str())))
+                {
+                    c.control = None;
+                }
+            }
             if let Some(calls) = c.calls {
                 c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
             }
@@ -1081,7 +1114,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for (owner, key, c) in &mut result {
         c.details = details.remove(&(*owner, *key)).unwrap_or_default();
         c.details.sort_by(|a, b| a.name.cmp(&b.name));
-        c.guidance = guidance(c, input.profiles);
     }
     let mut result: Vec<_> = result.into_iter().map(|(_, _, c)| c).collect();
     let order = |c: &ContextCost| c.estimated_usd.unwrap_or(-1.0);
@@ -1091,90 +1123,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     result
-}
-
-/// Explain supported alternatives without inventing the counterfactual discovery work.
-fn guidance(c: &ContextCost, profiles: &[Profile]) -> Vec<String> {
-    if c.kind == ContextKind::McpServer {
-        let mut notes = match c.harness {
-            Harness::Claude => vec![format!(
-                "Deferral: review env.ENABLE_TOOL_SEARCH in settings.json and mcpServers.{}.alwaysLoad in its MCP configuration (.mcp.json or the scope that declares it). ENABLE_TOOL_SEARCH=true defers tools; ENABLE_TOOL_SEARCH=false loads upfront. auto uses a 10% schema threshold; auto:N changes the percentage. alwaysLoad=true exempts this server; alwaysLoad=false forces deferral on Claude Code 2.1.287+. A small frequently used toolset can cost less upfront.", c.name
-            ), "Tool search needs Opus 4/Sonnet 4/Haiku 4.5 or later; Google Agent Platform needs 4.5 or later. Azure-hosted Foundry deployments do not support it. Experimental-beta restrictions, HIPAA policy, denying ToolSearch, and gateways can prevent deferral. https://code.claude.com/docs/en/mcp#configure-tool-search".into()],
-            Harness::Codex if c.name == CODEX_APPS => vec![
-                "Per-app controls: apps.<id>.enabled=false, apps.<id>.tools.<tool>.enabled=false, and apps.<id>.omit_tools_from=[\"direct\"] use the app id reported by app/installed, not its display name. These transcripts do not establish that id mapping, so per-app costs and settings patches are unavailable. https://learn.chatgpt.com/docs/app-server#apps-connectors".into()
-            ],
-            Harness::Codex => {
-                let owner = c.control.as_ref().filter(|control| control.path.first().is_some_and(|p| p == "mcp_servers"));
-                vec![match owner {
-                    Some(control) => {
-                        let mut omission = control.clone();
-                        omission.path[2] = "omit_tools_from".into();
-                        omission.value = ControlValue::Text("direct".into());
-                        omission.append = true;
-                        format!("Exposure: {} omits initial tools; deferred (tool search) and code_mode are other surfaces. Omission does not block calls or guarantee another surface exists. Use enabled_tools to allow tools or disabled_tools to block them; the deny list wins. https://learn.chatgpt.com/docs/config-file/config-reference", control_text(&omission, Harness::Codex))
-                    }
-                    None => "Exposure controls and per-tool blocks cannot be mapped to a unique config.toml server id here. Configure the plugin or launcher that supplies it; do not guess the id from its sanitized name. https://learn.chatgpt.com/docs/extend/mcp".into(),
-                }]
-            }
-        };
-        notes.push("Tool definitions and discovery context below are included in this server's cost. Missing discovery records mean unknown overhead, not zero. Search turns, returned definitions, cache changes and repeated loading cannot be attributed completely, so net deferral savings are unknown and no loading change is recommended.".into());
-        return notes;
-    }
-    if c.kind != ContextKind::Instructions {
-        return vec![];
-    }
-    let Some(size) = c.instruction_size else {
-        return vec![
-            "Instruction budget unknown: this record has no rendered instruction text to measure."
-                .into(),
-        ];
-    };
-    match c.harness {
-        Harness::Claude
-            if c.name
-                .rsplit(['/', '\\'])
-                .next()
-                .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md") =>
-        {
-            vec![format!(
-                "{}: {} recorded lines, {} UTF-8 bytes; {}Claude recommends under 200 lines per CLAUDE.md. This is guidance, not a quality score or a savings estimate. Prefer path-scoped rules for scoped instructions; imports still load together. https://code.claude.com/docs/en/memory#write-effective-instructions",
-                c.name,
-                size.lines,
-                size.bytes,
-                if size.lines >= 200 {
-                    "at or above the recommended length. "
-                } else {
-                    ""
-                }
-            )]
-        }
-        Harness::Codex => {
-            let budgets: HashSet<Option<usize>> = profiles
-                .iter()
-                .filter(|p| c.profiles.contains(&p.id))
-                .map(|p| match p.settings.get("project_doc_max_bytes") {
-                    None => Some(32 * 1024),
-                    Some(crate::model::Scalar::Number(n))
-                        if *n >= 0.0 && n.fract() == 0.0 && *n < usize::MAX as f64 =>
-                    {
-                        Some(*n as usize)
-                    }
-                    _ => None,
-                })
-                .collect();
-            let budget = if budgets.len() == 1 {
-                budgets.iter().next().copied().flatten()
-            } else {
-                None
-            };
-            vec![format!(
-                "Recorded AGENTS.md chain: {} UTF-8 bytes. {}The project_doc_max_bytes default is 32768 bytes across the combined chain. Project/CLI overrides and original source-file sizes are not established here; loaded text may already be truncated. Trim or scope guidance to preserve important instructions. Length alone does not establish quality. https://learn.chatgpt.com/docs/agent-configuration/agents-md",
-                size.bytes,
-                budget.map_or_else(|| "Selected profile budgets are unavailable or differ. ".into(), |n| format!("Selected profile budget: {n} bytes{}. ", if size.bytes >= n { "; recorded text reaches or exceeds it, check effective project_doc_max_bytes before relying on the tail" } else { "" }))
-            )]
-        }
-        _ => vec![],
-    }
 }
 
 #[cfg(test)]
@@ -1639,7 +1587,75 @@ mod tests {
     }
 
     #[test]
-    fn instruction_budgets_use_bytes_and_documented_guidance() {
+    fn codex_blocks_require_native_raw_tool_identity() {
+        for (exposed, raw) in [
+            ("read", Some("read")),
+            ("read", None),
+            ("read_file", Some("read-file")),
+            ("read_file", Some("read.file")),
+        ] {
+            let mut scan = ExposureScan {
+                components: vec![component(
+                    "schema",
+                    Category::McpSchema,
+                    &format!("mcp__docs_server__{exposed}"),
+                    400,
+                    &[],
+                )],
+                requests: vec![Exposure {
+                    request: "r1".into(),
+                    view: Arc::new(ExposureView {
+                        components: ids(&[]),
+                        candidates: ids(&["schema"]),
+                        linkage: Linkage::Chronological,
+                        ..(*exposure("r1", &[], 0, 0).view).clone()
+                    }),
+                    results: None,
+                }],
+                ..ExposureScan::default()
+            };
+            if let Some(raw) = raw {
+                let mut invocation = skill_use(InvocationKind::McpCall, "unused", 2);
+                invocation.harness = Harness::Codex;
+                invocation.via = Via::Completion;
+                invocation.status = InvocationStatus::Completed;
+                invocation.target = identity(&format!("mcp:mcp__docs-server__{raw}"));
+                scan.invocations.push(invocation);
+            }
+            let mut r = make_request();
+            r.id = "r1".into();
+            r.harness = Harness::Codex;
+            r.provider = Some("openai".into());
+            r.model = Some("gpt-5.4".into());
+            r.api = crate::model::Api::Responses;
+            r.parts[0].model = r.model.clone();
+            r.parts[0].tier = Some("standard".into());
+            r.parts[0].usage = Usage {
+                input: Some(4000),
+                read: Some(0),
+                write: None,
+                write5m: None,
+                write1h: None,
+                ..r.parts[0].usage
+            };
+            let mut profile = crate::test_support::make_profile("profile", "/codex");
+            profile.harness = Harness::Codex;
+            profile.mcp_servers = vec!["docs-server".into()];
+            let costs = context_costs(&ContextInput {
+                scan: &scan,
+                requests: &[r],
+                profiles: &[profile],
+                catalog: &prices(),
+                max_cost_per_use_usd: 1.0,
+            });
+            let tool = &costs[0].details[0];
+            assert_eq!(tool.control.is_some(), raw == Some(exposed));
+            assert_eq!(tool.verdict.is_some(), raw == Some(exposed));
+        }
+    }
+
+    #[test]
+    fn instruction_sizes_follow_the_recorded_revision() {
         let mut claude = component(
             "claude",
             Category::Instructions,
@@ -1658,25 +1674,13 @@ mod tests {
         };
         let rows = costs(&scan, &[request("r1", 1, 0, 300, 0)], 1.0);
         let c = row(&rows, "/repo/CLAUDE.md");
-        assert!(c.guidance[0].contains("200 recorded lines, 401 UTF-8 bytes; at or above"));
-        assert!(c.guidance[0].contains("imports still load together"));
-        let mut codex = c.clone();
-        codex.harness = Harness::Codex;
-        codex.instruction_size = Some(crate::model::InstructionSize {
-            bytes: 32_769,
-            lines: 1,
-        });
-        let mut profile = crate::test_support::make_profile("profile", "/codex");
-        let notes = guidance(&codex, std::slice::from_ref(&profile));
-        assert!(notes[0].contains("reaches or exceeds it"));
-        assert!(notes[0].contains("loaded text may already be truncated"));
-        profile.settings.insert(
-            "project_doc_max_bytes".into(),
-            crate::model::Scalar::Number(65536.0),
+        assert_eq!(
+            c.instruction_size,
+            Some(crate::model::InstructionSize {
+                bytes: 401,
+                lines: 200
+            })
         );
-        let notes = guidance(&codex, &[profile]);
-        assert!(notes[0].contains("Selected profile budget: 65536 bytes"));
-        assert!(!notes[0].contains("reaches or exceeds it"));
     }
 
     #[test]

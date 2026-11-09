@@ -12,7 +12,7 @@ setting, history profiles, window, costs (including partial known subtotals and
 unknown reasons), coverage, assumptions, uncertainty and sensitivities. Savings
 from independent checks still must not be added.
 
-Each `context[]` row now also has `details`, `instructionSize`, and `guidance`.
+Each `context[]` row now also has `details` and `instructionSize`.
 MCP server `details` contain `mcp-tool` and `mcp-discovery` rows with the same
 cost and coverage fields; these costs are already included in the server total.
 Do not sum parent and detail rows. Each estimate uses its own priced-request
@@ -21,9 +21,10 @@ different amount than the parent estimate. A tool's `control` blocks just that
 tool; recommendations to disable a whole server cover its tool recommendations in
 the text report and settings snippet. `instructionSize` is null without
 recorded text, otherwise `{ "bytes": N, "lines": N }` for the latest recorded
-revision. `guidance` contains supported controls, documented budget comparisons,
-source links and pricing limitations. These fields are retained in both JSON
-forms. Full scan components additionally retain optional `instructionSize`;
+revision. Codex sizes measure rendered text, including any wrappers, and do
+not establish the source-file chain size. These structured fields are retained
+in both JSON forms; explanatory guidance is generated only by the text renderer.
+Full scan components additionally retain optional `instructionSize`;
 the SSH scan-schema fingerprint changes with this metadata addition.
 
 Keepalive checks have the same complete shape in both versions, including every

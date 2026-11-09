@@ -1,7 +1,7 @@
 //! Shared data types. Serialized names match JSON report schema version 1.
 
 use indexmap::IndexMap;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Milliseconds since the Unix epoch.
 pub type Millis = i64;
@@ -10,7 +10,7 @@ pub type Millis = i64;
 pub type Text = std::sync::Arc<str>;
 
 /// The two locally supported transcript formats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
@@ -18,7 +18,7 @@ pub enum Harness {
 }
 
 /// A documented Claude cache lifetime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Ttl {
     #[serde(rename = "5m")]
     FiveMinutes,
@@ -61,7 +61,7 @@ impl<T> PerTtl<T> {
 }
 
 /// A value for the main conversation and for sub-agents.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PerBucket<T> {
     pub main: T,
     pub subagent: T,
@@ -111,14 +111,15 @@ pub enum Evidence {
 }
 
 /// A safe source location without transcript content.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Location {
+    #[serde(with = "crate::wire::text")]
     pub file: Text,
     pub line: u64,
 }
 
 /// Normalized counts: reads and writes are subsets of input, reasoning of output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub input: Option<i64>,
@@ -136,7 +137,7 @@ pub struct Usage {
     pub reasoning: Option<i64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PartKind {
     Message,
@@ -146,7 +147,7 @@ pub enum PartKind {
 }
 
 /// One non-overlapping billed sampling iteration.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BillingPart {
     pub kind: PartKind,
     pub model: Option<String>,
@@ -156,7 +157,7 @@ pub struct BillingPart {
     pub geo: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestEvidence {
     Measured,
@@ -164,7 +165,7 @@ pub enum RequestEvidence {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     Main,
@@ -172,7 +173,7 @@ pub enum Agent {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Api {
     Responses,
@@ -180,7 +181,7 @@ pub enum Api {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Accounting {
     Individual,
@@ -189,21 +190,21 @@ pub enum Accounting {
 }
 
 /// Recorded API-attempt budget; this does not establish execution or billing.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     pub max_output_tokens: Option<i64>,
 }
 
 /// Requested controls never establish the billed response tier.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestedSpeed {
     pub tier: Option<String>,
     pub speed: Option<String>,
 }
 
 /// One deduplicated model request, with no message content.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub evidence: RequestEvidence,
@@ -235,13 +236,13 @@ pub struct Request {
 }
 
 /// A safe location under one conversation alias.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Origin {
     pub session: String,
     pub location: Location,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
     Compaction,
@@ -254,7 +255,7 @@ pub enum EventKind {
     IdleNotice,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdleAttribution {
     Unknown,
@@ -262,7 +263,7 @@ pub enum IdleAttribution {
 }
 
 /// A scalar settings value as recorded.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Scalar {
     Bool(bool),
@@ -271,7 +272,7 @@ pub enum Scalar {
 }
 
 /// Preceding pricing metadata from the same file.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -281,7 +282,7 @@ pub struct Pricing {
 }
 
 /// Structural context and timing evidence, never a billed boundary request.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralEvent {
     pub id: String,
@@ -315,7 +316,7 @@ pub struct StructuralEvent {
 }
 
 /// What a Claude Bash call asked for and how it ended, never its command or output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellCall {
     /// Started with `run_in_background`, so the model did not wait on it.
@@ -327,7 +328,7 @@ pub struct ShellCall {
 }
 
 /// A current window control, without inventing a tuned model default.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowControl {
     pub value: Option<i64>,
@@ -341,7 +342,7 @@ pub struct WindowControl {
 }
 
 /// A current TTL control for one bucket.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TtlControl {
     pub value: Option<Ttl>,
     pub owner: String,
@@ -349,14 +350,14 @@ pub struct TtlControl {
 }
 
 /// Window controls for the default and per-model overrides.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CompactionControls {
     pub default: WindowControl,
     pub models: IndexMap<String, WindowControl>,
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdleControl {
     pub value: Option<bool>,
@@ -373,7 +374,7 @@ pub struct IdleControl {
 }
 
 /// Current speed preference after known disabling controls, without inferred session overrides.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SpeedControl {
     pub value: Option<String>,
     pub owner: String,
@@ -383,7 +384,7 @@ pub struct SpeedControl {
 }
 
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashCapControl {
     /// The larger of `BASH_MAX_TIMEOUT_MS` (default 600000) and `BASH_DEFAULT_TIMEOUT_MS`.
@@ -396,7 +397,7 @@ pub struct BashCapControl {
 }
 
 /// A selected profile's current settings and their owning controls.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub id: String,
@@ -424,7 +425,7 @@ pub struct Profile {
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RootState {
     Selected,
@@ -433,7 +434,7 @@ pub enum RootState {
     Inaccessible,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RootOrigin {
     Default,
@@ -443,7 +444,7 @@ pub enum RootOrigin {
 }
 
 /// Discovery includes exclusions and failures so selection cannot imply full-host coverage.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RootStatus {
     pub harness: Harness,
     pub path: String,
@@ -452,7 +453,7 @@ pub struct RootStatus {
 }
 
 /// File identity and byte boundary frozen before any transcript is parsed.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub file: String,
@@ -941,7 +942,7 @@ impl CheckResult {
 // ---------------------------------------------------------------------------
 // Exposure: recurring context components and how they were used.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
     ToolSchema,
@@ -981,7 +982,7 @@ impl Category {
 }
 
 /// Measured size of one component.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Size {
     pub characters: Option<i64>,
@@ -989,14 +990,14 @@ pub struct Size {
     pub fingerprint: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Owner {
     Skills,
     Context,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Component,
@@ -1004,7 +1005,7 @@ pub enum Scope {
 }
 
 /// One revision of one historical component, with no retained content.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Component {
     #[serde(flatten)]
@@ -1019,14 +1020,20 @@ pub struct Component {
     pub provenance: String,
     pub locations: Vec<Location>,
     pub first_seen: Millis,
-    /// Always "unresolved".
-    pub current: &'static str,
+    pub current: Current,
     pub scope: Scope,
     pub members: Vec<String>,
     pub targets: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+/// Whether a historical component is still sent; scans never resolve it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Current {
+    Unresolved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InvocationKind {
     SkillRequest,
@@ -1039,7 +1046,7 @@ pub enum InvocationKind {
     ScriptReference,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InvocationStatus {
     Requested,
@@ -1049,7 +1056,7 @@ pub enum InvocationStatus {
     Reference,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
     Typed,
@@ -1060,7 +1067,7 @@ pub enum Via {
     Script,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IdentityBasis {
     Recorded,
@@ -1068,7 +1075,7 @@ pub enum IdentityBasis {
 }
 
 /// Actual calls, requested skills and weak script references are different evidence.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invocation {
     pub id: String,
@@ -1088,7 +1095,7 @@ pub struct Invocation {
     pub locations: Vec<Location>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Linkage {
     Wire,
@@ -1096,7 +1103,7 @@ pub enum Linkage {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextCoverage {
     CompleteText,
@@ -1104,10 +1111,11 @@ pub enum TextCoverage {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct References {
     pub base: Option<String>,
     pub keep: Option<i64>,
+    #[serde(with = "crate::wire::ids")]
     pub tail: Ids,
     pub items: Option<Digests>,
 }
@@ -1184,6 +1192,10 @@ impl Digests {
     pub fn base(&self) -> Option<(&Digests, usize)> {
         self.0.base.as_ref().map(|b| (b, self.0.keep))
     }
+    /// The digests this list adds after the ones it keeps from its base.
+    pub fn tail(&self) -> &Ids {
+        &self.0.tail
+    }
     /// An identity for this shared list, stable while it is alive.
     pub fn address(&self) -> usize {
         std::sync::Arc::as_ptr(&self.0) as usize
@@ -1236,26 +1248,20 @@ impl std::fmt::Debug for Digests {
     }
 }
 
-impl Serialize for Digests {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.iter())
-    }
-}
-
 /// A request-local view of historical state, including unresolved visibility.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+///
+/// Serialized by [`crate::wire`], which shares views and result totals once per SSH stream.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Exposure {
     pub request: String,
     /// Identical views are shared, since consecutive requests usually carry the same context.
-    #[serde(flatten)]
     pub view: std::sync::Arc<ExposureView>,
     /// Tool output the conversation held when the request was sent.
-    #[serde(skip)]
     pub results: Option<std::sync::Arc<ResultTotals>>,
 }
 
 /// Characters of tool output a conversation holds, by tool, since its last compaction.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResultTotals {
     /// Changes at every compaction and transcript, so equal epochs mean one unbroken conversation.
     pub epoch: u64,
@@ -1264,13 +1270,18 @@ pub struct ResultTotals {
 }
 
 /// The request-independent part of an exposure.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExposureView {
+    #[serde(with = "crate::wire::ids")]
     pub components: Ids,
+    #[serde(with = "crate::wire::ids")]
     pub candidates: Ids,
+    #[serde(with = "crate::wire::ids")]
     pub removed: Ids,
+    #[serde(with = "crate::wire::ids")]
     pub inherited: Ids,
+    #[serde(with = "crate::wire::ids")]
     pub deferred: Ids,
     pub linkage: Linkage,
     pub coverage: TextCoverage,
@@ -1282,14 +1293,14 @@ pub struct ExposureView {
     pub reasons: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Visible {
     Partial,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Observed {
     Observed,
@@ -1297,7 +1308,7 @@ pub enum Observed {
 }
 
 /// Coverage is scoped to a concrete harness, client, version, component and window.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Visibility {
     pub harness: Harness,
@@ -1317,7 +1328,7 @@ pub struct Visibility {
 }
 
 /// How often one tool was called within the window, per profile set.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCalls {
     pub name: String,
@@ -1327,7 +1338,7 @@ pub struct ToolCalls {
 }
 
 /// How much output one tool returned within the window, per profile set.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResults {
     pub name: String,
@@ -1338,7 +1349,7 @@ pub struct ToolResults {
 }
 
 /// Parser output shared by later skills and context checks.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExposureScan {
     pub components: Vec<Component>,
@@ -1445,13 +1456,13 @@ pub struct ContextCost {
 // Scan and report.
 
 /// Pre-window Claude metadata supplies cache evidence, never selected billing or coverage.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CacheContext {
     pub requests: Vec<Request>,
     pub boundaries: Vec<StructuralEvent>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCoverage {
     pub requests: u64,
@@ -1466,7 +1477,7 @@ pub struct ScanCoverage {
 }
 
 /// The reusable parser output for downstream checks.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scan {
     pub snapshot_started_at: String,

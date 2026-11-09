@@ -18,7 +18,9 @@ pub mod replay;
 pub mod report;
 pub mod safe;
 pub mod scenarios;
+pub mod ssh;
 pub mod terminal;
+pub mod wire;
 
 #[cfg(test)]
 mod test_support;

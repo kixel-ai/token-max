@@ -2323,6 +2323,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: Some(Pricing {
                 model: Some("claude-opus-5-5".into()),
                 provider: Some("anthropic".into()),
@@ -2379,6 +2380,7 @@ mod tests {
             },
             provider: Some("anthropic".into()),
             settings: IndexMap::from([("idleCompaction".to_string(), Scalar::Bool(false))]),
+            mcp_servers: vec![],
             compaction: compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
                 user: &user,
@@ -2400,8 +2402,10 @@ mod tests {
                 .unwrap(),
             ),
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
+            background: vec![],
         }
     }
 

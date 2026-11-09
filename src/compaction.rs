@@ -1637,6 +1637,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: Some(Pricing {
                 provider: Some("anthropic".into()),
                 model: Some("claude-opus-5-5".into()),
@@ -1662,6 +1663,7 @@ mod tests {
             },
             provider: Some("anthropic".into()),
             settings: IndexMap::new(),
+            mcp_servers: vec![],
             compaction: controls(
                 Harness::Claude,
                 json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}}),
@@ -1670,8 +1672,10 @@ mod tests {
             ),
             idle: None,
             speed: None,
+            bash: None,
             speed_directories: None,
             idle_directories: None,
+            background: vec![],
         };
         let mut first = at("sample-resume", "sample", 1000);
         first.parts[0].usage = writes(20000);
@@ -3302,6 +3306,7 @@ mod tests {
             s.cache_context = CacheContext {
                 requests: vec![summary],
                 boundaries: vec![event],
+                prompts: vec![],
             };
             s.since = Some(1000);
             let report = report(&s);

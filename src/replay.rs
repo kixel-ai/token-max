@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::{IndexMap, IndexSet};
 
+use crate::background::{BackgroundInput, background_checks};
+use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
@@ -902,18 +904,37 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let background = background_checks(&BackgroundInput {
+        scan: &scan,
+        catalog,
+        since,
+        now,
+        max_cost_per_use_usd,
+    });
+    let bash = bash_checks(&BashInput {
+        scan: &scan,
+        catalog,
+        ttls: &ttl_refs,
+        since,
+        now,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
         .chain(windows.into_iter().map(CheckResult::Compaction))
         .chain(idle.into_iter().map(CheckResult::Idle))
         .chain(speed.into_iter().map(CheckResult::Speed))
+        .chain(background.into_iter().map(CheckResult::Background))
+        .chain(bash.into_iter().map(CheckResult::BashCap))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
         assumptions: [
             "component tokens are characters times a per-model ratio calibrated against recorded request totals",
+            "Codex records no complete request text to calibrate against, so its components and tool output use OpenAI's rule of thumb of 4 characters per token",
             "each component is priced at the cache state of its position in the prompt prefix: tools, system, then message attachments in arrival order",
+            "tool output stays in the conversation until it compacts; output the previous request held lies within its content, and newer output follows its input and reply",
+            "Claude Code caches through the last message, so a Claude request's content ends at its cached reads plus writes",
             "removing a component is assumed to change nothing else; costs of different components can be added only as an upper bound on the saving",
         ]
         .into_iter()
@@ -923,6 +944,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
+        profiles: &scan.profiles,
         catalog,
         max_cost_per_use_usd,
     });
@@ -945,6 +967,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             "measured usage is replayed at present public API rates, not historical invoices or subscription savings",
             "compaction summary proxies are separate from recorded request charges",
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",
+            "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",
             "Codex has no user cache-TTL control; its usage is priced but no TTL change is recommended",
             "no summed per-check or joint savings total",
         ]
@@ -1117,6 +1140,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         }
     }
@@ -1129,6 +1153,7 @@ mod tests {
                 color: false,
                 unicode: false,
                 details: true,
+                host: None,
             },
         )
     }

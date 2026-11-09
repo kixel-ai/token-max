@@ -21,7 +21,8 @@ use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
     Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness,
     IdleAttribution, Location, Millis, Origin, PartKind, Pricing, Profile, Request,
-    RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Snapshot, StructuralEvent, Text, Usage,
+    RequestEvidence, RequestedSpeed, Scan, ScanCoverage, ShellCall, Snapshot, StructuralEvent,
+    Text, Usage,
 };
 use crate::safe::{ScanError, count, id, identity, iso, label, object, timestamp};
 
@@ -305,6 +306,15 @@ fn idle_notice(text: &str) -> bool {
             .and_then(|rest| rest.strip_prefix(" ·"))
             .is_some_and(|rest| rest.trim_start_matches(js_space) == SUFFIX)
     })
+}
+
+/// Whether a shell command sleeps inside a loop, judged from its words and never retained.
+fn polling_loop(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
+    let has = |word: &str| words.contains(&word);
+    has("sleep") && has("do") && (has("while") || has("until") || has("for"))
 }
 
 /// Nested Claude subagent transcripts live under a `subagents` directory.
@@ -638,6 +648,7 @@ fn event(
         tool_id: None,
         settings: IndexMap::new(),
         idle_attribution: IdleAttribution::Unknown,
+        shell: None,
         pricing: context.pricing.clone(),
     }
 }
@@ -905,7 +916,8 @@ impl Reader {
                 });
             }
         }
-        if !selected && kind != Some("assistant") && !compact_boundary {
+        // Earlier user turns still count toward thresholds such as a recap's three turns.
+        if !selected && !matches!(kind, Some("assistant" | "user")) && !compact_boundary {
             return Ok(());
         }
         let context = &file.context;
@@ -974,6 +986,14 @@ impl Reader {
                         e.tool = label(member(b, "name"));
                         e.tool_id = opaque(b, "id")?;
                         e.request = Some(request_id.clone());
+                        if is(b, "name", "Bash") {
+                            let input = nested(b, "input");
+                            e.shell = Some(ShellCall {
+                                background: is_true(input, "run_in_background"),
+                                polls: string(input, "command").is_some_and(polling_loop),
+                                timed_out: false,
+                            });
+                        }
                         self.add_event(e);
                     }
                 }
@@ -1030,9 +1050,23 @@ impl Reader {
             let m = nested(raw, "message");
             let mut tool_result = false;
             if let Some(Value::Array(content)) = m.get("content") {
+                // The message-level result belongs to its block only when there is one.
+                let results = content
+                    .iter()
+                    .filter(|block| is(object(block), "type", "tool_result"))
+                    .count();
+                let timed_out = results == 1
+                    && nested(raw, "toolUseResult")
+                        .get("timedOutAfterMs")
+                        .is_some_and(Value::is_number);
                 for block in content {
                     let b = object(block);
                     if is(b, "type", "tool_result") {
+                        tool_result = true;
+                        // Earlier tool results are not retained, so their metadata cannot fail the scan.
+                        if !selected {
+                            continue;
+                        }
                         let mut e = event(
                             snapshot,
                             location,
@@ -1042,8 +1076,13 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?;
+                        if timed_out {
+                            e.shell = Some(ShellCall {
+                                timed_out,
+                                ..ShellCall::default()
+                            });
+                        }
                         self.add_event(e);
-                        tool_result = true;
                     }
                 }
             }
@@ -1601,6 +1640,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         events,
         cache_context: CacheContext {
             requests: context_requests,
+            prompts: context_events
+                .iter()
+                .filter(|e| e.kind == EventKind::TurnStart)
+                .cloned()
+                .collect(),
             boundaries: context_events
                 .into_iter()
                 .filter(|e| e.kind == EventKind::Compaction)
@@ -1835,6 +1879,36 @@ mod tests {
     }
 
     #[test]
+    fn earlier_prompts_are_context_and_earlier_tool_results_never_fail() {
+        let w = Workspace::new();
+        let user = |time: &str, content: Value| {
+            json!({
+                "type": "user",
+                "sessionId": "s",
+                "uuid": format!("u-{time}"),
+                "timestamp": time,
+                "message": { "role": "user", "content": content },
+            })
+        };
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[
+                user("2025-12-31T00:00:00Z", json!("SYNTHETIC_PRIVATE_PROMPT")),
+                user(
+                    "2025-12-31T00:01:00Z",
+                    json!([{ "type": "tool_result", "tool_use_id": 7 }]),
+                ),
+                user("2026-01-02T00:00:00Z", json!("SYNTHETIC_PRIVATE_PROMPT")),
+            ]),
+        );
+        let data = scan(&since(options(&w), "2026-01-01T00:00:00Z")).unwrap();
+        assert_eq!(data.cache_context.prompts.len(), 1);
+        assert_eq!(data.cache_context.prompts[0].kind, EventKind::TurnStart);
+        assert_eq!(data.events.len(), 1);
+        assert!(!private(&data));
+    }
+
+    #[test]
     fn legacy_counters_use_last_usage_ignore_repeated_totals_and_mark_resets_unknown() {
         let w = Workspace::new();
         let mut records = vec![
@@ -1915,6 +1989,25 @@ mod tests {
             usage(&split, Harness::Claude).map_err(|e| e.message),
             Err("cache write lifetime counts disagree with total".into())
         );
+    }
+
+    #[test]
+    fn polling_loops_need_a_loop_and_a_sleep() {
+        for command in [
+            "while ! test -f done; do sleep 30; done",
+            "until gh pr checks 1; do sleep 60; done",
+            "for i in $(seq 10); do curl -s x && break; sleep 5; done",
+        ] {
+            assert!(polling_loop(command), "{command}");
+        }
+        for command in [
+            "sleep 300",
+            "cargo build && sleep 1",
+            "for f in *.rs; do wc -l $f; done",
+            "./sleeper --while",
+        ] {
+            assert!(!polling_loop(command), "{command}");
+        }
     }
 
     #[test]

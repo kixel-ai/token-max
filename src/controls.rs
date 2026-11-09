@@ -1012,6 +1012,20 @@ mod tests {
             &env(&[("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS", "2e5")]),
         )
         .unwrap();
+        assert_eq!(c.threshold, Some(100_000));
+        assert_eq!(
+            c.threshold_owner,
+            "user.json:env.CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS"
+        );
+        let empty = Map::new();
+        let c = idle_controls(
+            &[SettingsScope {
+                config: &empty,
+                file: "user.json",
+            }],
+            &env(&[("CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS", "2e5")]),
+        )
+        .unwrap();
         assert_eq!(c.threshold, None);
         assert!(!c.resolved);
         assert_eq!(c.threshold_owner, "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS");

@@ -19,12 +19,15 @@ use crate::prices::{
     Catalog, add_costs, paired_savings, price_components, unit_rates, unknown_cost, zero_cost,
 };
 
-const SOURCES: [&str; 5] = [
+const SOURCES: [&str; 8] = [
     "https://code.claude.com/docs/en/costs#background-token-usage (2026-11-08)",
     "https://code.claude.com/docs/en/interactive-mode#prompt-suggestions (2026-11-08)",
     "https://code.claude.com/docs/en/interactive-mode#session-recap (2026-11-08)",
     "https://code.claude.com/docs/en/env-vars (2026-11-08)",
     "https://learn.chatgpt.com/docs/config-file/config-reference (2026-11-08)",
+    "https://code.claude.com/docs/en/settings (2026-11-08)",
+    "https://code.claude.com/docs/en/settings-reference#env (2026-11-08)",
+    "https://learn.chatgpt.com/docs/config-file/config-advanced (2026-11-08)",
 ];
 
 const DAY: f64 = 86_400_000.0;
@@ -54,7 +57,7 @@ pub struct BackgroundInput<'a> {
     pub max_cost_per_use_usd: f64,
 }
 
-/// One check per background feature of every profile.
+/// One check per distinct owning control, charging only its applicable requests.
 pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
     let mut result = vec![];
     for profile in &input.scan.profiles {
@@ -62,16 +65,47 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             .scan
             .requests
             .iter()
-            .filter(|r| r.profiles.contains(&profile.id) && input.since.is_none_or(|s| r.time >= s))
+            .filter(|r| {
+                r.agent == crate::model::Agent::Main
+                    && r.profiles.contains(&profile.id)
+                    && input.since.is_none_or(|s| r.time >= s)
+            })
             .collect();
         let mut ends = turn_ends(input.scan, profile);
         // Earlier history only establishes eligibility; charge turns inside the window.
         ends.retain(|e| input.since.is_none_or(|s| e.request.time >= s));
-        for control in &profile.background {
+        let mut groups: indexmap::IndexMap<&BackgroundControl, (Vec<&Request>, Vec<&TurnEnd<'_>>)> =
+            indexmap::IndexMap::new();
+        for &request in &requests {
+            for control in controls(profile, request) {
+                groups.entry(control).or_default().0.push(request);
+            }
+        }
+        for end in &ends {
+            for control in controls(profile, end.request) {
+                groups.entry(control).or_default().1.push(end);
+            }
+        }
+        if requests.is_empty() {
+            let unscoped = profile
+                .background_directories
+                .get("")
+                .unwrap_or(&profile.background);
+            groups.extend(unscoped.iter().map(|c| (c, (vec![], vec![]))));
+        }
+        for (control, (requests, ends)) in groups {
             result.push(check(input, profile, control, &requests, &ends));
         }
     }
     result
+}
+
+/// Discovery keeps absent working directories separate from the profile defaults.
+fn controls<'a>(profile: &'a Profile, request: &Request) -> &'a [BackgroundControl] {
+    profile
+        .background_directories
+        .get(request.cwd.as_deref().unwrap_or_default())
+        .map_or(&profile.background, Vec::as_slice)
 }
 
 /// A main-conversation response that finished a turn.
@@ -111,14 +145,6 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
     if profile.harness != Harness::Claude {
         return vec![];
     }
-    let enabled = |feature| {
-        profile
-            .background
-            .iter()
-            .any(|c| c.feature == feature && c.value)
-    };
-    let suggestions = enabled(BackgroundFeature::PromptSuggestions);
-    let recaps = enabled(BackgroundFeature::SessionRecaps);
     let mut sessions: indexmap::IndexMap<&str, Vec<&'a Request>> = indexmap::IndexMap::new();
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
         if r.harness == Harness::Claude
@@ -141,6 +167,13 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
         prompts.sort_unstable();
         let mut recap_turn = 0;
         for (i, &r) in main.iter().enumerate() {
+            let enabled = |feature| {
+                controls(profile, r)
+                    .iter()
+                    .any(|c| c.feature == feature && c.value == Some(true))
+            };
+            let suggestions = enabled(BackgroundFeature::PromptSuggestions);
+            let recaps = enabled(BackgroundFeature::SessionRecaps);
             let next = main.get(i + 1).copied();
             let prompt = prompts.iter().copied().find(|&t| t > r.time);
             // A later request before the next prompt continues the same turn.
@@ -176,6 +209,18 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
                 recap,
                 ttl: last_message(r)
                     .and_then(observed_ttl)
+                    .or_else(|| {
+                        r.cwd.as_ref().and_then(|cwd| {
+                            profile
+                                .idle_directories
+                                .as_ref()?
+                                .get(cwd)?
+                                .ttl
+                                .as_ref()?
+                                .main
+                                .value
+                        })
+                    })
                     .or(profile.ttl.main.value)
                     .unwrap_or(Ttl::FiveMinutes),
                 next,
@@ -245,6 +290,9 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
     let Some(next) = end.next else {
         return zero_cost();
     };
+    if next.cwd != end.request.cwd {
+        return zero_cost();
+    }
     let lifetime = ttl_milliseconds(end.ttl);
     let on = end.cache_touch(true, true);
     let off = end.cache_touch(
@@ -332,7 +380,7 @@ fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature
 fn generations(
     catalog: &Catalog,
     feature: BackgroundFeature,
-    ends: &[TurnEnd<'_>],
+    ends: &[&TurnEnd<'_>],
 ) -> Vec<(Cost, Cost)> {
     let mut result = vec![];
     for end in ends.iter().filter(|e| e.interactive) {
@@ -366,14 +414,16 @@ fn check(
     profile: &Profile,
     control: &BackgroundControl,
     requests: &[&Request],
-    ends: &[TurnEnd<'_>],
+    ends: &[&TurnEnd<'_>],
 ) -> BackgroundCheck {
     let feature = control.feature;
     let measurable = matches!(
         feature,
         BackgroundFeature::PromptSuggestions | BackgroundFeature::SessionRecaps
     );
-    let pairs = if measurable && control.value {
+    let enabled = control.value == Some(true);
+    let resolved = control.value.is_some();
+    let pairs = if measurable && enabled {
         generations(input.catalog, feature, ends)
     } else {
         vec![]
@@ -392,13 +442,14 @@ fn check(
     };
     // A suggestion or recap use is not recorded, so its whole cost counts as one use.
     let action = match (control.value, measurable, estimate) {
-        (false, _, _) => Action::Keep,
-        (true, false, _) | (true, true, None) => Action::Advisory,
-        (true, true, Some(usd)) if usd > input.max_cost_per_use_usd => Action::Change,
-        (true, true, Some(_)) => Action::Keep,
+        (None, _, _) => Action::Advisory,
+        (Some(false), _, _) => Action::Keep,
+        (Some(true), false, _) | (Some(true), true, None) => Action::Advisory,
+        (Some(true), true, Some(usd)) if usd > input.max_cost_per_use_usd => Action::Change,
+        (Some(true), true, Some(_)) => Action::Keep,
     };
     let other = ends.iter().filter(|e| !e.interactive).count();
-    let mut uncertainty = vec![];
+    let mut uncertainty = vec![control.reason.clone()];
     match feature {
         BackgroundFeature::PromptSuggestions => {
             uncertainty.push("assumes the terminal was focused after every eligible turn and suggestions were not throttled after many went unused".to_string());
@@ -416,8 +467,12 @@ fn check(
             "Codex does not record automatic recap requests in its session files".into(),
         ),
     }
-    let (cost, lost) = if control.value && !measurable {
-        let unknown = unknown_cost("these requests are not recorded");
+    let (cost, lost) = if !resolved || (enabled && !measurable) {
+        let unknown = unknown_cost(if resolved {
+            "these requests are not recorded"
+        } else {
+            &control.reason
+        });
         (unknown.clone(), unknown)
     } else {
         (
@@ -432,16 +487,16 @@ fn check(
         base: CheckBase {
             profile: profile.id.clone(),
             history_profiles: history_profiles.into_iter().cloned().collect(),
-            evidence: if measurable {
+            evidence: if measurable && resolved {
                 Evidence::Estimated
             } else {
                 Evidence::Guidance
             },
             action,
-            current: Some(control.value),
+            current: control.value,
             recommended: match action {
                 Action::Change => Some(false),
-                Action::Keep => Some(control.value),
+                Action::Keep => control.value,
                 Action::Advisory => None,
             },
             owner: control.owner.clone(),
@@ -453,14 +508,14 @@ fn check(
                 "explicit --since; current settings applied to history"
             }
             .into(),
-            baseline: "current profile with this feature on, holding recorded work and all other settings constant".into(),
+            baseline: "current owning control applied only to its recorded directories, holding recorded work and all other settings constant; not a measurement of historical enablement".into(),
             requests: requests.len() as u64,
-            coverage: (measurable && control.value).then_some(Coverage {
+            coverage: (measurable && enabled).then_some(Coverage {
                 priced: paired.priced,
                 total: paired.total,
             }),
-            savings_usd: if measurable && control.value { estimate } else { None },
-            monthly_savings_usd: if measurable && control.value {
+            savings_usd: if measurable && enabled { estimate } else { None },
+            monthly_savings_usd: if measurable && enabled {
                 month(estimate)
             } else {
                 None
@@ -479,9 +534,11 @@ fn check(
             sources: SOURCES.map(String::from).into(),
         },
         feature,
+        directories: requests.iter().map(|r| r.cwd.clone()).collect::<IndexSet<_>>().into_iter().collect(),
+        reason: control.reason.clone(),
         off: control.off.clone(),
         off_file: control.off_file.clone(),
-        generations: measurable.then_some(pairs.len() as u64),
+        generations: (measurable && resolved).then_some(pairs.len() as u64),
         cost,
         lost_warming: lost,
     }
@@ -496,7 +553,8 @@ mod tests {
     fn control(feature: BackgroundFeature, value: bool) -> BackgroundControl {
         BackgroundControl {
             feature,
-            value,
+            value: Some(value),
+            reason: "synthetic current controls applied to history".into(),
             minutes: None,
             owner: "/synthetic/.claude/settings.json:key".into(),
             off: "\"key\": false".into(),
@@ -590,6 +648,50 @@ mod tests {
     fn turns(features: &[(BackgroundFeature, bool)]) -> Scan {
         let requests = [0, 1, 2, 10].map(|t| response(t, 100_000)).into();
         scan(features, requests, &[0, 1, 2, 10])
+    }
+
+    #[test]
+    fn distinct_project_controls_charge_only_their_requests_and_keep_unknown_scopes_advisory() {
+        let mut s = turns(&[(BackgroundFeature::PromptSuggestions, true)]);
+        let mut on = control(BackgroundFeature::PromptSuggestions, true);
+        on.owner = "/synthetic/a/.claude/settings.json:promptSuggestionEnabled".into();
+        on.off_file = Some("/synthetic/a/.claude/settings.json".into());
+        let mut off = on.clone();
+        off.value = Some(false);
+        off.owner = "/synthetic/b/.claude/settings.json:promptSuggestionEnabled".into();
+        off.off_file = Some("/synthetic/b/.claude/settings.json".into());
+        let mut unknown = on.clone();
+        unknown.value = None;
+        unknown.reason =
+            "recorded working directory is absent; current ownership unresolved".into();
+        s.profiles[0].background_directories.extend([
+            ("/synthetic/a".into(), vec![on]),
+            ("/synthetic/b".into(), vec![off]),
+            (String::new(), vec![unknown]),
+        ]);
+        s.requests[0].cwd = Some("/synthetic/a".into());
+        s.requests[1].cwd = Some("/synthetic/a".into());
+        s.requests[2].cwd = Some("/synthetic/b".into());
+        let checks = run(&s, 0.0);
+        assert_eq!(checks.len(), 3);
+        assert_eq!(
+            (checks[0].base.requests, checks[0].generations),
+            (2, Some(1))
+        );
+        assert_eq!(checks[0].base.action, Action::Change);
+        assert_eq!(checks[0].directories, [Some("/synthetic/a".into())]);
+        assert_eq!(
+            (checks[1].base.requests, checks[1].generations),
+            (1, Some(0))
+        );
+        assert_eq!(checks[1].base.action, Action::Keep);
+        assert_eq!(checks[2].base.requests, 1);
+        assert_eq!(checks[2].base.current, None);
+        assert_eq!(checks[2].base.action, Action::Advisory);
+        assert_eq!(checks[2].cost.total_usd, None);
+        assert_eq!(checks[2].base.savings_usd, None);
+        assert_eq!(checks[2].generations, None);
+        assert_eq!(checks[2].directories, [None]);
     }
 
     #[test]

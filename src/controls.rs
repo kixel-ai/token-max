@@ -206,22 +206,65 @@ fn scoped_bool<'a>(
     Ok(result)
 }
 
-/// Resolve Claude's prompt suggestions, session recaps and goal check-ins, lowest-precedence
-/// scope first. The environment overrides settings. `flags` is false when the profile cannot
-/// fetch feature flags, as on a third-party provider, which leaves suggestions off unless the
-/// environment turns them on.
+/// Environment variables that can change background generation or its feature-flag gate.
+pub(crate) const CLAUDE_BACKGROUND_ENV: [&str; 8] = [
+    "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION",
+    "CLAUDE_CODE_ENABLE_AWAY_SUMMARY",
+    "CLAUDE_CODE_GOAL_CHECKIN_MINUTES",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "DISABLE_TELEMETRY",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
+
+/// Resolve Claude background controls in terminal precedence, including settings env over shell.
 pub fn claude_background(
     scopes: &[SettingsScope],
     env: &Env,
-    flags: bool,
 ) -> Result<Vec<BackgroundControl>, ScanError> {
     let first = scopes.first().map_or("settings.json", |s| s.file);
-    let environment = scoped_environment(scopes, env);
-    // Any value of this variable, even 0, stops feature-flag fetching.
-    let flags = flags
-        && !environment
+    let mut environment = scoped_environment(scopes, &Env::new());
+    for (key, value) in env {
+        if !environment.values.contains_key(key) {
+            environment
+                .values
+                .insert(key.clone(), Value::String(value.clone()));
+            environment.owners.insert(key.clone(), key.clone());
+        }
+    }
+    // These gates stop flag fetching, including nonempty "0" for the traffic switches.
+    let flags = ![
+        "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+        "DISABLE_TELEMETRY",
+    ]
+    .iter()
+    .any(|key| {
+        environment
             .values
-            .contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC");
+            .get(*key)
+            .is_some_and(|v| !js_string(Some(v)).is_empty())
+    }) && ![
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+    ]
+    .iter()
+    .any(|key| environment.values.get(*key).and_then(env_flag) == Some(true));
+    let environment_off = |variable: &str, off: &str| {
+        let owner = environment.owners.get(variable);
+        let file = scopes
+            .iter()
+            .find(|s| owner == Some(&format!("{}:env.{variable}", s.file)));
+        match file {
+            Some(scope) => (
+                format!("\"env\": {{\"{variable}\": \"{off}\"}}"),
+                Some(scope.file.to_string()),
+            ),
+            None => (format!("{variable}={off}"), None),
+        }
+    };
+    let reason = "current terminal settings and active-profile environment applied to history; historical files, --settings, --setting-sources, /cd environment carry-over and hosted launch overrides are not recorded";
     let toggle = |feature, key: &str, variable: &str, off: &str| {
         let forced = environment.values.get(variable).and_then(env_flag);
         let (value, owner, file) = match forced {
@@ -234,14 +277,17 @@ pub fn claude_background(
         Ok::<_, ScanError>((
             BackgroundControl {
                 feature,
-                value,
+                value: Some(value),
+                reason: reason.into(),
                 minutes: None,
                 owner,
-                off: match file {
-                    None => format!("{variable}={off}"),
-                    Some(_) => format!("\"{key}\": false"),
-                },
-                off_file: file.map(String::from),
+                off: file.map_or_else(
+                    || environment_off(variable, off).0,
+                    |_| format!("\"{key}\": false"),
+                ),
+                off_file: file
+                    .map(String::from)
+                    .or_else(|| environment_off(variable, off).1),
             },
             forced.is_some(),
         ))
@@ -253,7 +299,7 @@ pub fn claude_background(
         "false",
     )?;
     if !flags && !forced {
-        suggestions.value = false;
+        suggestions.value = Some(false);
         suggestions.owner = format!("{} (off without feature flags)", suggestions.owner);
     }
     let (recaps, _) = toggle(
@@ -273,14 +319,18 @@ pub fn claude_background(
     });
     let goal = BackgroundControl {
         feature: BackgroundFeature::GoalCheckIns,
-        value: minutes != Some(0),
+        value: Some(minutes != Some(0)),
+        reason: reason.into(),
         minutes: Some(minutes.unwrap_or(30)),
         owner: match minutes {
             Some(_) => environment.owners[variable].clone(),
+            None if environment.values.contains_key(variable) => {
+                format!("{} (invalid; default)", environment.owners[variable])
+            }
             None => format!("{variable} (default)"),
         },
-        off: format!("{variable}=0"),
-        off_file: None,
+        off: environment_off(variable, "0").0,
+        off_file: environment_off(variable, "0").1,
     };
     Ok(vec![suggestions, recaps, goal])
 }
@@ -295,7 +345,8 @@ pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundContro
     };
     Ok(vec![BackgroundControl {
         feature: BackgroundFeature::AutoRecaps,
-        value,
+        value: Some(value),
+        reason: "current config files applied to history; historical files and CLI/session overrides are not recorded".into(),
         minutes: None,
         owner,
         off: format!("{key} = false"),
@@ -894,6 +945,7 @@ mod tests {
             speed_directories: None,
             idle_directories: None,
             background: vec![],
+            background_directories: IndexMap::new(),
         }
     }
 
@@ -984,7 +1036,7 @@ mod tests {
     }
 
     #[test]
-    fn background_controls_follow_environment_then_managed_then_user() {
+    fn background_controls_follow_settings_env_then_inherited_env_then_settings_keys() {
         let user = map(json!({ "promptSuggestionEnabled": false, "awaySummaryEnabled": false }));
         let managed = map(json!({
             "awaySummaryEnabled": true,
@@ -1000,36 +1052,36 @@ mod tests {
                 file: "managed.json",
             },
         ];
-        let c = claude_background(&scopes, &Env::new(), true).unwrap();
+        let c = claude_background(&scopes, &Env::new()).unwrap();
         assert_eq!(
             (c[0].value, c[0].owner.as_str(), c[0].off.as_str()),
             (
-                false,
+                Some(false),
                 "user.json:promptSuggestionEnabled",
                 "\"promptSuggestionEnabled\": false"
             )
         );
         assert_eq!(
             (c[1].value, c[1].owner.as_str()),
-            (true, "managed.json:awaySummaryEnabled")
+            (Some(true), "managed.json:awaySummaryEnabled")
         );
         // Turning it off has to happen where the effective value is set.
         assert_eq!(c[1].off_file.as_deref(), Some("managed.json"));
-        assert_eq!((c[2].value, c[2].minutes), (false, Some(0)));
-        // The shell overrides settings; an unsupported value is unset.
+        assert_eq!((c[2].value, c[2].minutes), (Some(false), Some(0)));
+        // A shell variable overrides its paired setting, while managed env replaces the shell.
         let shell = env(&[
             ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true"),
             ("CLAUDE_CODE_ENABLE_AWAY_SUMMARY", "maybe"),
             ("CLAUDE_CODE_GOAL_CHECKIN_MINUTES", "1.5"),
         ]);
-        let c = claude_background(&scopes, &shell, true).unwrap();
+        let c = claude_background(&scopes, &shell).unwrap();
         assert_eq!(
             (c[0].value, c[0].off.as_str()),
-            (true, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
+            (Some(true), "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
         );
         assert_eq!(c[0].off_file, None);
         assert_eq!(c[1].owner, "managed.json:awaySummaryEnabled");
-        assert_eq!((c[2].value, c[2].minutes), (true, Some(30)));
+        assert_eq!((c[2].value, c[2].minutes), (Some(false), Some(0)));
     }
 
     #[test]
@@ -1039,16 +1091,37 @@ mod tests {
             config: &empty,
             file: "user.json",
         }];
-        let on = |shell: &[(&str, &str)], flags| {
-            claude_background(&scopes, &env(shell), flags).unwrap()[0].value
+        let on = |shell: &[(&str, &str)], flags: bool| {
+            let mut environment = env(shell);
+            if !flags {
+                environment.insert("CLAUDE_CODE_USE_VERTEX".into(), "1".into());
+            }
+            claude_background(&scopes, &environment).unwrap()[0].value
         };
-        assert!(on(&[], true));
-        assert!(!on(&[], false));
-        assert!(!on(
-            &[("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "0")],
-            true
-        ));
-        assert!(on(&[("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "1")], false));
+        assert_eq!(on(&[], true), Some(true));
+        assert_eq!(on(&[], false), Some(false));
+        assert_eq!(
+            on(&[("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "0")], true),
+            Some(false)
+        );
+        assert_eq!(
+            on(&[("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "1")], false),
+            Some(true)
+        );
+        assert_eq!(
+            on(&[("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "")], true),
+            Some(true)
+        );
+        assert_eq!(on(&[("DISABLE_TELEMETRY", "1")], true), Some(false));
+        let project = map(json!({ "env": { "CLAUDE_CODE_USE_VERTEX": "1" } }));
+        let scoped = [SettingsScope {
+            config: &project,
+            file: "project.json",
+        }];
+        assert_eq!(
+            claude_background(&scoped, &Env::new()).unwrap()[0].value,
+            Some(false)
+        );
         let codex = map(json!({ "tui": { "auto_recap": false } }));
         let c = codex_background(&[SettingsScope {
             config: &codex,
@@ -1057,7 +1130,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             (c[0].value, c[0].owner.as_str()),
-            (false, "config.toml:tui.auto_recap")
+            (Some(false), "config.toml:tui.auto_recap")
         );
         let bad = map(json!({ "tui": { "auto_recap": "no" } }));
         let error = codex_background(&[SettingsScope {

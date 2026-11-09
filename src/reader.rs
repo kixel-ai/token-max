@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::controls::js_string;
 use crate::discovery::{
-    Discovery, DiscoveryOptions, discover, discover_codex_speed_owners, discover_idle_owners,
+    Discovery, DiscoveryOptions, discover, discover_claude_controls, discover_codex_controls,
     structural_settings,
 };
 use crate::exposure::{ExposureCollector, js_entries};
@@ -1632,8 +1632,8 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     requests.sort_by_cached_key(|_, r| (r.time, r.id.clone()));
     let mut requests: Vec<Request> = requests.into_values().collect();
     events.sort_by_cached_key(|e| e.time);
-    discover_idle_owners(&options.discovery, &mut profiles, &requests)?;
-    discover_codex_speed_owners(&mut profiles, &requests)?;
+    discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
+    discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
     let before = |time: Millis| since.is_some_and(|since| time < since);
     let split = requests.partition_point(|r| before(r.time));
     let context_requests: Vec<Request> = requests.drain(..split).collect();

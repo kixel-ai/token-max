@@ -987,3 +987,121 @@ mod unix {
         }));
     }
 }
+
+#[test]
+fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
+    let w = Workspace::new();
+    w.settings(r#"{"promptSuggestionEnabled":true,"awaySummaryEnabled":true}"#);
+    let off = w.home.join("off");
+    let on = w.home.join("on");
+    for directory in [&off, &on] {
+        std::fs::create_dir_all(directory.join(".claude")).unwrap();
+        std::fs::create_dir_all(directory.join(".git")).unwrap();
+    }
+    std::fs::write(off.join(".claude/settings.local.json"), r#"{"promptSuggestionEnabled":false,"awaySummaryEnabled":false,"env":{"CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0"}}"#).unwrap();
+    std::fs::write(on.join(".claude/settings.local.json"), r#"{"env":{"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION":"1","CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"1","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0","SECRET":"SYNTHETIC_PRIVATE_SETTINGS"}}"#).unwrap();
+    let template = std::fs::read_to_string(fixture("claude.jsonl")).unwrap();
+    for (index, cwd) in [
+        Some(off.clone()),
+        Some(on.clone()),
+        None,
+        Some(w.home.join("gone")),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut lines = String::new();
+        for line in template.lines() {
+            let mut row: Value = serde_json::from_str(line).unwrap();
+            row["sessionId"] = format!("session-{index}").into();
+            row["cwd"] = cwd.as_ref().map(|p| text(p)).into();
+            row["entrypoint"] = "cli".into();
+            if row["type"] == "api-request" {
+                row["querySource"] = "repl_main_thread".into();
+            }
+            for key in ["id", "uuid", "requestRef"] {
+                if let Some(value) = row[key].as_str() {
+                    row[key] = format!("{value}-{index}").into();
+                }
+            }
+            if let Some(value) = row["message"]["id"].as_str() {
+                row["message"]["id"] = format!("{value}-{index}").into();
+            }
+            lines += &format!("{row}\n");
+        }
+        std::fs::write(
+            w.claude
+                .join(format!("projects/project/main-{index}.jsonl")),
+            lines,
+        )
+        .unwrap();
+    }
+    let mut args = prices_args(&w);
+    args.extend([
+        "--json-full".into(),
+        "--max-cost-per-use".into(),
+        "0".into(),
+    ]);
+    let (_, stdout, stderr) = run(&mut command(
+        &w,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    ));
+    assert_eq!(stderr, "");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    let checks: Vec<&Value> = report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["check"] == "background-generation")
+        .collect();
+    let feature = |directory: Option<&Path>, name: &str| {
+        *checks
+            .iter()
+            .find(|c| {
+                c["feature"] == name
+                    && c["directories"][0]
+                        == directory
+                            .map(text)
+                            .map(Value::String)
+                            .unwrap_or(Value::Null)
+            })
+            .unwrap()
+    };
+    let disabled = feature(Some(&off), "prompt-suggestions");
+    assert_eq!(disabled["current"], false);
+    assert_eq!(disabled["action"], "keep");
+    assert_eq!(disabled["requests"], 2);
+    assert_eq!(
+        disabled["offFile"],
+        text(&off.join(".claude/settings.local.json"))
+    );
+    let enabled = feature(Some(&on), "prompt-suggestions");
+    assert_eq!(enabled["action"], "change");
+    assert_eq!(enabled["requests"], 2);
+    assert_eq!(enabled["generations"], 1);
+    let patch: Value =
+        serde_json::from_str(&format!("{{{}}}", enabled["off"].as_str().unwrap())).unwrap();
+    assert_eq!(
+        patch["env"]["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"],
+        "false"
+    );
+    let gone = w.home.join("gone");
+    for directory in [None, Some(gone.as_path())] {
+        let unknown = feature(directory, "prompt-suggestions");
+        assert_eq!(unknown["current"], Value::Null);
+        assert_eq!(unknown["action"], "advisory");
+        assert_eq!(unknown["cost"]["totalUsd"], Value::Null);
+        assert_eq!(unknown["coverage"], Value::Null);
+    }
+    args.retain(|a| a != "--json-full");
+    let (_, stdout, stderr) = run(&mut command(
+        &w,
+        &args.iter().map(String::as_str).collect::<Vec<_>>(),
+    ));
+    assert_eq!(stderr, "");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    assert!(stdout.contains("scope or launch selection is unresolved"));
+    assert!(stdout.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"));
+    assert!(stdout.contains("Background estimates apply current files to history"));
+}

@@ -9,12 +9,13 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CompactionSources, Env, SettingsScope, bash_cap_control, claude_background, codex_background,
-    compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
+    CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, bash_cap_control,
+    claude_background, codex_background, compaction_controls, idle_controls, js_string, members,
+    scoped_environment, speed_controls,
 };
 use crate::model::{
-    Agent, Harness, Location, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus,
-    Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Harness, Location, PerBucket, Profile, Request, RootOrigin,
+    RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -504,8 +505,131 @@ fn directories<'a>(requests: impl Iterator<Item = &'a Request>) -> IndexSet<&'a 
         .collect()
 }
 
+/// Directories from the recorded cwd up to the nearest project marker, closest first.
+fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<String>, ScanError> {
+    let mut paths = vec![];
+    let mut path = cwd;
+    loop {
+        paths.push(path.to_string());
+        if markers.is_empty() {
+            return Ok(paths);
+        }
+        for marker in markers {
+            match fs::metadata(std::path::Path::new(path).join(marker)) {
+                Ok(_) => return Ok(paths),
+                Err(e) if absent(e.kind()) => {}
+                Err(_) => return Err(error("cannot inspect project scope", path, 0)),
+            }
+        }
+        if dirname(path) == path {
+            return Ok(vec![cwd.to_string()]);
+        }
+        path = dirname(path);
+    }
+}
+
+/// The main checkout of a linked worktree, reading only Git's path metadata.
+#[cfg(unix)]
+fn main_checkout(root: &str) -> Result<String, ScanError> {
+    let dotgit = join(&[root, ".git"]);
+    let meta = match fs::metadata(&dotgit) {
+        Ok(meta) => meta,
+        Err(e) if absent(e.kind()) => return Ok(root.into()),
+        Err(_) => return Err(error("cannot inspect git directory", &dotgit, 0)),
+    };
+    if meta.is_dir() {
+        return Ok(root.into());
+    }
+    if !meta.is_file() {
+        return Err(error("unsupported git directory pointer", &dotgit, 0));
+    }
+    let text = fs::read_to_string(&dotgit)
+        .map_err(|_| error("cannot read git directory pointer", &dotgit, 0))?;
+    let gitdir = text
+        .trim()
+        .strip_prefix("gitdir: ")
+        .filter(|p| !p.is_empty() && !p.contains(['\n', '\r']))
+        .ok_or_else(|| error("invalid git directory pointer", &dotgit, 0))?;
+    let gitdir = std::path::Path::new(root).join(gitdir);
+    let common_file = gitdir.join("commondir");
+    let common = match fs::read_to_string(&common_file) {
+        Ok(text) => text,
+        Err(e) if absent(e.kind()) => return Ok(root.into()),
+        Err(_) => {
+            return Err(error(
+                "cannot read git common directory",
+                &common_file.to_string_lossy(),
+                0,
+            ));
+        }
+    };
+    let common = common.trim();
+    if common.is_empty() || common.contains(['\n', '\r']) {
+        return Err(error(
+            "invalid git common directory",
+            &common_file.to_string_lossy(),
+            0,
+        ));
+    }
+    let common = realpath(&gitdir.join(common).to_string_lossy()).map_err(|_| {
+        error(
+            "cannot resolve git common directory",
+            &common_file.to_string_lossy(),
+            0,
+        )
+    })?;
+    if std::path::Path::new(&common)
+        .file_name()
+        .is_some_and(|n| n == ".git")
+    {
+        Ok(dirname(&common).into())
+    } else {
+        Err(error(
+            "unsupported git common directory",
+            &common_file.to_string_lossy(),
+            0,
+        ))
+    }
+}
+
+/// Claude keeps the local file at the main root only for user-owned Unix repositories.
+fn claude_local_root(root: &str, options: &DiscoveryOptions) -> Result<Option<String>, ScanError> {
+    #[cfg(windows)]
+    {
+        let _ = (root, options);
+        Ok(None)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let main = main_checkout(root)?;
+        if main == realpath(&options.home).unwrap_or_else(|_| options.home.clone()) {
+            return Ok(None);
+        }
+        for path in [&main, &join(&[&main, ".git"]), &join(&[&main, ".claude"])] {
+            match fs::metadata(path) {
+                // getuid has no preconditions and does not mutate process state.
+                Ok(meta) if meta.uid() == unsafe { libc::getuid() } => {}
+                Ok(_) => return Ok(None),
+                Err(e) if absent(e.kind()) && path.ends_with(".claude") => {}
+                Err(e) if absent(e.kind()) => return Ok(None),
+                Err(_) => return Err(error("cannot inspect local settings ownership", path, 0)),
+            }
+        }
+        Ok(Some(main))
+    }
+}
+
+fn unresolved_background(controls: &mut [BackgroundControl], reason: &str) {
+    for control in controls {
+        control.value = None;
+        control.minutes = None;
+        control.reason = reason.into();
+    }
+}
+
 /// Resolve current project/local controls at recorded directories, preserving every owner.
-pub fn discover_idle_owners(
+pub fn discover_claude_controls(
     options: &DiscoveryOptions,
     profiles: &mut [Profile],
     requests: &[Request],
@@ -526,34 +650,62 @@ pub fn discover_idle_owners(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
-        if relevant.iter().any(|r| r.cwd.is_none())
+        if relevant
+            .iter()
+            .any(|r| r.cwd.as_deref().is_none_or(str::is_empty))
             && let Some(idle) = &mut profile.idle
         {
             idle.resolved = false;
             idle.reason = "recorded working directory is absent; current project/local ownership cannot be resolved".into();
         }
+        let mut unknown = profile.background.clone();
+        unresolved_background(
+            &mut unknown,
+            "recorded working directory is absent; current project/local ownership and launch selection are unresolved",
+        );
+        profile
+            .background_directories
+            .insert(String::new(), unknown);
         for cwd in directories(relevant.into_iter()) {
-            let mut root = cwd;
-            let mut path = cwd;
-            loop {
-                match fs::metadata(join(&[path, ".git"])) {
-                    Ok(_) => {
-                        root = path;
-                        break;
-                    }
-                    Err(e) if absent(e.kind()) => {}
-                    Err(_) => {
-                        return Err(error("cannot resolve current project ownership", path, 0));
-                    }
+            let exists = match fs::metadata(cwd) {
+                Ok(meta) => meta.is_dir() && std::path::Path::new(cwd).is_absolute(),
+                Err(e) if absent(e.kind()) => false,
+                Err(_) => return Err(error("cannot inspect working directory", cwd, 0)),
+            };
+            if !exists {
+                let mut controls = profile.background.clone();
+                unresolved_background(
+                    &mut controls,
+                    "recorded working directory is missing or not absolute; current project/local ownership and launch selection are unresolved",
+                );
+                profile.background_directories.insert(cwd.into(), controls);
+                if let Some(mut speed) = profile.speed.clone() {
+                    speed.resolved = false;
+                    speed.value = None;
+                    speed.reason =
+                        "recorded working directory no longer exists; current ownership unresolved"
+                            .into();
+                    speed_directories.insert(cwd.into(), speed);
                 }
-                if dirname(path) == path {
-                    break;
+                if let Some(mut idle) = profile.idle.clone() {
+                    idle.resolved = false;
+                    idle.reason = "recorded working directory no longer exists; current project/local ownership is unresolved".into();
+                    idle_directories.insert(cwd.into(), idle);
                 }
-                path = dirname(path);
+                continue;
             }
-            let project_file = join(&[root, ".claude", "settings.json"]);
-            let local_file = join(&[root, ".claude", "settings.local.json"]);
+            let paths = project_directories(cwd, &[".git".into()])?;
+            let root = paths.last().expect("cwd is included");
+            let local_root = claude_local_root(root, options)?;
+            let project_file = join(&[cwd, ".claude", "settings.json"]);
+            let legacy_file = join(&[cwd, ".claude", "settings.local.json"]);
+            let local_file = join(&[
+                local_root.as_deref().unwrap_or(cwd),
+                ".claude",
+                "settings.local.json",
+            ]);
             let project = settings(&project_file, Harness::Claude)?;
+            let legacy = settings(&legacy_file, Harness::Claude)?;
             let local = settings(&local_file, Harness::Claude)?;
             let scopes = [
                 SettingsScope {
@@ -565,6 +717,10 @@ pub fn discover_idle_owners(
                     file: &project_file,
                 },
                 SettingsScope {
+                    config: &legacy,
+                    file: &legacy_file,
+                },
+                SettingsScope {
                     config: &local,
                     file: &local_file,
                 },
@@ -573,9 +729,29 @@ pub fn discover_idle_owners(
                     file: managed_file,
                 },
             ];
-            let mut speed = speed_controls(Harness::Claude, &scopes, local_env)?;
+            let speed = speed_controls(Harness::Claude, &scopes, local_env)?;
             let mut idle = idle_controls(&scopes, local_env)?;
-            let config = merged(&[&user, &project, &local, &managed]);
+            let mut background = claude_background(&scopes, local_env)?;
+            let hosted_conflict = requests.iter().any(|r| {
+                r.agent == Agent::Main
+                    && r.profiles.contains(&profile.id)
+                    && r.cwd.as_deref() == Some(cwd)
+                    && r.client.as_deref() != Some("cli")
+            }) && scopes.iter().any(|s| {
+                CLAUDE_BACKGROUND_ENV.iter().any(|key| {
+                    members(s.config.get("env"))
+                        .get(*key)
+                        .zip(local_env.get(*key))
+                        .is_some_and(|(setting, inherited)| js_string(Some(setting)) != *inherited)
+                })
+            });
+            if hosted_conflict {
+                unresolved_background(
+                    &mut background,
+                    "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
+                );
+            }
+            let config = merged(&[&user, &project, &legacy, &local, &managed]);
             idle.ttl = Some(ttl_controls(&TtlSources {
                 config: &config,
                 env: local_env,
@@ -593,20 +769,32 @@ pub fn discover_idle_owners(
                 managed_file,
                 scopes: Some(&scopes),
             })?);
-            if fs::metadata(cwd).is_err() {
-                speed.resolved = false;
-                speed.value = None;
-                speed.reason =
-                    "recorded working directory no longer exists; current ownership unresolved"
-                        .into();
-                idle.resolved = false;
-                idle.reason = "recorded working directory no longer exists; current project/local ownership is unresolved".into();
-            }
+            profile
+                .background_directories
+                .insert(cwd.to_string(), background);
             speed_directories.insert(cwd.to_string(), speed);
             idle_directories.insert(cwd.to_string(), idle);
         }
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
+        // /cd reapplies the new env over the old one; removed keys can survive it.
+        let mut session_cwds = std::collections::HashMap::new();
+        for request in requests
+            .iter()
+            .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
+        {
+            if let Some(previous) = session_cwds.insert(&request.session, request.cwd.as_deref())
+                && previous != request.cwd.as_deref()
+                && let Some(controls) = profile
+                    .background_directories
+                    .get_mut(request.cwd.as_deref().unwrap_or_default())
+            {
+                unresolved_background(
+                    controls,
+                    "session working directory changed; /cd environment carry-over and launch selection are not recorded",
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -614,16 +802,107 @@ pub fn discover_idle_owners(
 /// Codex keys that let a profile or project file change speed, model or gates.
 const CODEX_SPEED_KEYS: [&str; 4] = ["model", "model_provider", "service_tier", "features"];
 
-/// Keep unresolved Codex project overrides advisory rather than asserting user defaults own a launch.
-pub fn discover_codex_speed_owners(
+/// Resolve Codex project controls without inferring trust or a selected launch profile.
+pub fn discover_codex_controls(
+    options: &DiscoveryOptions,
     profiles: &mut [Profile],
     requests: &[Request],
 ) -> Result<(), ScanError> {
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Codex) {
+        let user = settings(&profile.settings_file, Harness::Codex)?;
+        let system = settings(&options.codex_system_config_file, Harness::Codex)?;
+        let base_scopes = [
+            SettingsScope {
+                config: &system,
+                file: &options.codex_system_config_file,
+            },
+            SettingsScope {
+                config: &user,
+                file: &profile.settings_file,
+            },
+        ];
+        let mut base = codex_background(&base_scopes)?;
+        let mut marker_selection = false;
+        for name in named_profile_files(&profile.root)? {
+            let file = join(&[&profile.root, &name]);
+            let config = settings(&file, Harness::Codex)?;
+            marker_selection |=
+                config.contains_key("project_root_markers") || config.contains_key("projects");
+            if members(config.get("tui")).contains_key("auto_recap") {
+                // Validate only the allowlisted control; profile selection is not in history.
+                codex_background(&[SettingsScope {
+                    config: &config,
+                    file: &file,
+                }])?;
+                unresolved_background(
+                    &mut base,
+                    "named config profiles can override automatic recaps; --profile and CLI/session selection are not recorded",
+                );
+                base[0].owner = format!(
+                    "{}; {file}:tui.auto_recap (--profile selection unresolved)",
+                    base[0].owner
+                );
+            }
+        }
+        profile.background = base.clone();
+        let mut unknown = base.clone();
+        unresolved_background(
+            &mut unknown,
+            "recorded working directory is absent; current project trust, ownership and launch selection are unresolved",
+        );
+        profile
+            .background_directories
+            .insert(String::new(), unknown);
+        let markers = base_scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.config.get("project_root_markers"));
+        let markers: Vec<String> = match markers {
+            None => vec![".git".into()],
+            Some(Value::Array(values)) if values.iter().all(Value::is_string) => values
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect(),
+            Some(_) => {
+                return Err(error(
+                    "invalid project_root_markers",
+                    &profile.settings_file,
+                    1,
+                ));
+            }
+        };
         let cwds = directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)));
         for cwd in cwds {
-            let mut path = cwd;
-            loop {
+            let exists = match fs::metadata(cwd) {
+                Ok(meta) => meta.is_dir() && std::path::Path::new(cwd).is_absolute(),
+                Err(e) if absent(e.kind()) => false,
+                Err(_) => return Err(error("cannot inspect working directory", cwd, 0)),
+            };
+            if !exists {
+                let mut controls = base.clone();
+                unresolved_background(
+                    &mut controls,
+                    "recorded working directory is missing or not absolute; current project trust and ownership are unresolved",
+                );
+                profile.background_directories.insert(cwd.into(), controls);
+                continue;
+            }
+            let paths = project_directories(cwd, &markers)?;
+            let root = paths.last().expect("cwd is included");
+            // Exact cwd, then project root; never infer trust from the fact requests exist.
+            let trust = [cwd, root.as_str()].into_iter().find_map(|path| {
+                base_scopes.iter().rev().find_map(|scope| {
+                    members(scope.config.get("projects"))
+                        .get(path)
+                        .and_then(|p| p.get("trust_level"))
+                        .and_then(Value::as_str)
+                })
+            });
+            let mut layers = Vec::new();
+            for path in &paths {
+                if trust == Some("untrusted") {
+                    continue;
+                }
                 let file = join(&[path, ".codex", "config.toml"]);
                 let config = settings(&file, Harness::Codex)?;
                 let overrides = CODEX_SPEED_KEYS.iter().any(|k| config.contains_key(*k));
@@ -636,30 +915,51 @@ pub fn discover_codex_speed_owners(
                         .speed
                         .clone()
                         .expect("every discovered profile has a speed control");
-                    profile
-                        .speed_directories
-                        .get_or_insert_default()
-                        .insert(
-                            cwd.to_string(),
-                            SpeedControl {
-                                value: None,
-                                resolved: false,
-                                owner: file,
-                                reason: "current project overrides exist; trust, profile and CLI/session selection are not established".into(),
-                                ..speed
-                            },
-                        );
+                    profile.speed_directories.get_or_insert_default().insert(cwd.into(), SpeedControl {
+                        value: None, resolved: false, owner: file.clone(),
+                        reason: "current project overrides exist; trust, profile and CLI/session selection are not established".into(),
+                        ..speed
+                    });
                 }
-                match fs::metadata(join(&[path, ".git"])) {
-                    Ok(_) => break,
-                    Err(e) if absent(e.kind()) => {}
-                    Err(_) => return Err(error("cannot inspect project scope", path, 0)),
-                }
-                if dirname(path) == path {
-                    break;
-                }
-                path = dirname(path);
+                layers.push((file, config));
             }
+            let mut scopes = base_scopes.to_vec();
+            if trust != Some("untrusted") {
+                scopes.extend(
+                    layers
+                        .iter()
+                        .rev()
+                        .map(|(file, config)| SettingsScope { config, file }),
+                );
+            }
+            let has_override = trust != Some("untrusted")
+                && layers
+                    .iter()
+                    .any(|(_, c)| members(c.get("tui")).contains_key("auto_recap"));
+            let mut controls = if has_override {
+                codex_background(&scopes)?
+            } else {
+                base.clone()
+            };
+            if has_override && trust != Some("trusted") {
+                unresolved_background(
+                    &mut controls,
+                    "project automatic recap overrides exist, but current project trust is unknown; historical trust and CLI/session selection are not recorded",
+                );
+            }
+            if marker_selection {
+                unresolved_background(
+                    &mut controls,
+                    "named profiles can change project root discovery; --profile and CLI/session selection are not recorded",
+                );
+            }
+            if trust == Some("untrusted") {
+                for c in &mut controls {
+                    c.reason +=
+                        "; current project is untrusted, so project config layers are ignored";
+                }
+            }
+            profile.background_directories.insert(cwd.into(), controls);
         }
     }
     Ok(())
@@ -673,6 +973,20 @@ fn named_profile_file(name: &str) -> bool {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     })
+}
+
+/// Named profile files in stable order, shared by control discovery.
+fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> {
+    let unreadable = || error("cannot read settings", root, 0);
+    let mut names = Vec::new();
+    for entry in fs::read_dir(root).map_err(|_| unreadable())? {
+        let name = entry.map_err(|_| unreadable())?.file_name();
+        if let Some(name) = name.to_str().filter(|n| named_profile_file(n)) {
+            names.push(name.to_string());
+        }
+    }
+    names.sort_unstable();
+    Ok(names)
 }
 
 /// The Codex files that can override or block a profile's saved speed.
@@ -735,17 +1049,7 @@ fn codex_speed(speed: &mut SpeedControl, sources: &CodexSpeedSources) -> Result<
         speed.resolved = false;
         speed.reason = "legacy profile selector/tables exist; current Codex removed them in 0.134.0, installed version and selected profile are unresolved".into();
     }
-    let unreadable = || error("cannot read settings", canonical, 0);
-    let mut names = Vec::new();
-    for entry in fs::read_dir(canonical).map_err(|_| unreadable())? {
-        let name = entry.map_err(|_| unreadable())?.file_name();
-        if let Some(name) = name.to_str().filter(|n| named_profile_file(n)) {
-            names.push(name.to_string());
-        }
-    }
-    // Node lists directories in byte order.
-    names.sort_unstable();
-    for name in names {
+    for name in named_profile_files(canonical)? {
         let file = join(&[canonical, &name]);
         let config = settings(&file, Harness::Codex)?;
         possible.push(or_base(config.get("service_tier")));
@@ -1116,7 +1420,7 @@ fn profile(
         None
     };
     let background = if claude {
-        claude_background(&speed_scopes, local_env, provider.is_none())?
+        claude_background(&speed_scopes, local_env)?
     } else {
         codex_background(&speed_scopes)?
     };
@@ -1138,6 +1442,7 @@ fn profile(
         speed_directories: None,
         idle_directories: None,
         background,
+        background_directories: IndexMap::new(),
     })
 }
 
@@ -1700,8 +2005,8 @@ mod tests {
         fs::create_dir_all(w.home.join(".git")).unwrap();
         let cwd = w.home.join(".claude-project");
         fs::create_dir_all(cwd.join(".claude")).unwrap();
-        // Project settings are at the repository root, not an arbitrary descendant.
-        let local = w.claude.join("settings.local.json");
+        // A repository rooted at home keeps the local file at the session directory.
+        let local = cwd.join(".claude/settings.local.json");
         write(&local, r#"{"fastMode":false}"#);
         let mut data = discover(&options(&w)).unwrap();
         let profile = claude(&data).clone();
@@ -1710,7 +2015,7 @@ mod tests {
             Some("fast")
         );
         let requests = [request(&profile, Some(&cwd))];
-        discover_idle_owners(&options(&w), &mut data.profiles, &requests).unwrap();
+        discover_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
         let directory = &claude(&data).speed_directories.as_ref().unwrap()[&text(&cwd)];
         assert_eq!(directory.value.as_deref(), Some("standard"));
         assert_eq!(directory.owner, format!("{}:fastMode", text(&local)));
@@ -1786,7 +2091,7 @@ mod tests {
             },
             request(&profile, None),
         ];
-        discover_codex_speed_owners(&mut data.profiles, &requests).unwrap();
+        discover_codex_controls(&options, &mut data.profiles, &requests).unwrap();
         let directories = data.profiles[0].speed_directories.as_ref().unwrap();
         assert_eq!(directories.len(), 1);
         let directory = &directories[&text(&nested)];
@@ -1814,17 +2119,338 @@ mod tests {
         );
     }
 
+    #[test]
+    fn claude_background_uses_session_project_and_root_local_env_with_managed_precedence() {
+        let w = Workspace::new();
+        let root = w.home.join("repo");
+        let nested = root.join("nested");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::create_dir_all(&nested).unwrap();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"promptSuggestionEnabled":false,"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"0"}}"#,
+        );
+        // Shared project settings come from the session directory, not the git root.
+        write(
+            root.join(".claude/settings.json"),
+            r#"{"promptSuggestionEnabled":false,"awaySummaryEnabled":false}"#,
+        );
+        let project = nested.join(".claude/settings.json");
+        write(
+            &project,
+            r#"{"promptSuggestionEnabled":true,"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"1"},"secret":"SYNTHETIC_PRIVATE"}"#,
+        );
+        write(
+            nested.join(".claude/settings.local.json"),
+            r#"{"env":{"CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"3"}}"#,
+        );
+        let local = root.join(".claude/settings.local.json");
+        write(
+            &local,
+            r#"{"env":{"CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"7","SECRET":"SYNTHETIC_PRIVATE"}}"#,
+        );
+        let mut o = options(&w);
+        o.env
+            .insert("CLAUDE_CODE_GOAL_CHECKIN_MINUTES".into(), "9".into());
+        let mut d = discover(&o).unwrap();
+        let r = Request {
+            client: Some("cli".into()),
+            ..request(claude(&d), Some(&nested))
+        };
+        discover_claude_controls(
+            &o,
+            &mut d.profiles,
+            &[
+                r.clone(),
+                Request {
+                    cwd: None,
+                    ..r.clone()
+                },
+            ],
+        )
+        .unwrap();
+        let p = claude(&d);
+        let c = &p.background_directories[&text(&nested)];
+        assert_eq!(c[0].value, Some(true));
+        assert_eq!(
+            c[0].owner,
+            format!("{}:promptSuggestionEnabled", text(&project))
+        );
+        assert_eq!(c[1].value, Some(true));
+        assert_eq!(c[1].off_file.as_deref(), Some(text(&project).as_str()));
+        assert_eq!(
+            c[1].off,
+            "\"env\": {\"CLAUDE_CODE_ENABLE_AWAY_SUMMARY\": \"0\"}"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            (c[2].minutes, c[2].off_file.as_deref()),
+            (Some(7), Some(text(&local).as_str()))
+        );
+        #[cfg(windows)]
+        assert_eq!(c[2].minutes, Some(3));
+        assert!(
+            p.background_directories[""]
+                .iter()
+                .all(|c| c.value.is_none())
+        );
+        assert!(
+            !serde_json::to_string(p)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE")
+        );
+        write(
+            w.managed_settings_file(),
+            r#"{"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"0","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0"}}"#,
+        );
+        discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let c = &claude(&d).background_directories[&text(&nested)];
+        assert_eq!((c[1].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!(
+            c[2].off_file.as_deref(),
+            Some(text(&w.managed_settings_file()).as_str())
+        );
+        let hosted = Request {
+            client: Some("desktop".into()),
+            ..r.clone()
+        };
+        discover_claude_controls(&o, &mut d.profiles, &[hosted]).unwrap();
+        let c = &claude(&d).background_directories[&text(&nested)];
+        assert!(c.iter().all(|c| c.value.is_none()));
+        assert!(c[0].reason.contains("launch precedence"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_worktree_local_file_belongs_to_main_checkout() {
+        let w = Workspace::new();
+        let main = w.home.join("main");
+        let work = w.home.join("worktree");
+        fs::create_dir_all(main.join(".git/worktrees/branch")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        write(
+            work.join(".git"),
+            &format!("gitdir: {}\n", text(&main.join(".git/worktrees/branch"))),
+        );
+        write(main.join(".git/worktrees/branch/commondir"), "../..\n");
+        let local = main.join(".claude/settings.local.json");
+        write(&local, r#"{"awaySummaryEnabled":false}"#);
+        write(
+            work.join(".claude/settings.local.json"),
+            r#"{"awaySummaryEnabled":true}"#,
+        );
+        let mut d = discover(&options(&w)).unwrap();
+        let r = request(claude(&d), Some(&work));
+        discover_claude_controls(&options(&w), &mut d.profiles, &[r]).unwrap();
+        let c = &claude(&d).background_directories[&text(&work)][1];
+        assert_eq!(c.value, Some(false));
+        assert_eq!(c.off_file.as_deref(), Some(text(&local).as_str()));
+        assert_eq!(
+            fs::read_to_string(&local).unwrap(),
+            r#"{"awaySummaryEnabled":false}"#
+        );
+    }
+
+    #[test]
+    fn codex_project_boundaries_and_profile_selection_preserve_known_and_unknown_owners() {
+        let w = Workspace::new();
+        let root = w.home.join("repo");
+        let cwd = root.join("nested");
+        fs::create_dir_all(root.join(".boundary")).unwrap();
+        write(
+            root.join(".codex/config.toml"),
+            "[tui]\nauto_recap = false\n",
+        );
+        write(cwd.join(".codex/config.toml"), "[tui]\nauto_recap = true\n");
+        write(
+            w.codex.join("quiet.config.toml"),
+            "[tui]\nauto_recap = false\n",
+        );
+        write(
+            w.codex.join("config.toml"),
+            &format!(
+                "project_root_markers = ['.boundary']\n[projects.{}]\ntrust_level = 'trusted'\n",
+                serde_json::to_string(&text(&root)).unwrap()
+            ),
+        );
+        let mut d = discover(&options(&w)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        let r = Request {
+            harness: Harness::Codex,
+            ..request(p, Some(&cwd))
+        };
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        // Trusted project overrides rank above every unobserved named profile's recap value.
+        let c = &p.background_directories[&text(&cwd)][0];
+        assert_eq!(c.value, Some(true));
+        assert_eq!(
+            c.off_file.as_deref(),
+            Some(text(&cwd.join(".codex/config.toml")).as_str())
+        );
+        write(
+            w.codex.join("quiet.config.toml"),
+            "project_root_markers = []\n",
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        assert_eq!(p.background_directories[&text(&cwd)][0].value, None);
+        fs::remove_file(w.codex.join("quiet.config.toml")).unwrap();
+        // Empty root markers stop at cwd, including trust selection.
+        write(
+            w.codex.join("config.toml"),
+            &format!(
+                "project_root_markers = []\n[projects.{}]\ntrust_level = 'trusted'\n",
+                serde_json::to_string(&text(&cwd)).unwrap()
+            ),
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        assert_eq!(p.background_directories[&text(&cwd)][0].value, Some(true));
+        // A worktree's .git file is a boundary, even inside a different trusted checkout.
+        write(cwd.join(".git"), "gitdir: ../elsewhere\n");
+        write(
+            w.codex.join("config.toml"),
+            &format!(
+                "[projects.{}]\ntrust_level = 'trusted'\n",
+                serde_json::to_string(&text(&root)).unwrap()
+            ),
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
+        let p = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        assert_eq!(
+            p.background_directories[&text(&cwd)][0].value,
+            None,
+            "parent checkout trust is not worktree trust"
+        );
+    }
+
+    #[test]
+    fn codex_recaps_follow_trusted_layers_and_keep_unobserved_selection_unknown() {
+        let w = Workspace::new();
+        let root = w.home.join("repo");
+        let cwd = root.join("nested");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        let project = root.join(".codex/config.toml");
+        let nearest = cwd.join(".codex/config.toml");
+        write(&project, "[tui]\nauto_recap = false\n");
+        write(
+            &nearest,
+            "secret = 'SYNTHETIC_PRIVATE'\n[tui]\nauto_recap = true\n",
+        );
+        write(
+            w.codex.join("config.toml"),
+            &format!(
+                "[tui]\nauto_recap = false\n[projects.{}]\ntrust_level = 'trusted'\n",
+                serde_json::to_string(&text(&root)).unwrap()
+            ),
+        );
+        let mut d = discover(&options(&w)).unwrap();
+        let id = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap()
+            .id
+            .clone();
+        let req = Request {
+            harness: Harness::Codex,
+            profiles: vec![id.clone()],
+            cwd: Some(text(&cwd)),
+            ..make_request()
+        };
+        let recap = |d: &Discovery| {
+            d.profiles
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap()
+                .background_directories[&text(&cwd)][0]
+                .clone()
+        };
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert_eq!(recap(&d).value, Some(true));
+        assert_eq!(recap(&d).off_file.as_deref(), Some(text(&nearest).as_str()));
+        assert!(
+            !serde_json::to_string(&d.profiles)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE")
+        );
+        write(w.codex.join("config.toml"), "[tui]\nauto_recap = false\n");
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert_eq!(recap(&d).value, None);
+        assert!(recap(&d).reason.contains("trust is unknown"));
+        write(
+            w.codex.join("config.toml"),
+            &format!(
+                "[tui]\nauto_recap = false\n[projects.{}]\ntrust_level = 'untrusted'\n",
+                serde_json::to_string(&text(&root)).unwrap()
+            ),
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert_eq!(recap(&d).value, Some(false));
+        assert!(recap(&d).reason.contains("untrusted"));
+        write(
+            w.codex.join("quiet.config.toml"),
+            "[tui]\nauto_recap = true\n",
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert_eq!(recap(&d).value, None);
+        assert!(recap(&d).reason.contains("--profile"));
+        let gone = Request {
+            cwd: Some(text(&w.home.join("gone"))),
+            ..req.clone()
+        };
+        let absent = Request { cwd: None, ..req };
+        discover_codex_controls(&options(&w), &mut d.profiles, &[gone.clone(), absent]).unwrap();
+        let p = d.profiles.iter().find(|p| p.id == id).unwrap();
+        assert!(
+            p.background_directories[""]
+                .iter()
+                .all(|c| c.value.is_none())
+        );
+        assert!(
+            p.background_directories[&gone.cwd.unwrap()][0]
+                .value
+                .is_none()
+        );
+    }
+
     // Ported from the discovery half of idle.test.ts: "native informational notices are the only parsed idle attribution; project owners and threshold floor resolve".
     #[test]
     fn project_owners_and_threshold_floor_resolve_at_recorded_directories() {
         let w = Workspace::new();
         let project = w.home.join("project");
         fs::create_dir_all(project.join(".git")).unwrap();
+        fs::create_dir_all(project.join("nested")).unwrap();
         write(
             w.claude.join("settings.json"),
             r#"{"idleCompaction":true,"autoCompactWindow":400000,"promptCacheTtl":"1h"}"#,
         );
-        let local = project.join(".claude/settings.local.json");
+        let local = if cfg!(windows) {
+            project.join("nested/.claude/settings.local.json")
+        } else {
+            project.join(".claude/settings.local.json")
+        };
         write(
             &local,
             r#"{"idleCompaction":false,"env":{"CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS":"90000"},"promptCacheTtl":"5m"}"#,
@@ -1840,7 +2466,7 @@ mod tests {
                 ..request(&profile, None)
             },
         ];
-        discover_idle_owners(&options(&w), &mut data.profiles, &requests).unwrap();
+        discover_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();
         let profile = claude(&data);
         assert!(
             profile.idle.as_ref().unwrap().resolved,
@@ -1859,7 +2485,7 @@ mod tests {
             owner.ttl.as_ref().unwrap().main.owner,
             format!("{}:promptCacheTtl", text(&local))
         );
-        assert!(!owner.resolved, "the nested directory does not exist");
+        assert!(owner.resolved, "the nested directory exists");
         let missing = &directories[&text(&gone)];
         assert!(!missing.resolved);
         assert_eq!(
@@ -1870,7 +2496,7 @@ mod tests {
         assert_eq!(speed.value, None);
 
         let absent = [request(claude(&data), None)];
-        discover_idle_owners(&options(&w), &mut data.profiles, &absent).unwrap();
+        discover_claude_controls(&options(&w), &mut data.profiles, &absent).unwrap();
         let profile = claude(&data);
         assert!(!profile.idle.as_ref().unwrap().resolved);
         assert!(profile.idle_directories.as_ref().unwrap().is_empty());

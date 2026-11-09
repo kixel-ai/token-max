@@ -819,8 +819,8 @@ mod tests {
             std::fs::create_dir(w.home.join(".git")).unwrap();
             std::fs::create_dir_all(w.home.join(".claude-project/.claude")).unwrap();
             let cwd = text(&w.home.join(".claude-project"));
-            // Project settings are at the repository root, not an arbitrary descendant.
-            let local = w.claude.join("settings.local.json");
+            // A repository rooted at home keeps the local file at the session directory.
+            let local = w.home.join(".claude-project/.claude/settings.local.json");
             write(&local, r#"{"fastMode":false}"#);
             let rows: String = std::fs::read_to_string(&file)
                 .unwrap()

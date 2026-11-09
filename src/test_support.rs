@@ -222,5 +222,6 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         speed_directories: None,
         idle_directories: None,
         background: vec![],
+        background_directories: IndexMap::new(),
     }
 }

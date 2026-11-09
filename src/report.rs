@@ -3177,7 +3177,7 @@ mod tests {
         assert!(has("  Fast mode: off."));
         assert!(has("  Subagent prompt cache TTL: 1h. Saves $4.20 over 5m."));
         assert!(has(
-            "  Workflow tool: on. Cost unknown: none of its requests could be priced."
+            "  Workflow tool: on. Cost unknown: none of its requests could be priced. Turn off: \"enableWorkflows\": false."
         ));
         assert!(has(
             "  Idle compaction: on. On and off cost the same on recorded idle gaps, so neither is cheaper."

@@ -1201,13 +1201,23 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         }
         CheckResult::T3Idle(i) => {
             for comparison in [&i.current_settings, &i.after_recommendations] {
-                out.field("T3 period baseline",&comparison.baseline);
-                let mut groups=IndexMap::new();
+                out.field("T3 period baseline", &comparison.baseline);
+                let mut groups = IndexMap::new();
                 for p in &comparison.periods {
-                    *groups.entry((p.status,p.return_timing,p.outcome,p.reason.as_str())).or_insert(0usize)+=1;
+                    *groups
+                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .or_insert(0usize) += 1;
                 }
-                for ((status,timing,outcome,reason),count) in groups {
-                    out.field("T3 idle period group",&format!("{count} periods; {}; {}; {}; {reason}",label(&status),label(&timing),label(&outcome)));
+                for ((status, timing, outcome, reason), count) in groups {
+                    out.field(
+                        "T3 idle period group",
+                        &format!(
+                            "{count} periods; {}; {}; {}; {reason}",
+                            label(&status),
+                            label(&timing),
+                            label(&outcome)
+                        ),
+                    );
                 }
             }
         }

@@ -22,8 +22,8 @@ use crate::model::{
     Usage, UsageEstimate, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, add_costs, paired_savings, price_part, price_request, server_cost,
-    unknown_cost, zero_cost,
+    Catalog, PRICE_SOURCES, add_costs, conditional_tier, paired_savings, price_part, price_request,
+    server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{AttemptScenario, ReplayOptions, ReplayTtls, cache_bucket, replay_parts};
@@ -845,6 +845,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 },
                 profiles: requests[0].profiles.clone(),
                 requests: requests.len() as u64,
+                priced_requests: costs.iter().filter(|c| c.total_usd.is_some()).count() as u64,
+                conditional_requests: requests
+                    .iter()
+                    .zip(&costs)
+                    .filter(|(r, c)| {
+                        c.total_usd.is_some() && r.parts.iter().any(|p| conditional_tier(r, p))
+                    })
+                    .count() as u64,
+                tier_sensitivity: tier_sensitivity(catalog, &requests),
                 evidence: "estimated",
                 cost: add_costs(&costs),
             }

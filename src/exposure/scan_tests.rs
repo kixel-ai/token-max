@@ -1551,8 +1551,7 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         world(3, json!({"host_skills": {"body": body.replace("SYNTHETIC_PRIVATE_DESCRIPTION", "expanded description with unicode λ")}}), false),
         usage(4, 0), usage(5, 1000),
     ], None).unwrap();
-    // Native records omit billed tiers. Inject a known synthetic tier to test
-    // allocation independently of the missing-tier pricing quest.
+    // Keep this allocation case independent of conditional tier pricing.
     for r in &mut data.requests {
         r.parts[0].tier = Some("standard".into());
     }
@@ -1608,6 +1607,88 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         Some(false)
     );
     assert!(!leaks(&split, &["SYNTHETIC_PRIVATE"]));
+}
+
+#[test]
+fn codex_catalog_conditional_prices_preserve_evidence_and_duplicate_controls() {
+    let body = "- same: a (file: /skills/a/SKILL.md)\n- same: b (file: /skills/b/SKILL.md)\n- unique: c (file: /skills/c/SKILL.md)";
+    let mut usage = billed(3);
+    // Uniform cache geometry makes every catalog share priceable.
+    usage["payload"]["usage"]["cached_input_tokens"] = json!(1000);
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(), world(0, json!({"host_skills":{"body":body}}), true),
+        json!({"type":"response_item", "timestamp":at(1), "payload":{"type":"message", "role":"user",
+            "content":[{"type":"skill", "name":"same", "path":"/skills/a/SKILL.md"}]}}),
+        skill_load(2, "load", "/skills/a/SKILL.md", 0), usage,
+    ], None).unwrap();
+    let split = report(&data, 0.0);
+    let preferred = skill_row(&split, "/skills/a/SKILL.md");
+    assert_eq!(preferred.calls, Some(1));
+    let evidence = preferred.skill.as_ref().unwrap();
+    assert_eq!((evidence.requested, evidence.loaded), (1, 1));
+    assert_eq!(preferred.verdict, None);
+    assert_eq!(
+        skill_row(&split, "/skills/b/SKILL.md").verdict,
+        Some(Verdict::Off)
+    );
+    assert_eq!(skill_row(&split, "/skills/c/SKILL.md").verdict, None);
+
+    let mut aggregate_data = data.clone();
+    for c in &mut aggregate_data.exposure.components {
+        c.members.clear();
+    }
+    let aggregate = report(&aggregate_data, 0.0);
+    let before = row(&aggregate, "Skill list");
+    assert_eq!(
+        (
+            before.priced,
+            before.conditional_requests,
+            before.tier_unknown_requests
+        ),
+        (1, 1, 1)
+    );
+    assert!(!before.assumptions.is_empty());
+    let parts: Vec<_> = split
+        .context
+        .iter()
+        .filter(|c| c.skill.is_some() || c.name == "Skill list framing")
+        .collect();
+    assert_eq!(parts.len(), 4);
+    for c in &parts {
+        assert_eq!(
+            (c.priced, c.conditional_requests, c.tier_unknown_requests),
+            (1, 1, 1)
+        );
+        assert_eq!(c.assumptions, before.assumptions);
+    }
+    assert!(
+        (parts.iter().map(|c| c.estimated_usd.unwrap()).sum::<f64>()
+            - before.estimated_usd.unwrap())
+        .abs()
+            < 1e-12
+    );
+
+    let output = format_report(
+        &split,
+        ReportOptions {
+            width: None,
+            ..Default::default()
+        },
+    );
+    let unresolved = output
+        .lines()
+        .find(|line| line.contains("Skill same (/skills/a/SKILL.md)"))
+        .unwrap();
+    assert!(unresolved.contains("Estimated cost"), "{output}");
+    assert!(unresolved.contains("keep/off unresolved because tier sensitivity could reverse it"));
+    assert!(
+        unresolved
+            .contains("1 requested; 1 confirmed SKILL.md loads; successful invocation unknown")
+    );
+    assert!(
+        unresolved.contains("[[skills.config]], path = \"/skills/a/SKILL.md\", enabled = false")
+    );
+    assert!(output.contains("Duplicate skill same"));
 }
 
 #[test]
@@ -1758,8 +1839,7 @@ fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_d
         json!({"type":"event_msg", "timestamp":at(3), "payload":{"type":"user_message", "message":"$same"}}),
         billed(4), warm,
     ], None).unwrap();
-    // Native records omit billed tiers. Inject a known synthetic tier to test
-    // allocation independently of the missing-tier pricing quest.
+    // Keep this allocation case independent of conditional tier pricing.
     for r in &mut data.requests {
         r.parts[0].tier = Some("standard".into());
     }

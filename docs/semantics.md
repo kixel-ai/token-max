@@ -598,7 +598,7 @@ switch removes the skill entirely, where typed requests count too. A piece still
 today is recommended off when `estimatedUsd` divided by its uses, counting no
 use as one, exceeds `maxCostPerUseUsd` (default $1, `--max-cost-per-use`);
 otherwise it is kept. The ratio does not depend on the window's length. A piece
-with no priced request gets no cost-per-use verdict. Duplicate Codex copies can
+with no priced request or unresolved service-tier evidence gets no cost-per-use verdict. Duplicate Codex copies can
 still receive a path-based recommendation without dollars. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
@@ -651,8 +651,10 @@ Duplicate detection is by exact name within the latest catalog for each owning
 profile set, independent of pricing. Retain the identifiable path with the
 most recorded observations, breaking ties in listing order, and recommend
 disabling other paths even without prices. The preferred copy keeps its
-cost-per-use verdict, so all copies may be off when even that copy exceeds
-the threshold; without prices its verdict remains unknown. Repeated discovery of the same path
+cost-per-use verdict when prices and service-tier evidence permit one, so all
+copies may be off when even that copy exceeds the threshold. Conditional prices
+retain the skill's observed-use evidence and disable control while leaving its
+cost-per-use verdict unresolved. Repeated discovery of the same path
 cannot be removed with a path control while keeping that path enabled; remove
 the redundant discovery source. For symlinked duplicates, remove the redundant
 link at its source; transcripts do not establish filesystem equivalence.

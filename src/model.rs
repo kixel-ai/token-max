@@ -409,6 +409,8 @@ pub struct Profile {
     pub ttl: PerBucket<TtlControl>,
     pub provider: Option<String>,
     pub settings: IndexMap<String, Scalar>,
+    /// MCP server ids the settings file declares, which its own switches can turn off.
+    pub mcp_servers: Vec<String>,
     pub compaction: CompactionControls,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle: Option<IdleControl>,
@@ -1248,12 +1250,23 @@ impl std::fmt::Debug for Digests {
 
 /// A request-local view of historical state, including unresolved visibility.
 ///
-/// Serialized by [`crate::wire`], which shares each view once per SSH stream.
+/// Serialized by [`crate::wire`], which shares views and result totals once per SSH stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exposure {
     pub request: String,
     /// Identical views are shared, since consecutive requests usually carry the same context.
     pub view: std::sync::Arc<ExposureView>,
+    /// Tool output the conversation held when the request was sent.
+    pub results: Option<std::sync::Arc<ResultTotals>>,
+}
+
+/// Characters of tool output a conversation holds, by tool, since its last compaction.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultTotals {
+    /// Changes at every compaction and transcript, so equal epochs mean one unbroken conversation.
+    pub epoch: u64,
+    /// Each tool's total characters, and whether any of its output was an image or other non-text input.
+    pub tools: Vec<(Text, i64, bool)>,
 }
 
 /// The request-independent part of an exposure.
@@ -1324,6 +1337,17 @@ pub struct ToolCalls {
     pub last_used: Millis,
 }
 
+/// How much output one tool returned within the window, per profile set.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResults {
+    pub name: String,
+    pub profiles: Vec<String>,
+    pub results: u64,
+    /// Characters of the largest text result.
+    pub largest_characters: i64,
+}
+
 /// Parser output shared by later skills and context checks.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1334,6 +1358,8 @@ pub struct ExposureScan {
     pub visibility: Vec<Visibility>,
     /// Selected-window calls to each tool, deduplicated by call id.
     pub tool_calls: Vec<ToolCalls>,
+    /// Selected-window output of each tool, deduplicated by call id.
+    pub tool_results: Vec<ToolResults>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -1381,6 +1407,8 @@ pub enum ContextKind {
     Skill,
     Instructions,
     System,
+    /// A tool's output, carried in the conversation after the call that returned it.
+    ToolOutput,
     Other,
 }
 
@@ -1395,6 +1423,7 @@ pub enum Verdict {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextCost {
+    pub harness: Harness,
     pub profiles: Vec<String>,
     pub kind: ContextKind,
     pub name: String,
@@ -1419,6 +1448,8 @@ pub struct ContextCost {
     pub cost_per_use_usd: Option<f64>,
     /// "off" when it cost more per use than the limit; null when it cannot be switched off or was never priced.
     pub verdict: Option<Verdict>,
+    /// Characters of the largest single result, for tool output.
+    pub largest_characters: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------

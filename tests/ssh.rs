@@ -273,6 +273,95 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
 }
 
 #[test]
+fn codex_context_and_output_keep_their_remote_controls() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    let codex = home.join(".codex");
+    std::fs::create_dir_all(codex.join("sessions")).unwrap();
+    std::fs::write(
+        codex.join("config.toml"),
+        "tool_output_token_limit = 7000\n[mcp_servers.docs]\nurl = 'https://synthetic.invalid/mcp'\n",
+    )
+    .unwrap();
+    let fixture: Vec<Value> = std::fs::read_to_string(fixture("codex.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let mut records = vec![
+        fixture[0].clone(),
+        fixture[1].clone(),
+        serde_json::json!({
+            "type": "world_state", "timestamp": "2026-11-01T00:00:00Z",
+            "payload": {"full": true, "state": {"tools": {"mcp__docs": "SYNTHETIC_PRIVATE_SCHEMA"}}}
+        }),
+        serde_json::json!({
+            "type": "response_item", "timestamp": "2026-11-01T00:00:00Z",
+            "payload": {"type": "function_call", "name": "mcp__docs__read", "call_id": "read-1", "arguments": "{}"}
+        }),
+        serde_json::json!({
+            "type": "response_item", "timestamp": "2026-11-01T00:00:00Z",
+            "payload": {"type": "function_call_output", "call_id": "read-1", "output": "SYNTHETIC_PRIVATE_OUTPUT"}
+        }),
+        fixture[2].clone(),
+    ];
+    let mut next = fixture[2].clone();
+    next["timestamp"] = "2026-11-01T00:00:02Z".into();
+    next["payload"]["response_id"] = "response-b".into();
+    records.push(next.clone());
+    records.push(serde_json::json!({
+        "type": "compacted", "timestamp": "2026-11-01T00:00:03Z", "payload": {}
+    }));
+    next["timestamp"] = "2026-11-01T00:00:04Z".into();
+    next["payload"]["response_id"] = "response-c".into();
+    records.push(next);
+    let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+    std::fs::write(codex.join("sessions/rollout.jsonl"), lines).unwrap();
+
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert_eq!(stderr, "");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let combined: Value = serde_json::from_str(&stdout).unwrap();
+    let local = &combined["hosts"][0]["report"];
+    let remote = &combined["hosts"][1]["report"];
+    assert!(local["context"].as_array().unwrap().is_empty());
+    let rows = remote["context"].as_array().unwrap();
+    let server = rows.iter().find(|r| r["kind"] == "mcp-server").unwrap();
+    assert_eq!(server["harness"], "codex");
+    assert_eq!(server["name"], "docs");
+    assert_eq!(
+        server["control"]["path"],
+        serde_json::json!(["mcp_servers", "docs", "enabled"])
+    );
+    let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
+    assert_eq!(output["name"], "mcp__docs");
+    // Both requests retain the result; compaction removes it before the third.
+    assert_eq!(output["requests"], 2);
+    assert_eq!(output["calls"], 1);
+    assert_eq!(
+        output["largestCharacters"],
+        "SYNTHETIC_PRIVATE_OUTPUT".len()
+    );
+    // Native Codex usage has no billed tier, so these costs remain explicitly unknown.
+    assert_eq!(output["priced"], 0);
+    assert_eq!(output["estimatedUsd"], Value::Null);
+    let (_, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+    assert_eq!(stderr, "");
+    let there: Value = serde_json::from_str(&there).unwrap();
+    assert_eq!(timeless(remote), timeless(&there));
+    assert_eq!(remote["context"], there["context"]);
+
+    let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
+    assert_eq!(stderr, "");
+    assert!(!text.contains("SYNTHETIC_PRIVATE"));
+    assert!(
+        text.contains("tool_output_token_limit is 7,000 tokens"),
+        "{text}"
+    );
+}
+
+#[test]
 fn any_failed_destination_fails_the_whole_report() {
     let hosts = Hosts::new();
     hosts.host("devbox");

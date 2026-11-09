@@ -1,7 +1,7 @@
 //! The private SSH audit stream: a remote `token-max --ssh-scan` sends its scan as JSON.
 //!
 //! A stream is a [`Header`], then one [`Outcome`], each a JSON value. Strings, identifier
-//! lists, exposure views and message digests that the scan shares in memory are sent once and
+//! lists, exposure views, result totals and message digests shared in memory are sent once and
 //! then named by index, so the stream stays about as small as the scan it carries. The JSON
 //! report serializes the same types without sharing.
 
@@ -17,7 +17,7 @@ use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::model::{Digests, Exposure, ExposureView, Ids, Location, Scan, Text};
+use crate::model::{Digests, Exposure, ExposureView, Ids, Location, ResultTotals, Scan, Text};
 
 /// This build's identity: the package version and a fingerprint of the types a stream carries.
 ///
@@ -102,12 +102,13 @@ enum Table {
     Ids,
     View,
     Digests,
+    Results,
 }
 
 /// Each table maps a shared value's address to its index, assigned once it has been written.
 #[derive(Default)]
 struct Encoder {
-    tables: [HashMap<usize, u64>; 4],
+    tables: [HashMap<usize, u64>; 5],
 }
 
 /// Values in the order the encoder indexed them.
@@ -117,6 +118,7 @@ struct Decoder {
     ids: Vec<Ids>,
     views: Vec<Arc<ExposureView>>,
     digests: Vec<Digests>,
+    results: Vec<Arc<ResultTotals>>,
 }
 
 thread_local! {
@@ -301,12 +303,43 @@ fn view<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<ExposureView>,
     deserializer.deserialize_any(V)
 }
 
+/// Tool-output totals shared while the conversation has no new results.
+struct SharedResults(Arc<ResultTotals>);
+
+impl Serialize for SharedResults {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let address = Arc::as_ptr(&self.0) as usize;
+        shared(Table::Results, address, serializer, |s| self.0.serialize(s))
+    }
+}
+
+impl<'de> Deserialize<'de> for SharedResults {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = Arc<ResultTotals>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("tool-output totals or earlier totals' index")
+            }
+            fn visit_u64<E: de::Error>(self, index: u64) -> Result<Self::Value, E> {
+                earlier(index, |d| &d.results)
+            }
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                let results = ResultTotals::deserialize(MapAccessDeserializer::new(map))?;
+                remember(Arc::new(results), |d| &mut d.results)
+            }
+        }
+        deserializer.deserialize_any(V).map(SharedResults)
+    }
+}
+
 impl Serialize for Exposure {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if encoding() {
-            let mut s = serializer.serialize_struct("Exposure", 2)?;
+            let mut s = serializer.serialize_struct("Exposure", 3)?;
             s.serialize_field("request", &self.request)?;
             s.serialize_field("view", &SharedView(&self.view))?;
+            s.serialize_field("results", &self.results.clone().map(SharedResults))?;
             return s.end();
         }
         #[derive(Serialize)]
@@ -331,9 +364,18 @@ impl<'de> Deserialize<'de> for Exposure {
             request: String,
             #[serde(deserialize_with = "view")]
             view: Arc<ExposureView>,
+            results: Option<SharedResults>,
         }
-        let Wire { request, view } = Wire::deserialize(deserializer)?;
-        Ok(Exposure { request, view })
+        let Wire {
+            request,
+            view,
+            results,
+        } = Wire::deserialize(deserializer)?;
+        Ok(Exposure {
+            request,
+            view,
+            results: results.map(|r| r.0),
+        })
     }
 }
 
@@ -473,18 +515,25 @@ mod tests {
         let first = Digests::new(None, ids(&["a", "b"]));
         let second = Digests::new(Some((&first, 1)), ids(&["c"]));
         let shared = view(second);
+        let results = Arc::new(ResultTotals {
+            epoch: 17,
+            tools: vec![("Bash".into(), 42, false), ("mcp__docs".into(), 0, true)],
+        });
         scan.exposure.requests = vec![
             Exposure {
                 request: "r1".into(),
                 view: shared.clone(),
+                results: Some(results.clone()),
             },
             Exposure {
                 request: "r2".into(),
                 view: shared,
+                results: Some(results),
             },
             Exposure {
                 request: "r3".into(),
                 view: view(first),
+                results: None,
             },
         ];
         scan
@@ -520,10 +569,16 @@ mod tests {
         // The report form is unchanged, and the stream carries no transcript text.
         assert_eq!(serde_json::to_string(&scan).unwrap(), report);
         assert!(!text.contains("SYNTHETIC_PRIVATE"));
+        assert!(!report.contains("\"epoch\""));
+        assert_eq!(text.matches("\"epoch\":17").count(), 1);
         let decoded = decode(&bytes).unwrap();
         assert_eq!(decoded, scan);
         let views = &decoded.exposure.requests;
         assert!(Arc::ptr_eq(&views[0].view, &views[1].view));
+        assert!(Arc::ptr_eq(
+            views[0].results.as_ref().unwrap(),
+            views[1].results.as_ref().unwrap()
+        ));
         let items = |n: usize| {
             views[n]
                 .view
@@ -551,6 +606,7 @@ mod tests {
         scan.exposure.requests.push(Exposure {
             request: "late".into(),
             view: view(items),
+            results: None,
         });
         assert_eq!(decode(&encode(scan.clone())).unwrap(), scan);
     }
@@ -563,6 +619,9 @@ mod tests {
         assert!(decode(&[&bytes[..], b"{}"].concat()).is_err());
         let text = String::from_utf8(bytes).unwrap();
         let unsent = text.replacen("\"view\":0", "\"view\":99", 1);
+        assert_ne!(unsent, text);
+        assert!(decode(unsent.as_bytes()).is_err());
+        let unsent = text.replacen("\"results\":0", "\"results\":99", 1);
         assert_ne!(unsent, text);
         assert!(decode(unsent.as_bytes()).is_err());
         // A digest list cannot keep more than its base holds.

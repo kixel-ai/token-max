@@ -1037,7 +1037,7 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
     let (_, details, stderr) = invoke("--details");
     assert!(stderr.is_empty());
     assert!(
-        details.contains("T3 idle compaction")
+        details.contains("t3-idle-compaction")
             && details.contains("ephemeral")
             && details.contains("unavailable")
     );

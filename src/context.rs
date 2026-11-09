@@ -1975,6 +1975,10 @@ mod tests {
         assert_eq!(of("functions", "b").priced, 0);
         // Another tool's schema of the same server does not measure it.
         assert_eq!(of("other", "a").priced, 0);
+        let other = of("other", "a");
+        assert_eq!(row(&other.details, "mcp__other__read").priced, 1);
+        assert_eq!(row(&other.details, "mcp__other__search").estimated_usd, None);
+        assert_eq!(other.estimated_usd, None);
         // A request copied into profiles that declare the server differently
         // gets no switch.
         assert_eq!(of("docs_server", "a+b").control, None);

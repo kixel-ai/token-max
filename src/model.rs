@@ -1603,7 +1603,7 @@ pub struct ContextCost {
     pub current: bool,
     /// estimatedUsd divided by uses, counting no use as one; null without both.
     pub cost_per_use_usd: Option<f64>,
-    /// "off" when it cost more per use than the limit; null when it cannot be switched off or was never priced.
+    /// "off" above the per-use limit; null without a switch, pricing or resolved tier sensitivity.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,

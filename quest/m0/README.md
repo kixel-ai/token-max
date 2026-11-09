@@ -175,6 +175,7 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 ## Required
 
 - [Codex costs without recorded billing tiers](/quest/m0/codex-tier.md) - conditional API-equivalent estimates keep missing tier evidence from suppressing every cost check
+- [Project-scoped background controls](/quest/m0/background-scopes.md) - resolve each project's current background controls and their owning files
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Codex skills catalog](/quest/m0/skills-catalog.md) - a priced line and `config.toml` switch per Codex skill, and duplicate listings flagged
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds

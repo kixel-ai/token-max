@@ -593,6 +593,7 @@ fn explicit_windows_match_the_library_replay() {
                 env: Env::new(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
+                t3_dirs: vec![],
                 managed_settings_file: text(&w.home.join("managed-settings.json")),
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
@@ -1171,4 +1172,62 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
     assert!(stdout.contains("scope or launch selection is unresolved"));
     assert!(stdout.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"));
     assert!(stdout.contains("Background estimates apply current files to history"));
+}
+
+#[test]
+fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
+    let w = Workspace::new();
+    w.fixture();
+    let native = std::fs::read_to_string(w.transcript())
+        .unwrap()
+        .replace("sdk-ts", "t3-code");
+    std::fs::write(w.transcript(), native).unwrap();
+    let state = w.home.join("selected-t3");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(state.join("settings.json"),json!({"idleCompaction":"off","providerInstances":{"claudeAgent":{"driver":"claudeAgent","config":{"homePath":text(&w.claude),"autoCompactWindow":"300000"}},"other":{"driver":"unsupported","config":{"homePath":{"PRIVATE_CONFIG":"not-a-home"}}}}}).to_string()).unwrap();
+    let state = text(&state);
+    let prices = text(&fixture("prices.json"));
+    let invoke = |output| {
+        run(&mut command(
+            &w,
+            &["--t3-dir", &state, "--prices-file", &prices, output],
+        ))
+    };
+    let (status, full, stderr) = invoke("--json-full");
+    assert_ne!(status, 2, "{stderr}");
+    assert!(stderr.is_empty());
+    let full: Value = serde_json::from_str(&full).unwrap();
+    assert_eq!(full["scan"]["requests"].as_array().unwrap().len(), 2);
+    assert_eq!(full["scan"]["t3"].as_array().unwrap().len(), 1);
+    assert!(
+        full["scan"]["t3"][0]["metadata"]
+            .as_str()
+            .unwrap()
+            .contains("unavailable")
+    );
+    let exclusions = full["scan"]["t3"][0]["exclusions"].to_string();
+    assert!(exclusions.contains("ephemeral") && exclusions.contains("unsupported"));
+    assert!(
+        full["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["check"] == "t3-idle-compaction"
+                && c["currentSettings"]["scenarios"].as_array().unwrap().len() == 3)
+    );
+    let (_, compact, stderr) = invoke("--json");
+    assert!(stderr.is_empty());
+    let compact: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(compact["scan"]["requests"], 2);
+    let (_, details, stderr) = invoke("--details");
+    assert!(stderr.is_empty());
+    assert!(
+        details.contains("t3-idle-compaction")
+            && details.contains("ephemeral")
+            && details.contains("unavailable")
+    );
+    for output in [full.to_string(), compact.to_string(), details] {
+        assert!(!output.contains("SYNTHETIC_PRIVATE") && !output.contains("PRIVATE_CONFIG"));
+    }
+    assert!(!Path::new(&state).join("statev2.sqlite").exists());
 }

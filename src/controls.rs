@@ -939,6 +939,7 @@ mod tests {
             background: vec![],
             background_directories: IndexMap::new(),
             background_requests: IndexMap::new(),
+            t3: None,
         }
     }
 

@@ -26,6 +26,8 @@ pub struct DiscoveryOptions {
     pub env: Env,
     pub claude_dirs: Vec<String>,
     pub codex_dirs: Vec<String>,
+    /// Explicit T3 state directories containing settings.json and statev2.sqlite.
+    pub t3_dirs: Vec<String>,
     /// The system managed Claude settings file; overridable for host adapters and synthetic tests.
     pub managed_settings_file: String,
     /// The system Codex config file.
@@ -51,6 +53,7 @@ impl DiscoveryOptions {
                 .collect(),
             claude_dirs: vec![],
             codex_dirs: vec![],
+            t3_dirs: vec![],
             managed_settings_file: managed_settings_path(std::env::consts::OS).into(),
             codex_system_config_file: "/etc/codex/config.toml".into(),
             codex_requirements_file: "/etc/codex/requirements.toml".into(),
@@ -64,6 +67,7 @@ pub struct Discovery {
     pub roots: Vec<RootStatus>,
     pub profiles: Vec<Profile>,
     pub snapshots: Vec<Snapshot>,
+    pub t3: Vec<crate::model::T3State>,
 }
 
 /// A safe error naming a path without its contents.
@@ -174,7 +178,7 @@ fn dirname(path: &str) -> &str {
 
 /// `fs.realpath`, as a string; a non-UTF-8 target cannot name a file Node could open either.
 #[cfg(not(windows))]
-fn realpath(path: &str) -> std::io::Result<String> {
+pub(crate) fn realpath(path: &str) -> std::io::Result<String> {
     fs::canonicalize(path)?
         .into_os_string()
         .into_string()
@@ -236,7 +240,7 @@ fn dirname(path: &str) -> &str {
 
 /// `fs.realpath`, as a string. Canonical Windows paths carry a `\\?\` prefix Node never shows.
 #[cfg(windows)]
-fn realpath(path: &str) -> std::io::Result<String> {
+pub(crate) fn realpath(path: &str) -> std::io::Result<String> {
     let canonical = fs::canonicalize(path)?
         .into_os_string()
         .into_string()
@@ -643,7 +647,10 @@ pub fn discover_claude_controls(
     let configured = env.get("CLAUDE_CONFIG_DIR").unwrap_or(&default_root);
     let active = realpath(&resolve(configured)).unwrap_or_default();
     let managed_file = options.managed_settings_file.as_str();
-    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+    for profile in profiles
+        .iter_mut()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
+    {
         profile.background_requests.clear();
         let user = settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
@@ -825,7 +832,10 @@ pub fn discover_codex_controls(
     profiles: &mut [Profile],
     requests: &[Request],
 ) -> Result<(), ScanError> {
-    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Codex) {
+    for profile in profiles
+        .iter_mut()
+        .filter(|p| p.harness == Harness::Codex && p.t3.is_none())
+    {
         let user = settings(&profile.settings_file, Harness::Codex)?;
         let system = settings(&options.codex_system_config_file, Harness::Codex)?;
         let base_scopes = [
@@ -1267,7 +1277,7 @@ fn add_root(
 }
 
 /// Resolve one canonical root's current settings into a profile, without walking its histories.
-fn profile(
+pub(crate) fn profile(
     options: &DiscoveryOptions,
     harness: Harness,
     canonical: String,
@@ -1474,6 +1484,7 @@ fn profile(
         background,
         background_directories: IndexMap::new(),
         background_requests: IndexMap::new(),
+        t3: None,
     })
 }
 
@@ -1481,7 +1492,9 @@ fn profile(
 pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
     let home = options.home.as_str();
     let env = &options.env;
-    let explicit = !options.claude_dirs.is_empty() || !options.codex_dirs.is_empty();
+    let explicit = !options.claude_dirs.is_empty()
+        || !options.codex_dirs.is_empty()
+        || !options.t3_dirs.is_empty();
     let mut candidates = IndexMap::new();
     let add = |candidates: &mut IndexMap<String, RootStatus>, harness, path: &str, origin| {
         add_root(candidates, explicit, harness, path, origin)
@@ -1589,7 +1602,8 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
         let profile = profile(options, root.harness, canonical, root.path.clone(), &key)?;
         profiles.insert(key, profile);
     }
-    let profiles: Vec<Profile> = profiles.into_values().collect();
+    let mut profiles: Vec<Profile> = profiles.into_values().collect();
+    let t3 = crate::t3::discover(options, &mut profiles)?;
     let mut walk = Walk::default();
     for (index, profile) in profiles.iter().enumerate() {
         for history in &profile.histories {
@@ -1600,6 +1614,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
         roots,
         profiles,
         snapshots: walk.files.into_values().collect(),
+        t3,
     })
 }
 
@@ -1635,6 +1650,7 @@ mod tests {
             env: Env::new(),
             claude_dirs: vec![],
             codex_dirs: vec![],
+            t3_dirs: vec![],
             managed_settings_file: text(&w.managed_settings_file()),
             codex_system_config_file: text(&w.home.join("system.toml")),
             codex_requirements_file: text(&w.home.join("requirements.toml")),

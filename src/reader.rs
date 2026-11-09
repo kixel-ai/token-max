@@ -658,6 +658,7 @@ fn event(
         settings: IndexMap::new(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
+        t3: None,
         pricing: context.pricing.clone(),
     }
 }
@@ -702,6 +703,7 @@ fn request(
             speed: None,
         }),
         issues: vec![],
+        t3: None,
     }
 }
 
@@ -1522,7 +1524,7 @@ fn agreed(profiles: &[&Profile]) -> Option<Option<String>> {
         .then(|| first.provider.clone())
 }
 
-fn now() -> Millis {
+pub(crate) fn now() -> Millis {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock after 1970")
@@ -1537,8 +1539,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         roots,
         mut profiles,
         mut snapshots,
+        mut t3,
     } = discover(&options.discovery)?;
     let snapshot_finished_at = iso(now());
+    let mut native_ids = crate::t3::NativeIds::default();
+    let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
         since,
         exposure: ExposureCollector::new(since),
@@ -1558,6 +1563,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         let mut file = FileState::new(&view);
         for record in read_snapshot(snapshot)? {
             let (raw, location) = record?;
+            if has_t3 {
+                native_ids.observe(&raw, view.harness);
+            }
             reader
                 .consume(&view, &mut file, &raw, &location)
                 .map_err(|error| ScanError::at(error.message, location))?;
@@ -1678,6 +1686,14 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     events.sort_by_cached_key(|e| e.time);
     discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
     discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
+    crate::t3::enrich(
+        &mut t3,
+        &mut profiles,
+        &mut requests,
+        &mut events,
+        &native_ids,
+        &snapshot_finished_at,
+    );
     let before = |time: Millis| since.is_some_and(|since| time < since);
     let split = requests.partition_point(|r| before(r.time));
     let context_requests: Vec<Request> = requests.drain(..split).collect();
@@ -1751,6 +1767,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 .collect(),
         },
         coverage,
+        t3,
     })
 }
 

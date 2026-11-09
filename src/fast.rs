@@ -357,6 +357,7 @@ mod tests {
             exposure: ExposureScan::default(),
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
+            t3: vec![],
         }
     }
 
@@ -547,6 +548,7 @@ mod tests {
                 env: Env::new(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
+                t3_dirs: vec![],
                 managed_settings_file: text(&w.managed_settings_file()),
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),

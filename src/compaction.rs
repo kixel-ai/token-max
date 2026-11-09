@@ -1661,6 +1661,7 @@ mod tests {
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: Some(std::sync::Arc::new(Pricing {
                 provider: Some("anthropic".into()),
                 model: Some("claude-opus-5-5".into()),
@@ -1701,6 +1702,7 @@ mod tests {
             background: vec![],
             background_directories: IndexMap::new(),
             background_requests: IndexMap::new(),
+            t3: None,
         };
         let mut first = at("sample-resume", "sample", 1000);
         first.parts[0].usage = writes(20000);
@@ -1718,6 +1720,7 @@ mod tests {
         // Coverage and snapshot times match the TypeScript fixture, which the text report prints.
         let n = requests.len() as u64;
         Scan {
+            t3: vec![],
             snapshot_started_at: crate::safe::iso(0),
             snapshot_finished_at: crate::safe::iso(0),
             since: None,
@@ -1794,6 +1797,7 @@ mod tests {
                 attempt: None,
                 server_tools: Some(IndexMap::new()),
                 requested_speed: None,
+                t3: None,
                 parts: vec![BillingPart {
                     kind: PartKind::Compaction,
                     model: pricing.model,
@@ -2911,6 +2915,7 @@ mod tests {
                     env: Env::new(),
                     claude_dirs: vec![],
                     codex_dirs: vec![],
+                    t3_dirs: vec![],
                     managed_settings_file: text(&w.managed_settings_file()),
                     codex_system_config_file: text(&w.home.join("system.toml")),
                     codex_requirements_file: text(&w.home.join("requirements.toml")),

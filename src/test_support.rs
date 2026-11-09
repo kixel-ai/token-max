@@ -98,6 +98,7 @@ pub fn make_request() -> Request {
         accounting: Accounting::Individual,
         attempt: None,
         requested_speed: None,
+        t3: None,
         issues: vec![],
     }
 }
@@ -163,6 +164,7 @@ impl Workspace {
                 env: Env::new(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
+                t3_dirs: vec![],
                 managed_settings_file: text(self.managed_settings_file()),
                 codex_system_config_file: text(self.home.join("system.toml")),
                 codex_requirements_file: text(self.home.join("requirements.toml")),
@@ -224,5 +226,6 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         background: vec![],
         background_directories: IndexMap::new(),
         background_requests: IndexMap::new(),
+        t3: None,
     }
 }

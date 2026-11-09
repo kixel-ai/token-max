@@ -8,9 +8,9 @@ use serde_json::Value;
 
 use crate::context::{control_text, settings_patch};
 use crate::model::{
-    Action, CacheReplayEvidence, CheckBase, CheckResult, ContextCost, ContextKind, Control, Cost,
-    Coverage, EstimateEvidence, Evidence, Millis, PeriodStatus, Profile, Report, RequestEvidence,
-    Ttl, UsageEstimate, Verdict,
+    Action, BashCapCheck, CacheReplayEvidence, CheckBase, CheckResult, ContextCost, ContextKind,
+    Control, Cost, Coverage, EstimateEvidence, Evidence, Millis, PeriodStatus, Profile, Report,
+    RequestEvidence, Ttl, UsageEstimate, Verdict,
 };
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
@@ -169,6 +169,7 @@ enum Setting<'a> {
     Window(i64),
     Idle(bool),
     Speed(&'a str),
+    Cap(Millis),
 }
 
 /// The fields every check shares, whatever its value type.
@@ -260,7 +261,20 @@ fn common(result: &CheckResult) -> Common<'_> {
             &c.usage_estimates,
             |s: &String| Setting::Speed(s),
         ),
+        CheckResult::BashCap(c) => base("bash-timeout-cap", c.bucket, &c.base, &[], |n| {
+            Setting::Cap(*n)
+        }),
     }
+}
+
+/// A duration in the largest whole unit, such as `55m`.
+fn duration(ms: Millis) -> String {
+    for (unit, size) in [("h", 3_600_000), ("m", 60_000), ("s", 1000)] {
+        if ms % size == 0 {
+            return format!("{}{unit}", ms / size);
+        }
+    }
+    format!("{ms}ms")
 }
 
 /// A value as the evidence cards print it.
@@ -271,6 +285,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::Window(n)) => format!("{n} tokens"),
         Some(Setting::Idle(b)) => b.to_string(),
         Some(Setting::Speed(s)) => s.into(),
+        Some(Setting::Cap(ms)) => format!("{ms} ms"),
     }
 }
 
@@ -283,6 +298,7 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
         Some(Setting::Ttl(t)) => t.as_str().into(),
+        Some(Setting::Cap(ms)) => duration(ms),
     }
 }
 
@@ -825,6 +841,21 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 &estimate(s.reread_break_even_usd_per_resumed_summary),
             );
         }
+        CheckResult::BashCap(b) => {
+            out.field(
+                "Compared TTL",
+                &format!("{}; {}", b.ttl.map_or("unknown", Ttl::as_str), b.ttl_basis),
+            );
+            out.field("Replacement", &b.replacement);
+            let w = &b.waits;
+            out.field(
+                "Foreground Bash waits",
+                &format!(
+                    "{} calls; {} reached the cache TTL ({} timed out, {} polling loops)",
+                    w.calls, w.long, w.timed_out, w.polling
+                ),
+            );
+        }
         CheckResult::Speed(s) => {
             out.field("Standard-speed replacement", &s.replacement);
             out.field(
@@ -1088,6 +1119,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 out.notes("Idle unknown", &scenario.unknown);
             }
         }
+        CheckResult::BashCap(b) => out.cost("Cache misses after long waits", &b.waits.miss_cost),
         CheckResult::Speed(s) => {
             out.cost("Observed response-tier premium", &s.observed.premium);
             out.cost(
@@ -1176,7 +1208,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
     match result {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
         CheckResult::Compaction(c) => out.witnesses(&c.cache_evidence),
-        CheckResult::Idle(_) | CheckResult::Speed(_) => {}
+        CheckResult::Idle(_) | CheckResult::Speed(_) | CheckResult::BashCap(_) => {}
     }
     out.notes("Assumption", r.assumptions);
     out.notes("Uncertainty", r.uncertainty);
@@ -1186,6 +1218,16 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
+        CheckResult::BashCap(b) => {
+            return match (b.ttl, r.action) {
+                (None, _) => "No main-agent cache TTL to compare the cap with.".into(),
+                (Some(ttl), Action::Change) => format!(
+                    "A foreground wait as long as the cap outlasts the {} cache; lower it below the TTL.",
+                    ttl.as_str()
+                ),
+                (Some(ttl), _) => format!("The cap is under the {} cache TTL.", ttl.as_str()),
+            };
+        }
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
                 "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
@@ -1238,6 +1280,7 @@ fn setting_name(result: &CheckResult) -> String {
         }
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
+        CheckResult::BashCap(_) => "Bash timeout cap".into(),
     }
 }
 
@@ -1245,6 +1288,12 @@ fn setting_name(result: &CheckResult) -> String {
 fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if let CheckResult::Speed(s) = result {
         return capitalize(&s.reason) + ".";
+    }
+    if let CheckResult::BashCap(b) = result {
+        return format!(
+            "{}, so the cap has nothing to compare with.",
+            capitalize(&b.ttl_basis)
+        );
     }
     if let Some(recommended) = r.recommended {
         return if Some(recommended) == r.current {
@@ -1310,7 +1359,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             }
             "Idle summaries or resumed sessions could not be priced.".into()
         }
-        CheckResult::Speed(_) => unreachable!("handled above"),
+        CheckResult::Speed(_) | CheckResult::BashCap(_) => unreachable!("handled above"),
     }
 }
 
@@ -1603,6 +1652,28 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             format!("{label}: on. {cost}; {uses}.")
         }
     };
+    // What long foreground Bash waits cost, scaled like every other line.
+    let waits = |b: &BashCapCheck, r: &Common<'_>| {
+        let w = &b.waits;
+        if w.long == 0 {
+            return "No foreground Bash wait outlasted the cache.".to_string();
+        }
+        let cost = &w.miss_cost;
+        let cost = match cost.total_usd {
+            Some(usd) => monthly(usd, r.since, r.until),
+            None if cost.known_usd > 0.0 => {
+                format!("at least {}", monthly(cost.known_usd, r.since, r.until))
+            }
+            None => "an unknown amount".into(),
+        };
+        format!(
+            "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost}.",
+            count(w.long),
+            if w.long == 1 { "" } else { "s" },
+            count(w.timed_out),
+            count(w.polling)
+        )
+    };
     let check_line = |c: &(&CheckResult, Common<'_>), out: &Out<'_>| {
         let (result, r) = c;
         let head = format!("{}: {}", name(r, result, out), setting_value(r.current));
@@ -1618,6 +1689,17 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         coverage_note(r)
                     ),
                     (None, CheckResult::Speed(s)) => format!(" {}.", capitalize(&s.reason)),
+                    (None, CheckResult::BashCap(b)) => {
+                        let mut text = format!(
+                            " A wait that long outlasts the {} cache. {}",
+                            b.ttl.map_or("unknown", Ttl::as_str),
+                            waits(b, r)
+                        );
+                        if b.replacement.contains("BASH_DEFAULT_TIMEOUT_MS") {
+                            text += " Lower BASH_DEFAULT_TIMEOUT_MS to match.";
+                        }
+                        text
+                    }
                     (None, _) => String::new(),
                 };
                 return format!(
@@ -1651,6 +1733,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             CheckResult::Compaction(_) => {
                 format!("{head}. No other window was cheaper on recorded sessions.")
             }
+            CheckResult::BashCap(b) => format!(
+                "{head}. Under the {} cache TTL. {}",
+                b.ttl.map_or("unknown", Ttl::as_str),
+                waits(b, r)
+            ),
             CheckResult::Idle(_) => format!(
                 "{head}. {}",
                 if r.current == Some(Setting::Idle(true)) {

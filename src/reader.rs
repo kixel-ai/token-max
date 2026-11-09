@@ -21,7 +21,8 @@ use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
     Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness,
     IdleAttribution, Location, Millis, Origin, PartKind, Pricing, Profile, Request,
-    RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Snapshot, StructuralEvent, Text, Usage,
+    RequestEvidence, RequestedSpeed, Scan, ScanCoverage, ShellCall, Snapshot, StructuralEvent,
+    Text, Usage,
 };
 use crate::safe::{ScanError, count, id, identity, iso, label, object, timestamp};
 
@@ -305,6 +306,15 @@ fn idle_notice(text: &str) -> bool {
             .and_then(|rest| rest.strip_prefix(" ·"))
             .is_some_and(|rest| rest.trim_start_matches(js_space) == SUFFIX)
     })
+}
+
+/// Whether a shell command sleeps inside a loop, judged from its words and never retained.
+fn polling_loop(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .collect();
+    let has = |word: &str| words.contains(&word);
+    has("sleep") && has("do") && (has("while") || has("until") || has("for"))
 }
 
 /// Nested Claude subagent transcripts live under a `subagents` directory.
@@ -638,6 +648,7 @@ fn event(
         tool_id: None,
         settings: IndexMap::new(),
         idle_attribution: IdleAttribution::Unknown,
+        shell: None,
         pricing: context.pricing.clone(),
     }
 }
@@ -974,6 +985,14 @@ impl Reader {
                         e.tool = label(member(b, "name"));
                         e.tool_id = opaque(b, "id")?;
                         e.request = Some(request_id.clone());
+                        if is(b, "name", "Bash") {
+                            let input = nested(b, "input");
+                            e.shell = Some(ShellCall {
+                                background: is_true(input, "run_in_background"),
+                                polls: string(input, "command").is_some_and(polling_loop),
+                                timed_out: false,
+                            });
+                        }
                         self.add_event(e);
                     }
                 }
@@ -1030,6 +1049,15 @@ impl Reader {
             let m = nested(raw, "message");
             let mut tool_result = false;
             if let Some(Value::Array(content)) = m.get("content") {
+                // The message-level result belongs to its block only when there is one.
+                let results = content
+                    .iter()
+                    .filter(|block| is(object(block), "type", "tool_result"))
+                    .count();
+                let timed_out = results == 1
+                    && nested(raw, "toolUseResult")
+                        .get("timedOutAfterMs")
+                        .is_some_and(Value::is_number);
                 for block in content {
                     let b = object(block);
                     if is(b, "type", "tool_result") {
@@ -1042,6 +1070,12 @@ impl Reader {
                             string(b, "tool_use_id"),
                         );
                         e.tool_id = opaque(b, "tool_use_id")?;
+                        if timed_out {
+                            e.shell = Some(ShellCall {
+                                timed_out,
+                                ..ShellCall::default()
+                            });
+                        }
                         self.add_event(e);
                         tool_result = true;
                     }
@@ -1915,6 +1949,25 @@ mod tests {
             usage(&split, Harness::Claude).map_err(|e| e.message),
             Err("cache write lifetime counts disagree with total".into())
         );
+    }
+
+    #[test]
+    fn polling_loops_need_a_loop_and_a_sleep() {
+        for command in [
+            "while ! test -f done; do sleep 30; done",
+            "until gh pr checks 1; do sleep 60; done",
+            "for i in $(seq 10); do curl -s x && break; sleep 5; done",
+        ] {
+            assert!(polling_loop(command), "{command}");
+        }
+        for command in [
+            "sleep 300",
+            "cargo build && sleep 1",
+            "for f in *.rs; do wc -l $f; done",
+            "./sleeper --while",
+        ] {
+            assert!(!polling_loop(command), "{command}");
+        }
     }
 
     #[test]

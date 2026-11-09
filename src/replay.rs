@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use indexmap::{IndexMap, IndexSet};
 
 use crate::background::{BackgroundInput, background_checks};
+use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
@@ -910,6 +911,13 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         now,
         max_cost_per_use_usd,
     });
+    let bash = bash_checks(&BashInput {
+        scan: &scan,
+        catalog,
+        ttls: &ttl_refs,
+        since,
+        now,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
@@ -917,6 +925,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .chain(idle.into_iter().map(CheckResult::Idle))
         .chain(speed.into_iter().map(CheckResult::Speed))
         .chain(background.into_iter().map(CheckResult::Background))
+        .chain(bash.into_iter().map(CheckResult::BashCap))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
@@ -1127,6 +1136,7 @@ mod tests {
             tool_id: None,
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         }
     }

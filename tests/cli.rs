@@ -528,7 +528,7 @@ fn explicit_windows_match_the_library_replay() {
         );
         c.env("CLAUDE_CONFIG_DIR", &w.claude);
         let (status, stdout, stderr) = run(&mut c);
-        let expected = i32::from(check.base.action == Action::Change);
+        let expected = i32::from(report.checks.iter().any(|c| c.action() == Action::Change));
         assert_eq!(status, expected, "{mode}: {stderr}");
         let cli: Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(

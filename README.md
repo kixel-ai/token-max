@@ -1,7 +1,8 @@
 # token-max
 
 Replay this host's Claude Code and Codex transcripts at public API prices and
-recommend cheaper cache TTL, compaction-window, native Claude idle-compaction and standard-speed settings. Transcripts and settings stay read-only.
+recommend cheaper cache TTL, compaction-window, native Claude idle-compaction,
+standard-speed and Bash timeout-cap settings. Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
 
@@ -284,3 +285,25 @@ Neither client logs these requests, so suggestion and recap costs are estimated
 at each recorded interactive-terminal turn where they would have run, and their
 uses count as one against `--max-cost-per-use`. Goal check-ins and Codex recaps
 cannot be told apart in transcripts, so their cost is shown as unknown.
+
+## Bash timeout cap
+
+Claude Code waits on a foreground Bash call for at most
+`max(BASH_MAX_TIMEOUT_MS, BASH_DEFAULT_TIMEOUT_MS)`, 600000 ms by default,
+then moves the command to the background. A wait at least as long as the cache
+TTL lets the cache expire before the model replies, so the next request
+rewrites the whole prefix. The `bash-timeout-cap` check compares the cap with
+the main-agent TTL: the one this report recommends, else the current setting,
+else the lifetime the latest main-agent request wrote. At or above it, the
+check recommends 240000 ms for a 5m cache or 3300000 ms for 1h, which leaves
+room for the model's reply on either side of the wait, and exits 1. Commands
+longer than the cap keep running in the background, where checking on them
+reads the cache instead.
+
+The line also counts foreground Bash waits that outlasted the cache the
+starting request wrote, how many hit their timeout or slept in a polling loop,
+and what their cache misses cost: the prefix the next request wrote instead of
+read, at the write rate minus the read rate. Background commands and the user's
+own processes are unaffected by the cap. Codex's
+`background_terminal_max_timeout` bounds one poll of a background terminal,
+and each poll reads the cache, so it is not checked.

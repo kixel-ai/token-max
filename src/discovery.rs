@@ -9,7 +9,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 
 use crate::controls::{
-    CompactionSources, Env, SettingsScope, claude_background, codex_background,
+    CompactionSources, Env, SettingsScope, bash_cap_control, claude_background, codex_background,
     compaction_controls, idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
@@ -1033,6 +1033,7 @@ fn profile(
         settings(requirements_file, Harness::Codex)?
     };
     let mut speed = speed_controls(harness, &speed_scopes, local_env)?;
+    let bash = claude.then(|| bash_cap_control(&speed_scopes, local_env));
     if !claude {
         codex_speed(
             &mut speed,
@@ -1113,6 +1114,7 @@ fn profile(
         compaction,
         idle,
         speed: Some(speed),
+        bash,
         speed_directories: None,
         idle_directories: None,
         background,

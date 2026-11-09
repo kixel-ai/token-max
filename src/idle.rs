@@ -2380,6 +2380,7 @@ mod tests {
             },
             provider: Some("anthropic".into()),
             settings: IndexMap::from([("idleCompaction".to_string(), Scalar::Bool(false))]),
+            mcp_servers: vec![],
             compaction: compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
                 user: &user,

@@ -814,6 +814,39 @@ pub fn unit_rates(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<Uni
     })
 }
 
+/// One part's input as consecutive spans of its prompt prefix, each with its
+/// token count and per-token price: cache reads, then cache writes, then
+/// ordinary input, which runs to the end. None when usage or a price is missing,
+/// or when two write lifetimes leave their order in the prefix unknown.
+pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<Vec<(f64, f64)>> {
+    let u = &p.usage;
+    let rates = selected_rates(catalog, r, p).ok()?.rates;
+    let (input, read) = (rates.input? / 1e6, rates.read? / 1e6);
+    let mut spans = vec![(u.read? as f64, read)];
+    if r.harness == Harness::Claude {
+        if u.write? > 0 {
+            // Longer lifetimes must precede shorter ones in a Claude prompt.
+            spans.push((u.write1h? as f64, input * 2.0));
+            spans.push((u.write5m? as f64, rates.write? / 1e6));
+        }
+    } else if write_billing(p.model.as_deref()?)? {
+        // Only a model that bills writes needs them recorded; otherwise uncached
+        // input is ordinary.
+        let written = u.write?;
+        if written > 0 {
+            match (u.write30m.unwrap_or(0), u.write12h.unwrap_or(0)) {
+                (0, 0) => spans.push((written as f64, input * 1.25)),
+                (short, 0) => spans.push((short as f64, input * 1.25)),
+                (0, long) => spans.push((long as f64, input * 2.5)),
+                _ => return None,
+            }
+        }
+    }
+    u.input?;
+    spans.push((f64::INFINITY, input));
+    Some(spans)
+}
+
 /// One part's cache, ordinary input and output charges, priced at the whole request's context tier.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Components {

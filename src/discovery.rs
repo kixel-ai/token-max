@@ -441,7 +441,8 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
 }
 
 /// Settings that current or planned checks consume; anything else is never retained.
-const STRUCTURAL_SETTINGS: [&str; 19] = [
+const STRUCTURAL_SETTINGS: [&str; 20] = [
+    "project_doc_max_bytes",
     "bashOutputMaxChars",
     "tool_output_token_limit",
     "promptCacheTtl",

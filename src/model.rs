@@ -1130,6 +1130,16 @@ pub struct Component {
     pub scope: Scope,
     pub members: Vec<String>,
     pub targets: Vec<String>,
+    /// Recorded instruction text size, without retaining its content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction_size: Option<InstructionSize>,
+}
+
+/// UTF-8 bytes and lines of a recorded instruction file or combined chain.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct InstructionSize {
+    pub bytes: usize,
+    pub lines: usize,
 }
 
 /// Whether a historical component is still sent; scans never resolve it.
@@ -1555,6 +1565,8 @@ pub struct Control {
 pub enum ContextKind {
     Tool,
     McpServer,
+    McpTool,
+    McpDiscovery,
     Skill,
     Instructions,
     System,
@@ -1601,6 +1613,12 @@ pub struct ContextCost {
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,
+    /// MCP tool and discovery costs already included in this server's total.
+    pub details: Vec<ContextCost>,
+    /// Size of the most recent recorded instruction revision.
+    pub instruction_size: Option<InstructionSize>,
+    /// Supported controls and limitations that the evidence cannot turn into savings.
+    pub guidance: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

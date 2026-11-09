@@ -887,7 +887,16 @@ impl ExposureCollector {
         let key: Text = component_key(new.category, new.name).into();
         let size = content.measure();
         let revision = identity(&format!("{key}:{}", size.fingerprint));
-        self.place(new, &key, &revision, &size, at)
+        let instruction_size = match (&content, new.category) {
+            (Content::Text(text), Category::Instructions) => Some(crate::model::InstructionSize {
+                bytes: text.len(),
+                lines: text.lines().count(),
+            }),
+            _ => None,
+        };
+        let id = self.place(new, &key, &revision, &size, at);
+        self.components[&*id].instruction_size = instruction_size;
+        id
     }
 
     fn place(
@@ -914,6 +923,7 @@ impl ExposureCollector {
                 );
                 let member = new.role == Role::Member;
                 let component = Component {
+                    instruction_size: None,
                     size: size.clone(),
                     id: revision.to_string(),
                     key: key.to_string(),
@@ -3349,7 +3359,7 @@ mod tests {
             vec![
                 instructions(0, "first"),
                 assistant(1, json!([])),
-                instructions(2, "second"),
+                instructions(2, "é\nsecond\n"),
                 // Deferred definitions never displace or remove active revisions.
                 attachment(
                     3,
@@ -3388,6 +3398,18 @@ mod tests {
         // Revisions first seen before the window are inherited.
         assert_eq!(second.inherited, second.candidates);
         assert_eq!(scan.components.len(), 3);
+        let revision = scan
+            .components
+            .iter()
+            .find(|c| c.id.as_str() == &**second.candidates.iter().next().unwrap())
+            .unwrap();
+        assert_eq!(
+            revision.instruction_size,
+            Some(crate::model::InstructionSize {
+                bytes: 10,
+                lines: 2
+            })
+        );
     }
 
     #[test]

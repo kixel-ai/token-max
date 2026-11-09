@@ -158,6 +158,7 @@ struct Kind {
     kind: ContextKind,
     name: String,
     control: Option<Control>,
+    parent: Option<usize>,
 }
 
 /// Where a piece's history says it sits in the request.
@@ -214,6 +215,7 @@ impl Pieces<'_> {
                 kind,
                 name,
                 control,
+                parent: None,
             });
             next
         })
@@ -521,6 +523,52 @@ fn output_piece(owner: &str, harness: Harness, interned: &mut Pieces<'_>) -> usi
     )
 }
 
+/// Price a schema once at its actual position, crediting its server total too.
+fn mcp_detail(component: &Component, parent: usize, interned: &mut Pieces<'_>) -> usize {
+    let server = &interned.kinds[parent];
+    if server.kind != ContextKind::McpServer {
+        return parent;
+    }
+    let (kind, name, control) = if component.category == Category::McpDiscovery {
+        (ContextKind::McpDiscovery, component.name.clone(), None)
+    } else if matches!(
+        component.category,
+        Category::ToolSchema | Category::McpSchema
+    ) && let Some((_, tool)) = component
+        .name
+        .strip_prefix("mcp__")
+        .and_then(|n| n.split_once("__"))
+        && !tool.is_empty()
+    {
+        let control = match server.control.as_ref() {
+            Some(c) if c.path.first().is_some_and(|p| p == "mcp_servers") => Some(Control {
+                path: vec![
+                    "mcp_servers".into(),
+                    c.path[1].clone(),
+                    "disabled_tools".into(),
+                ],
+                value: ControlValue::Text(tool.into()),
+                append: true,
+            }),
+            Some(c) if c.path.first().is_some_and(|p| p == "permissions") => {
+                deny(component.name.clone())
+            }
+            _ => None,
+        };
+        (ContextKind::McpTool, component.name.clone(), control)
+    } else {
+        return parent;
+    };
+    let key = interned.intern(
+        format!("detail:{parent}:{kind:?}:{name}"),
+        kind,
+        name,
+        control,
+    );
+    interned.kinds[key].parent = Some(parent);
+    key
+}
+
 /// The previous request of a session, which bounds where its attachments sit in the next one.
 struct Prior<'a> {
     input: Option<i64>,
@@ -627,7 +675,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 continue;
             }
             if !interned.of.contains_key(&(id, owner)) {
-                let split = if codex {
+                let mut split = if codex {
                     codex_pieces(component, &servers, &mut interned)
                 } else {
                     pieces(component, &components, &mut interned)
@@ -635,6 +683,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         .map(|(key, characters)| (key, Some(characters)))
                         .collect()
                 };
+                for (key, _) in &mut split {
+                    *key = mcp_detail(component, *key, &mut interned);
+                }
                 interned.of.insert((id, owner), split);
             }
             let prefix = !codex && index < view.prefix;
@@ -700,8 +751,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         {
             let mut seen = HashSet::new();
             for piece in &parts {
-                if seen.insert(piece.key) {
-                    unique.push(piece.key);
+                for key in std::iter::once(piece.key).chain(interned.kinds[piece.key].parent) {
+                    if seen.insert(key) {
+                        unique.push(key);
+                    }
                 }
             }
         }
@@ -726,6 +779,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         cost_per_use_usd: None,
                         verdict: None,
                         largest_characters: None,
+                        details: vec![],
+                        instruction_size: None,
+                        guidance: vec![],
                     },
                     owner,
                     key,
@@ -733,6 +789,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
             });
             row.cost.requests += 1;
+        }
+        for piece in &parts {
+            if let History::Revision(revision) = piece.history
+                && interned.kinds[piece.key].kind == ContextKind::Instructions
+            {
+                rows.get_mut(&(owner, piece.key))
+                    .expect("piece has a row")
+                    .cost
+                    .instruction_size = component(revision).instruction_size;
+            }
         }
         // The leading tools and system prompt by revision, and the tokenizer that
         // counted them: when either changes, the previous input no longer bounds
@@ -847,6 +913,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     entry.2 = true;
                 }
             }
+            let parents: Vec<_> = charged
+                .iter()
+                .filter_map(|(&key, &value)| Some((interned.kinds[key].parent?, value)))
+                .collect();
+            for (parent, (tokens, cost, missing)) in parents {
+                let entry = charged.entry(parent).or_insert((0.0, 0.0, false));
+                entry.0 += tokens;
+                entry.1 += cost;
+                entry.2 |= missing;
+            }
             for (key, (tokens, cost, missing)) in charged {
                 // A row with any piece of unknown cost in this request stays unpriced
                 // for it, so a subtotal is never shown as the whole.
@@ -881,6 +957,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             kind,
             ContextKind::Tool
                 | ContextKind::McpServer
+                | ContextKind::McpTool
                 | ContextKind::Skill
                 | ContextKind::ToolOutput
         ) {
@@ -916,6 +993,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             (ContextKind::Tool, c.name.as_str())
         };
         credit(families.get(&family), &c.profiles, c.last_used, c.calls);
+        if c.name.starts_with("mcp__") {
+            credit(
+                families.get(&(ContextKind::McpTool, c.name.as_str())),
+                &c.profiles,
+                c.last_used,
+                c.calls,
+            );
+        }
     }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
@@ -962,10 +1047,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .into_iter()
         .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
         .collect();
-    let mut result: Vec<ContextCost> = rows
+    let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::new();
+    let mut result: Vec<(usize, usize, ContextCost)> = rows
         .into_values()
         .enumerate()
-        .map(|(index, row)| {
+        .filter_map(|(index, row)| {
             let mut c = row.cost;
             c.current = latest
                 .get(&row.owner)
@@ -984,9 +1070,20 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     Verdict::Keep
                 });
             }
-            c
+            if let Some(parent) = interned.kinds[row.key].parent {
+                details.entry((row.owner, parent)).or_default().push(c);
+                None
+            } else {
+                Some((row.owner, row.key, c))
+            }
         })
         .collect();
+    for (owner, key, c) in &mut result {
+        c.details = details.remove(&(*owner, *key)).unwrap_or_default();
+        c.details.sort_by(|a, b| a.name.cmp(&b.name));
+        c.guidance = guidance(c, input.profiles);
+    }
+    let mut result: Vec<_> = result.into_iter().map(|(_, _, c)| c).collect();
     let order = |c: &ContextCost| c.estimated_usd.unwrap_or(-1.0);
     result.sort_by(|a, b| {
         order(b)
@@ -994,6 +1091,90 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     result
+}
+
+/// Explain supported alternatives without inventing the counterfactual discovery work.
+fn guidance(c: &ContextCost, profiles: &[Profile]) -> Vec<String> {
+    if c.kind == ContextKind::McpServer {
+        let mut notes = match c.harness {
+            Harness::Claude => vec![format!(
+                "Deferral: review env.ENABLE_TOOL_SEARCH in settings.json and mcpServers.{}.alwaysLoad in its MCP configuration (.mcp.json or the scope that declares it). ENABLE_TOOL_SEARCH=true defers tools; ENABLE_TOOL_SEARCH=false loads upfront. auto uses a 10% schema threshold; auto:N changes the percentage. alwaysLoad=true exempts this server; alwaysLoad=false forces deferral on Claude Code 2.1.287+. A small frequently used toolset can cost less upfront.", c.name
+            ), "Tool search needs Opus 4/Sonnet 4/Haiku 4.5 or later; Google Agent Platform needs 4.5 or later. Azure-hosted Foundry deployments do not support it. Experimental-beta restrictions, HIPAA policy, denying ToolSearch, and gateways can prevent deferral. https://code.claude.com/docs/en/mcp#configure-tool-search".into()],
+            Harness::Codex if c.name == CODEX_APPS => vec![
+                "Per-app controls: apps.<id>.enabled=false, apps.<id>.tools.<tool>.enabled=false, and apps.<id>.omit_tools_from=[\"direct\"] use the app id reported by app/installed, not its display name. These transcripts do not establish that id mapping, so per-app costs and settings patches are unavailable. https://learn.chatgpt.com/docs/app-server#apps-connectors".into()
+            ],
+            Harness::Codex => {
+                let owner = c.control.as_ref().filter(|control| control.path.first().is_some_and(|p| p == "mcp_servers"));
+                vec![match owner {
+                    Some(control) => {
+                        let mut omission = control.clone();
+                        omission.path[2] = "omit_tools_from".into();
+                        omission.value = ControlValue::Text("direct".into());
+                        omission.append = true;
+                        format!("Exposure: {} omits initial tools; deferred (tool search) and code_mode are other surfaces. Omission does not block calls or guarantee another surface exists. Use enabled_tools to allow tools or disabled_tools to block them; the deny list wins. https://learn.chatgpt.com/docs/config-file/config-reference", control_text(&omission, Harness::Codex))
+                    }
+                    None => "Exposure controls and per-tool blocks cannot be mapped to a unique config.toml server id here. Configure the plugin or launcher that supplies it; do not guess the id from its sanitized name. https://learn.chatgpt.com/docs/extend/mcp".into(),
+                }]
+            }
+        };
+        notes.push("Tool definitions and discovery context below are included in this server's cost. Missing discovery records mean unknown overhead, not zero. Search turns, returned definitions, cache changes and repeated loading cannot be attributed completely, so net deferral savings and an alwaysLoad recommendation are unknown.".into());
+        return notes;
+    }
+    if c.kind != ContextKind::Instructions {
+        return vec![];
+    }
+    let Some(size) = c.instruction_size else {
+        return vec![
+            "Instruction budget unknown: this record has no rendered instruction text to measure."
+                .into(),
+        ];
+    };
+    match c.harness {
+        Harness::Claude
+            if c.name
+                .rsplit(['/', '\\'])
+                .next()
+                .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md") =>
+        {
+            vec![format!(
+                "{}: {} recorded lines, {} UTF-8 bytes; {}Claude recommends under 200 lines per CLAUDE.md. This is guidance, not a quality score or a savings estimate. Prefer path-scoped rules for scoped instructions; imports still load together. https://code.claude.com/docs/en/memory#write-effective-instructions",
+                c.name,
+                size.lines,
+                size.bytes,
+                if size.lines >= 200 {
+                    "at or above the recommended length. "
+                } else {
+                    ""
+                }
+            )]
+        }
+        Harness::Codex => {
+            let budgets: HashSet<Option<usize>> = profiles
+                .iter()
+                .filter(|p| c.profiles.contains(&p.id))
+                .map(|p| match p.settings.get("project_doc_max_bytes") {
+                    None => Some(32 * 1024),
+                    Some(crate::model::Scalar::Number(n))
+                        if *n >= 0.0 && n.fract() == 0.0 && *n < usize::MAX as f64 =>
+                    {
+                        Some(*n as usize)
+                    }
+                    _ => None,
+                })
+                .collect();
+            let budget = if budgets.len() == 1 {
+                budgets.iter().next().copied().flatten()
+            } else {
+                None
+            };
+            vec![format!(
+                "Recorded AGENTS.md chain: {} UTF-8 bytes. {}The project_doc_max_bytes default is 32768 bytes across the combined chain. Project/CLI overrides and original source-file sizes are not established here; loaded text may already be truncated. Trim or scope guidance to preserve important instructions. Length alone does not establish quality. https://learn.chatgpt.com/docs/agent-configuration/agents-md",
+                size.bytes,
+                budget.map_or_else(|| "Selected profile budgets are unavailable or differ. ".into(), |n| format!("Selected profile budget: {n} bytes{}. ", if size.bytes >= n { "; recorded text reaches or exceeds it, check effective project_doc_max_bytes before relying on the tail" } else { "" }))
+            )]
+        }
+        _ => vec![],
+    }
 }
 
 #[cfg(test)]
@@ -1019,6 +1200,7 @@ mod tests {
         members: &[&str],
     ) -> Component {
         Component {
+            instruction_size: None,
             size: Size {
                 characters: Some(characters),
                 recorded_tokens: None,
@@ -1364,6 +1546,137 @@ mod tests {
         let mut r2 = request("r2", 2, 0, 0, 100);
         r2.profiles = vec!["a".into(), "b".into()];
         (scan, vec![r1, r2])
+    }
+
+    #[test]
+    fn mcp_details_share_placement_without_double_counting_input() {
+        let scan = ExposureScan {
+            components: vec![
+                component("read", Category::McpSchema, "mcp__docs__read", 400, &[]),
+                component("write", Category::McpSchema, "mcp__docs__write", 100, &[]),
+                component("discovery", Category::McpDiscovery, "mcp__docs", 100, &[]),
+            ],
+            requests: vec![exposure("r1", &["read", "write", "discovery"], 3, 600)],
+            tool_calls: vec![ToolCalls {
+                name: "mcp__docs__read".into(),
+                profiles: vec!["profile".into()],
+                calls: 3,
+                last_used: 5,
+            }],
+            ..ExposureScan::default()
+        };
+        let rows = costs(&scan, &[request("r1", 1, 0, 600, 0)], 1.0);
+        let server = row(&rows, "docs");
+        assert_eq!(
+            (server.tokens, server.priced, server.calls),
+            (Some(600), 1, Some(3))
+        );
+        assert_eq!(server.details.len(), 3);
+        assert!(close(
+            server.cost_usd,
+            server.details.iter().map(|c| c.cost_usd).sum()
+        ));
+        let read = row(&server.details, "mcp__docs__read");
+        assert_eq!((read.tokens, read.calls), (Some(400), Some(3)));
+        assert_eq!(
+            control_text(read.control.as_ref().unwrap(), Harness::Claude),
+            r#""permissions": {"deny": ["mcp__docs__read"]}"#
+        );
+        let discovery = row(&server.details, "mcp__docs");
+        assert_eq!(
+            (discovery.kind, discovery.tokens, discovery.calls),
+            (ContextKind::McpDiscovery, Some(100), None)
+        );
+    }
+
+    #[test]
+    fn codex_tool_controls_require_an_unambiguous_server_id() {
+        let schema = component(
+            "schema",
+            Category::McpSchema,
+            "mcp__docs_server__read",
+            400,
+            &[],
+        );
+        for (declared, expected) in [
+            (vec![vec!["docs-server".to_string()]], Some("docs-server")),
+            (
+                vec![vec!["docs-server".to_string(), "docs_server".to_string()]],
+                None,
+            ),
+            (
+                vec![
+                    vec!["docs-server".to_string()],
+                    vec!["docs_server".to_string()],
+                ],
+                None,
+            ),
+        ] {
+            let servers: Vec<&[String]> = declared.iter().map(Vec::as_slice).collect();
+            let mut interned = Pieces::default();
+            let parts = codex_pieces(&schema, &servers, &mut interned);
+            let key = mcp_detail(&schema, parts[0].0, &mut interned);
+            let tool = &interned.kinds[key];
+            assert_eq!(tool.kind, ContextKind::McpTool);
+            assert_eq!(
+                tool.control
+                    .as_ref()
+                    .map(|c| control_text(c, Harness::Codex)),
+                expected.map(|id| format!("mcp_servers.{id}.disabled_tools = [\"read\"]"))
+            );
+        }
+        // Discovery with the same exposed name must not consume the schema's identity.
+        let mut interned = Pieces::default();
+        let (key, kind, name, control) = tool(&schema.name);
+        let parent = interned.intern(key, kind, name, control);
+        let mut discovery = schema.clone();
+        discovery.category = Category::McpDiscovery;
+        let found = mcp_detail(&discovery, parent, &mut interned);
+        let loaded = mcp_detail(&schema, parent, &mut interned);
+        assert_ne!(found, loaded);
+        assert_eq!(interned.kinds[found].kind, ContextKind::McpDiscovery);
+        assert_eq!(interned.kinds[loaded].kind, ContextKind::McpTool);
+    }
+
+    #[test]
+    fn instruction_budgets_use_bytes_and_documented_guidance() {
+        let mut claude = component(
+            "claude",
+            Category::Instructions,
+            "/repo/CLAUDE.md",
+            200,
+            &[],
+        );
+        claude.instruction_size = Some(crate::model::InstructionSize {
+            bytes: 401,
+            lines: 200,
+        });
+        let scan = ExposureScan {
+            components: vec![claude],
+            requests: vec![exposure("r1", &["claude"], 0, 300)],
+            ..ExposureScan::default()
+        };
+        let rows = costs(&scan, &[request("r1", 1, 0, 300, 0)], 1.0);
+        let c = row(&rows, "/repo/CLAUDE.md");
+        assert!(c.guidance[0].contains("200 recorded lines, 401 UTF-8 bytes; at or above"));
+        assert!(c.guidance[0].contains("imports still load together"));
+        let mut codex = c.clone();
+        codex.harness = Harness::Codex;
+        codex.instruction_size = Some(crate::model::InstructionSize {
+            bytes: 32_769,
+            lines: 1,
+        });
+        let mut profile = crate::test_support::make_profile("profile", "/codex");
+        let notes = guidance(&codex, std::slice::from_ref(&profile));
+        assert!(notes[0].contains("reaches or exceeds it"));
+        assert!(notes[0].contains("loaded text may already be truncated"));
+        profile.settings.insert(
+            "project_doc_max_bytes".into(),
+            crate::model::Scalar::Number(65536.0),
+        );
+        let notes = guidance(&codex, &[profile]);
+        assert!(notes[0].contains("Selected profile budget: 65536 bytes"));
+        assert!(!notes[0].contains("reaches or exceeds it"));
     }
 
     #[test]

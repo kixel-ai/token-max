@@ -12,6 +12,18 @@ setting, history profiles, window, costs (including partial known subtotals and
 unknown reasons), coverage, assumptions, uncertainty and sensitivities. Savings
 from independent checks still must not be added.
 
+Each `context[]` row now also has `details`, `instructionSize`, and `guidance`.
+MCP server `details` contain `mcp-tool` and `mcp-discovery` rows with the same
+cost and coverage fields; these costs are already included in the server total.
+Do not sum parent and detail rows. A tool's `control` blocks just that tool;
+recommendations to disable a whole server cover its tool recommendations in
+the text report and settings snippet. `instructionSize` is null without
+recorded text, otherwise `{ "bytes": N, "lines": N }` for the latest recorded
+revision. `guidance` contains supported controls, documented budget comparisons,
+source links and pricing limitations. These fields are retained in both JSON
+forms. Full scan components additionally retain optional `instructionSize`;
+the SSH scan-schema fingerprint changes with this metadata addition.
+
 Keepalive checks have the same complete shape in both versions, including every
 cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
 Their period coverage, unknown current ping state, unpriced periods and unresolved

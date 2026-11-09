@@ -13,7 +13,7 @@ Expanded 2026-11-06 (maintainer, /quest-plan): ✅ usage and recurring cost
 for both harnesses in m0 (rejected: defer to m1). Decided 2026-11-07
 (maintainer): ✅ recommend hiding a skill whose listing cost more than $1
 per recorded use, counting no use as one, with `--max-cost-per-use` to
-change the default $1 threshold, per the [context quest](/quest/m0/context.md).
+change the default $1 threshold, per the [context pricing rules](/docs/semantics.md#shared-component-measurements).
 
 Done for Claude: listing members are priced per skill with a verdict;
 `skillOverrides` applies only to local and bundled skills, synced
@@ -32,9 +32,8 @@ Codex chronological exposure pricing and `config.toml` rendering landed in
 `src/context.rs` still prices the Codex catalog as one unswitchable "Skill
 list" row. This quest splits it into per-skill rows, links observed uses,
 adds path-based `[[skills.config]]` controls, and detects duplicate listings.
-Reuse that pricing and TOML rendering; the context quest's remaining work
-on deferred loading, per-tool controls and instruction budgets does not
-block this quest.
+Reuse that pricing and TOML rendering. MCP deferred loading, per-tool
+controls and instruction budgets are independent of this quest.
 
 Decided 2026-11-08 (maintainer, [settled choices on the Claude control
 PR](https://github.com/kixelated/token-max/pull/28#issuecomment-6730699066)):

@@ -1642,6 +1642,8 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
             "ChatGPT apps".into()
         }
         ContextKind::McpServer => format!("MCP server {}", c.name),
+        ContextKind::McpTool => format!("MCP tool {} (included in server total)", c.name),
+        ContextKind::McpDiscovery => format!("MCP discovery {} (included in server total)", c.name),
         ContextKind::Skill if c.name == SYNCED_SKILLS => "Skills synced from claude.ai".into(),
         ContextKind::ToolOutput => match c.name.strip_prefix("mcp__") {
             Some(server) => format!("MCP server {server} output"),
@@ -1893,6 +1895,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let pieces: Vec<&ContextCost> = report
         .context
         .iter()
+        .flat_map(|c| {
+            std::iter::once(c).chain(c.details.iter().filter(|_| c.verdict != Some(Verdict::Off)))
+        })
         .filter(|c| c.verdict.is_some())
         .collect();
     let off: Vec<&ContextCost> = pieces
@@ -2140,6 +2145,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let unpriced: Vec<&ContextCost> = report
         .context
         .iter()
+        .flat_map(|c| std::iter::once(c).chain(&c.details))
         .filter(|c| c.current && c.control.is_some() && c.estimated_usd.is_none())
         .collect();
     if !unknown.is_empty() || !unpriced.is_empty() {
@@ -2155,6 +2161,37 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 suffix(c, out)
             );
             out.line(&text, 2, 0);
+        }
+    }
+    let guided: Vec<_> = report
+        .context
+        .iter()
+        .filter(|c| c.current && (!c.guidance.is_empty() || !c.details.is_empty()))
+        .collect();
+    if !guided.is_empty() {
+        out.section("MCP loading and instruction budgets");
+        for c in guided {
+            out.line(&format!("{}{}:", piece_label(c, out), suffix(c, out)), 2, 0);
+            for note in &c.guidance {
+                out.line(note, 4, 0);
+            }
+            for detail in c.details.iter().filter(|d| d.current) {
+                let cost = detail.estimated_usd.map_or_else(
+                    || "cost unknown".into(),
+                    |usd| format!("costs {}", monthly(usd, since, Some(until))),
+                );
+                let control = detail.control.as_ref().map_or_else(String::new, |control| {
+                    format!("; off: {}", control_text(control, detail.harness))
+                });
+                let uses = detail
+                    .calls
+                    .map_or_else(String::new, |calls| format!("; {calls} recorded uses"));
+                out.line(
+                    &format!("{}: {cost}{uses}{control}.", piece_label(detail, out)),
+                    4,
+                    0,
+                );
+            }
         }
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
@@ -2266,11 +2303,19 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             );
             out.line(&text, 2, 0);
         }
+        for c in fixed.iter().filter(|c| c.kind == ContextKind::McpServer) {
+            out.line(&format!("{}{}: {}. Configure the plugin or launcher that supplies it; no unique local server switch was resolved.", piece_label(c, out), suffix(c, out), c.estimated_usd.map_or_else(|| "cost unknown".into(), |usd| format!("costs {}", monthly(usd, since, Some(until))))), 2, 0);
+        }
         // Scaled to 30 days like every other line, without counting unknowns as $0.
         let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
         let core: Vec<Option<f64>> = fixed
             .iter()
-            .filter(|c| !matches!(c.kind, ContextKind::Instructions | ContextKind::Skill))
+            .filter(|c| {
+                !matches!(
+                    c.kind,
+                    ContextKind::Instructions | ContextKind::Skill | ContextKind::McpServer
+                )
+            })
             .map(|c| c.estimated_usd.map(|usd| usd * scale))
             .collect();
         if !core.is_empty() {
@@ -2364,14 +2409,21 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
     out.section("What each piece of context costs");
     out.line(
         &format!(
-            "Sent with every request whether or not it is used, priced over the same window. Recommended off when it cost more than {} per use.",
+            "Priced over the requests that carried it in the same window. Tool and discovery detail costs are included in their server total. Recommended off when it cost more than {} per use.",
             about(report.max_cost_per_use_usd)
         ),
         0,
         0,
     );
-    for c in &report.context {
+    for c in report
+        .context
+        .iter()
+        .flat_map(|c| std::iter::once(c).chain(&c.details))
+    {
         let first = first_profile(c);
+        for note in &c.guidance {
+            out.line(note, 2, 0);
+        }
         // Unpriced requests are scaled from the priced ones, never counted as free.
         let cost = match c.estimated_usd {
             None => "cost unknown".to_string(),
@@ -2761,6 +2813,9 @@ mod tests {
         ContextCost {
             harness: Harness::Claude,
             largest_characters: None,
+            details: vec![],
+            instruction_size: None,
+            guidance: vec![],
             profiles: vec!["profile".into()],
             kind,
             name: name.into(),
@@ -3146,6 +3201,59 @@ mod tests {
                 "permissions": {"deny": ["mcp__docs"]}
             })
         );
+    }
+
+    #[test]
+    fn tool_blocks_are_covered_by_a_server_block() {
+        let mut report = synthetic();
+        report.checks.clear();
+        report.scan.profiles[0].harness = Harness::Codex;
+        report.scan.profiles[0].settings_file = "/synthetic/.codex/config.toml".into();
+        let mut server = context_piece(
+            ContextKind::McpServer,
+            "docs",
+            switch(
+                &["mcp_servers", "docs", "enabled"],
+                ControlValue::Bool(false),
+            ),
+            Some(20.0),
+            Some(100),
+        );
+        server.harness = Harness::Codex;
+        let mut tool = context_piece(
+            ContextKind::McpTool,
+            "mcp__docs__write",
+            Some(Control {
+                path: vec!["mcp_servers".into(), "docs".into(), "disabled_tools".into()],
+                value: ControlValue::Text("write".into()),
+                append: true,
+            }),
+            Some(5.0),
+            Some(0),
+        );
+        tool.harness = Harness::Codex;
+        server.details.push(tool);
+        report.context = vec![server];
+        let rendered = text(&report, None, false);
+        assert!(
+            rendered.contains("MCP tool mcp__docs__write (included in server total): on -> off")
+        );
+        let patch = rendered.split("To turn these off").nth(1).unwrap();
+        assert!(patch.contains("disabled_tools = [\"write\"]"));
+        assert!(!patch.contains("enabled = false"));
+
+        report.context[0].verdict = Some(Verdict::Off);
+        let rendered = text(&report, None, false);
+        let patch = rendered.split("To turn these off").nth(1).unwrap();
+        assert!(patch.contains("enabled = false"));
+        assert!(!patch.contains("disabled_tools"));
+        assert!(
+            !rendered.contains("MCP tool mcp__docs__write (included in server total): on -> off")
+        );
+        // Both JSON projections retain costs inside the server, without a second top-level row.
+        let json = serde_json::to_value(&report.context).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["details"][0]["estimatedUsd"], 5.0);
     }
 
     #[test]
@@ -3730,6 +3838,9 @@ mod tests {
         let skill = ContextCost {
             harness: Harness::Claude,
             largest_characters: None,
+            details: vec![],
+            instruction_size: None,
+            guidance: vec![],
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
             name: name.into(),

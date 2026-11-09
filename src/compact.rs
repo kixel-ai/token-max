@@ -244,6 +244,7 @@ mod tests {
     #[test]
     fn one_off_coverage_groups_by_target_instead_of_call_identity() {
         let component = |id: &str| Component {
+            instruction_size: None,
             size: Size {
                 characters: None,
                 recorded_tokens: None,
@@ -299,6 +300,7 @@ mod tests {
     #[test]
     fn visibility_groups_keep_component_identity_and_unknown_reasons() {
         let component = |id: &str, name: &str| Component {
+            instruction_size: None,
             size: Size {
                 characters: None,
                 recorded_tokens: None,

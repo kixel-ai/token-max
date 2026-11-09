@@ -222,6 +222,20 @@ impl<'a> WindowEvents<'a> {
             cache: CacheBoundaries::new(events.iter().copied()),
         }
     }
+
+    /// Keep calibration identities while removing idle boundaries from an idle-off policy.
+    pub(crate) fn suppress_idle(&mut self, since: Millis) {
+        let events: Vec<_> = self
+            .by_id
+            .values()
+            .copied()
+            .filter(|e| {
+                e.idle_attribution != crate::model::IdleAttribution::Notice || e.time < since
+            })
+            .collect();
+        self.boundaries = SessionBoundaries::new(events.iter().copied());
+        self.cache = CacheBoundaries::new(events);
+    }
 }
 
 fn is_message(p: &BillingPart) -> bool {

@@ -822,6 +822,7 @@ mod tests {
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: None,
         };
         for session in ["original", "copy"] {

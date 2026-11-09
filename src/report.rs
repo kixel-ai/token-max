@@ -182,6 +182,7 @@ enum Setting<'a> {
     Ttl(Ttl),
     Window(i64),
     Idle(bool),
+    T3Idle(crate::model::T3IdleMode),
     Speed(&'a str),
     Toggle(bool),
     Cap(Millis),
@@ -270,6 +271,9 @@ fn common(result: &CheckResult) -> Common<'_> {
             &c.usage_estimates,
             |b| Setting::Idle(*b),
         ),
+        CheckResult::T3Idle(c) => base("t3-idle-compaction", "main", &c.base, &[], |mode| {
+            Setting::T3Idle(*mode)
+        }),
         CheckResult::Speed(c) => base(
             "fast-mode",
             c.bucket,
@@ -327,6 +331,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Window(n)) => format!("{n} tokens"),
         Some(Setting::Idle(b)) => b.to_string(),
+        Some(Setting::T3Idle(mode)) => mode.as_str().into(),
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Cap(ms)) => format!("{ms} ms"),
@@ -338,6 +343,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
 fn setting_value(value: Option<Setting<'_>>) -> String {
     match value {
         None => "unknown".into(),
+        Some(Setting::T3Idle(mode)) => mode.as_str().into(),
         Some(Setting::Idle(b) | Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Speed("standard")) => "off".into(),
         Some(Setting::Speed(s)) => s.into(),
@@ -496,14 +502,30 @@ impl<'a> Out<'a> {
     /// A profile by harness and quoted root, for evidence cards.
     fn profile_name(&self, id: &str) -> String {
         match self.profiles.get(id) {
-            Some(p) => format!("{} {}", label(&p.harness), display(&p.root)),
+            Some(p) => match &p.t3 {
+                Some(t) => format!(
+                    "T3 {} {} ({})",
+                    t.instance,
+                    label(&p.harness),
+                    display(&p.root)
+                ),
+                None => format!("{} {}", label(&p.harness), display(&p.root)),
+            },
             None => display(id),
         }
     }
     /// A profile by harness and home-relative root, for the summary.
     fn short_profile(&self, id: &str) -> String {
         match self.profiles.get(id) {
-            Some(p) => format!("{} {}", label(&p.harness), self.home(&p.root)),
+            Some(p) => match &p.t3 {
+                Some(t) => format!(
+                    "T3 {} {} ({})",
+                    t.instance,
+                    label(&p.harness),
+                    self.home(&p.root)
+                ),
+                None => format!("{} {}", label(&p.harness), self.home(&p.root)),
+            },
             None => self.home(id),
         }
     }
@@ -537,9 +559,22 @@ fn generated_at(report: &Report) -> Millis {
     parse_instant(&report.generated_at).expect("reports record an ISO generation time")
 }
 
+fn t3_coverage(report: &Report, out: &mut Out<'_>) {
+    for state in report.scan.t3.iter().filter(|s| s.status == "selected") {
+        out.field(
+            "T3 state",
+            &format!("{}; {}", display(&state.path), state.metadata),
+        );
+        for exclusion in &state.exclusions {
+            out.field("T3 coverage", exclusion);
+        }
+    }
+}
+
 fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
     out.title();
+    t3_coverage(report, out);
     out.line("Public API-price estimates, not subscription bills.", 0, 0);
     let requests = &report.scan.requests;
     let earliest = requests.first().map(|r| r.time);
@@ -895,6 +930,21 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 );
             }
         }
+        CheckResult::T3Idle(i) => {
+            for comparison in [&i.current_settings, &i.after_recommendations] {
+                out.field("T3 baseline", &comparison.baseline);
+                for scenario in &comparison.scenarios {
+                    out.cost(scenario.mode.as_str(), &scenario.cost);
+                    out.field(
+                        "Summaries",
+                        &format!(
+                            "{} generated, {} with no observed return",
+                            scenario.summaries, scenario.final_summaries
+                        ),
+                    );
+                }
+            }
+        }
         CheckResult::Idle(i) => {
             out.field(
                 "Effective idle threshold",
@@ -1166,6 +1216,28 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 }
             }
         }
+        CheckResult::T3Idle(i) => {
+            for comparison in [&i.current_settings, &i.after_recommendations] {
+                out.field("T3 period baseline", &comparison.baseline);
+                let mut groups = IndexMap::new();
+                for p in &comparison.periods {
+                    *groups
+                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .or_insert(0usize) += 1;
+                }
+                for ((status, timing, outcome, reason), count) in groups {
+                    out.field(
+                        "T3 idle period group",
+                        &format!(
+                            "{count} periods; {}; {}; {}; {reason}",
+                            label(&status),
+                            label(&timing),
+                            label(&outcome)
+                        ),
+                    );
+                }
+            }
+        }
         CheckResult::Idle(i) => {
             for scenario in [&i.current_settings, &i.after_recommendations] {
                 out.field("Idle scenario", &scenario.baseline);
@@ -1366,7 +1438,8 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
     match result {
         CheckResult::Ttl(t) => out.witnesses(&t.cache_evidence),
         CheckResult::Compaction(c) => out.witnesses(&c.cache_evidence),
-        CheckResult::Idle(_)
+        CheckResult::T3Idle(_)
+        | CheckResult::Idle(_)
         | CheckResult::Speed(_)
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
@@ -1405,6 +1478,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
             }
             .into();
         }
+        CheckResult::T3Idle(_) => return "Lowest aggregate estimated cost among off, conditional on-return acceptance and conditional proactive server liveness; unavailable lifecycle or summary evidence stays unpriced.".into(),
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
                 "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
@@ -1458,6 +1532,7 @@ fn setting_name(result: &CheckResult) -> String {
                 format!("Auto-compact window ({})", models.join(", "))
             }
         }
+        CheckResult::T3Idle(_) => "T3 idle compaction".into(),
         CheckResult::Idle(_) => "Idle compaction".into(),
         CheckResult::Speed(_) => "Fast mode".into(),
         CheckResult::Keepalive(_) => "Keepalive pings".into(),
@@ -1642,6 +1717,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             }
             "Too many requests lack recorded usage to compare windows.".into()
         }
+        CheckResult::T3Idle(_) => "T3 lifecycle, observed expiry or compatible summary evidence is unavailable; the current mode alone does not establish generation.".into(),
         CheckResult::Idle(i) => {
             let periods = &i.after_recommendations.periods;
             if !periods.is_empty()
@@ -1806,6 +1882,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let until = generated_at(report);
     let many = report.scan.profiles.len() > 1;
     out.title();
+    t3_coverage(report, out);
     out.line(
         "Estimated with public API prices, not your subscription bill. Nothing was changed.",
         0,
@@ -3004,6 +3081,7 @@ mod tests {
             schema_version: 1,
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
+                t3: vec![],
                 snapshot_started_at: "2026-12-01T00:00:00.000Z".into(),
                 snapshot_finished_at: "2026-12-01T00:00:01.000Z".into(),
                 since: Some(NOV1),

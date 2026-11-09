@@ -177,4 +177,3 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 - [Project-scoped background controls](/quest/m0/background-scopes.md) - resolve each project's current background controls and their owning files
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Codex skills catalog](/quest/m0/skills-catalog.md) - a priced line and `config.toml` switch per Codex skill, and duplicate listings flagged
-- [T3 profiles and settings](/quest/m0/t3.md) - native history discovery, T3 ownership, and T3-specific idle policies without double billing

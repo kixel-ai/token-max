@@ -453,6 +453,7 @@ mod tests {
             tool_id: None,
             settings: Default::default(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
+            shell: None,
             pricing: None,
         }
     }

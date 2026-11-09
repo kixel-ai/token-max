@@ -69,12 +69,11 @@ fn windows(path: &str) -> bool {
 // `..` can cross a symlink. Historical transcripts cannot prove its resolved identity.
 fn plain(path: &str) -> bool {
     let separators: &[char] = if windows(path) { &['/', '\\'] } else { &['/'] };
-    let body = if path.starts_with("\\\\") {
-        &path[2..]
-    } else {
-        path.strip_prefix('/').unwrap_or(path)
-    }
-    .trim_end_matches(separators);
+    let body = path
+        .strip_prefix("\\\\")
+        .or_else(|| path.strip_prefix('/'))
+        .unwrap_or(path)
+        .trim_end_matches(separators);
     !body
         .split(separators)
         .any(|part| part == "." || part == ".." || part.is_empty())

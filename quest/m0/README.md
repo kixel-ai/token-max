@@ -174,6 +174,7 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 
 ## Required
 
+- [Codex costs without recorded billing tiers](/quest/m0/codex-tier.md) - conditional API-equivalent estimates keep missing tier evidence from suppressing every cost check
 - [Skills catalog and usage check](/quest/m0/skills-catalog.md) - prices recurring listings, detects duplicates, and ranks unused or rarely used skills for trimming
 - [MCP and loaded-context check](/quest/m0/context.md) - attributes exposed tool and instruction context, identifies unused MCPs, and gives guidance-backed trimming warnings
 - [Keepalive check](/quest/m0/keepalive.md) - whether capped pings beat leaving sessions idle and, where supported, idle compaction after costs and client lifetime bounds

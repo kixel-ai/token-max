@@ -205,7 +205,12 @@ fn settings_control(profile: &Profile) -> IdleControl {
         config: &config,
         file: &profile.settings_file,
     }];
-    idle_controls(&scopes, &Env::new()).unwrap_or_else(|error| panic!("{error}"))
+    let mut control = idle_controls(&scopes, &Env::new()).unwrap_or_else(|error| panic!("{error}"));
+    if profile.t3.is_some() {
+        control.ttl = Some(profile.ttl.clone());
+        control.compaction = Some(profile.compaction.clone());
+    }
+    control
 }
 
 /// One profile's idle controls by working directory, with window controls memoized per scope
@@ -297,6 +302,7 @@ impl<'p> Scopes<'p> {
 
 /// A selected replayed part, kept for the shared baseline cost.
 struct Selected {
+    part: usize,
     request: String,
     compaction: bool,
     cost: Cost,
@@ -1405,6 +1411,7 @@ impl<'a> Profiled<'a> {
             for item in items {
                 if item.selected {
                     result.selected.push(Selected {
+                        part: item.part,
                         request: item.request.id.clone(),
                         compaction: item.p.kind == PartKind::Compaction,
                         cost: item.components.total(),
@@ -1941,7 +1948,7 @@ fn historically_available(events: &[&StructuralEvent], r: &Request) -> bool {
 pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
     let mut checks = Vec::new();
     for profile in &options.scan.profiles {
-        if profile.harness == Harness::Claude {
+        if profile.harness == Harness::Claude && profile.t3.is_none() {
             profile_checks(options, profile, &mut checks);
         }
     }
@@ -2247,6 +2254,682 @@ fn profile_checks<'a>(
     }
 }
 
+/// Compare T3's policies with the shared summary calibration and provider pricing owners.
+pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleCheck> {
+    use crate::model::T3IdleCheck;
+    let mut checks = Vec::new();
+    for profile in &options.scan.profiles {
+        let Some(instance) = &profile.t3 else {
+            continue;
+        };
+        if profile.harness != Harness::Claude {
+            continue;
+        }
+        let requests: Vec<&Request> = options
+            .scan
+            .cache_context
+            .requests
+            .iter()
+            .chain(&options.scan.requests)
+            .filter(|r| r.profiles.contains(&profile.id))
+            .collect();
+        let events: Vec<&StructuralEvent> = options
+            .scan
+            .cache_context
+            .boundaries
+            .iter()
+            .chain(&options.scan.events)
+            .filter(|e| e.profiles.contains(&profile.id))
+            .collect();
+        let samples = compaction_samples(&requests, &events, options.summaries);
+        let first = requests.iter().map(|r| r.time).min();
+        let since = options.since.or(first);
+        let mut groups = IndexMap::new();
+        for &r in &requests {
+            groups
+                .entry(r.session.as_str())
+                .or_insert_with(Vec::new)
+                .push(r);
+        }
+        let profiled = Profiled {
+            catalog: options.catalog,
+            estimates: options.estimates,
+            all_summaries: options.summaries,
+            summaries: Summaries {
+                by_event: HashMap::new(),
+                requests: HashSet::new(),
+            },
+            scopes: Scopes::new(profile),
+            since: since.unwrap_or(options.now),
+            now: options.now,
+            groups,
+            window_events: WindowEvents::new(events.iter().copied()),
+            calibration: samples,
+        };
+        let current_windows = current_windows(&profiled.scopes, &requests);
+        let after_windows = recommended_windows(&profiled.scopes, &requests, options.windows);
+        let current_ttls = PerBucket {
+            main: profile.ttl.main.value,
+            subagent: profile.ttl.subagent.value,
+        };
+        let current_replay = profiled.replay(&current_ttls, &current_windows);
+        let current = t3_comparison(
+            options,
+            profile,
+            &current_replay,
+            &events,
+            &profiled.calibration,
+            &current_ttls,
+            "T3 modes at current native TTL/window controls",
+        );
+        let ttl = options
+            .ttls
+            .iter()
+            .find(|c| {
+                c.base.profile == profile.id
+                    && c.bucket == Bucket::Main
+                    && c.base.action == Action::Change
+            })
+            .and_then(|c| c.base.recommended)
+            .or(profile.ttl.main.value);
+        let after_ttls = PerBucket {
+            main: ttl,
+            subagent: options
+                .ttls
+                .iter()
+                .find(|c| {
+                    c.base.profile == profile.id
+                        && c.bucket == Bucket::Subagent
+                        && c.base.action == Action::Change
+                })
+                .and_then(|c| c.base.recommended)
+                .or(profile.ttl.subagent.value),
+        };
+        let after_replay = profiled.replay(&after_ttls, &after_windows);
+        let after = t3_comparison(
+            options,
+            profile,
+            &after_replay,
+            &events,
+            &profiled.calibration,
+            &after_ttls,
+            "T3 modes after applicable TTL/window recommendations using the shared window/cache replay; independent savings do not add",
+        );
+        let all_priced = requests
+            .iter()
+            .any(|r| r.agent == Agent::Main && r.parts.iter().any(is_message))
+            && after.scenarios.iter().all(|s| s.cost.total_usd.is_some());
+        let best = all_priced.then(|| {
+            after
+                .scenarios
+                .iter()
+                .min_by(|a, b| {
+                    a.cost
+                        .total_usd
+                        .unwrap()
+                        .total_cmp(&b.cost.total_usd.unwrap())
+                        .then_with(|| {
+                            (b.mode == instance.idle_mode).cmp(&(a.mode == instance.idle_mode))
+                        })
+                })
+                .unwrap()
+        });
+        let winner = best.map(|s| s.mode);
+        let baseline_cost = after
+            .scenarios
+            .iter()
+            .find(|s| s.mode == instance.idle_mode)
+            .and_then(|s| s.cost.total_usd);
+        let savings = baseline_cost
+            .zip(best.and_then(|s| s.cost.total_usd))
+            .map(|(a, b)| a - b);
+        let applicable = instance.enabled && instance.ownership_resolved;
+        checks.push(T3IdleCheck {
+            base: CheckBase {
+                profile: profile.id.clone(), history_profiles: requests.iter().flat_map(|r|r.profiles.iter().cloned()).collect::<IndexSet<_>>().into_iter().collect(),
+                evidence: if all_priced { Evidence::Estimated } else { Evidence::Unknown },
+                action: if !applicable || winner.is_none() { Action::Advisory } else if winner==Some(instance.idle_mode) || savings==Some(0.0) { Action::Keep } else { Action::Change },
+                current: Some(instance.idle_mode), recommended: if applicable { winner } else { None },
+                owner: instance.idle_owner.clone(), since, until: Some(options.now),
+                window_basis: "captured native requests plus a separately bounded T3 SQLite snapshot".into(),
+                baseline: format!("{}; onReturn assumes accepting the offered summary, beforeCacheExpires assumes the server remains running until its observed-expiry timer fires",instance.idle_mode.as_str()),
+                requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: None,
+                savings_usd: savings.filter(|_|applicable), monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
+                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session; 5m and 1h caches both apply".into(), "onReturn is conditional on an offered resume dialog and user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
+                uncertainty: instance.limitations.clone(), sources: vec![crate::t3::SOURCE.into()],
+            }, current_settings: current, after_recommendations: after,
+        });
+    }
+    checks
+}
+
+struct T3Gap<'a> {
+    previous: &'a Request,
+    next: Option<&'a Request>,
+    trigger: Option<Millis>,
+    observed: Option<crate::model::T3IdleMode>,
+    boundary: Option<&'a StructuralEvent>,
+    status: PeriodStatus,
+    tokens: Option<i64>,
+}
+
+fn t3_comparison(
+    options: &IdleOptions<'_>,
+    profile: &Profile,
+    replay: &Replay<'_>,
+    events: &[&StructuralEvent],
+    samples: &CompactionSamples<'_>,
+    ttls: &Ttls,
+    baseline: &str,
+) -> crate::model::T3IdleComparison {
+    use crate::model::{T3IdleComparison, T3IdleMode};
+    let ttl = ttls.main;
+    let requests: Vec<&Request> = replay.requests.iter().map(AsRef::as_ref).collect();
+    let events = all_events(events, &replay.modeled);
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    for &r in requests.iter().filter(|r| {
+        r.agent == Agent::Main
+            && r.t3.as_ref().is_none_or(|t| t.idle_mode.is_none())
+            && r.parts.iter().any(is_message)
+    }) {
+        groups.entry(&r.session).or_default().push(r);
+    }
+    let mut gaps = Vec::new();
+    let mut periods = Vec::new();
+    for group in groups.values_mut() {
+        group.sort_by_key(|r| r.time);
+        for (i, &r) in group.iter().enumerate() {
+            let next = group.get(i + 1).copied();
+            // Only the last native request of a run can arm T3's completion timer.
+            if next.is_some_and(|n| {
+                r.t3.as_ref()
+                    .zip(n.t3.as_ref())
+                    .is_some_and(|(a, b)| a.run == b.run)
+            }) {
+                continue;
+            }
+            let end = next.map_or(options.now, |r| r.time);
+            if options.since.is_some_and(|s| end < s) || end <= r.end_time {
+                continue;
+            }
+            let meta = r.t3.as_ref();
+            let native = options
+                .scan
+                .requests
+                .iter()
+                .chain(&options.scan.cache_context.requests)
+                .find(|n| n.id == r.id);
+            let tokens = meta.and_then(|t| t.used_tokens).and_then(|tokens| {
+                let before = native?.parts.iter().find(|p| is_message(p))?.usage.input?;
+                let after = r.parts.iter().find(|p| is_message(p))?.usage.input?;
+                tokens.checked_add(after - before).filter(|n| *n >= 0)
+            });
+            let expires = meta.and_then(|t| t.cache_expires_at).and_then(|expiry| {
+                if ttl == profile.ttl.main.value {
+                    return Some(expiry);
+                }
+                let old =
+                    crate::cache::observed_ttl(native?.parts.iter().find(|p| is_message(p))?)?;
+                Some(expiry - ttl_milliseconds(old) + ttl_milliseconds(ttl?))
+            });
+            let trigger = expires.map(|t| t - 120_000).filter(|t| *t >= r.end_time);
+            let boundary = events.iter().copied().find(|e| {
+                e.session.as_ref() == r.session
+                    && e.time > r.end_time
+                    && e.time <= end
+                    && e.idle_attribution == IdleAttribution::T3
+            });
+            let observed = boundary
+                .and_then(|e| e.t3.as_ref())
+                .and_then(|t| t.idle_mode);
+            let (status, reason) = if observed.is_some() {
+                (
+                    PeriodStatus::Eligible,
+                    "explicit idle run identity and native applied compaction boundary",
+                )
+            } else if tokens.is_some_and(|n| n < 200_000) {
+                (
+                    PeriodStatus::Ineligible,
+                    "T3 context is below 200000 tokens",
+                )
+            } else if trigger.is_some_and(|t| end < t) {
+                (
+                    PeriodStatus::Censored,
+                    "return or final snapshot precedes the observed-expiry timer",
+                )
+            } else if meta.is_some_and(|t| t.status != "completed") {
+                (
+                    PeriodStatus::Ineligible,
+                    "T3 run is not completed in the captured projection",
+                )
+            } else if tokens.is_some()
+                && trigger.is_some()
+                && meta.is_some_and(|t| {
+                    t.lifecycle_eligible == Some(true)
+                        && t.completed_at.is_some_and(|c| c <= trigger.unwrap())
+                })
+            {
+                (
+                    PeriodStatus::Eligible,
+                    "completed main-thread projection with observed expiry and verified current lifecycle guards; generation remains conditional on server liveness",
+                )
+            } else {
+                (
+                    PeriodStatus::Unknown,
+                    "T3 native run, token threshold, observed cache expiry or lifecycle guards are unavailable; current settings do not establish historical eligibility",
+                )
+            };
+            periods.push(IdlePeriod {
+                request:r.id.clone(), resume:next.map(|r|r.id.clone()),session:r.session.clone(),context_tokens:tokens,
+                gap_ms:end-r.end_time,status,reason:reason.into(),confirmed:observed.is_some(),
+                return_timing:if next.is_none(){ReturnTiming::Final}else if expires.is_some_and(|t|end>=t){ReturnTiming::AfterExpiry}else{ReturnTiming::BeforeExpiry},
+                outcome:if observed.is_some(){PeriodOutcome::Applied}else{PeriodOutcome::Unobserved},event:boundary.map(|e|e.id.clone()),version:r.version.clone(),client:r.client.clone(),flag_state:None,
+                activation:if status==PeriodStatus::Eligible{Some(1.0)}else{None},activation_basis:"conditional server liveness or on-return acceptance; absent generation is unobserved".into(),summary_cost:zero_cost(),calibration:None,
+            });
+            gaps.push(T3Gap {
+                previous: r,
+                next,
+                trigger,
+                observed,
+                boundary,
+                status,
+                tokens,
+            });
+        }
+    }
+    let scenarios = [
+        T3IdleMode::Off,
+        T3IdleMode::OnReturn,
+        T3IdleMode::BeforeCacheExpires,
+    ]
+    .into_iter()
+    .map(|mode| {
+        t3_replay(
+            options,
+            &T3Replay {
+                requests: &requests,
+                events: &events,
+                samples,
+                ttls,
+                replay,
+            },
+            &gaps,
+            &mut periods,
+            mode,
+        )
+    })
+    .collect();
+    // All values are changed charges against the same native request baseline.
+    T3IdleComparison {
+        baseline: baseline.into(),
+        ttl,
+        scenarios,
+        periods,
+    }
+}
+
+/// Replay T3 changes through later native requests, converging at unrelated compactions.
+/// Recorded idle replacement is undone before inserting any hypothetical policy's summary.
+struct T3Replay<'a> {
+    requests: &'a [&'a Request],
+    events: &'a [&'a StructuralEvent],
+    samples: &'a CompactionSamples<'a>,
+    ttls: &'a Ttls,
+    replay: &'a Replay<'a>,
+}
+
+fn t3_replay(
+    options: &IdleOptions<'_>,
+    input: &T3Replay<'_>,
+    gaps: &[T3Gap<'_>],
+    periods: &mut [IdlePeriod],
+    mode: crate::model::T3IdleMode,
+) -> crate::model::T3IdleScenario {
+    let T3Replay {
+        requests,
+        events,
+        samples,
+        ttls,
+        replay,
+    } = input;
+    let requests = *requests;
+    let events = *events;
+    let ttl = ttls.main;
+    use crate::model::{T3IdleMode, T3IdleScenario};
+    enum Tick<'a> {
+        Request(&'a Request),
+        Boundary(&'a StructuralEvent),
+        Generate(usize),
+    }
+    let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::new();
+    let idle_ids: HashSet<&str> = events
+        .iter()
+        .filter(|e| e.idle_attribution == IdleAttribution::T3)
+        .map(|e| e.id.as_str())
+        .collect();
+    let idle_requests: HashSet<&str> = options
+        .summaries
+        .iter()
+        .filter(|s| idle_ids.contains(s.event.as_str()))
+        .filter_map(|s| s.request.as_deref())
+        .collect();
+    for &r in requests {
+        sessions
+            .entry(&r.session)
+            .or_default()
+            .push((r.time, 2, Tick::Request(r)));
+    }
+    for &e in events.iter().filter(|e| e.kind == EventKind::Compaction) {
+        sessions
+            .entry(&e.session)
+            .or_default()
+            .push((e.time, 0, Tick::Boundary(e)));
+    }
+    let baseline: HashMap<(&str, usize), &Cost> = replay
+        .selected
+        .iter()
+        .map(|s| ((s.request.as_str(), s.part), &s.cost))
+        .collect();
+    let mut costs = replay.added.clone();
+    costs.extend(replay.errors.iter().cloned().map(unknown_cost));
+    if requests.iter().any(|r| {
+        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+            && !idle_requests.contains(r.id.as_str())
+    }) {
+        costs.push(unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
+    }
+    let mut count = 0;
+    let mut final_count = 0;
+    if mode != T3IdleMode::Off {
+        for (i, gap) in gaps.iter().enumerate() {
+            if gap.status == PeriodStatus::Unknown {
+                costs.push(unknown_cost(
+                    "T3 run, observed-expiry or lifecycle evidence is unavailable",
+                ));
+            }
+            if gap.status != PeriodStatus::Eligible {
+                continue;
+            }
+            let at = if mode == T3IdleMode::OnReturn {
+                let Some(next) = gap.next else {
+                    continue;
+                };
+                // The native resume dialog is conditional. An explicit on-return outcome
+                // establishes it; otherwise model it only once the observed cache is cold.
+                if gap.observed != Some(mode) && gap.trigger.is_none_or(|t| next.time < t + 120_000)
+                {
+                    continue;
+                }
+                next.time
+            } else {
+                gap.trigger
+                    .unwrap_or_else(|| gap.boundary.map_or(gap.previous.end_time, |b| b.time))
+            };
+            sessions
+                .entry(&gap.previous.session)
+                .or_default()
+                .push((at, 1, Tick::Generate(i)));
+        }
+    }
+    for ticks in sessions.values_mut() {
+        ticks.sort_by_key(|(time, priority, _)| (*time, *priority));
+        let mut offset = 0i64;
+        let mut context = None;
+        let mut last_time = None;
+        let mut cache_lifetime = ttl.map(ttl_milliseconds);
+        let mut changed = false;
+        let mut cached_prefix = 0;
+        for (time, _, tick) in ticks {
+            match tick {
+                Tick::Request(r) => {
+                    let idle_run = r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some());
+                    for (part, p) in r.parts.iter().enumerate() {
+                        if idle_run
+                            || (idle_requests.contains(r.id.as_str())
+                                && p.kind == PartKind::Compaction)
+                        {
+                            continue;
+                        }
+                        let selected = options.since.is_none_or(|s| r.time >= s);
+                        if p.kind == PartKind::Compaction
+                            || (r.agent == Agent::Main && is_message(p))
+                        {
+                            let altered = if offset == 0 {
+                                Some(p.clone())
+                            } else {
+                                let size = prefix(p)
+                                    .and_then(|n| n.checked_add(offset))
+                                    .filter(|n| *n >= 0);
+                                let input = p
+                                    .usage
+                                    .input
+                                    .and_then(|n| n.checked_add(offset))
+                                    .filter(|n| *n >= 0);
+                                let part_ttl = if p.kind == PartKind::Compaction {
+                                    ttls.subagent
+                                } else {
+                                    ttl
+                                };
+                                size.zip(input).zip(part_ttl).map(|((size, input), ttl)| {
+                                    let read = if changed {
+                                        if last_time
+                                            .zip(cache_lifetime)
+                                            .is_some_and(|(last, life)| *time - last < life)
+                                        {
+                                            size.min(cached_prefix)
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        p.usage.read.unwrap_or(0).min(size)
+                                    };
+                                    let write = size - read;
+                                    BillingPart {
+                                        usage: Usage {
+                                            input: Some(input),
+                                            read: Some(read),
+                                            write: Some(write),
+                                            write5m: Some(if ttl == Ttl::FiveMinutes {
+                                                write
+                                            } else {
+                                                0
+                                            }),
+                                            write1h: Some(if ttl == Ttl::OneHour {
+                                                write
+                                            } else {
+                                                0
+                                            }),
+                                            ..p.usage
+                                        },
+                                        ..p.clone()
+                                    }
+                                })
+                            };
+                            if selected {
+                                costs.push(if offset==0 {
+                                    baseline.get(&(r.id.as_str(),part)).map_or_else(||unknown_cost("shared cache replay did not price this native part"),|c|(*c).clone())
+                                } else { altered.as_ref().map_or_else(||unknown_cost("T3 counterfactual carried prefix or effective TTL is unavailable"),|p|price_part(options.catalog,r,p)) });
+                            }
+                            if r.agent == Agent::Main && is_message(p) {
+                                context = p
+                                    .usage
+                                    .input
+                                    .zip(p.usage.output)
+                                    .and_then(|(a, b)| a.checked_add(b))
+                                    .and_then(|n| n.checked_add(offset));
+                                cached_prefix = altered.as_ref().and_then(prefix).unwrap_or(0);
+                                last_time = Some(r.end_time);
+                                cache_lifetime = ttl.map(ttl_milliseconds);
+                            }
+                        } else if selected {
+                            costs.push(baseline.get(&(r.id.as_str(), part)).map_or_else(
+                                || {
+                                    unknown_cost(
+                                        "shared cache replay did not price this native part",
+                                    )
+                                },
+                                |c| (*c).clone(),
+                            ));
+                        }
+                    }
+                    if !idle_run && options.since.is_none_or(|s| r.time >= s) {
+                        costs.push(server_cost(r));
+                    }
+                }
+                Tick::Boundary(e) => {
+                    let charge = options.summaries.iter().find(|s| s.event == e.id);
+                    if e.idle_attribution == IdleAttribution::T3 {
+                        let next = requests.iter().copied().find(|r| {
+                            r.session == e.session.as_ref()
+                                && r.time > e.time
+                                && r.agent == Agent::Main
+                                && r.t3.as_ref().is_none_or(|t| t.idle_mode.is_none())
+                                && r.parts.iter().any(is_message)
+                        });
+                        if let Some(next) = next {
+                            let full = next.parts.iter().find(|p| is_message(p)).and_then(prefix);
+                            match e.pre_tokens.zip(full) {Some((pre,full))=>offset+=pre-full,_=>costs.push(unknown_cost("applied T3 idle boundary lacks the pre-context or full resumed native prefix needed to undo it"))}
+                        }
+                        changed = true;
+                        // The recorded summary is removed from every scenario. A generated
+                        // summary is charged only by its policy's explicit Generate tick.
+                    } else {
+                        if let Some(charge) = charge.filter(|s| s.request.is_none())
+                            && options.since.is_none_or(|s| e.time >= s)
+                        {
+                            costs.push(if offset == 0 {
+                                charge.cost.clone()
+                            } else {
+                                unknown_cost(
+                                    "changed input to a later unlinked summary is unavailable",
+                                )
+                            });
+                        }
+                        offset = 0;
+                        context = e.post_tokens;
+                        changed = false;
+                    }
+                }
+                Tick::Generate(i) => {
+                    let gap = &gaps[*i];
+                    let Some(p) = gap.previous.parts.iter().find(|p| is_message(p)) else {
+                        continue;
+                    };
+                    let Some(input) = context.or(gap.tokens).filter(|n| *n >= 200_000) else {
+                        continue;
+                    };
+                    count += 1;
+                    if gap.next.is_none() {
+                        final_count += 1;
+                    }
+                    let matches: Vec<&CompactionSample> = samples
+                        .samples
+                        .iter()
+                        .filter(|s| {
+                            sample_key(s.request, s.p) == sample_key(gap.previous, p)
+                                && sample_key(gap.previous, p).is_some()
+                        })
+                        .collect();
+                    let uniform = matches.first().is_some_and(|first| {
+                        matches.iter().all(|s| {
+                            s.summary.model == first.summary.model
+                                && s.summary_request.provider == first.summary_request.provider
+                                && s.summary.tier == first.summary.tier
+                                && s.summary.speed == first.summary.speed
+                                && s.summary.geo == first.summary.geo
+                        })
+                    });
+                    if !uniform {
+                        costs.push(unknown_cost("T3 summary needs compatible linked native output and full resumed-prefix calibration"));
+                        continue;
+                    }
+                    let sample = matches[0];
+                    let full = median(matches.iter().map(|s| s.prefix).collect());
+                    let output = median(matches.iter().map(|s| s.output).collect());
+                    let overhead = median(
+                        matches
+                            .iter()
+                            .map(|s| {
+                                (s.summary.usage.input.unwrap_or(0)
+                                    - events
+                                        .iter()
+                                        .find(|e| e.id == s.event)
+                                        .and_then(|e| e.pre_tokens)
+                                        .unwrap_or(s.summary.usage.input.unwrap_or(0)))
+                                .max(0)
+                            })
+                            .collect(),
+                    );
+                    if full >= input {
+                        costs.push(unknown_cost(
+                            "T3 calibrated full resumed prefix does not shrink this context",
+                        ));
+                        continue;
+                    }
+                    let summary_ttl = ttls.subagent;
+                    let Some(ttl) = summary_ttl else {
+                        costs.push(unknown_cost(
+                            "T3 effective outside-main summary/cache TTL is unavailable",
+                        ));
+                        continue;
+                    };
+                    let same = sample.summary.model == p.model
+                        && sample.summary_request.provider == gap.previous.provider
+                        && sample.summary.speed == p.speed
+                        && sample.summary.geo == p.geo;
+                    let warm = same
+                        && last_time
+                            .zip(cache_lifetime)
+                            .is_some_and(|(last, life)| *time - last < life);
+                    let read = if warm { input.min(cached_prefix) } else { 0 };
+                    let write = input - read;
+                    let summary = BillingPart {
+                        usage: Usage {
+                            input: Some(input + overhead),
+                            output: Some(output),
+                            read: Some(read),
+                            write: Some(write),
+                            write5m: Some(if ttl == Ttl::FiveMinutes { write } else { 0 }),
+                            write1h: Some(if ttl == Ttl::OneHour { write } else { 0 }),
+                            ..sample.summary.usage
+                        },
+                        ..sample.summary.clone()
+                    };
+                    let cost = price_part(options.catalog, sample.summary_request, &summary);
+                    if options.since.is_none_or(|s| *time >= s) {
+                        costs.push(cost.clone());
+                    }
+                    periods[*i].summary_cost = cost;
+                    periods[*i].calibration = Some(PeriodCalibration {
+                        events: matches.iter().map(|s| s.event.into()).collect(),
+                        summary_tokens: output,
+                        prefix_tokens: full,
+                    });
+                    cached_prefix = (full - output)
+                        .min(median(
+                            matches
+                                .iter()
+                                .map(|s| s.p.usage.read.unwrap_or(0))
+                                .collect(),
+                        ))
+                        .max(0);
+                    offset += full - input;
+                    context = Some(full);
+                    last_time = Some(*time);
+                    cache_lifetime = Some(ttl_milliseconds(ttl));
+                    changed = true;
+                }
+            }
+        }
+    }
+    T3IdleScenario {
+        mode,
+        cost: add_costs(&costs),
+        summaries: count,
+        final_summaries: final_count,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2341,6 +3024,7 @@ mod tests {
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: Some(std::sync::Arc::new(Pricing {
                 model: Some("claude-opus-5-5".into()),
                 provider: Some("anthropic".into()),
@@ -2423,6 +3107,7 @@ mod tests {
             speed_directories: None,
             idle_directories: None,
             background: vec![],
+            t3: None,
         }
     }
 
@@ -2450,6 +3135,7 @@ mod tests {
             exposure: ExposureScan::default(),
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
+            t3: vec![],
         }
     }
 
@@ -3337,6 +4023,171 @@ mod tests {
         assert!(
             !unknown.contains("policy changes within a conversation"),
             "{unknown}"
+        );
+    }
+    fn t3_data(target: Vec<Request>, ttl: Ttl, mode: crate::model::T3IdleMode) -> Scan {
+        use crate::model::{T3Instance, T3Request};
+        let mut scan = data(target, vec![]);
+        let p = &mut scan.profiles[0];
+        p.ttl.main.value = Some(ttl);
+        p.idle = None;
+        p.t3 = Some(T3Instance {
+            state: "synthetic-t3".into(),
+            instance: "claudeAgent".into(),
+            enabled: true,
+            idle_mode: mode,
+            idle_owner: "t3/settings.json:idleCompaction".into(),
+            ownership_resolved: true,
+            limitations: vec![],
+        });
+        for r in &mut scan.requests {
+            r.client = Some("t3-code".into());
+            if r.parts.iter().any(is_message) {
+                r.parts[0].usage = usage(
+                    r.parts[0].usage.write.unwrap(),
+                    r.parts[0].usage.read.unwrap(),
+                    0,
+                    ttl,
+                );
+                r.t3 = Some(T3Request {
+                    thread: r.session.clone(),
+                    run: r.id.clone(),
+                    attempt: r.id.clone(),
+                    provider_turn: r.id.clone(),
+                    status: "completed".into(),
+                    completed_at: Some(r.end_time),
+                    usage_updated_at: Some(r.end_time),
+                    used_tokens: r.parts[0].usage.input,
+                    cache_expires_at: Some(r.end_time + ttl_milliseconds(ttl)),
+                    idle_mode: None,
+                    lifecycle_eligible: Some(true),
+                });
+            }
+        }
+        scan
+    }
+
+    fn t3_check(scan: &Scan, now: f64) -> crate::model::T3IdleCheck {
+        let catalog = prices();
+        let mut scan = scan.clone();
+        let summaries = compaction_charges(&mut scan, &catalog);
+        t3_idle_checks(&IdleOptions {
+            scan: &scan,
+            catalog: &catalog,
+            summaries: &summaries,
+            estimates: &IndexMap::new(),
+            ttls: &[],
+            windows: &[],
+            since: None,
+            now: (now * MINUTE as f64) as Millis,
+        })
+        .remove(0)
+    }
+
+    #[test]
+    fn t3_five_minute_cache_prices_all_modes_and_full_cold_resume() {
+        use crate::model::T3IdleMode::*;
+        let scan = t3_data(
+            vec![request("a", 0.0, 300_000), request("b", 10.0, 320_000)],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        let check = t3_check(&scan, 10.0);
+        let scenarios = &check.current_settings.scenarios;
+        assert_eq!(
+            scenarios.iter().map(|s| s.mode).collect::<Vec<_>>(),
+            vec![Off, OnReturn, BeforeCacheExpires]
+        );
+        assert!(
+            scenarios.iter().all(|s| s.cost.total_usd.is_some()),
+            "{scenarios:?}"
+        );
+        assert_eq!(scenarios[0].summaries, 0);
+        assert_eq!(scenarios[1].summaries, 1);
+        assert_eq!(scenarios[2].summaries, 1);
+        assert!(
+            scenarios[2].cost.total_usd.unwrap() < scenarios[1].cost.total_usd.unwrap(),
+            "warm proactive summary should beat cold on-return summary"
+        );
+        assert!(
+            scenarios[2].cost.total_usd.unwrap() < scenarios[0].cost.total_usd.unwrap(),
+            "full resumed-prefix savings should cover the summary"
+        );
+        assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
+        assert!(check.base.owner.contains("t3/settings.json"));
+        let p = check
+            .current_settings
+            .periods
+            .iter()
+            .find(|p| p.request == "a")
+            .unwrap();
+        assert_eq!(p.status, PeriodStatus::Eligible);
+        assert_eq!(p.return_timing, ReturnTiming::AfterExpiry);
+        assert_eq!(p.calibration.as_ref().unwrap().prefix_tokens, 20_000);
+    }
+
+    #[test]
+    fn t3_final_summary_is_charged_and_short_observations_are_censored() {
+        use crate::model::T3IdleMode::*;
+        let scan = t3_data(
+            vec![request("final", 0.0, 300_000)],
+            Ttl::FiveMinutes,
+            BeforeCacheExpires,
+        );
+        let check = t3_check(&scan, 10.0);
+        let s = &check.current_settings.scenarios;
+        assert_eq!(s[1].summaries, 0);
+        assert_eq!(s[2].final_summaries, 1);
+        assert!(s[2].cost.total_usd.unwrap() > s[0].cost.total_usd.unwrap());
+        assert_eq!(check.base.recommended, Some(Off));
+        let short = t3_check(&scan, 2.0);
+        assert_eq!(
+            short
+                .current_settings
+                .periods
+                .iter()
+                .find(|p| p.request == "final")
+                .unwrap()
+                .status,
+            PeriodStatus::Censored
+        );
+        assert!(
+            short
+                .current_settings
+                .scenarios
+                .iter()
+                .all(|s| s.summaries == 0)
+        );
+        assert_eq!(short.base.recommended, Some(BeforeCacheExpires));
+    }
+
+    #[test]
+    fn t3_missing_projection_or_calibration_stays_unknown_and_disabled_advisory() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(vec![request("a", 0.0, 300_000)], Ttl::FiveMinutes, Off);
+        scan.requests.iter_mut().find(|r| r.id == "a").unwrap().t3 = None;
+        let check = t3_check(&scan, 10.0);
+        assert!(check.current_settings.scenarios[2].cost.total_usd.is_none());
+        assert_eq!(check.base.action, Action::Advisory);
+        let mut scan = t3_data(vec![request("a", 0.0, 300_000)], Ttl::OneHour, Off);
+        scan.events.clear();
+        scan.requests.retain(|r| r.session != "sample");
+        let check = t3_check(&scan, 70.0);
+        assert!(check.current_settings.scenarios[2].cost.total_usd.is_none());
+        scan.profiles[0].t3.as_mut().unwrap().enabled = false;
+        assert_eq!(t3_check(&scan, 70.0).base.action, Action::Advisory);
+        assert!(
+            idle_checks(&IdleOptions {
+                scan: &scan,
+                catalog: &prices(),
+                summaries: &[],
+                estimates: &IndexMap::new(),
+                ttls: &[],
+                windows: &[],
+                since: None,
+                now: 70 * MINUTE
+            })
+            .is_empty()
         );
     }
 }

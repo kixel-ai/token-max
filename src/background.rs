@@ -532,6 +532,7 @@ mod tests {
             settings: Default::default(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: None,
         }
     }
@@ -573,6 +574,7 @@ mod tests {
             exposure: ExposureScan::default(),
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
+            t3: vec![],
         }
     }
 

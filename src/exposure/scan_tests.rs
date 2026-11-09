@@ -129,6 +129,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             env: Env::new(),
             claude_dirs: vec![],
             codex_dirs: vec![],
+            t3_dirs: vec![],
             managed_settings_file: text(&w.managed_settings_file()),
             codex_system_config_file: text(&w.home.join("system.toml")),
             codex_requirements_file: text(&w.home.join("requirements.toml")),

@@ -171,6 +171,7 @@ pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
         .scan
         .profiles
         .iter()
+        .filter(|p| p.t3.is_none())
         .filter_map(|p| check(options, p))
         .collect()
 }
@@ -1032,6 +1033,7 @@ mod tests {
             exposure: ExposureScan::default(),
             cache_context,
             coverage: ScanCoverage::default(),
+            t3: vec![],
         }
     }
 
@@ -1296,6 +1298,7 @@ mod tests {
             settings: IndexMap::new(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: None,
         });
         assert!(run(&compacted, 3 * HOUR).scenarios.is_empty());
@@ -1365,6 +1368,7 @@ mod tests {
             settings: IndexMap::new(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
+            t3: None,
             pricing: None,
         }
     }

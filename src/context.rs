@@ -1117,7 +1117,7 @@ fn guidance(c: &ContextCost, profiles: &[Profile]) -> Vec<String> {
                 }]
             }
         };
-        notes.push("Tool definitions and discovery context below are included in this server's cost. Missing discovery records mean unknown overhead, not zero. Search turns, returned definitions, cache changes and repeated loading cannot be attributed completely, so net deferral savings and an alwaysLoad recommendation are unknown.".into());
+        notes.push("Tool definitions and discovery context below are included in this server's cost. Missing discovery records mean unknown overhead, not zero. Search turns, returned definitions, cache changes and repeated loading cannot be attributed completely, so net deferral savings are unknown and no loading change is recommended.".into());
         return notes;
     }
     if c.kind != ContextKind::Instructions {

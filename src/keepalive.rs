@@ -200,7 +200,7 @@ impl Replayer<'_> {
         let idle_summaries: Vec<_> = session
             .events
             .iter()
-            .filter(|e| e.idle_attribution == IdleAttribution::Notice)
+            .filter(|e| e.idle_attribution == IdleAttribution::Notice && e.time >= self.since)
             .filter_map(|e| {
                 self.options
                     .summaries
@@ -245,7 +245,7 @@ impl Replayer<'_> {
         for (time, _, tick) in ticks {
             match tick {
                 Tick::Boundary(e) => {
-                    if e.idle_attribution == IdleAttribution::Notice {
+                    if e.idle_attribution == IdleAttribution::Notice && e.time >= self.since {
                         // Both pinging and leaving the client idle disable idle compaction.
                         // Undo the recorded replacement before the shared window simulation.
                         let pre = e.pre_tokens?;
@@ -346,7 +346,7 @@ impl Replayer<'_> {
             .events
             .iter()
             .copied()
-            .filter(|e| e.idle_attribution != IdleAttribution::Notice)
+            .filter(|e| e.idle_attribution != IdleAttribution::Notice || e.time < self.since)
             .collect();
         let settings: Vec<_> = session
             .windows
@@ -561,7 +561,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .collect();
     let samples = compaction_samples(&requests, &all_events, options.summaries);
     let mut window_events = WindowEvents::new(all_events.iter().copied());
-    window_events.suppress_idle();
+    window_events.suppress_idle(since);
     let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
     for &r in &requests {
         groups.entry(&r.session).or_default().push(r);
@@ -1173,7 +1173,7 @@ mod tests {
         let events: Vec<_> = events.iter().collect();
         let samples = compaction_samples(&requests, &events, &[]);
         let mut window_events = WindowEvents::new(events.iter().copied());
-        window_events.suppress_idle();
+        window_events.suppress_idle(0);
         let lifetime = Lifetime {
             ms: HOUR,
             cache: Cache::Claude(Ttl::OneHour),
@@ -1224,23 +1224,29 @@ mod tests {
 
     #[test]
     fn each_later_request_uses_its_actual_model_speed_geography_and_tier() {
-        let mut later = turn("a", 2 * HOUR + MINUTE);
-        later.parts[0].model = Some("claude-haiku-5-5".into());
-        later.parts[0].speed = Some("standard".into());
-        later.parts[0].geo = Some("us".into());
-        let original = later.clone();
-        let (base, pinged) = replay(vec![turn("a", 0), turn("a", 2 * HOUR), later], vec![], 2);
-        let (short_base, short_pinged) = replay(vec![turn("a", 0), turn("a", 2 * HOUR)], vec![], 2);
-        let mut expected = original.parts[0].clone();
-        expected.usage = Cache::Claude(Ttl::OneHour).usage(0, 103_000, 0, 500);
-        let mut before = original.parts[0].clone();
-        before.usage = Cache::Claude(Ttl::OneHour).usage(0, 101_000, 0, 500);
-        let cost = |p: &BillingPart| price_part(&prices(), &original, p).total_usd.unwrap();
-        near(
-            (pinged.recorded - base.recorded) - (short_pinged.recorded - short_base.recorded),
-            cost(&expected) - cost(&before),
-        );
-        assert_eq!(pinged.reads[&original.id], 0);
+        for (model, speed) in [
+            ("claude-haiku-5-5", "standard"),
+            ("claude-opus-5-5", "fast"),
+        ] {
+            let mut later = turn("a", 2 * HOUR + MINUTE);
+            later.parts[0].model = Some(model.into());
+            later.parts[0].speed = Some(speed.into());
+            later.parts[0].geo = Some("us".into());
+            let original = later.clone();
+            let (base, pinged) = replay(vec![turn("a", 0), turn("a", 2 * HOUR), later], vec![], 2);
+            let (short_base, short_pinged) =
+                replay(vec![turn("a", 0), turn("a", 2 * HOUR)], vec![], 2);
+            let mut expected = original.parts[0].clone();
+            expected.usage = Cache::Claude(Ttl::OneHour).usage(0, 103_000, 0, 500);
+            let mut before = original.parts[0].clone();
+            before.usage = Cache::Claude(Ttl::OneHour).usage(0, 101_000, 0, 500);
+            let cost = |p: &BillingPart| price_part(&prices(), &original, p).total_usd.unwrap();
+            near(
+                (pinged.recorded - base.recorded) - (short_pinged.recorded - short_base.recorded),
+                cost(&expected) - cost(&before),
+            );
+            assert_eq!(pinged.reads[&original.id], 0);
+        }
     }
 
     #[test]
@@ -1433,6 +1439,19 @@ mod tests {
         .remove(0);
         assert_eq!(original.unpriced, 0);
         assert!(smaller.scenarios[1].avoided_usd < original.scenarios[1].avoided_usd);
+    }
+
+    #[test]
+    fn a_temporary_model_switch_preserves_the_earlier_cohorts_warm_cache() {
+        let mut other = turn("a", 110 * MINUTE);
+        other.parts[0].model = Some("claude-haiku-5-5".into());
+        let (base, pinged) = replay(
+            vec![turn("a", 0), other, turn("a", 159 * MINUTE)],
+            vec![],
+            2,
+        );
+        assert_eq!(base.reads["a:9540000"], 0);
+        assert_eq!(pinged.reads["a:9540000"], 103_000);
     }
 
     #[test]

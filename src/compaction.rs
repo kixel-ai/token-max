@@ -224,12 +224,14 @@ impl<'a> WindowEvents<'a> {
     }
 
     /// Keep calibration identities while removing idle boundaries from an idle-off policy.
-    pub(crate) fn suppress_idle(&mut self) {
+    pub(crate) fn suppress_idle(&mut self, since: Millis) {
         let events: Vec<_> = self
             .by_id
             .values()
             .copied()
-            .filter(|e| e.idle_attribution != crate::model::IdleAttribution::Notice)
+            .filter(|e| {
+                e.idle_attribution != crate::model::IdleAttribution::Notice || e.time < since
+            })
             .collect();
         self.boundaries = SessionBoundaries::new(events.iter().copied());
         self.cache = CacheBoundaries::new(events);

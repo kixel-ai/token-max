@@ -1112,11 +1112,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for (owner, shown) in latest_catalogs {
         let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::new();
         for id in shown {
-            let c = components[id.as_str()];
+            let c = components[&**id];
             if c.category != Category::SkillListing {
                 continue;
             }
-            for (member, (key, _)) in c.members.iter().zip(&interned.of[&(id.as_str(), owner)]) {
+            for (member, (key, _)) in c.members.iter().zip(&interned.of[&(&**id, owner)]) {
                 duplicates
                     .entry(&components[member.as_str()].name)
                     .or_default()

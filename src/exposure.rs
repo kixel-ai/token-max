@@ -1043,12 +1043,14 @@ impl ExposureCollector {
         }
     }
 
-    fn invoke(&mut self, name: &str, input: Invoke, line: &Line<'_>) -> Result<(), ScanError> {
+    fn invoke(&mut self, name: &str, mut input: Invoke, line: &Line<'_>) -> Result<(), ScanError> {
         let time = line
             .time
             .ok_or_else(|| ScanError::new("missing invocation timestamp"))?;
         let target = if is_skill(input.kind) {
-            target("skill", self.skill_name(name))
+            let name = self.skill_name(name);
+            input.group = group(name).or(input.group);
+            target("skill", name)
         } else {
             target("mcp", name)
         };
@@ -1769,12 +1771,13 @@ impl ExposureCollector {
             basis: IdentityBasis::Recorded,
         };
         self.invoke(target_name, invoke, line)?;
+        let target_name = if scope == "skill" {
+            self.skill_name(target_name)
+        } else {
+            target_name
+        };
         let pending = PendingTool {
-            target: if scope == "skill" {
-                target(scope, self.skill_name(target_name))
-            } else {
-                target(scope, target_name)
-            },
+            target: target(scope, target_name),
             group: group(target_name),
             kind,
         };
@@ -3688,13 +3691,20 @@ mod tests {
             let scan = c.finish(&[feed.request("r", 3, None)], None);
             scan.invocations
                 .iter()
-                .map(|i| (i.kind, i.target.clone()))
+                .map(|i| (i.kind, i.target.clone(), i.group.clone()))
                 .collect::<Vec<_>>()
         };
         let both = |name: &str| {
+            let namespace = name
+                .starts_with("anthropic-skills:")
+                .then(|| identity("plugin:anthropic-skills"));
             [
-                (InvocationKind::SkillRequest, target("skill", name)),
-                (InvocationKind::SkillCall, target("skill", name)),
+                (
+                    InvocationKind::SkillRequest,
+                    target("skill", name),
+                    namespace.clone(),
+                ),
+                (InvocationKind::SkillCall, target("skill", name), namespace),
             ]
         };
         assert_eq!(

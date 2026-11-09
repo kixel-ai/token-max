@@ -3,8 +3,9 @@
 //!
 //! Claude Code 2.1.319 sends suggestions and recaps as forks of the main conversation with
 //! `skipTranscript` and `skipCacheWrite`, so transcripts never record them. Their cost is
-//! estimated at each recorded turn where Claude Code would have sent one: a cache read of the
-//! conversation, the last response and the instruction as new input, and a short reply.
+//! estimated at each recorded turn where Claude Code would have sent one: the conversation
+//! prefix at its cache-read or expired-input rate, the last response and instruction as new
+//! input, and a short reply.
 
 use indexmap::IndexSet;
 

@@ -217,6 +217,68 @@ fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
 }
 
 #[test]
+fn a_tool_only_recommendation_sets_exit_one() {
+    let w = Workspace::new();
+    w.settings(r#"{"promptCacheTtl":"1h","subagentPromptCacheTtl":"1h"}"#);
+    let tools: Vec<Value> = ["read", "write"]
+        .map(|tool| {
+            json!({
+                "name": format!("mcp__docs__{tool}"),
+                "description": "synthetic schema ".repeat(50),
+                "input_schema": {"type": "object"}
+            })
+        })
+        .into();
+    let calls: Vec<Value> = (0..20).map(|i| json!({"type": "tool_use", "id": format!("call-{i}"), "name": "mcp__docs__read", "input": {}})).collect();
+    let records = [
+        json!({"type": "api-request", "id": "api", "sessionId": "session", "timestamp": "2026-11-01T00:00:00Z", "params": {
+            "model": "claude-opus-5-5", "system": "synthetic system", "messages": [], "tools": tools
+        }}),
+        json!({"type": "assistant", "uuid": "block", "sessionId": "session", "timestamp": "2026-11-01T00:00:01Z", "entrypoint": "sdk-ts", "requestRef": "api", "message": {
+            "id": "message", "model": "claude-opus-5-5", "content": calls, "usage": {
+                "input_tokens": 1000, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard", "speed": "standard", "inference_geo": "global"
+            }
+        }}),
+    ];
+    let lines = records
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    std::fs::write(w.transcript(), lines).unwrap();
+    let base = prices_args(&w);
+    let (status, stdout, stderr) = run(&mut command(
+        &w,
+        &args(&base, &["--json-full", "--max-cost-per-use", "0.001"]),
+    ));
+    assert_eq!(status, 1, "{stderr}\n{stdout}");
+    let report: Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|c| c["action"] != "change")
+    );
+    let server = report["context"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "docs")
+        .unwrap();
+    assert_eq!(server["verdict"], "keep");
+    let write = server["details"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "mcp__docs__write")
+        .unwrap();
+    assert_eq!(write["verdict"], "off");
+}
+
+#[test]
 fn compact_json_preserves_the_full_reports_decisions_without_request_arrays() {
     let w = Workspace::new();
     w.fixture();

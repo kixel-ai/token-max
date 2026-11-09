@@ -171,7 +171,3 @@ interleaved lines, several recent). ✅ price a custom `ANTHROPIC_BASE_URL` as
 the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
-
-## Required
-
-- [Codex skills catalog](/quest/m0/skills-catalog.md) - a priced line and `config.toml` switch per Codex skill, and duplicate listings flagged

@@ -274,6 +274,7 @@ mod tests {
             scope: Scope::Component,
             members: vec![],
             targets: vec!["same-skill".into()],
+            skill_path: None,
         };
         let row = |id: &str| Visibility {
             harness: Harness::Claude,
@@ -329,6 +330,7 @@ mod tests {
             current: Current::Unresolved,
             scope: Scope::Component,
             members: vec![],
+            skill_path: None,
             targets: vec![],
         };
         let row = |id: &str| Visibility {

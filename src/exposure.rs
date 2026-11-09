@@ -10,6 +10,8 @@ use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
+use crate::skills::skill_file;
+
 use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
@@ -121,6 +123,10 @@ pub struct ExposureCollector {
     session: Text,
     // The last raw Claude session id and the session derived from it.
     session_cache: Option<(String, Text)>,
+    turn: Option<String>,
+    turn_from_user: bool,
+    turn_available: bool,
+    turn_aliases: HashMap<String, String>,
     client: Option<String>,
     version: Option<String>,
     uncertain: bool,
@@ -128,6 +134,8 @@ pub struct ExposureCollector {
     digests: HashMap<String, Ids>,
     // Catalog names keyed without ASCII case, retaining their spelling for use attribution.
     known_skills: HashMap<String, String>,
+    // A name resolves only when every current rendered copy has the same absolute path.
+    codex_skill_paths: HashMap<String, (Option<String>, usize)>,
     // Explicit typed skill blocks establish use evidence without claiming catalog membership.
     typed_skills: HashSet<String>,
     // Short names of listed synced skills: `/pdf` reaches `anthropic-skills:pdf` while no
@@ -374,12 +382,17 @@ impl ExposureCollector {
             pending_removed: IndexSet::new(),
             session: Text::from(""),
             session_cache: None,
+            turn: None,
+            turn_from_user: false,
+            turn_available: false,
+            turn_aliases: HashMap::new(),
             client: None,
             version: None,
             uncertain: true,
             deferred: IndexSet::new(),
             digests: HashMap::new(),
             known_skills: HashMap::new(),
+            codex_skill_paths: HashMap::new(),
             typed_skills: HashSet::new(),
             synced_skills: HashMap::new(),
             user_aliases: HashMap::new(),
@@ -404,9 +417,13 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.codex_skill_paths.clear();
         self.typed_skills.clear();
         self.synced_skills.clear();
         self.uncertain = true;
+        self.turn = None;
+        self.turn_from_user = false;
+        self.turn_available = false;
         self.invalidated = true;
     }
 
@@ -438,6 +455,28 @@ impl ExposureCollector {
             self.session = id(present(payload.get("id")).or(payload.get("session_id")))?.into();
             self.client = label(field(payload, "originator")).or(label(field(payload, "source")));
             self.version = label(field(payload, "cli_version"));
+        }
+        if !claude
+            && (kind == Some("turn_context")
+                || (kind == Some("event_msg") && is(payload, "type", "task_started")))
+        {
+            let recorded = payload
+                .get("turn_id")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(identity);
+            if let Some(recorded) = recorded {
+                if self.turn_from_user
+                    && let Some(inferred) = &self.turn
+                {
+                    self.turn_aliases.insert(inferred.clone(), recorded.clone());
+                    self.turn_available = false;
+                } else if self.turn.as_ref() != Some(&recorded) {
+                    self.turn_available = true;
+                }
+                self.turn = Some(recorded);
+                self.turn_from_user = false;
+            }
         }
         let line = Line {
             raw,
@@ -549,6 +588,7 @@ impl ExposureCollector {
             observations,
             mut lists,
             mut views,
+            turn_aliases,
             ..
         } = self;
         let mut previous: Option<Ids> = None;
@@ -693,6 +733,13 @@ impl ExposureCollector {
             invocations: invocations
                 .into_values()
                 .filter(|i| since.is_none_or(|s| i.time >= s))
+                .map(|mut i| {
+                    if let Some(recorded) = i.turn.as_ref().and_then(|turn| turn_aliases.get(turn))
+                    {
+                        i.turn = Some(recorded.clone());
+                    }
+                    i
+                })
                 .collect(),
             visibility,
             tool_calls: tool_calls(calls.into_values()),
@@ -798,6 +845,9 @@ impl ExposureCollector {
         self.pending_removed.clear();
         self.session = identity(&snapshot.file).into();
         self.session_cache = None;
+        self.turn = None;
+        self.turn_from_user = false;
+        self.turn_available = false;
         self.client = None;
         self.version = None;
         self.uncertain = true;
@@ -805,6 +855,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.codex_skill_paths.clear();
         self.typed_skills.clear();
         self.synced_skills.clear();
         self.user_aliases.clear();
@@ -946,6 +997,7 @@ impl ExposureCollector {
                         Scope::Component
                     },
                     members: vec![],
+                    skill_path: None,
                     targets: new.targets.unwrap_or_else(|| {
                         if member || category == Category::SkillBody {
                             vec![target("skill", new.name)]
@@ -1027,13 +1079,40 @@ impl ExposureCollector {
             at,
         );
         let mut members = vec![];
-        for (name, span) in listing_entries(body) {
+        let entries = listing_entries(body);
+        let codex = self.file.as_ref().expect("observing a file").harness == Harness::Codex;
+        let paths = if codex {
+            crate::skills::paths(body, &entries)
+        } else {
+            vec![None; entries.len()]
+        };
+        for ((name, span), path) in entries.into_iter().zip(paths) {
             self.know_skill(name);
             let new = New {
                 role: Role::Member,
                 ..New::active(Category::SkillListing, name, "rendered-listing-entry-span")
             };
-            members.push(self.component(new, Content::Text(span), at).to_string());
+            let member = if codex {
+                self.codex_skill_paths
+                    .entry(name.to_string())
+                    .and_modify(|prior| {
+                        if prior.0 != path {
+                            prior.0 = None;
+                        }
+                        prior.1 += 1;
+                    })
+                    .or_insert_with(|| (path.clone(), 1));
+                let key: Text =
+                    component_key(Category::SkillListing, &format!("{name}@{path:?}")).into();
+                let size = Content::Text(span).measure();
+                let revision = identity(&format!("{key}:{}", size.fingerprint));
+                let member = self.place(new, &key, &revision, &size, at);
+                self.components[&*member].skill_path = path;
+                member
+            } else {
+                self.component(new, Content::Text(span), at)
+            };
+            members.push(member.to_string());
         }
         self.components[&*aggregate].members = members;
         aggregate
@@ -1042,6 +1121,7 @@ impl ExposureCollector {
     fn clear(&mut self, category: Option<Category>) {
         if category.is_none_or(|category| category == Category::SkillListing) {
             self.known_skills.clear();
+            self.codex_skill_paths.clear();
             self.synced_skills.clear();
         }
         let pending = &mut self.pending_removed;
@@ -1071,8 +1151,24 @@ impl ExposureCollector {
             .ok_or_else(|| ScanError::new("missing invocation timestamp"))?;
         let target = if is_skill(input.kind) {
             let name = self.skill_name(name);
-            input.group = group(name).or(input.group);
-            target("skill", name)
+            let selected = (input.kind == InvocationKind::SkillRequest)
+                .then(|| self.codex_skill_paths.get(name))
+                .flatten();
+            let ambiguous = selected.is_some_and(|(path, count)| path.is_none() && *count > 1);
+            let name = selected
+                .and_then(|(path, _)| path.as_deref())
+                .unwrap_or(name);
+            input.group = input.group.or_else(|| group(name));
+            target(
+                if ambiguous {
+                    "skill-ambiguous"
+                } else if selected.is_some_and(|(path, _)| path.is_none()) {
+                    "skill-unresolved"
+                } else {
+                    "skill"
+                },
+                &crate::skills::normalize(name),
+            )
         } else {
             target("mcp", name)
         };
@@ -1090,6 +1186,10 @@ impl ExposureCollector {
             kind_name(input.kind)
         ));
         if let Some(prior) = self.invocations.get_mut(&id) {
+            if input.via == Via::Typed {
+                prior.target = target;
+                prior.via = input.via;
+            }
             prior.locations.push(location.clone());
             if !prior.sessions.iter().any(|s| **s == *self.session) {
                 prior.sessions.push(self.session.to_string());
@@ -1117,6 +1217,9 @@ impl ExposureCollector {
             session: self.session.to_string(),
             sessions: vec![self.session.to_string()],
             identity_basis: input.basis,
+            turn: (file.harness == Harness::Codex)
+                .then(|| self.turn.clone())
+                .flatten(),
             harness: file.harness,
             client: self.client.clone(),
             version: self.version.clone(),
@@ -1640,6 +1743,21 @@ impl ExposureCollector {
             }
             _ => array(contents)?,
         };
+        let native_user = is(p, "type", "user_message") || is(item, "type", "UserMessage");
+        let user = user
+            && raw.get("isMeta") != Some(&Value::Bool(true))
+            && (!codex
+                || native_user
+                || blocks.iter().any(|v| {
+                    let b = object(v);
+                    is(b, "type", "skill")
+                        || b.get("text").and_then(Value::as_str).is_some_and(|t| {
+                            let t = t.trim_start();
+                            !t.starts_with("<skill>") && !t.starts_with("<user_shell_command>")
+                        })
+                }));
+        let mut block_ids = vec![];
+        let mut typed_aliases = HashMap::new();
         for (index, v) in blocks.iter().enumerate() {
             let b = object(v);
             let source = match present(raw.get("uuid")).or(present(item.get("id"))) {
@@ -1667,18 +1785,70 @@ impl ExposureCollector {
                 call = format!("user:{signature}:{occurrence}");
                 basis = IdentityBasis::ContentOccurrence;
             }
+            if codex && let Some(t) = block_text {
+                for (offset, name) in mentions(t) {
+                    typed_aliases
+                        .entry(name.to_ascii_lowercase())
+                        .or_insert_with(|| (format!("{call}:{offset}"), basis));
+                }
+            }
+            if user && is(b, "type", "skill") {
+                self.typed_skills
+                    .insert(text(b.get("name"))?.to_ascii_lowercase());
+            }
+            block_ids.push((call, basis));
+        }
+        if user && codex {
+            // Text aliases share their inferred turn, so a request and a later load
+            // count as one use even when native records lack a turn id.
+            let boundary = blocks
+                .iter()
+                .zip(&block_ids)
+                .find(|(v, _)| object(v).get("text").is_some_and(Value::is_string))
+                .map(|(_, id)| id)
+                .or_else(|| block_ids.first());
+            let inferred = boundary.map(|(call, _)| identity(call));
+            let recorded = inferred
+                .as_ref()
+                .and_then(|turn| self.turn_aliases.get(turn))
+                .cloned()
+                .or_else(|| self.turn_available.then(|| self.turn.clone()).flatten());
+            if let (Some(inferred), Some(recorded)) = (&inferred, &recorded) {
+                self.turn_aliases.insert(inferred.clone(), recorded.clone());
+            }
+            self.turn_from_user = recorded.is_none();
+            self.turn_available = false;
+            self.turn = recorded.or(inferred);
+        }
+        for (v, (call, basis)) in blocks.iter().zip(block_ids) {
+            let b = object(v);
+            let block_text = b.get("text").and_then(Value::as_str);
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
-                self.typed_skills.insert(name.to_ascii_lowercase());
+                let alias = typed_aliases.get(&name.to_ascii_lowercase());
                 let invoke = Invoke {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
                     status: InvocationStatus::Requested,
-                    call: call.clone(),
+                    call: alias.map_or_else(|| call.clone(), |(call, _)| call.clone()),
                     group: group(name),
-                    basis: IdentityBasis::Recorded,
+                    basis: alias.map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
                 };
-                self.invoke(name, invoke, line)?;
+                let selected = if codex {
+                    b.get("path")
+                        .and_then(Value::as_str)
+                        .filter(|p| crate::skills::absolute(p) && skill_file(p))
+                        .filter(|_| {
+                            !self
+                                .codex_skill_paths
+                                .get(self.skill_name(name))
+                                .is_some_and(|(path, count)| path.is_none() && *count == 1)
+                        })
+                        .unwrap_or(name)
+                } else {
+                    name
+                };
+                self.invoke(selected, invoke, line)?;
             }
             if user
                 && raw.get("isMeta") != Some(&Value::Bool(true))
@@ -1882,8 +2052,11 @@ impl ExposureCollector {
                 let invoke = Invoke {
                     kind: InvocationKind::SkillLoad,
                     via: Via::Completion,
-                    status: if succeeded {
+                    status: if succeeded && parsed.len() == 1 {
                         InvocationStatus::Completed
+                    } else if succeeded {
+                        // A compound command's exit status cannot confirm each file read.
+                        InvocationStatus::Called
                     } else {
                         InvocationStatus::Failed
                     },
@@ -2573,11 +2746,6 @@ fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or("")
 }
 
-/// `/[/\\]SKILL\.md$/`
-fn skill_file(path: &str) -> bool {
-    path.ends_with("/SKILL.md") || path.ends_with("\\SKILL.md")
-}
-
 /// `/^(?:(?:mcp|functions)\.)?(?:read_resource|...|get_prompt)$/`
 fn resource_tool(name: &str) -> bool {
     let bare = name
@@ -2597,6 +2765,9 @@ fn resource_tool(name: &str) -> bool {
 
 /// A plugin (`name:`) or MCP server (`mcp__server__`) owner identity.
 fn group(value: &str) -> Option<String> {
+    if crate::skills::absolute(value) || skill_file(value) {
+        return None;
+    }
     // /^(?:mcp__)?([^:]+):/
     let plugin = value.find(':').and_then(|colon| {
         if value.starts_with("mcp__") && colon > 5 {
@@ -3798,7 +3969,7 @@ mod tests {
                 (InvocationKind::SkillReference, target("skill", "pdf")),
                 (
                     InvocationKind::SkillRequest,
-                    target("skill", "anthropic-skills:pdf")
+                    target("skill-unresolved", "anthropic-skills:pdf")
                 ),
             ]
         );
@@ -4163,5 +4334,24 @@ mod tests {
         assert!(!is_subagent("/p/subagents.jsonl"));
         assert!(resource_tool("functions.list_mcp_resources"));
         assert!(!resource_tool("mcp.mcp.get_prompt"));
+    }
+
+    #[test]
+    fn malformed_optional_codex_turn_ids_do_not_discard_exposure_records() {
+        for turn_id in [json!(""), json!(42)] {
+            let mut c = ExposureCollector::new(None);
+            let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
+            feed.all(&mut c, vec![
+                json!({"type":"session_meta", "timestamp":at(0), "payload":{"id":"s"}}),
+                json!({"type":"turn_context", "timestamp":at(0), "payload":{"turn_id":turn_id}}),
+                json!({"type":"event_msg", "timestamp":at(0), "payload":{"type":"task_started", "turn_id":turn_id}}),
+                json!({"type":"world_state", "timestamp":at(0), "payload":{"full":true,
+                    "state":{"host_skills":{"body":"- foo: x (file: /skills/foo/SKILL.md)"}}}}),
+                json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$foo"}}),
+            ]);
+            let scan = c.finish(&[feed.request("r", 2, None)], None);
+            assert_eq!(scan.invocations.len(), 1);
+            assert_eq!(scan.invocations[0].kind, InvocationKind::SkillRequest);
+        }
     }
 }

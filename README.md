@@ -85,11 +85,18 @@ ownership stays there and does not cause exit 1.
 Features sent with every request, such as a tool, MCP server or skill, show what
 they cost and how often they were used. One is recommended off when it cost more
 than `--max-cost-per-use` (default $1) per use, counting no use as one; the rest
-are kept. A skill's uses count only the model's own calls, because hiding it
+are kept. A Claude skill's uses count only the model's own calls, because hiding it
 with `skillOverrides` set to `user-invocable-only` still lets you type `/name`.
 Skills synced from claude.ai share one line, since only `syncClaudeAiSkills`
 turns them off in settings, and that also removes typed uses, so those count.
-Instruction files, plugin skills, which `skillOverrides` does not reach, and the
+Codex skills have separate listing-cost lines by absolute `SKILL.md` path,
+with requested uses and confirmed file loads distinguished. Disable one with
+`[[skills.config]]`, its `path`, and `enabled = false` in `config.toml`; this
+also removes explicit invocation. Same-named copies are flagged even without
+prices, with one copy retained. Repeated discovery of the same path needs the
+redundant source removed. Zero observations do not prove nonuse, and listing
+cost is not promised savings: Codex can backfill the freed catalog space.
+Instruction files, Claude plugin skills, which `skillOverrides` does not reach, and the
 system prompt, core tools such as Bash and Read, and the skill and subagent
 lists have no switch and are listed after the verdicts.
 The report ends with one `settings.json` or `config.toml` snippet per settings file holding every

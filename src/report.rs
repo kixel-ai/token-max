@@ -1776,9 +1776,61 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
             Some(server) => format!("MCP server {server} output"),
             None => format!("{} output", c.name),
         },
+        ContextKind::Skill if c.skill.as_ref().is_some_and(|s| s.path.is_some()) => format!(
+            "Skill {} ({})",
+            c.name,
+            out.home(c.skill.as_ref().unwrap().path.as_ref().unwrap())
+        ),
         ContextKind::Skill => format!("Skill {}", c.name),
         ContextKind::Instructions => out.home(&c.name),
         ContextKind::System | ContextKind::Other => c.name.clone(),
+    }
+}
+
+/// Codex counts positive request/load evidence, never inferring successful execution or nonuse.
+fn catalog_evidence(c: &ContextCost) -> String {
+    let Some(s) = &c.skill else {
+        return String::new();
+    };
+    let mut text = format!(
+        "{} requested; {} confirmed SKILL.md loads; successful invocation unknown",
+        count(s.requested),
+        count(s.loaded)
+    );
+    if s.ambiguous_requests > 0 {
+        text += &format!(
+            "; {} name-only requests ambiguous across paths, excluded from uses",
+            count(s.ambiguous_requests)
+        );
+    }
+    text
+}
+
+fn catalog_control(c: &ContextCost) -> String {
+    match c.skill.as_ref().and_then(|s| s.path.as_ref()) {
+        Some(path) => format!("Disable in config.toml with [[skills.config]], path = {}, enabled = false", toml::Value::String(path.clone())),
+        None => "Disable control unavailable: the recorded catalog does not resolve an absolute SKILL.md path".into(),
+    }
+}
+
+fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
+    if !report.context.iter().any(|c| c.skill.is_some()) {
+        return;
+    }
+    out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. A request and confirmed loads in one user turn count as one use; absent turn boundaries, evidence is conservatively grouped within its session. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, 0);
+    let mut seen = IndexSet::new();
+    for c in report
+        .context
+        .iter()
+        .filter(|c| c.current && c.skill.as_ref().is_some_and(|s| s.duplicate_entries > 1))
+        .filter(|c| seen.insert((&c.profiles, &c.name)))
+    {
+        let s = c.skill.as_ref().unwrap();
+        let retained = s.retained_path.as_ref().map_or_else(
+            || "an unresolved path; resolve the listed paths before disabling copies".into(),
+            |p| out.home(p),
+        );
+        out.line(&format!("Duplicate skill {}: {} same-named catalog entries. Preferred copy: {retained}; disable redundant paths. The preferred copy still follows --max-cost-per-use. Repeated entries of the same path need their duplicate discovery source removed. If a copy is symlinked, remove the redundant link at its source; transcripts cannot establish symlink identity.", c.name, count(s.duplicate_entries)), 2, 0);
     }
 }
 
@@ -2205,14 +2257,23 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     }
     let piece = |c: &ContextCost, out: &Out<'_>| {
         let label = piece_label(c, out) + &suffix(c, out);
-        let cost = format!(
-            "Costs {}",
-            monthly(c.estimated_usd.unwrap_or(0.0), since, Some(until))
+        let cost = c.estimated_usd.map_or_else(
+            || "Cost unknown".into(),
+            |usd| format!("Costs {}", monthly(usd, since, Some(until))),
         );
         let calls = c.calls.unwrap_or(0);
         // Only the model's calls count for a skill that stays typeable.
         let typed = typed_only(c.control.as_ref());
-        let uses = if calls == 0 {
+        let uses = if c.skill.is_some() {
+            format!(
+                "{} observed skill turns ({} per use, counting zero as one); {}. {}",
+                count(calls),
+                c.cost_per_use_usd
+                    .map_or_else(|| "cost unknown".into(), about),
+                catalog_evidence(c),
+                catalog_control(c)
+            )
+        } else if calls == 0 {
             if typed {
                 "the model never used it".to_string()
             } else {
@@ -2421,7 +2482,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         for c in unpriced {
             let text = format!(
-                "{}{}: on. {} Turn off: {}.",
+                "{}{}: on. {}{} {}.",
                 piece_label(c, out),
                 suffix(c, out),
                 c.estimated_usd.map_or_else(
@@ -2435,7 +2496,16 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         }
                     }
                 ),
-                control_text(c.control.as_ref().expect("switchable context"), c.harness)
+                if c.skill.is_some() {
+                    format!(" {}.", catalog_evidence(c))
+                } else {
+                    String::new()
+                },
+                if c.skill.is_some() {
+                    catalog_control(c)
+                } else {
+                    format!("Turn off: {}", control_text(c.control.as_ref().expect("switchable context"), c.harness))
+                }
             );
             out.line(&text, 2, 0);
         }
@@ -2574,11 +2644,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         for c in fixed.iter().filter(|c| c.kind == ContextKind::Skill) {
             let calls = c.calls.unwrap_or(0);
             let text = format!(
-                "{}{}: {}; {}. {PLUGIN_SKILL}.",
+                "{}{}: {}; {}. {}.",
                 piece_label(c, out),
                 suffix(c, out),
                 cost_text(c),
-                if calls == 0 {
+                if c.skill.is_some() {
+                    catalog_evidence(c)
+                } else if calls == 0 {
                     "never used".into()
                 } else {
                     format!(
@@ -2586,6 +2658,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         count(calls),
                         if calls == 1 { "" } else { "s" }
                     )
+                },
+                if c.skill.is_some() {
+                    catalog_control(c)
+                } else {
+                    PLUGIN_SKILL.into()
                 }
             );
             out.line(&text, 2, 0);
@@ -2622,6 +2699,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             );
         }
     }
+    catalog_guidance(report, out);
     let mut files: IndexMap<&str, Vec<&Control>> = IndexMap::new();
     for c in &off {
         let file = settings_file
@@ -2749,6 +2827,11 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                 if results == 1 { "" } else { "s" },
                 count(c.largest_characters.unwrap_or(0))
             ),
+            _ if c.skill.is_some() => format!(
+                "; {} observed skill turns; {}",
+                count(c.calls.unwrap_or(0)),
+                catalog_evidence(c)
+            ),
             Some(0) => "; no recorded use".into(),
             Some(calls) => format!(
                 "; used {} time{}, last {}",
@@ -2810,6 +2893,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             None if c.kind == ContextKind::Instructions => {
                 "Turn off: trim or scope this file".into()
             }
+            None if c.skill.is_some() => catalog_control(c),
             None if c.kind == ContextKind::Skill => PLUGIN_SKILL.into(),
             None if c.kind == ContextKind::ToolOutput => match output_cap(report, c) {
                 Some((_, cap)) => format!("Capped by {cap}"),
@@ -2825,6 +2909,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         };
         out.line(&text, 6, 0);
     }
+    catalog_guidance(report, out);
 }
 
 #[cfg(test)]
@@ -3120,6 +3205,7 @@ mod tests {
         ContextCost {
             harness: Harness::Claude,
             largest_characters: None,
+            skill: None,
             details: vec![],
             instruction_size: None,
             profiles: vec!["profile".into()],
@@ -4336,6 +4422,7 @@ mod tests {
         let skill = ContextCost {
             harness: Harness::Claude,
             largest_characters: None,
+            skill: None,
             details: vec![],
             instruction_size: None,
             profiles: vec![report.scan.profiles[0].id.clone()],

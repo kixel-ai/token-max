@@ -971,7 +971,8 @@ impl ExposureCollector {
     /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
     fn know_skill(&mut self, name: &str) {
         let key = name.to_ascii_lowercase();
-        if let Some(short) = synced_short(&key)
+        if self.file.as_ref().expect("observing a file").harness == Harness::Claude
+            && let Some(short) = synced_short(&key)
             && !claude_command(short)
         {
             self.synced_skills
@@ -3711,6 +3712,39 @@ mod tests {
         assert_eq!(
             resolved(json!(["anthropic-skills:PDF"])),
             both("anthropic-skills:PDF")
+        );
+    }
+
+    #[test]
+    fn codex_skill_names_do_not_gain_claude_aliases() {
+        let mut c = ExposureCollector::new(None);
+        let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
+        feed.all(
+            &mut c,
+            vec![
+                json!({ "type": "session_meta", "timestamp": at(0), "payload": { "id": "s" } }),
+                json!({ "type": "world_state", "timestamp": at(0), "payload": { "full": true,
+                "state": { "host_skills": { "body": "- anthropic-skills:pdf: synced" } } } }),
+                json!({ "type": "event_msg", "timestamp": at(1), "payload": {
+                "type": "user_message", "message": "$pdf $anthropic-skills:pdf" } }),
+                json!({ "type": "token_usage_record", "timestamp": at(2) }),
+            ],
+        );
+        let scan = c.finish(&[feed.request("r", 4, None)], None);
+        let uses: Vec<_> = scan
+            .invocations
+            .iter()
+            .map(|i| (i.kind, i.target.clone()))
+            .collect();
+        assert_eq!(
+            uses,
+            [
+                (InvocationKind::SkillReference, target("skill", "pdf")),
+                (
+                    InvocationKind::SkillRequest,
+                    target("skill", "anthropic-skills:pdf")
+                ),
+            ]
         );
     }
 

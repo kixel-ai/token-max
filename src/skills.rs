@@ -63,7 +63,12 @@ pub(crate) fn normalize(path: &str) -> String {
 }
 
 fn windows(path: &str) -> bool {
-    path.starts_with("\\\\") || path.as_bytes().get(1) == Some(&b':')
+    path.starts_with("\\\\")
+        || (path.as_bytes().get(1) == Some(&b':')
+            && path
+                .as_bytes()
+                .get(2)
+                .is_some_and(|c| *c == b'/' || *c == b'\\'))
 }
 
 // `..` can cross a symlink. Historical transcripts cannot prove its resolved identity.

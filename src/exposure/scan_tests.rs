@@ -1967,3 +1967,21 @@ fn resolved_paths_with_colons_preserve_the_skill_plugin_group() {
     );
     assert_eq!(requests.iter().filter(|i| i.group.is_none()).count(), 1);
 }
+
+#[test]
+fn a_one_letter_plugin_name_is_not_a_windows_drive() {
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(),
+        world(0, json!({"host_skills":{"body":"- a:foo: no path recorded"}}), true),
+        json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$a:foo"}}),
+        billed(2),
+    ], None).unwrap();
+    let r = report(&data, 1.0);
+    let c = r.context.iter().find(|c| c.name == "a:foo").unwrap();
+    assert_eq!(c.calls, Some(1));
+    assert_eq!(c.skill.as_ref().unwrap().requested, 1);
+    assert_eq!(
+        data.exposure.invocations[0].group,
+        Some(identity("plugin:a"))
+    );
+}

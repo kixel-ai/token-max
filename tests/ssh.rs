@@ -461,67 +461,84 @@ fn codex_context_and_output_keep_their_remote_controls() {
     next["timestamp"] = "2026-11-01T00:00:04Z".into();
     next["payload"]["response_id"] = "response-c".into();
     records.push(next);
-    let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
-    std::fs::write(codex.join("sessions/rollout.jsonl"), lines).unwrap();
+    for priceable in [false, true] {
+        // Unknown offsets across cache categories remain unknown even with a tier estimate.
+        // A cache-free request prices every possible offset at the same ordinary rate.
+        if priceable {
+            for record in &mut records {
+                if record["type"] == "token_usage_record" {
+                    record["payload"]["usage"]["cached_input_tokens"] = 0.into();
+                    record["payload"]["usage"]["cache_write_input_tokens"] = 0.into();
+                }
+            }
+        }
+        let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+        std::fs::write(codex.join("sessions/rollout.jsonl"), lines).unwrap();
 
-    let (status, stdout, stderr) =
-        hosts.run(&["--ssh", "devbox", "--include-local", "--json-full"]);
-    assert_eq!(status, 0, "{stderr}");
-    assert_eq!(stderr, "");
-    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let combined: Value = serde_json::from_str(&stdout).unwrap();
-    let local = &combined["hosts"][0]["report"];
-    let remote = &combined["hosts"][1]["report"];
-    assert!(local["context"].as_array().unwrap().is_empty());
-    let rows = remote["context"].as_array().unwrap();
-    let server = rows.iter().find(|r| r["kind"] == "mcp-server").unwrap();
-    assert_eq!(server["harness"], "codex");
-    assert_eq!(server["name"], "docs");
-    assert_eq!(
-        server["control"]["path"],
-        serde_json::json!(["mcp_servers", "docs", "enabled"])
-    );
-    assert!(server["estimatedUsd"].as_f64().is_some());
-    assert_eq!(server["conditionalRequests"], server["priced"]);
-    assert!(server["assumptions"].to_string().contains("conditional"));
-    assert_eq!(server["verdict"], Value::Null);
-    assert_eq!(remote["scan"]["coverage"]["tierKnown"], 0);
-    let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
-    assert_eq!(output["name"], "mcp__docs");
-    // Both requests retain the result; compaction removes it before the third.
-    assert_eq!(output["requests"], 2);
-    assert_eq!(output["calls"], 1);
-    assert_eq!(
-        output["largestCharacters"],
-        "SYNTHETIC_PRIVATE_OUTPUT".len()
-    );
-    // This output's possible offsets cross cache categories, so its cost stays unknown.
-    assert_eq!(output["priced"], 0);
-    assert_eq!(output["estimatedUsd"], Value::Null);
-    let (_, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
-    assert_eq!(stderr, "");
-    let there: Value = serde_json::from_str(&there).unwrap();
-    assert_eq!(timeless(remote), timeless(&there));
-    assert_eq!(remote["context"], there["context"]);
-    assert_eq!(remote["historical"], there["historical"]);
-    let (_, compact, stderr) = hosts.run(&["--ssh", "devbox", "--json"]);
-    assert_eq!(stderr, "");
-    let compact: Value = serde_json::from_str(&compact).unwrap();
-    assert_eq!(
-        compact["hosts"][0]["report"]["historical"],
-        remote["historical"]
-    );
-    assert_eq!(compact["hosts"][0]["report"]["context"], remote["context"]);
+        let (status, stdout, stderr) =
+            hosts.run(&["--ssh", "devbox", "--include-local", "--json-full"]);
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(stderr, "");
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        let combined: Value = serde_json::from_str(&stdout).unwrap();
+        let local = &combined["hosts"][0]["report"];
+        let remote = &combined["hosts"][1]["report"];
+        assert!(local["context"].as_array().unwrap().is_empty());
+        let rows = remote["context"].as_array().unwrap();
+        let server = rows.iter().find(|r| r["kind"] == "mcp-server").unwrap();
+        assert_eq!(server["harness"], "codex");
+        assert_eq!(server["name"], "docs");
+        assert_eq!(
+            server["control"]["path"],
+            serde_json::json!(["mcp_servers", "docs", "enabled"])
+        );
+        assert_eq!(
+            server["estimatedUsd"].as_f64().is_some(),
+            priceable,
+            "{server}"
+        );
+        assert_eq!(server["conditionalRequests"], server["priced"]);
+        assert!(server["assumptions"].to_string().contains("conditional"));
+        assert_eq!(server["verdict"], Value::Null);
+        assert_eq!(remote["scan"]["coverage"]["tierKnown"], 0);
+        let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
+        assert_eq!(output["name"], "mcp__docs");
+        // Both requests retain the result; compaction removes it before the third.
+        assert_eq!(output["requests"], 2);
+        assert_eq!(output["calls"], 1);
+        assert_eq!(
+            output["largestCharacters"],
+            "SYNTHETIC_PRIVATE_OUTPUT".len()
+        );
+        assert_eq!(output["priced"], if priceable { 2 } else { 0 });
+        assert_eq!(output["estimatedUsd"].as_f64().is_some(), priceable);
+        let (_, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
+        assert_eq!(stderr, "");
+        let there: Value = serde_json::from_str(&there).unwrap();
+        assert_eq!(timeless(remote), timeless(&there));
+        assert_eq!(remote["context"], there["context"]);
+        assert_eq!(remote["historical"], there["historical"]);
+        let (_, compact, stderr) = hosts.run(&["--ssh", "devbox", "--json"]);
+        assert_eq!(stderr, "");
+        let compact: Value = serde_json::from_str(&compact).unwrap();
+        assert_eq!(
+            compact["hosts"][0]["report"]["historical"],
+            remote["historical"]
+        );
+        assert_eq!(compact["hosts"][0]["report"]["context"], remote["context"]);
 
-    let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
-    assert_eq!(stderr, "");
-    assert!(!text.contains("SYNTHETIC_PRIVATE"));
-    assert!(text.contains("Conditional Codex pricing"), "{text}");
-    assert!(text.contains("keep/off unresolved"), "{text}");
-    assert!(
-        text.contains("tool_output_token_limit is 7,000 tokens"),
-        "{text}"
-    );
+        let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
+        assert_eq!(stderr, "");
+        assert!(!text.contains("SYNTHETIC_PRIVATE"));
+        assert!(text.contains("Conditional Codex pricing"), "{text}");
+        if priceable {
+            assert!(text.contains("keep/off unresolved"), "{text}");
+        }
+        assert!(
+            text.contains("tool_output_token_limit is 7,000 tokens"),
+            "{text}"
+        );
+    }
 }
 
 #[test]

@@ -37,8 +37,10 @@ cost aggregates are known zero; empty ranges have null endpoints. No fixed
 row limit drops distinct conditions. Request/event identifiers, individual file
 boundaries, component catalogs/locations and calibration witnesses remain in
 `--json-full`. Compact visibility groups identify each component by name/category and count
-coverage records, not requests;
-per-setting request coverage stays in `context` and checks.
+coverage records, not requests. Names that identify an individual rendered message,
+tool result or unmapped delta are null; those records group by semantic targets,
+category and provenance instead. This preserves feature coverage without listing
+every message/call. Per-setting request coverage stays in `context` and checks.
 
 Full evidence is streamed to stdout without building a serialized copy of the
 history in memory. It can still produce many gigabytes. Compact output releases

@@ -170,7 +170,12 @@ fn visibility(scan: &ExposureScan) -> Value {
     groups(scan.visibility.iter().map(|v| json!({
         "component": v.component.as_ref().map(|id| {
             let c = components[id.as_str()];
-            json!({"name": c.name, "category": c.category})
+            // These names identify individual messages/calls, not settings. Keep
+            // their semantic target and provenance without recreating a call catalog.
+            let name = (!matches!(c.provenance.as_str(),
+                "unclassified-rendered-attachment" | "observed-tool-result-not-wire-proof" | "unmapped-rendered-delta"
+            )).then_some(&c.name);
+            json!({"name": name, "category": c.category, "targets": c.targets, "provenance": c.provenance})
         }),
         "harness": v.harness, "client": v.client, "version": v.version, "profiles": v.profiles,
         "exposure": v.exposure, "directCalls": v.direct_calls, "nestedCalls": v.nested_calls,
@@ -235,6 +240,61 @@ pub(crate) fn report(mut report: Report) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn one_off_coverage_groups_by_target_instead_of_call_identity() {
+        let component = |id: &str| Component {
+            size: Size {
+                characters: None,
+                recorded_tokens: None,
+                fingerprint: id.into(),
+            },
+            id: id.into(),
+            key: id.into(),
+            name: id.into(),
+            category: Category::SkillBody,
+            owner: Owner::Skills,
+            group: None,
+            provenance: "observed-tool-result-not-wire-proof".into(),
+            locations: vec![],
+            first_seen: 0,
+            current: Current::Unresolved,
+            scope: Scope::Component,
+            members: vec![],
+            targets: vec!["same-skill".into()],
+        };
+        let row = |id: &str| Visibility {
+            harness: Harness::Claude,
+            client: None,
+            version: None,
+            profiles: vec!["profile".into()],
+            component: Some(id.into()),
+            since: 0,
+            until: 1,
+            exposure: Visible::Partial,
+            direct_calls: Observed::Unknown,
+            nested_calls: Visible::Unknown,
+            typed_skills: Observed::Unknown,
+            automatic_unused: false,
+            reasons: vec!["synthetic incomplete invocation coverage".into()],
+        };
+        let scan = ExposureScan {
+            components: vec![component("call-a"), component("call-b")],
+            visibility: vec![row("call-a"), row("call-b")],
+            ..ExposureScan::default()
+        };
+        let compact = visibility(&scan);
+        assert_eq!(compact["count"], 2);
+        let groups = compact["groups"].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["count"], 2);
+        assert_eq!(groups[0]["component"]["name"], Value::Null);
+        assert_eq!(groups[0]["component"]["targets"], json!(["same-skill"]));
+        assert_eq!(
+            groups[0]["reasons"],
+            json!(["synthetic incomplete invocation coverage"])
+        );
+    }
 
     #[test]
     fn visibility_groups_keep_component_identity_and_unknown_reasons() {

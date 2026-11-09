@@ -19,10 +19,14 @@ use crate::safe::identity;
 /// or config.toml's `features.apps = false`.
 pub fn control_text(control: &Control, harness: Harness) -> String {
     if harness == Harness::Codex {
+        if matches!(control.value, ControlValue::Skill { .. }) {
+            return config_patch([control]).trim_end().to_string();
+        }
         let path: Vec<String> = control.path.iter().map(|key| toml_key(key)).collect();
         let value = match &control.value {
             ControlValue::Text(text) => toml::Value::String(text.clone()),
             ControlValue::Bool(b) => toml::Value::Boolean(*b),
+            ControlValue::Skill { .. } => unreachable!("skill entries rendered above"),
         };
         let value = if control.append {
             toml::Value::Array(vec![value])
@@ -131,6 +135,9 @@ fn json_value(value: &ControlValue) -> Value {
     match value {
         ControlValue::Text(text) => Value::String(text.clone()),
         ControlValue::Bool(b) => Value::Bool(*b),
+        ControlValue::Skill { path, enabled } => {
+            serde_json::json!({ "path": path, "enabled": enabled })
+        }
     }
 }
 
@@ -181,6 +188,8 @@ struct Placed<'a> {
     history: History<'a>,
     /// Images or other input whose tokens characters cannot measure.
     opaque: bool,
+    /// Keep the aggregate catalog's placement bounds when allocating its charge to entries.
+    extent: Option<i64>,
 }
 
 /// Pieces by key, interned so each request compares indices rather than strings.
@@ -194,6 +203,8 @@ struct Pieces<'a> {
     /// The row a skill invocation counts for, by hashed `skill:<name>` target. The
     /// scan already resolved a short name to the synced skill it reached.
     skills: HashMap<String, usize>,
+    /// Codex members are keyed by path, with name-only members left unswitchable.
+    catalog: HashMap<usize, Option<String>>,
 }
 
 /// One component's share of a piece: its characters, or None when only its
@@ -475,6 +486,7 @@ fn pieces(
 fn codex_pieces(
     component: &Component,
     servers: &[&[String]],
+    components: &HashMap<&str, &Component>,
     interned: &mut Pieces<'_>,
 ) -> Vec<Split> {
     let characters = component.size.characters;
@@ -482,7 +494,47 @@ fn codex_pieces(
         Category::ToolSchema | Category::McpSchema | Category::McpDiscovery => {
             codex_tool(&component.name, servers)
         }
-        // The skills check owns per-skill findings, so the catalog is one piece here.
+        Category::SkillListing if characters.is_some() && !component.members.is_empty() => {
+            let mut result = vec![];
+            let mut listed = 0;
+            for member in &component.members {
+                let m = components[member.as_str()];
+                let n = m
+                    .size
+                    .characters
+                    .expect("rendered catalog members have sizes");
+                listed += n;
+                let path = m.skill_path.clone();
+                let control = path.as_ref().map(|path| Control {
+                    path: vec!["skills".into(), "config".into()],
+                    value: ControlValue::Skill {
+                        path: path.clone(),
+                        enabled: false,
+                    },
+                    append: true,
+                });
+                let key = interned.intern(
+                    format!("codex:skill:{}@{path:?}", m.name),
+                    ContextKind::Skill,
+                    m.name.clone(),
+                    control,
+                );
+                interned.catalog.insert(key, path);
+                result.push((key, Some(n)));
+            }
+            assert!(
+                listed <= characters.unwrap(),
+                "entry spans are subsets of their catalog"
+            );
+            let framing = interned.intern(
+                "codex:other:skill-list-framing".into(),
+                ContextKind::Other,
+                "Skill list framing".into(),
+                None,
+            );
+            result.push((framing, Some(characters.unwrap() - listed)));
+            return result;
+        }
         Category::SkillListing => (
             "codex:other:skill-list".into(),
             ContextKind::Other,
@@ -563,6 +615,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut owners: HashMap<Vec<String>, usize> = HashMap::new();
     let mut owner_profiles: Vec<Vec<String>> = vec![];
     let mut rows: IndexMap<(usize, usize), Row> = IndexMap::new();
+    let mut duplicate_catalogs: HashMap<usize, Vec<Vec<usize>>> = HashMap::new();
     let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::new();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::new();
     let mut ordered: Vec<_> = scan
@@ -628,7 +681,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             }
             if !interned.of.contains_key(&(id, owner)) {
                 let split = if codex {
-                    codex_pieces(component, &servers, &mut interned)
+                    codex_pieces(component, &servers, &components, &mut interned)
                 } else {
                     pieces(component, &components, &mut interned)
                         .into_iter()
@@ -638,17 +691,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 interned.of.insert((id, owner), split);
             }
             let prefix = !codex && index < view.prefix;
-            parts.extend(
-                interned.of[&(id, owner)]
-                    .iter()
-                    .map(|&(key, characters)| Placed {
-                        key,
-                        characters: characters.unwrap_or(0),
-                        prefix,
-                        history: History::Revision(id),
-                        opaque: characters.is_none(),
-                    }),
-            );
+            parts.extend(interned.of[&(id, owner)].iter().map(|&(key, characters)| {
+                Placed {
+                    key,
+                    characters: characters.unwrap_or(0),
+                    prefix,
+                    history: History::Revision(id),
+                    opaque: characters.is_none(),
+                    extent: (codex && component.category == Category::SkillListing)
+                        .then_some(component.size.characters)
+                        .flatten(),
+                }
+            }));
         }
         let prior_results = previous
             .get(r.session.as_str())
@@ -674,6 +728,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     prefix: false,
                     history,
                     opaque: *opaque,
+                    extent: None,
                 });
             }
         }
@@ -726,6 +781,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         cost_per_use_usd: None,
                         verdict: None,
                         largest_characters: None,
+                        skill: interned
+                            .catalog
+                            .get(&key)
+                            .map(|path| crate::model::CatalogSkill {
+                                path: path.clone(),
+                                duplicate_entries: 1,
+                                ..Default::default()
+                            }),
                     },
                     owner,
                     key,
@@ -836,12 +899,15 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     (Some((input, prior)), None) => (input + prior.reply) as f64,
                     _ => prefix_end,
                 };
+                let extent = piece
+                    .extent
+                    .map_or(tokens, |n| n as f64 * ratio.unwrap_or(0.0));
                 let to = match carried {
                     Some((input, prior)) => prior.content_end.unwrap_or(input) as f64,
                     None => content_end.unwrap_or(end) as f64,
-                } - tokens;
+                } - extent;
                 let first = slot(from);
-                if to >= from && first == slot(to + tokens - 1e-9) {
+                if to >= from && first == slot(to + extent - 1e-9) {
                     entry.1 += tokens * slots[first].1;
                 } else {
                     entry.2 = true;
@@ -866,6 +932,23 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             _ if !shaped => {}
             Some((time, _)) if r.time < *time => {}
             _ => {
+                let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::new();
+                for id in &shown {
+                    let c = component(id);
+                    if codex && c.category == Category::SkillListing {
+                        for member in &c.members {
+                            let m = component(member);
+                            let key = format!("codex:skill:{}@{:?}", m.name, m.skill_path);
+                            if let Some(&key) = interned.ids.get(&key) {
+                                duplicates.entry(&m.name).or_default().push(key);
+                            }
+                        }
+                    }
+                }
+                duplicate_catalogs.insert(
+                    owner,
+                    duplicates.into_values().filter(|v| v.len() > 1).collect(),
+                );
                 latest.insert(owner, (r.time, unique));
             }
         }
@@ -919,6 +1002,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
+        if i.harness == Harness::Codex {
+            continue;
+        }
         // A namespace-wide switch also removes recorded uses of members whose
         // listing was not measured. Other skill controls apply only to their own target.
         let key = if i.harness == Harness::Claude && i.group.as_ref() == Some(&synced_group) {
@@ -939,6 +1025,59 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         };
         if counts {
             credit(skill_families.get(&key), &i.profiles, i.time, 1);
+        }
+    }
+    // A name alone does not identify one of several historical paths. Path evidence
+    // remains attributable even when that copy is absent from the latest catalog.
+    for i in scan
+        .invocations
+        .iter()
+        .filter(|i| i.harness == Harness::Codex)
+    {
+        let candidates: Vec<usize> = rows
+            .values()
+            .enumerate()
+            .filter_map(|(index, row)| {
+                let skill = row.cost.skill.as_ref()?;
+                if !i.profiles.iter().any(|p| row.cost.profiles.contains(p)) {
+                    return None;
+                }
+                let name = identity(&format!("skill:{}", row.cost.name));
+                let path = skill.path.as_ref().map(|p| identity(&format!("skill:{p}")));
+                let ambiguous = identity(&format!("skill-ambiguous:{}", row.cost.name));
+                (i.target == name || i.target == ambiguous || path.as_ref() == Some(&i.target))
+                    .then_some(index)
+            })
+            .collect();
+        let paths: HashSet<_> = candidates
+            .iter()
+            .map(|&index| rows[index].cost.skill.as_ref().unwrap().path.as_ref())
+            .collect();
+        let ambiguous = paths.len() > 1
+            || candidates.iter().any(|&index| {
+                i.target == identity(&format!("skill-ambiguous:{}", rows[index].cost.name))
+            });
+        for index in candidates {
+            let c = &mut rows[index].cost;
+            let skill = c.skill.as_mut().unwrap();
+            match i.kind {
+                InvocationKind::SkillRequest
+                    if i.status == InvocationStatus::Requested && ambiguous =>
+                {
+                    skill.ambiguous_requests += 1;
+                    continue;
+                }
+                InvocationKind::SkillRequest if i.status == InvocationStatus::Requested => {
+                    skill.requested += 1
+                }
+                InvocationKind::SkillLoad if i.status == InvocationStatus::Completed => {
+                    skill.loaded += 1
+                }
+                _ => continue,
+            }
+            *c.calls.as_mut().unwrap() += 1;
+            let time = last.entry(index).or_insert(Millis::MIN);
+            *time = (*time).max(i.time);
         }
     }
     // Results count as their tool's uses, and the largest one sizes its output cap.
@@ -987,6 +1126,47 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c
         })
         .collect();
+    for (owner, groups) in duplicate_catalogs {
+        for keys in groups {
+            let indices: Vec<_> = keys
+                .iter()
+                .filter_map(|key| {
+                    let name = &interned.kinds[*key].name;
+                    let path = &interned.catalog[key];
+                    result.iter().position(|c| {
+                        c.profiles == owner_profiles[owner]
+                            && &c.name == name
+                            && c.skill.as_ref().is_some_and(|s| &s.path == path)
+                    })
+                })
+                .collect();
+            // Retain the most-used identifiable copy, breaking ties by listing order.
+            let retained = indices
+                .iter()
+                .copied()
+                .filter(|&i| result[i].control.is_some())
+                .max_by_key(|&i| {
+                    (
+                        result[i].calls.unwrap_or(0),
+                        std::cmp::Reverse(indices.iter().position(|&j| j == i).unwrap()),
+                    )
+                })
+                .and_then(|i| result[i].skill.as_ref().unwrap().path.clone());
+            for index in indices {
+                let c = &mut result[index];
+                let skill = c.skill.as_mut().unwrap();
+                skill.duplicate_entries = keys.len() as u64;
+                skill.retained_path = retained.clone();
+                if retained.is_some() && c.control.is_some() {
+                    c.verdict = Some(if skill.path == retained {
+                        Verdict::Keep
+                    } else {
+                        Verdict::Off
+                    });
+                }
+            }
+        }
+    }
     let order = |c: &ContextCost| c.estimated_usd.unwrap_or(-1.0);
     result.sort_by(|a, b| {
         order(b)
@@ -1040,6 +1220,7 @@ mod tests {
                 Scope::Aggregate
             },
             members: members.iter().map(|m| m.to_string()).collect(),
+            skill_path: None,
             targets: vec![],
         }
     }

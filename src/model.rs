@@ -1130,6 +1130,9 @@ pub struct Component {
     pub scope: Scope,
     pub members: Vec<String>,
     pub targets: Vec<String>,
+    /// Absolute SKILL.md identity resolved from a rendered Codex catalog, without filesystem reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_path: Option<String>,
 }
 
 /// Whether a historical component is still sent; scans never resolve it.
@@ -1540,6 +1543,7 @@ pub struct Calibration {
 pub enum ControlValue {
     Text(String),
     Bool(bool),
+    Skill { path: String, enabled: bool },
 }
 
 /// One settings.json change: set `path` to `value`, or add `value` to the list at `path`.
@@ -1568,6 +1572,23 @@ pub enum ContextKind {
 pub enum Verdict {
     Off,
     Keep,
+}
+
+/// Observations for a Codex catalog member; counts are evidence events, not successful executions.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogSkill {
+    pub path: Option<String>,
+    pub requested: u64,
+    pub loaded: u64,
+    /// Successful skill execution is not observed in the supported Codex records.
+    pub successful_invocations: Option<u64>,
+    /// Name-only requests that could reach multiple catalog paths, excluded from uses.
+    pub ambiguous_requests: u64,
+    /// Same-named entries in the current catalog, including itself; one when not flagged.
+    pub duplicate_entries: u64,
+    /// Preferred copy to retain when the latest catalog has duplicates.
+    pub retained_path: Option<String>,
 }
 
 /// What one piece of always-sent context cost over the window, and how to turn it off.
@@ -1601,6 +1622,8 @@ pub struct ContextCost {
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill: Option<CatalogSkill>,
 }
 
 // ---------------------------------------------------------------------------

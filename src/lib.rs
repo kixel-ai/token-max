@@ -21,6 +21,7 @@ pub mod replay;
 pub mod report;
 pub mod safe;
 pub mod scenarios;
+mod skills;
 pub mod ssh;
 pub mod terminal;
 pub mod wire;

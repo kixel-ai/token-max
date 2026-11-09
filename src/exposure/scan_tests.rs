@@ -1510,3 +1510,241 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
             .any(|c| c.provenance == "world-state-metadata-only")
     );
 }
+
+fn skill_load(second: u32, id: &str, path: &str, exit: i32) -> Value {
+    json!({"type": "event_msg", "timestamp": at(second), "payload": {
+        "type": "item_completed", "item": {"type": "CommandExecution", "id": id,
+        "exit_code": exit, "parsed_cmd": [{"type": "read", "path": path}],
+        "aggregated_output": "SYNTHETIC_PRIVATE_SKILL_BODY"}
+    }})
+}
+
+fn skill_row<'a>(report: &'a Report, path: &str) -> &'a ContextCost {
+    report
+        .context
+        .iter()
+        .find(|c| {
+            c.skill
+                .as_ref()
+                .is_some_and(|s| s.path.as_deref() == Some(path))
+        })
+        .unwrap()
+}
+
+#[test]
+fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
+    let body = "# Skills\n- `r0` = `/remote/skills`\n- one: SYNTHETIC_PRIVATE_DESCRIPTION (file: r0/one/SKILL.md)\n- plugin:two: x (file: r0/two/SKILL.md)\nUse skills when relevant.\n";
+    let usage = |second, cached: i64| {
+        let mut record = billed(second);
+        record["payload"]["usage"]["cached_input_tokens"] = json!(cached);
+        record
+    };
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(), world(0, json!({"host_skills": {"body": body}}), true),
+        // Mixed cache regions leave the whole first catalog unpriced.
+        billed(1), usage(2, 1000),
+        world(3, json!({"host_skills": {"body": body.replace("SYNTHETIC_PRIVATE_DESCRIPTION", "expanded description with unicode λ")}}), false),
+        usage(4, 0), usage(5, 1000),
+    ], None).unwrap();
+    let split = report(&data, 0.0);
+    let mut aggregate_data = data.clone();
+    for c in &mut aggregate_data.exposure.components {
+        c.members.clear();
+    }
+    let aggregate = report(&aggregate_data, 0.0);
+    let before = row(&aggregate, "Skill list");
+    let parts: Vec<_> = split
+        .context
+        .iter()
+        .filter(|c| c.skill.is_some() || c.name == "Skill list framing")
+        .collect();
+    assert_eq!(parts.len(), 3);
+    assert!(
+        before.priced > 0 && before.priced < before.requests,
+        "{before:?}"
+    );
+    assert!(
+        parts
+            .iter()
+            .all(|c| c.priced == before.priced && c.requests == before.requests)
+    );
+    assert!((parts.iter().map(|c| c.cost_usd).sum::<f64>() - before.cost_usd).abs() < 1e-12);
+    assert!(
+        (parts.iter().map(|c| c.estimated_usd.unwrap()).sum::<f64>()
+            - before.estimated_usd.unwrap())
+        .abs()
+            < 1e-12
+    );
+    let control = skill_row(&split, "/remote/skills/two/SKILL.md")
+        .control
+        .as_ref()
+        .unwrap();
+    let patch = crate::context::config_patch([control, control]);
+    let parsed: toml::Value = toml::from_str(&patch).unwrap();
+    assert_eq!(parsed["skills"]["config"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        parsed["skills"]["config"][0]["path"].as_str(),
+        Some("/remote/skills/two/SKILL.md")
+    );
+    assert_eq!(
+        parsed["skills"]["config"][0]["enabled"].as_bool(),
+        Some(false)
+    );
+    assert!(control_text(control, Harness::Codex).contains("[[skills.config]]"));
+    assert!(!leaks(&split, &["SYNTHETIC_PRIVATE"]));
+}
+
+#[test]
+fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success() {
+    let w = Workspace::new();
+    let body = "- `r0` = `/skills`\n- same: a (file: r0/a/SKILL.md)\n- same: b (file: r0/b/SKILL.md)\n- plugin:other: c (file: r0/c/SKILL.md)";
+    let message = json!({"type": "response_item", "timestamp": at(1), "payload": {
+    "type": "message", "role": "user", "content": [
+        {"type": "input_text", "text": "$same"},
+        {"type": "skill", "name": "same", "path": "/skills/b/SKILL.md"}
+    ]}});
+    let alias = json!({"type": "event_msg", "timestamp": at(1), "payload": {"type": "user_message", "message": "$same"}});
+    let mut compound = skill_load(4, "compound", "/skills/a/SKILL.md", 0);
+    compound["payload"]["item"]["parsed_cmd"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"type": "unknown", "cmd": "true"}));
+    let records = vec![
+        codex_meta(),
+        turn(),
+        world(0, json!({"host_skills": {"body": body}}), true),
+        message,
+        alias,
+        skill_load(2, "load-b", "/skills/b/SKILL.md", 0),
+        skill_load(3, "failed-a", "/skills/a/SKILL.md", 1),
+        compound,
+        json!({"type":"event_msg", "timestamp":at(5), "payload":{"type":"user_message", "message":"$same"}}),
+        billed(6),
+        billed(7),
+    ];
+    for file in ["a.jsonl", "b.jsonl"] {
+        std::fs::write(w.codex.join("sessions").join(file), jsonl(&records)).unwrap();
+    }
+    let data = scan(&options(&w, None)).unwrap();
+    let r = report(&data, 1.0);
+    let a = skill_row(&r, "/skills/a/SKILL.md");
+    let b = skill_row(&r, "/skills/b/SKILL.md");
+    assert_eq!(a.calls, Some(0));
+    assert_eq!(b.calls, Some(2));
+    let evidence = b.skill.as_ref().unwrap();
+    assert_eq!(
+        (
+            evidence.requested,
+            evidence.loaded,
+            evidence.ambiguous_requests
+        ),
+        (1, 1, 1)
+    );
+    assert_eq!(evidence.successful_invocations, None);
+    assert_eq!(a.skill.as_ref().unwrap().ambiguous_requests, 1);
+    assert_eq!(evidence.duplicate_entries, 2);
+    assert_eq!(
+        evidence.retained_path.as_deref(),
+        Some("/skills/b/SKILL.md")
+    );
+    assert_eq!(
+        (a.verdict, b.verdict),
+        (Some(Verdict::Off), Some(Verdict::Keep))
+    );
+    let output = text(&r);
+    assert!(output.contains("Duplicate skill same"), "{output}");
+    assert!(output.contains("successful invocation unknown"));
+    assert!(output.contains("not promised savings"));
+    assert!(output.contains("Visibility is incomplete"));
+    assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
+    let compact = crate::compact::report(r.clone());
+    assert!(
+        compact["context"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["skill"]["loaded"] == 1)
+    );
+}
+
+#[test]
+fn codex_duplicates_are_actionable_without_prices_and_same_path_repeats_keep_one_control() {
+    let body = "- same: a (file: /skills/a/SKILL.md)\n- same: b (file: /skills/b/SKILL.md)\n- repeated: c (file: /skills/c/SKILL.md)\n- repeated: c (file: /skills/c/SKILL.md)\n- unresolved: x (file: r9/x/SKILL.md)\n- unresolved: y (file: r9/y/SKILL.md)";
+    let data = transcript(
+        Harness::Codex,
+        &[
+            codex_meta(),
+            turn(),
+            world(0, json!({"host_skills":{"body":body}}), true),
+            json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$unresolved"}}),
+            billed(2),
+        ],
+        None,
+    )
+    .unwrap();
+    let r = report(&data, 0.0);
+    assert_eq!(
+        skill_row(&r, "/skills/a/SKILL.md").verdict,
+        Some(Verdict::Keep)
+    );
+    let off = skill_row(&r, "/skills/b/SKILL.md");
+    assert_eq!((off.estimated_usd, off.verdict), (None, Some(Verdict::Off)));
+    assert_eq!(
+        skill_row(&r, "/skills/c/SKILL.md").verdict,
+        Some(Verdict::Keep)
+    );
+    assert_eq!(
+        skill_row(&r, "/skills/c/SKILL.md")
+            .skill
+            .as_ref()
+            .unwrap()
+            .duplicate_entries,
+        2
+    );
+    assert!(row(&r, "unresolved").control.is_none());
+    assert_eq!(row(&r, "unresolved").calls, Some(0));
+    assert_eq!(
+        row(&r, "unresolved")
+            .skill
+            .as_ref()
+            .unwrap()
+            .ambiguous_requests,
+        1
+    );
+    let output = text(&r);
+    assert!(
+        labelled(&output, "Skill same (/skills/b/SKILL.md)", |rest| rest
+            .starts_with(": on -> off. Cost unknown")),
+        "{output}"
+    );
+    assert!(output.contains("does not resolve an absolute SKILL.md path"));
+    assert!(!output.contains("Costs $0; 0 use observations"));
+    assert!(!output.contains("Skill unresolved: costs"));
+}
+
+#[test]
+fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_duplicates() {
+    let body = "- `r0` = `/old`\n- same: a (file: r0/a/SKILL.md)\n- same: b (file: r0/b/SKILL.md)";
+    let replacement = "- `r0` = `/new`\n- same: a (file: r0/a/SKILL.md)";
+    let mut warm = billed(5);
+    warm["payload"]["usage"]["cached_input_tokens"] = json!(1000);
+    let data = transcript(Harness::Codex, &[
+        codex_meta(), turn(), world(0, json!({"host_skills":{"body":body}}), true), billed(1),
+        world(2, json!({"host_skills":{"body":replacement}}), false),
+        json!({"type":"event_msg", "timestamp":at(3), "payload":{"type":"user_message", "message":"$same"}}),
+        billed(4), warm,
+    ], None).unwrap();
+    let r = report(&data, 0.0);
+    assert_eq!(skill_row(&r, "/new/a/SKILL.md").calls, Some(1));
+    assert_eq!(skill_row(&r, "/new/a/SKILL.md").verdict, Some(Verdict::Off));
+    for path in ["/old/a/SKILL.md", "/old/b/SKILL.md"] {
+        let c = skill_row(&r, path);
+        assert_eq!((c.current, c.calls, c.verdict), (false, Some(0), None));
+    }
+    assert!(!text(&r).contains("Duplicate skill"));
+    let keep = report(&data, 1.0);
+    assert_eq!(
+        skill_row(&keep, "/new/a/SKILL.md").verdict,
+        Some(Verdict::Keep)
+    );
+}

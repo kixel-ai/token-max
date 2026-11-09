@@ -128,6 +128,8 @@ pub struct ExposureCollector {
     digests: HashMap<String, Ids>,
     // Catalog names keyed without ASCII case, retaining their spelling for use attribution.
     known_skills: HashMap<String, String>,
+    // A name resolves only when every current rendered copy has the same absolute path.
+    codex_skill_paths: HashMap<String, (Option<String>, usize)>,
     // Explicit typed skill blocks establish use evidence without claiming catalog membership.
     typed_skills: HashSet<String>,
     // Short names of listed synced skills: `/pdf` reaches `anthropic-skills:pdf` while no
@@ -380,6 +382,7 @@ impl ExposureCollector {
             deferred: IndexSet::new(),
             digests: HashMap::new(),
             known_skills: HashMap::new(),
+            codex_skill_paths: HashMap::new(),
             typed_skills: HashSet::new(),
             synced_skills: HashMap::new(),
             user_aliases: HashMap::new(),
@@ -404,6 +407,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.codex_skill_paths.clear();
         self.typed_skills.clear();
         self.synced_skills.clear();
         self.uncertain = true;
@@ -805,6 +809,7 @@ impl ExposureCollector {
         self.digests.clear();
         self.pending_tools.clear();
         self.known_skills.clear();
+        self.codex_skill_paths.clear();
         self.typed_skills.clear();
         self.synced_skills.clear();
         self.user_aliases.clear();
@@ -936,6 +941,7 @@ impl ExposureCollector {
                         Scope::Component
                     },
                     members: vec![],
+                    skill_path: None,
                     targets: new.targets.unwrap_or_else(|| {
                         if member || category == Category::SkillBody {
                             vec![target("skill", new.name)]
@@ -1017,13 +1023,40 @@ impl ExposureCollector {
             at,
         );
         let mut members = vec![];
-        for (name, span) in listing_entries(body) {
+        let entries = listing_entries(body);
+        let codex = self.file.as_ref().expect("observing a file").harness == Harness::Codex;
+        let paths = if codex {
+            crate::skills::paths(body, &entries)
+        } else {
+            vec![None; entries.len()]
+        };
+        for ((name, span), path) in entries.into_iter().zip(paths) {
             self.know_skill(name);
             let new = New {
                 role: Role::Member,
                 ..New::active(Category::SkillListing, name, "rendered-listing-entry-span")
             };
-            members.push(self.component(new, Content::Text(span), at).to_string());
+            let member = if codex {
+                self.codex_skill_paths
+                    .entry(name.to_string())
+                    .and_modify(|prior| {
+                        if prior.0 != path {
+                            prior.0 = None;
+                        }
+                        prior.1 += 1;
+                    })
+                    .or_insert_with(|| (path.clone(), 1));
+                let key: Text =
+                    component_key(Category::SkillListing, &format!("{name}@{path:?}")).into();
+                let size = Content::Text(span).measure();
+                let revision = identity(&format!("{key}:{}", size.fingerprint));
+                let member = self.place(new, &key, &revision, &size, at);
+                self.components[&*member].skill_path = path;
+                member
+            } else {
+                self.component(new, Content::Text(span), at)
+            };
+            members.push(member.to_string());
         }
         self.components[&*aggregate].members = members;
         aggregate
@@ -1032,6 +1065,7 @@ impl ExposureCollector {
     fn clear(&mut self, category: Option<Category>) {
         if category.is_none_or(|category| category == Category::SkillListing) {
             self.known_skills.clear();
+            self.codex_skill_paths.clear();
             self.synced_skills.clear();
         }
         let pending = &mut self.pending_removed;
@@ -1061,8 +1095,22 @@ impl ExposureCollector {
             .ok_or_else(|| ScanError::new("missing invocation timestamp"))?;
         let target = if is_skill(input.kind) {
             let name = self.skill_name(name);
+            let selected = (input.kind == InvocationKind::SkillRequest)
+                .then(|| self.codex_skill_paths.get(name))
+                .flatten();
+            let ambiguous = selected.is_some_and(|(path, count)| path.is_none() && *count > 1);
+            let name = selected
+                .and_then(|(path, _)| path.as_deref())
+                .unwrap_or(name);
             input.group = group(name).or(input.group);
-            target("skill", name)
+            target(
+                if ambiguous {
+                    "skill-ambiguous"
+                } else {
+                    "skill"
+                },
+                name,
+            )
         } else {
             target("mcp", name)
         };
@@ -1080,6 +1128,10 @@ impl ExposureCollector {
             kind_name(input.kind)
         ));
         if let Some(prior) = self.invocations.get_mut(&id) {
+            if input.via == Via::Typed {
+                prior.target = target;
+                prior.via = input.via;
+            }
             prior.locations.push(location.clone());
             if !prior.sessions.iter().any(|s| **s == *self.session) {
                 prior.sessions.push(self.session.to_string());
@@ -1630,6 +1682,8 @@ impl ExposureCollector {
             }
             _ => array(contents)?,
         };
+        let mut block_ids = vec![];
+        let mut typed_aliases = HashMap::new();
         for (index, v) in blocks.iter().enumerate() {
             let b = object(v);
             let source = match present(raw.get("uuid")).or(present(item.get("id"))) {
@@ -1657,6 +1711,18 @@ impl ExposureCollector {
                 call = format!("user:{signature}:{occurrence}");
                 basis = IdentityBasis::ContentOccurrence;
             }
+            if codex && let Some(t) = block_text {
+                for (offset, name) in mentions(t) {
+                    typed_aliases
+                        .entry(name.to_string())
+                        .or_insert_with(|| (format!("{call}:{offset}"), basis));
+                }
+            }
+            block_ids.push((call, basis));
+        }
+        for (v, (call, basis)) in blocks.iter().zip(block_ids) {
+            let b = object(v);
+            let block_text = b.get("text").and_then(Value::as_str);
             if user && is(b, "type", "skill") {
                 let name = text(b.get("name"))?;
                 self.typed_skills.insert(name.to_ascii_lowercase());
@@ -1664,11 +1730,23 @@ impl ExposureCollector {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
                     status: InvocationStatus::Requested,
-                    call: call.clone(),
+                    call: typed_aliases
+                        .get(name)
+                        .map_or_else(|| call.clone(), |(call, _)| call.clone()),
                     group: group(name),
-                    basis: IdentityBasis::Recorded,
+                    basis: typed_aliases
+                        .get(name)
+                        .map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
                 };
-                self.invoke(name, invoke, line)?;
+                let selected = if codex {
+                    b.get("path")
+                        .and_then(Value::as_str)
+                        .filter(|p| crate::skills::absolute(p) && crate::skills::skill_file(p))
+                        .unwrap_or(name)
+                } else {
+                    name
+                };
+                self.invoke(selected, invoke, line)?;
             }
             if user
                 && raw.get("isMeta") != Some(&Value::Bool(true))
@@ -1872,8 +1950,11 @@ impl ExposureCollector {
                 let invoke = Invoke {
                     kind: InvocationKind::SkillLoad,
                     via: Via::Completion,
-                    status: if succeeded {
+                    status: if succeeded && parsed.len() == 1 {
                         InvocationStatus::Completed
+                    } else if succeeded {
+                        // A compound command's exit status cannot confirm each file read.
+                        InvocationStatus::Called
                     } else {
                         InvocationStatus::Failed
                     },

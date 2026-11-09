@@ -548,7 +548,13 @@ unpriced rather than clipped. `costUsd` covers priced requests only;
 `estimatedUsd` scales it to every request that carried the piece and is null
 when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
 once. Skill listings split into their member skills plus the listing framing;
-MCP tools group by server. Codex skill listings stay one `Skill list` row.
+MCP tools group by server. Codex rendered catalogs split into path-identified
+skills and framing. Their aggregate revision still determines cache placement:
+every share is priced only when the whole catalog fits one cache rate. The
+shares conserve the aggregate's priced charge without charging it twice.
+Each row scales only its own priced observations; estimates for changing
+membership can have different coverage and must not be summed as a catalog
+counterfactual.
 One-off attachments and skill bodies are excluded because no setting removes
 them up front.
 
@@ -592,9 +598,59 @@ switch removes the skill entirely, where typed requests count too. A piece still
 today is recommended off when `estimatedUsd` divided by its uses, counting no
 use as one, exceeds `maxCostPerUseUsd` (default $1, `--max-cost-per-use`);
 otherwise it is kept. The ratio does not depend on the window's length. A piece
-with no priced request gets no verdict. The cost is gross: removing a piece leaves later
+with no priced request gets no cost-per-use verdict. Duplicate Codex copies can
+still receive a path-based recommendation without dollars. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
+
+Codex skill controls and behavior were verified on 2026-11-08 against the
+[official skills documentation](https://learn.chatgpt.com/docs/build-skills) and
+[typed invocation protocol](https://learn.chatgpt.com/docs/app-server#skills).
+Each rendered `- name: description (file: ...)` span gets its own recurring
+listing cost. Root alias declarations resolve the file to its absolute
+`SKILL.md` without inspecting today's filesystem. An unresolved/conflicting
+alias leaves the path and disable control unknown. Root declarations and
+unparsed framing remain in the framing charge. Descriptions and bodies are
+never retained. Different paths sharing a name remain separate rows; repeated
+identical entries contribute all of their rendered characters to that path's
+row, with requests counted once. Replacing aliases also changes member identity.
+
+`context[].skill` publishes the resolved path, requested and loaded evidence,
+ambiguous requests, duplicate entry count, and preferred retained path.
+`calls` is the sum of attributable request and confirmed-load observations,
+not a count of successful executions: a request and a later load can describe
+the same use. Only a successful single parsed file-read command confirms a
+load; failed or compound commands do not. Typed `skill` input with an absolute
+path identifies its copy. Name-only requests resolve against the active catalog
+only when every copy resolves to the same path. Otherwise they are excluded
+from each copy's uses and disclosed as ambiguous. Successful skill invocation
+remains unknown. Existing invocation IDs and content-occurrence aliases
+deduplicate copied events; a typed skill and its text mention share a request
+ID when the same message contains both. Unknown recording coverage and zero
+observations never prove nonuse.
+
+An absolute-path `[[skills.config]]` entry with `enabled = false` removes a
+Codex skill entirely, including explicit invocation, so typed requests count.
+The JSON control uses `path: ["skills", "config"]`, an object `value` containing
+`path` and `enabled`, and `append: true`; generated TOML appends array-of-table
+entries rather than replacing existing controls. Last matching entries win;
+restart Codex after changing config. `allow_implicit_invocation: false` changes
+invocation policy and is not claimed to remove listing cost.
+
+Duplicate detection is by exact name within the latest catalog for each owning
+profile set, independent of pricing. Retain the identifiable path with the
+most recorded observations, breaking ties in listing order, and recommend
+disabling other paths even without prices. That preference overrides the
+cost-per-use verdict to retain one copy. Repeated discovery of the same path
+cannot be removed with a path control while keeping that path enabled; remove
+the redundant discovery source. For symlinked duplicates, remove the redundant
+link at its source; transcripts do not establish filesystem equivalence.
+Every current member still gets its cost and path control when known.
+
+These are rendered listing charges, never promised net savings. Codex can
+backfill omitted skills or expand descriptions after a removal. No separate
+listing-budget warning, fixed-space savings estimate, or body-execution
+success is inferred from catalog evidence.
 
 Invocation evidence separates typed and mentioned skill requests, command
 wrappers, unresolved references, Skill calls, identified SKILL.md reads, direct MCP calls, actual

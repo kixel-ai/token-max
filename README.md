@@ -84,8 +84,11 @@ they cost and how often they were used. One is recommended off when it cost more
 than `--max-cost-per-use` (default $1) per use, counting no use as one; the rest
 are kept. A skill's uses count only the model's own calls, because hiding it
 with `skillOverrides` set to `user-invocable-only` still lets you type `/name`.
-Instruction files and the system prompt, core tools such as Bash and Read, and
-the skill and subagent lists have no switch and are listed after the verdicts.
+Skills synced from claude.ai share one line, since only `syncClaudeAiSkills`
+turns them off in settings, and that also removes typed uses, so those count.
+Instruction files, plugin skills, which `skillOverrides` does not reach, and the
+system prompt, core tools such as Bash and Read, and the skill and subagent
+lists have no switch and are listed after the verdicts.
 The report ends with one `settings.json` snippet per settings file holding every
 recommended change, such as `"enableArtifact": false` or a bare tool name in
 `permissions.deny`; merge it by hand. `--details` lists every piece, including

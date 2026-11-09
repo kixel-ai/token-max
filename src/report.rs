@@ -6,7 +6,7 @@ use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::context::{config_patch, control_text, settings_patch};
+use crate::context::{SYNCED_SKILLS, config_patch, control_text, settings_patch, typed_only};
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, Control, Cost, Coverage, EstimateEvidence, Evidence,
@@ -1453,6 +1453,10 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     }
 }
 
+/// How to turn off a namespaced skill, which `skillOverrides` does not reach.
+const PLUGIN_SKILL: &str =
+    "Turn off its plugin with /plugin, or remove the skill from the added directory";
+
 fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
     match c.kind {
         ContextKind::Tool => format!("{} tool", c.name),
@@ -1460,6 +1464,7 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
             "ChatGPT apps".into()
         }
         ContextKind::McpServer => format!("MCP server {}", c.name),
+        ContextKind::Skill if c.name == SYNCED_SKILLS => "Skills synced from claude.ai".into(),
         ContextKind::ToolOutput => match c.name.strip_prefix("mcp__") {
             Some(server) => format!("MCP server {server} output"),
             None => format!("{} output", c.name),
@@ -1763,8 +1768,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             monthly(c.estimated_usd.unwrap_or(0.0), since, Some(until))
         );
         let calls = c.calls.unwrap_or(0);
+        // Only the model's calls count for a skill that stays typeable.
+        let typed = typed_only(c.control.as_ref());
         let uses = if calls == 0 {
-            if c.kind == ContextKind::Skill {
+            if typed {
                 "the model never used it".to_string()
             } else {
                 "never used".to_string()
@@ -1772,17 +1779,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         } else {
             format!(
                 "{} {} time{} ({} each)",
-                if c.kind == ContextKind::Skill {
-                    "the model used it"
-                } else {
-                    "used"
-                },
+                if typed { "the model used it" } else { "used" },
                 count(calls),
                 if calls == 1 { "" } else { "s" },
                 about(c.cost_per_use_usd.unwrap_or(0.0))
             )
         };
-        let change = if c.kind == ContextKind::Skill {
+        let change = if typed {
             format!("on {arrow} only when you type /{}", c.name)
         } else {
             format!("on {arrow} off")
@@ -2062,11 +2065,33 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             );
             out.line(&text, 2, 0);
         }
+        for c in fixed.iter().filter(|c| c.kind == ContextKind::Skill) {
+            let calls = c.calls.unwrap_or(0);
+            let text = format!(
+                "{}{}: {}; {}. {PLUGIN_SKILL}.",
+                piece_label(c, out),
+                suffix(c, out),
+                c.estimated_usd.map_or_else(
+                    || "cost unknown".into(),
+                    |usd| format!("costs {}", monthly(usd, since, Some(until)))
+                ),
+                if calls == 0 {
+                    "never used".into()
+                } else {
+                    format!(
+                        "used {} time{}",
+                        count(calls),
+                        if calls == 1 { "" } else { "s" }
+                    )
+                }
+            );
+            out.line(&text, 2, 0);
+        }
         // Scaled to 30 days like every other line, without counting unknowns as $0.
         let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
         let core: Vec<Option<f64>> = fixed
             .iter()
-            .filter(|c| c.kind != ContextKind::Instructions)
+            .filter(|c| !matches!(c.kind, ContextKind::Instructions | ContextKind::Skill))
             .map(|c| c.estimated_usd.map(|usd| usd * scale))
             .collect();
         if !core.is_empty() {
@@ -2253,6 +2278,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             None if c.kind == ContextKind::Instructions => {
                 "Turn off: trim or scope this file".into()
             }
+            None if c.kind == ContextKind::Skill => PLUGIN_SKILL.into(),
             None if c.kind == ContextKind::ToolOutput => match output_cap(report, c) {
                 Some((_, cap)) => format!("Capped by {cap}"),
                 None => "No cap is checked for it".into(),
@@ -2638,6 +2664,14 @@ mod tests {
                 Some(2),
             ),
             context_piece(
+                ContextKind::Skill,
+                SYNCED_SKILLS,
+                switch(&["syncClaudeAiSkills"], off.clone()),
+                Some(30.0),
+                Some(2),
+            ),
+            context_piece(ContextKind::Skill, "tools:deploy", None, Some(6.0), Some(0)),
+            context_piece(
                 ContextKind::McpServer,
                 "docs",
                 deny("mcp__docs"),
@@ -2884,13 +2918,20 @@ mod tests {
         );
         assert!(change < keep && keep < unknown && unknown < fixed);
         let has = |line: &str| lines.contains(&line);
-        assert!(has("4 setting changes recommended."));
+        assert!(has("5 setting changes recommended."));
         assert!(has(
             "  Main-agent prompt cache TTL: 5m -> 1h. Saves $25, using the 99.5% of requests with measured usage. Set in /synthetic/home/.claude/settings.json:promptCacheTtl."
         ));
         assert!(has("  Artifact tool: on -> off. Costs $90; never used."));
         assert!(has(
             "  Skill example: on -> only when you type /example. Costs $12; the model used it 2 times ($6 each)."
+        ));
+        // Turning syncing off removes typed uses too, so every use counts.
+        assert!(has(
+            "  Skills synced from claude.ai: on -> off. Costs $30; used 2 times ($15 each)."
+        ));
+        assert!(has(
+            "  Skill tools:deploy: costs $6; never used. Turn off its plugin with /plugin, or remove the skill from the added directory."
         ));
         assert!(has(
             "  Agent tool: on. Costs $40; used 310 times ($0.13 each)."
@@ -2922,6 +2963,7 @@ mod tests {
             serde_json::json!({
                 "enableArtifact": false,
                 "skillOverrides": {"example": "user-invocable-only"},
+                "syncClaudeAiSkills": false,
                 "permissions": {"deny": ["mcp__docs"]}
             })
         );
@@ -3399,7 +3441,7 @@ mod tests {
         check.base.monthly_savings_usd = Some(720.0);
         assert!(text(&report, Some(200), false).contains("Saves $720."));
 
-        let name = "google-drive:google-drive-comments";
+        let name = "google-drive-comments";
         report.checks.clear();
         let skill = ContextCost {
             harness: Harness::Claude,

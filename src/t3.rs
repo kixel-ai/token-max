@@ -1618,7 +1618,9 @@ pub(crate) fn enrich(
             .or_else(|| roots.get(&(root.clone(), false)))
             .cloned()
     };
-    const MIXED: &str = "the subagent's root session resolves to more than one owner";
+    // Roots whose own requests all excluded T3, which their subagents inherit even
+    // when the root stays among several native profiles.
+    let mut native_roots: HashMap<((Harness, String), bool), bool> = HashMap::new();
     let order: Vec<usize> = (0..requests.len())
         .filter(|&i| requests[i].agent != Agent::Subagent)
         .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
@@ -1707,21 +1709,22 @@ pub(crate) fn enrich(
                     && matches!(r.source.as_deref(), Some("cli" | "exec"))
                     && r.client.as_deref() != Some("T3 Code"));
             // Labels T3's provider adapters write: the Claude Agent SDK's default, T3's own
-            // entrypoint, and T3's Codex originator. A missing label proves nothing, nor does
-            // a Codex source standing in for a missing originator.
+            // entrypoint, and T3's Codex originator. A missing label proves nothing.
             let t3_label = match r.harness {
                 Harness::Claude => matches!(r.client.as_deref(), None | Some("sdk-ts" | "t3-code")),
-                Harness::Codex => {
-                    matches!(r.client.as_deref(), None | Some("T3 Code")) || r.client == r.source
-                }
+                Harness::Codex => matches!(r.client.as_deref(), None | Some("T3 Code")),
             };
+            let native_root = subagent
+                && native_roots
+                    .get(&(root.clone(), true))
+                    .or_else(|| native_roots.get(&(root.clone(), false)))
+                    == Some(&true);
             let native = r.profiles.iter().any(|p| !t3_ids.contains(p));
             let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&r.id);
             let found = match session_owners.map_or(0, Vec::len) {
-                0 if native_source && native && !stray => None,
+                0 if (native_source || native_root) && native && !stray => None,
                 0 => match root_resolution {
-                    // A root left among native profiles only has already excluded T3.
-                    Some(Err(c)) if c != MIXED => Some(c),
+                    Some(Err(c)) => Some(c),
                     _ if r
                         .profiles
                         .iter()
@@ -1773,6 +1776,9 @@ pub(crate) fn enrich(
             }
         }
         if !subagent {
+            const MIXED: &str = "the subagent's root session resolves to more than one owner";
+            let native_only = cause.is_none() && r.profiles.iter().all(|p| !t3_ids.contains(p));
+            *native_roots.entry((root.clone(), selected)).or_insert(true) &= native_only;
             let resolved = match (cause, &r.profiles[..]) {
                 (Some(c), _) => Err(c),
                 (None, [p]) => Ok(p.clone()),
@@ -2535,7 +2541,7 @@ mod tests {
             w.claude.join("projects/p/native/subagents/agent-a1.jsonl"),
             format!(
                 "{}\n",
-                json!({"type":"assistant","uuid":"sub-uuid","sessionId":"native","isSidechain":true,"timestamp":"2026-01-01T00:00:01Z","entrypoint":"sdk-cli","message":{"id":"sub-message","model":"claude-opus-5-5","usage":usage}})
+                json!({"type":"assistant","uuid":"sub-uuid","sessionId":"native","isSidechain":true,"timestamp":"2026-01-01T00:00:01Z","message":{"id":"sub-message","model":"claude-opus-5-5","usage":usage}})
             ),
         );
         let other = w.home.join("other-claude");
@@ -2611,7 +2617,7 @@ mod tests {
             w.claude.join("projects/p/t3.jsonl"),
             format!("{}\n", row("t3-session", "t3-code")),
         );
-        // A missing originator falls back to the source, which proves nothing.
+        // A missing originator proves nothing.
         for (name, originator) in [
             ("vscode", json!("codex_vscode")),
             ("t3", json!("T3 Code")),
@@ -2634,7 +2640,8 @@ mod tests {
                 .profiles
                 .iter()
                 .any(|p| data.profiles.iter().any(|q| &q.id == p && q.t3.is_some()));
-            let labelled = matches!(r.client.as_deref(), Some("t3-code" | "T3 Code" | "vscode"));
+            let labelled =
+                r.client.is_none() || matches!(r.client.as_deref(), Some("t3-code" | "T3 Code"));
             assert_eq!(t3, labelled, "{r:?}");
             assert_eq!(r.profiles.len() > 1, labelled, "{r:?}");
         }

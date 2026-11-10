@@ -1136,7 +1136,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
         let mut groups: IndexMap<String, (WindowControl, Vec<Option<String>>)> = IndexMap::new();
         for model in observed_models {
             let control = window_control(
-                profile,
+                &profile.compaction,
                 match profile.harness {
                     Harness::Codex => None,
                     Harness::Claude => model.as_deref(),
@@ -3200,8 +3200,8 @@ mod tests {
                 .find(|p| p.harness == Harness::Claude)
                 .unwrap()
                 .clone();
-            assert_eq!(window_control(&p, Some("opus[1m]")).value, Some(400000));
-            let aliased = window_control(&p, Some("claude-opus-4-6"));
+            assert_eq!(window_control(&p.compaction, Some("opus[1m]")).value, Some(400000));
+            let aliased = window_control(&p.compaction, Some("claude-opus-4-6"));
             assert_eq!(aliased.value, None);
             assert!(!aliased.applicable);
             assert!(aliased.reason.contains("alias"));
@@ -3216,7 +3216,7 @@ mod tests {
                 scopes: None,
             })
             .unwrap();
-            let current = window_control(&p, Some("claude-opus-4-6"));
+            let current = window_control(&p.compaction, Some("claude-opus-4-6"));
             assert_eq!(current.value, Some(500000));
             assert_eq!(current.owner, "managed.json:autoCompactWindow");
             std::fs::write(
@@ -3258,7 +3258,7 @@ mod tests {
                 .find(|p| p.harness == Harness::Claude)
                 .unwrap();
             assert_eq!(
-                window_control(claude, Some("claude-opus-5-5")).value,
+                window_control(&claude.compaction, Some("claude-opus-5-5")).value,
                 Some(400000)
             );
             let codex = result

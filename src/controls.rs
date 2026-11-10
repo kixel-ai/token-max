@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, Harness, IdleControl,
-    Location, Millis, Profile, SpeedControl, WindowControl,
+    Location, Millis, SpeedControl, WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -604,8 +604,8 @@ fn strip_dated(text: &str, digits: usize) -> Option<&str> {
 }
 
 /// Exact model settings win; known dated Claude IDs share their undated model row.
-pub fn window_control(profile: &Profile, model: Option<&str>) -> WindowControl {
-    let models = &profile.compaction.models;
+pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> WindowControl {
+    let models = &compaction.models;
     let model = model.unwrap_or("");
     let canonical = strip_dated(model, 8).unwrap_or(model);
     let dated_family = claude_family(canonical).is_some_and(|family| {
@@ -618,7 +618,7 @@ pub fn window_control(profile: &Profile, model: Option<&str>) -> WindowControl {
         Some(row) if !model.is_empty() => row,
         _ => match models.get(canonical) {
             Some(row) if dated_family => row,
-            _ => &profile.compaction.default,
+            _ => &compaction.default,
         },
     };
     let aliases = match claude_family(model) {
@@ -893,7 +893,6 @@ pub fn speed_controls(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PerBucket, TtlControl};
     use serde_json::json;
 
     fn map(value: Value) -> Map<String, Value> {
@@ -908,39 +907,6 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
-    }
-
-    fn profile(compaction: CompactionControls) -> Profile {
-        let ttl = TtlControl {
-            value: None,
-            owner: "settings.json:promptCacheTtl".into(),
-            reason: "synthetic".into(),
-        };
-        Profile {
-            id: "profile".into(),
-            harness: Harness::Claude,
-            root: "synthetic".into(),
-            aliases: vec!["synthetic".into()],
-            histories: vec![],
-            settings_file: "synthetic/settings.json".into(),
-            ttl: PerBucket {
-                main: ttl.clone(),
-                subagent: ttl,
-            },
-            provider: Some("anthropic".into()),
-            settings: IndexMap::new(),
-            mcp_servers: vec![],
-            compaction,
-            idle: None,
-            speed: None,
-            bash: None,
-            speed_directories: None,
-            idle_directories: None,
-            background: vec![],
-            background_directories: IndexMap::new(),
-            background_requests: IndexMap::new(),
-            t3: None,
-        }
     }
 
     fn claude_sources<'a>(
@@ -1159,7 +1125,7 @@ mod tests {
         }));
         let empty = Map::new();
         let none = Env::new();
-        let p = profile(compaction_controls(&claude_sources(&user, &empty, &none)).unwrap());
+        let p = compaction_controls(&claude_sources(&user, &empty, &none)).unwrap();
         assert_eq!(
             window_control(&p, Some("claude-opus-5-5-20261101")).value,
             Some(300_000)
@@ -1174,13 +1140,13 @@ mod tests {
         let mut quiet = user.clone();
         quiet.insert("env".into(), json!({}));
         let managed = map(json!({ "autoCompactWindow": 500000 }));
-        let p = profile(compaction_controls(&claude_sources(&quiet, &managed, &none)).unwrap());
+        let p = compaction_controls(&claude_sources(&quiet, &managed, &none)).unwrap();
         let current = window_control(&p, Some("claude-opus-5-5"));
         assert_eq!(current.value, Some(500_000));
         assert_eq!(current.owner, "managed.json:autoCompactWindow");
 
         let shell = env(&[("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "200000")]);
-        let p = profile(compaction_controls(&claude_sources(&user, &empty, &shell)).unwrap());
+        let p = compaction_controls(&claude_sources(&user, &empty, &shell)).unwrap();
         let current = window_control(&p, Some("claude-opus-5-5"));
         assert_eq!(
             current.owner,
@@ -1189,7 +1155,7 @@ mod tests {
         assert_eq!(current.minimum_claude_patch, Some(304));
 
         let disabled = map(json!({ "autoCompactEnabled": false }));
-        let p = profile(compaction_controls(&claude_sources(&user, &disabled, &none)).unwrap());
+        let p = compaction_controls(&claude_sources(&user, &disabled, &none)).unwrap();
         assert!(!window_control(&p, Some("claude-opus-5-5")).applicable);
 
         let negative = map(json!({ "autoCompactWindow": -1 }));
@@ -1211,19 +1177,19 @@ mod tests {
         }));
         let empty = Map::new();
         let none = Env::new();
-        let p = profile(compaction_controls(&claude_sources(&user, &empty, &none)).unwrap());
+        let p = compaction_controls(&claude_sources(&user, &empty, &none)).unwrap();
         assert_eq!(window_control(&p, Some("opus[1m]")).value, Some(400_000));
         let aliased = window_control(&p, Some("claude-opus-4-6"));
         assert_eq!(aliased.value, None);
         assert!(!aliased.applicable);
         assert!(aliased.reason.contains("alias"));
         assert_eq!(
-            p.compaction.models.keys().collect::<Vec<_>>(),
+            p.models.keys().collect::<Vec<_>>(),
             ["opus[1m]", "claude-opus-4-6[1m]"]
         );
 
         let managed = map(json!({ "autoCompactWindow": 500000 }));
-        let p = profile(compaction_controls(&claude_sources(&user, &managed, &none)).unwrap());
+        let p = compaction_controls(&claude_sources(&user, &managed, &none)).unwrap();
         let current = window_control(&p, Some("claude-opus-4-6"));
         assert_eq!(current.value, Some(500_000));
         assert_eq!(current.owner, "managed.json:autoCompactWindow");

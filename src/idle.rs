@@ -2455,6 +2455,23 @@ fn t3_comparison(
     }) {
         groups.entry(&r.session).or_default().push(r);
     }
+    // Index once: per-request scans of every request and event are quadratic on real histories.
+    let mut natives: HashMap<&str, &Request> = HashMap::new();
+    for n in options
+        .scan
+        .requests
+        .iter()
+        .chain(&options.scan.cache_context.requests)
+    {
+        natives.entry(n.id.as_str()).or_insert(n);
+    }
+    let mut boundaries: HashMap<&str, Vec<&StructuralEvent>> = HashMap::new();
+    for &e in events
+        .iter()
+        .filter(|e| e.idle_attribution == IdleAttribution::T3)
+    {
+        boundaries.entry(&e.session).or_default().push(e);
+    }
     let mut gaps = Vec::new();
     let mut periods = Vec::new();
     for group in groups.values_mut() {
@@ -2474,12 +2491,7 @@ fn t3_comparison(
                 continue;
             }
             let meta = r.t3.as_ref();
-            let native = options
-                .scan
-                .requests
-                .iter()
-                .chain(&options.scan.cache_context.requests)
-                .find(|n| n.id == r.id);
+            let native = natives.get(r.id.as_str()).copied();
             let tokens = meta.and_then(|t| t.used_tokens).and_then(|tokens| {
                 let before = native?.parts.iter().find(|p| is_message(p))?.usage.input?;
                 let after = r.parts.iter().find(|p| is_message(p))?.usage.input?;
@@ -2494,11 +2506,10 @@ fn t3_comparison(
                 Some(expiry - ttl_milliseconds(old) + ttl_milliseconds(ttl?))
             });
             let trigger = expires.map(|t| t - 120_000).filter(|t| *t >= r.end_time);
-            let boundary = events.iter().copied().find(|e| {
-                e.session.as_ref() == r.session
-                    && e.time > r.end_time
-                    && e.time <= end
-                    && e.idle_attribution == IdleAttribution::T3
+            let boundary = boundaries.get(r.session.as_str()).and_then(|b| {
+                b.iter()
+                    .copied()
+                    .find(|e| e.time > r.end_time && e.time <= end)
             });
             let observed = boundary
                 .and_then(|e| e.t3.as_ref())

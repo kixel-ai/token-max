@@ -1203,8 +1203,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 time: i.time,
                 calls: 1,
                 invocation: (i.harness == Harness::Codex).then_some(i),
-                ambiguous: ambiguous_targets.contains(&i.target),
-                fallback: fallback_targets.contains(&i.target),
+                // Claude targets can share a Codex skill's name identity, but only Codex
+                // targets resolve through the catalog's ambiguous and fallback rows.
+                ambiguous: i.harness == Harness::Codex && ambiguous_targets.contains(&i.target),
+                fallback: i.harness == Harness::Codex && fallback_targets.contains(&i.target),
             },
         );
     }
@@ -1968,6 +1970,38 @@ mod tests {
         // The latest request dropped the tool and plugin, so neither gets a verdict.
         assert!(!artifact.current && artifact.verdict.is_none());
         assert!(!plugin.current);
+    }
+
+    #[test]
+    fn claude_skill_uses_ignore_a_codex_skill_of_the_same_name() {
+        let (mut scan, mut requests) = copied();
+        let mut skill = component("codex-review", Category::SkillListing, "review", 50, &[]);
+        skill.skill_path = Some("/skills/review/SKILL.md".into());
+        scan.components.extend([
+            skill,
+            component(
+                "codex-listing",
+                Category::SkillListing,
+                "skills",
+                100,
+                &["codex-review"],
+            ),
+        ]);
+        let mut e = exposure("r3", &[], 0, 100);
+        let view = Arc::make_mut(&mut e.view);
+        view.candidates = ids(&["codex-listing"]);
+        view.linkage = Linkage::Chronological;
+        scan.requests.push(e);
+        let mut r3 = request("r3", 3, 0, 0, 100);
+        r3.harness = Harness::Codex;
+        r3.profiles = vec!["b".into()];
+        requests.push(r3);
+        let rows = costs(&scan, &requests, 1.0);
+        let claude = rows
+            .iter()
+            .find(|c| c.name == "review" && c.skill.is_none())
+            .unwrap();
+        assert_eq!(claude.calls, Some(1));
     }
 
     /// Tool output a conversation holds, as `(tool, characters, opaque)`.

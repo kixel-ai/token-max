@@ -3200,7 +3200,10 @@ mod tests {
                 .find(|p| p.harness == Harness::Claude)
                 .unwrap()
                 .clone();
-            assert_eq!(window_control(&p.compaction, Some("opus[1m]")).value, Some(400000));
+            assert_eq!(
+                window_control(&p.compaction, Some("opus[1m]")).value,
+                Some(400000)
+            );
             let aliased = window_control(&p.compaction, Some("claude-opus-4-6"));
             assert_eq!(aliased.value, None);
             assert!(!aliased.applicable);

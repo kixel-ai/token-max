@@ -1608,8 +1608,16 @@ pub(crate) fn enrich(
     let mut ambiguous_profiles = HashSet::new();
     let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::new();
     // How each root session's own requests resolved, which its subagents inherit: one
-    // profile, or why not.
-    let mut roots: HashMap<(Harness, String), Result<String, &'static str>> = HashMap::new();
+    // profile, or why not. Requests inside the window decide; earlier ones only fill in.
+    type Resolution = Result<String, &'static str>;
+    let mut roots: HashMap<((Harness, String), bool), Resolution> = HashMap::new();
+    let resolution = |roots: &HashMap<((Harness, String), bool), Resolution>,
+                      root: &(Harness, String)| {
+        roots
+            .get(&(root.clone(), true))
+            .or_else(|| roots.get(&(root.clone(), false)))
+            .cloned()
+    };
     let order: Vec<usize> = (0..requests.len())
         .filter(|&i| requests[i].agent != Agent::Subagent)
         .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
@@ -1626,8 +1634,14 @@ pub(crate) fn enrich(
             .filter(|(p, _)| {
                 !invalid_joins.contains(&r.id) && !p.is_empty() && r.profiles.contains(p)
             });
-        let inherited = match roots.get(&root) {
-            Some(Ok(p)) if subagent && r.profiles.contains(p) => Some(p.clone()),
+        let selected = since.is_none_or(|s| r.time >= s);
+        let root_resolution = if subagent {
+            resolution(&roots, &root)
+        } else {
+            None
+        };
+        let inherited = match &root_resolution {
+            Some(Ok(p)) if r.profiles.contains(p) => Some(p.clone()),
             _ => None,
         };
         let owner = unique
@@ -1697,8 +1711,8 @@ pub(crate) fn enrich(
                 0 if native_source && r.profiles.iter().any(|p| !t3_ids.contains(p)) && !stray => {
                     None
                 }
-                0 => Some(match roots.get(&root) {
-                    Some(Err(c)) if subagent => c,
+                0 => Some(match root_resolution {
+                    Some(Err(c)) => c,
                     _ if r
                         .profiles
                         .iter()
@@ -1735,7 +1749,7 @@ pub(crate) fn enrich(
                     r.issues.push(format!("T3/shared native history ownership is unresolved: {c}; current control guidance is advisory"));
                     // Context before the window prices cache state but says nothing about
                     // which controls ran the selected requests.
-                    if since.is_none_or(|s| r.time >= s) {
+                    if selected {
                         let states: HashSet<String> =
                             r.profiles.iter().filter_map(state_of).collect();
                         for state in states {
@@ -1753,12 +1767,13 @@ pub(crate) fn enrich(
                 (None, [p]) => Ok(p.clone()),
                 (None, _) => Err(MIXED),
             };
-            let merged = match (roots.remove(&root), resolved) {
+            let key = (root, selected);
+            let merged = match (roots.remove(&key), resolved) {
                 (None, resolved) => resolved,
                 (Some(Err(c)), _) | (Some(Ok(_)), Err(c)) => Err(c),
                 (Some(Ok(p)), Ok(q)) => (p == q).then_some(p).ok_or(MIXED),
             };
-            roots.insert(root, merged);
+            roots.insert(key, merged);
         }
     }
     for state in states.iter_mut() {
@@ -2488,6 +2503,41 @@ mod tests {
             assert!(r.t3.is_none());
             assert!(data.t3[0].unresolved.is_empty(), "{:?}", data.t3[0]);
         }
+    }
+
+    #[test]
+    fn subagents_inherit_their_roots_resolution_inside_the_window() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        db(&root);
+        let usage = json!({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
+        write(
+            w.claude.join("projects/p/native.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                json!({"type":"assistant","uuid":"print-uuid","sessionId":"native-claude","timestamp":"2026-01-01T00:00:00Z","entrypoint":"sdk-cli","message":{"id":"print-message","model":"claude-opus-5-5","usage":usage}}),
+                json!({"type":"api-request","id":"api","sessionId":"native-claude","timestamp":"2026-01-03T00:00:00Z","querySource":"repl_main_thread","params":{"model":"claude-opus-5-5"}}),
+                json!({"type":"assistant","uuid":"native-uuid","sessionId":"native-claude","timestamp":"2026-01-03T00:00:01Z","entrypoint":"cli","requestRef":"api","message":{"id":"native-message","model":"claude-opus-5-5","usage":usage}})
+            ),
+        );
+        write(
+            w.claude
+                .join("projects/p/native-claude/subagents/agent-a1.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"sub-uuid","sessionId":"native-claude","isSidechain":true,"timestamp":"2026-01-03T00:00:02Z","entrypoint":"cli","message":{"id":"sub-message","model":"claude-opus-5-5","usage":usage}})
+            ),
+        );
+        let mut options = w.scan_options();
+        options.since = timestamp(&json!("2026-01-02T00:00:00Z"));
+        let data = scan(&options).unwrap();
+        let sub = data
+            .requests
+            .iter()
+            .find(|r| r.agent == Agent::Subagent)
+            .unwrap();
+        assert_eq!(sub.profiles.len(), 1, "{sub:?}");
+        assert!(data.t3[0].unresolved.is_empty(), "{:?}", data.t3[0]);
     }
 
     #[test]

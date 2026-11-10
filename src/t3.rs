@@ -173,6 +173,29 @@ impl Instance {
     }
 }
 
+/// `config.enabled` and `config.customModels`, read leniently for every driver because
+/// text generation can fall back to any of them.
+fn common_config(config: Option<&RawValue>) -> (Option<bool>, Vec<String>) {
+    #[derive(Default, Deserialize)]
+    #[serde(default, rename_all = "camelCase")]
+    struct Common {
+        enabled: Value,
+        custom_models: Value,
+    }
+    let common = config
+        .and_then(|v| serde_json::from_str::<Common>(v.get()).ok())
+        .unwrap_or_default();
+    let custom_models = match common.custom_models {
+        Value::Array(models) => models
+            .iter()
+            .filter_map(|m| m.as_str().or_else(|| m.get("slug")?.as_str()))
+            .map(|slug| slug.trim().to_string())
+            .collect(),
+        _ => vec![],
+    };
+    (common.enabled.as_bool(), custom_models)
+}
+
 impl<'de> Deserialize<'de> for Instance {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Default, Deserialize)]
@@ -184,31 +207,11 @@ impl<'de> Deserialize<'de> for Instance {
             environment: Option<Box<RawValue>>,
         }
         let raw = Fields::deserialize(d)?;
-        #[derive(Default, Deserialize)]
-        #[serde(default, rename_all = "camelCase")]
-        struct Common {
-            enabled: Value,
-            custom_models: Value,
-        }
         let driver = raw
             .driver
             .and_then(|v| serde_json::from_str::<String>(v.get()).ok())
             .unwrap_or_default();
-        // Text generation can fall back to any driver, so these are read leniently for all.
-        let common = raw
-            .config
-            .as_ref()
-            .and_then(|v| serde_json::from_str::<Common>(v.get()).ok())
-            .unwrap_or_default();
-        let config_enabled = common.enabled.as_bool();
-        let custom_models = match common.custom_models {
-            Value::Array(models) => models
-                .iter()
-                .filter_map(|m| m.as_str().or_else(|| m.get("slug")?.as_str()))
-                .map(|slug| slug.trim().to_string())
-                .collect(),
-            _ => vec![],
-        };
+        let (config_enabled, custom_models) = common_config(raw.config.as_deref());
         if !matches!(driver.as_str(), "claudeAgent" | "codex") {
             return Ok(Self {
                 enabled: raw.enabled.and_then(|v| serde_json::from_str(v.get()).ok()),
@@ -522,8 +525,11 @@ pub(crate) fn discover(
             });
         let mut instances = std::mem::take(&mut settings.provider_instances);
         for (driver, config) in std::mem::take(&mut settings.providers) {
+            let (config_enabled, custom_models) = common_config(Some(&config));
             instances.entry(driver.clone()).or_insert(Instance {
                 driver,
+                config_enabled,
+                custom_models,
                 config: Some(config),
                 ..Default::default()
             });
@@ -2071,6 +2077,8 @@ mod tests {
         );
         assert_eq!(pick(&g), pair("claudeAgent", "claude-haiku-5-5"));
         assert!(g.resolution.contains("falls back to instance claudeAgent"));
+        let g = resolve(json!({"providers":{"codex":{"enabled":false}}}));
+        assert_eq!(pick(&g), pair("claudeAgent", "claude-haiku-5-5"));
         let g = resolve(json!({
             "defaultModelSelection":{"instanceId":"claudeAgent","model":"custom-claude"},
             "providerInstances":{"codex":{"driver":"codex","enabled":false},"claudeAgent":{"driver":"claudeAgent","config":{"customModels":[{"slug":"custom-claude"}]}}}

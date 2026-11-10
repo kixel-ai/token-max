@@ -17,12 +17,15 @@ Measured 2026-11-09 on the maintainer's host, release builds, `--offline`:
 | #40, default profiles without T3 | 1,013,410 | 4:53 | 268 s | 14.3 GB |
 
 #40 removed the quadratic profile clone in `idle::Scopes::window`, which took
-the default run from 82 minutes to under 10. What remains is T3: this host's
-T3 metadata read fails (see [T3 state](/quest/m0/t3-state.md)), so every
-native `.claude` request (648k) stays shared with both T3 Claude instances
-and each per-profile check replays it three times, and the failing metadata
-query itself costs about 15% of the reader thread. Once T3 metadata joins,
-`t3::enrich` gives each joined request a single owner.
+the default run from 82 minutes to under 10. What remained was T3: this
+host's T3 metadata read failed, so every native `.claude` request (648k)
+stayed shared with both T3 Claude instances and each per-profile check
+replayed it three times, and the failing metadata query itself cost about 15%
+of the reader thread.
+[kixelated/token-max#41](https://github.com/kixelated/token-max/pull/41)
+has since fixed the read, and `t3::enrich` gives each joined request a single
+owner, but subagent and `sdk-cli` requests still stay shared (see
+[T3 state](/quest/m0/t3-state.md)).
 
 After the T3 state quest lands, measure the default run again against #27's
 binary on the same history. If shared requests still repeat whole check

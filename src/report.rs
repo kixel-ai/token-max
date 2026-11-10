@@ -14,7 +14,7 @@ use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, Control, ControlValue, Cost, Coverage, EstimateEvidence,
     Evidence, Harness, KeepaliveCheck, Millis, PeriodStatus, Profile, Report, RequestEvidence,
-    Scalar, Ttl, UsageEstimate, Verdict,
+    Scalar, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -561,6 +561,38 @@ fn generated_at(report: &Report) -> Millis {
     parse_instant(&report.generated_at).expect("reports record an ISO generation time")
 }
 
+/// One line per T3 state for its text-generation model, whose cost no native record holds.
+fn t3_text_generation(report: &Report, out: &Out<'_>) -> Vec<String> {
+    let text = |g: &T3TextGeneration| {
+        let mut line = format!(
+            "T3 text generation: {} {} ({}). Cost unmeasured: T3 writes thread titles, branch names, PR text and other generated text in ephemeral sessions that keep no native records. Set in {}.",
+            g.selection.instance,
+            g.selection.model,
+            g.resolution,
+            out.home(&g.owner)
+        );
+        for (key, s) in &g.overrides {
+            let _ = write!(line, " {key} replaces it with {} {}.", s.instance, s.model);
+        }
+        if g.project_overrides > 0 {
+            let _ = write!(
+                line,
+                " {} project{} replace these selections in projectSettingsOverrides.",
+                count(g.project_overrides),
+                if g.project_overrides == 1 { "" } else { "s" }
+            );
+        }
+        line
+    };
+    report
+        .scan
+        .t3
+        .iter()
+        .filter_map(|s| s.text_generation.as_ref())
+        .map(text)
+        .collect()
+}
+
 fn t3_coverage(report: &Report, out: &mut Out<'_>) {
     for state in report.scan.t3.iter().filter(|s| s.status == "selected") {
         out.field(
@@ -569,6 +601,11 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
         );
         for exclusion in &state.exclusions {
             out.field("T3 coverage", exclusion);
+        }
+    }
+    if out.options.details {
+        for line in t3_text_generation(report, out) {
+            out.line(&line, 2, 0);
         }
     }
 }
@@ -2474,8 +2511,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let unpriced: Vec<&ContextCost> = setting_rows(&report.context)
         .filter(|c| c.current && c.control.is_some() && c.verdict.is_none())
         .collect();
-    if !unknown.is_empty() || !unpriced.is_empty() {
+    let generation = t3_text_generation(report, out);
+    if !unknown.is_empty() || !unpriced.is_empty() || !generation.is_empty() {
         out.section("Not enough evidence");
+        for line in generation {
+            out.line(&line, 2, 0);
+        }
         for c in unknown {
             let text = check_line(c, out);
             out.line(&text, 2, 0);

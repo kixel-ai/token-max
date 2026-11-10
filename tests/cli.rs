@@ -1267,8 +1267,15 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
             .unwrap()
             .contains("unavailable")
     );
-    let exclusions = full["scan"]["t3"][0]["exclusions"].to_string();
-    assert!(exclusions.contains("ephemeral") && exclusions.contains("unsupported"));
+    assert!(
+        full["scan"]["t3"][0]["exclusions"]
+            .to_string()
+            .contains("unsupported")
+    );
+    assert_eq!(
+        full["scan"]["t3"][0]["textGeneration"]["selection"],
+        json!({"instance": "codex", "model": "gpt-6-luna"})
+    );
     assert!(
         full["checks"]
             .as_array()
@@ -1285,10 +1292,22 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
     assert!(stderr.is_empty());
     assert!(
         details.contains("t3-idle-compaction")
-            && details.contains("ephemeral")
+            && details
+                .contains("T3 text generation: codex gpt-6-luna (T3 default). Cost unmeasured")
             && details.contains("unavailable")
     );
-    for output in [full.to_string(), compact.to_string(), details] {
+    let (_, summary, stderr) = run(&mut command(
+        &w,
+        &["--t3-dir", &state, "--prices-file", &prices],
+    ));
+    assert!(stderr.is_empty());
+    let unmeasured = summary.split("Not enough evidence").nth(1).unwrap();
+    assert!(
+        unmeasured.contains("T3 text generation: codex gpt-6-luna (T3 default). Cost unmeasured")
+            && unmeasured
+                .contains("Set in ~/selected-t3/settings.json:textGenerationModelSelection.")
+    );
+    for output in [full.to_string(), compact.to_string(), details, summary] {
         assert!(!output.contains("SYNTHETIC_PRIVATE") && !output.contains("PRIVATE_CONFIG"));
     }
     assert!(!Path::new(&state).join("statev2.sqlite").exists());

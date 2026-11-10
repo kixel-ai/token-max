@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use indexmap::IndexMap;
 use rusqlite::{Connection, OpenFlags, Transaction};
 use serde::Deserialize;
+use serde::de::IgnoredAny;
 use serde_json::{Map, Value, value::RawValue};
 
 use crate::controls::Env;
@@ -17,7 +18,30 @@ use crate::safe::{ScanError, identity, iso, timestamp};
 
 /// The upstream implementation whose settings and projections this adapter supports.
 pub const SOURCE: &str = "https://github.com/pingdotgg/t3code/tree/c4ce7b0fd74f6beb37ed6034f5c8416e5aa7e165 (2026-11-08)";
-const AUXILIARY: &str = "T3 titles, branches, PR text and other helper generation can use ephemeral sessions; absent retained native billing records leave their cost unmeasured, not free";
+/// T3's default text-generation model on its default Codex instance.
+const DEFAULT_TEXT_MODEL: &str = "gpt-6-luna";
+/// Default instances T3 tries, in order, when the text-generation selection is disabled.
+const TEXT_FALLBACK: &[&str] = &[
+    "codex",
+    "claudeAgent",
+    "cursor",
+    "grok",
+    "muse",
+    "pi",
+    "opencode",
+    "antigravity",
+];
+/// Drivers whose instances are disabled unless enabled explicitly.
+const DEFAULT_DISABLED_DRIVERS: &[&str] = &[
+    "cursor",
+    "grok",
+    "fx",
+    "kiro",
+    "muse",
+    "pi",
+    "opencode",
+    "antigravity",
+];
 const ENVIRONMENT: &[&str] = &[
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
@@ -61,6 +85,61 @@ struct Settings {
     providers: IndexMap<String, Box<RawValue>>,
     idle_compaction: Option<T3IdleMode>,
     compact_idle_threads: Option<LegacyIdle>,
+    default_model_selection: Option<Selection>,
+    text_generation_model_selection: Option<Selection>,
+    source_control_writer_model_selection: Option<Selection>,
+    review_guide_model_selection: Option<Selection>,
+    speech_post_processing_model_selection: Option<Selection>,
+    text_generators: IndexMap<String, TextGenerator>,
+    project_settings_overrides: IndexMap<String, IndexMap<String, IgnoredAny>>,
+}
+
+/// A model API key that generates text directly; only whether it is enabled is read.
+#[derive(Deserialize)]
+struct TextGenerator {
+    #[serde(default = "enabled")]
+    enabled: bool,
+}
+fn enabled() -> bool {
+    true
+}
+
+/// T3's `ModelSelection`, including the legacy `provider` key; options are not read.
+#[derive(Clone, Deserialize)]
+#[serde(try_from = "SelectionWire")]
+struct Selection(T3Selection);
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionWire {
+    instance_id: Option<String>,
+    provider: Option<Value>,
+    model: String,
+}
+
+impl TryFrom<SelectionWire> for Selection {
+    type Error = &'static str;
+    fn try_from(wire: SelectionWire) -> Result<Self, Self::Error> {
+        let instance = wire
+            .instance_id
+            .or(match wire.provider {
+                Some(Value::String(provider)) => Some(provider),
+                _ => None,
+            })
+            .ok_or("model selection names no instance")?;
+        let model = wire.model.trim();
+        if !slug(&instance)
+            || model.is_empty()
+            || model.len() > 256
+            || model.chars().any(char::is_control)
+        {
+            return Err("invalid model selection");
+        }
+        Ok(Self(T3Selection {
+            instance,
+            model: model.into(),
+        }))
+    }
 }
 
 #[derive(Deserialize)]
@@ -74,8 +153,24 @@ enum LegacyIdle {
 struct Instance {
     driver: String,
     enabled: Option<bool>,
+    /// `config.enabled` when it is a boolean, for every driver.
+    config_enabled: Option<bool>,
+    /// `config.customModels` slugs, which let a fallback keep the thread default model.
+    custom_models: Vec<String>,
     config: Option<Box<RawValue>>,
     environment: Vec<Environment>,
+}
+
+impl Instance {
+    /// T3's `resolveProviderInstanceEnabled`: either flag disables, else the driver's default.
+    fn resolved_enabled(&self) -> bool {
+        if self.enabled == Some(false) || self.config_enabled == Some(false) {
+            return false;
+        }
+        self.enabled
+            .or(self.config_enabled)
+            .unwrap_or(!DEFAULT_DISABLED_DRIVERS.contains(&self.driver.as_str()))
+    }
 }
 
 impl<'de> Deserialize<'de> for Instance {
@@ -89,13 +184,37 @@ impl<'de> Deserialize<'de> for Instance {
             environment: Option<Box<RawValue>>,
         }
         let raw = Fields::deserialize(d)?;
+        #[derive(Default, Deserialize)]
+        #[serde(default, rename_all = "camelCase")]
+        struct Common {
+            enabled: Value,
+            custom_models: Value,
+        }
         let driver = raw
             .driver
             .and_then(|v| serde_json::from_str::<String>(v.get()).ok())
             .unwrap_or_default();
+        // Text generation can fall back to any driver, so these are read leniently for all.
+        let common = raw
+            .config
+            .as_ref()
+            .and_then(|v| serde_json::from_str::<Common>(v.get()).ok())
+            .unwrap_or_default();
+        let config_enabled = common.enabled.as_bool();
+        let custom_models = match common.custom_models {
+            Value::Array(models) => models
+                .iter()
+                .filter_map(|m| m.as_str().or_else(|| m.get("slug")?.as_str()))
+                .map(|slug| slug.trim().to_string())
+                .collect(),
+            _ => vec![],
+        };
         if !matches!(driver.as_str(), "claudeAgent" | "codex") {
             return Ok(Self {
+                enabled: raw.enabled.and_then(|v| serde_json::from_str(v.get()).ok()),
                 driver,
+                config_enabled,
+                custom_models,
                 ..Self::default()
             });
         }
@@ -113,6 +232,8 @@ impl<'de> Deserialize<'de> for Instance {
         Ok(Self {
             driver,
             enabled,
+            config_enabled,
+            custom_models,
             environment,
             config: raw.config,
         })
@@ -141,7 +262,6 @@ fn managed_policy_unresolved() -> bool {
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Config {
-    enabled: Option<bool>,
     home_path: String,
     shadow_home_path: String,
     setup_mode: Option<String>,
@@ -228,6 +348,110 @@ fn slug(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
 
+/// Resolve the model T3 generates titles, branch names, PR text and other text with,
+/// as its server does with no project selected and provider snapshots unavailable.
+fn text_generation(
+    settings: &Settings,
+    instances: &IndexMap<String, Instance>,
+    file: &Path,
+) -> T3TextGeneration {
+    let generator = |id: &str| settings.text_generators.get(id).map(|g| g.enabled);
+    let instance = |id: &str| instances.get(id).is_some_and(Instance::resolved_enabled);
+    // A text generator shares the instance id namespace and takes precedence.
+    let enabled = |id: &str| generator(id).unwrap_or_else(|| instance(id));
+    let (selection, origin) = match &settings.text_generation_model_selection {
+        Some(Selection(s)) => (s.clone(), "set"),
+        None => (
+            T3Selection {
+                instance: "codex".into(),
+                model: DEFAULT_TEXT_MODEL.into(),
+            },
+            "T3 default",
+        ),
+    };
+    let usable = enabled(&selection.instance)
+        && instances
+            .get(&selection.instance)
+            .is_none_or(|i| i.driver != "acpRegistry");
+    let (selection, resolution) = if usable {
+        (selection, origin.to_string())
+    } else if let Some(&id) = TEXT_FALLBACK.iter().find(|&&id| instance(id)) {
+        let model = match &settings.default_model_selection {
+            Some(Selection(d))
+                if d.instance == id && instances[id].custom_models.contains(&d.model) =>
+            {
+                d.model.clone()
+            }
+            _ => match id {
+                "claudeAgent" => "claude-haiku-5-5",
+                "cursor" => "composer-2",
+                "grok" => "grok-build",
+                "muse" | "pi" => "default",
+                "opencode" => "opencode/big-pickle",
+                "antigravity" => "antigravity-default",
+                _ => DEFAULT_TEXT_MODEL,
+            }
+            .into(),
+        };
+        (
+            T3Selection {
+                instance: id.into(),
+                model,
+            },
+            format!(
+                "{origin} {} cannot generate text, so T3 falls back to instance {id}",
+                selection.instance
+            ),
+        )
+    } else {
+        (
+            selection,
+            format!("{origin}, but no enabled instance can generate text"),
+        )
+    };
+    let mut overrides = IndexMap::new();
+    for (key, value, usable) in [
+        (
+            "sourceControlWriterModelSelection",
+            &settings.source_control_writer_model_selection,
+            &enabled as &dyn Fn(&str) -> bool,
+        ),
+        (
+            // Text generators cannot investigate a checkout, so they never write review guides.
+            "reviewGuideModelSelection",
+            &settings.review_guide_model_selection,
+            &|id: &str| generator(id).is_none() && instance(id),
+        ),
+        (
+            "speechPostProcessingModelSelection",
+            &settings.speech_post_processing_model_selection,
+            &enabled,
+        ),
+    ] {
+        if let Some(Selection(s)) = value
+            && usable(&s.instance)
+        {
+            overrides.insert(key.to_string(), s.clone());
+        }
+    }
+    const SCOPED: [&str; 3] = [
+        "textGenerationModelSelection",
+        "sourceControlWriterModelSelection",
+        "reviewGuideModelSelection",
+    ];
+    T3TextGeneration {
+        selection,
+        owner: format!("{}:textGenerationModelSelection", file.display()),
+        resolution,
+        overrides,
+        project_overrides: settings
+            .project_settings_overrides
+            .values()
+            .filter(|o| SCOPED.iter().any(|k| o.contains_key(*k)))
+            .count() as u64,
+    }
+}
+
 /// Add distinct T3 control profiles while sharing the native history snapshot walk.
 pub(crate) fn discover(
     options: &DiscoveryOptions,
@@ -273,6 +497,7 @@ pub(crate) fn discover(
                     snapshot_finished_at: None,
                     joined_requests: 0,
                     ambiguous_requests: 0,
+                    text_generation: None,
                 });
                 continue;
             }
@@ -282,7 +507,7 @@ pub(crate) fn discover(
             continue;
         }
         let file = path.join("settings.json");
-        let settings = match fs::read(&file) {
+        let mut settings = match fs::read(&file) {
             Ok(bytes) => serde_json::from_slice::<Settings>(&bytes)
                 .map_err(|_| fail("invalid T3 settings", &file))?,
             Err(e) if e.kind() == ErrorKind::NotFound => Settings::default(),
@@ -295,8 +520,8 @@ pub(crate) fn discover(
                 Some(LegacyIdle::Bool(true)) => T3IdleMode::BeforeCacheExpires,
                 _ => T3IdleMode::OnReturn,
             });
-        let mut instances = settings.provider_instances;
-        for (driver, config) in settings.providers {
+        let mut instances = std::mem::take(&mut settings.provider_instances);
+        for (driver, config) in std::mem::take(&mut settings.providers) {
             instances.entry(driver.clone()).or_insert(Instance {
                 driver,
                 config: Some(config),
@@ -313,14 +538,16 @@ pub(crate) fn discover(
         let mut state = T3State {
             path: path.to_string_lossy().into_owned(),
             status: "selected".into(),
-            exclusions: vec![AUXILIARY.into(), "Native terminal suggestions, away summaries, goal check-ins, Codex TUI recaps and terminal keepalive guidance do not apply to T3; their native toggles do not control T3 helpers".into()],
+            exclusions: vec!["Native terminal suggestions, away summaries, goal check-ins, Codex TUI recaps and terminal keepalive guidance do not apply to T3; their native toggles do not control T3 helpers".into()],
             metadata: "not read".into(),
             snapshot_started_at: None,
             snapshot_finished_at: None,
             joined_requests: 0,
             ambiguous_requests: 0,
+            text_generation: Some(text_generation(&settings, &instances, &file)),
         };
         for (id, instance) in instances {
+            let enabled = instance.resolved_enabled();
             let harness = match instance.driver.as_str() {
                 "claudeAgent" => Harness::Claude,
                 "codex" => Harness::Codex,
@@ -418,8 +645,7 @@ pub(crate) fn discover(
                     format!("{owner}.config.idleCompaction"),
                 ),
             };
-            let enabled = instance.enabled != Some(false) && config.enabled != Some(false);
-            let mut limitations = vec![AUXILIARY.into(), "T3's current thread selection and new-thread browser default are unavailable with the server closed; historical requested speed does not establish current selection or billed speed".into()];
+            let mut limitations = vec!["T3's current thread selection and new-thread browser default are unavailable with the server closed; historical requested speed does not establish current selection or billed speed".into()];
             if config.launch_args {
                 limitations.push("T3 launchArgs are present; arbitrary CLI overrides are not inspected, so affected native fallback controls remain advisory".into());
             }
@@ -1793,6 +2019,107 @@ mod tests {
         for r in &explicit.requests {
             assert!(!r.profiles.is_empty());
             assert!(r.issues.iter().any(|s| s.contains("advisory")));
+        }
+    }
+
+    #[test]
+    fn text_generation_resolves_defaults_fallbacks_and_overrides() {
+        let w = Workspace::new();
+        let resolve = |settings: Value| {
+            let root = state(&w, settings);
+            let data = scan(&w.scan_options()).unwrap();
+            assert!(
+                !serde_json::to_string(&data)
+                    .unwrap()
+                    .contains("PRIVATE_KEY")
+            );
+            let g = data.t3[0].text_generation.clone().unwrap();
+            assert_eq!(
+                g.owner,
+                format!(
+                    "{}:textGenerationModelSelection",
+                    fs::canonicalize(&root)
+                        .unwrap()
+                        .join("settings.json")
+                        .display()
+                )
+            );
+            g
+        };
+        let pick = |g: &T3TextGeneration| (g.selection.instance.clone(), g.selection.model.clone());
+        let pair = |i: &str, m: &str| (i.to_string(), m.to_string());
+
+        let g = resolve(json!({}));
+        assert_eq!(
+            (pick(&g), g.resolution.as_str()),
+            (pair("codex", "gpt-6-luna"), "T3 default")
+        );
+        assert!(g.overrides.is_empty() && g.project_overrides == 0);
+
+        // Legacy `provider` keys still route; an enabled selection is kept as set.
+        let g = resolve(
+            json!({"textGenerationModelSelection":{"provider":"claudeAgent","model":" claude-x "}}),
+        );
+        assert_eq!(
+            (pick(&g), g.resolution.as_str()),
+            (pair("claudeAgent", "claude-x"), "set")
+        );
+
+        // Either enabled flag disables codex; the fallback keeps a custom thread default.
+        let g = resolve(
+            json!({"providerInstances":{"codex":{"driver":"codex","config":{"enabled":false}}}}),
+        );
+        assert_eq!(pick(&g), pair("claudeAgent", "claude-haiku-5-5"));
+        assert!(g.resolution.contains("falls back to instance claudeAgent"));
+        let g = resolve(json!({
+            "defaultModelSelection":{"instanceId":"claudeAgent","model":"custom-claude"},
+            "providerInstances":{"codex":{"driver":"codex","enabled":false},"claudeAgent":{"driver":"claudeAgent","config":{"customModels":[{"slug":"custom-claude"}]}}}
+        }));
+        assert_eq!(pick(&g), pair("claudeAgent", "custom-claude"));
+
+        // Default-disabled drivers fall back only when enabled; none enabled keeps the selection.
+        let g = resolve(json!({"providerInstances":{
+            "codex":{"driver":"codex","enabled":false},"claudeAgent":{"driver":"claudeAgent","enabled":false},
+            "cursor":{"driver":"cursor"},"grok":{"driver":"grok","enabled":true}}}));
+        assert_eq!(pick(&g), pair("grok", "grok-build"));
+        let g = resolve(json!({"providerInstances":{
+            "codex":{"driver":"codex","enabled":false},"claudeAgent":{"driver":"claudeAgent","enabled":false}}}));
+        assert_eq!(pick(&g), pair("codex", "gpt-6-luna"));
+        assert!(g.resolution.contains("no enabled instance"));
+
+        // A text generator takes precedence over an instance id; a disabled one falls back.
+        let g = resolve(json!({
+            "textGenerators":{"api":{"kind":"openai","apiKey":"PRIVATE_KEY"}},
+            "textGenerationModelSelection":{"instanceId":"api","model":"small"},
+            "sourceControlWriterModelSelection":{"instanceId":"api","model":"writer"},
+            "reviewGuideModelSelection":{"instanceId":"api","model":"guide"},
+            "speechPostProcessingModelSelection":{"instanceId":"cursor","model":"off"},
+            "projectSettingsOverrides":{"a":{"reviewGuideModelSelection":null},"b":{"defaultAutoPull":true}}
+        }));
+        assert_eq!(
+            (pick(&g), g.resolution.as_str()),
+            (pair("api", "small"), "set")
+        );
+        // Review guides never use text generators, and cursor is disabled by default.
+        assert_eq!(
+            g.overrides.keys().collect::<Vec<_>>(),
+            ["sourceControlWriterModelSelection"]
+        );
+        assert_eq!(g.project_overrides, 1);
+        let g = resolve(json!({
+            "textGenerators":{"api":{"kind":"openai","enabled":false}},
+            "textGenerationModelSelection":{"instanceId":"api","model":"small"}
+        }));
+        assert_eq!(pick(&g), pair("codex", "gpt-6-luna"));
+
+        for selection in [
+            json!({"model":"x"}),
+            json!({"instanceId":"codex","model":" "}),
+            json!({"instanceId":"codex","model":"a\u{1b}b"}),
+        ] {
+            state(&w, json!({"textGenerationModelSelection":selection}));
+            let error = scan(&w.scan_options()).unwrap_err();
+            assert!(error.message.contains("invalid T3 settings"));
         }
     }
 

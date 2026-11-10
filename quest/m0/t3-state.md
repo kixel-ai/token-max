@@ -29,8 +29,8 @@ evidence gap that keeps native usage, never a failed run (2026-11-07
 decision in the m0 README).
 
 Decided 2026-11-09 (maintainer, /quest-plan, asking which T3 Code settings to
-audit): ✅ plan this quest; ✅ text-generation model as
-[its own quest](/quest/m0/t3-text-generation.md) (rejected: the T3
+audit): ✅ plan this quest; ✅ text-generation model as its own
+quest, since reported (rejected: the T3
 `contextWindow` option, which T3 offers only for older 4.6 Claude profiles and
 hides for Claude, while the per-instance auto-compact window check covers
 current models; auto-resume of limited or interrupted threads, which only

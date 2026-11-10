@@ -33,6 +33,10 @@ Decided 2026-11-09 (maintainer, /quest-plan from /quest-complete): ✅ plan
 this follow-up (rejected: accept the 12-minute run). ✅ m0 (rejected: m1),
 since first-release users with large histories hit it.
 
+Decided 2026-11-09 (maintainer, /quest-complete): ✅ land #40 as a partial
+fix and keep this quest open behind T3 state (rejected: keep #40 open until
+the T3 duplication is fixed too).
+
 ## Required
 
 - [T3 state](/quest/m0/t3-state.md) - joined T3 metadata gives shared native requests a single owner

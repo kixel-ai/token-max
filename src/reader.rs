@@ -1150,7 +1150,7 @@ impl Reader {
             let source = member(p, "source");
             set(
                 &mut context.client,
-                label(member(p, "originator"))
+                crate::safe::originator(member(p, "originator"))
                     .or_else(|| label(source))
                     .as_deref(),
             );

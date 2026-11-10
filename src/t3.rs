@@ -1698,45 +1698,52 @@ pub(crate) fn enrich(
                 r.issues.push("T3 native session owner is unique; per-request run/speed/idle metadata is unavailable".into());
             }
         } else if r.profiles.iter().any(|p| t3_ids.contains(p)) {
-            // REPL provenance excludes the SDK client. T3 can override its entrypoint
-            // label, so a different label alone cannot prove a native control owner.
+            // Native REPL or CLI provenance excludes T3 even when its state was not read.
             let native_source = (r.harness == Harness::Claude
                 && r.client.as_deref() == Some("cli")
                 && r.source.as_deref() == Some("repl_main_thread"))
                 || (r.harness == Harness::Codex
                     && matches!(r.source.as_deref(), Some("cli" | "exec"))
                     && r.client.as_deref() != Some("T3 Code"));
+            // Labels T3's provider adapters write: the Claude Agent SDK's default, T3's own
+            // entrypoint, and T3's Codex originator. A missing label proves nothing.
+            let t3_label = match r.harness {
+                Harness::Claude => matches!(r.client.as_deref(), None | Some("sdk-ts" | "t3-code")),
+                Harness::Codex => matches!(r.client.as_deref(), None | Some("T3 Code")),
+            };
+            let native = r.profiles.iter().any(|p| !t3_ids.contains(p));
             let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&r.id);
             let found = match session_owners.map_or(0, Vec::len) {
-                0 if native_source && r.profiles.iter().any(|p| !t3_ids.contains(p)) && !stray => {
-                    None
-                }
-                0 => Some(match root_resolution {
-                    Some(Err(c)) => c,
+                0 if native_source && native && !stray => None,
+                0 => match root_resolution {
+                    Some(Err(c)) => Some(c),
                     _ if r
                         .profiles
                         .iter()
                         .filter(|p| t3_ids.contains(*p))
                         .any(|p| state_of(p).is_none_or(|s| !read.contains(&s))) =>
                     {
-                        "the T3 state database was not read"
+                        Some("the T3 state database was not read")
                     }
-                    _ if unlinked.contains(&root) => {
-                        "the native session's T3 provider thread was linked after the native snapshot"
-                    }
-                    _ if stray => {
-                        "a T3 turn matches the request, but no T3 thread owns its native session"
-                    }
-                    None if subagent => {
-                        "the subagent's root session has no transcript and no T3 provider thread"
-                    }
-                    _ if r.harness == Harness::Claude && r.client.as_deref() == Some("sdk-cli") => {
-                        "a `claude -p` (sdk-cli) session with no T3 provider thread; T3 text generation runs this way"
-                    }
-                    _ => {
-                        "no T3 provider thread owns the native session, and its client does not prove the native CLI"
-                    }
-                }),
+                    _ if unlinked.contains(&root) => Some(
+                        "the native session's T3 provider thread was linked after the native snapshot",
+                    ),
+                    _ if stray => Some(
+                        "a T3 turn matches the request, but no T3 thread owns its native session",
+                    ),
+                    // T3's state was read without a provider thread for this session. A T3
+                    // provider session lacks one only if T3 dropped it, so its label decides.
+                    _ if native && !t3_label => None,
+                    _ if t3_label => Some(
+                        "no T3 provider thread owns the native session, but its client label is one T3 writes",
+                    ),
+                    None if subagent => Some(
+                        "the subagent's root session has no transcript and no T3 provider thread",
+                    ),
+                    _ => Some(
+                        "no T3 provider thread owns the native session, and no native profile shares its home",
+                    ),
+                },
                 1 => Some(
                     "the native session's only T3 owner is not a selected instance for this home",
                 ),
@@ -2343,6 +2350,7 @@ mod tests {
                         row["payload"]["cwd"] = json!(cwd);
                         if row["type"] == "session_meta" {
                             row["payload"]["source"] = json!("app-server");
+                            row["payload"]["originator"] = json!("T3 Code");
                         }
                     }
                     row
@@ -2541,24 +2549,45 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_requests_name_their_cause() {
+    fn sessions_without_a_t3_thread_resolve_by_client_label() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
         db(&root);
+        let row = |session: &str, entrypoint: &str| json!({"type":"assistant","uuid":format!("{session}-uuid"),"sessionId":session,"timestamp":"2026-01-01T00:00:01Z","entrypoint":entrypoint,"message":{"id":format!("{session}-message"),"model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
         write(
             w.claude.join("projects/p/print.jsonl"),
-            format!(
-                "{}\n",
-                json!({"type":"assistant","uuid":"print-uuid","sessionId":"print-session","timestamp":"2026-01-01T00:00:01Z","entrypoint":"sdk-cli","message":{"id":"print-message","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
-            ),
+            format!("{}\n", row("print-session", "sdk-cli")),
         );
+        write(
+            w.claude.join("projects/p/t3.jsonl"),
+            format!("{}\n", row("t3-session", "t3-code")),
+        );
+        for (name, originator) in [("vscode", "codex_vscode"), ("t3", "T3 Code")] {
+            write(
+                w.codex.join(format!("sessions/{name}.jsonl")),
+                format!(
+                    "{}\n{}\n{}\n",
+                    json!({"type":"session_meta","timestamp":"2026-01-01T00:00:00Z","payload":{"id":format!("{name}-thread"),"model_provider":"openai","originator":originator,"source":"vscode"}}),
+                    json!({"type":"turn_context","timestamp":"2026-01-01T00:00:01Z","payload":{"turn_id":format!("{name}-turn"),"model":"gpt-6.1-sol"}}),
+                    json!({"type":"token_usage_record","timestamp":"2026-01-01T00:00:02Z","payload":{"response_id":format!("{name}-response"),"turn_id":format!("{name}-turn"),"usage":{"input_tokens":10,"output_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0}}})
+                ),
+            );
+        }
         let data = scan(&w.scan_options()).unwrap();
-        assert_eq!(data.requests.len(), 1);
-        assert!(data.requests[0].profiles.len() > 1);
+        assert_eq!(data.requests.len(), 4);
+        for r in &data.requests {
+            let t3 = r
+                .profiles
+                .iter()
+                .any(|p| data.profiles.iter().any(|q| &q.id == p && q.t3.is_some()));
+            let labelled = matches!(r.client.as_deref(), Some("t3-code" | "T3 Code"));
+            assert_eq!(t3, labelled, "{r:?}");
+            assert_eq!(r.profiles.len() > 1, labelled, "{r:?}");
+        }
         let causes: Vec<_> = data.t3[0].unresolved.iter().collect();
         assert_eq!(causes.len(), 1, "{causes:?}");
-        assert!(causes[0].0.contains("sdk-cli"), "{causes:?}");
-        assert_eq!(*causes[0].1, 1);
+        assert!(causes[0].0.contains("label is one T3 writes"), "{causes:?}");
+        assert_eq!(*causes[0].1, 2);
         // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
         // so check the marker shared-history ambiguity leaves on the TTL instead.
         let ambiguous = |s: &Scan| {

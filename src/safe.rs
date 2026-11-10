@@ -56,6 +56,11 @@ pub fn label(value: &Value) -> Option<String> {
     valid.then(|| text.to_string())
 }
 
+/// A Codex originator label, admitting the spaced name T3's Codex adapter writes.
+pub fn originator(value: &Value) -> Option<String> {
+    label(value).or_else(|| (value.as_str() == Some("T3 Code")).then(|| "T3 Code".into()))
+}
+
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.
 pub fn identity(value: &str) -> String {
     let digest = Sha256::digest(value.as_bytes());

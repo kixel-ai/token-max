@@ -24,10 +24,11 @@ replayed it three times, and the failing metadata query itself cost about 15%
 of the reader thread.
 [kixelated/token-max#41](https://github.com/kixelated/token-max/pull/41)
 has since fixed the read, and `t3::enrich` gives each joined request a single
-owner, but subagent and `sdk-cli` requests still stay shared (see
-[T3 state](/quest/m0/t3-state.md)).
+owner. A session with no T3 provider thread now stays shared only when its
+client label is one T3 writes (1 request of a `--since 2026-11-08` run on
+2026-11-10, down from 482).
 
-After the T3 state quest lands, measure the default run again against #27's
+Measure the default run again against #27's
 binary on the same history. If shared requests still repeat whole check
 replays, share per-profile replays between profiles whose requests and
 relevant controls match, keeping `--json` identical.
@@ -39,7 +40,3 @@ since first-release users with large histories hit it.
 Decided 2026-11-09 (maintainer, /quest-complete): ✅ land #40 as a partial
 fix and keep this quest open behind T3 state (rejected: keep #40 open until
 the T3 duplication is fixed too).
-
-## Required
-
-- [T3 state](/quest/m0/t3-state.md) - joined T3 metadata gives shared native requests a single owner

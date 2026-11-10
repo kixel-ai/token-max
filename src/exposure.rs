@@ -453,8 +453,7 @@ impl ExposureCollector {
         let kind = raw.get("type").and_then(Value::as_str);
         if kind == Some("session_meta") {
             self.session = id(present(payload.get("id")).or(payload.get("session_id")))?.into();
-            self.client =
-                safe::originator(field(payload, "originator")).or(label(field(payload, "source")));
+            self.client = safe::originator(field(payload, "originator"));
             self.version = label(field(payload, "cli_version"));
         }
         if !claude

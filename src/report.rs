@@ -603,6 +603,16 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
         for exclusion in &state.exclusions {
             out.field("T3 coverage", exclusion);
         }
+        for (cause, n) in &state.unresolved {
+            out.field(
+                "T3 unresolved",
+                &format!(
+                    "{} request{}: {cause}",
+                    count(*n),
+                    if *n == 1 { "" } else { "s" }
+                ),
+            );
+        }
     }
     if out.options.details {
         for line in t3_text_generation(report, out) {

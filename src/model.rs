@@ -487,6 +487,9 @@ pub struct T3State {
     pub snapshot_finished_at: Option<String>,
     pub joined_requests: u64,
     pub ambiguous_requests: u64,
+    /// Requests whose T3 or native control owner stays unresolved, counted by cause.
+    #[serde(default)]
+    pub unresolved: IndexMap<String, u64>,
     /// The model T3 resolves for generated text; absent for a state that was not read.
     pub text_generation: Option<T3TextGeneration>,
 }

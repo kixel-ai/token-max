@@ -1,42 +1,43 @@
-# [M] Resolve T3 control ownership on shared native homes
+# [S] Resolve T3 control ownership of unowned shared sessions
 
 ## Goal
 
-On a host where T3 instances share a native Claude or Codex home with the
-terminal CLI, every request in that home resolves to the T3 instance or
-native profile whose controls ran it, so the T3 idle-compaction and fast-mode
-lines carry evidence instead of "unknown". Requests that stay ambiguous are
-named with their cause.
+On a host where T3 instances share a native Claude or Codex home with other
+clients, a session with no T3 provider thread no longer keeps the T3 instance
+profiles unresolved, so the T3 idle-compaction and fast-mode lines carry
+evidence instead of "unknown". Sessions whose owner stays unproven keep their
+named cause.
 
 ## Plan
 
-[kixelated/token-max#41](https://github.com/kixelated/token-max/pull/41)
-fixed the read itself. The 10,000 x 1,000 VM-step cap was the cause: one
-Claude request's lookup cost 5.9M steps and about 50 s of I/O on the
-maintainer's 20 GB `statev2.sqlite`, because it scanned every provider turn
-and every turn item's payload. Reads now follow T3's indexes from the selected
-sessions' provider threads, and a failure names schema, resource bound, or
-access. A `--since 2026-11-08` run joins 18,992 requests in a 16.5 s
-snapshot, none ambiguous.
+[kixelated/token-max#44](https://github.com/kixelated/token-max/pull/44)
+gave subagents their root session's owner, joined Claude tool-only and
+thinking-only responses by item id, scoped ownership to the window, and named
+each unresolved request's cause. A `--since 2026-11-08` run on the
+maintainer's host (2026-11-10, T3 0.1.7) leaves 482 unresolved requests, all
+in sessions no T3 provider thread owns:
 
-The T3 lines still say "unknown" on that host (measured 2026-11-09, T3 0.1.7):
+- 438 `claude -p` (`sdk-cli`) requests. T3 text generation runs
+  `claude -p --json-schema` in the shared home, as do the maintainer's own
+  `claude -p` tools such as `quest review`.
+- 41 requests from other clients without native CLI provenance, mostly Codex
+  `vscode` sessions (Codex Desktop or the VS Code extension) and their
+  subagents.
+- 3 Codex subagent requests whose root session left no transcript, such as an
+  ephemeral `codex exec`.
 
-- Subagent requests never inherit their parent session's T3 owner: Claude
-  subagent sessions are keyed per agent file, and Codex subagent threads by
-  their own id (`session_meta.session_id` and `parent_thread_id` name the
-  root). About 11,500 requests in two days, marking the shared profiles
-  unresolved, which also clears their cache TTL.
-- About 430 `sdk-cli` Claude requests (`claude -p`-style sessions) have no T3
-  provider thread. They may be T3's ephemeral text generation, which the
-  "T3 text generation" line reports as unmeasured, so they stay ambiguous and
-  keep the shared `~/.claude` unresolved.
-- Fast mode stays unknown by design: T3's current thread and browser
-  selection is not read, only historical requested speed.
-- About 14,000 Claude main requests join only at the session level. Their
-  responses carry tool calls or thinking but no text, and T3 keys those items
-  by tool-use id or `<message id>:thinking:<n>`, which token-max does not
-  collect.
+Each keeps every T3 instance of its home as a candidate owner, which marks
+them unresolved. A session T3 ran as a provider instance has a provider
+thread, unless T3's projection maintenance dropped it, which is why the
+current rule does not exclude T3 on a missing thread alone.
+
+Fast mode stays unknown by design: T3's current thread and browser selection
+is not read, only historical requested speed.
 
 Settled: T3 metadata stays optional, and a failed read stays a named
 evidence gap that keeps native usage, never a failed run (2026-11-07
 decision in the m0 README).
+
+## Waiting
+
+- Maintainer: decide whether a readable T3 state with no provider thread for a session excludes T3's instances as its owner. Options: (1, recommended) exclude them when the client label is not one T3's provider adapters write (Claude `sdk-ts` or T3's own label, Codex originator `T3 Code`), leaving the request unresolved only among native profiles; (2) exclude them for every session without a provider thread, trusting T3 never drops one; (3) keep today's rule, so these sessions keep the T3 lines unknown. Only the maintainer can weigh the projection-pruning risk against the evidence the T3 lines gain. Check: this item is replaced by the chosen rule in this Plan.

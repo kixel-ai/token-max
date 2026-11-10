@@ -1,37 +1,42 @@
-# [M] Read real T3 state
+# [M] Resolve T3 control ownership on shared native homes
 
 ## Goal
 
-On a host whose T3 `statev2.sqlite` is tens of gigabytes, `token-max` reads
-the thread metadata it needs within a budget that does not grow with the
-database, so the T3 idle-compaction and fast-mode lines carry evidence
-instead of "unknown". When the read still fails, the report names the cause:
-schema, budget, or access.
+On a host where T3 instances share a native Claude or Codex home with the
+terminal CLI, every request in that home resolves to the T3 instance or
+native profile whose controls ran it, so the T3 idle-compaction and fast-mode
+lines carry evidence instead of "unknown". Requests that stay ambiguous are
+named with their cause.
 
 ## Plan
 
-Measured 2026-11-09 on the maintainer's host (T3 0.1.7): `statev2.sqlite`
-is 20 GB with a 15 MB WAL. Every run reports `T3 state: ... unavailable:
-incompatible/malformed schema, metadata resource bound, or read-only
-database/WAL access failed`. As a result, `T3 idle compaction` (all three
-Claude instances, `idleCompaction = onReturn`) and `Fast mode` (every T3
-instance) say their current selection or lifecycle evidence is unavailable.
+[kixelated/token-max#41](https://github.com/kixelated/token-max/pull/41)
+fixed the read itself. The 10,000 x 1,000 VM-step cap was the cause: one
+Claude request's lookup cost 5.9M steps and about 50 s of I/O on the
+maintainer's 20 GB `statev2.sqlite`, because it scanned every provider turn
+and every turn item's payload. Reads now follow T3's indexes from the selected
+sessions' provider threads, and a failure names schema, resource bound, or
+access. A `--since 2026-11-08` run joins 18,992 requests in a 16.5 s
+snapshot, none ambiguous.
 
-The reader in `src/t3.rs` maps every error to that one message. It caps each
-snapshot at 10,000 progress callbacks of 1,000 SQLite VM steps, which is the
-likely cause on this database, but the run does not say. Find the actual
-cause first, then make the queries use T3's indexes or narrow them to the
-selected requests' threads, so the cost follows the selected history, not
-the database.
+The T3 lines still say "unknown" on that host (measured 2026-11-09, T3 0.1.7):
+
+- Subagent requests never inherit their parent session's T3 owner: Claude
+  subagent sessions are keyed per agent file, and Codex subagent threads by
+  their own id (`session_meta.session_id` and `parent_thread_id` name the
+  root). About 11,500 requests in two days, marking the shared profiles
+  unresolved, which also clears their cache TTL.
+- About 430 `sdk-cli` Claude requests (`claude -p`-style sessions) have no T3
+  provider thread. They may be T3's ephemeral text generation, which the
+  "T3 text generation" line reports as unmeasured, so they stay ambiguous and
+  keep the shared `~/.claude` unresolved.
+- Fast mode stays unknown by design: T3's current thread and browser
+  selection is not read, only historical requested speed.
+- About 14,000 Claude main requests join only at the session level. Their
+  responses carry tool calls or thinking but no text, and T3 keys those items
+  by tool-use id or `<message id>:thinking:<n>`, which token-max does not
+  collect.
 
 Settled: T3 metadata stays optional, and a failed read stays a named
 evidence gap that keeps native usage, never a failed run (2026-11-07
 decision in the m0 README).
-
-Decided 2026-11-09 (maintainer, /quest-plan, asking which T3 Code settings to
-audit): ✅ plan this quest; ✅ text-generation model as its own
-quest, since reported (rejected: the T3
-`contextWindow` option, which T3 offers only for older 4.6 Claude profiles and
-hides for Claude, while the per-instance auto-compact window check covers
-current models; auto-resume of limited or interrupted threads, which only
-continues work the user would do anyway). ✅ m0 (rejected: m1).

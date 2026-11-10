@@ -14,7 +14,7 @@ include = ["/src", "/tests", "/test/fixtures", "/docs/semantics.md", "/README.md
 [dependencies]
 ctrlc = { version = "3.5.2", features = ["termination"] }
 indexmap = { version = "2.14.2", features = ["serde"] }
-rusqlite = { version = "0.41.1", features = ["bundled", "limits", "hooks"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "limits"] }
 jiff = "0.2.40"
 memchr = "2.8.3"
 serde = { version = "1.0.229", features = ["derive", "rc"] }

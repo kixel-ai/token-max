@@ -883,19 +883,39 @@ fn native_request<'a>(r: &'a Request, ids: &'a NativeIds) -> Option<NativeReques
     })
 }
 
-// Native identities and the earliest running selection are the join. No Usage totals,
-// messages, prompts, credentials, or arbitrary JSON objects leave SQLite.
-const OWNERS: &str =
-    "SELECT pt.provider_instance_id FROM orchestration_v2_projection_provider_threads pt
- WHERE pt.driver=?1 AND json_extract(pt.payload_json,'$.nativeThreadRef.nativeId')=?2
- AND (pt.updated_at<=?3 OR EXISTS (
-   SELECT 1 FROM orchestration_events e
-   WHERE e.application_event_version=2 AND e.aggregate_kind='thread'
-     AND e.stream_id=pt.thread_id AND e.event_type='provider-thread.updated' AND e.occurred_at<=?3
-     AND json_extract(e.payload_json,'$.id')=pt.provider_thread_id
-     AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
-     AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=?1
-     AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=?2)) LIMIT 2";
+// T3 indexes no Claude native identity (its one native index covers Codex turns), so one
+// pass over provider threads maps the selected native sessions to T3 threads. Every
+// later lookup follows T3's indexes from those threads, so cost tracks the selected
+// history, not the database. No Usage totals, messages, prompts, credentials, or
+// arbitrary JSON objects leave SQLite.
+const PROVIDER_THREADS: &str = "SELECT provider_thread_id, driver,
+ json_extract(payload_json,'$.nativeThreadRef.nativeId'), provider_instance_id, updated_at<=?1
+ FROM orchestration_v2_projection_provider_threads WHERE driver IN ('claudeAgent','codex')";
+// A provider thread updated after the native bound owns its session only through an
+// earlier event that already linked it.
+const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_projection_provider_threads pt
+ JOIN orchestration_events e ON e.stream_id=pt.thread_id
+ WHERE pt.provider_thread_id=?1 AND e.application_event_version=2 AND e.aggregate_kind='thread'
+   AND e.event_type='provider-thread.updated' AND e.occurred_at<=?2
+   AND json_extract(e.payload_json,'$.id')=pt.provider_thread_id
+   AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
+   AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=pt.driver
+   AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=json_extract(pt.payload_json,'$.nativeThreadRef.nativeId'))";
+// Native turn and item references of one provider thread. Codex joins by turn id alone, so
+// only Claude reads items. T3's Claude adapter keys tool items by tool-use id and reasoning
+// by `<message id>:thinking:<n>`, so neither can hold a transcript record uuid; skipping
+// them avoids reading tool outputs, most of the table.
+const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$.nativeTurnRef.driver'),
+ json_extract(payload_json,'$.nativeTurnRef.driver'), json_extract(payload_json,'$.nativeTurnRef.nativeId')
+ FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1
+ UNION ALL
+ SELECT t.provider_turn_id, json_extract(t.payload_json,'$.nativeTurnRef.driver'),
+ json_extract(i.payload_json,'$.nativeItemRef.driver'), json_extract(i.payload_json,'$.nativeItemRef.nativeId')
+ FROM orchestration_v2_projection_provider_turns t
+ JOIN orchestration_v2_projection_turn_items i ON i.provider_turn_id=t.provider_turn_id AND i.thread_id=t.thread_id
+ WHERE ?2='claudeAgent' AND t.provider_thread_id=?1
+   AND i.type NOT IN ('command_execution','file_change','web_search','dynamic_tool','reasoning')";
+// Native identities and the earliest running selection are the join.
 const TURN: &str = "WITH matched AS (
  SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
  json_extract(a.payload_json,'$.nativeThreadId') AS native_session,
@@ -908,13 +928,7 @@ const TURN: &str = "WITH matched AS (
  FROM orchestration_v2_projection_provider_turns t
  LEFT JOIN orchestration_v2_projection_run_attempts a ON a.attempt_id=t.run_attempt_id
    AND a.thread_id=t.thread_id AND a.provider_thread_id=t.provider_thread_id
- WHERE json_extract(t.payload_json,'$.nativeTurnRef.driver')=?1
-   AND (json_extract(t.payload_json,'$.nativeTurnRef.nativeId')=?2 OR EXISTS (
-     SELECT 1 FROM orchestration_v2_projection_turn_items item
-     WHERE item.provider_turn_id=t.provider_turn_id AND item.thread_id=t.thread_id
-       AND json_extract(item.payload_json,'$.nativeItemRef.driver')=?1
-       AND json_extract(item.payload_json,'$.nativeItemRef.nativeId')=?2))
- LIMIT 2)
+ WHERE t.provider_turn_id=?1)
  SELECT m.native_session, m.provider_instance_id, m.thread_id, m.run_id, m.attempt_id,
  m.provider_turn_id, m.status, m.started_at, m.completed_at,
  json_extract(m.payload_json,'$.tokenUsage.updatedAt'),
@@ -940,7 +954,7 @@ const TURN: &str = "WITH matched AS (
    AND COALESCE(json_extract(th.payload_json,'$.settledOverride'),'')!='settled'
    AND COALESCE(json_extract(th.payload_json,'$.lineage.relationshipToParent'),'')!='subagent'
    AND COALESCE(json_extract(th.payload_json,'$.lineage.sideChat'),0)=0
-   AND (json_extract(th.payload_json,'$.snoozedUntil') IS NULL OR json_extract(th.payload_json,'$.snoozedUntil')<=?3)
+   AND (json_extract(th.payload_json,'$.snoozedUntil') IS NULL OR json_extract(th.payload_json,'$.snoozedUntil')<=?2)
    AND th.active_provider_thread_id=m.provider_thread_id
    AND th.provider_instance_id=m.provider_instance_id
    AND r.status='completed' AND m.completed_at IS NOT NULL
@@ -954,8 +968,7 @@ const TURN: &str = "WITH matched AS (
    AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_runtime_requests q
      WHERE q.thread_id=m.thread_id AND q.status='pending')
    AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_context_transfers c
-     WHERE json_extract(c.payload_json,'$.targetThreadId')=m.thread_id
-       AND json_extract(c.payload_json,'$.type')='merge_back' AND c.status='pending')
+     WHERE c.target_thread_id=m.thread_id AND c.type='merge_back' AND c.status='pending')
    AND NOT EXISTS (SELECT 1 FROM orchestration_v2_projection_turn_items i
      WHERE i.thread_id=m.thread_id AND i.status IN ('pending','running','waiting'))
    AND COALESCE(json_array_length(pt.payload_json,'$.pendingBackgroundTasks'),0)=0)
@@ -965,6 +978,45 @@ const TURN: &str = "WITH matched AS (
  LEFT JOIN orchestration_v2_projection_messages msg ON msg.message_id=json_extract(r.payload_json,'$.userMessageId') AND msg.thread_id=m.thread_id
  LEFT JOIN orchestration_v2_projection_threads th ON th.thread_id=m.thread_id
  LEFT JOIN orchestration_v2_projection_provider_threads pt ON pt.provider_thread_id=m.provider_thread_id";
+
+/// Why optional T3 metadata could not be read.
+#[derive(Debug)]
+enum Unavailable {
+    Schema(String),
+    Budget(String),
+    Access(String),
+}
+impl From<rusqlite::Error> for Unavailable {
+    fn from(e: rusqlite::Error) -> Self {
+        use rusqlite::ErrorCode::*;
+        // SQLite messages name codes, tables and columns, never row values.
+        let detail = e.to_string();
+        match e.sqlite_error_code() {
+            Some(TooBig | OutOfMemory) => Self::Budget(detail),
+            Some(
+                PermissionDenied
+                | DatabaseBusy
+                | DatabaseLocked
+                | ReadOnly
+                | SystemIoFailure
+                | CannotOpen
+                | NotFound
+                | FileLockingProtocolFailed
+                | NoLargeFileSupport,
+            ) => Self::Access(detail),
+            _ => Self::Schema(detail),
+        }
+    }
+}
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Schema(d) => write!(f, "incompatible or malformed schema ({d})"),
+            Self::Budget(d) => write!(f, "a value exceeds the 1 MiB resource bound ({d})"),
+            Self::Access(d) => write!(f, "read-only database/WAL access failed ({d})"),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct Joined {
@@ -982,6 +1034,142 @@ struct Projection {
 struct TurnMatch {
     count: usize,
     joined: Option<Joined>,
+}
+
+/// One provider turn's allowlisted columns, read once and judged against each native request.
+struct TurnRow {
+    native_session: Option<String>,
+    instance: Option<String>,
+    thread: Option<String>,
+    run: Option<String>,
+    attempt: Option<String>,
+    provider_turn: Option<String>,
+    status: Option<String>,
+    started_at: Option<Millis>,
+    completed_at: Option<Millis>,
+    usage_updated_at: Option<Millis>,
+    used_tokens: Option<i64>,
+    cache_expires_at: Option<Millis>,
+    model: Option<String>,
+    tier: Option<String>,
+    fast: Option<bool>,
+    tier_count: Option<i64>,
+    fast_count: Option<i64>,
+    event_time: Option<Millis>,
+    idle_mode: Option<T3IdleMode>,
+    thread_updated_at: Option<Millis>,
+    lifecycle: Option<bool>,
+}
+impl TurnRow {
+    fn read(row: &rusqlite::Row<'_>) -> Self {
+        Self {
+            native_session: text_column(row, 0),
+            instance: text_column(row, 1),
+            thread: text_column(row, 2),
+            run: text_column(row, 3),
+            attempt: text_column(row, 4),
+            provider_turn: text_column(row, 5),
+            status: text_column(row, 6),
+            started_at: instant(text_column(row, 7)),
+            completed_at: instant(text_column(row, 8)),
+            usage_updated_at: instant(text_column(row, 9)),
+            used_tokens: integer_column(row, 10),
+            cache_expires_at: instant(text_column(row, 11)),
+            model: text_column(row, 12),
+            tier: text_column(row, 13),
+            fast: bool_column(row, 14),
+            tier_count: integer_column(row, 15),
+            fast_count: integer_column(row, 16),
+            event_time: instant(text_column(row, 17)),
+            idle_mode: mode(text_column(row, 18)),
+            thread_updated_at: instant(text_column(row, 19)),
+            lifecycle: bool_column(row, 20),
+        }
+    }
+
+    /// The evidence this turn gives one native request, or None when it is invalid for it.
+    fn join(&self, r: &NativeRequest<'_>, bound_ms: Millis) -> Option<Joined> {
+        let native_session = self.native_session.as_deref()?;
+        let instance = self.instance.clone()?;
+        let tier_count = self.tier_count?;
+        let fast_count = self.fast_count?;
+        let (completed_at, usage_updated_at) = (self.completed_at, self.usage_updated_at);
+        let requested = if tier_count <= 1
+            && fast_count <= 1
+            && self.model.as_deref() == r.model
+            && self.model.is_some()
+            && self
+                .event_time
+                .is_some_and(|t| t <= r.time && t <= bound_ms)
+        {
+            let tier = self.tier.clone().filter(|s| {
+                matches!(
+                    s.as_str(),
+                    "auto"
+                        | "default"
+                        | "standard"
+                        | "fast"
+                        | "priority"
+                        | "ultrafast"
+                        | "flex"
+                        | "scale"
+                )
+            });
+            if (tier_count > 0 && tier.is_none()) || (fast_count > 0 && self.fast.is_none()) {
+                None
+            } else if r.harness == Harness::Codex {
+                Some(RequestedSpeed {
+                    tier: tier.or_else(|| (self.fast == Some(true)).then(|| "fast".into())),
+                    speed: None,
+                })
+            } else {
+                self.fast.map(|v| RequestedSpeed {
+                    tier: None,
+                    speed: Some(if v { "fast" } else { "standard" }.into()),
+                })
+            }
+        } else {
+            None
+        };
+        let evidence = T3Request {
+            thread: identity(self.thread.as_deref()?),
+            run: identity(self.run.as_deref()?),
+            attempt: identity(self.attempt.as_deref()?),
+            provider_turn: identity(self.provider_turn.as_deref()?),
+            status: match self.status.as_deref()? {
+                "completed" => "completed",
+                "running" => "running",
+                "failed" => "failed",
+                "interrupted" => "interrupted",
+                "cancelled" => "cancelled",
+                _ => "unknown",
+            }
+            .into(),
+            completed_at,
+            usage_updated_at,
+            used_tokens: self.used_tokens.filter(|n| {
+                (0..=9_007_199_254_740_991).contains(n)
+                    && usage_updated_at.is_some_and(|t| t <= bound_ms)
+            }),
+            cache_expires_at: usage_updated_at
+                .filter(|t| *t <= bound_ms)
+                .and(self.cache_expires_at),
+            idle_mode: self.idle_mode,
+            lifecycle_eligible: self
+                .thread_updated_at
+                .filter(|t| *t <= bound_ms)
+                .and(self.lifecycle),
+        };
+        let valid = native_session == r.native_session
+            && completed_at.is_none_or(|t| t <= bound_ms)
+            && usage_updated_at.is_none_or(|t| t <= bound_ms)
+            && self.started_at.is_some_and(|t| t <= r.time);
+        (valid && (evidence.status != "completed" || completed_at.is_some())).then_some(Joined {
+            instance,
+            evidence,
+            requested,
+        })
+    }
 }
 
 fn text_column(row: &rusqlite::Row<'_>, index: usize) -> Option<String> {
@@ -1022,7 +1210,7 @@ fn metadata(
     tx: &Transaction<'_>,
     requests: &[&NativeRequest<'_>],
     bound: &str,
-) -> rusqlite::Result<Projection> {
+) -> Result<Projection, Unavailable> {
     // Reject views and unknown/missing schemas before issuing any projection queries.
     for table in [
         "orchestration_events",
@@ -1042,149 +1230,139 @@ fn metadata(
             |r| r.get(0),
         )?;
         if !valid {
-            return Err(rusqlite::Error::InvalidQuery);
+            return Err(Unavailable::Schema(format!("no table {table}")));
         }
     }
-    let mut owner_query = tx.prepare(OWNERS)?;
-    let mut turn_query = tx.prepare(TURN)?;
-    let mut result = Projection::default();
-    let bound_ms = timestamp(&Value::String(bound.into())).ok_or(rusqlite::Error::InvalidQuery)?;
-    for r in requests {
-        let session = r.native_session;
-        let driver = if r.harness == Harness::Claude {
+    let bound_ms = timestamp(&Value::String(bound.into()))
+        .ok_or_else(|| Unavailable::Schema(format!("invalid native bound {bound}")))?;
+    let driver = |h: Harness| -> &'static str {
+        if h == Harness::Claude {
             "claudeAgent"
         } else {
             "codex"
-        };
-        let owner_key = (r.harness, r.session.to_string());
-        if let std::collections::hash_map::Entry::Vacant(entry) = result.owners.entry(owner_key) {
-            let owners = owner_query
-                .query_map([driver, session, bound], |r| {
-                    // Legacy nullable/malformed owners block uniqueness, not other rows.
-                    Ok(text_column(r, 0).unwrap_or_default())
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            entry.insert(owners);
         }
+    };
+    // The native turn and item ids each selected native session needs.
+    let mut wanted: HashMap<(&str, &str), HashSet<&str>> = HashMap::new();
+    for r in requests {
+        wanted
+            .entry((driver(r.harness), r.native_session))
+            .or_default()
+            .extend(&r.native_turns);
+    }
+    /// A provider thread whose current native ref is a selected session.
+    struct Thread {
+        id: String,
+        instance: Option<String>,
+        /// Linked to the session within the native bound, so it may own it.
+        linked: bool,
+    }
+    let mut threads: HashMap<(&str, String), Vec<Thread>> = HashMap::new();
+    let mut owner_event = tx.prepare(OWNER_EVENT)?;
+    let mut query = tx.prepare(PROVIDER_THREADS)?;
+    let mut rows = query.query([bound])?;
+    while let Some(row) = rows.next()? {
+        let (Some(id), Some(driver), Some(native)) = (
+            text_column(row, 0),
+            text_column(row, 1),
+            text_column(row, 2),
+        ) else {
+            continue;
+        };
+        let driver = match driver.as_str() {
+            "claudeAgent" => "claudeAgent",
+            _ => "codex",
+        };
+        if !wanted.contains_key(&(driver, native.as_str())) {
+            continue;
+        }
+        let linked = bool_column(row, 4) == Some(true)
+            || owner_event.query_row(rusqlite::params![id, bound], |r| r.get(0))?;
+        threads.entry((driver, native)).or_default().push(Thread {
+            id,
+            instance: text_column(row, 3),
+            linked,
+        });
+    }
+    // Provider turns per native turn/item id, within each selected session's threads.
+    let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::new();
+    let mut native_refs = tx.prepare(NATIVE_REFS)?;
+    for (key, list) in &threads {
+        let found = refs.entry(key).or_default();
+        let wanted = &wanted[&(key.0, key.1.as_str())];
+        for thread in list {
+            let mut rows = native_refs.query(rusqlite::params![thread.id, key.0])?;
+            while let Some(row) = rows.next()? {
+                let (Some(turn), Some(native)) = (text_column(row, 0), text_column(row, 3)) else {
+                    continue;
+                };
+                if text_column(row, 1).as_deref() == Some(key.0)
+                    && text_column(row, 2).as_deref() == Some(key.0)
+                    && wanted.contains(native.as_str())
+                {
+                    let turns = found.entry(native).or_default();
+                    if !turns.contains(&turn) {
+                        turns.push(turn);
+                    }
+                }
+            }
+        }
+    }
+    let mut turn_query = tx.prepare(TURN)?;
+    let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::new();
+    let mut result = Projection::default();
+    for r in requests {
+        let key = (driver(r.harness), r.native_session.to_string());
+        result
+            .owners
+            .entry((r.harness, r.session.to_string()))
+            .or_insert_with(|| {
+                threads
+                    .get(&key)
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| t.linked)
+                    // Legacy nullable owners block uniqueness, not other rows.
+                    .map(|t| t.instance.clone().unwrap_or_default())
+                    .collect()
+            });
         if r.native_turns.is_empty() || result.turns.contains_key(r.id) {
             continue;
         }
-        let mut rows = IndexMap::new();
-        for native_turn in &r.native_turns {
-            let matches = turn_query
-                .query_map([driver, native_turn, bound], |row| {
-                    let parse = || -> Option<Joined> {
-                        let native_session = text_column(row, 0)?;
-                        let instance = text_column(row, 1)?;
-                        let model = text_column(row, 12);
-                        let tier = text_column(row, 13);
-                        let fast = bool_column(row, 14);
-                        let tier_count = integer_column(row, 15)?;
-                        let fast_count = integer_column(row, 16)?;
-                        let event_time = instant(text_column(row, 17));
-                        let completed_at = instant(text_column(row, 8));
-                        let usage_updated_at = instant(text_column(row, 9));
-                        let thread_updated_at = instant(text_column(row, 19));
-                        let lifecycle = bool_column(row, 20);
-                        let used_tokens = integer_column(row, 10);
-                        let requested = if tier_count <= 1
-                            && fast_count <= 1
-                            && model.as_deref() == r.model
-                            && model.is_some()
-                            && event_time.is_some_and(|t| t <= r.time && t <= bound_ms)
-                        {
-                            let tier = tier.filter(|s| {
-                                matches!(
-                                    s.as_str(),
-                                    "auto"
-                                        | "default"
-                                        | "standard"
-                                        | "fast"
-                                        | "priority"
-                                        | "ultrafast"
-                                        | "flex"
-                                        | "scale"
-                                )
-                            });
-                            if (tier_count > 0 && tier.is_none())
-                                || (fast_count > 0 && fast.is_none())
-                            {
-                                None
-                            } else if r.harness == Harness::Codex {
-                                Some(RequestedSpeed {
-                                    tier: tier
-                                        .or_else(|| (fast == Some(true)).then(|| "fast".into())),
-                                    speed: None,
-                                })
-                            } else {
-                                fast.map(|v| RequestedSpeed {
-                                    tier: None,
-                                    speed: Some(if v { "fast" } else { "standard" }.into()),
-                                })
-                            }
-                        } else {
-                            None
-                        };
-                        let evidence = T3Request {
-                            thread: identity(&text_column(row, 2)?),
-                            run: identity(&text_column(row, 3)?),
-                            attempt: identity(&text_column(row, 4)?),
-                            provider_turn: identity(&text_column(row, 5)?),
-                            status: match text_column(row, 6)?.as_str() {
-                                "completed" => "completed",
-                                "running" => "running",
-                                "failed" => "failed",
-                                "interrupted" => "interrupted",
-                                "cancelled" => "cancelled",
-                                _ => "unknown",
-                            }
-                            .into(),
-                            completed_at,
-                            usage_updated_at,
-                            used_tokens: used_tokens.filter(|n| {
-                                (0..=9_007_199_254_740_991).contains(n)
-                                    && usage_updated_at.is_some_and(|t| t <= bound_ms)
-                            }),
-                            cache_expires_at: usage_updated_at
-                                .filter(|t| *t <= bound_ms)
-                                .and(instant(text_column(row, 11))),
-                            idle_mode: mode(text_column(row, 18)),
-                            lifecycle_eligible: thread_updated_at
-                                .filter(|t| *t <= bound_ms)
-                                .and(lifecycle),
-                        };
-                        let valid = native_session == session
-                            && completed_at.is_none_or(|t| t <= bound_ms)
-                            && usage_updated_at.is_none_or(|t| t <= bound_ms)
-                            && instant(text_column(row, 7)).is_some_and(|t| t <= r.time);
-                        (valid && (evidence.status != "completed" || completed_at.is_some()))
-                            .then_some(Joined {
-                                instance,
-                                evidence,
-                                requested,
-                            })
-                    };
-                    Ok((text_column(row, 5).map(|id| identity(&id)), parse()))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            for (key, joined) in matches {
-                let key = key.unwrap_or_else(|| format!("invalid:{}", rows.len()));
-                rows.entry(key).or_insert(joined);
-            }
-            if rows.len() > 1 {
-                break;
+        let mut turns: Vec<&String> = Vec::new();
+        for native in &r.native_turns {
+            for turn in refs
+                .get(&key)
+                .and_then(|f| f.get(*native))
+                .into_iter()
+                .flatten()
+            {
+                if !turns.contains(&turn) {
+                    turns.push(turn);
+                }
             }
         }
-        let count = rows.len();
+        let joined = match turns[..] {
+            [turn] => {
+                if !turn_rows.contains_key(turn) {
+                    let row = turn_query
+                        .query_row(rusqlite::params![turn, bound], |row| Ok(TurnRow::read(row)))
+                        .map(Some)
+                        .or_else(|e| match e {
+                            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                            e => Err(e),
+                        })?;
+                    turn_rows.insert(turn.clone(), row);
+                }
+                turn_rows[turn].as_ref().and_then(|t| t.join(r, bound_ms))
+            }
+            _ => None,
+        };
         result.turns.insert(
             r.id.to_string(),
             TurnMatch {
-                count,
-                joined: if count == 1 {
-                    rows.into_values().next().flatten()
-                } else {
-                    None
-                },
+                count: turns.len(),
+                joined,
             },
         );
     }
@@ -1237,16 +1415,6 @@ pub(crate) fn enrich(
             )?;
             db.busy_timeout(std::time::Duration::ZERO)?;
             db.set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)?;
-            // Optional metadata has a fixed total VM budget, independent of database size.
-            // Oversized/unindexed histories degrade to an explicit evidence gap.
-            let mut steps = 0u32;
-            db.progress_handler(
-                1_000,
-                Some(move || {
-                    steps += 1;
-                    steps > 10_000
-                }),
-            )?;
             db.execute_batch("PRAGMA query_only=ON; PRAGMA trusted_schema=OFF;")?;
             let tx = db.transaction()?;
             let relevant: Vec<&NativeRequest> = projections
@@ -1261,7 +1429,7 @@ pub(crate) fn enrich(
                 .collect();
             let result = metadata(&tx, &relevant, bound)?;
             tx.rollback()?;
-            Ok::<_, rusqlite::Error>(result)
+            Ok::<_, Unavailable>(result)
         })();
         state.snapshot_finished_at = Some(iso(crate::reader::now()));
         let data = match data {
@@ -1269,8 +1437,8 @@ pub(crate) fn enrich(
                 state.metadata = "read-only consistent SQLite snapshot; allowlisted native links and controls only".into();
                 data
             }
-            Err(_) => {
-                state.metadata = "unavailable: incompatible/malformed schema, metadata resource bound, or read-only database/WAL access failed; native usage is retained".into();
+            Err(e) => {
+                state.metadata = format!("unavailable: {e}; native usage is retained");
                 continue;
             }
         };
@@ -1852,7 +2020,9 @@ mod tests {
             .execute_batch("DROP TABLE orchestration_v2_projection_messages;")
             .unwrap();
         let result = scan(&w.scan_options()).unwrap();
-        assert!(result.t3[0].metadata.contains("incompatible"));
+        assert!(result.t3[0].metadata.contains(
+            "incompatible or malformed schema (no table orchestration_v2_projection_messages)"
+        ));
     }
     #[test]
     fn malformed_turn_rows_are_isolated_and_integral_real_counts_are_supported() {
@@ -1862,6 +2032,11 @@ mod tests {
         seed(&database, "codex", "codex");
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads SELECT 'legacy',thread_id,driver,NULL,updated_at,payload_json FROM orchestration_v2_projection_provider_threads",[]).unwrap();
         database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
+        // Codex joins never read item payloads, so an oversized one cannot sink the snapshot.
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('thread','turn','assistant_message','completed',?1)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
+        database
+            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
+            .unwrap();
         database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
         let valid = NativeRequest {
             id: "valid",
@@ -2182,6 +2357,99 @@ mod tests {
             data.owners[&(Harness::Codex, "opaque-session".into())],
             vec!["codex"]
         );
+    }
+
+    #[test]
+    fn native_items_join_by_session_skip_tool_ids_and_name_the_resource_bound() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        let mut database = db(&root);
+        seed(&database, "claudeAgent", "claude");
+        let item = |database: &Connection, kind: &str, native: &str, extra: &str| {
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('thread','turn',?1,'completed',?2)",params![kind,json!({"nativeItemRef":{"driver":"claudeAgent","nativeId":native},"output":extra}).to_string()]).unwrap();
+        };
+        item(&database, "assistant_message", "assistant-uuid", "");
+        item(
+            &database,
+            "command_execution",
+            "tool-uuid",
+            &"x".repeat(2_000_000),
+        );
+        let request = NativeRequest {
+            id: "assistant",
+            session: "opaque-session",
+            native_session: "native-session",
+            native_turns: vec!["assistant-uuid"],
+            harness: Harness::Claude,
+            time: 1_767_225_605_000,
+            model: None,
+            profiles: &[],
+        };
+        let tool = NativeRequest {
+            id: "tool",
+            native_turns: vec!["tool-uuid"],
+            ..request
+        };
+        let other = NativeRequest {
+            id: "other",
+            native_session: "other-session",
+            native_turns: vec!["assistant-uuid"],
+            ..request
+        };
+        database
+            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
+            .unwrap();
+        let tx = database.transaction().unwrap();
+        let data = metadata(&tx, &[&request, &tool, &other], "2026-01-01T00:00:20Z").unwrap();
+        assert_eq!(data.turns["assistant"].count, 1);
+        assert!(data.turns["assistant"].joined.is_some());
+        assert_eq!(data.turns["tool"].count, 0);
+        assert_eq!(data.turns["other"].count, 0);
+        tx.rollback().unwrap();
+        let writer = Connection::open(root.join("statev2.sqlite")).unwrap();
+        item(
+            &writer,
+            "assistant_message",
+            "large",
+            &"x".repeat(2_000_000),
+        );
+        let tx = database.transaction().unwrap();
+        let error = metadata(&tx, &[&request], "2026-01-01T00:00:20Z")
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("1 MiB resource bound"));
+    }
+
+    #[test]
+    fn projection_queries_follow_t3_indexes() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        let database = db(&root);
+        for (query, scans) in [
+            (PROVIDER_THREADS, 1),
+            (OWNER_EVENT, 0),
+            (NATIVE_REFS, 0),
+            (TURN, 0),
+        ] {
+            let mut plan = database
+                .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
+                .unwrap();
+            let unbound = vec![rusqlite::types::Null; plan.parameter_count()];
+            let details: Vec<String> = plan
+                .query_map(rusqlite::params_from_iter(unbound), |r| r.get(3))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let full = details
+                .iter()
+                .filter(|d| {
+                    d.starts_with("SCAN")
+                        && !d.contains("VIRTUAL TABLE")
+                        && *d != "SCAN CONSTANT ROW"
+                })
+                .count();
+            assert_eq!(full, scans, "{details:#?}");
+        }
     }
 
     #[test]

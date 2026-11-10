@@ -2559,22 +2559,23 @@ mod tests {
         assert_eq!(causes.len(), 1, "{causes:?}");
         assert!(causes[0].0.contains("sdk-cli"), "{causes:?}");
         assert_eq!(*causes[0].1, 1);
-        assert!(
-            data.profiles
-                .iter()
-                .any(|p| p.t3.as_ref().is_some_and(|t| !t.ownership_resolved))
-        );
+        // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
+        // so check the marker shared-history ambiguity leaves on the TTL instead.
+        let ambiguous = |s: &Scan| {
+            s.profiles.iter().any(|p| {
+                p.ttl
+                    .main
+                    .reason
+                    .contains("unresolved T3 control ownership")
+            })
+        };
+        assert!(ambiguous(&data));
         // History before the window leaves current ownership alone.
         let mut options = w.scan_options();
         options.since = timestamp(&json!("2026-01-02T00:00:00Z"));
         let later = scan(&options).unwrap();
         assert!(later.t3[0].unresolved.is_empty());
-        assert!(
-            later
-                .profiles
-                .iter()
-                .all(|p| p.t3.as_ref().is_none_or(|t| t.ownership_resolved))
-        );
+        assert!(!ambiguous(&later));
     }
 
     #[test]

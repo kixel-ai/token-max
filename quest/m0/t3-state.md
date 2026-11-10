@@ -27,9 +27,9 @@ The T3 lines still say "unknown" on that host (measured 2026-11-09, T3 0.1.7):
   root). About 11,500 requests in two days, marking the shared profiles
   unresolved, which also clears their cache TTL.
 - About 430 `sdk-cli` Claude requests (`claude -p`-style sessions) have no T3
-  provider thread. They may be T3's ephemeral helper generation, which
-  [Report T3's text-generation model](/quest/m0/t3-text-generation.md)
-  covers, so they stay ambiguous and keep the shared `~/.claude` unresolved.
+  provider thread. They may be T3's ephemeral text generation, which the
+  "T3 text generation" line reports as unmeasured, so they stay ambiguous and
+  keep the shared `~/.claude` unresolved.
 - Fast mode stays unknown by design: T3's current thread and browser
   selection is not read, only historical requested speed.
 - About 14,000 Claude main requests join only at the session level. Their
@@ -40,7 +40,3 @@ The T3 lines still say "unknown" on that host (measured 2026-11-09, T3 0.1.7):
 Settled: T3 metadata stays optional, and a failed read stays a named
 evidence gap that keeps native usage, never a failed run (2026-11-07
 decision in the m0 README).
-
-## Related
-
-- [Report T3's text-generation model](/quest/m0/t3-text-generation.md) - T3 helper sessions with no provider thread

@@ -56,9 +56,14 @@ pub fn label(value: &Value) -> Option<String> {
     valid.then(|| text.to_string())
 }
 
-/// A Codex originator label, admitting the spaced name T3's Codex adapter writes.
+/// A Codex originator label, admitting spaced client names such as `T3 Code` and
+/// `Codex Desktop`.
 pub fn originator(value: &Value) -> Option<String> {
-    label(value).or_else(|| (value.as_str() == Some("T3 Code")).then(|| "T3 Code".into()))
+    let text = value.as_str()?;
+    let valid = text.len() <= 64 && text.trim() == text;
+    label(&Value::from(text.replace(' ', "_")))
+        .filter(|_| valid)
+        .map(|_| text.to_string())
 }
 
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.
@@ -190,6 +195,8 @@ mod tests {
             Some("claude-opus-5-5".into())
         );
         assert_eq!(label(&json!("has space")), None);
+        assert_eq!(originator(&json!("T3 Code")), Some("T3 Code".into()));
+        assert_eq!(originator(&json!(" padded")), None);
         assert_eq!(label(&json!("")), None);
         assert_eq!(label(&json!("x".repeat(161))), None);
         assert_eq!(label(&json!(5)), None);

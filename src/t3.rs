@@ -500,6 +500,7 @@ pub(crate) fn discover(
                     snapshot_finished_at: None,
                     joined_requests: 0,
                     ambiguous_requests: 0,
+                    unresolved: IndexMap::new(),
                     text_generation: None,
                 });
                 continue;
@@ -550,6 +551,7 @@ pub(crate) fn discover(
             snapshot_finished_at: None,
             joined_requests: 0,
             ambiguous_requests: 0,
+            unresolved: IndexMap::new(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
         for (id, instance) in instances {
@@ -771,33 +773,62 @@ pub(crate) fn attribute_compactions(scan: &mut Scan, charges: &[CompactionCharge
 #[derive(Default)]
 pub(crate) struct NativeIds {
     ids: HashMap<String, String>,
+    /// A subagent session's key to its parent's, whose T3 owner it shares.
+    parents: HashMap<String, String>,
     items: HashMap<String, Vec<String>>,
     events: HashMap<String, String>,
-    last_session: String,
+    last_session: (String, String),
     last_turn: String,
     last_message: (String, String),
 }
 impl NativeIds {
-    pub(crate) fn observe(&mut self, raw: &Map<String, Value>, harness: Harness) {
+    /// Record one transcript record's native keys; `session` is the key the reader gave it.
+    pub(crate) fn observe(&mut self, raw: &Map<String, Value>, harness: Harness, session: &str) {
         let payload = raw.get("payload").and_then(Value::as_object);
-        let session = if harness == Harness::Claude {
-            raw.get("sessionId").and_then(Value::as_str)
-        } else if raw.get("type").and_then(Value::as_str) == Some("session_meta") {
-            payload.and_then(|p| {
-                p.get("id")
-                    .and_then(Value::as_str)
-                    .or_else(|| p.get("session_id").and_then(Value::as_str))
-            })
-        } else {
-            None
-        };
-        if let Some(session) = session
-            && session != self.last_session
+        // A Claude subagent file records its parent's session id under its own session key.
+        // A Codex subagent thread names its root as `session_id`, or in older spawns its
+        // parent as `parent_thread_id`.
+        let (native, parent) = if harness == Harness::Claude {
+            (raw.get("sessionId").and_then(Value::as_str), None)
+        } else if raw.get("type").and_then(Value::as_str) == Some("session_meta")
+            && let Some(p) = payload
         {
-            self.ids
-                .entry(identity(session))
-                .or_insert_with(|| session.into());
-            self.last_session = session.into();
+            fn text(v: Option<&Value>) -> Option<&str> {
+                v.and_then(Value::as_str).filter(|s| !s.is_empty())
+            }
+            let id = text(p.get("id")).or_else(|| text(p.get("session_id")));
+            let parent = text(p.get("session_id"))
+                .filter(|root| Some(*root) != id)
+                .or_else(|| text(p.get("parent_thread_id")))
+                .or_else(|| {
+                    text(
+                        p.get("source")
+                            .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id")),
+                    )
+                });
+            (id, parent)
+        } else {
+            (None, None)
+        };
+        if let Some(native) = native
+            && (native != self.last_session.0 || session != self.last_session.1)
+        {
+            let key = identity(native);
+            self.ids.entry(key.clone()).or_insert_with(|| native.into());
+            let parent = match parent {
+                Some(parent) => {
+                    let parent_key = identity(parent);
+                    self.ids
+                        .entry(parent_key.clone())
+                        .or_insert_with(|| parent.into());
+                    parent_key
+                }
+                None => key,
+            };
+            if parent != session {
+                self.parents.insert(session.into(), parent);
+            }
+            self.last_session = (native.into(), session.into());
         }
         if harness == Harness::Codex
             && let Some(turn) = payload
@@ -822,30 +853,98 @@ impl NativeIds {
         if raw.get("type").and_then(Value::as_str) != Some("assistant") {
             return;
         }
-        let name = raw
-            .get("message")
-            .and_then(Value::as_object)
-            .and_then(|m| m.get("id"))
-            .filter(|v| !v.is_null())
+        let message = raw.get("message").and_then(Value::as_object);
+        let message_id = message.and_then(|m| m.get("id")).filter(|v| !v.is_null());
+        let name = message_id
             .or_else(|| raw.get("requestId").filter(|v| !v.is_null()))
             .or_else(|| raw.get("requestRef"))
             .and_then(Value::as_str);
-        if let (Some(name), Some(uuid)) = (name, raw.get("uuid").and_then(Value::as_str)) {
-            if self.last_message.0 != name {
-                self.last_message = (name.into(), format!("claude:{}", identity(name)));
+        let (Some(name), Some(uuid)) = (name, raw.get("uuid").and_then(Value::as_str)) else {
+            return;
+        };
+        if self.last_message.0 != name {
+            self.last_message = (name.into(), format!("claude:{}", identity(name)));
+        }
+        let items = self.items.entry(self.last_message.1.clone()).or_default();
+        let mut add = |item: &str| {
+            if !items.iter().any(|v| v == item) {
+                items.push(item.into());
             }
-            let items = self.items.entry(self.last_message.1.clone()).or_default();
-            if !items.iter().any(|v| v == uuid) {
-                items.push(uuid.into());
+        };
+        // T3 keys text by record uuid, tools by tool-use id, and thinking by
+        // `<message id>:thinking:<n>`, which `item_key` reduces to `<message id>:thinking`.
+        add(uuid);
+        for block in message
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            match block.get("type").and_then(Value::as_str) {
+                Some("tool_use" | "server_tool_use") => {
+                    if let Some(id) = block.get("id").and_then(Value::as_str) {
+                        add(id);
+                    }
+                }
+                Some("thinking") => {
+                    if let Some(id) = message_id.and_then(Value::as_str) {
+                        add(&format!("{id}:thinking"));
+                    }
+                }
+                _ => {}
             }
         }
     }
+
+    /// The session whose T3 owner a request's session shares: itself unless it is a subagent's.
+    fn root<'a>(&'a self, session: &'a str) -> &'a str {
+        let mut root = session;
+        // Bounded so a cycle in recorded parent ids cannot loop.
+        for _ in 0..self.parents.len() {
+            match self.parents.get(root) {
+                Some(parent) => root = parent,
+                None => break,
+            }
+        }
+        root
+    }
+}
+
+/// The native item id inside a T3 Claude turn item id, with a thinking block's index dropped.
+/// T3 derives the id as `turn-item:provider:claudeAgent:native-item:` plus the
+/// URI-component-encoded native id, so no item payload (tool output) needs reading.
+fn item_key(turn_item: &str) -> Option<String> {
+    let encoded = turn_item.strip_prefix("turn-item:provider:claudeAgent:native-item:")?;
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3)?;
+            let digit = |b: u8| (b as char).to_digit(16);
+            decoded.push((digit(hex[0])? * 16 + digit(hex[1])?) as u8);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let native = String::from_utf8(decoded).ok()?;
+    Some(match native.rsplit_once(":thinking:") {
+        Some((message, index))
+            if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            format!("{message}:thinking")
+        }
+        _ => native,
+    })
 }
 
 /// Borrow only join keys; native billing parts and locations never need copying.
 struct NativeRequest<'a> {
     id: &'a str,
-    session: &'a str,
+    /// The key of the session that owns the request: its root for a subagent's.
+    root: &'a str,
     native_session: &'a str,
     native_turns: Vec<&'a str>,
     harness: Harness,
@@ -854,14 +953,15 @@ struct NativeRequest<'a> {
     profiles: &'a [String],
 }
 fn native_request<'a>(r: &'a Request, ids: &'a NativeIds) -> Option<NativeRequest<'a>> {
-    if r.agent != Agent::Main {
-        return None;
-    }
+    let root = ids.root(&r.session);
     Some(NativeRequest {
         id: &r.id,
-        session: &r.session,
-        native_session: ids.ids.get(&r.session)?,
-        native_turns: if r.harness == Harness::Codex {
+        root,
+        native_session: ids.ids.get(root)?,
+        // T3 records turns for the main conversation only; a subagent shares its root's owner.
+        native_turns: if r.agent == Agent::Subagent {
+            vec![]
+        } else if r.harness == Harness::Codex {
             r.turn
                 .as_ref()
                 .and_then(|t| ids.ids.get(t))
@@ -901,20 +1001,17 @@ const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_project
    AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
    AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=pt.driver
    AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=json_extract(pt.payload_json,'$.nativeThreadRef.nativeId'))";
-// Native turn and item references of one provider thread. Codex joins by turn id alone, so
-// only Claude reads items. T3's Claude adapter keys tool items by tool-use id and reasoning
-// by `<message id>:thinking:<n>`, so neither can hold a transcript record uuid; skipping
-// them avoids reading tool outputs, most of the table.
+// Native turn and item references of one provider thread: a native turn id, or for Claude a
+// turn item id that `item_key` decodes. Codex joins by turn id alone, so only Claude reads
+// items. Item ids avoid reading item payloads, which hold tool outputs.
 const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$.nativeTurnRef.driver'),
- json_extract(payload_json,'$.nativeTurnRef.driver'), json_extract(payload_json,'$.nativeTurnRef.nativeId')
+ json_extract(payload_json,'$.nativeTurnRef.nativeId'), 0
  FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1
  UNION ALL
- SELECT t.provider_turn_id, json_extract(t.payload_json,'$.nativeTurnRef.driver'),
- json_extract(i.payload_json,'$.nativeItemRef.driver'), json_extract(i.payload_json,'$.nativeItemRef.nativeId')
+ SELECT t.provider_turn_id, json_extract(t.payload_json,'$.nativeTurnRef.driver'), i.turn_item_id, 1
  FROM orchestration_v2_projection_provider_turns t
  JOIN orchestration_v2_projection_turn_items i ON i.provider_turn_id=t.provider_turn_id AND i.thread_id=t.thread_id
- WHERE ?2='claudeAgent' AND t.provider_thread_id=?1
-   AND i.type NOT IN ('command_execution','file_change','web_search','dynamic_tool','reasoning')";
+ WHERE ?2='claudeAgent' AND t.provider_thread_id=?1";
 // Native identities and the earliest running selection are the join.
 const TURN: &str = "WITH matched AS (
  SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
@@ -1026,7 +1123,10 @@ struct Joined {
 }
 #[derive(Default)]
 struct Projection {
+    /// Instances whose provider threads own each root session, keyed by its session key.
     owners: HashMap<(Harness, String), Vec<String>>,
+    /// Root sessions with a provider thread linked only after the native bound.
+    unlinked: HashSet<(Harness, String)>,
     turns: HashMap<String, TurnMatch>,
 }
 
@@ -1293,12 +1393,18 @@ fn metadata(
         for thread in list {
             let mut rows = native_refs.query(rusqlite::params![thread.id, key.0])?;
             while let Some(row) = rows.next()? {
-                let (Some(turn), Some(native)) = (text_column(row, 0), text_column(row, 3)) else {
+                let (Some(turn), Some(native)) = (text_column(row, 0), text_column(row, 2)) else {
                     continue;
                 };
-                if text_column(row, 1).as_deref() == Some(key.0)
-                    && text_column(row, 2).as_deref() == Some(key.0)
-                    && wanted.contains(native.as_str())
+                let native = if bool_column(row, 3) == Some(true) {
+                    let Some(native) = item_key(&native) else {
+                        continue;
+                    };
+                    native
+                } else {
+                    native
+                };
+                if text_column(row, 1).as_deref() == Some(key.0) && wanted.contains(native.as_str())
                 {
                     let turns = found.entry(native).or_default();
                     if !turns.contains(&turn) {
@@ -1313,19 +1419,21 @@ fn metadata(
     let mut result = Projection::default();
     for r in requests {
         let key = (driver(r.harness), r.native_session.to_string());
-        result
-            .owners
-            .entry((r.harness, r.session.to_string()))
-            .or_insert_with(|| {
-                threads
-                    .get(&key)
-                    .into_iter()
-                    .flatten()
+        let root = (r.harness, r.root.to_string());
+        if !result.owners.contains_key(&root) {
+            let list = threads.get(&key).map_or(&[][..], Vec::as_slice);
+            if list.iter().any(|t| !t.linked) {
+                result.unlinked.insert(root.clone());
+            }
+            result.owners.insert(
+                root,
+                list.iter()
                     .filter(|t| t.linked)
                     // Legacy nullable owners block uniqueness, not other rows.
                     .map(|t| t.instance.clone().unwrap_or_default())
-                    .collect()
-            });
+                    .collect(),
+            );
+        }
         if r.native_turns.is_empty() || result.turns.contains_key(r.id) {
             continue;
         }
@@ -1377,16 +1485,18 @@ pub(crate) fn enrich(
     events: &mut [StructuralEvent],
     ids: &NativeIds,
     bound: &str,
+    since: Option<Millis>,
 ) {
     let mut projections: Vec<NativeRequest<'_>> = requests
         .iter()
         .filter_map(|r| native_request(r, ids))
         .collect();
     for e in events.iter().filter(|e| ids.events.contains_key(&e.id)) {
-        if let Some(session) = ids.ids.get(e.session.as_ref()) {
+        let root = ids.root(e.session.as_ref());
+        if let Some(session) = ids.ids.get(root) {
             projections.push(NativeRequest {
                 id: &e.id,
-                session: e.session.as_ref(),
+                root,
                 native_session: session,
                 native_turns: vec![&ids.events[&e.id]],
                 harness: e.harness,
@@ -1400,6 +1510,8 @@ pub(crate) fn enrich(
     let mut invalid_joins = HashSet::new();
     let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::new();
     let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::new();
+    let mut unlinked = HashSet::new();
+    let mut read = HashSet::new();
     for state in states.iter_mut().filter(|s| s.status == "selected") {
         let path = Path::new(&state.path).join("statev2.sqlite");
         if !path.is_file() {
@@ -1435,6 +1547,8 @@ pub(crate) fn enrich(
         let data = match data {
             Ok(data) => {
                 state.metadata = "read-only consistent SQLite snapshot; allowlisted native links and controls only".into();
+                read.insert(state.path.clone());
+                unlinked.extend(data.unlinked.iter().cloned());
                 data
             }
             Err(e) => {
@@ -1484,22 +1598,48 @@ pub(crate) fn enrich(
         .filter(|p| p.t3.is_some())
         .map(|p| p.id.clone())
         .collect();
+    let state_of = |id: &String| {
+        profiles
+            .iter()
+            .find(|p| &p.id == id)
+            .and_then(|p| p.t3.as_ref())
+            .map(|t| t.state.clone())
+    };
     let mut ambiguous_profiles = HashSet::new();
-    for r in requests.iter_mut() {
+    let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::new();
+    // How each root session's own requests resolved, which its subagents inherit: one
+    // profile, or why not.
+    let mut roots: HashMap<(Harness, String), Result<String, &'static str>> = HashMap::new();
+    let order: Vec<usize> = (0..requests.len())
+        .filter(|&i| requests[i].agent != Agent::Subagent)
+        .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
+        .collect();
+    for i in order {
+        let r = &mut requests[i];
+        let subagent = r.agent == Agent::Subagent;
+        let root = (r.harness, ids.root(&r.session).to_string());
         let rows = joins.get(&r.id);
-        let session_owners = owners.get(&(r.harness, r.session.clone()));
+        let session_owners = owners.get(&root);
         let unique = rows
             .filter(|v| v.len() == 1)
             .and_then(|v| v.first())
             .filter(|(p, _)| {
                 !invalid_joins.contains(&r.id) && !p.is_empty() && r.profiles.contains(p)
             });
-        let owner = unique.map(|(p, _)| p).or_else(|| {
-            session_owners
-                .filter(|o| o.len() == 1)
-                .and_then(|o| o.first())
-                .filter(|p| !p.is_empty() && r.profiles.contains(p))
-        });
+        let inherited = match roots.get(&root) {
+            Some(Ok(p)) if subagent && r.profiles.contains(p) => Some(p.clone()),
+            _ => None,
+        };
+        let owner = unique
+            .map(|(p, _)| p)
+            .or_else(|| {
+                session_owners
+                    .filter(|o| o.len() == 1)
+                    .and_then(|o| o.first())
+                    .filter(|p| !p.is_empty() && r.profiles.contains(p))
+            })
+            .or(inherited.as_ref());
+        let mut cause = None;
         if let Some(owner) = owner {
             r.profiles = vec![owner.clone()];
             if let Some((_, joined)) = unique {
@@ -1538,6 +1678,8 @@ pub(crate) fn enrich(
                 {
                     state.joined_requests += 1;
                 }
+            } else if subagent {
+                r.issues.push("subagent shares its root session's owner; T3 records no per-request run/speed/idle metadata for it".into());
             } else {
                 r.issues.push("T3 native session owner is unique; per-request run/speed/idle metadata is unavailable".into());
             }
@@ -1550,18 +1692,83 @@ pub(crate) fn enrich(
                 || (r.harness == Harness::Codex
                     && matches!(r.source.as_deref(), Some("cli" | "exec"))
                     && r.client.as_deref() != Some("T3 Code"));
-            if native_source
-                && r.profiles.iter().any(|p| !t3_ids.contains(p))
-                && session_owners.is_none_or(|o| o.is_empty())
-                && rows.is_none_or(|r| r.is_empty())
-                && !invalid_joins.contains(&r.id)
-            {
-                r.profiles.retain(|p| !t3_ids.contains(p));
-            } else {
-                r.issues.push("T3/shared native history ownership or metadata join is ambiguous/unavailable; current control guidance is advisory".into());
-                ambiguous_profiles.extend(r.profiles.iter().cloned());
+            let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&r.id);
+            let found = match session_owners.map_or(0, Vec::len) {
+                0 if native_source && r.profiles.iter().any(|p| !t3_ids.contains(p)) && !stray => {
+                    None
+                }
+                0 => Some(match roots.get(&root) {
+                    Some(Err(c)) if subagent => c,
+                    _ if r
+                        .profiles
+                        .iter()
+                        .filter(|p| t3_ids.contains(*p))
+                        .any(|p| state_of(p).is_none_or(|s| !read.contains(&s))) =>
+                    {
+                        "the T3 state database was not read"
+                    }
+                    _ if unlinked.contains(&root) => {
+                        "the native session's T3 provider thread was linked after the native snapshot"
+                    }
+                    _ if stray => {
+                        "a T3 turn matches the request, but no T3 thread owns its native session"
+                    }
+                    None if subagent => {
+                        "the subagent's root session has no transcript and no T3 provider thread"
+                    }
+                    _ if r.harness == Harness::Claude && r.client.as_deref() == Some("sdk-cli") => {
+                        "a `claude -p` (sdk-cli) session with no T3 provider thread; T3 text generation runs this way"
+                    }
+                    _ => {
+                        "no T3 provider thread owns the native session, and its client does not prove the native CLI"
+                    }
+                }),
+                1 => Some(
+                    "the native session's only T3 owner is not a selected instance for this home",
+                ),
+                _ => Some("several T3 provider threads own the native session"),
+            };
+            match found {
+                None => r.profiles.retain(|p| !t3_ids.contains(p)),
+                Some(c) => {
+                    cause = Some(c);
+                    r.issues.push(format!("T3/shared native history ownership is unresolved: {c}; current control guidance is advisory"));
+                    // Context before the window prices cache state but says nothing about
+                    // which controls ran the selected requests.
+                    if since.is_none_or(|s| r.time >= s) {
+                        let states: HashSet<String> =
+                            r.profiles.iter().filter_map(state_of).collect();
+                        for state in states {
+                            *unresolved.entry((state, c)).or_default() += 1;
+                        }
+                        ambiguous_profiles.extend(r.profiles.iter().cloned());
+                    }
+                }
             }
         }
+        if !subagent {
+            const MIXED: &str = "the subagent's root session resolves to more than one owner";
+            let resolved = match (cause, &r.profiles[..]) {
+                (Some(c), _) => Err(c),
+                (None, [p]) => Ok(p.clone()),
+                (None, _) => Err(MIXED),
+            };
+            let merged = match (roots.remove(&root), resolved) {
+                (None, resolved) => resolved,
+                (Some(Err(c)), _) | (Some(Ok(_)), Err(c)) => Err(c),
+                (Some(Ok(p)), Ok(q)) => (p == q).then_some(p).ok_or(MIXED),
+            };
+            roots.insert(root, merged);
+        }
+    }
+    for state in states.iter_mut() {
+        let mut causes: Vec<(&str, u64)> = unresolved
+            .iter()
+            .filter(|((path, _), _)| *path == state.path)
+            .map(|((_, c), n)| (*c, *n))
+            .collect();
+        causes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        state.unresolved = causes.into_iter().map(|(c, n)| (c.into(), n)).collect();
     }
     // A uniquely owned session also owns its structural evidence, without assuming a run.
     let mut sessions: HashMap<(Harness, &str), HashSet<&str>> = HashMap::new();
@@ -2033,14 +2240,14 @@ mod tests {
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads SELECT 'legacy',thread_id,driver,NULL,updated_at,payload_json FROM orchestration_v2_projection_provider_threads",[]).unwrap();
         database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
         // Codex joins never read item payloads, so an oversized one cannot sink the snapshot.
-        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('thread','turn','assistant_message','completed',?1)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('item','thread','turn','assistant_message','completed',?1)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
         database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
         let valid = NativeRequest {
             id: "valid",
-            session: "opaque-session",
+            root: "opaque-session",
             native_session: "native-session",
             native_turns: vec!["missing", "native-turn", "native-turn"],
             harness: Harness::Codex,
@@ -2181,8 +2388,32 @@ mod tests {
                 json!({"type":"assistant","uuid":"native-uuid","sessionId":"native-claude","timestamp":"2026-01-01T00:00:01Z","entrypoint":"cli","requestRef":"api","message":{"id":"native-message","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
             ),
         );
+        // Subagents carry no REPL or CLI provenance of their own; they follow their root.
+        write(
+            w.claude
+                .join("projects/p/native-claude/subagents/agent-a1.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"sub-uuid","sessionId":"native-claude","isSidechain":true,"timestamp":"2026-01-01T00:00:02Z","entrypoint":"cli","message":{"id":"sub-message","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+            ),
+        );
+        write(
+            w.codex.join("sessions/subagent.jsonl"),
+            concat!(
+                "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T00:00:02Z\",\"payload\":{\"id\":\"sub-thread\",\"session_id\":\"native-session\",\"parent_thread_id\":\"native-session\",\"model_provider\":\"openai\",\"originator\":\"codex_exec\",\"source\":{\"subagent\":\"review\"}}}\n",
+                "{\"type\":\"turn_context\",\"timestamp\":\"2026-01-01T00:00:03Z\",\"payload\":{\"turn_id\":\"sub-turn\",\"model\":\"gpt-6.1-sol\"}}\n",
+                "{\"type\":\"token_usage_record\",\"timestamp\":\"2026-01-01T00:00:04Z\",\"payload\":{\"response_id\":\"sub-response\",\"turn_id\":\"sub-turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0}}}\n"
+            ),
+        );
         let data = scan(&w.scan_options()).unwrap();
-        assert_eq!(data.requests.len(), 2);
+        assert_eq!(data.requests.len(), 4);
+        assert_eq!(
+            data.requests
+                .iter()
+                .filter(|r| r.agent == Agent::Subagent)
+                .count(),
+            2
+        );
         for r in &data.requests {
             assert_eq!(r.profiles.len(), 1, "{r:?}");
             let p = data
@@ -2191,16 +2422,109 @@ mod tests {
                 .find(|p| p.id == r.profiles[0])
                 .unwrap();
             assert!(p.t3.is_none(), "{r:?}");
-            assert!(!r.issues.iter().any(|s| s.contains("ambiguous")));
+            assert!(!r.issues.iter().any(|s| s.contains("unresolved")));
         }
+        assert!(data.t3[0].unresolved.is_empty());
         let mut options = w.scan_options();
         options.discovery.t3_dirs = vec![root.to_string_lossy().into_owned()];
         let explicit = scan(&options).unwrap();
-        assert_eq!(explicit.requests.len(), 2);
+        assert_eq!(explicit.requests.len(), 4);
         for r in &explicit.requests {
             assert!(!r.profiles.is_empty());
             assert!(r.issues.iter().any(|s| s.contains("advisory")));
         }
+    }
+
+    #[test]
+    fn subagents_share_their_root_sessions_t3_owner() {
+        for harness in [Harness::Claude, Harness::Codex] {
+            let w = Workspace::new();
+            let root = state(
+                &w,
+                json!({"providerInstances":{"instance":{"driver":if harness == Harness::Claude {"claudeAgent"} else {"codex"}}}}),
+            );
+            let database = db(&root);
+            seed(
+                &database,
+                if harness == Harness::Claude {
+                    "claudeAgent"
+                } else {
+                    "codex"
+                },
+                "instance",
+            );
+            if harness == Harness::Claude {
+                write(
+                    w.claude
+                        .join("projects/p/native-session/subagents/agent-a1.jsonl"),
+                    format!(
+                        "{}\n",
+                        json!({"type":"assistant","uuid":"sub-uuid","sessionId":"native-session","isSidechain":true,"timestamp":"2026-01-01T00:00:05Z","entrypoint":"sdk-ts","message":{"id":"sub-message","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+                    ),
+                );
+            } else {
+                // A nested spawn names only its parent, which names the root.
+                write(
+                    w.codex.join("sessions/subagent.jsonl"),
+                    concat!(
+                        "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T00:00:02Z\",\"payload\":{\"id\":\"sub-thread\",\"session_id\":\"native-session\",\"model_provider\":\"openai\",\"source\":{\"subagent\":\"review\"}}}\n",
+                        "{\"type\":\"session_meta\",\"timestamp\":\"2026-01-01T00:00:03Z\",\"payload\":{\"id\":\"nested-thread\",\"model_provider\":\"openai\",\"source\":{\"subagent\":{\"thread_spawn\":{\"parent_thread_id\":\"sub-thread\",\"depth\":2}}}}}\n",
+                        "{\"type\":\"turn_context\",\"timestamp\":\"2026-01-01T00:00:03Z\",\"payload\":{\"turn_id\":\"sub-turn\",\"model\":\"gpt-6.1-sol\"}}\n",
+                        "{\"type\":\"token_usage_record\",\"timestamp\":\"2026-01-01T00:00:04Z\",\"payload\":{\"response_id\":\"sub-response\",\"turn_id\":\"sub-turn\",\"usage\":{\"input_tokens\":10,\"output_tokens\":1,\"cached_input_tokens\":0,\"cache_write_input_tokens\":0}}}\n"
+                    ),
+                );
+            }
+            let data = scan(&w.scan_options()).unwrap();
+            let owner = data
+                .profiles
+                .iter()
+                .find(|p| p.t3.is_some())
+                .map(|p| p.id.clone())
+                .unwrap();
+            assert_eq!(data.requests.len(), 1, "{harness:?}");
+            let r = &data.requests[0];
+            assert_eq!(r.agent, Agent::Subagent, "{harness:?}");
+            assert_eq!(r.profiles, vec![owner], "{harness:?}");
+            assert!(r.t3.is_none());
+            assert!(data.t3[0].unresolved.is_empty(), "{:?}", data.t3[0]);
+        }
+    }
+
+    #[test]
+    fn unresolved_requests_name_their_cause() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        db(&root);
+        write(
+            w.claude.join("projects/p/print.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"print-uuid","sessionId":"print-session","timestamp":"2026-01-01T00:00:01Z","entrypoint":"sdk-cli","message":{"id":"print-message","model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}})
+            ),
+        );
+        let data = scan(&w.scan_options()).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        assert!(data.requests[0].profiles.len() > 1);
+        let causes: Vec<_> = data.t3[0].unresolved.iter().collect();
+        assert_eq!(causes.len(), 1, "{causes:?}");
+        assert!(causes[0].0.contains("sdk-cli"), "{causes:?}");
+        assert_eq!(*causes[0].1, 1);
+        assert!(
+            data.profiles
+                .iter()
+                .any(|p| p.t3.as_ref().is_some_and(|t| !t.ownership_resolved))
+        );
+        // History before the window leaves current ownership alone.
+        let mut options = w.scan_options();
+        options.since = timestamp(&json!("2026-01-02T00:00:00Z"));
+        let later = scan(&options).unwrap();
+        assert!(later.t3[0].unresolved.is_empty());
+        assert!(
+            later
+                .profiles
+                .iter()
+                .all(|p| p.t3.as_ref().is_none_or(|t| t.ownership_resolved))
+        );
     }
 
     #[test]
@@ -2338,7 +2662,7 @@ mod tests {
         database.execute("UPDATE orchestration_v2_projection_provider_threads SET updated_at='2026-01-01T00:01:00Z'",[]).unwrap();
         let request = NativeRequest {
             id: "request",
-            session: "opaque-session",
+            root: "opaque-session",
             native_session: "native-session",
             native_turns: vec![],
             harness: Harness::Codex,
@@ -2360,24 +2684,26 @@ mod tests {
     }
 
     #[test]
-    fn native_items_join_by_session_skip_tool_ids_and_name_the_resource_bound() {
+    fn native_items_join_by_item_id_without_reading_payloads_and_name_the_resource_bound() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
         let mut database = db(&root);
         seed(&database, "claudeAgent", "claude");
         let item = |database: &Connection, kind: &str, native: &str, extra: &str| {
-            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('thread','turn',?1,'completed',?2)",params![kind,json!({"nativeItemRef":{"driver":"claudeAgent","nativeId":native},"output":extra}).to_string()]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn',?2,'completed',?3)",params![format!("turn-item:provider:claudeAgent:native-item:{native}"),kind,json!({"output":extra}).to_string()]).unwrap();
         };
         item(&database, "assistant_message", "assistant-uuid", "");
+        // Tool outputs can exceed the length bound; the join never reads them.
         item(
             &database,
             "command_execution",
-            "tool-uuid",
+            "toolu_1",
             &"x".repeat(2_000_000),
         );
+        item(&database, "reasoning", "msg_1%3Athinking%3A1", "");
         let request = NativeRequest {
             id: "assistant",
-            session: "opaque-session",
+            root: "opaque-session",
             native_session: "native-session",
             native_turns: vec!["assistant-uuid"],
             harness: Harness::Claude,
@@ -2387,7 +2713,12 @@ mod tests {
         };
         let tool = NativeRequest {
             id: "tool",
-            native_turns: vec!["tool-uuid"],
+            native_turns: vec!["record-uuid", "toolu_1"],
+            ..request
+        };
+        let thinking = NativeRequest {
+            id: "thinking",
+            native_turns: vec!["msg_1:thinking"],
             ..request
         };
         let other = NativeRequest {
@@ -2400,19 +2731,25 @@ mod tests {
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
         let tx = database.transaction().unwrap();
-        let data = metadata(&tx, &[&request, &tool, &other], "2026-01-01T00:00:20Z").unwrap();
-        assert_eq!(data.turns["assistant"].count, 1);
-        assert!(data.turns["assistant"].joined.is_some());
-        assert_eq!(data.turns["tool"].count, 0);
+        let data = metadata(
+            &tx,
+            &[&request, &tool, &thinking, &other],
+            "2026-01-01T00:00:20Z",
+        )
+        .unwrap();
+        for id in ["assistant", "tool", "thinking"] {
+            assert_eq!(data.turns[id].count, 1, "{id}");
+            assert!(data.turns[id].joined.is_some(), "{id}");
+        }
         assert_eq!(data.turns["other"].count, 0);
         tx.rollback().unwrap();
         let writer = Connection::open(root.join("statev2.sqlite")).unwrap();
-        item(
-            &writer,
-            "assistant_message",
-            "large",
-            &"x".repeat(2_000_000),
-        );
+        writer
+            .execute(
+                "UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.large',?1)",
+                [&"x".repeat(2_000_000)],
+            )
+            .unwrap();
         let tx = database.transaction().unwrap();
         let error = metadata(&tx, &[&request], "2026-01-01T00:00:20Z")
             .err()
@@ -2456,7 +2793,7 @@ mod tests {
     fn native_keys_skip_null_message_ids_keep_all_blocks_and_ignore_codex_response_ids() {
         let mut ids = NativeIds::default();
         for uuid in ["first", "second", "first"] {
-            ids.observe(json!({"type":"assistant","uuid":uuid,"sessionId":"session","requestId":"request","message":{"id":null}}).as_object().unwrap(),Harness::Claude);
+            ids.observe(json!({"type":"assistant","uuid":uuid,"sessionId":"session","requestId":"request","message":{"id":null}}).as_object().unwrap(),Harness::Claude,&identity("session"));
         }
         assert_eq!(
             ids.items[&format!("claude:{}", identity("request"))],
@@ -2467,8 +2804,33 @@ mod tests {
                 .as_object()
                 .unwrap(),
             Harness::Codex,
+            "session",
         );
         assert!(!ids.ids.values().any(|id| id == "PRIVATE_RESPONSE_ID"));
+        ids.observe(json!({"type":"assistant","uuid":"tool-record","sessionId":"session","message":{"id":"msg_1","content":[{"type":"thinking","thinking":""},{"type":"tool_use","id":"toolu_1"},{"type":"server_tool_use","id":"srvtoolu_1"}]}}).as_object().unwrap(),Harness::Claude,&identity("session"));
+        assert_eq!(
+            ids.items[&format!("claude:{}", identity("msg_1"))],
+            vec!["tool-record", "msg_1:thinking", "toolu_1", "srvtoolu_1"]
+        );
+        for (id, key) in [
+            (
+                "turn-item:provider:claudeAgent:native-item:toolu_1",
+                Some("toolu_1"),
+            ),
+            (
+                "turn-item:provider:claudeAgent:native-item:msg_1%3Athinking%3A12",
+                Some("msg_1:thinking"),
+            ),
+            (
+                "turn-item:provider:claudeAgent:native-item:msg_1%3Athinking%3A",
+                Some("msg_1:thinking:"),
+            ),
+            ("turn-item:provider:codex:native-item:toolu_1", None),
+            ("turn-item:provider:claudeAgent:native-item:bad%G1", None),
+            ("turn-item:provider:claudeAgent:native-item:cut%3", None),
+        ] {
+            assert_eq!(item_key(id).as_deref(), key, "{id}");
+        }
     }
 
     #[test]

@@ -98,4 +98,5 @@ in both JSON forms; its `currentSettings.periods` and
 periods. Unsupported providers remain explicit exclusions. `scan.t3[].textGeneration`
 names the resolved text-generation `selection`, its `owner` setting, its
 `resolution`, narrower `overrides` and the count of `projectOverrides`; its
-cost is unmeasured.
+cost is unmeasured. `scan.t3[].unresolved` counts the window's requests whose
+control owner stays unresolved, keyed by cause.

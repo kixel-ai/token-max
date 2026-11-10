@@ -488,8 +488,8 @@ pub(crate) fn discover(
     let mut seen = HashSet::new();
     for (path, required) in paths {
         let path = absolute(path)?;
-        let path = match fs::canonicalize(&path) {
-            Ok(path) => path,
+        let path = match crate::discovery::realpath(&path.to_string_lossy()) {
+            Ok(path) => PathBuf::from(path),
             Err(e) if e.kind() == ErrorKind::NotFound && !required => {
                 states.push(T3State {
                     path: path.to_string_lossy().into_owned(),
@@ -2044,8 +2044,7 @@ mod tests {
                 g.owner,
                 format!(
                     "{}:textGenerationModelSelection",
-                    fs::canonicalize(&root)
-                        .unwrap()
+                    Path::new(&crate::discovery::realpath(&root.to_string_lossy()).unwrap())
                         .join("settings.json")
                         .display()
                 )

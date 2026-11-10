@@ -1618,6 +1618,7 @@ pub(crate) fn enrich(
             .or_else(|| roots.get(&(root.clone(), false)))
             .cloned()
     };
+    const MIXED: &str = "the subagent's root session resolves to more than one owner";
     let order: Vec<usize> = (0..requests.len())
         .filter(|&i| requests[i].agent != Agent::Subagent)
         .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
@@ -1706,17 +1707,21 @@ pub(crate) fn enrich(
                     && matches!(r.source.as_deref(), Some("cli" | "exec"))
                     && r.client.as_deref() != Some("T3 Code"));
             // Labels T3's provider adapters write: the Claude Agent SDK's default, T3's own
-            // entrypoint, and T3's Codex originator. A missing label proves nothing.
+            // entrypoint, and T3's Codex originator. A missing label proves nothing, nor does
+            // a Codex source standing in for a missing originator.
             let t3_label = match r.harness {
                 Harness::Claude => matches!(r.client.as_deref(), None | Some("sdk-ts" | "t3-code")),
-                Harness::Codex => matches!(r.client.as_deref(), None | Some("T3 Code")),
+                Harness::Codex => {
+                    matches!(r.client.as_deref(), None | Some("T3 Code")) || r.client == r.source
+                }
             };
             let native = r.profiles.iter().any(|p| !t3_ids.contains(p));
             let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&r.id);
             let found = match session_owners.map_or(0, Vec::len) {
                 0 if native_source && native && !stray => None,
                 0 => match root_resolution {
-                    Some(Err(c)) => Some(c),
+                    // A root left among native profiles only has already excluded T3.
+                    Some(Err(c)) if c != MIXED => Some(c),
                     _ if r
                         .profiles
                         .iter()
@@ -1768,7 +1773,6 @@ pub(crate) fn enrich(
             }
         }
         if !subagent {
-            const MIXED: &str = "the subagent's root session resolves to more than one owner";
             let resolved = match (cause, &r.profiles[..]) {
                 (Some(c), _) => Err(c),
                 (None, [p]) => Ok(p.clone()),
@@ -2513,6 +2517,51 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn subagents_of_a_native_only_root_exclude_t3() {
+        let w = Workspace::new();
+        let root = state(&w, json!({}));
+        db(&root);
+        let usage = json!({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
+        write(
+            w.claude.join("projects/p/native.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"print-uuid","sessionId":"native","timestamp":"2026-01-01T00:00:00Z","entrypoint":"sdk-cli","message":{"id":"print-message","model":"claude-opus-5-5","usage":usage}})
+            ),
+        );
+        write(
+            w.claude.join("projects/p/native/subagents/agent-a1.jsonl"),
+            format!(
+                "{}\n",
+                json!({"type":"assistant","uuid":"sub-uuid","sessionId":"native","isSidechain":true,"timestamp":"2026-01-01T00:00:01Z","entrypoint":"sdk-cli","message":{"id":"sub-message","model":"claude-opus-5-5","usage":usage}})
+            ),
+        );
+        let other = w.home.join("other-claude");
+        fs::create_dir_all(&other).unwrap();
+        std::os::unix::fs::symlink(w.claude.join("projects"), other.join("projects")).unwrap();
+        let mut options = w.scan_options();
+        options.discovery.claude_dirs = vec![
+            w.claude.to_string_lossy().into(),
+            other.to_string_lossy().into(),
+        ];
+        options.discovery.t3_dirs = vec![root.to_string_lossy().into()];
+        let data = scan(&options).unwrap();
+        let t3: HashSet<&String> = data
+            .profiles
+            .iter()
+            .filter(|p| p.t3.is_some())
+            .map(|p| &p.id)
+            .collect();
+        assert_eq!(data.requests.len(), 2);
+        for r in &data.requests {
+            assert_eq!(r.profiles.len(), 2, "{r:?}");
+            assert!(r.profiles.iter().all(|p| !t3.contains(p)), "{r:?}");
+        }
+        assert!(data.t3[0].unresolved.is_empty(), "{:?}", data.t3[0]);
+    }
+
     #[test]
     fn subagents_inherit_their_roots_resolution_inside_the_window() {
         let w = Workspace::new();
@@ -2562,7 +2611,12 @@ mod tests {
             w.claude.join("projects/p/t3.jsonl"),
             format!("{}\n", row("t3-session", "t3-code")),
         );
-        for (name, originator) in [("vscode", "codex_vscode"), ("t3", "T3 Code")] {
+        // A missing originator falls back to the source, which proves nothing.
+        for (name, originator) in [
+            ("vscode", json!("codex_vscode")),
+            ("t3", json!("T3 Code")),
+            ("bare", Value::Null),
+        ] {
             write(
                 w.codex.join(format!("sessions/{name}.jsonl")),
                 format!(
@@ -2574,20 +2628,20 @@ mod tests {
             );
         }
         let data = scan(&w.scan_options()).unwrap();
-        assert_eq!(data.requests.len(), 4);
+        assert_eq!(data.requests.len(), 5);
         for r in &data.requests {
             let t3 = r
                 .profiles
                 .iter()
                 .any(|p| data.profiles.iter().any(|q| &q.id == p && q.t3.is_some()));
-            let labelled = matches!(r.client.as_deref(), Some("t3-code" | "T3 Code"));
+            let labelled = matches!(r.client.as_deref(), Some("t3-code" | "T3 Code" | "vscode"));
             assert_eq!(t3, labelled, "{r:?}");
             assert_eq!(r.profiles.len() > 1, labelled, "{r:?}");
         }
         let causes: Vec<_> = data.t3[0].unresolved.iter().collect();
         assert_eq!(causes.len(), 1, "{causes:?}");
         assert!(causes[0].0.contains("label is one T3 writes"), "{causes:?}");
-        assert_eq!(*causes[0].1, 2);
+        assert_eq!(*causes[0].1, 3);
         // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
         // so check the marker shared-history ambiguity leaves on the TTL instead.
         let ambiguous = |s: &Scan| {

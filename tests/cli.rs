@@ -78,6 +78,8 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
         .args(args)
         .env_clear()
         .env("HOME", &w.home)
+        // Windows resolves the home from USERPROFILE and ignores HOME.
+        .env("USERPROFILE", &w.home)
         .env("TERM", "xterm-256color")
         .stdin(Stdio::null());
     command
@@ -746,6 +748,8 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
             .current_dir(&consumer)
             .env_clear()
             .env("HOME", &w.home)
+            // Windows resolves the home from USERPROFILE and ignores HOME.
+            .env("USERPROFILE", &w.home)
             .env("NO_COLOR", "1")
             .stdin(Stdio::null());
         run(&mut c)
@@ -1267,8 +1271,15 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
             .unwrap()
             .contains("unavailable")
     );
-    let exclusions = full["scan"]["t3"][0]["exclusions"].to_string();
-    assert!(exclusions.contains("ephemeral") && exclusions.contains("unsupported"));
+    assert!(
+        full["scan"]["t3"][0]["exclusions"]
+            .to_string()
+            .contains("unsupported")
+    );
+    assert_eq!(
+        full["scan"]["t3"][0]["textGeneration"]["selection"],
+        json!({"instance": "codex", "model": "gpt-6-luna"})
+    );
     assert!(
         full["checks"]
             .as_array()
@@ -1285,10 +1296,24 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
     assert!(stderr.is_empty());
     assert!(
         details.contains("t3-idle-compaction")
-            && details.contains("ephemeral")
+            && details
+                .contains("T3 text generation: codex gpt-6-luna (T3 default). Cost unmeasured")
             && details.contains("unavailable")
     );
-    for output in [full.to_string(), compact.to_string(), details] {
+    let (_, summary, stderr) = run(&mut command(
+        &w,
+        &["--t3-dir", &state, "--prices-file", &prices],
+    ));
+    assert!(stderr.is_empty());
+    let unmeasured = summary.split("Not enough evidence").nth(1).unwrap();
+    assert!(
+        unmeasured.contains("T3 text generation: codex gpt-6-luna (T3 default). Cost unmeasured")
+            && unmeasured.contains(&format!(
+                "Set in ~{0}selected-t3{0}settings.json:textGenerationModelSelection.",
+                std::path::MAIN_SEPARATOR
+            ))
+    );
+    for output in [full.to_string(), compact.to_string(), details, summary] {
         assert!(!output.contains("SYNTHETIC_PRIVATE") && !output.contains("PRIVATE_CONFIG"));
     }
     assert!(!Path::new(&state).join("statev2.sqlite").exists());

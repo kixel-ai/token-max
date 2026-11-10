@@ -95,4 +95,7 @@ metadata in full JSON. `requestedSpeed` remains separate from each billing
 part's `tier`/`speed`. The `t3-idle-compaction` check keeps all three policy costs
 in both JSON forms; its `currentSettings.periods` and
 `afterRecommendations.periods` use the same compact grouping as native idle
-periods. Unsupported providers and auxiliary costs remain explicit exclusions.
+periods. Unsupported providers remain explicit exclusions. `scan.t3[].textGeneration`
+names the resolved text-generation `selection`, its `owner` setting, its
+`resolution`, narrower `overrides` and the count of `projectOverrides`; its
+cost is unmeasured.

@@ -761,8 +761,15 @@ impl From<rusqlite::Error> for Unavailable {
         match e.sqlite_error_code() {
             Some(TooBig | OutOfMemory) => Self::Budget(detail),
             Some(
-                PermissionDenied | DatabaseBusy | DatabaseLocked | ReadOnly | SystemIoFailure
-                | CannotOpen | NotFound | FileLockingProtocolFailed | NoLargeFileSupport,
+                PermissionDenied
+                | DatabaseBusy
+                | DatabaseLocked
+                | ReadOnly
+                | SystemIoFailure
+                | CannotOpen
+                | NotFound
+                | FileLockingProtocolFailed
+                | NoLargeFileSupport,
             ) => Self::Access(detail),
             _ => Self::Schema(detail),
         }
@@ -858,7 +865,9 @@ impl TurnRow {
             && fast_count <= 1
             && self.model.as_deref() == r.model
             && self.model.is_some()
-            && self.event_time.is_some_and(|t| t <= r.time && t <= bound_ms)
+            && self
+                .event_time
+                .is_some_and(|t| t <= r.time && t <= bound_ms)
         {
             let tier = self.tier.clone().filter(|s| {
                 matches!(
@@ -1008,15 +1017,23 @@ fn metadata(
             .or_default()
             .extend(&r.native_turns);
     }
-    // (provider thread, instance, linked within the native bound) per native session.
-    let mut threads: HashMap<(&str, String), Vec<(String, Option<String>, bool)>> = HashMap::new();
+    /// A provider thread whose current native ref is a selected session.
+    struct Thread {
+        id: String,
+        instance: Option<String>,
+        /// Linked to the session within the native bound, so it may own it.
+        linked: bool,
+    }
+    let mut threads: HashMap<(&str, String), Vec<Thread>> = HashMap::new();
     let mut owner_event = tx.prepare(OWNER_EVENT)?;
     let mut query = tx.prepare(PROVIDER_THREADS)?;
     let mut rows = query.query([bound])?;
     while let Some(row) = rows.next()? {
-        let (Some(id), Some(driver), Some(native)) =
-            (text_column(row, 0), text_column(row, 1), text_column(row, 2))
-        else {
+        let (Some(id), Some(driver), Some(native)) = (
+            text_column(row, 0),
+            text_column(row, 1),
+            text_column(row, 2),
+        ) else {
             continue;
         };
         let driver = match driver.as_str() {
@@ -1028,10 +1045,11 @@ fn metadata(
         }
         let linked = bool_column(row, 4) == Some(true)
             || owner_event.query_row(rusqlite::params![id, bound], |r| r.get(0))?;
-        threads
-            .entry((driver, native))
-            .or_default()
-            .push((id, text_column(row, 3), linked));
+        threads.entry((driver, native)).or_default().push(Thread {
+            id,
+            instance: text_column(row, 3),
+            linked,
+        });
     }
     // Provider turns per native turn/item id, within each selected session's threads.
     let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::new();
@@ -1039,8 +1057,8 @@ fn metadata(
     for (key, list) in &threads {
         let found = refs.entry(key).or_default();
         let wanted = &wanted[&(key.0, key.1.as_str())];
-        for (id, _, _) in list {
-            let mut rows = native_refs.query([id])?;
+        for thread in list {
+            let mut rows = native_refs.query([&thread.id])?;
             while let Some(row) = rows.next()? {
                 let (Some(turn), Some(native)) = (text_column(row, 0), text_column(row, 3)) else {
                     continue;
@@ -1070,9 +1088,9 @@ fn metadata(
                     .get(&key)
                     .into_iter()
                     .flatten()
-                    .filter(|(_, _, linked)| *linked)
+                    .filter(|t| t.linked)
                     // Legacy nullable owners block uniqueness, not other rows.
-                    .map(|(_, instance, _)| instance.clone().unwrap_or_default())
+                    .map(|t| t.instance.clone().unwrap_or_default())
                     .collect()
             });
         if r.native_turns.is_empty() || result.turns.contains_key(r.id) {
@@ -1080,7 +1098,12 @@ fn metadata(
         }
         let mut turns: Vec<&String> = Vec::new();
         for native in &r.native_turns {
-            for turn in refs.get(&key).and_then(|f| f.get(*native)).into_iter().flatten() {
+            for turn in refs
+                .get(&key)
+                .and_then(|f| f.get(*native))
+                .into_iter()
+                .flatten()
+            {
                 if !turns.contains(&turn) {
                     turns.push(turn);
                 }
@@ -1764,7 +1787,9 @@ mod tests {
             .execute_batch("DROP TABLE orchestration_v2_projection_messages;")
             .unwrap();
         let result = scan(&w.scan_options()).unwrap();
-        assert!(result.t3[0].metadata.contains("incompatible or malformed schema (no table orchestration_v2_projection_messages)"));
+        assert!(result.t3[0].metadata.contains(
+            "incompatible or malformed schema (no table orchestration_v2_projection_messages)"
+        ));
     }
     #[test]
     fn malformed_turn_rows_are_isolated_and_integral_real_counts_are_supported() {
@@ -2004,7 +2029,12 @@ mod tests {
             database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('thread','turn',?1,'completed',?2)",params![kind,json!({"nativeItemRef":{"driver":"claudeAgent","nativeId":native},"output":extra}).to_string()]).unwrap();
         };
         item(&database, "assistant_message", "assistant-uuid", "");
-        item(&database, "command_execution", "tool-uuid", &"x".repeat(2_000_000));
+        item(
+            &database,
+            "command_execution",
+            "tool-uuid",
+            &"x".repeat(2_000_000),
+        );
         let request = NativeRequest {
             id: "assistant",
             session: "opaque-session",
@@ -2037,9 +2067,16 @@ mod tests {
         assert_eq!(data.turns["other"].count, 0);
         tx.rollback().unwrap();
         let writer = Connection::open(root.join("statev2.sqlite")).unwrap();
-        item(&writer, "assistant_message", "large", &"x".repeat(2_000_000));
+        item(
+            &writer,
+            "assistant_message",
+            "large",
+            &"x".repeat(2_000_000),
+        );
         let tx = database.transaction().unwrap();
-        let error = metadata(&tx, &[&request], "2026-01-01T00:00:20Z").err().unwrap();
+        let error = metadata(&tx, &[&request], "2026-01-01T00:00:20Z")
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("1 MiB resource bound"));
     }
 
@@ -2066,7 +2103,9 @@ mod tests {
             let full = details
                 .iter()
                 .filter(|d| {
-                    d.starts_with("SCAN") && !d.contains("VIRTUAL TABLE") && *d != "SCAN CONSTANT ROW"
+                    d.starts_with("SCAN")
+                        && !d.contains("VIRTUAL TABLE")
+                        && *d != "SCAN CONSTANT ROW"
                 })
                 .count();
             assert_eq!(full, scans, "{details:#?}");

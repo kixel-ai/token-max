@@ -491,10 +491,11 @@ impl<'a> Out<'a> {
     fn home(&self, path: &str) -> String {
         match &self.home {
             Some(dir)
+                // A Windows home, local or remote, also separates with backslashes.
                 if path == dir
-                    || path
-                        .strip_prefix(dir.as_str())
-                        .is_some_and(|rest| rest.starts_with('/')) =>
+                    || path.strip_prefix(dir.as_str()).is_some_and(|rest| {
+                        rest.starts_with('/') || (dir.contains('\\') && rest.starts_with('\\'))
+                    }) =>
             {
                 format!("~{}", &path[dir.len()..])
             }

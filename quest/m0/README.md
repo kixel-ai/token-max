@@ -174,6 +174,5 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 
 ## Required
 
-- [Keep the ready-for-review Check from losing to a draft edit](/quest/m0/ci-ready-race.md) - `quest ready` leaves a passing required Check, so auto-merge lands without a draft toggle
 - [Restore the large-history runtime](/quest/m0/runtime.md) - the default run is back to #27's runtime or better, with hot spots measured
 - [Resolve T3 control ownership of unowned shared sessions](/quest/m0/t3-state.md) - a session with no T3 provider thread stops leaving the T3 idle-compaction and fast-mode lines unknown, per the maintainer's ownership rule

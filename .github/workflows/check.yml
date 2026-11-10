@@ -15,9 +15,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Read the draft state when the run starts, not from the event payload. A body
+  # edit made just before marking ready can create its run after the
+  # ready_for_review run, cancel it, and still carry draft: true. GitHub then
+  # judges the PR by that newest run, so it must validate a PR that is ready now.
+  state:
+    name: Draft state
+    runs-on: ubuntu-24.04
+    outputs:
+      draft: ${{ steps.read.outputs.draft }}
+    steps:
+      - id: read
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          draft=false
+          if [ "$EVENT" = pull_request ]; then
+            draft=$(gh api "repos/$REPO/pulls/$PR" --jq .draft)
+          fi
+          echo "draft=$draft" >> "$GITHUB_OUTPUT"
+
   source:
     name: Source
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: state
+    if: needs.state.outputs.draft == 'false'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -32,7 +56,8 @@ jobs:
 
   platform:
     name: Tests (${{ matrix.os }})
-    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    needs: state
+    if: needs.state.outputs.draft == 'false'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:

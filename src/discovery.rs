@@ -583,17 +583,15 @@ fn main_checkout(root: &str) -> Result<String, ScanError> {
             0,
         )
     })?;
+    // Like Claude Code, a common directory outside a checkout (a bare repository, or a
+    // submodule under .git/modules) is itself the root; lacking .git, it owns no local file.
     if std::path::Path::new(&common)
         .file_name()
         .is_some_and(|n| n == ".git")
     {
         Ok(dirname(&common).into())
     } else {
-        Err(error(
-            "unsupported git common directory",
-            &common_file.to_string_lossy(),
-            0,
-        ))
+        Ok(common)
     }
 }
 
@@ -2399,6 +2397,32 @@ mod tests {
             fs::read_to_string(&local).unwrap(),
             r#"{"awaySummaryEnabled":false}"#
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_submodule_worktree_keeps_local_file_in_place() {
+        let w = Workspace::new();
+        let module = w.home.join("super/.git/modules/sub");
+        let work = w.home.join("worktree");
+        fs::create_dir_all(module.join("worktrees/branch")).unwrap();
+        fs::create_dir_all(&work).unwrap();
+        write(
+            work.join(".git"),
+            &format!("gitdir: {}\n", text(&module.join("worktrees/branch"))),
+        );
+        write(module.join("worktrees/branch/commondir"), "../..\n");
+        write(
+            work.join(".claude/settings.local.json"),
+            r#"{"awaySummaryEnabled":false}"#,
+        );
+        let mut d = discover(&options(&w)).unwrap();
+        let r = request(claude(&d), Some(&work));
+        discover_claude_controls(&options(&w), &mut d.profiles, &[r]).unwrap();
+        let c = &claude(&d).background_directories[&text(&work)][1];
+        assert_eq!(c.value, Some(false));
+        let local = work.join(".claude/settings.local.json");
+        assert_eq!(c.off_file.as_deref(), Some(text(&local).as_str()));
     }
 
     #[test]

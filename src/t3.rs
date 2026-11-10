@@ -669,9 +669,10 @@ const OWNER_EVENT: &str = "SELECT EXISTS (SELECT 1 FROM orchestration_v2_project
    AND json_extract(e.payload_json,'$.providerInstanceId')=pt.provider_instance_id
    AND json_extract(e.payload_json,'$.nativeThreadRef.driver')=pt.driver
    AND json_extract(e.payload_json,'$.nativeThreadRef.nativeId')=json_extract(pt.payload_json,'$.nativeThreadRef.nativeId'))";
-// Native turn and item references of one provider thread. T3's Claude adapter keys tool
-// items by tool-use id and reasoning by `<message id>:thinking:<n>`, so neither can hold a
-// transcript record uuid; skipping them avoids reading tool outputs, most of the table.
+// Native turn and item references of one provider thread. Codex joins by turn id alone, so
+// only Claude reads items. T3's Claude adapter keys tool items by tool-use id and reasoning
+// by `<message id>:thinking:<n>`, so neither can hold a transcript record uuid; skipping
+// them avoids reading tool outputs, most of the table.
 const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$.nativeTurnRef.driver'),
  json_extract(payload_json,'$.nativeTurnRef.driver'), json_extract(payload_json,'$.nativeTurnRef.nativeId')
  FROM orchestration_v2_projection_provider_turns WHERE provider_thread_id=?1
@@ -680,7 +681,7 @@ const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$
  json_extract(i.payload_json,'$.nativeItemRef.driver'), json_extract(i.payload_json,'$.nativeItemRef.nativeId')
  FROM orchestration_v2_projection_provider_turns t
  JOIN orchestration_v2_projection_turn_items i ON i.provider_turn_id=t.provider_turn_id AND i.thread_id=t.thread_id
- WHERE t.provider_thread_id=?1
+ WHERE ?2='claudeAgent' AND t.provider_thread_id=?1
    AND i.type NOT IN ('command_execution','file_change','web_search','dynamic_tool','reasoning')";
 // Native identities and the earliest running selection are the join.
 const TURN: &str = "WITH matched AS (
@@ -1058,7 +1059,7 @@ fn metadata(
         let found = refs.entry(key).or_default();
         let wanted = &wanted[&(key.0, key.1.as_str())];
         for thread in list {
-            let mut rows = native_refs.query([&thread.id])?;
+            let mut rows = native_refs.query(rusqlite::params![thread.id, key.0])?;
             while let Some(row) = rows.next()? {
                 let (Some(turn), Some(native)) = (text_column(row, 0), text_column(row, 3)) else {
                     continue;
@@ -1799,6 +1800,11 @@ mod tests {
         seed(&database, "codex", "codex");
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads SELECT 'legacy',thread_id,driver,NULL,updated_at,payload_json FROM orchestration_v2_projection_provider_threads",[]).unwrap();
         database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
+        // Codex joins never read item payloads, so an oversized one cannot sink the snapshot.
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('thread','turn','assistant_message','completed',?1)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
+        database
+            .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
+            .unwrap();
         database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
         let valid = NativeRequest {
             id: "valid",

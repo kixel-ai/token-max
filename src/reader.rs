@@ -1150,9 +1150,8 @@ impl Reader {
             let source = member(p, "source");
             set(
                 &mut context.client,
-                label(member(p, "originator"))
-                    .or_else(|| label(source))
-                    .as_deref(),
+                // The source is not a client: T3 runs the app-server, whose default is `vscode`.
+                crate::safe::originator(member(p, "originator")).as_deref(),
             );
             let spawned = truthy(object(source).get("subagent"));
             context.source = label(source).or_else(|| spawned.then(|| "subagent".into()));

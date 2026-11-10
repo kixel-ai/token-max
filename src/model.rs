@@ -487,6 +487,34 @@ pub struct T3State {
     pub snapshot_finished_at: Option<String>,
     pub joined_requests: u64,
     pub ambiguous_requests: u64,
+    /// Requests whose T3 or native control owner stays unresolved, counted by cause.
+    #[serde(default)]
+    pub unresolved: IndexMap<String, u64>,
+    /// The model T3 resolves for generated text; absent for a state that was not read.
+    pub text_generation: Option<T3TextGeneration>,
+}
+
+/// A T3 model selection: the instance or text generator it routes to, and its model.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3Selection {
+    pub instance: String,
+    pub model: String,
+}
+
+/// T3's current text-generation model; its cost is unmeasured because T3 keeps no native records.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct T3TextGeneration {
+    pub selection: T3Selection,
+    /// The settings key that changes it.
+    pub owner: String,
+    /// How the selection resolved: set, T3's default, or a fallback past a disabled selection.
+    pub resolution: String,
+    /// Narrower settings that currently replace it, keyed by setting name.
+    pub overrides: IndexMap<String, T3Selection>,
+    /// Projects whose own settings replace any of these selections.
+    pub project_overrides: u64,
 }
 
 /// Historical projection evidence uniquely linked to a captured native request.

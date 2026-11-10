@@ -1150,9 +1150,8 @@ impl Reader {
             let source = member(p, "source");
             set(
                 &mut context.client,
-                label(member(p, "originator"))
-                    .or_else(|| label(source))
-                    .as_deref(),
+                // The source is not a client: T3 runs the app-server, whose default is `vscode`.
+                crate::safe::originator(member(p, "originator")).as_deref(),
             );
             let spawned = truthy(object(source).get("subagent"));
             context.source = label(source).or_else(|| spawned.then(|| "subagent".into()));
@@ -1563,12 +1562,12 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         let mut file = FileState::new(&view);
         for record in read_snapshot(snapshot)? {
             let (raw, location) = record?;
-            if has_t3 {
-                native_ids.observe(&raw, view.harness);
-            }
             reader
                 .consume(&view, &mut file, &raw, &location)
                 .map_err(|error| ScanError::at(error.message, location))?;
+            if has_t3 {
+                native_ids.observe(&raw, view.harness, &file.context.session);
+            }
         }
     }
     let Reader {
@@ -1693,6 +1692,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &mut events,
         &native_ids,
         &snapshot_finished_at,
+        since,
     );
     let before = |time: Millis| since.is_some_and(|since| time < since);
     let split = requests.partition_point(|r| before(r.time));

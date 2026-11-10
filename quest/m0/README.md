@@ -160,7 +160,7 @@ Recommendations for every check:
 
 ## Waiting
 
-- Maintainer: publish the first crates.io release with a short-lived token, since crates.io creates trusted publishers only for an existing crate, then add the trusted publisher for later releases. Follow [release preparation](../../docs/releasing.md); the `crates-io` GitHub environment restricted to `main` must exist first. An agent can automate the protected workflow and drive Chrome through crates.io setup, but cannot sign in as the owner. No release was attempted.
+- Maintainer: publish the first crates.io release with a short-lived token, since crates.io creates trusted publishers only for an existing crate, then add the trusted publisher for later releases. Follow [release preparation](../../docs/releasing.md); the `crates-io` GitHub environment restricted to `main` exists (created 2026-11-10 by /quest-unblock). The maintainer offered browser control, so an agent drives Chrome through the token and trusted-publisher steps at release time. An agent can automate the protected workflow and drive Chrome through crates.io setup, but cannot sign in as the owner. No release was attempted.
 
 Decided 2026-11-08 (maintainer, after the first run on the maintainer's
 host): ✅ recommend from the measured requests when the missing ones cannot
@@ -175,5 +175,4 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 ## Required
 
 - [Restore the large-history runtime](/quest/m0/runtime.md) - the default run is back to #27's runtime or better, with hot spots measured
-- [Read real T3 state](/quest/m0/t3-state.md) - T3 idle-compaction and fast-mode lines carry evidence on a 20 GB state database, or name why not
-- [Report T3's text-generation model](/quest/m0/t3-text-generation.md) - one line per T3 instance for the title and PR-text model and its cost
+- [Measure T3 idle compaction from recorded evidence](/quest/m0/t3-idle-evidence.md) - each T3 Claude instance's idle-compaction line is priced or names the one missing piece of evidence

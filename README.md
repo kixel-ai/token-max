@@ -298,10 +298,12 @@ stay unknown; `postTokens` alone cannot establish the full request.
 T3's Claude Code and Codex instances reuse their native histories, including
 retained histories of disabled instances. Shared homes, Codex shadow-home
 symlinks and request identities are deduplicated. T3 Usage aggregates are never
-added to native billed requests. Unsupported providers and helper generation
-(titles, branches, PR text and other potentially ephemeral sessions) are explicit
-coverage gaps with unmeasured cost. Native terminal suggestions, recaps, goal
-check-ins and keepalive guidance do not control those helpers.
+added to native billed requests. Unsupported providers are explicit coverage
+gaps. Each T3 state gets a line naming the model its
+`textGenerationModelSelection` resolves to for titles, branch names, PR text and
+other generated text, with the narrower selections that replace it; their cost
+is unmeasured because T3 runs them in ephemeral sessions. Native terminal
+suggestions, recaps, goal check-ins and keepalive guidance do not control them.
 
 The report names T3's `providerInstances.<id>.config.autoCompactWindow` when
 it overrides a native Claude window. Thread speed selection belongs to

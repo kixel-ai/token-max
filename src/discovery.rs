@@ -1991,7 +1991,8 @@ mod tests {
         );
         let data = discover(&options(&w)).unwrap();
         assert_eq!(
-            crate::controls::window_control(claude(&data), Some("claude-opus-5-5")).value,
+            crate::controls::window_control(&claude(&data).compaction, Some("claude-opus-5-5"))
+                .value,
             Some(400_000)
         );
         let codex = data

@@ -218,8 +218,6 @@ fn settings_control(profile: &Profile) -> IdleControl {
 pub(crate) struct Scopes<'p> {
     profile: &'p Profile,
     fallback: OnceCell<IdleControl>,
-    /// The profile without its per-directory controls, for scoped window overrides.
-    bare: OnceCell<Profile>,
     windows: RefCell<HashMap<Scope, HashMap<String, Rc<WindowControl>>>>,
 }
 
@@ -228,7 +226,6 @@ impl<'p> Scopes<'p> {
         Self {
             profile,
             fallback: OnceCell::new(),
-            bare: OnceCell::new(),
             windows: RefCell::new(HashMap::new()),
         }
     }
@@ -276,21 +273,12 @@ impl<'p> Scopes<'p> {
         if let Some(w) = self.windows.borrow().get(&scope).and_then(|m| m.get(key)) {
             return w.clone();
         }
-        let w = Rc::new(match &self.control(scope).compaction {
-            Some(compaction) => {
-                let bare = self.bare.get_or_init(|| Profile {
-                    idle_directories: None,
-                    speed_directories: None,
-                    ..self.profile.clone()
-                });
-                let scoped = Profile {
-                    compaction: compaction.clone(),
-                    ..bare.clone()
-                };
-                window_control(&scoped, model)
-            }
-            None => window_control(self.profile, model),
-        });
+        let compaction = self
+            .control(scope)
+            .compaction
+            .as_ref()
+            .unwrap_or(&self.profile.compaction);
+        let w = Rc::new(window_control(compaction, model));
         self.windows
             .borrow_mut()
             .entry(scope)

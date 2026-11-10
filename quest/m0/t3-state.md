@@ -34,10 +34,15 @@ current rule does not exclude T3 on a missing thread alone.
 Fast mode stays unknown by design: T3's current thread and browser selection
 is not read, only historical requested speed.
 
+Decided 2026-11-10 (maintainer, /quest-unblock): when T3's state was read
+and a session has no T3 provider thread, exclude T3's instances as its owner
+unless the session's client label is one T3's provider adapters write (Claude
+`sdk-ts` or T3's own label, Codex originator `T3 Code`); such a request stays
+unresolved only among the native profiles. ✅ exclude unless a T3 label
+(rejected: exclude for every session without a provider thread, since T3's
+projection maintenance may drop a thread and that was not ruled out; keep
+today's rule, which leaves the T3 lines unknown on the maintainer's host).
+
 Settled: T3 metadata stays optional, and a failed read stays a named
 evidence gap that keeps native usage, never a failed run (2026-11-07
 decision in the m0 README).
-
-## Waiting
-
-- Maintainer: decide whether a readable T3 state with no provider thread for a session excludes T3's instances as its owner. Options: (1, recommended) exclude them when the client label is not one T3's provider adapters write (Claude `sdk-ts` or T3's own label, Codex originator `T3 Code`), leaving the request unresolved only among native profiles; (2) exclude them for every session without a provider thread, trusting T3 never drops one; (3) keep today's rule, so these sessions keep the T3 lines unknown. Only the maintainer can weigh the projection-pruning risk against the evidence the T3 lines gain. Check: this item is replaced by the chosen rule in this Plan.

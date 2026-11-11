@@ -1165,6 +1165,9 @@ impl Reader {
                 e.pre_tokens = count(meta.get("preTokens"))?;
                 e.post_tokens = count(meta.get("postTokens"))?;
                 e.duration_ms = count(meta.get("durationMs"))?;
+            } else {
+                // A pre-window trigger still shows the current window; its other counts are never read.
+                e.pre_tokens = count(meta.get("preTokens")).ok().flatten();
             }
             e.request = if let Some(reference) = opaque(raw, "requestRef")? {
                 Some(format!("ref:{reference}").into())

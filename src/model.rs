@@ -595,6 +595,9 @@ pub struct CompactionControls {
     /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at a 200k window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
+    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size a model ID Claude Code does not recognize.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
     /// Tuned windows by undated model ID, for every model the profile used.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tuned: IndexMap<String, TunedWindow>,

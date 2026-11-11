@@ -2236,6 +2236,14 @@ mod tests {
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
         assert_eq!(window(&capped, "claude-sonnet-4-6").value, Some(200_000));
         assert_eq!(window(&capped, "claude-opus-5-5").value, Some(200_000));
+        assert_eq!(window(&capped, "gateway-opus").value, Some(200_000));
+
+        // A declared window may size an unrecognized ID, but not a documented model.
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
+        capped.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut capped);
+        assert_eq!(window(&capped, "gateway-opus").value, None);
+        assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
 
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
         capped.profiles[0].compaction = unset(&env);

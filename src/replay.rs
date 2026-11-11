@@ -2342,6 +2342,7 @@ mod tests {
             assert_eq!(context.requests[0].evidence, RequestEvidence::Unknown);
             assert_eq!(context.requests[0].parts[0].usage.read, None);
             assert_eq!(context.boundaries.len(), usize::from(with_boundary));
+            assert!(context.boundaries.iter().all(|b| b.pre_tokens.is_none()));
             assert_eq!(selected.events.len(), 0);
             let c = check(&selected, Some(19 * MIN), 21 * MIN);
             assert_eq!(
@@ -2364,6 +2365,31 @@ mod tests {
                 }));
             }
         }
+    }
+
+    #[test]
+    fn a_pre_window_automatic_compaction_still_sets_an_unset_window() {
+        let records = [
+            assistant(0, "first", 100_000, 2000),
+            compact_boundary(
+                18,
+                "boundary",
+                json!({"trigger": "auto", "preTokens": 300_000}),
+            ),
+            assistant(20, "last", 100_000, 2000),
+        ];
+        let w = profile_with(&records);
+        let mut selected = scan(&options(&w, Some(19 * MIN))).unwrap();
+        assert_eq!(
+            selected.cache_context.boundaries[0].pre_tokens,
+            Some(300_000)
+        );
+        crate::controls::tune_windows(&mut selected);
+        let control = crate::controls::window_control(
+            &selected.profiles[0].compaction,
+            Some("claude-opus-5-5"),
+        );
+        assert_eq!(control.value, Some(300_000));
     }
 
     #[test]

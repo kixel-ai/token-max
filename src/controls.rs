@@ -490,6 +490,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             },
             models,
             capped: false,
+            declared: false,
             tuned: IndexMap::default(),
         });
     }
@@ -585,6 +586,9 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
         default: resolve(None)?,
         models,
         capped: environment.is("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1"),
+        declared: environment
+            .values
+            .contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
         tuned: IndexMap::default(),
     })
 }
@@ -719,7 +723,7 @@ pub fn tune_windows(scan: &mut Scan) {
             }
         }
         let mut observed: IndexMap<String, (Millis, i64)> = IndexMap::default();
-        for e in events.iter() {
+        for e in cache_context.boundaries.iter().chain(events.iter()) {
             if let (
                 EventKind::Compaction,
                 Some("auto"),
@@ -741,11 +745,15 @@ pub fn tune_windows(scan: &mut Scan) {
                 }
             }
         }
-        let capped = profile.compaction.capped;
+        let CompactionControls {
+            capped, declared, ..
+        } = profile.compaction;
         for (model, size) in largest {
-            let (value, reason) = match (observed.get(&model), native_million(&model)) {
-                // The cap holds even an explicit window, so a trigger from before it cannot lift it.
-                (_, Some(_)) if capped => (
+            let documented = native_million(&model);
+            let (value, reason) = match (observed.get(&model), documented) {
+                // The cap holds even an explicit window, so a trigger from before it cannot lift
+                // it; only a declared window can size an ID Claude Code does not recognize.
+                _ if capped && (documented.is_some() || !declared) => (
                     Some(TUNED_STANDARD),
                     "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
                 ),

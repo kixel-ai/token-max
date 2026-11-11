@@ -219,6 +219,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
             },
             models: IndexMap::default(),
             capped: false,
+            declared: false,
             tuned: IndexMap::default(),
         },
         idle: None,

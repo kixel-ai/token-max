@@ -258,10 +258,11 @@ client version is the applicability assumption.
 
 When no setting names a window, each model the profile used gets Claude Code's
 tuned window, owned by that model's `modelSettings` row because the defaults
-differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every documented
-model at 200k. Otherwise the trigger of the profile's latest automatic, non-idle
-compaction on the model comes first, since the server can retune the default
-without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
+differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
+except an ID outside the table when `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size it.
+Otherwise the trigger of the profile's latest automatic, non-idle compaction on
+the model comes first, including one before `--since`, since the server can
+retune the default without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
 checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
 Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
 Sonnet and Haiku models.

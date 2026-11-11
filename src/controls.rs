@@ -586,9 +586,16 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
         default: resolve(None)?,
         models,
         capped: environment.is("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1"),
+        // Only a positive token count declares a window; anything else leaves the cap in force.
         declared: environment
             .values
-            .contains_key("CLAUDE_CODE_MAX_CONTEXT_TOKENS"),
+            .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
+            .map(|value| js_string(Some(value)))
+            .is_some_and(|text| {
+                !text.is_empty()
+                    && text.bytes().all(|b| b.is_ascii_digit())
+                    && text.parse::<u64>().is_ok_and(|n| n > 0)
+            }),
         tuned: IndexMap::default(),
     })
 }

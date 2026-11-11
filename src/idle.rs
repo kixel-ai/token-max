@@ -2247,9 +2247,10 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             subagent: profile.ttl.subagent.value,
         };
         let mut current_replay = profiled.replay(&current_ttls, &current_windows);
+        // The unresolved window causes the replay's own errors, so it is named first.
         current_replay
             .errors
-            .extend(unresolved_windows.iter().cloned());
+            .splice(0..0, unresolved_windows.iter().cloned());
         let current = t3_comparison(
             options,
             profile,
@@ -2285,7 +2286,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         let mut after_replay = profiled.replay(&after_ttls, &after_windows);
         after_replay
             .errors
-            .extend(unresolved_windows.iter().cloned());
+            .splice(0..0, unresolved_windows.iter().cloned());
         let after = t3_comparison(
             options,
             profile,
@@ -2335,7 +2336,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 baseline: format!("{}; onReturn assumes accepting the offered summary, beforeCacheExpires assumes the server remains running until its observed-expiry timer fires",instance.idle_mode.as_str()),
                 requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: None,
                 savings_usd: savings.filter(|_|applicable), monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
-                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session; 5m and 1h caches both apply".into(), "onReturn is conditional on an offered resume dialog and user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
+                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session; 5m and 1h caches both apply".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
         });
@@ -2343,13 +2344,31 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
     checks
 }
 
+/// T3 starts its proactive summary this long before the observed cache expiry.
+const T3_LEAD: Millis = 2 * 60_000;
+/// The shortest cache lifetime, 5m, minus the lead: no proactive timer fires sooner.
+const T3_EARLIEST: Millis = 3 * 60_000;
+/// No cache goes cold sooner than the 5m lifetime, so no earlier return is offered a summary.
+const T3_COLDEST: Millis = 5 * 60_000;
+/// T3 and the SDK leave smaller contexts alone.
+const T3_MIN_TOKENS: i64 = 200_000;
+
+/// Whether `onReturn` summarizes at a gap's return.
+#[derive(Clone, Copy, PartialEq)]
+enum OnReturn {
+    Skip,
+    Generate,
+    Unknown(&'static str),
+}
+
 struct T3Gap<'a> {
     previous: &'a Request,
     next: Option<&'a Request>,
     trigger: Option<Millis>,
-    observed: Option<crate::model::T3IdleMode>,
     boundary: Option<&'a StructuralEvent>,
     status: PeriodStatus,
+    reason: &'static str,
+    on_return: OnReturn,
     tokens: Option<i64>,
 }
 
@@ -2409,13 +2428,25 @@ fn t3_comparison(
             if options.since.is_some_and(|s| end < s) || end <= r.end_time {
                 continue;
             }
+            // Without a linked api-request record, `r.time` is the first response record, which
+            // can follow the request start. The main thread runs one request at a time, so the
+            // previous request's end bounds the start from below.
+            let start_floor = i.checked_sub(1).map(|j| group[j].end_time);
             let meta = r.t3.as_ref();
             let native = natives.get(&*r.id).copied();
-            let tokens = meta.and_then(|t| t.used_tokens).and_then(|tokens| {
-                let before = native?.parts.iter().find(|p| is_message(p))?.usage.input?;
-                let after = r.parts.iter().find(|p| is_message(p))?.usage.input?;
-                tokens.checked_add(after - before).filter(|n| *n >= 0)
-            });
+            let message = r.parts.iter().find(|p| is_message(p));
+            let tokens = match meta.and_then(|t| t.used_tokens) {
+                Some(tokens) => (|| {
+                    let before = native?.parts.iter().find(|p| is_message(p))?.usage.input?;
+                    let after = message?.usage.input?;
+                    tokens.checked_add(after - before).filter(|n| *n >= 0)
+                })(),
+                // T3's usedTokens is the native input plus output of the run's last request.
+                None => message
+                    .and_then(|p| p.usage.input.zip(p.usage.output))
+                    .and_then(|(a, b)| a.checked_add(b)),
+            };
+            // T3 dates expiry from the request start, so the timer is relative to `r.time`.
             let expires = meta.and_then(|t| t.cache_expires_at).and_then(|expiry| {
                 if ttl == profile.ttl.main.value {
                     return Some(expiry);
@@ -2424,7 +2455,11 @@ fn t3_comparison(
                     crate::cache::observed_ttl(native?.parts.iter().find(|p| is_message(p))?)?;
                 Some(expiry - ttl_milliseconds(old) + ttl_milliseconds(ttl?))
             });
-            let trigger = expires.map(|t| t - 120_000).filter(|t| *t >= r.end_time);
+            // T3 evaluates the window when the run completes and starts a lapsed lead at once.
+            let completed = meta.and_then(|t| t.completed_at).unwrap_or(r.end_time);
+            let trigger = expires
+                .filter(|t| completed < *t)
+                .map(|t| (t - T3_LEAD).max(completed));
             let boundary = boundaries.get(&*r.session).and_then(|b| {
                 b.iter()
                     .copied()
@@ -2438,7 +2473,17 @@ fn t3_comparison(
                     PeriodStatus::Eligible,
                     "explicit idle run identity and native applied compaction boundary",
                 )
-            } else if tokens.is_some_and(|n| n < 200_000) {
+            } else if next.is_some() && start_floor.is_some_and(|f| end < f + T3_EARLIEST) {
+                (
+                    PeriodStatus::Censored,
+                    "return precedes the earliest timer a 5m cache allows",
+                )
+            } else if meta.is_none() {
+                (
+                    PeriodStatus::Unknown,
+                    "no unique T3 turn joins this native request, so its run, completion and cache expiry are unknown",
+                )
+            } else if tokens.is_some_and(|n| n < T3_MIN_TOKENS) {
                 (
                     PeriodStatus::Ineligible,
                     "T3 context is below 200000 tokens",
@@ -2453,22 +2498,76 @@ fn t3_comparison(
                     PeriodStatus::Ineligible,
                     "T3 run is not completed in the captured projection",
                 )
-            } else if tokens.is_some()
-                && trigger.is_some()
-                && meta.is_some_and(|t| {
-                    t.lifecycle_eligible == Some(true)
-                        && t.completed_at.is_some_and(|c| c <= trigger.unwrap())
-                })
+            } else if tokens.is_none() {
+                (
+                    PeriodStatus::Unknown,
+                    "the context size of the run's last request is unrecorded",
+                )
+            } else if meta.is_some_and(|t| t.usage_updated_at.is_some())
+                && meta.is_some_and(|t| t.cache_expires_at.is_none())
             {
+                (
+                    PeriodStatus::Ineligible,
+                    "a fully cached last request reports no TTL, so T3 arms no timer",
+                )
+            } else if expires.is_none() {
+                (
+                    PeriodStatus::Unknown,
+                    "T3 recorded no usage with prompt cache expiry for the run's last request",
+                )
+            } else if trigger.is_none() {
+                (
+                    PeriodStatus::Ineligible,
+                    "the cache expired before the run completed",
+                )
+            } else if meta.is_some_and(|t| t.lifecycle_eligible != Some(true)) {
+                (
+                    PeriodStatus::Unknown,
+                    "T3 keeps only current lifecycle guards, so this earlier idle gap's guards are unproven",
+                )
+            } else {
                 (
                     PeriodStatus::Eligible,
                     "completed main-thread projection with observed expiry and verified current lifecycle guards; generation remains conditional on server liveness",
                 )
-            } else {
-                (
-                    PeriodStatus::Unknown,
-                    "T3 native run, token threshold, observed cache expiry or lifecycle guards are unavailable; current settings do not establish historical eligibility",
-                )
+            };
+            // The SDK offers its resume dialog when a new run resumes a cold session, which
+            // needs no T3 lifecycle guard or recorded expiry.
+            let on_return = match next {
+                None => OnReturn::Skip,
+                Some(_) if observed == Some(crate::model::T3IdleMode::OnReturn) => {
+                    OnReturn::Generate
+                }
+                Some(_) if start_floor.is_some_and(|f| end < f + T3_COLDEST) => OnReturn::Skip,
+                Some(n) => match (meta, n.t3.as_ref()) {
+                    (Some(a), Some(b)) if a.run == b.run => OnReturn::Skip,
+                    (Some(_), Some(_)) => match ttl.map(ttl_milliseconds) {
+                        None => OnReturn::Unknown("the effective main cache TTL is unknown"),
+                        // T3's recorded expiry is exact; otherwise the start lies between its
+                        // floor and `r.time`.
+                        Some(_) if expires.is_some_and(|e| end < e) => OnReturn::Skip,
+                        Some(life)
+                            if expires.is_none()
+                                && end < r.time + life
+                                && start_floor.is_none_or(|f| end >= f + life) =>
+                        {
+                            OnReturn::Unknown(
+                                "the request start is unrecorded, so whether the cache was cold at return is unknown",
+                            )
+                        }
+                        Some(life) if expires.is_none() && end < r.time + life => OnReturn::Skip,
+                        Some(_) => match tokens {
+                            None => OnReturn::Unknown(
+                                "the context size of the run's last request is unrecorded",
+                            ),
+                            Some(n) if n < T3_MIN_TOKENS => OnReturn::Skip,
+                            Some(_) => OnReturn::Generate,
+                        },
+                    },
+                    _ => OnReturn::Unknown(
+                        "no unique T3 turn joins a request around this gap, so whether a new run resumed it is unknown",
+                    ),
+                },
             };
             periods.push(IdlePeriod {
                 request:r.id.clone(), resume:next.map(|r|r.id.clone()),session:r.session.clone(),context_tokens:tokens,
@@ -2481,9 +2580,10 @@ fn t3_comparison(
                 previous: r,
                 next,
                 trigger,
-                observed,
                 boundary,
                 status,
+                reason,
+                on_return,
                 tokens,
             });
         }
@@ -2581,8 +2681,10 @@ fn t3_replay(
         .iter()
         .map(|s| ((&*s.request, s.part), &s.cost))
         .collect();
-    let mut costs = replay.added.clone();
-    costs.extend(replay.errors.iter().cloned().map(unknown_cost));
+    // Each mode charges only what it changes. Charges every mode shares, including the
+    // window replay's added summaries, server fees and the removal of recorded idle runs,
+    // cancel in the comparison, so their missing usage cannot block it.
+    let mut costs: Vec<Cost> = replay.errors.iter().cloned().map(unknown_cost).collect();
     if requests.iter().any(|r| {
         r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some()) && !idle_requests.contains(&*r.id)
     }) {
@@ -2592,26 +2694,24 @@ fn t3_replay(
     let mut final_count = 0;
     if mode != T3IdleMode::Off {
         for (i, gap) in gaps.iter().enumerate() {
-            if gap.status == PeriodStatus::Unknown {
-                costs.push(unknown_cost(
-                    "T3 run, observed-expiry or lifecycle evidence is unavailable",
-                ));
-            }
-            if gap.status != PeriodStatus::Eligible {
-                continue;
-            }
             let at = if mode == T3IdleMode::OnReturn {
-                let Some(next) = gap.next else {
-                    continue;
-                };
-                // The native resume dialog is conditional. An explicit on-return outcome
-                // establishes it; otherwise model it only once the observed cache is cold.
-                if gap.observed != Some(mode) && gap.trigger.is_none_or(|t| next.time < t + 120_000)
-                {
-                    continue;
+                match (gap.on_return, gap.next) {
+                    (OnReturn::Generate, Some(next)) => next.time,
+                    (OnReturn::Unknown(reason), _) => {
+                        costs.push(unknown_cost(reason));
+                        continue;
+                    }
+                    _ => continue,
                 }
-                next.time
             } else {
+                match gap.status {
+                    PeriodStatus::Eligible => {}
+                    PeriodStatus::Unknown => {
+                        costs.push(unknown_cost(gap.reason));
+                        continue;
+                    }
+                    _ => continue,
+                }
                 gap.trigger
                     .unwrap_or_else(|| gap.boundary.map_or(gap.previous.end_time, |b| b.time))
             };
@@ -2643,7 +2743,7 @@ fn t3_replay(
                         if p.kind == PartKind::Compaction
                             || (r.agent == Agent::Main && is_message(p))
                         {
-                            let altered = if offset == 0 {
+                            let altered = if offset == 0 && !changed {
                                 Some(p.clone())
                             } else {
                                 let size = prefix(p)
@@ -2694,10 +2794,21 @@ fn t3_replay(
                                     }
                                 })
                             };
-                            if selected {
-                                costs.push(if offset==0 {
-                                    baseline.get(&(&*r.id,part)).map_or_else(||unknown_cost("shared cache replay did not price this native part"),|c|(*c).clone())
-                                } else { altered.as_ref().map_or_else(||unknown_cost("T3 counterfactual carried prefix or effective TTL is unavailable"),|p|price_part(options.catalog,r,p)) });
+                            if selected && (offset != 0 || changed) {
+                                costs.push(match (altered.as_ref(), baseline.get(&(&*r.id, part))) {
+                                    (None, _) => unknown_cost("T3 counterfactual carried prefix or effective TTL is unavailable"),
+                                    (_, None) => unknown_cost("shared cache replay did not price this native part"),
+                                    (Some(altered), _) if altered == p => zero_cost(),
+                                    // Equal unknown prices of changed usage are not a known zero.
+                                    (Some(altered), Some(before)) => {
+                                        let after = price_part(options.catalog, r, altered);
+                                        if after.total_usd.is_none() && after == **before {
+                                            after
+                                        } else {
+                                            difference(&after, before)
+                                        }
+                                    }
+                                });
                             }
                             if r.agent == Agent::Main && is_message(p) {
                                 context = p
@@ -2710,19 +2821,7 @@ fn t3_replay(
                                 last_time = Some(r.end_time);
                                 cache_lifetime = ttl.map(ttl_milliseconds);
                             }
-                        } else if selected {
-                            costs.push(baseline.get(&(&*r.id, part)).map_or_else(
-                                || {
-                                    unknown_cost(
-                                        "shared cache replay did not price this native part",
-                                    )
-                                },
-                                |c| (*c).clone(),
-                            ));
                         }
-                    }
-                    if !idle_run && options.since.is_none_or(|s| r.time >= s) {
-                        costs.push(server_cost(r));
                     }
                 }
                 Tick::Boundary(e) => {
@@ -2743,16 +2842,13 @@ fn t3_replay(
                         // The recorded summary is removed from every scenario. A generated
                         // summary is charged only by its policy's explicit Generate tick.
                     } else {
-                        if let Some(charge) = charge.filter(|s| s.request.is_none())
+                        if (offset != 0 || changed)
+                            && charge.is_some_and(|s| s.request.is_none())
                             && options.since.is_none_or(|s| e.time >= s)
                         {
-                            costs.push(if offset == 0 {
-                                charge.cost.clone()
-                            } else {
-                                unknown_cost(
-                                    "changed input to a later unlinked summary is unavailable",
-                                )
-                            });
+                            costs.push(unknown_cost(
+                                "changed input to a later unlinked summary is unavailable",
+                            ));
                         }
                         offset = 0;
                         context = e.post_tokens;
@@ -4207,18 +4303,19 @@ mod tests {
         boundary.idle_attribution = IdleAttribution::T3;
         observed.events.push(boundary);
         observed.events.sort_by_key(|e| e.time);
-        let off = t3_check(&observed, 10.0)
-            .current_settings
-            .scenarios
-            .remove(0);
-        near(
-            off.cost.total_usd,
-            t3_check(&baseline, 10.0).current_settings.scenarios[0]
-                .cost
-                .total_usd
-                .unwrap(),
-        );
-        assert_eq!(off.summaries, 0);
+        let observed = t3_check(&observed, 10.0).current_settings.scenarios;
+        let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
+        // Off grows the later request back from 20k to 300k uncached tokens, and charges
+        // neither the recorded nor a new summary.
+        near(observed[0].cost.total_usd, 1.5 - 0.1);
+        assert_eq!(observed[0].summaries, 0);
+        near(baseline[0].cost.total_usd, 0.0);
+        // The proactive summary replaces the recorded one, so both histories compare alike.
+        // onReturn is left out: the recorded summary also calibrates its cache reads.
+        let relative = |s: &[crate::model::T3IdleScenario]| {
+            s[2].cost.total_usd.unwrap() - s[0].cost.total_usd.unwrap()
+        };
+        near(Some(relative(&observed)), relative(&baseline));
     }
 
     #[test]
@@ -4249,5 +4346,132 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    fn t3_meta<'s>(scan: &'s mut Scan, id: &str) -> &'s mut crate::model::T3Request {
+        scan.requests
+            .iter_mut()
+            .find(|r| *r.id == *id)
+            .unwrap()
+            .t3
+            .as_mut()
+            .unwrap()
+    }
+
+    #[test]
+    fn t3_on_return_needs_no_lifecycle_guard_and_the_report_names_what_proactive_lacks() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(
+            vec![request("a", 0.0, 300_000), request("b", 10.0, 320_000)],
+            Ttl::FiveMinutes,
+            OnReturn,
+        );
+        // A later run replaced the projection's guards for `a`.
+        t3_meta(&mut scan, "a").lifecycle_eligible = Some(false);
+        let check = t3_check(&scan, 10.0);
+        let s = &check.current_settings.scenarios;
+        near(s[0].cost.total_usd, 0.0);
+        assert!(s[1].cost.total_usd.is_some(), "{:?}", s[1].cost);
+        assert_eq!(s[1].summaries, 1);
+        assert_eq!(s[2].cost.total_usd, None);
+        let guards = "T3 keeps only current lifecycle guards";
+        assert!(s[2].cost.unknown.iter().all(|u| u.starts_with(guards)));
+        assert_eq!(check.base.action, Action::Advisory);
+        let mut report = report(scan, 10.0);
+        report
+            .checks
+            .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
+        report.checks.push(CheckResult::T3Idle(check));
+        let text = format_report(&report, ReportOptions::default());
+        let line = text.lines().find(|l| l.contains("T3 idle")).unwrap();
+        assert!(
+            line.contains("Changed cost per month: off $0, onReturn ")
+                && line.contains(&format!("beforeCacheExpires is unpriced: {guards}")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn t3_gaps_use_timer_bounds_without_inventing_a_proactive_summary() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(
+            vec![
+                request("p", 0.0, 300_000),
+                request("a", 1.0, 300_000),
+                request("b", 2.5, 320_000),
+            ],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        // No 5m-cache timer can fire within three minutes of the request start, joined to
+        // T3 or not. Without a linked start, the previous request's end bounds it.
+        scan.requests.iter_mut().find(|r| &*r.id == "a").unwrap().t3 = None;
+        let check = t3_check(&scan, 2.5);
+        let status = |check: &crate::model::T3IdleCheck, id: &str| {
+            let periods = &check.current_settings.periods;
+            periods.iter().find(|p| *p.request == *id).unwrap().status
+        };
+        assert_eq!(status(&check, "a"), PeriodStatus::Censored);
+        let proactive = &check.current_settings.scenarios[2];
+        assert_eq!(
+            (proactive.cost.total_usd, proactive.summaries),
+            (Some(0.0), 0)
+        );
+        // With no earlier request, `a` may have started long before its first record.
+        scan.requests.retain(|r| &*r.id != "p");
+        assert_eq!(status(&t3_check(&scan, 2.5), "a"), PeriodStatus::Unknown);
+
+        // T3 dates expiry from the request start; a run completing inside the lead starts
+        // the summary at completion instead of skipping it.
+        let mut scan = t3_data(
+            vec![request("a", 0.0, 300_000), request("b", 10.0, 320_000)],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        scan.requests
+            .iter_mut()
+            .find(|r| &*r.id == "a")
+            .unwrap()
+            .end_time = 4 * MINUTE;
+        let a = t3_meta(&mut scan, "a");
+        a.completed_at = Some(4 * MINUTE);
+        a.cache_expires_at = Some(5 * MINUTE);
+        let check = t3_check(&scan, 10.0);
+        assert_eq!(
+            check.current_settings.periods[0].status,
+            PeriodStatus::Eligible
+        );
+        assert_eq!(check.current_settings.scenarios[2].summaries, 1);
+
+        // A fully cached last request reports no TTL, so T3 arms no timer, while the
+        // SDK still offers its summary when the cold session resumes.
+        t3_meta(&mut scan, "a").cache_expires_at = None;
+        let check = t3_check(&scan, 10.0);
+        let p = &check.current_settings.periods[0];
+        assert_eq!(p.status, PeriodStatus::Ineligible);
+        assert!(p.reason.contains("arms no timer"));
+        let s = &check.current_settings.scenarios;
+        assert_eq!((s[1].summaries, s[2].summaries), (1, 0));
+        assert!(s.iter().all(|s| s.cost.total_usd.is_some()));
+    }
+
+    #[test]
+    fn t3_modes_compare_changed_charges_so_unrelated_unpriced_requests_cancel() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(
+            vec![request("a", 0.0, 300_000), request("b", 10.0, 320_000)],
+            Ttl::FiveMinutes,
+            OnReturn,
+        );
+        let priced = t3_check(&scan, 10.0).current_settings.scenarios;
+        let mut unpriced = in_session(request("side", 1.0, 1000), "side");
+        unpriced.agent = Agent::Subagent;
+        unpriced.parts[0].model = Some("unpriced-model".into());
+        scan.requests.push(unpriced);
+        let check = t3_check(&scan, 10.0);
+        for (with, without) in check.current_settings.scenarios.iter().zip(&priced) {
+            near(with.cost.total_usd, without.cost.total_usd.unwrap());
+        }
+        assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
     }
 }

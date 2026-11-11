@@ -324,17 +324,21 @@ separately; later or ambiguous evidence cannot supply a historical join.
 
 `t3-idle-compaction` compares `off`, `onReturn` and `beforeCacheExpires`
 under current and recommended TTL/window controls using the shared cache,
-compaction calibration and API pricing. The proactive timer starts two minutes
-before the observed cache expiry, for eligible completed main threads with at
-least 200,000 tokens. Five-minute and one-hour caches both apply. In-memory
-timers disappear on server restart, so generation remains conditional on server
-liveness. `onReturn` assumes the SDK offers a resume dialog on a cold return and
-the user accepts it; the adapter does not infer an unrecorded acceptance. `off`
-also suppresses that dialog. Summaries pay warm or cold input plus output; later
-requests pay their full changed prefixes, and final proactive summaries have no
-invented return benefit. Missing lifecycle or compatible full-prefix calibration
-stays unpriced. Current lifecycle guards do not reconstruct prior guard states.
-See [T3 evidence and sources](docs/t3.md) for supported schema and limits.
+compaction calibration and API pricing. Each mode's cost is what it changes
+from the recorded history, so charges every mode shares cancel. The proactive
+timer starts two minutes before the observed cache expiry, for eligible
+completed main threads with at least 200,000 tokens. Five-minute and one-hour
+caches both apply. In-memory timers disappear on server restart, so generation
+remains conditional on server liveness. `onReturn` assumes the SDK offers a
+resume dialog when a new run resumes a cold session of at least 200,000 tokens
+and the user accepts it; the adapter does not infer an unrecorded acceptance.
+It needs no T3 lifecycle guard. `off` also suppresses that dialog. Summaries
+pay warm or cold input plus output; later requests pay their full changed
+prefixes, and final proactive summaries have no invented return benefit.
+Missing lifecycle or compatible full-prefix calibration stays unpriced, and
+the report names the first missing input. Current lifecycle guards do not
+reconstruct prior guard states. See [T3 evidence and sources](docs/t3.md) for
+supported schema and limits.
 
 ## Other hosts over SSH
 

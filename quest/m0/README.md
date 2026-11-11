@@ -171,7 +171,3 @@ interleaved lines, several recent). ✅ price a custom `ANTHROPIC_BASE_URL` as
 the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
-
-## Required
-
-- [Measure T3 idle compaction from recorded evidence](/quest/m0/t3-idle-evidence.md) - each T3 Claude instance's idle-compaction line is priced or names the one missing piece of evidence

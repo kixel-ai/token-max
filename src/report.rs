@@ -1835,12 +1835,12 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
         .flat_map(|s| s.cost.unknown.iter().map(String::as_str))
         .collect();
     let Some(first) = reasons.first() else {
-        // Every mode is priced, so only ownership keeps the result advisory.
+        if c.after_recommendations.periods.is_empty() {
+            return "No main-thread idle gaps in this window to compare.".into();
+        }
+        // Every mode is priced, so only a disabled instance or ownership keeps it advisory.
         return format!(
-            "{priced}Its current mode is not confirmed to govern these sessions: {}.",
-            r.uncertainty
-                .last()
-                .map_or("ownership is unresolved", String::as_str)
+            "{priced}The instance is disabled or its sessions' ownership is unresolved, so no mode is recommended."
         );
     };
     let more = match reasons.len() - 1 {

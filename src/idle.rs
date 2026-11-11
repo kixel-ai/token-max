@@ -2497,6 +2497,10 @@ fn t3_comparison(
             if options.since.is_some_and(|s| end < s) || end <= r.end_time {
                 continue;
             }
+            // Without a linked api-request record, `r.time` is the first response record, which
+            // can follow the request start. The main thread runs one request at a time, so the
+            // previous request's end bounds the start from below.
+            let start_floor = i.checked_sub(1).map(|j| group[j].end_time);
             let meta = r.t3.as_ref();
             let native = natives.get(r.id.as_str()).copied();
             let message = r.parts.iter().find(|p| is_message(p));
@@ -2538,7 +2542,7 @@ fn t3_comparison(
                     PeriodStatus::Eligible,
                     "explicit idle run identity and native applied compaction boundary",
                 )
-            } else if next.is_some() && end < r.time + T3_EARLIEST {
+            } else if next.is_some() && start_floor.is_some_and(|f| end < f + T3_EARLIEST) {
                 (
                     PeriodStatus::Censored,
                     "return precedes the earliest timer a 5m cache allows",
@@ -2603,12 +2607,24 @@ fn t3_comparison(
                 Some(_) if observed == Some(crate::model::T3IdleMode::OnReturn) => {
                     OnReturn::Generate
                 }
-                Some(_) if end < r.time + T3_COLDEST => OnReturn::Skip,
+                Some(_) if start_floor.is_some_and(|f| end < f + T3_COLDEST) => OnReturn::Skip,
                 Some(n) => match (meta, n.t3.as_ref()) {
                     (Some(a), Some(b)) if a.run == b.run => OnReturn::Skip,
-                    (Some(_), Some(_)) => match ttl.map(|t| r.time + ttl_milliseconds(t)) {
+                    (Some(_), Some(_)) => match ttl.map(ttl_milliseconds) {
                         None => OnReturn::Unknown("the effective main cache TTL is unknown"),
-                        Some(cold) if end < cold => OnReturn::Skip,
+                        // T3's recorded expiry is exact; otherwise the start lies between its
+                        // floor and `r.time`.
+                        Some(_) if expires.is_some_and(|e| end < e) => OnReturn::Skip,
+                        Some(life)
+                            if expires.is_none()
+                                && end < r.time + life
+                                && start_floor.is_none_or(|f| end >= f + life) =>
+                        {
+                            OnReturn::Unknown(
+                                "the request start is unrecorded, so whether the cache was cold at return is unknown",
+                            )
+                        }
+                        Some(life) if expires.is_none() && end < r.time + life => OnReturn::Skip,
                         Some(_) => match tokens {
                             None => OnReturn::Unknown(
                                 "the context size of the run's last request is unrecorded",
@@ -2853,7 +2869,16 @@ fn t3_replay(
                                 costs.push(match (altered.as_ref(), baseline.get(&(r.id.as_str(), part))) {
                                     (None, _) => unknown_cost("T3 counterfactual carried prefix or effective TTL is unavailable"),
                                     (_, None) => unknown_cost("shared cache replay did not price this native part"),
-                                    (Some(p), Some(before)) => difference(&price_part(options.catalog, r, p), before),
+                                    (Some(altered), _) if altered == p => zero_cost(),
+                                    // Equal unknown prices of changed usage are not a known zero.
+                                    (Some(altered), Some(before)) => {
+                                        let after = price_part(options.catalog, r, altered);
+                                        if after.total_usd.is_none() && after == **before {
+                                            after
+                                        } else {
+                                            difference(&after, before)
+                                        }
+                                    }
                                 });
                             }
                             if r.agent == Agent::Main && is_message(p) {
@@ -4439,22 +4464,31 @@ mod tests {
     fn t3_gaps_use_timer_bounds_without_inventing_a_proactive_summary() {
         use crate::model::T3IdleMode::*;
         let mut scan = t3_data(
-            vec![request("a", 0.0, 300_000), request("b", 2.0, 320_000)],
+            vec![
+                request("p", 0.0, 300_000),
+                request("a", 1.0, 300_000),
+                request("b", 2.5, 320_000),
+            ],
             Ttl::FiveMinutes,
             Off,
         );
-        // No 5m-cache timer can fire within three minutes, joined to T3 or not.
+        // No 5m-cache timer can fire within three minutes of the request start, joined to
+        // T3 or not. Without a linked start, the previous request's end bounds it.
         scan.requests.iter_mut().find(|r| r.id == "a").unwrap().t3 = None;
-        let check = t3_check(&scan, 2.0);
-        let p = &check.current_settings.periods[0];
-        assert_eq!(p.status, PeriodStatus::Censored);
-        assert!(
-            check
-                .current_settings
-                .scenarios
-                .iter()
-                .all(|s| s.cost.total_usd == Some(0.0) && s.summaries == 0)
+        let check = t3_check(&scan, 2.5);
+        let status = |check: &crate::model::T3IdleCheck, id: &str| {
+            let periods = &check.current_settings.periods;
+            periods.iter().find(|p| p.request == id).unwrap().status
+        };
+        assert_eq!(status(&check, "a"), PeriodStatus::Censored);
+        let proactive = &check.current_settings.scenarios[2];
+        assert_eq!(
+            (proactive.cost.total_usd, proactive.summaries),
+            (Some(0.0), 0)
         );
+        // With no earlier request, `a` may have started long before its first record.
+        scan.requests.retain(|r| r.id != "p");
+        assert_eq!(status(&t3_check(&scan, 2.5), "a"), PeriodStatus::Unknown);
 
         // T3 dates expiry from the request start; a run completing inside the lead starts
         // the summary at completion instead of skipping it.

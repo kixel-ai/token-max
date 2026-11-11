@@ -1,9 +1,14 @@
 # JSON reports and migration
 
-`--json` emits compact schema version 2. Replace an existing `--json` invocation
-with `--json-full` to keep schema version 1 and its complete per-request evidence.
-Both forms use the same analysis, costs, recommendations and exit codes. Neither
-contains prompt, reply, tool argument, tool output or component text.
+`--json` emits schema version 2, an aggregate report with the same analysis,
+costs, recommendations and exit codes as the text report. It contains no prompt,
+reply, tool argument, tool output or component text.
+
+`--json-full` and schema version 1, which listed every request, event, file and
+component sighting, are removed: token-max summarizes settings and recommends
+changes rather than exporting evidence. Replace `--json-full` with `--json`; the
+table below lists what each removed evidence field became. Nothing replaces the
+per-request lists.
 
 Version 2 keeps the version 1 field names for unchanged fields. In particular,
 `context` retains every component cost, request/pricing coverage, use count,
@@ -23,12 +28,10 @@ the text report and settings snippet. A covered tool's `verdict` is null, while
 its cost, use count and control remain available. `instructionSize` is null without
 recorded text, otherwise `{ "bytes": N, "lines": N }` for the latest recorded
 revision. Codex sizes measure rendered text, including any wrappers, and do
-not establish the source-file chain size. These structured fields are retained
-in both JSON forms; explanatory guidance is generated only by the text renderer.
-Full scan components additionally retain optional `instructionSize`;
-the SSH scan-schema fingerprint changes with this metadata addition.
+not establish the source-file chain size. Explanatory guidance is generated only by the
+text renderer.
 
-In both versions, `historical[]` includes `pricedRequests`, `conditionalRequests`
+`historical[]` includes `pricedRequests`, `conditionalRequests`
 and `tierSensitivity` (served-tier scenarios with full `Cost` values). A numeric
 conditional estimate does not increase `scan.coverage.tierKnown`. Context rows
 include `conditionalRequests`, `tierUnknownRequests` (including unpriced requests)
@@ -38,13 +41,13 @@ dollars remain available, but recommendation savings and winners stay unresolved
 when affected costs depend on missing tiers. Unsupported tier
 scenarios have a null total and explicit unknown reasons, never a zero total.
 
-Keepalive checks have the same complete shape in both versions, including every
+Keepalive checks keep their complete shape, including every
 cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
 Their period coverage, unknown current ping state, unpriced periods and unresolved
 comparisons remain explicit. The sequential replay uses complete historical inputs
-before either output projection, including when the scan came from SSH.
+before the output projection, including when the scan came from SSH.
 
-These evidence fields change shape:
+These version 1 evidence fields change shape:
 
 | Field | Version 2 |
 | --- | --- |
@@ -67,33 +70,27 @@ appearing in multiple replays. Unknown sizes have no numeric token range. A
 summed delta or cost stays null if any contributing value is unknown. Empty
 cost aggregates are known zero; empty ranges have null endpoints. No fixed
 row limit drops distinct conditions. Request/event identifiers, individual file
-boundaries, component catalogs/locations and calibration witnesses remain in
-`--json-full`. Compact visibility groups identify each component by name/category and count
+boundaries, component catalogs and calibration witnesses are not reported. Visibility groups identify each component by name/category and count
 coverage records, not requests. Names that identify an individual rendered message,
 tool result or unmapped delta are null; those records group by semantic targets,
 category and provenance instead. This preserves feature coverage without listing
 every message/call. Per-setting request coverage stays in `context` and checks.
 
-Full evidence is streamed to stdout without building a serialized copy of the
-history in memory. It can still produce many gigabytes. Compact output releases
-evidence before building its JSON representation, but scanning and analysis still
-retain historical metadata in memory. `--since` selects billing and coverage;
-it does not discard older catalogs, ownership, aliases, calibration or cache
-context needed to interpret the selected requests. Neither form changes or
-writes transcripts or settings.
+The report releases evidence before building its JSON representation, but
+scanning and analysis still retain the historical metadata the checks read.
+`--since` selects billing and coverage; it does not discard older catalogs,
+ownership, aliases, calibration or cache context needed to interpret the selected
+requests. The report never changes or writes transcripts or settings.
 
-With `--ssh`, the envelope is `{"schemaVersion": 2, "hosts": [...]}` for
-`--json`, and version 1 for `--json-full`. Each `hosts[]` contains `ssh` (null
-for this host) and `report` in that same schema. The private SSH scan protocol
-still transfers the complete metadata required for analysis with shared values;
-the output choice is applied by the coordinator. Destinations need the same
-build, including its scan-schema fingerprint. Costs are independent per host.
+With `--ssh`, the envelope is `{"schemaVersion": 2, "hosts": [...]}`. Each
+`hosts[]` contains `ssh` (null for this host) and `report` in that same schema.
+The private SSH scan protocol transfers the metadata the analysis needs with
+shared values; the coordinator analyzes and reports it. Destinations need the
+same build, including its scan-schema fingerprint. Costs are independent per host.
 
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
-instance ownership, plus opaque `requests[].t3`/`events[].t3` historical run
-metadata in full JSON. `requestedSpeed` remains separate from each billing
-part's `tier`/`speed`. The `t3-idle-compaction` check keeps all three policy costs
-in both JSON forms; its `currentSettings.periods` and
+instance ownership. The `t3-idle-compaction` check keeps all three policy costs;
+its `currentSettings.periods` and
 `afterRecommendations.periods` use the same compact grouping as native idle
 periods. Unsupported providers remain explicit exclusions. `scan.t3[].textGeneration`
 names the resolved text-generation `selection`, its `owner` setting, its

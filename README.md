@@ -153,8 +153,7 @@ uncertainty, cost components, break-evens, sensitivity scenarios, cache witnesse
 and sources. Repeated idle periods, cache witnesses and attempt estimates are
 grouped by their recorded outcomes and reasons. Token ranges and combined costs
 summarize modeled compactions; geometry sources are listed once. Identifiers in
-grouped cache and attempt evidence are examples. `--json-full` retains every period,
-witness, context-size comparison and modeled compaction. Nothing is hidden behind an interactive prompt
+grouped cache and attempt evidence are examples. Nothing is hidden behind an interactive prompt
 or a top-N limit. The layout wraps long paths and
 names on narrow terminals. Redirected output keeps each field on one line so
 paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
@@ -204,20 +203,17 @@ To turn these off, merge this into ~/.claude/settings.json, adding to any lists 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
 
-Text and both JSON forms share the same analysis. `--json` now emits compact
-schema version 2. It retains every check's costs, coverage, current and recommended
+Text and `--json` share the same analysis. `--json` emits schema version 2. It retains every check's costs, coverage, current and recommended
 values, owning controls, assumptions, uncertainty and sensitivity, plus every
 per-piece cost and use count in `context`. Large evidence arrays become counts
 and groups of distinct conditions; unknown totals remain null with their known
-subtotal and every unknown-cost reason. See [JSON migration](docs/json.md).
+subtotal and every unknown-cost reason. `--json-full` and its per-request schema
+version 1 are removed; see [JSON migration](docs/json.md).
 
-Use `--json-full` for the full schema version 1 report. It includes profile aliases, snapshots, deduplicated requests, structural events,
-usage coverage, pre-window cache context, partially known costs, summary estimates,
-component measurements with exposure/invocation coverage, calibration provenance,
-per-piece context costs in `context`, and check results. Each check has a `check` discriminator: `claude-cache-ttl`
+Each check has a `check` discriminator: `claude-cache-ttl`
 retains its TTL-specific fields, while `compaction-window` includes candidate
 windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
-current-settings and post-recommendation on/off costs, request/final periods,
+current-settings and post-recommendation on/off costs, grouped periods,
 activation cohorts, context-size costs and lifetime/summary/timing sensitivities.
 `background-generation` adds the feature, the setting that turns it off, its
 estimated request count and cost, and the cache rewrites it avoided.
@@ -242,7 +238,7 @@ winner, and unknown fixed charges can cancel without pretending they cost zero.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans
-compatible histories; `--json-full` retains complete predecessor witnesses; compact JSON and text group
+compatible histories; JSON and text group
 their states and reasons. A comparison
 stays unpriced when those histories imply different cache charges, while invariant
 charges can still be compared.
@@ -355,7 +351,7 @@ token-max --ssh devbox --ssh user@laptop --include-local
 
 The destination runs `token-max --ssh-scan`, which discovers that host's own
 profiles from its home and environment, reads its transcripts and settings,
-and streams only the metadata `--json-full` would show, never prompt, reply or
+and streams only the metadata the checks read, never prompt, reply or
 component text. It looks for `token-max` on the non-interactive `PATH` and in
 `~/.cargo/bin`. Prices and every check run on this host, with one price
 catalog. `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
@@ -364,8 +360,7 @@ catalog. `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. With `--ssh`, JSON is
 `{"schemaVersion": 2, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
-report per host and `ssh` null for this host. `--json-full` uses version 1 for
-both the envelope and its full reports. A history copied between hosts
+report per host and `ssh` null for this host. A history copied between hosts
 counts in each host's report, so don't add amounts across hosts. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination.
@@ -428,7 +423,7 @@ requested tiers, conflicting evidence, missing usage and unavailable prices stay
 unknown. Recorded effective tiers always take precedence.
 
 Reports count conditional requests separately from recorded tier coverage. Details
-and both JSON forms show standard, fast and ultrafast served-tier scenarios for
+and JSON show standard, fast and ultrafast served-tier scenarios for
 conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual

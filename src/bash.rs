@@ -1,8 +1,6 @@
 //! Whether Claude's foreground Bash timeout cap lets the prompt cache expire, and what long waits cost.
 
-use std::collections::HashMap;
-
-use indexmap::IndexSet;
+use crate::collections::{HashMap, IndexSet};
 
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
@@ -135,15 +133,15 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
         })
         .collect();
     requests.sort_by_key(|r| r.time);
-    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (r.id.as_str(), *r)).collect();
-    let mut sessions: HashMap<&str, Vec<&Request>> = HashMap::new();
+    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
+    let mut sessions: HashMap<&str, Vec<&Request>> = HashMap::default();
     for &r in &requests {
         sessions.entry(&r.session).or_default().push(r);
     }
     let (ttl, ttl_basis) = evaluation_ttl(ttls, profile, &requests);
 
     let mine = |e: &&StructuralEvent| e.profiles.contains(&profile.id) && selected(e.time);
-    let mut ends: HashMap<(&str, &str), &StructuralEvent> = HashMap::new();
+    let mut ends: HashMap<(&str, &str), &StructuralEvent> = HashMap::default();
     for e in scan
         .events
         .iter()
@@ -162,7 +160,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     }
     let (mut calls, mut long, mut timed_out, mut polling) = (0, 0, 0, 0);
     let mut costs = vec![];
-    let mut priced = std::collections::HashSet::new();
+    let mut priced = crate::collections::HashSet::default();
     for start in scan.events.iter().filter(mine) {
         let Some(shell) = start
             .shell
@@ -198,7 +196,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
                 .copied()
         });
         // Parallel waits can share one next request, whose rewrite counts once.
-        if next.is_none_or(|r| priced.insert(r.id.as_str())) {
+        if next.is_none_or(|r| priced.insert(&*r.id)) {
             costs.push(miss(catalog, issuing, next));
         }
     }
@@ -216,7 +214,8 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     if let Some(cap) = recommended.filter(|cap| control.default_timeout > *cap) {
         replacement += &format!(" and env.BASH_DEFAULT_TIMEOUT_MS: \"{cap}\"");
     }
-    let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
+    let history_profiles: IndexSet<&String> =
+        requests.iter().flat_map(|r| r.profiles.iter()).collect();
     let mut uncertainty = vec![
         "project/local settings and launch environments are not read; only user/managed settings and the active profile's environment".into(),
     ];

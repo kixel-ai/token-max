@@ -161,7 +161,7 @@ fn a_remote_report_matches_running_there() {
         "--ssh",
         "devbox",
         "--include-local",
-        "--json-full",
+        "--json",
         since[0],
         since[1],
     ]);
@@ -170,20 +170,16 @@ fn a_remote_report_matches_running_there() {
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     let combined: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(combined["schemaVersion"], 1);
+    assert_eq!(combined["schemaVersion"], 2);
     let reports = combined["hosts"].as_array().unwrap();
     assert_eq!(reports.len(), 2);
     assert_eq!(reports[0]["ssh"], Value::Null);
     assert_eq!(reports[1]["ssh"], "devbox");
     let (_, there, _) = run(hosts
-        .command(&["--json-full", since[0], since[1]])
+        .command(&["--json", since[0], since[1]])
         .env("HOME", &home));
     let there: Value = serde_json::from_str(&there).unwrap();
     assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
-    let file = reports[1]["report"]["scan"]["snapshots"][0]["file"]
-        .as_str()
-        .unwrap();
-    assert!(file.starts_with(home.to_str().unwrap()), "{file}");
 
     let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
     for option in [
@@ -207,7 +203,7 @@ fn a_remote_report_matches_running_there() {
 }
 
 #[test]
-fn keepalive_retains_costs_unknowns_and_caps_in_both_ssh_schemas() {
+fn keepalive_retains_costs_unknowns_and_caps_over_ssh() {
     let hosts = Hosts::new();
     let home = hosts.host("devbox");
     let fixture: Vec<Value> = std::fs::read_to_string(fixture("claude.jsonl"))
@@ -262,48 +258,32 @@ fn keepalive_retains_costs_unknowns_and_caps_in_both_ssh_schemas() {
         check.as_object_mut().unwrap().remove("monthlySavingsUsd");
         check
     };
-    let mut full = None;
-    for flag in ["--json-full", "--json"] {
-        let args = [flag, "--since", "2026-11-01T00:10:00Z"];
-        let (status, stdout, stderr) = hosts.run(&[&["--ssh", "devbox"][..], &args].concat());
-        assert_ne!(status, 2, "{stderr}");
-        assert!(stderr.is_empty(), "{stderr}");
-        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-        let combined: Value = serde_json::from_str(&stdout).unwrap();
-        let remote = &combined["hosts"][0]["report"];
-        let check = keepalive(remote);
-        assert_eq!(check["current"], Value::Null);
-        assert_eq!(check["action"], "advisory");
-        assert_eq!(check["savingsUsd"], Value::Null);
-        assert_eq!(check["marginUsd"], Value::Null);
-        assert_eq!(check["pingInputTokens"], 1000);
-        assert!(check["coverage"]["priced"].as_u64().unwrap() > 0);
-        assert!(check["unpriced"].as_u64().unwrap() > 0);
-        let caps = check["scenarios"].as_array().unwrap();
-        assert!(caps.len() >= 2);
-        for cap in caps {
-            assert!(cap["pingCostUsd"].as_f64().unwrap() > 0.0);
-            assert!(
-                cap["closedSavingsUsd"].as_f64().unwrap() > cap["savingsUsd"].as_f64().unwrap()
-            );
-        }
-        let (_, stdout, stderr) = run(hosts.command(&args).env("HOME", &home));
-        assert!(stderr.is_empty(), "{stderr}");
-        let local: Value = serde_json::from_str(&stdout).unwrap();
-        assert_eq!(check, keepalive(&local));
-        if let Some(full) = &full {
-            assert_eq!(&check, full);
-        } else {
-            assert_eq!(
-                remote["scan"]["cacheContext"]["requests"]
-                    .as_array()
-                    .unwrap()
-                    .len(),
-                2
-            );
-            full = Some(check);
-        }
+    let args = ["--json", "--since", "2026-11-01T00:10:00Z"];
+    let (status, stdout, stderr) = hosts.run(&[&["--ssh", "devbox"][..], &args].concat());
+    assert_ne!(status, 2, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    let combined: Value = serde_json::from_str(&stdout).unwrap();
+    let remote = &combined["hosts"][0]["report"];
+    assert_eq!(remote["scan"]["cacheContext"]["requests"], 2);
+    let check = keepalive(remote);
+    assert_eq!(check["current"], Value::Null);
+    assert_eq!(check["action"], "advisory");
+    assert_eq!(check["savingsUsd"], Value::Null);
+    assert_eq!(check["marginUsd"], Value::Null);
+    assert_eq!(check["pingInputTokens"], 1000);
+    assert!(check["coverage"]["priced"].as_u64().unwrap() > 0);
+    assert!(check["unpriced"].as_u64().unwrap() > 0);
+    let caps = check["scenarios"].as_array().unwrap();
+    assert!(caps.len() >= 2);
+    for cap in caps {
+        assert!(cap["pingCostUsd"].as_f64().unwrap() > 0.0);
+        assert!(cap["closedSavingsUsd"].as_f64().unwrap() > cap["savingsUsd"].as_f64().unwrap());
     }
+    let (_, stdout, stderr) = run(hosts.command(&args).env("HOME", &home));
+    assert!(stderr.is_empty(), "{stderr}");
+    let local: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(check, keepalive(&local));
 }
 
 #[test]
@@ -381,8 +361,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
     std::fs::write(&transcript, lines).unwrap();
 
-    let (status, stdout, stderr) =
-        hosts.run(&["--ssh", "devbox", "--include-local", "--json-full"]);
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -409,7 +388,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         assert_eq!(remote["waits"][field], 1, "{field}");
     }
     assert!(remote["waits"]["missCost"]["totalUsd"].as_f64().unwrap() > 0.0);
-    let (status, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
+    let (status, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
     let there: Value = serde_json::from_str(&there).unwrap();
     assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
@@ -475,8 +454,7 @@ fn codex_context_and_output_keep_their_remote_controls() {
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         std::fs::write(codex.join("sessions/rollout.jsonl"), lines).unwrap();
 
-        let (status, stdout, stderr) =
-            hosts.run(&["--ssh", "devbox", "--include-local", "--json-full"]);
+        let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
         assert_eq!(status, 0, "{stderr}");
         assert_eq!(stderr, "");
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -506,18 +484,6 @@ fn codex_context_and_output_keep_their_remote_controls() {
             remote["scan"]["coverage"]["tierKnown"],
             local["scan"]["coverage"]["tierKnown"]
         );
-        assert!(
-            remote["scan"]["requests"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|r| r["harness"] == "codex")
-                .all(|r| r["parts"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|p| p["tier"].is_null()))
-        );
         let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
         assert_eq!(output["name"], "mcp__docs");
         // Both requests retain the result; compaction removes it before the third.
@@ -529,7 +495,7 @@ fn codex_context_and_output_keep_their_remote_controls() {
         );
         assert_eq!(output["priced"], if priceable { 2 } else { 0 });
         assert_eq!(output["estimatedUsd"].as_f64().is_some(), priceable);
-        let (_, there, stderr) = run(hosts.command(&["--json-full"]).env("HOME", &home));
+        let (_, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
         assert_eq!(stderr, "");
         let there: Value = serde_json::from_str(&there).unwrap();
         assert_eq!(timeless(remote), timeless(&there));
@@ -666,7 +632,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
 
     // Two earlier turns establish eligibility for the first selected turn's recap.
     let args = [
-        "--json-full",
+        "--json",
         "--since",
         "2026-11-01T00:02:00Z",
         "--max-cost-per-use",
@@ -743,20 +709,8 @@ fn background_controls_and_estimates_keep_their_remote_history() {
         claude["backgroundDirectories"][home.join("workspace").to_str().unwrap()][2]["minutes"],
         7
     );
-    assert_eq!(
-        remote["scan"]["cacheContext"]["prompts"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
-    assert_eq!(
-        remote["scan"]["cacheContext"]["requests"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(remote["scan"]["cacheContext"]["prompts"], 2);
+    assert_eq!(remote["scan"]["cacheContext"]["requests"], 2);
 
     let (status, there, stderr) = run(hosts.command(&args).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
@@ -840,7 +794,7 @@ fn any_failed_destination_fails_the_whole_report() {
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
     }
-    let (status, _, stderr) = hosts.run(&["--ssh", "broken", "--json-full"]);
+    let (status, _, stderr) = hosts.run(&["--ssh", "broken", "--json"]);
     assert_eq!(status, 2);
     let diagnostic: Value = serde_json::from_str(&stderr).unwrap();
     assert_eq!(diagnostic["location"]["line"], 1);
@@ -912,7 +866,7 @@ fn destinations_and_directory_flags_are_unambiguous() {
         (&["--ssh", "a", "--ssh", "a"], "--ssh a is selected twice"),
         (&["--include-local"], "--include-local requires --ssh"),
         (&["--ssh", "a", "--claude-dir", "x"], "add --include-local"),
-        (&["--ssh-scan", "--json-full"], "invalid arguments"),
+        (&["--ssh-scan", "--json"], "invalid arguments"),
         (&["--ssh", "-x"], "invalid arguments"),
     ] {
         let (status, stdout, stderr) = hosts.run(args);

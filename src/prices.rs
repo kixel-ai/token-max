@@ -1,6 +1,6 @@
 //! Public API prices from the models.dev catalog, and the rules that apply them to requests.
 
-use std::collections::HashMap;
+use crate::collections::{HashMap, IndexSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use indexmap::IndexSet;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
@@ -37,7 +36,7 @@ pub fn conditional_tier(r: &Request, p: &BillingPart) -> bool {
         && (p.tier.is_none()
             || r.issues
                 .iter()
-                .any(|s| s == "conflicting effective service tiers"))
+                .any(|s| &**s == "conflicting effective service tiers"))
 }
 
 /// Whether this cost depends on unresolved Codex service-tier evidence.
@@ -58,7 +57,7 @@ pub(crate) fn tier_name(tier: &str) -> &str {
 fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'static str> {
     if r.issues
         .iter()
-        .any(|s| s == "conflicting effective service tiers")
+        .any(|s| &**s == "conflicting effective service tiers")
     {
         return Err("conflicting effective service tiers");
     }
@@ -73,7 +72,7 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
     }
     if r.issues
         .iter()
-        .any(|s| s == "conflicting requested service tiers")
+        .any(|s| &**s == "conflicting requested service tiers")
     {
         return Err("conflicting requested service tiers");
     }
@@ -552,8 +551,8 @@ pub fn zero_cost() -> Cost {
 pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
     let mut known = 0.0;
     let mut total = Some(0.0);
-    let mut unknown = IndexSet::new();
-    let mut assumptions = IndexSet::new();
+    let mut unknown = IndexSet::default();
+    let mut assumptions = IndexSet::default();
     for cost in costs {
         known += cost.known_usd;
         total = match (total, cost.total_usd) {
@@ -568,6 +567,78 @@ pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
         total_usd: total,
         unknown: unknown.into_iter().map(str::to_string).collect(),
         assumptions: assumptions.into_iter().map(str::to_string).collect(),
+    }
+}
+
+/// A running [`add_costs`], so charges need not be kept to be totaled.
+#[derive(Clone, Debug)]
+pub struct Sum {
+    known: f64,
+    total: Option<f64>,
+    unknown: IndexSet<String>,
+    assumptions: IndexSet<String>,
+}
+
+impl Default for Sum {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sum {
+    /// The total of no costs.
+    pub fn new() -> Self {
+        Self {
+            known: 0.0,
+            total: Some(0.0),
+            unknown: IndexSet::default(),
+            assumptions: IndexSet::default(),
+        }
+    }
+
+    /// Add one cost, as the next item of [`add_costs`] would.
+    pub fn add(&mut self, cost: &Cost) {
+        self.add_scaled(cost, 1.0);
+    }
+
+    /// Add `scale(cost, weight)` without building it.
+    pub fn add_scaled(&mut self, cost: &Cost, weight: f64) {
+        if weight == 0.0 {
+            self.known += 0.0;
+            self.total = self.total.map(|t| t + 0.0);
+            return;
+        }
+        self.known += if weight == 1.0 {
+            cost.known_usd
+        } else {
+            cost.known_usd * weight
+        };
+        self.total = match (self.total, cost.total_usd) {
+            (Some(sum), Some(value)) => {
+                Some(sum + if weight == 1.0 { value } else { value * weight })
+            }
+            _ => None,
+        };
+        for reason in &cost.unknown {
+            if !self.unknown.contains(reason.as_str()) {
+                self.unknown.insert(reason.clone());
+            }
+        }
+        for assumption in &cost.assumptions {
+            if !self.assumptions.contains(assumption.as_str()) {
+                self.assumptions.insert(assumption.clone());
+            }
+        }
+    }
+
+    /// The total so far.
+    pub fn cost(self) -> Cost {
+        Cost {
+            known_usd: self.known,
+            total_usd: self.total,
+            unknown: self.unknown.into_iter().collect(),
+            assumptions: self.assumptions.into_iter().collect(),
+        }
     }
 }
 
@@ -1185,7 +1256,7 @@ pub fn server_cost(r: &Request) -> Cost {
         return unknown_cost("server-tool fee coverage is not recorded");
     };
     let mut result = zero_cost();
-    for (name, &requests) in tools {
+    for (name, requests) in tools.iter() {
         if name == "web_search_requests" && r.provider.as_deref() == Some("anthropic") {
             result.known_usd += requests as f64 * 0.01;
         } else if name != "web_fetch_requests" && requests > 0 {
@@ -1212,7 +1283,11 @@ pub fn price_request(catalog: &Catalog, r: &Request) -> Cost {
 
 fn request_evidence(r: &Request, mut result: Cost) -> Cost {
     let mut assumptions: IndexSet<String> = result.assumptions.drain(..).collect();
-    assumptions.extend(r.issues.iter().cloned());
+    for issue in &r.issues {
+        if !assumptions.contains(&**issue) {
+            assumptions.insert(issue.to_string());
+        }
+    }
     result.assumptions = assumptions.into_iter().collect();
     if r.issues.iter().any(|issue| {
         issue.contains("no verified request delta")
@@ -1220,7 +1295,9 @@ fn request_evidence(r: &Request, mut result: Cost) -> Cost {
             || issue.contains("no linked assistant usage")
     }) {
         result.total_usd = None;
-        result.unknown.extend(r.issues.iter().cloned());
+        result
+            .unknown
+            .extend(r.issues.iter().map(|issue| issue.to_string()));
     }
     result
 }
@@ -1228,7 +1305,7 @@ fn request_evidence(r: &Request, mut result: Cost) -> Cost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Usage;
+    use crate::model::{Text, Usage};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
     use serde_json::json;
 
@@ -1306,7 +1383,7 @@ mod tests {
         };
         for tier in [None, Some("auto"), Some("default")] {
             r.requested_speed = Some(crate::model::RequestedSpeed {
-                tier: tier.map(str::to_string),
+                tier: tier.map(Text::from),
                 speed: None,
             });
             assert!(close(price_request(&c, &r).total_usd, 0.00355));
@@ -1580,7 +1657,7 @@ mod tests {
         let r = make_request();
         let c = prices();
         let with_geo = |geo: Option<&str>| BillingPart {
-            geo: geo.map(str::to_string),
+            geo: geo.map(Text::from),
             ..r.parts[0].clone()
         };
         let result = price_part(&c, &r, &with_geo(Some("not_available")));

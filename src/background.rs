@@ -7,13 +7,13 @@
 //! prefix at its cache-read or expired-input rate, the last response and instruction as new
 //! input, and a short reply.
 
-use indexmap::IndexSet;
+use crate::collections::IndexSet;
 
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BackgroundCheck, BackgroundControl, BackgroundFeature, BillingPart, CheckBase, Cost,
     Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
-    Scan, Ttl, Usage,
+    Scan, Text, Ttl, Usage,
 };
 use crate::prices::{
     Catalog, add_costs, paired_savings, price_components, unit_rates, unknown_cost, zero_cost,
@@ -73,10 +73,12 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             .collect();
         let mut ends = turn_ends(input.scan, profile);
         // Earlier history only establishes eligibility; charge turns inside the window.
-        let selected: IndexSet<&str> = requests.iter().map(|r| r.id.as_str()).collect();
-        ends.retain(|e| selected.contains(e.request.id.as_str()));
-        let mut groups: indexmap::IndexMap<&BackgroundControl, (Vec<&Request>, Vec<&TurnEnd<'_>>)> =
-            indexmap::IndexMap::new();
+        let selected: IndexSet<&str> = requests.iter().map(|r| &*r.id).collect();
+        ends.retain(|e| selected.contains(&*e.request.id));
+        let mut groups: crate::collections::IndexMap<
+            &BackgroundControl,
+            (Vec<&Request>, Vec<&TurnEnd<'_>>),
+        > = crate::collections::IndexMap::default();
         for &request in &requests {
             for control in controls(profile, request) {
                 groups.entry(control).or_default().0.push(request);
@@ -119,7 +121,7 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
 fn controls<'a>(profile: &'a Profile, request: &Request) -> &'a [BackgroundControl] {
     profile
         .background_requests
-        .get(&request.id)
+        .get(&*request.id)
         .or_else(|| {
             profile
                 .background_directories
@@ -165,7 +167,8 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
     if profile.harness != Harness::Claude {
         return vec![];
     }
-    let mut sessions: indexmap::IndexMap<&str, Vec<&'a Request>> = indexmap::IndexMap::new();
+    let mut sessions: crate::collections::IndexMap<&str, Vec<&'a Request>> =
+        crate::collections::IndexMap::default();
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
         if r.harness == Harness::Claude
             && r.agent == crate::model::Agent::Main
@@ -174,7 +177,8 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
             sessions.entry(&r.session).or_default().push(r);
         }
     }
-    let mut starts: indexmap::IndexMap<&str, Vec<Millis>> = indexmap::IndexMap::new();
+    let mut starts: crate::collections::IndexMap<&str, Vec<Millis>> =
+        crate::collections::IndexMap::default();
     for e in scan.cache_context.prompts.iter().chain(&scan.events) {
         if e.kind == EventKind::TurnStart && e.profiles.contains(&profile.id) {
             starts.entry(&e.session).or_default().push(e.time);
@@ -234,7 +238,7 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
                             profile
                                 .idle_directories
                                 .as_ref()?
-                                .get(cwd)?
+                                .get(&**cwd)?
                                 .ttl
                                 .as_ref()?
                                 .main
@@ -503,8 +507,9 @@ fn check(
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
     let uncertainty: IndexSet<String> = uncertainty.into_iter().collect();
-    let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
-    let directories: IndexSet<Option<String>> = if requests.is_empty() {
+    let history_profiles: IndexSet<&String> =
+        requests.iter().flat_map(|r| r.profiles.iter()).collect();
+    let directories: IndexSet<Option<Text>> = if requests.is_empty() {
         input
             .scan
             .cache_context
@@ -618,7 +623,7 @@ mod tests {
             session: "session".into(),
             time,
             kind: EventKind::TurnStart,
-            profiles: vec!["profile".into()],
+            profiles: vec!["profile".into()].into(),
             location: Location {
                 file: "synthetic".into(),
                 line: 1,
@@ -646,7 +651,7 @@ mod tests {
     /// An interactive response at `time` minutes with `read` cached tokens.
     fn response(time: Millis, read: i64) -> Request {
         let mut r = make_request();
-        r.id = format!("r{time}");
+        r.id = format!("r{time}").into();
         r.time = time * MINUTE;
         r.end_time = r.time + 1000;
         r.client = Some("cli".into());
@@ -787,7 +792,7 @@ mod tests {
         unknown[0].reason = "unrecorded session launch precedence".into();
         s.profiles[0]
             .background_requests
-            .insert(s.requests[2].id.clone(), unknown);
+            .insert(s.requests[2].id.to_string(), unknown);
         let checks = run(&s, 0.0);
         assert_eq!(checks.len(), 2);
         assert_eq!(

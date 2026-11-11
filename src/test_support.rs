@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use indexmap::IndexMap;
+use crate::collections::IndexMap;
 
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
@@ -89,8 +89,8 @@ pub fn make_request() -> Request {
         client: Some("sdk-ts".into()),
         cwd: None,
         parts: vec![message_part(claude_usage(ClaudeUsage::default()))],
-        server_tools: Some(IndexMap::new()),
-        profiles: vec!["profile".into()],
+        server_tools: Some(Default::default()),
+        profiles: vec!["profile".into()].into(),
         locations: vec![Location {
             file: "synthetic".into(),
             line: 1,
@@ -161,7 +161,7 @@ impl Workspace {
         ScanOptions {
             discovery: DiscoveryOptions {
                 home: text(self.home.clone()),
-                env: Env::new(),
+                env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 t3_dirs: vec![],
@@ -205,7 +205,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
             subagent: ttl(),
         },
         provider: None,
-        settings: IndexMap::new(),
+        settings: IndexMap::default(),
         mcp_servers: vec![],
         compaction: CompactionControls {
             default: WindowControl {
@@ -216,7 +216,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
                 minimum_claude_patch: None,
                 comparison_unknown: None,
             },
-            models: IndexMap::new(),
+            models: IndexMap::default(),
         },
         idle: None,
         speed: None,
@@ -224,8 +224,8 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         speed_directories: None,
         idle_directories: None,
         background: vec![],
-        background_directories: IndexMap::new(),
-        background_requests: IndexMap::new(),
+        background_directories: IndexMap::default(),
+        background_requests: IndexMap::default(),
         t3: None,
     }
 }

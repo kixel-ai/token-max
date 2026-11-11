@@ -1,13 +1,11 @@
 //! Shared cache replay of request parts under chosen TTLs, for every setting consumer.
 
-use std::collections::HashSet;
-
-use indexmap::IndexMap;
+use crate::collections::{HashSet, IndexMap};
 
 use crate::cache::{CacheBoundaries, CacheChain, Replayed, Touch};
 use crate::model::{
     Agent, BillingPart, Bucket, CacheReplayEvidence, Harness, Millis, PartKind, Request,
-    RequestEvidence, Ttl, UsageEstimate,
+    RequestEvidence, Text, Ttl, UsageEstimate,
 };
 use crate::prices::{Catalog, Components, price_components, unknown_cost};
 
@@ -70,14 +68,14 @@ pub enum AttemptScenario {
 /// Inputs shared by every replay of one set of requests.
 #[derive(Clone, Copy, Debug)]
 pub struct ReplayOptions<'a> {
-    pub estimates: &'a IndexMap<String, UsageEstimate>,
+    pub estimates: &'a IndexMap<Text, UsageEstimate>,
     pub catalog: &'a Catalog,
     pub ttls: ReplayTtls,
     /// Parts at or after this time are selected; earlier parts only inform cache state.
     pub since: Millis,
     pub cold_prefixes: bool,
     /// Further (request id, part index) pairs whose geometry is estimated.
-    pub estimated_parts: Option<&'a HashSet<(String, usize)>>,
+    pub estimated_parts: Option<&'a HashSet<(Text, usize)>>,
     pub attempt_scenario: AttemptScenario,
 }
 
@@ -89,7 +87,7 @@ pub struct ReplayedPart<'a> {
     pub p: BillingPart,
     pub selected: bool,
     pub components: Components,
-    pub evidence: Option<CacheReplayEvidence>,
+    pub evidence: Option<Box<CacheReplayEvidence>>,
 }
 
 /// Replay the same cache histories and usage estimates for every setting consumer.
@@ -170,7 +168,7 @@ pub fn replay_parts<'a, 'b>(
                         .evidence
                         .as_ref()
                         .expect("unknown replay has evidence");
-                    components.cache = unknown_cost(evidence.reason.clone());
+                    components.cache = unknown_cost(evidence.reason);
                 }
             }
             result.push(ReplayedPart {
@@ -223,7 +221,7 @@ mod tests {
             session: session.into(),
             time,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()],
+            profiles: vec!["profile".into()].into(),
             location,
             request: None,
             model: None,
@@ -237,7 +235,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -259,7 +257,7 @@ mod tests {
         let base = [boundary("base", "a", 300_000)];
         let extra = [boundary("extra", "b", 900_000)];
         let catalog = prices();
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let options = ReplayOptions {
             estimates: &estimates,
             catalog: &catalog,

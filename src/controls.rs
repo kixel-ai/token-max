@@ -1,8 +1,7 @@
 //! Resolve current settings files and environments into controls with explicit owners.
 
-use std::collections::HashMap;
+use crate::collections::{HashMap, IndexMap};
 
-use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::model::{
@@ -457,7 +456,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
     ];
     let scopes = scopes.unwrap_or(&default_scopes);
     let environment = scoped_environment(scopes, env);
-    let mut models = IndexMap::new();
+    let mut models = IndexMap::default();
     if harness == Harness::Codex {
         let value = user.get("model_auto_compact_token_limit");
         if value.is_some_and(|v| safe_integer(v).is_none_or(|n| n <= 0)) {
@@ -967,7 +966,7 @@ mod tests {
             config: &user,
             file: "user.json",
         }];
-        let c = idle_controls(&scopes, &Env::new()).unwrap();
+        let c = idle_controls(&scopes, &Env::default()).unwrap();
         assert_eq!(c.threshold, Some(100_000));
         assert_eq!(
             c.threshold_owner,
@@ -1002,7 +1001,7 @@ mod tests {
                 config: &bad,
                 file: "bad.json",
             }],
-            &Env::new(),
+            &Env::default(),
         )
         .unwrap_err();
         assert_eq!(error.message, "invalid idleCompaction");
@@ -1026,7 +1025,7 @@ mod tests {
                 file: "managed.json",
             },
         ];
-        let c = claude_background(&scopes, &Env::new()).unwrap();
+        let c = claude_background(&scopes, &Env::default()).unwrap();
         assert_eq!(
             (c[0].value, c[0].owner.as_str(), c[0].off.as_str()),
             (
@@ -1093,7 +1092,7 @@ mod tests {
             file: "project.json",
         }];
         assert_eq!(
-            claude_background(&scoped, &Env::new()).unwrap()[0].value,
+            claude_background(&scoped, &Env::default()).unwrap()[0].value,
             Some(false)
         );
         let codex = map(json!({ "tui": { "auto_recap": false } }));
@@ -1124,7 +1123,7 @@ mod tests {
             "env": { "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "300k" },
         }));
         let empty = Map::new();
-        let none = Env::new();
+        let none = Env::default();
         let p = compaction_controls(&claude_sources(&user, &empty, &none)).unwrap();
         assert_eq!(
             window_control(&p, Some("claude-opus-5-5-20261101")).value,
@@ -1176,7 +1175,7 @@ mod tests {
             },
         }));
         let empty = Map::new();
-        let none = Env::new();
+        let none = Env::default();
         let p = compaction_controls(&claude_sources(&user, &empty, &none)).unwrap();
         assert_eq!(window_control(&p, Some("opus[1m]")).value, Some(400_000));
         let aliased = window_control(&p, Some("claude-opus-4-6"));
@@ -1207,7 +1206,7 @@ mod tests {
     #[test]
     fn codex_limits_require_total_scope_and_a_known_profile() {
         let empty = Map::new();
-        let none = Env::new();
+        let none = Env::default();
         let codex = |user: &Map<String, Value>| {
             compaction_controls(&CompactionSources {
                 harness: Harness::Codex,
@@ -1491,7 +1490,7 @@ mod tests {
                         file,
                     },
                 ],
-                &Env::new(),
+                &Env::default(),
             )
             .unwrap_err();
             assert!(error.message.contains(key));

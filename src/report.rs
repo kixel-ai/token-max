@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use indexmap::{IndexMap, IndexSet};
+use crate::collections::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -423,23 +423,18 @@ impl<'a> Out<'a> {
         self.notes("Assumption", &value.assumptions);
     }
     fn witnesses(&mut self, values: &[CacheReplayEvidence]) {
-        let mut groups = IndexMap::new();
-        let mut predecessors = IndexMap::new();
+        let mut groups = IndexMap::default();
+        let mut predecessors = IndexMap::default();
         let mut unrecorded = 0;
         for e in values {
             let group = groups
-                .entry((e.ttl, e.state, e.outcome, e.reason.as_str()))
+                .entry((e.ttl, e.state, e.outcome, e.reason))
                 .or_insert((0usize, e));
             group.0 += 1;
             unrecorded += usize::from(e.predecessors.is_empty());
             for p in &e.predecessors {
                 let group = predecessors
-                    .entry((
-                        p.state,
-                        p.prefix_evidence,
-                        p.cohort_known,
-                        p.reason.as_str(),
-                    ))
+                    .entry((p.state, p.prefix_evidence, p.cohort_known, p.reason))
                     .or_insert((0usize, p));
                 group.0 += 1;
             }
@@ -536,7 +531,7 @@ impl<'a> Out<'a> {
 
 /// Render all findings in a wrapping flow, with grouped evidence in details.
 pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
-    let mut profiles = IndexMap::new();
+    let mut profiles = IndexMap::default();
     for p in &report.scan.profiles {
         profiles.insert(p.id.as_str(), p);
     }
@@ -895,7 +890,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
     out.notes("Exposure assumption", &report.exposure.assumptions);
     out.blank();
     out.line(
-        "Repeated evidence is grouped; cache and attempt identifiers are examples. --json-full provides every period, witness and modeled compaction in the complete structured report (schema version 1).",
+        "Repeated evidence is grouped; cache and attempt identifiers are examples.",
         0,
         0,
     );
@@ -1277,10 +1272,10 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         CheckResult::T3Idle(i) => {
             for comparison in [&i.current_settings, &i.after_recommendations] {
                 out.field("T3 period baseline", &comparison.baseline);
-                let mut groups = IndexMap::new();
+                let mut groups = IndexMap::default();
                 for p in &comparison.periods {
                     *groups
-                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .entry((p.status, p.return_timing, p.outcome, p.reason))
                         .or_insert(0usize) += 1;
                 }
                 for ((status, timing, outcome, reason), count) in groups {
@@ -1336,7 +1331,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 out.field(
                     "Idle context sizes",
                     &format!(
-                        "{} distinct sizes ({} unknown); {}; full size and period evidence: --json-full",
+                        "{} distinct sizes ({} unknown); {}",
                         scenario.by_context.len(),
                         scenario
                             .by_context
@@ -1346,10 +1341,10 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                         token_range(scenario.by_context.iter().filter_map(|s| s.tokens))
                     ),
                 );
-                let mut groups = IndexMap::new();
+                let mut groups = IndexMap::default();
                 for p in &scenario.periods {
                     *groups
-                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .entry((p.status, p.return_timing, p.outcome, p.reason))
                         .or_insert(0usize) += 1;
                 }
                 for ((status, timing, outcome, reason), count) in groups {
@@ -1473,11 +1468,11 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
             }
         }
     }
-    let mut attempts = IndexMap::new();
+    let mut attempts = IndexMap::default();
     for e in r.usage_estimates {
         let group = attempts
-            .entry((e.evidence, e.max_output_tokens, e.reason.as_str()))
-            .or_insert((0usize, e, IndexSet::new()));
+            .entry((e.evidence, e.max_output_tokens, e.reason))
+            .or_insert((0usize, e, IndexSet::default()));
         group.0 += 1;
         group.2.extend(&e.assumptions);
     }
@@ -1485,8 +1480,11 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         out.field(
             "Attempt",
             &format!(
-                "{count} attempts; example {}: {}; {}; output budget {} (not observed output); full basis: --json-full",
-                e.request, label(&e.evidence), e.reason, or_unknown(e.max_output_tokens)
+                "{count} attempts; example {}: {}; {}; output budget {} (not observed output)",
+                e.request,
+                label(&e.evidence),
+                e.reason,
+                or_unknown(e.max_output_tokens)
             ),
         );
         for assumption in assumptions {
@@ -1583,7 +1581,7 @@ fn setting_name(result: &CheckResult) -> String {
             crate::model::Bucket::Subagent => "Subagent prompt cache TTL".into(),
         },
         CheckResult::Compaction(c) => {
-            let models: Vec<&str> = c.models.iter().flatten().map(String::as_str).collect();
+            let models: Vec<&str> = c.models.iter().flatten().map(|m| &**m).collect();
             if models.is_empty() {
                 "Auto-compact window".into()
             } else {
@@ -1916,7 +1914,7 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
         return;
     }
     out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. A request and confirmed loads in one user turn count as one use; absent turn boundaries, evidence is conservatively grouped within its session. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, 0);
-    let mut seen = IndexSet::new();
+    let mut seen = IndexSet::default();
     for c in report
         .context
         .iter()
@@ -2012,7 +2010,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
             )]
         }
         Harness::Codex => {
-            let budgets: std::collections::HashSet<Option<usize>> = profiles
+            let budgets: crate::collections::HashSet<Option<usize>> = profiles
                 .iter()
                 .filter(|p| c.profiles.contains(&p.id))
                 .map(|p| match p.settings.get("project_doc_max_bytes") {
@@ -2247,7 +2245,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
         if empty { Action::Advisory } else { r.action }
     };
-    let decided: std::collections::HashSet<String> = checks
+    let decided: crate::collections::HashSet<String> = checks
         .iter()
         .filter(|c| action(c) != Action::Advisory)
         .map(key)
@@ -2660,7 +2658,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
-    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::new();
+    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::default();
     for c in report
         .context
         .iter()
@@ -2802,7 +2800,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
     }
     catalog_guidance(report, out);
-    let mut files: IndexMap<&str, Vec<&Control>> = IndexMap::new();
+    let mut files: IndexMap<&str, Vec<&Control>> = IndexMap::default();
     for c in &off {
         let file = settings_file
             .get(first_profile(c))
@@ -3088,7 +3086,7 @@ mod tests {
                 basis: vec![],
                 part: None,
                 max_output_tokens: Some(2048),
-                reason: "no supported input estimate".into(),
+                reason: "no supported input estimate",
                 assumptions: vec!["synthetic attempt assumption".into()],
             }],
             cache_evidence: vec![CacheReplayEvidence {
@@ -3103,10 +3101,10 @@ mod tests {
                     state: KnownState::Unknown,
                     prefix_evidence: PrefixEvidence::Unknown,
                     cohort_known: false,
-                    reason: "synthetic witness reason".into(),
+                    reason: "synthetic witness reason",
                 }],
                 outcome: ReplayOutcome::Unknown,
-                reason: "synthetic unresolved predecessor".into(),
+                reason: "synthetic unresolved predecessor",
             }],
             sensitivity: TtlSensitivity {
                 cold_prefix1h_usd: Some(1.5),
@@ -3168,7 +3166,7 @@ mod tests {
                     state: KnownState::Estimated,
                     predecessors: vec![],
                     outcome: ReplayOutcome::Estimated,
-                    reason: "synthetic geometry".into(),
+                    reason: "synthetic geometry",
                 }],
                 sensitivity: WindowSensitivity {
                     larger_summary_savings_usd: Some(0.015),
@@ -3184,19 +3182,19 @@ mod tests {
     fn period(status: PeriodStatus, resume: Option<&str>) -> IdlePeriod {
         IdlePeriod {
             request: "synthetic-idle-request".into(),
-            resume: resume.map(String::from),
+            resume: resume.map(Text::from),
             session: "session".into(),
             context_tokens: Some(180_000),
             gap_ms: 3_700_000,
             status,
-            reason: "synthetic gap".into(),
+            reason: "synthetic gap",
             confirmed: status == PeriodStatus::Eligible,
             return_timing: ReturnTiming::AfterExpiry,
             outcome: PeriodOutcome::Unobserved,
             event: None,
             version: Some("2.1.314".into()),
             client: None,
-            flag_state: Some("on".into()),
+            flag_state: Some("on"),
             activation: Some(1.0 / 3.0),
             activation_basis: "synthetic cohort".into(),
             summary_cost: cost(Some(0.875), 0.875),
@@ -3237,7 +3235,7 @@ mod tests {
             activation_cohorts: vec![ActivationCohort {
                 version: "2.1.314".into(),
                 client: "cli".into(),
-                flag_state: "on".into(),
+                flag_state: "on",
                 applied: 1,
                 eligible: 3,
                 fraction: 1.0 / 3.0,
@@ -3356,9 +3354,9 @@ mod tests {
             .into_iter()
             .map(|(i, input)| {
                 let mut r = make_request();
-                r.id = format!("request-{i}");
+                r.id = format!("request-{i}").into();
                 r.time = NOV1 + i * 1000;
-                r.profiles = vec!["profile".into()];
+                r.profiles = vec!["profile".into()].into();
                 r.parts[0].usage.input = Some(input);
                 r
             })
@@ -3490,7 +3488,7 @@ mod tests {
             speed_check(fast, "explicit fastMode false"),
         ];
         Report {
-            schema_version: 1,
+            schema_version: 2,
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 t3: vec![],
@@ -4316,7 +4314,7 @@ mod tests {
             .unwrap();
         let eligible = period(PeriodStatus::Eligible, Some("return"));
         let mut unknown = period(PeriodStatus::Unknown, None);
-        unknown.reason = "unresolved synthetic setting".into();
+        unknown.reason = "unresolved synthetic setting";
         let mut periods = vec![eligible; 100];
         periods.push(unknown);
         idle.after_recommendations.periods = periods;
@@ -4331,7 +4329,7 @@ mod tests {
         ));
         assert!(!rendered.contains("Idle period:"));
         assert!(!rendered.contains("Idle by context:"));
-        assert!(rendered.contains("--json-full provides every period"));
+        assert!(rendered.contains("Repeated evidence is grouped"));
         assert_eq!(json(&report), before);
     }
 
@@ -4364,7 +4362,7 @@ mod tests {
             basis: vec![],
             part: None,
             max_output_tokens: Some(2048),
-            reason: "no supported input estimate".into(),
+            reason: "no supported input estimate",
             assumptions: vec!["synthetic attempt assumption".into()],
         });
         result.cache_evidence.push(CacheReplayEvidence {
@@ -4373,7 +4371,7 @@ mod tests {
             ttl: Ttl::OneHour,
             state: KnownState::Unknown,
             outcome: ReplayOutcome::Unknown,
-            reason: "synthetic unresolved predecessor".into(),
+            reason: "synthetic unresolved predecessor",
             predecessors: vec![CachePredecessor {
                 request: "synthetic-cache-predecessor".into(),
                 part: 0,
@@ -4381,7 +4379,7 @@ mod tests {
                 state: KnownState::Unknown,
                 prefix_evidence: PrefixEvidence::Unknown,
                 cohort_known: false,
-                reason: "synthetic witness reason".into(),
+                reason: "synthetic witness reason",
             }],
         });
         let result = result.clone();
@@ -4416,7 +4414,7 @@ mod tests {
         for value in values {
             assert!(compact.contains(&super::tests::compact(value)), "{value}");
         }
-        assert!(text.contains(&result.cache_evidence[0].request));
+        assert!(text.contains(&*result.cache_evidence[0].request));
         assert!(text.contains("Predecessor:"));
         let unknown_fixed = report
             .checks

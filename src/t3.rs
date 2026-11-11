@@ -1,11 +1,10 @@
 //! T3 discovery and allowlisted metadata, never a second usage or billing ledger.
 
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet, IndexMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use indexmap::IndexMap;
 use rusqlite::{Connection, OpenFlags, Transaction};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -412,7 +411,7 @@ fn text_generation(
             format!("{origin}, but no enabled instance can generate text"),
         )
     };
-    let mut overrides = IndexMap::new();
+    let mut overrides = IndexMap::default();
     for (key, value, usable) in [
         (
             "sourceControlWriterModelSelection",
@@ -485,7 +484,7 @@ pub(crate) fn discover(
             .map(|s| (expand(&options.home, s), true)),
     );
     let mut states = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for (path, required) in paths {
         let path = absolute(path)?;
         let path = match crate::discovery::realpath(&path.to_string_lossy()) {
@@ -500,7 +499,7 @@ pub(crate) fn discover(
                     snapshot_finished_at: None,
                     joined_requests: 0,
                     ambiguous_requests: 0,
-                    unresolved: IndexMap::new(),
+                    unresolved: IndexMap::default(),
                     text_generation: None,
                 });
                 continue;
@@ -551,7 +550,7 @@ pub(crate) fn discover(
             snapshot_finished_at: None,
             joined_requests: 0,
             ambiguous_requests: 0,
-            unresolved: IndexMap::new(),
+            unresolved: IndexMap::default(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
         for (id, instance) in instances {
@@ -750,7 +749,7 @@ pub(crate) fn attribute_compactions(scan: &mut Scan, charges: &[CompactionCharge
                 scan.requests
                     .iter()
                     .chain(&scan.cache_context.requests)
-                    .find(|r| &r.id == id)
+                    .find(|r| *r.id == **id)
             })
             .and_then(|r| r.t3.as_ref())
             .filter(|t| t.idle_mode.is_some())
@@ -964,13 +963,13 @@ fn native_request<'a>(r: &'a Request, ids: &'a NativeIds) -> Option<NativeReques
         } else if r.harness == Harness::Codex {
             r.turn
                 .as_ref()
-                .and_then(|t| ids.ids.get(t))
+                .and_then(|t| ids.ids.get(&**t))
                 .map(String::as_str)
                 .into_iter()
                 .collect()
         } else {
             ids.items
-                .get(&r.id)
+                .get(&*r.id)
                 .into_iter()
                 .flatten()
                 .map(String::as_str)
@@ -1219,7 +1218,9 @@ impl TurnRow {
                 None
             } else if r.harness == Harness::Codex {
                 Some(RequestedSpeed {
-                    tier: tier.or_else(|| (self.fast == Some(true)).then(|| "fast".into())),
+                    tier: tier
+                        .or_else(|| (self.fast == Some(true)).then(|| "fast".into()))
+                        .map(Text::from),
                     speed: None,
                 })
             } else {
@@ -1343,7 +1344,7 @@ fn metadata(
         }
     };
     // The native turn and item ids each selected native session needs.
-    let mut wanted: HashMap<(&str, &str), HashSet<&str>> = HashMap::new();
+    let mut wanted: HashMap<(&str, &str), HashSet<&str>> = HashMap::default();
     for r in requests {
         wanted
             .entry((driver(r.harness), r.native_session))
@@ -1357,7 +1358,7 @@ fn metadata(
         /// Linked to the session within the native bound, so it may own it.
         linked: bool,
     }
-    let mut threads: HashMap<(&str, String), Vec<Thread>> = HashMap::new();
+    let mut threads: HashMap<(&str, String), Vec<Thread>> = HashMap::default();
     let mut owner_event = tx.prepare(OWNER_EVENT)?;
     let mut query = tx.prepare(PROVIDER_THREADS)?;
     let mut rows = query.query([bound])?;
@@ -1385,7 +1386,7 @@ fn metadata(
         });
     }
     // Provider turns per native turn/item id, within each selected session's threads.
-    let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::new();
+    let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::default();
     let mut native_refs = tx.prepare(NATIVE_REFS)?;
     for (key, list) in &threads {
         let found = refs.entry(key).or_default();
@@ -1415,7 +1416,7 @@ fn metadata(
         }
     }
     let mut turn_query = tx.prepare(TURN)?;
-    let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::new();
+    let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::default();
     let mut result = Projection::default();
     for r in requests {
         let key = (driver(r.harness), r.native_session.to_string());
@@ -1477,6 +1478,16 @@ fn metadata(
     Ok(result)
 }
 
+/// The one-owner profile set for `owner`, shared by every record it owns.
+fn shared(owned: &mut HashMap<String, Profiles>, owner: &str) -> Profiles {
+    if let Some(profiles) = owned.get(owner) {
+        return profiles.clone();
+    }
+    let profiles = Profiles::from([owner.to_string()]);
+    owned.insert(owner.to_string(), profiles.clone());
+    profiles
+}
+
 /// Freeze optional projection metadata in one read-only WAL transaction, then close it before analysis.
 pub(crate) fn enrich(
     states: &mut [T3State],
@@ -1507,11 +1518,11 @@ pub(crate) fn enrich(
         }
     }
     let harnesses: HashMap<&str, Harness> = projections.iter().map(|r| (r.id, r.harness)).collect();
-    let mut invalid_joins = HashSet::new();
-    let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::new();
-    let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::new();
-    let mut unlinked = HashSet::new();
-    let mut read = HashSet::new();
+    let mut invalid_joins = HashSet::default();
+    let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::default();
+    let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::default();
+    let mut unlinked = HashSet::default();
+    let mut read = HashSet::default();
     for state in states.iter_mut().filter(|s| s.status == "selected") {
         let path = Path::new(&state.path).join("statev2.sqlite");
         if !path.is_file() {
@@ -1605,12 +1616,12 @@ pub(crate) fn enrich(
             .and_then(|p| p.t3.as_ref())
             .map(|t| t.state.clone())
     };
-    let mut ambiguous_profiles = HashSet::new();
-    let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::new();
+    let mut ambiguous_profiles = HashSet::default();
+    let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::default();
     // How each root session's own requests resolved, which its subagents inherit: one
     // profile, or why not. Requests inside the window decide; earlier ones only fill in.
     type Resolution = Result<String, &'static str>;
-    let mut roots: HashMap<((Harness, String), bool), Resolution> = HashMap::new();
+    let mut roots: HashMap<((Harness, String), bool), Resolution> = HashMap::default();
     let resolution = |roots: &HashMap<((Harness, String), bool), Resolution>,
                       root: &(Harness, String)| {
         roots
@@ -1620,7 +1631,10 @@ pub(crate) fn enrich(
     };
     // Roots whose own requests all excluded T3, which their subagents inherit even
     // when the root stays among several native profiles.
-    let mut native_roots: HashMap<((Harness, String), bool), bool> = HashMap::new();
+    let mut native_roots: HashMap<((Harness, String), bool), bool> = HashMap::default();
+    // Shared profile sets, so requests resolved alike keep sharing one copy.
+    let mut owned: HashMap<String, Profiles> = HashMap::default();
+    let mut native_only: HashMap<Profiles, Profiles> = HashMap::default();
     let order: Vec<usize> = (0..requests.len())
         .filter(|&i| requests[i].agent != Agent::Subagent)
         .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
@@ -1629,13 +1643,13 @@ pub(crate) fn enrich(
         let r = &mut requests[i];
         let subagent = r.agent == Agent::Subagent;
         let root = (r.harness, ids.root(&r.session).to_string());
-        let rows = joins.get(&r.id);
+        let rows = joins.get(&*r.id);
         let session_owners = owners.get(&root);
         let unique = rows
             .filter(|v| v.len() == 1)
             .and_then(|v| v.first())
             .filter(|(p, _)| {
-                !invalid_joins.contains(&r.id) && !p.is_empty() && r.profiles.contains(p)
+                !invalid_joins.contains(&*r.id) && !p.is_empty() && r.profiles.contains(p)
             });
         let selected = since.is_none_or(|s| r.time >= s);
         let root_resolution = if subagent {
@@ -1658,9 +1672,9 @@ pub(crate) fn enrich(
             .or(inherited.as_ref());
         let mut cause = None;
         if let Some(owner) = owner {
-            r.profiles = vec![owner.clone()];
+            r.profiles = shared(&mut owned, owner);
             if let Some((_, joined)) = unique {
-                r.t3 = Some(joined.evidence.clone());
+                r.t3 = Some(Box::new(joined.evidence.clone()));
                 if joined.evidence.idle_mode.is_some() {
                     for part in &mut r.parts {
                         if part.kind == PartKind::Message {
@@ -1720,7 +1734,7 @@ pub(crate) fn enrich(
                     .or_else(|| native_roots.get(&(root.clone(), false)))
                     == Some(&true);
             let native = r.profiles.iter().any(|p| !t3_ids.contains(p));
-            let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&r.id);
+            let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&*r.id);
             let found = match session_owners.map_or(0, Vec::len) {
                 0 if (native_source || native_root) && native && !stray => None,
                 0 => match root_resolution {
@@ -1758,10 +1772,20 @@ pub(crate) fn enrich(
                 _ => Some("several T3 provider threads own the native session"),
             };
             match found {
-                None => r.profiles.retain(|p| !t3_ids.contains(p)),
+                None => {
+                    r.profiles = native_only
+                        .entry(r.profiles.clone())
+                        .or_insert_with_key(|all| {
+                            all.iter()
+                                .filter(|p| !t3_ids.contains(*p))
+                                .cloned()
+                                .collect()
+                        })
+                        .clone();
+                }
                 Some(c) => {
                     cause = Some(c);
-                    r.issues.push(format!("T3/shared native history ownership is unresolved: {c}; current control guidance is advisory"));
+                    r.issues.push(format!("T3/shared native history ownership is unresolved: {c}; current control guidance is advisory").into());
                     // Context before the window prices cache state but says nothing about
                     // which controls ran the selected requests.
                     if selected {
@@ -1803,7 +1827,7 @@ pub(crate) fn enrich(
         state.unresolved = causes.into_iter().map(|(c, n)| (c.into(), n)).collect();
     }
     // A uniquely owned session also owns its structural evidence, without assuming a run.
-    let mut sessions: HashMap<(Harness, &str), HashSet<&str>> = HashMap::new();
+    let mut sessions: HashMap<(Harness, &str), HashSet<&str>> = HashMap::default();
     for r in requests.iter() {
         sessions
             .entry((r.harness, &r.session))
@@ -1817,16 +1841,17 @@ pub(crate) fn enrich(
             && !rows[0].0.is_empty()
         {
             let (owner, joined) = &rows[0];
-            e.profiles = vec![owner.clone()];
-            e.t3 = Some(joined.evidence.clone());
+            e.profiles = shared(&mut owned, owner);
+            e.t3 = Some(Box::new(joined.evidence.clone()));
             if joined.evidence.idle_mode.is_some() {
                 e.idle_attribution = IdleAttribution::T3;
             }
         }
         if let Some(owners) = sessions.get(&(e.harness, e.session.as_ref()))
             && owners.len() == 1
+            && let Some(owner) = owners.iter().next()
         {
-            e.profiles = owners.iter().map(|s| s.to_string()).collect();
+            e.profiles = shared(&mut owned, owner);
         }
     }
     for p in profiles.iter_mut() {
@@ -2517,7 +2542,7 @@ mod tests {
             assert_eq!(data.requests.len(), 1, "{harness:?}");
             let r = &data.requests[0];
             assert_eq!(r.agent, Agent::Subagent, "{harness:?}");
-            assert_eq!(r.profiles, vec![owner], "{harness:?}");
+            assert_eq!(*r.profiles, [owner], "{harness:?}");
             assert!(r.t3.is_none());
             assert!(data.t3[0].unresolved.is_empty(), "{:?}", data.t3[0]);
         }
@@ -2982,8 +3007,8 @@ mod tests {
         seed(&db, "codex", "codex");
         let mut request = make_request();
         request.harness = Harness::Codex;
-        request.session = identity("native-session");
-        request.turn = Some(identity("native-turn"));
+        request.session = identity("native-session").into();
+        request.turn = Some(identity("native-turn").into());
         request.model = Some("gpt-6.1-sol".into());
         request.time = 1_767_225_605_000;
         let mut ids = NativeIds::default();
@@ -3003,6 +3028,6 @@ mod tests {
             "2026-01-01T00:00:06Z",
         )
         .unwrap();
-        assert!(data.turns[&request.id].joined.is_none());
+        assert!(data.turns[&*request.id].joined.is_none());
     }
 }

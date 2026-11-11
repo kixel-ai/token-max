@@ -1,8 +1,6 @@
 //! Claude cache-TTL checks, compaction summary charges, and the shared report every check joins.
 
-use std::collections::{HashMap, HashSet};
-
-use indexmap::{IndexMap, IndexSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 
 use crate::background::{BackgroundInput, background_checks};
 use crate::bash::{BashInput, bash_checks};
@@ -18,12 +16,12 @@ use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
     HistoricalCost, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
-    RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck, TtlSensitivity, UnlinkedSensitivity,
-    Usage, UsageEstimate, WindowBasisKind,
+    RequestEvidence, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
+    UnlinkedSensitivity, Usage, UsageEstimate, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, add_costs, conditional_tier, paired_savings, price_part, price_request,
-    server_cost, tier_sensitivity, unknown_cost, zero_cost,
+    Catalog, PRICE_SOURCES, Sum, add_costs, conditional_tier, paired_savings, price_part,
+    price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{AttemptScenario, ReplayOptions, ReplayTtls, cache_bucket, replay_parts};
@@ -75,9 +73,9 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
     };
     Some(Request {
         evidence: RequestEvidence::Estimated,
-        id: identity(&event.id),
+        id: identity(&event.id).into(),
         harness: event.harness,
-        session: event.session.to_string(),
+        session: event.session.clone(),
         time: event.time,
         end_time: event.time,
         agent: Agent::Subagent,
@@ -89,17 +87,17 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
             .or_else(|| previous.and_then(|r| r.provider.clone())),
         api: Api::Messages,
         source: Some("compaction".into()),
-        trigger: event.trigger.clone(),
+        trigger: event.trigger.as_deref().map(Text::from),
         reference: None,
         turn: None,
-        version: event.version.as_deref().map(String::from),
-        client: event.client.as_deref().map(String::from),
-        cwd: event.cwd.as_deref().map(String::from),
+        version: event.version.clone(),
+        client: event.client.clone(),
+        cwd: event.cwd.clone(),
         profiles: event.profiles.clone(),
         locations: vec![event.location.clone()],
         accounting: Accounting::Individual,
         attempt: None,
-        server_tools: Some(IndexMap::new()),
+        server_tools: Some(crate::model::ServerTools::default()),
         requested_speed: None,
         t3: event.t3.clone(),
         parts: vec![BillingPart {
@@ -189,17 +187,17 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
     // union of a boundary's alias groups needs no deduplication.
     let times: Vec<Millis> = (0..all.len()).map(|i| all.get(i).time).collect();
     let (groups, plans) = {
-        let mut group_of: HashMap<&str, usize> = HashMap::new();
+        let mut group_of: HashMap<&str, usize> = HashMap::default();
         let mut groups: Vec<Vec<usize>> = vec![];
-        let mut by_id: HashMap<&str, usize> = HashMap::new();
+        let mut by_id: HashMap<&str, usize> = HashMap::default();
         for i in 0..all.len() {
             let r = all.get(i);
-            let g = *group_of.entry(r.session.as_str()).or_insert_with(|| {
+            let g = *group_of.entry(&*r.session).or_insert_with(|| {
                 groups.push(vec![]);
                 groups.len() - 1
             });
             groups[g].push(i);
-            by_id.insert(r.id.as_str(), i);
+            by_id.insert(&*r.id, i);
         }
         // Stable, so equal times keep their order, as a stable sort of the merged aliases would.
         for group in &mut groups {
@@ -208,7 +206,7 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
         let plans: Vec<Plan> = boundaries
             .iter()
             .map(|e| {
-                let mut aliases: IndexSet<usize> = IndexSet::new();
+                let mut aliases: IndexSet<usize> = IndexSet::default();
                 for origin in &e.origins {
                     if let Some(&g) = group_of.get(&*origin.session) {
                         aliases.insert(g);
@@ -358,7 +356,7 @@ struct Window {
 }
 
 fn default_since(requests: &[&Request], selected: Bucket) -> Window {
-    let mut cohorts: HashMap<String, (Ttl, Option<Millis>)> = HashMap::new();
+    let mut cohorts: HashMap<String, (Ttl, Option<Millis>)> = HashMap::default();
     let mut ambiguous = false;
     for r in requests {
         for p in &r.parts {
@@ -416,7 +414,7 @@ struct Replay<'a> {
     /// Cache cost per selected request part, keyed by request id and part index.
     items: IndexMap<(&'a str, usize), Cost>,
     fixed: Cost,
-    predecessors: HashSet<String>,
+    predecessors: HashSet<Text>,
     evidence: Vec<CacheReplayEvidence>,
 }
 
@@ -427,7 +425,7 @@ struct TtlInput<'a> {
     /// Every pre-window and selected boundary, indexed once for all replays.
     boundaries: &'a CacheBoundaries,
     summaries: &'a [CompactionCharge],
-    estimates: &'a IndexMap<String, UsageEstimate>,
+    estimates: &'a IndexMap<Text, UsageEstimate>,
     since: Option<Millis>,
     now: Millis,
 }
@@ -451,10 +449,10 @@ impl<'a> Replayer<'_, 'a> {
             estimated_parts: None,
             attempt_scenario,
         };
-        let mut predecessors = HashSet::new();
+        let mut predecessors = HashSet::default();
         let mut evidence = vec![];
-        let mut items = IndexMap::new();
-        let mut fixed = vec![];
+        let mut items = IndexMap::default();
+        let mut fixed = Sum::new();
         let replayed = replay_parts(
             self.requests.iter().copied(),
             [self.input.boundaries],
@@ -468,17 +466,17 @@ impl<'a> Replayer<'_, 'a> {
                 for predecessor in &e.predecessors {
                     predecessors.insert(predecessor.request.clone());
                 }
-                evidence.push(e);
+                evidence.push(*e);
             }
             // Replay clones each part, so only its recorded index identifies it.
-            items.insert((item.request.id.as_str(), item.part), item.components.cache);
-            fixed.push(item.components.ordinary);
-            fixed.push(item.components.output);
+            items.insert((&*item.request.id, item.part), item.components.cache);
+            fixed.add(&item.components.ordinary);
+            fixed.add(&item.components.output);
         }
         Replay {
             comparison: add_costs(items.values()),
             items,
-            fixed: add_costs(&fixed),
+            fixed: fixed.cost(),
             predecessors,
             evidence,
         }
@@ -665,8 +663,8 @@ fn ttl_check(
     };
     let profiles: IndexSet<&str> = relevant
         .iter()
-        .flat_map(|r| &r.profiles)
-        .chain(boundaries.iter().flat_map(|e| &e.profiles))
+        .flat_map(|r| r.profiles.iter())
+        .chain(boundaries.iter().flat_map(|e| e.profiles.iter()))
         .map(String::as_str)
         .collect();
     let mut uncertainty: IndexSet<&str> = [
@@ -692,19 +690,19 @@ fn ttl_check(
         );
     }
     for estimate in &usage_estimates {
-        uncertainty.insert(&estimate.reason);
+        uncertainty.insert(estimate.reason);
         uncertainty.extend(estimate.assumptions.iter().map(String::as_str));
     }
-    uncertainty.extend(selected.iter().flat_map(|r| &r.issues).map(String::as_str));
+    uncertainty.extend(selected.iter().flat_map(|r| &r.issues).map(|i| &**i));
     uncertainty.extend(
         requests
             .iter()
             .filter(|r| predecessor(r))
             .flat_map(|r| &r.issues)
-            .map(String::as_str),
+            .map(|i| &**i),
     );
-    uncertainty.extend(short.evidence.iter().map(|e| e.reason.as_str()));
-    uncertainty.extend(long.evidence.iter().map(|e| e.reason.as_str()));
+    uncertainty.extend(short.evidence.iter().map(|e| e.reason));
+    uncertainty.extend(long.evidence.iter().map(|e| e.reason));
     uncertainty.extend(cost.five_minutes.unknown.iter().map(String::as_str));
     uncertainty.extend(cost.one_hour.unknown.iter().map(String::as_str));
     let uncertainty: Vec<String> = uncertainty.into_iter().map(String::from).collect();
@@ -828,7 +826,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     crate::t3::attribute_compactions(&mut scan, &compactions);
     let scan = scan;
     let estimates = estimate_usage(&scan);
-    let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::default();
     for r in &scan.requests {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
         // JavaScript's default sort compares UTF-16 code units.
@@ -845,7 +843,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 } else {
                     key
                 },
-                profiles: requests[0].profiles.clone(),
+                profiles: requests[0].profiles.to_vec(),
                 requests: requests.len() as u64,
                 priced_requests: costs.iter().filter(|c| c.total_usd.is_some()).count() as u64,
                 conditional_requests: requests
@@ -994,7 +992,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         max_cost_per_use_usd,
     });
     Ok(Report {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: iso(now),
         prices: PriceSource {
             source: catalog.source.clone(),
@@ -1170,7 +1168,7 @@ mod tests {
             session: session.into(),
             time,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()],
+            profiles: vec!["profile".into()].into(),
             location,
             request: None,
             model: None,
@@ -1184,7 +1182,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -1318,8 +1316,8 @@ mod tests {
         let mut requests: Vec<Request> = (0..4)
             .map(|i| {
                 let r = Request {
-                    id: format!("small-{i}"),
-                    session: format!("small-{i}"),
+                    id: format!("small-{i}").into(),
+                    session: format!("small-{i}").into(),
                     ..make_request()
                 };
                 with(r, u(10, 0, M5))
@@ -1442,7 +1440,10 @@ mod tests {
     #[test]
     fn scenario_invariant_unknown_server_fees_do_not_veto() {
         let first = Request {
-            server_tools: Some(IndexMap::from([("code_execution_requests".into(), 1)])),
+            server_tools: Some(crate::model::ServerTools::from_iter([(
+                "code_execution_requests".into(),
+                1,
+            )])),
             ..make_request()
         };
         let mut next = Request {
@@ -1784,7 +1785,7 @@ mod tests {
         } = bracketed_attempt();
         first.parts[0].usage = claude_usage(u(1000, 0, H1));
         retime(&mut attempt, 17 * MIN);
-        attempt.parts[0].speed = speed.map(String::from);
+        attempt.parts[0].speed = speed.map(Text::from);
         retime(&mut after, 20 * MIN);
         after.parts[0].usage = claude_usage(u(200, 1000, H1));
         let mut other = Request {
@@ -1968,7 +1969,7 @@ mod tests {
                 "source" => after.source = Some("different-source".into()),
                 "model" => after.parts[0].model = Some("claude-haiku-5-5".into()),
                 "client" => after.client = Some("changed-entrypoint".into()),
-                "profiles" => after.profiles = vec!["profile".into(), "alias".into()],
+                "profiles" => after.profiles = vec!["profile".into(), "alias".into()].into(),
                 _ => events.push(boundary("boundary", "session", 900_000)),
             }
             let report = report_at(&data(vec![first, attempt, after], events), None, 1_800_000);

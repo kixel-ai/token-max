@@ -126,7 +126,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
     ScanOptions {
         discovery: DiscoveryOptions {
             home: text(&w.home),
-            env: Env::new(),
+            env: Env::default(),
             claude_dirs: vec![],
             codex_dirs: vec![],
             t3_dirs: vec![],
@@ -645,7 +645,7 @@ fn copied_history_is_one_request_exposure_and_conflicting_copies_stay_unknown() 
     assert_eq!(view.linkage, Linkage::Unknown);
     assert!(view.reasons.join(",").contains("disagree"));
     assert_eq!(
-        data.requests[0].id,
+        *data.requests[0].id,
         format!("codex:{}", identity("response-1"))
     );
 }
@@ -1364,9 +1364,11 @@ fn skill_references_need_a_known_catalog_and_native_user_aliases_keep_repeated_m
     .unwrap();
     let requests = kinds(&data.exposure, InvocationKind::SkillRequest);
     assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(
-        |i| i.identity_basis == IdentityBasis::ContentOccurrence && i.locations.len() == 2
-    ));
+    assert!(
+        requests
+            .iter()
+            .all(|i| i.identity_basis == IdentityBasis::ContentOccurrence)
+    );
     assert_eq!(
         kinds(&data.exposure, InvocationKind::SkillReference).len(),
         4

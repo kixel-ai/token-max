@@ -171,7 +171,3 @@ interleaved lines, several recent). ✅ price a custom `ANTHROPIC_BASE_URL` as
 the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
-
-## Required
-
-- [Restore the large-history runtime](/quest/m0/runtime.md) - the default run is back to #27's runtime or better, with hot spots measured

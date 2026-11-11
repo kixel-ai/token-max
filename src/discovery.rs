@@ -855,50 +855,44 @@ pub fn discover_claude_controls(
             ..idle_controls(&[user_scope, managed_scope], env)?
         };
         let mut directories_controls = IndexMap::default();
+        // As for a native profile, a missing or unrecorded directory keeps the home's window.
         for cwd in directories(
             requests
                 .iter()
                 .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id)),
         ) {
-            let compaction = if existing_directory(cwd)? {
-                let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
-                let project = settings(&project_file, Harness::Claude)?;
-                let legacy = settings(&legacy_file, Harness::Claude)?;
-                let local = settings(&local_file, Harness::Claude)?;
-                let scopes = [
-                    user_scope,
-                    SettingsScope {
-                        config: &project,
-                        file: &project_file,
-                    },
-                    SettingsScope {
-                        config: &legacy,
-                        file: &legacy_file,
-                    },
-                    SettingsScope {
-                        config: &local,
-                        file: &local_file,
-                    },
-                    managed_scope,
-                ];
-                compaction_controls(&CompactionSources {
-                    harness: Harness::Claude,
-                    user: &user,
-                    managed: &managed,
-                    env,
-                    file: &profile.settings_file,
-                    managed_file,
-                    scopes: Some(&scopes),
-                })?
-            } else {
-                let mut compaction = profile.compaction.clone();
-                for control in
-                    std::iter::once(&mut compaction.default).chain(compaction.models.values_mut())
-                {
-                    control.comparison_unknown = Some("recorded working directory no longer exists; its project/local window is unresolved".into());
-                }
-                compaction
-            };
+            if !existing_directory(cwd)? {
+                continue;
+            }
+            let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
+            let project = settings(&project_file, Harness::Claude)?;
+            let legacy = settings(&legacy_file, Harness::Claude)?;
+            let local = settings(&local_file, Harness::Claude)?;
+            let scopes = [
+                user_scope,
+                SettingsScope {
+                    config: &project,
+                    file: &project_file,
+                },
+                SettingsScope {
+                    config: &legacy,
+                    file: &legacy_file,
+                },
+                SettingsScope {
+                    config: &local,
+                    file: &local_file,
+                },
+                managed_scope,
+            ];
+            let compaction = compaction_controls(&CompactionSources {
+                harness: Harness::Claude,
+                user: &user,
+                managed: &managed,
+                env,
+                file: &profile.settings_file,
+                managed_file,
+                scopes: Some(&scopes),
+            })?;
             directories_controls.insert(
                 cwd.to_string(),
                 IdleControl {

@@ -2375,12 +2375,12 @@ mod tests {
         assert!(!instance(&data, "codex").t3.unwrap().ownership_resolved);
 
         let missing = w.home.join("removed");
-        let requests: Vec<Request> = [&project, &missing]
+        let requests: Vec<Request> = [Some(&project), Some(&missing), None]
             .into_iter()
             .flat_map(|cwd| {
                 ["claudeAgent", "pinned", "flagged"].map(|id| {
                     let mut r = make_request();
-                    r.cwd = Some(cwd.to_string_lossy().as_ref().into());
+                    r.cwd = cwd.map(|cwd| cwd.to_string_lossy().as_ref().into());
                     r.profiles = vec![instance(&data, id).id].into();
                     r
                 })
@@ -2393,16 +2393,15 @@ mod tests {
         )
         .unwrap();
         let directories = instance(&data, "claudeAgent").idle_directories.unwrap();
-        let window = |cwd: &Path| {
-            directories[cwd.to_string_lossy().as_ref()]
-                .compaction
-                .clone()
-                .unwrap()
-                .default
-        };
-        assert_eq!(window(&project).value, Some(250000));
-        assert_eq!(window(&project).comparison_unknown, None);
-        assert!(window(&missing).comparison_unknown.is_some());
+        let window = &directories[project.to_string_lossy().as_ref()]
+            .compaction
+            .as_ref()
+            .unwrap()
+            .default;
+        assert_eq!(window.value, Some(250000));
+        assert_eq!(window.comparison_unknown, None);
+        // A missing or unrecorded directory keeps the home's window, as a native profile does.
+        assert_eq!(directories.len(), 1);
         // T3's own window and an unresolved launch keep the profile's window everywhere.
         assert!(instance(&data, "pinned").idle_directories.is_none());
         assert!(instance(&data, "flagged").idle_directories.is_none());

@@ -1,8 +1,6 @@
 //! Whether Claude's foreground Bash timeout cap lets the prompt cache expire, and what long waits cost.
 
-use std::collections::HashMap;
-
-use indexmap::IndexSet;
+use crate::collections::{HashMap, IndexSet};
 
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
@@ -136,14 +134,14 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
         .collect();
     requests.sort_by_key(|r| r.time);
     let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (r.id.as_str(), *r)).collect();
-    let mut sessions: HashMap<&str, Vec<&Request>> = HashMap::new();
+    let mut sessions: HashMap<&str, Vec<&Request>> = HashMap::default();
     for &r in &requests {
         sessions.entry(&r.session).or_default().push(r);
     }
     let (ttl, ttl_basis) = evaluation_ttl(ttls, profile, &requests);
 
     let mine = |e: &&StructuralEvent| e.profiles.contains(&profile.id) && selected(e.time);
-    let mut ends: HashMap<(&str, &str), &StructuralEvent> = HashMap::new();
+    let mut ends: HashMap<(&str, &str), &StructuralEvent> = HashMap::default();
     for e in scan
         .events
         .iter()
@@ -162,7 +160,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     }
     let (mut calls, mut long, mut timed_out, mut polling) = (0, 0, 0, 0);
     let mut costs = vec![];
-    let mut priced = std::collections::HashSet::new();
+    let mut priced = crate::collections::HashSet::default();
     for start in scan.events.iter().filter(mine) {
         let Some(shell) = start
             .shell

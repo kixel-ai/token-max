@@ -1,8 +1,6 @@
 //! Comparison-only input estimates for unlinked API attempts, from adjacent measured requests.
 
-use std::collections::{HashMap, HashSet};
-
-use indexmap::IndexMap;
+use crate::collections::{HashMap, HashSet, IndexMap};
 
 use crate::model::{
     BillingPart, EstimateEvidence, EventKind, Harness, Millis, PartKind, Request, RequestEvidence,
@@ -40,8 +38,8 @@ fn profile_key(r: &Request) -> String {
 
 /// Estimate isolated attempts from matching or same-cache-lifetime growing input brackets.
 pub fn estimate_usage(scan: &Scan) -> IndexMap<String, UsageEstimate> {
-    let mut result = IndexMap::new();
-    let mut boundaries: HashMap<&str, Vec<Millis>> = HashMap::new();
+    let mut result = IndexMap::default();
+    let mut boundaries: HashMap<&str, Vec<Millis>> = HashMap::default();
     for event in scan.cache_context.boundaries.iter().chain(&scan.events) {
         if event.harness != Harness::Claude || event.kind != EventKind::Compaction {
             continue;
@@ -56,7 +54,7 @@ pub fn estimate_usage(scan: &Scan) -> IndexMap<String, UsageEstimate> {
     for times in boundaries.values_mut() {
         times.sort_unstable();
     }
-    let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
         if r.harness == Harness::Claude {
             sessions.entry(r.session.as_str()).or_default().push(r);

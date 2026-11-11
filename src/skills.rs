@@ -1,10 +1,10 @@
 //! Historical Codex skill paths, resolved lexically without reading installed files.
 
-use std::collections::HashMap;
+use crate::collections::HashMap;
 
 /// Resolve a rendered catalog's root aliases and entry file suffixes.
 pub(crate) fn paths<'a>(body: &'a str, entries: &[(&str, &'a str)]) -> Vec<Option<String>> {
-    let mut roots: HashMap<&str, Option<&str>> = HashMap::new();
+    let mut roots: HashMap<&str, Option<&str>> = HashMap::default();
     for line in body.lines() {
         let Some((alias, root)) = line.strip_prefix("- `").and_then(|s| s.split_once("` = `"))
         else {

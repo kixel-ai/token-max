@@ -654,7 +654,7 @@ fn explicit_windows_match_the_library_replay() {
         let selected = scan(&ScanOptions {
             discovery: DiscoveryOptions {
                 home: text(&w.home),
-                env: Env::new(),
+                env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 t3_dirs: vec![],

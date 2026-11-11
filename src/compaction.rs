@@ -1,11 +1,10 @@
 //! Compaction-window checks: calibrate summaries from linked billed usage, simulate earlier
 //! compactions under candidate windows, and compare them after the recommended TTLs.
 
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 use std::iter;
-
-use indexmap::{IndexMap, IndexSet};
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, CacheBoundaries, ttl_milliseconds};
 use crate::controls::{CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, window_control};
@@ -102,7 +101,7 @@ pub struct CompactionSamples<'a> {
 impl<'a> CompactionSamples<'a> {
     /// Index samples by cohort, keeping their order within each cohort.
     pub fn new(samples: Vec<CompactionSample<'a>>) -> Self {
-        let mut index: HashMap<SampleCohort<'a>, usize> = HashMap::new();
+        let mut index: HashMap<SampleCohort<'a>, usize> = HashMap::default();
         let mut groups: Vec<Vec<usize>> = vec![];
         for (i, s) in samples.iter().enumerate() {
             if let Some(cohort) = SampleCohort::of(s.request, s.p) {
@@ -169,7 +168,7 @@ struct SessionBoundaries {
 
 impl SessionBoundaries {
     fn new<'e>(events: impl IntoIterator<Item = &'e StructuralEvent>) -> Self {
-        let mut times: HashMap<String, Vec<Millis>> = HashMap::new();
+        let mut times: HashMap<String, Vec<Millis>> = HashMap::default();
         for event in events {
             if event.kind != EventKind::Compaction {
                 continue;
@@ -212,7 +211,7 @@ impl<'a> WindowEvents<'a> {
     /// Index these events by identity and by compaction boundary.
     pub fn new(events: impl IntoIterator<Item = &'a StructuralEvent>) -> Self {
         let events: Vec<&'a StructuralEvent> = events.into_iter().collect();
-        let mut by_id = HashMap::new();
+        let mut by_id = HashMap::default();
         for &event in &events {
             by_id.entry(event.id.as_str()).or_insert(event);
         }
@@ -297,14 +296,14 @@ pub fn compaction_samples<'a>(
     let mut result = Vec::new();
     // Later duplicates win, like a JavaScript Map built from the array.
     let by_id: HashMap<&str, &'a Request> = requests.iter().map(|r| (r.id.as_str(), *r)).collect();
-    let mut charges: HashMap<&str, &CompactionCharge> = HashMap::new();
+    let mut charges: HashMap<&str, &CompactionCharge> = HashMap::default();
     for charge in summaries {
         charges.entry(charge.event.as_str()).or_insert(charge);
     }
     let boundaries = SessionBoundaries::new(events.iter().copied());
     // Requests with a message part, per session in array order, and whether each list is
     // also in time order so the first match can be found by bisection.
-    let mut sessions: HashMap<&str, (Vec<usize>, bool)> = HashMap::new();
+    let mut sessions: HashMap<&str, (Vec<usize>, bool)> = HashMap::default();
     for (index, r) in requests.iter().enumerate() {
         if !r.parts.iter().any(is_message) {
             continue;
@@ -536,7 +535,7 @@ fn simulate<'r>(
         ..Simulation::default()
     };
     let extra = SessionBoundaries::new(extra);
-    let mut states: HashMap<String, WindowState> = HashMap::new();
+    let mut states: HashMap<String, WindowState> = HashMap::default();
     for source in requests {
         let billing = estimates
             .and_then(|e| e.get(&source.id))
@@ -910,7 +909,7 @@ impl Replayer<'_> {
         let extra = CacheBoundaries::new(&simulation.events);
         let after = self.selected(
             simulation.requests.iter().map(AsRef::as_ref),
-            &IndexMap::new(),
+            &IndexMap::default(),
             Some(&extra),
             Some(&simulation.estimated_parts),
         );
@@ -1133,7 +1132,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .map(|i| i.p.model.clone())
             .collect();
         // One effective key has one aggregate winner, including global/environment controls.
-        let mut groups: IndexMap<String, (WindowControl, Vec<Option<String>>)> = IndexMap::new();
+        let mut groups: IndexMap<String, (WindowControl, Vec<Option<String>>)> =
+            IndexMap::default();
         for model in observed_models {
             let control = window_control(
                 &profile.compaction,
@@ -1188,7 +1188,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     candidates.extend(catalog.tier_sizes(provider, model).map(|s| s as i64));
                 }
             }
-            let mut geometries: IndexMap<_, Vec<i64>> = IndexMap::new();
+            let mut geometries: IndexMap<_, Vec<i64>> = IndexMap::default();
             for sample in calibration
                 .samples
                 .iter()
@@ -1273,7 +1273,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 let previous = before.map_or(&baseline, |b| &b.after);
                 // One pair per request that gains or loses a summary, so the unpriced
                 // bound compares against single differences rather than their total.
-                let mut summaries: IndexMap<&str, (Vec<&Cost>, Vec<&Cost>)> = IndexMap::new();
+                let mut summaries: IndexMap<&str, (Vec<&Cost>, Vec<&Cost>)> = IndexMap::default();
                 for a in before.into_iter().flat_map(|b| &b.simulation.added) {
                     summaries
                         .entry(a.request.as_str())
@@ -1450,7 +1450,8 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 "compaction trigger timing and replacement-prefix identity are estimated from token counts, not observed counterfactual behavior; no samples means affected candidates remain unpriced",
             ]
             .map(String::from)
-            .into();
+            .into_iter()
+            .collect();
             if conditional {
                 uncertainty.insert(TIER_SENSITIVITY.into());
             }
@@ -1658,7 +1659,7 @@ mod tests {
             duration_ms: Some(1000),
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -1686,12 +1687,12 @@ mod tests {
                 subagent: ttl(Ttl::FiveMinutes, "settings.json:subagentPromptCacheTtl"),
             },
             provider: Some("anthropic".into()),
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             mcp_servers: vec![],
             compaction: controls(
                 Harness::Claude,
                 json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}}),
-                &Env::new(),
+                &Env::default(),
                 "settings.json",
             ),
             idle: None,
@@ -1700,8 +1701,8 @@ mod tests {
             speed_directories: None,
             idle_directories: None,
             background: vec![],
-            background_directories: IndexMap::new(),
-            background_requests: IndexMap::new(),
+            background_directories: IndexMap::default(),
+            background_requests: IndexMap::default(),
             t3: None,
         };
         let mut first = at("sample-resume", "sample", 1000);
@@ -1795,7 +1796,7 @@ mod tests {
                 locations: vec![e.location.clone()],
                 accounting: Accounting::Individual,
                 attempt: None,
-                server_tools: Some(IndexMap::new()),
+                server_tools: Some(IndexMap::default()),
                 requested_speed: None,
                 t3: None,
                 parts: vec![BillingPart {
@@ -1892,7 +1893,7 @@ mod tests {
                 p.compaction = controls(
                     Harness::Codex,
                     json!({"model_auto_compact_token_limit": 400000}),
-                    &Env::new(),
+                    &Env::default(),
                     "config.toml",
                 );
                 s.requests[0].parts.truncate(1);
@@ -2063,7 +2064,7 @@ mod tests {
                 s.profiles[0].compaction = controls(
                     Harness::Claude,
                     json!({"autoCompactWindow": 400000}),
-                    &Env::new(),
+                    &Env::default(),
                     "settings.json",
                 );
                 s
@@ -2650,7 +2651,7 @@ mod tests {
     fn replay_windows_without_a_value_returns_inputs_unapplied() {
         let s = data(2);
         let catalog = prices();
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let events = WindowEvents::new(&s.events);
         let samples = samples_of(&s.requests, &s.events, &[]);
         let options = window_options(&events, &estimates, &catalog, &samples);
@@ -2706,7 +2707,7 @@ mod tests {
         smaller.parts[0].usage = writes(140000);
         s.requests.extend([unknown, smaller]);
         let catalog = prices();
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let events = WindowEvents::new(&s.events);
         let samples = samples_of(&s.requests, &s.events, &[]);
         let options = window_options(&events, &estimates, &catalog, &samples);
@@ -2912,7 +2913,7 @@ mod tests {
             ScanOptions {
                 discovery: DiscoveryOptions {
                     home: text(&w.home),
-                    env: Env::new(),
+                    env: Env::default(),
                     claude_dirs: vec![],
                     codex_dirs: vec![],
                     t3_dirs: vec![],
@@ -3118,7 +3119,7 @@ mod tests {
             .into_iter()
             .collect();
             let mut user = json!({ "model_auto_compact_token_limit": 400000 });
-            p.compaction = controls(Harness::Codex, user.clone(), &Env::new(), "config.toml");
+            p.compaction = controls(Harness::Codex, user.clone(), &Env::default(), "config.toml");
             s.requests[0].parts.truncate(1);
             for r in &mut s.requests {
                 r.harness = Harness::Codex;
@@ -3175,7 +3176,7 @@ mod tests {
                 Scalar::Text("body_after_prefix".into()),
             );
             user["model_auto_compact_token_limit_scope"] = json!("body_after_prefix");
-            unsupported.compaction = controls(Harness::Codex, user, &Env::new(), "config.toml");
+            unsupported.compaction = controls(Harness::Codex, user, &Env::default(), "config.toml");
             let u = check(&unpriced);
             assert_eq!(u.base.action, Action::Advisory);
             assert_eq!(u.scenarios[0].savings_usd, None);
@@ -3213,7 +3214,7 @@ mod tests {
                 harness: Harness::Claude,
                 user: &user,
                 managed: &managed,
-                env: &Env::new(),
+                env: &Env::default(),
                 file: "user.json",
                 managed_file: "managed.json",
                 scopes: None,
@@ -3452,7 +3453,7 @@ mod tests {
                     request.parts[0].usage = writes(150000);
                     s.requests.push(request);
                 }
-                let mut env = Env::new();
+                let mut env = Env::default();
                 if environment {
                     env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "400000".into());
                 }
@@ -3465,7 +3466,7 @@ mod tests {
                 let report = report(&s);
                 let checks = windows(&report);
                 assert_eq!(checks.len(), 1);
-                let models: std::collections::HashSet<_> =
+                let models: crate::collections::HashSet<_> =
                     checks[0].models.iter().map(|m| m.as_deref()).collect();
                 assert_eq!(
                     models,

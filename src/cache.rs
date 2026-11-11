@@ -1,8 +1,8 @@
 //! Explicit cache-state replay for Claude TTL counterfactuals.
 
-use std::collections::HashMap;
+use crate::collections::{HashMap, IndexMap};
 
-use indexmap::{Equivalent, IndexMap};
+use indexmap::Equivalent;
 
 use crate::model::{
     Agent, BillingPart, CachePredecessor, CacheReplayEvidence, EventKind, Harness, KnownState,
@@ -340,7 +340,7 @@ pub struct CacheBoundaries {
 impl CacheBoundaries {
     /// Index every Claude compaction boundary under each of its origin sessions.
     pub fn new<'a>(events: impl IntoIterator<Item = &'a StructuralEvent>) -> Self {
-        let mut times: HashMap<String, Vec<Millis>> = HashMap::new();
+        let mut times: HashMap<String, Vec<Millis>> = HashMap::default();
         for event in events {
             if event.harness != Harness::Claude || event.kind != EventKind::Compaction {
                 continue;
@@ -376,7 +376,7 @@ impl<'b> CacheChain<'b> {
     /// A chain whose histories reset at every boundary in any of `boundaries`.
     pub fn new(boundaries: impl IntoIterator<Item = &'b CacheBoundaries>) -> Self {
         Self {
-            sessions: HashMap::new(),
+            sessions: HashMap::default(),
             boundaries: boundaries.into_iter().collect(),
             order: 0,
         }
@@ -389,7 +389,7 @@ impl<'b> CacheChain<'b> {
         let ttl = touch.ttl;
         if !self.sessions.contains_key(&r.session) {
             let session = Session {
-                histories: IndexMap::new(),
+                histories: IndexMap::default(),
                 cursors: vec![0; self.boundaries.len()],
             };
             self.sessions.insert(r.session.clone(), session);
@@ -418,7 +418,7 @@ impl<'b> CacheChain<'b> {
             } else {
                 None
             };
-            let mut candidates: IndexMap<i64, &State> = IndexMap::new();
+            let mut candidates: IndexMap<i64, &State> = IndexMap::default();
             if let Some(anchor) = anchor {
                 candidates.insert(anchor.order, anchor);
             }
@@ -577,9 +577,9 @@ impl<'b> CacheChain<'b> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collections::HashSet;
     use crate::model::{IdleAttribution, Location, Origin};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request};
-    use std::collections::HashSet;
 
     fn feed(
         chain: &mut CacheChain,
@@ -819,7 +819,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,

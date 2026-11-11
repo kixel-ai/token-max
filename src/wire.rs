@@ -5,8 +5,8 @@
 //! then named by index, so the stream stays about as small as the scan it carries. The JSON
 //! report serializes the same types without sharing.
 
+use crate::collections::HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::fmt;
 use std::io::{Read, Write};
 use std::sync::Arc;

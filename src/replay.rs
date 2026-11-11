@@ -1,8 +1,6 @@
 //! Claude cache-TTL checks, compaction summary charges, and the shared report every check joins.
 
-use std::collections::{HashMap, HashSet};
-
-use indexmap::{IndexMap, IndexSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 
 use crate::background::{BackgroundInput, background_checks};
 use crate::bash::{BashInput, bash_checks};
@@ -99,7 +97,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         locations: vec![event.location.clone()],
         accounting: Accounting::Individual,
         attempt: None,
-        server_tools: Some(IndexMap::new()),
+        server_tools: Some(IndexMap::default()),
         requested_speed: None,
         t3: event.t3.clone(),
         parts: vec![BillingPart {
@@ -189,9 +187,9 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
     // union of a boundary's alias groups needs no deduplication.
     let times: Vec<Millis> = (0..all.len()).map(|i| all.get(i).time).collect();
     let (groups, plans) = {
-        let mut group_of: HashMap<&str, usize> = HashMap::new();
+        let mut group_of: HashMap<&str, usize> = HashMap::default();
         let mut groups: Vec<Vec<usize>> = vec![];
-        let mut by_id: HashMap<&str, usize> = HashMap::new();
+        let mut by_id: HashMap<&str, usize> = HashMap::default();
         for i in 0..all.len() {
             let r = all.get(i);
             let g = *group_of.entry(r.session.as_str()).or_insert_with(|| {
@@ -208,7 +206,7 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
         let plans: Vec<Plan> = boundaries
             .iter()
             .map(|e| {
-                let mut aliases: IndexSet<usize> = IndexSet::new();
+                let mut aliases: IndexSet<usize> = IndexSet::default();
                 for origin in &e.origins {
                     if let Some(&g) = group_of.get(&*origin.session) {
                         aliases.insert(g);
@@ -358,7 +356,7 @@ struct Window {
 }
 
 fn default_since(requests: &[&Request], selected: Bucket) -> Window {
-    let mut cohorts: HashMap<String, (Ttl, Option<Millis>)> = HashMap::new();
+    let mut cohorts: HashMap<String, (Ttl, Option<Millis>)> = HashMap::default();
     let mut ambiguous = false;
     for r in requests {
         for p in &r.parts {
@@ -451,9 +449,9 @@ impl<'a> Replayer<'_, 'a> {
             estimated_parts: None,
             attempt_scenario,
         };
-        let mut predecessors = HashSet::new();
+        let mut predecessors = HashSet::default();
         let mut evidence = vec![];
-        let mut items = IndexMap::new();
+        let mut items = IndexMap::default();
         let mut fixed = vec![];
         let replayed = replay_parts(
             self.requests.iter().copied(),
@@ -828,7 +826,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     crate::t3::attribute_compactions(&mut scan, &compactions);
     let scan = scan;
     let estimates = estimate_usage(&scan);
-    let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::default();
     for r in &scan.requests {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
         // JavaScript's default sort compares UTF-16 code units.
@@ -1184,7 +1182,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -1442,7 +1440,7 @@ mod tests {
     #[test]
     fn scenario_invariant_unknown_server_fees_do_not_veto() {
         let first = Request {
-            server_tools: Some(IndexMap::from([("code_execution_requests".into(), 1)])),
+            server_tools: Some(IndexMap::from_iter([("code_execution_requests".into(), 1)])),
             ..make_request()
         };
         let mut next = Request {

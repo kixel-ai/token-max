@@ -1,8 +1,7 @@
 //! What each piece of always-sent context cost, and the setting that turns it off.
 
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 
-use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
@@ -676,12 +675,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let components: HashMap<&str, &Component> =
         scan.components.iter().map(|c| (c.id.as_str(), c)).collect();
     let mut interned = Pieces::default();
-    let mut owners: HashMap<Vec<String>, usize> = HashMap::new();
+    let mut owners: HashMap<Vec<String>, usize> = HashMap::default();
     let mut owner_profiles: Vec<Vec<String>> = vec![];
-    let mut rows: IndexMap<(usize, usize), Row> = IndexMap::new();
-    let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::new();
-    let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::new();
-    let mut previous: HashMap<&str, Prior<'_>> = HashMap::new();
+    let mut rows: IndexMap<(usize, usize), Row> = IndexMap::default();
+    let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::default();
+    let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::default();
+    let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -823,7 +822,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .map_or_else(Vec::new, |p| pricing_assumptions(catalog, r, p));
         let mut unique: Vec<usize> = vec![];
         {
-            let mut seen = HashSet::new();
+            let mut seen = HashSet::default();
             for piece in &parts {
                 for key in std::iter::once(piece.key).chain(interned.kinds[piece.key].parent) {
                     if seen.insert(key) {
@@ -870,7 +869,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     owner,
                     key,
                     time: Millis::MIN,
-                    assumptions: IndexSet::new(),
+                    assumptions: IndexSet::default(),
                 }
             });
             row.cost.requests += 1;
@@ -961,7 +960,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         .filter(|&input| input <= end)
                         .map(|i| (i, prior))
                 });
-            let mut charged: IndexMap<usize, (f64, f64, bool)> = IndexMap::new();
+            let mut charged: IndexMap<usize, (f64, f64, bool)> = IndexMap::default();
             let mut offset = 0.0;
             for piece in &parts {
                 let tokens = size(piece);
@@ -1045,8 +1044,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     // Copied histories can leave a call and the requests around it with different
     // profile sets, and a copy cannot say which profile made the call, so it
     // counts for every row of its tool that shares a profile with it.
-    let mut families: HashMap<(ContextKind, &str), Vec<usize>> = HashMap::new();
-    let mut skill_families: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut families: HashMap<(ContextKind, &str), Vec<usize>> = HashMap::default();
+    let mut skill_families: HashMap<usize, Vec<usize>> = HashMap::default();
     for (index, row) in rows.values_mut().enumerate() {
         let kind = row.cost.kind;
         if !matches!(
@@ -1067,9 +1066,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             families.entry((kind, name)).or_default().push(index);
         }
     }
-    let mut targets: HashMap<String, Vec<usize>> = HashMap::new();
-    let mut ambiguous_targets = HashSet::new();
-    let mut fallback_targets = HashSet::new();
+    let mut targets: HashMap<String, Vec<usize>> = HashMap::default();
+    let mut ambiguous_targets = HashSet::default();
+    let mut fallback_targets = HashSet::default();
     for (index, row) in rows.values().enumerate() {
         let Some(skill) = &row.cost.skill else {
             continue;
@@ -1094,8 +1093,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         targets.entry(ambiguous.clone()).or_default().push(index);
         ambiguous_targets.insert(ambiguous);
     }
-    let mut last: HashMap<usize, Millis> = HashMap::new();
-    let mut turns = HashSet::new();
+    let mut last: HashMap<usize, Millis> = HashMap::default();
+    let mut turns = HashSet::default();
     let mut credit = |indices: Option<&Vec<usize>>, observed: ObservedUse<'_>| {
         let ambiguous = observed.ambiguous
             || (observed.fallback
@@ -1211,7 +1210,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         );
     }
     // Results count as their tool's uses, and the largest one sizes its output cap.
-    let mut largest: HashMap<usize, i64> = HashMap::new();
+    let mut largest: HashMap<usize, i64> = HashMap::default();
     for t in &scan.tool_results {
         for &index in families
             .get(&(ContextKind::ToolOutput, t.name.as_str()))
@@ -1231,7 +1230,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .into_iter()
         .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
         .collect();
-    let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::new();
+    let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::default();
     // Native MCP completions name the raw server and tool. Model-facing names
     // can be sanitized or shortened and cannot safely supply a deny-list entry.
     let raw_tools: HashSet<(&str, &str)> = scan
@@ -1311,7 +1310,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .collect();
     let mut result: Vec<_> = result.into_iter().map(|(_, _, c)| c).collect();
     for (owner, shown) in latest_catalogs {
-        let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::new();
+        let mut duplicates: HashMap<&str, Vec<usize>> = HashMap::default();
         for id in shown {
             let c = components[&**id];
             if c.category != Category::SkillListing {
@@ -1810,7 +1809,7 @@ mod tests {
         ] {
             let servers: Vec<&[String]> = declared.iter().map(Vec::as_slice).collect();
             let mut interned = Pieces::default();
-            let parts = codex_pieces(&schema, &servers, &HashMap::new(), &mut interned);
+            let parts = codex_pieces(&schema, &servers, &HashMap::default(), &mut interned);
             let key = mcp_detail(&schema, parts[0].0, &mut interned);
             let tool = &interned.kinds[key];
             assert_eq!(tool.kind, ContextKind::McpTool);

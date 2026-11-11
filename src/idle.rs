@@ -1,13 +1,12 @@
 //! Idle compaction checks: find idle request gaps, replay a summary at the estimated
 //! near-expiry trigger with idle compaction on and off, and compare the aggregate cost.
 
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use indexmap::map::Entry;
-use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 
 use crate::cache::{CacheBoundaries, ttl_milliseconds};
@@ -205,7 +204,8 @@ fn settings_control(profile: &Profile) -> IdleControl {
         config: &config,
         file: &profile.settings_file,
     }];
-    let mut control = idle_controls(&scopes, &Env::new()).unwrap_or_else(|error| panic!("{error}"));
+    let mut control =
+        idle_controls(&scopes, &Env::default()).unwrap_or_else(|error| panic!("{error}"));
     if profile.t3.is_some() {
         control.ttl = Some(profile.ttl.clone());
         control.compaction = Some(profile.compaction.clone());
@@ -226,7 +226,7 @@ impl<'p> Scopes<'p> {
         Self {
             profile,
             fallback: OnceCell::new(),
-            windows: RefCell::new(HashMap::new()),
+            windows: RefCell::new(HashMap::default()),
         }
     }
 
@@ -376,13 +376,13 @@ impl<'r> ReplayIndex<'r> {
         since: Millis,
     ) -> Self {
         let mut index = Self {
-            conversations: IndexMap::new(),
-            events: HashMap::new(),
-            requests: HashMap::new(),
-            boundaries: HashMap::new(),
-            by_id: HashMap::new(),
-            selected_events: HashSet::new(),
-            calibration: HashMap::new(),
+            conversations: IndexMap::default(),
+            events: HashMap::default(),
+            requests: HashMap::default(),
+            boundaries: HashMap::default(),
+            by_id: HashMap::default(),
+            selected_events: HashSet::default(),
+            calibration: HashMap::default(),
         };
         for r in requests.iter().map(AsRef::as_ref) {
             if r.agent != Agent::Subagent && r.parts.iter().any(is_conversation) {
@@ -400,7 +400,7 @@ impl<'r> ReplayIndex<'r> {
             index.by_id.insert(r.id.as_str(), r);
         }
         // The last event with each identity, like a JavaScript Map built from the array.
-        let mut by_id: HashMap<&str, &StructuralEvent> = HashMap::new();
+        let mut by_id: HashMap<&str, &StructuralEvent> = HashMap::default();
         for &e in events {
             by_id.insert(e.id.as_str(), e);
             if e.time >= since {
@@ -417,7 +417,7 @@ impl<'r> ReplayIndex<'r> {
                 }
             }
         }
-        let mut groups: HashMap<SampleKey, Vec<&CompactionSample>> = HashMap::new();
+        let mut groups: HashMap<SampleKey, Vec<&CompactionSample>> = HashMap::default();
         for s in &samples.samples {
             if let Some(key) = sample_key(s.request, s.p) {
                 groups.entry(key).or_default().push(s);
@@ -541,7 +541,8 @@ fn warm(now: Millis, time: Option<Millis>, lifetime: Millis) -> bool {
 
 /// Combine states with the same path, keeping first-seen order and dropping zero weights.
 fn merge(states: Vec<State>) -> Vec<State> {
-    let mut grouped: IndexMap<Path, State> = IndexMap::with_capacity(states.len());
+    let mut grouped: IndexMap<Path, State> =
+        IndexMap::with_capacity_and_hasher(states.len(), Default::default());
     for state in states {
         if state.weight == 0.0 {
             continue;
@@ -645,8 +646,8 @@ impl Sum {
         Self {
             known: 0.0,
             total: Some(0.0),
-            unknown: IndexSet::new(),
-            assumptions: IndexSet::new(),
+            unknown: IndexSet::default(),
+            assumptions: IndexSet::default(),
         }
     }
 
@@ -790,7 +791,7 @@ impl<'r, 'x> Runner<'r, 'x> {
         periods: &[IdlePeriod],
         ttls: &Ttls,
     ) -> Self {
-        let mut first: HashMap<&str, usize> = HashMap::new();
+        let mut first: HashMap<&str, usize> = HashMap::default();
         let canonical = periods
             .iter()
             .enumerate()
@@ -817,7 +818,7 @@ impl<'r, 'x> Runner<'r, 'x> {
         scenario: &Ttls,
         late: bool,
     ) -> Vec<Session<'r>> {
-        let mut groups: IndexMap<&str, Vec<usize>> = IndexMap::new();
+        let mut groups: IndexMap<&str, Vec<usize>> = IndexMap::default();
         for (i, p) in self.prepared.iter().enumerate() {
             groups
                 .entry(p.previous.session.as_str())
@@ -827,7 +828,7 @@ impl<'r, 'x> Runner<'r, 'x> {
         groups
             .into_iter()
             .map(|(session, ps)| {
-                let mut idle_by_event: HashMap<&str, usize> = HashMap::new();
+                let mut idle_by_event: HashMap<&str, usize> = HashMap::default();
                 for &i in &ps {
                     if let Some(b) = self.prepared[i].boundary {
                         idle_by_event.insert(b.id.as_str(), i);
@@ -904,7 +905,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             by_period: vec![None; self.prepared.len()],
         };
         let mut resumed = 0.0;
-        let mut charged: HashSet<&str> = HashSet::new();
+        let mut charged: HashSet<&str> = HashSet::default();
         for session in sessions {
             let mut states = vec![State {
                 weight: 1.0,
@@ -1326,9 +1327,9 @@ impl<'a> Profiled<'a> {
             requests: vec![],
         };
         // Later duplicates win, like a JavaScript Map keyed by request and part.
-        let mut replayed: HashMap<String, HashMap<usize, BillingPart>> = HashMap::new();
-        let mut untouched: HashSet<&'a str> = HashSet::new();
-        let no_estimates = IndexMap::new();
+        let mut replayed: HashMap<String, HashMap<usize, BillingPart>> = HashMap::default();
+        let mut untouched: HashSet<&'a str> = HashSet::default();
+        let no_estimates = IndexMap::default();
         for group in self.groups.values() {
             let source = group
                 .iter()
@@ -1410,7 +1411,7 @@ impl<'a> Profiled<'a> {
                         parts.insert(item.part, item.p);
                     }
                     None => {
-                        let parts = HashMap::from([(item.part, item.p)]);
+                        let parts = HashMap::from_iter([(item.part, item.p)]);
                         replayed.insert(item.request.id.clone(), parts);
                     }
                 }
@@ -1469,7 +1470,7 @@ impl<'a> Profiled<'a> {
         let mut prepared = vec![];
         let mut periods = vec![];
         // The first window owning each (owner, model), as `find` would return.
-        let mut lookup: HashMap<(&str, Option<&str>), Option<i64>> = HashMap::new();
+        let mut lookup: HashMap<(&str, Option<&str>), Option<i64>> = HashMap::default();
         for w in windows {
             for model in &w.models {
                 lookup
@@ -1491,8 +1492,8 @@ impl<'a> Profiled<'a> {
             let mut activity_index = 0;
             let mut turn_start = Millis::MIN;
             let mut turn_end = Millis::MIN;
-            let mut pending: HashSet<&str> = HashSet::new();
-            let mut old: HashMap<&str, &Scalar> = HashMap::new();
+            let mut pending: HashSet<&str> = HashSet::default();
+            let mut old: HashMap<&str, &Scalar> = HashMap::default();
             for (position, &r) in group.iter().enumerate() {
                 let scope = self.scopes.scope(r);
                 let c = self.scopes.control(scope);
@@ -1687,7 +1688,7 @@ impl<'a> Profiled<'a> {
             }
         }
         let truthy = |text: &Option<String>| text.clone().filter(|t| !t.is_empty());
-        let mut cohorts: IndexMap<(String, String, String), ActivationCohort> = IndexMap::new();
+        let mut cohorts: IndexMap<(String, String, String), ActivationCohort> = IndexMap::default();
         for (p, item) in periods.iter().zip(&prepared) {
             if p.status != PeriodStatus::Eligible || truthy(&p.resume).is_none() || !item.known_on {
                 continue;
@@ -1848,7 +1849,7 @@ impl<'a> Profiled<'a> {
         });
         let delta_usd = if unknown.is_empty() { delta(&on) } else { None };
         // Group once by size, keeping first-seen size order and period order within each.
-        let mut sizes: IndexMap<Option<i64>, Vec<usize>> = IndexMap::new();
+        let mut sizes: IndexMap<Option<i64>, Vec<usize>> = IndexMap::default();
         for (i, p) in periods.iter().enumerate() {
             sizes.entry(p.context_tokens).or_default().push(i);
         }
@@ -1953,7 +1954,7 @@ fn current_windows(scopes: &Scopes, main: &[&Request]) -> Vec<ScenarioWindow> {
     // A request whose scope was already seen adds no new (owner, model) pair.
     let main_scopes: IndexSet<Scope> = main.iter().map(|r| scopes.scope(r)).collect();
     let mut current_windows: Vec<ScenarioWindow> = vec![];
-    let mut seen: HashSet<(String, Option<&str>)> = HashSet::new();
+    let mut seen: HashSet<(String, Option<&str>)> = HashSet::default();
     for &scope in &main_scopes {
         for &model in &models {
             let c = scopes.window(scope, model);
@@ -2035,13 +2036,13 @@ fn profile_checks<'a>(
     events.sort_by_key(|e| e.time);
     let since = options.since.unwrap_or(first);
     let now = options.now;
-    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for &r in &requests {
         groups.entry(r.session.as_str()).or_default().push(r);
     }
     let mut summaries = Summaries {
-        by_event: HashMap::new(),
-        requests: HashSet::new(),
+        by_event: HashMap::default(),
+        requests: HashSet::default(),
     };
     for s in options.summaries {
         summaries.by_event.insert(s.event.as_str(), s);
@@ -2079,7 +2080,7 @@ fn profile_checks<'a>(
         }
     }
     // Each owner keeps its first position and its last request's control.
-    let mut controls: IndexMap<&str, &IdleControl> = IndexMap::new();
+    let mut controls: IndexMap<&str, &IdleControl> = IndexMap::default();
     for r in &main {
         let c = scopes.control(scopes.scope(r));
         controls.insert(c.owner.as_str(), c);
@@ -2272,7 +2273,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         let samples = compaction_samples(&requests, &events, options.summaries);
         let first = requests.iter().map(|r| r.time).min();
         let since = options.since.or(first);
-        let mut groups = IndexMap::new();
+        let mut groups = IndexMap::default();
         for &r in &requests {
             groups
                 .entry(r.session.as_str())
@@ -2284,8 +2285,8 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             estimates: options.estimates,
             all_summaries: options.summaries,
             summaries: Summaries {
-                by_event: HashMap::new(),
-                requests: HashSet::new(),
+                by_event: HashMap::default(),
+                requests: HashSet::default(),
             },
             scopes: Scopes::new(profile),
             since: since.unwrap_or(options.now),
@@ -2435,7 +2436,7 @@ fn t3_comparison(
     let ttl = ttls.main;
     let requests: Vec<&Request> = replay.requests.iter().map(AsRef::as_ref).collect();
     let events = all_events(events, &replay.modeled);
-    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for &r in requests.iter().filter(|r| {
         r.agent == Agent::Main
             && r.t3.as_ref().is_none_or(|t| t.idle_mode.is_none())
@@ -2444,7 +2445,7 @@ fn t3_comparison(
         groups.entry(&r.session).or_default().push(r);
     }
     // Index once: per-request scans of every request and event are quadratic on real histories.
-    let mut natives: HashMap<&str, &Request> = HashMap::new();
+    let mut natives: HashMap<&str, &Request> = HashMap::default();
     for n in options
         .scan
         .requests
@@ -2453,7 +2454,7 @@ fn t3_comparison(
     {
         natives.entry(n.id.as_str()).or_insert(n);
     }
-    let mut boundaries: HashMap<&str, Vec<&StructuralEvent>> = HashMap::new();
+    let mut boundaries: HashMap<&str, Vec<&StructuralEvent>> = HashMap::default();
     for &e in events
         .iter()
         .filter(|e| e.idle_attribution == IdleAttribution::T3)
@@ -2621,7 +2622,7 @@ fn t3_replay(
         Boundary(&'a StructuralEvent),
         Generate(usize),
     }
-    let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::new();
+    let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
     let idle_ids: HashSet<&str> = events
         .iter()
         .filter(|e| e.idle_attribution == IdleAttribution::T3)
@@ -3043,7 +3044,7 @@ mod tests {
             duration_ms: Some(1000),
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -3084,7 +3085,7 @@ mod tests {
         user.insert("idleCompaction".into(), Value::Bool(false));
         user.insert("autoCompactWindow".into(), Value::from(400_000));
         let managed = Map::new();
-        let env = Env::new();
+        let env = Env::default();
         let ttl = |value, owner: &str| crate::model::TtlControl {
             value: Some(value),
             owner: owner.into(),
@@ -3102,7 +3103,7 @@ mod tests {
                 subagent: ttl(Ttl::FiveMinutes, "settings.json:subagentPromptCacheTtl"),
             },
             provider: Some("anthropic".into()),
-            settings: IndexMap::from([("idleCompaction".to_string(), Scalar::Bool(false))]),
+            settings: IndexMap::from_iter([("idleCompaction".to_string(), Scalar::Bool(false))]),
             mcp_servers: vec![],
             compaction: compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
@@ -3129,8 +3130,8 @@ mod tests {
             speed_directories: None,
             idle_directories: None,
             background: vec![],
-            background_directories: IndexMap::new(),
-            background_requests: IndexMap::new(),
+            background_directories: IndexMap::default(),
+            background_requests: IndexMap::default(),
             t3: None,
         }
     }
@@ -3435,7 +3436,7 @@ mod tests {
             assumptions: vec![],
         };
         let policies = Policies {
-            estimates: IndexMap::from([("estimated".to_string(), estimate)]),
+            estimates: IndexMap::from_iter([("estimated".to_string(), estimate)]),
             since: Some(100 * MINUTE),
             ..Policies::default()
         };
@@ -3600,7 +3601,7 @@ mod tests {
             s.events.insert(
                 0,
                 StructuralEvent {
-                    settings: IndexMap::from([
+                    settings: IndexMap::from_iter([
                         ("idleCompaction".to_string(), Scalar::Bool(true)),
                         ("promptCacheTtl".to_string(), Scalar::Text("1h".into())),
                         ("autoCompactEnabled".to_string(), Scalar::Bool(true)),
@@ -4120,7 +4121,7 @@ mod tests {
             scan: &scan,
             catalog: &catalog,
             summaries: &summaries,
-            estimates: &IndexMap::new(),
+            estimates: &IndexMap::default(),
             ttls: &[],
             windows: &[],
             since: None,
@@ -4310,7 +4311,7 @@ mod tests {
                 scan: &scan,
                 catalog: &prices(),
                 summaries: &[],
-                estimates: &IndexMap::new(),
+                estimates: &IndexMap::default(),
                 ttls: &[],
                 windows: &[],
                 since: None,

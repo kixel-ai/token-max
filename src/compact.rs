@@ -177,7 +177,7 @@ fn visibility(scan: &ExposureScan) -> Value {
         .components
         .iter()
         .map(|c| (c.id.as_str(), c))
-        .collect::<std::collections::HashMap<_, _>>();
+        .collect::<crate::collections::HashMap<_, _>>();
     groups(scan.visibility.iter().map(|v| json!({
         "component": v.component.as_ref().map(|id| {
             let c = components[id.as_str()];

@@ -1,6 +1,6 @@
 //! Public API prices from the models.dev catalog, and the rules that apply them to requests.
 
-use std::collections::HashMap;
+use crate::collections::{HashMap, IndexSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use indexmap::IndexSet;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
@@ -552,8 +551,8 @@ pub fn zero_cost() -> Cost {
 pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
     let mut known = 0.0;
     let mut total = Some(0.0);
-    let mut unknown = IndexSet::new();
-    let mut assumptions = IndexSet::new();
+    let mut unknown = IndexSet::default();
+    let mut assumptions = IndexSet::default();
     for cost in costs {
         known += cost.known_usd;
         total = match (total, cost.total_usd) {

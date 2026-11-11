@@ -1,11 +1,9 @@
 //! Keepalive check: price pinging idle sessions just under the cache lifetime, for each cap
 //! on how long to keep pinging, against leaving them idle and idle compaction.
 
-use std::collections::HashMap;
+use crate::collections::{HashMap, IndexMap};
 
 use std::borrow::Cow;
-
-use indexmap::IndexMap;
 
 use crate::cache::{
     CODEX_CACHE_MILLISECONDS, CacheBoundaries, CacheChain, Touch, observed_ttl, ttl_milliseconds,
@@ -262,7 +260,7 @@ impl Replayer<'_> {
         }
         ticks.sort_by_key(|(time, order, _)| (*time, *order));
         let mut requests = vec![];
-        let mut ping_ids = HashMap::new();
+        let mut ping_ids = HashMap::default();
         let mut offset = 0;
         let mut context = None;
         for (time, _, tick) in ticks {
@@ -406,7 +404,7 @@ impl Replayer<'_> {
             &settings,
             &WindowOptions {
                 events: self.events,
-                estimates: &IndexMap::new(),
+                estimates: &IndexMap::default(),
                 catalog: self.options.catalog,
                 samples: self.samples,
                 since: self.since,
@@ -424,9 +422,9 @@ impl Replayer<'_> {
         events.sort_by_key(|e| e.time);
         let mut boundaries = events.into_iter().peekable();
         // Cache entries survive a temporary switch back to another pricing cohort.
-        let mut cache: HashMap<_, [Option<(Millis, i64)>; 2]> = HashMap::new();
+        let mut cache: HashMap<_, [Option<(Millis, i64)>; 2]> = HashMap::default();
         let mut run = Run::default();
-        let mut positions = HashMap::new();
+        let mut positions = HashMap::default();
         let original: HashMap<_, _> = session
             .requests
             .iter()
@@ -435,7 +433,7 @@ impl Replayer<'_> {
             .collect();
         // Only the shared TTL replay decides whether recorded Claude reads survive
         // the chosen policy. The ping simulation separately establishes added warmth.
-        let mut observed_reads = HashMap::new();
+        let mut observed_reads = HashMap::default();
         if let Cache::Claude(ttl) = self.lifetime.cache {
             let boundaries = CacheBoundaries::new(session.events.iter().copied());
             let mut chain = CacheChain::new([&boundaries]);
@@ -598,7 +596,7 @@ impl Replayer<'_> {
 
 /// New prompt input from consecutive un-compacted turns, excluding the preceding reply.
 fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
-    let mut boundaries: HashMap<&str, Vec<Millis>> = HashMap::new();
+    let mut boundaries: HashMap<&str, Vec<Millis>> = HashMap::default();
     for e in scan
         .cache_context
         .boundaries
@@ -616,7 +614,7 @@ fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
         times.sort_unstable();
         times.dedup();
     }
-    let mut previous: HashMap<&str, &Request> = HashMap::new();
+    let mut previous: HashMap<&str, &Request> = HashMap::default();
     let mut growth = vec![];
     for &r in requests {
         let before = previous.insert(&r.session, r);
@@ -728,11 +726,11 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     let samples = compaction_samples(&requests, &all_events, options.summaries);
     let mut window_events = WindowEvents::new(all_events.iter().copied());
     window_events.suppress_idle(since);
-    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for &r in &requests {
         groups.entry(&r.session).or_default().push(r);
     }
-    let mut events: HashMap<&str, Vec<&StructuralEvent>> = HashMap::new();
+    let mut events: HashMap<&str, Vec<&StructuralEvent>> = HashMap::default();
     for e in options
         .scan
         .cache_context
@@ -969,7 +967,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     let elapsed = options.now - since;
     Some(KeepaliveCheck {
         base: CheckBase {
-            profile: profile.id.clone(), history_profiles: main.iter().flat_map(|r| r.profiles.clone()).collect::<indexmap::IndexSet<_>>().into_iter().collect(),
+            profile: profile.id.clone(), history_profiles: main.iter().flat_map(|r| r.profiles.clone()).collect::<crate::collections::IndexSet<_>>().into_iter().collect(),
             evidence: if priced > 0 {Evidence::Estimated} else {Evidence::Unknown},
             action: Action::Advisory, current: None, recommended,
             owner: match profile.harness {
@@ -1087,7 +1085,7 @@ mod tests {
             idle: &[],
             windows: &[],
             summaries: &[],
-            estimates: &IndexMap::new(),
+            estimates: &IndexMap::default(),
             since: scan.since,
             now,
         });
@@ -1325,7 +1323,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: crate::model::IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -1395,7 +1393,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -1408,7 +1406,7 @@ mod tests {
         let profile = one_hour();
         let scan = scan(profile.clone(), requests);
         let catalog = prices();
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let options = KeepaliveOptions {
             scan: &scan,
             catalog: &catalog,
@@ -1643,7 +1641,7 @@ mod tests {
                 user: &serde_json::from_value(serde_json::json!({"autoCompactWindow": 400_000}))
                     .unwrap(),
                 managed: &serde_json::Map::new(),
-                env: &crate::controls::Env::new(),
+                env: &crate::controls::Env::default(),
                 file: "settings.json",
                 managed_file: "managed.json",
                 scopes: None,
@@ -1700,7 +1698,7 @@ mod tests {
         scan.events = vec![event];
         let catalog = prices();
         let summaries = crate::replay::compaction_charges(&mut scan, &catalog);
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let since = Some(100 * MINUTE);
         let windows = crate::compaction::compaction_checks(&crate::compaction::CompactionOptions {
             scan: &scan,
@@ -1802,7 +1800,7 @@ mod tests {
             r.parts[0].usage.write1h = Some(1000);
         }
         let catalog = prices();
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let idle = crate::idle::idle_checks(&crate::idle::IdleOptions {
             scan: &scan,
             catalog: &catalog,

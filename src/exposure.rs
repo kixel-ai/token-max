@@ -3,10 +3,9 @@
 //! Raw records are observed transiently; only counts, fingerprints, opaque identities and
 //! readable names (tools, skills, servers, file paths) are retained.
 
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::sync::Arc;
 
-use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
@@ -39,7 +38,7 @@ pub fn cohort(r: &Request) -> String {
 /// Calibrate complete text-only wire inputs against observed, single-request input totals.
 pub fn calibrate(scan: &ExposureScan, requests: &[Request]) -> Vec<Calibration> {
     let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (r.id.as_str(), r)).collect();
-    let mut result: IndexMap<String, (Calibration, i64, i64)> = IndexMap::new();
+    let mut result: IndexMap<String, (Calibration, i64, i64)> = IndexMap::default();
     for exposure in &scan.requests {
         let Some(r) = by_id.get(exposure.request.as_str()) else {
             continue;
@@ -365,47 +364,47 @@ impl ExposureCollector {
     pub fn new(since: Option<Millis>) -> Self {
         Self {
             since,
-            calls: IndexMap::new(),
-            results: IndexMap::new(),
-            names: HashSet::new(),
-            call_tools: HashMap::new(),
-            held: IndexMap::new(),
+            calls: IndexMap::default(),
+            results: IndexMap::default(),
+            names: HashSet::default(),
+            call_tools: HashMap::default(),
+            held: IndexMap::default(),
             held_epoch: 0,
             epochs: 0,
             held_snapshot: None,
-            provided: HashSet::new(),
-            components: IndexMap::new(),
-            invocations: IndexMap::new(),
-            observations: HashMap::new(),
+            provided: HashSet::default(),
+            components: IndexMap::default(),
+            invocations: IndexMap::default(),
+            observations: HashMap::default(),
             file: None,
-            active: IndexMap::new(),
-            pending_removed: IndexSet::new(),
+            active: IndexMap::default(),
+            pending_removed: IndexSet::default(),
             session: Text::from(""),
             session_cache: None,
             turn: None,
             turn_from_user: false,
             turn_available: false,
-            turn_aliases: HashMap::new(),
+            turn_aliases: HashMap::default(),
             client: None,
             version: None,
             uncertain: true,
-            deferred: IndexSet::new(),
-            digests: HashMap::new(),
-            known_skills: HashMap::new(),
-            codex_skill_paths: HashMap::new(),
-            typed_skills: HashSet::new(),
-            synced_skills: HashMap::new(),
-            user_aliases: HashMap::new(),
-            surfaced: HashMap::new(),
-            shapes: HashMap::new(),
-            blobs: HashMap::new(),
+            deferred: IndexSet::default(),
+            digests: HashMap::default(),
+            known_skills: HashMap::default(),
+            codex_skill_paths: HashMap::default(),
+            typed_skills: HashSet::default(),
+            synced_skills: HashMap::default(),
+            user_aliases: HashMap::default(),
+            surfaced: HashMap::default(),
+            shapes: HashMap::default(),
+            blobs: HashMap::default(),
             blob_epoch: 0,
-            prefixes: HashMap::new(),
+            prefixes: HashMap::default(),
             invalidated: false,
-            pending_tools: HashMap::new(),
-            lists: HashSet::new(),
+            pending_tools: HashMap::default(),
+            lists: HashSet::default(),
             previous: None,
-            views: HashSet::new(),
+            views: HashSet::default(),
         }
     }
 
@@ -605,7 +604,7 @@ impl ExposureCollector {
             ids
         };
         // Final views by the one observed view they derive from.
-        let mut settled: HashMap<usize, Arc<ExposureView>> = HashMap::new();
+        let mut settled: HashMap<usize, Arc<ExposureView>> = HashMap::default();
         let mut exposures = Vec::with_capacity(requests.len());
         for r in requests {
             let found: Vec<&Arc<ExposureView>> = r
@@ -689,7 +688,7 @@ impl ExposureCollector {
         let mut used = vec![false; components.len()];
         let mut queue = vec![];
         // Lists are interned, so each distinct one is visited once.
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for e in &exposures {
             let v = &e.view;
             let lists = [
@@ -1757,7 +1756,7 @@ impl ExposureCollector {
                         })
                 }));
         let mut block_ids = vec![];
-        let mut typed_aliases = HashMap::new();
+        let mut typed_aliases = HashMap::default();
         for (index, v) in blocks.iter().enumerate() {
             let b = object(v);
             let source = match present(raw.get("uuid")).or(present(item.get("id"))) {
@@ -2174,8 +2173,8 @@ fn visibility(
     }
     // Requests with the same cohort and listed components open the same windows. Grouping
     // them first preserves the order in which each window first appears.
-    let mut cohorts: HashMap<Cohort<'_>, usize> = HashMap::new();
-    let mut groups: IndexMap<(usize, usize, usize), Group<'_>> = IndexMap::new();
+    let mut cohorts: HashMap<Cohort<'_>, usize> = HashMap::default();
+    let mut groups: IndexMap<(usize, usize, usize), Group<'_>> = IndexMap::default();
     for (r, e) in requests.iter().zip(exposures) {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
         profiles.sort_unstable();
@@ -2196,7 +2195,7 @@ fn visibility(
         let g = groups.entry(key).or_insert_with(|| Group {
             r,
             view: e.view.clone(),
-            sessions: HashSet::new(),
+            sessions: HashSet::default(),
             since: r.time,
             until: r.end_time,
         });
@@ -2204,7 +2203,7 @@ fn visibility(
         g.since = g.since.min(r.time);
         g.until = g.until.max(r.end_time);
     }
-    let mut windows: IndexMap<(usize, Option<Text>), Window<'_>> = IndexMap::new();
+    let mut windows: IndexMap<(usize, Option<Text>), Window<'_>> = IndexMap::default();
     for (&(cohort, _, _), g) in &groups {
         let listed: Vec<Option<Text>> =
             if g.view.components.is_empty() && g.view.candidates.is_empty() {
@@ -2222,7 +2221,7 @@ fn visibility(
                 .entry((cohort, component))
                 .or_insert_with(|| Window {
                     r: g.r,
-                    sessions: HashSet::new(),
+                    sessions: HashSet::default(),
                     since: since.unwrap_or(g.r.time),
                     until: g.r.end_time,
                 });
@@ -2252,7 +2251,7 @@ fn visibility(
         }
     }
     // A window counts a call recorded in any of its sessions, so per-session summaries combine.
-    let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::new();
+    let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::default();
     for i in invocations
         .values()
         .filter(|i| since.is_none_or(|s| i.time >= s))
@@ -2383,7 +2382,7 @@ fn output_characters(output: Option<&Value>) -> (i64, bool) {
 
 /// Count each tool's results and its largest one per profile set, after merging copies.
 fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
-    let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::new();
+    let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::default();
     for r in results {
         let mut profiles = r.profiles;
         profiles.sort_by(|a, b| js_cmp(a, b));
@@ -2405,7 +2404,7 @@ fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
 
 /// Count each tool's calls per profile set, after merging copies of one call.
 fn tool_calls(calls: impl Iterator<Item = ToolCall>) -> Vec<ToolCalls> {
-    let mut result: IndexMap<(Text, Vec<Text>), ToolCalls> = IndexMap::new();
+    let mut result: IndexMap<(Text, Vec<Text>), ToolCalls> = IndexMap::default();
     for call in calls {
         let mut profiles = call.profiles;
         profiles.sort_by(|a, b| js_cmp(a, b));

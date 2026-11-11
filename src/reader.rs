@@ -3,13 +3,12 @@
 //! Raw records live only while one line is normalized; retained data holds counts, opaque
 //! identities, times and whitelisted structural metadata.
 
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::fs::File;
 use std::io::{ErrorKind, Read};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -269,7 +268,7 @@ fn numeric_tools(raw: Option<&Value>) -> Result<Option<IndexMap<String, i64>>, S
         Some(Value::Object(map)) => map,
         Some(_) => return Err(ScanError::new("invalid server tool usage")),
     };
-    let mut result = IndexMap::new();
+    let mut result = IndexMap::default();
     for (key, value) in js_entries(map) {
         if let Some(name) = label(&Value::String(key.to_string())) {
             let requests = count(Some(value))?
@@ -655,7 +654,7 @@ fn event(
         duration_ms: None,
         tool: None,
         tool_id: None,
-        settings: IndexMap::new(),
+        settings: IndexMap::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
         t3: None,
@@ -1546,14 +1545,14 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let mut reader = Reader {
         since,
         exposure: ExposureCollector::new(since),
-        requests: IndexMap::new(),
+        requests: IndexMap::default(),
         events: vec![],
-        event_ids: HashMap::new(),
-        compact_parents: HashMap::new(),
-        notice_parents: HashMap::new(),
-        refs: IndexMap::new(),
-        issues: IndexSet::new(),
-        modern_totals: HashSet::new(),
+        event_ids: HashMap::default(),
+        compact_parents: HashMap::default(),
+        notice_parents: HashMap::default(),
+        refs: IndexMap::default(),
+        issues: IndexSet::default(),
+        modern_totals: HashSet::default(),
         legacy: vec![],
     };
     for snapshot in &mut snapshots {
@@ -1597,7 +1596,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             add(&mut requests, r.clone());
         }
     }
-    let mut ref_to_request: HashMap<String, String> = HashMap::new();
+    let mut ref_to_request: HashMap<String, String> = HashMap::default();
     for r in requests.values_mut() {
         if let Some(reference) = &r.reference {
             ref_to_request.insert(reference.clone(), r.id.clone());
@@ -1647,7 +1646,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     }
     // Events share their pricing context, so fill each shared copy once per provider. Each
     // entry keeps its source alive, so no other copy can reuse the address it is keyed by.
-    let mut filled: HashMap<(usize, String), (Arc<Pricing>, Arc<Pricing>)> = HashMap::new();
+    let mut filled: HashMap<(usize, String), (Arc<Pricing>, Arc<Pricing>)> = HashMap::default();
     for e in &mut events {
         if let Some(reference) = e.request.as_deref().and_then(|r| r.strip_prefix("ref:")) {
             e.request = ref_to_request.get(reference).cloned();
@@ -1794,7 +1793,7 @@ fn attribute_idle(
         })
         .collect();
     for (time, sessions, mut parent) in notices {
-        let mut visited = HashSet::new();
+        let mut visited = HashSet::default();
         while let Some(current) = parent
             && visited.insert(current)
         {
@@ -1849,7 +1848,7 @@ mod tests {
         r.parts[0].tier = Some("priority".into());
         let mut missing = r.clone();
         missing.parts[0].tier = None;
-        let mut requests = IndexMap::new();
+        let mut requests = IndexMap::default();
         add(&mut requests, r.clone());
         add(&mut requests, missing.clone());
         assert_eq!(requests[&r.id].parts[0].tier.as_deref(), Some("priority"));

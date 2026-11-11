@@ -126,7 +126,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
     ScanOptions {
         discovery: DiscoveryOptions {
             home: text(&w.home),
-            env: Env::new(),
+            env: Env::default(),
             claude_dirs: vec![],
             codex_dirs: vec![],
             t3_dirs: vec![],

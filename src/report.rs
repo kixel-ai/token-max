@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use indexmap::{IndexMap, IndexSet};
+use crate::collections::{IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -423,8 +423,8 @@ impl<'a> Out<'a> {
         self.notes("Assumption", &value.assumptions);
     }
     fn witnesses(&mut self, values: &[CacheReplayEvidence]) {
-        let mut groups = IndexMap::new();
-        let mut predecessors = IndexMap::new();
+        let mut groups = IndexMap::default();
+        let mut predecessors = IndexMap::default();
         let mut unrecorded = 0;
         for e in values {
             let group = groups
@@ -536,7 +536,7 @@ impl<'a> Out<'a> {
 
 /// Render all findings in a wrapping flow, with grouped evidence in details.
 pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
-    let mut profiles = IndexMap::new();
+    let mut profiles = IndexMap::default();
     for p in &report.scan.profiles {
         profiles.insert(p.id.as_str(), p);
     }
@@ -1277,7 +1277,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         CheckResult::T3Idle(i) => {
             for comparison in [&i.current_settings, &i.after_recommendations] {
                 out.field("T3 period baseline", &comparison.baseline);
-                let mut groups = IndexMap::new();
+                let mut groups = IndexMap::default();
                 for p in &comparison.periods {
                     *groups
                         .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
@@ -1346,7 +1346,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                         token_range(scenario.by_context.iter().filter_map(|s| s.tokens))
                     ),
                 );
-                let mut groups = IndexMap::new();
+                let mut groups = IndexMap::default();
                 for p in &scenario.periods {
                     *groups
                         .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
@@ -1473,11 +1473,11 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
             }
         }
     }
-    let mut attempts = IndexMap::new();
+    let mut attempts = IndexMap::default();
     for e in r.usage_estimates {
         let group = attempts
             .entry((e.evidence, e.max_output_tokens, e.reason.as_str()))
-            .or_insert((0usize, e, IndexSet::new()));
+            .or_insert((0usize, e, IndexSet::default()));
         group.0 += 1;
         group.2.extend(&e.assumptions);
     }
@@ -1866,7 +1866,7 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
         return;
     }
     out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. A request and confirmed loads in one user turn count as one use; absent turn boundaries, evidence is conservatively grouped within its session. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, 0);
-    let mut seen = IndexSet::new();
+    let mut seen = IndexSet::default();
     for c in report
         .context
         .iter()
@@ -1962,7 +1962,7 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
             )]
         }
         Harness::Codex => {
-            let budgets: std::collections::HashSet<Option<usize>> = profiles
+            let budgets: crate::collections::HashSet<Option<usize>> = profiles
                 .iter()
                 .filter(|p| c.profiles.contains(&p.id))
                 .map(|p| match p.settings.get("project_doc_max_bytes") {
@@ -2197,7 +2197,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
         if empty { Action::Advisory } else { r.action }
     };
-    let decided: std::collections::HashSet<String> = checks
+    let decided: crate::collections::HashSet<String> = checks
         .iter()
         .filter(|c| action(c) != Action::Advisory)
         .map(key)
@@ -2610,7 +2610,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
-    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::new();
+    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::default();
     for c in report
         .context
         .iter()
@@ -2752,7 +2752,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
     }
     catalog_guidance(report, out);
-    let mut files: IndexMap<&str, Vec<&Control>> = IndexMap::new();
+    let mut files: IndexMap<&str, Vec<&Control>> = IndexMap::default();
     for c in &off {
         let file = settings_file
             .get(first_profile(c))

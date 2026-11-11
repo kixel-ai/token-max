@@ -1,6 +1,6 @@
 //! Rate-only fast-mode premiums at the current profile's speed setting.
 
-use indexmap::IndexSet;
+use crate::collections::IndexSet;
 
 use crate::controls::claude_fast_support;
 use crate::model::{
@@ -394,7 +394,11 @@ mod tests {
             ..usage
         });
         r.parts = vec![fast, standard];
-        r.server_tools = Some([("web_search_requests".to_string(), 999)].into());
+        r.server_tools = Some(
+            [("web_search_requests".to_string(), 999)]
+                .into_iter()
+                .collect(),
+        );
         scan(control(Some("fast"), true), vec![r])
     }
 
@@ -487,7 +491,8 @@ mod tests {
                 ("a".to_string(), control(Some("ultrafast"), true)),
                 ("b".to_string(), control(Some("standard"), true)),
             ]
-            .into(),
+            .into_iter()
+            .collect(),
         );
         s
     }
@@ -545,7 +550,7 @@ mod tests {
         fn options(w: &Workspace) -> DiscoveryOptions {
             DiscoveryOptions {
                 home: text(&w.home),
-                env: Env::new(),
+                env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 t3_dirs: vec![],
@@ -607,7 +612,7 @@ mod tests {
                         file: "managed",
                     },
                 ],
-                &Env::new(),
+                &Env::default(),
             )
             .unwrap()
         }
@@ -671,7 +676,11 @@ mod tests {
                         ..base
                     },
                 ],
-                server_tools: Some([("web_search_requests".to_string(), 999)].into()),
+                server_tools: Some(
+                    [("web_search_requests".to_string(), 999)]
+                        .into_iter()
+                        .collect(),
+                ),
                 ..request(claude(&s))
             };
             s.requests = vec![r.clone()];
@@ -803,7 +812,8 @@ mod tests {
                     ("CLAUDE_CONFIG_DIR".to_string(), text(&w.claude)),
                     ("CLAUDE_CODE_DISABLE_FAST_MODE".to_string(), "1".to_string()),
                 ]
-                .into(),
+                .into_iter()
+                .collect(),
                 ..options(&w)
             });
             assert_eq!(
@@ -1020,7 +1030,8 @@ mod tests {
                         control(Harness::Codex, json!({ "service_tier": "default" })),
                     ),
                 ]
-                .into(),
+                .into_iter()
+                .collect(),
             );
             let p = p.clone();
             s.requests = vec![

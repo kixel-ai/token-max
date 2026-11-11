@@ -1,8 +1,6 @@
 //! Shared cache replay of request parts under chosen TTLs, for every setting consumer.
 
-use std::collections::HashSet;
-
-use indexmap::IndexMap;
+use crate::collections::{HashSet, IndexMap};
 
 use crate::cache::{CacheBoundaries, CacheChain, Replayed, Touch};
 use crate::model::{
@@ -237,7 +235,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: IndexMap::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -259,7 +257,7 @@ mod tests {
         let base = [boundary("base", "a", 300_000)];
         let extra = [boundary("extra", "b", 900_000)];
         let catalog = prices();
-        let estimates = IndexMap::new();
+        let estimates = IndexMap::default();
         let options = ReplayOptions {
             estimates: &estimates,
             catalog: &catalog,

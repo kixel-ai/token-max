@@ -1,11 +1,10 @@
 //! Find Claude and Codex profiles, resolve their current settings and freeze history files.
 
+use crate::collections::{HashSet, IndexMap, IndexSet};
 use std::cmp::Ordering;
-use std::collections::HashSet;
 use std::fs;
 use std::io::ErrorKind;
 
-use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Value};
 
 use crate::controls::{
@@ -471,7 +470,7 @@ const STRUCTURAL_SETTINGS: [&str; 20] = [
 
 /// Retain only settings that current or planned checks consume.
 pub fn structural_settings(config: &Map<String, Value>) -> IndexMap<String, Scalar> {
-    let mut result = IndexMap::new();
+    let mut result = IndexMap::default();
     for key in STRUCTURAL_SETTINGS {
         let value = config.get(key).unwrap_or(&Value::Null);
         let scalar = match value {
@@ -641,7 +640,7 @@ pub fn discover_claude_controls(
     requests: &[Request],
 ) -> Result<(), ScanError> {
     let env = &options.env;
-    let empty = Env::new();
+    let empty = Env::default();
     let default_root = join(&[&options.home, ".claude"]);
     let configured = env.get("CLAUDE_CONFIG_DIR").unwrap_or(&default_root);
     let active = realpath(&resolve(configured)).unwrap_or_default();
@@ -654,8 +653,8 @@ pub fn discover_claude_controls(
         let user = settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
-        let mut speed_directories = IndexMap::new();
-        let mut idle_directories = IndexMap::new();
+        let mut speed_directories = IndexMap::default();
+        let mut idle_directories = IndexMap::default();
         let relevant: Vec<&Request> = requests
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
@@ -793,7 +792,7 @@ pub fn discover_claude_controls(
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
         // /cd reapplies the new env over the old one; removed keys can survive it.
-        let mut session_cwds = std::collections::HashMap::new();
+        let mut session_cwds = crate::collections::HashMap::default();
         for request in requests
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
@@ -1315,7 +1314,7 @@ pub(crate) fn profile(
     let default_root = join(&[&options.home, default_dir]);
     let active = resolve(options.env.get(variable).unwrap_or(&default_root));
     let active = realpath(&active).unwrap_or(active);
-    let empty = Env::new();
+    let empty = Env::default();
     let local_env = if active == canonical {
         &options.env
     } else {
@@ -1481,8 +1480,8 @@ pub(crate) fn profile(
         speed_directories: None,
         idle_directories: None,
         background,
-        background_directories: IndexMap::new(),
-        background_requests: IndexMap::new(),
+        background_directories: IndexMap::default(),
+        background_requests: IndexMap::default(),
         t3: None,
     })
 }
@@ -1494,7 +1493,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
     let explicit = !options.claude_dirs.is_empty()
         || !options.codex_dirs.is_empty()
         || !options.t3_dirs.is_empty();
-    let mut candidates = IndexMap::new();
+    let mut candidates = IndexMap::default();
     let add = |candidates: &mut IndexMap<String, RootStatus>, harness, path: &str, origin| {
         add_root(candidates, explicit, harness, path, origin)
     };
@@ -1559,7 +1558,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
     }
     let mut roots: Vec<RootStatus> = candidates.into_values().collect();
     roots.sort_by(|a, b| locale_compare(&a.path, &b.path));
-    let mut profiles: IndexMap<String, Profile> = IndexMap::new();
+    let mut profiles: IndexMap<String, Profile> = IndexMap::default();
     for root in &mut roots {
         if root.status == RootState::Excluded {
             continue;
@@ -1646,7 +1645,7 @@ mod tests {
     fn options(w: &Workspace) -> DiscoveryOptions {
         DiscoveryOptions {
             home: text(&w.home),
-            env: Env::new(),
+            env: Env::default(),
             claude_dirs: vec![],
             codex_dirs: vec![],
             t3_dirs: vec![],

@@ -1,6 +1,6 @@
 //! Shared data types. Serialized names match JSON report schema version 1.
 
-use indexmap::IndexMap;
+use crate::collections::IndexMap;
 use serde::{Deserialize, Serialize};
 
 /// Milliseconds since the Unix epoch.
@@ -1910,7 +1910,7 @@ pub struct Report {
 #[cfg(test)]
 mod ids_tests {
     use super::{Ids, Text};
-    use std::collections::HashSet;
+    use crate::collections::HashSet;
 
     #[test]
     fn branches_keep_their_flat_values_after_ancestors_are_dropped() {
@@ -1932,7 +1932,7 @@ mod ids_tests {
             serde_json::to_value(&last).unwrap(),
             serde_json::to_value(&flat).unwrap()
         );
-        assert!(HashSet::from([Ids::from(flat)]).contains(&last));
+        assert!(HashSet::from_iter([Ids::from(flat)]).contains(&last));
         assert_ne!(last, Ids::from(texts(&["a", "different", "i"])));
     }
 

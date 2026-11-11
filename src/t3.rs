@@ -1,11 +1,10 @@
 //! T3 discovery and allowlisted metadata, never a second usage or billing ledger.
 
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet, IndexMap};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use indexmap::IndexMap;
 use rusqlite::{Connection, OpenFlags, Transaction};
 use serde::Deserialize;
 use serde::de::IgnoredAny;
@@ -412,7 +411,7 @@ fn text_generation(
             format!("{origin}, but no enabled instance can generate text"),
         )
     };
-    let mut overrides = IndexMap::new();
+    let mut overrides = IndexMap::default();
     for (key, value, usable) in [
         (
             "sourceControlWriterModelSelection",
@@ -485,7 +484,7 @@ pub(crate) fn discover(
             .map(|s| (expand(&options.home, s), true)),
     );
     let mut states = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for (path, required) in paths {
         let path = absolute(path)?;
         let path = match crate::discovery::realpath(&path.to_string_lossy()) {
@@ -500,7 +499,7 @@ pub(crate) fn discover(
                     snapshot_finished_at: None,
                     joined_requests: 0,
                     ambiguous_requests: 0,
-                    unresolved: IndexMap::new(),
+                    unresolved: IndexMap::default(),
                     text_generation: None,
                 });
                 continue;
@@ -551,7 +550,7 @@ pub(crate) fn discover(
             snapshot_finished_at: None,
             joined_requests: 0,
             ambiguous_requests: 0,
-            unresolved: IndexMap::new(),
+            unresolved: IndexMap::default(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
         for (id, instance) in instances {
@@ -1343,7 +1342,7 @@ fn metadata(
         }
     };
     // The native turn and item ids each selected native session needs.
-    let mut wanted: HashMap<(&str, &str), HashSet<&str>> = HashMap::new();
+    let mut wanted: HashMap<(&str, &str), HashSet<&str>> = HashMap::default();
     for r in requests {
         wanted
             .entry((driver(r.harness), r.native_session))
@@ -1357,7 +1356,7 @@ fn metadata(
         /// Linked to the session within the native bound, so it may own it.
         linked: bool,
     }
-    let mut threads: HashMap<(&str, String), Vec<Thread>> = HashMap::new();
+    let mut threads: HashMap<(&str, String), Vec<Thread>> = HashMap::default();
     let mut owner_event = tx.prepare(OWNER_EVENT)?;
     let mut query = tx.prepare(PROVIDER_THREADS)?;
     let mut rows = query.query([bound])?;
@@ -1385,7 +1384,7 @@ fn metadata(
         });
     }
     // Provider turns per native turn/item id, within each selected session's threads.
-    let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::new();
+    let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::default();
     let mut native_refs = tx.prepare(NATIVE_REFS)?;
     for (key, list) in &threads {
         let found = refs.entry(key).or_default();
@@ -1415,7 +1414,7 @@ fn metadata(
         }
     }
     let mut turn_query = tx.prepare(TURN)?;
-    let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::new();
+    let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::default();
     let mut result = Projection::default();
     for r in requests {
         let key = (driver(r.harness), r.native_session.to_string());
@@ -1507,11 +1506,11 @@ pub(crate) fn enrich(
         }
     }
     let harnesses: HashMap<&str, Harness> = projections.iter().map(|r| (r.id, r.harness)).collect();
-    let mut invalid_joins = HashSet::new();
-    let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::new();
-    let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::new();
-    let mut unlinked = HashSet::new();
-    let mut read = HashSet::new();
+    let mut invalid_joins = HashSet::default();
+    let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::default();
+    let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::default();
+    let mut unlinked = HashSet::default();
+    let mut read = HashSet::default();
     for state in states.iter_mut().filter(|s| s.status == "selected") {
         let path = Path::new(&state.path).join("statev2.sqlite");
         if !path.is_file() {
@@ -1605,12 +1604,12 @@ pub(crate) fn enrich(
             .and_then(|p| p.t3.as_ref())
             .map(|t| t.state.clone())
     };
-    let mut ambiguous_profiles = HashSet::new();
-    let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::new();
+    let mut ambiguous_profiles = HashSet::default();
+    let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::default();
     // How each root session's own requests resolved, which its subagents inherit: one
     // profile, or why not. Requests inside the window decide; earlier ones only fill in.
     type Resolution = Result<String, &'static str>;
-    let mut roots: HashMap<((Harness, String), bool), Resolution> = HashMap::new();
+    let mut roots: HashMap<((Harness, String), bool), Resolution> = HashMap::default();
     let resolution = |roots: &HashMap<((Harness, String), bool), Resolution>,
                       root: &(Harness, String)| {
         roots
@@ -1620,7 +1619,7 @@ pub(crate) fn enrich(
     };
     // Roots whose own requests all excluded T3, which their subagents inherit even
     // when the root stays among several native profiles.
-    let mut native_roots: HashMap<((Harness, String), bool), bool> = HashMap::new();
+    let mut native_roots: HashMap<((Harness, String), bool), bool> = HashMap::default();
     let order: Vec<usize> = (0..requests.len())
         .filter(|&i| requests[i].agent != Agent::Subagent)
         .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
@@ -1803,7 +1802,7 @@ pub(crate) fn enrich(
         state.unresolved = causes.into_iter().map(|(c, n)| (c.into(), n)).collect();
     }
     // A uniquely owned session also owns its structural evidence, without assuming a run.
-    let mut sessions: HashMap<(Harness, &str), HashSet<&str>> = HashMap::new();
+    let mut sessions: HashMap<(Harness, &str), HashSet<&str>> = HashMap::default();
     for r in requests.iter() {
         sessions
             .entry((r.harness, &r.session))

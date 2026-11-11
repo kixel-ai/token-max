@@ -2767,7 +2767,7 @@ mod tests {
         assert_eq!(owned, ["large-0", "large-1"]);
         assert_eq!(applied.added.len(), 1);
         assert_eq!(applied.events.len(), 1);
-        assert_eq!(applied.events[0].id, "modeled:large-0:0");
+        assert_eq!(applied.events[0].id.to_string(), "modeled:large-0:0");
         assert_eq!(applied.requests[1].parts[0].usage.input, Some(20000));
         // The second request keeps the removed context; its expired prefix is rewritten cold.
         assert_eq!(applied.requests[2].parts[0].usage.write, Some(20000));

@@ -7,7 +7,7 @@
 
 use std::io::{self, BufReader, BufWriter, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, PoisonError};
 
 use crate::discovery::DiscoveryOptions;
@@ -131,8 +131,18 @@ impl Drop for Session {
     }
 }
 
-/// Scan one destination with its installed `token-max`, failing on any error there.
-pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanError> {
+/// A destination that has started scanning; its scan is read only on [`Connection::receive`],
+/// and dropping it stops the audit.
+pub struct Connection {
+    session: Session,
+    stream: Stream<BufReader<ChildStdout>>,
+    since: Option<Millis>,
+    home: Option<String>,
+}
+
+/// Start scanning one destination with its installed `token-max`, once it shows it matches this
+/// build.
+pub fn connect(destination: &str, since: Option<Millis>) -> Result<Connection, ScanError> {
     let mut command = Command::new("ssh");
     command
         .args(["-T", "-x", "-a"])
@@ -208,42 +218,57 @@ pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanErr
             )
         }));
     }
-    let outcome = stream.outcome();
-    match outcome {
-        Ok(Outcome::Scan(scan)) => {
-            let status = session.stop(false).and_then(|s| s.code());
-            if status != Some(0) {
-                return Err(ScanError::new(format!(
-                    "{destination}: token-max failed after sending its scan ({})",
-                    exit(status)
-                )));
+    Ok(Connection {
+        session,
+        stream,
+        since,
+        home: header.home,
+    })
+}
+
+impl Connection {
+    /// Read the destination's scan, failing on any error there.
+    pub fn receive(self) -> Result<Remote, ScanError> {
+        let Connection {
+            mut session,
+            mut stream,
+            since,
+            home,
+        } = self;
+        let destination = session.destination.clone();
+        match stream.outcome() {
+            Ok(Outcome::Scan(scan)) => {
+                let status = session.stop(false).and_then(|s| s.code());
+                if status != Some(0) {
+                    return Err(ScanError::new(format!(
+                        "{destination}: token-max failed after sending its scan ({})",
+                        exit(status)
+                    )));
+                }
+                if scan.since != since {
+                    return Err(ScanError::new(format!(
+                        "{destination}: token-max scanned a different window than requested"
+                    )));
+                }
+                Ok(Remote { scan: *scan, home })
             }
-            if scan.since != since {
-                return Err(ScanError::new(format!(
-                    "{destination}: token-max scanned a different window than requested"
-                )));
+            Ok(Outcome::Error { message, location }) => {
+                session.stop(true);
+                Err(ScanError {
+                    message: format!("{destination}: {}", terminal_text(&message)),
+                    location,
+                })
             }
-            Ok(Remote {
-                scan: *scan,
-                home: header.home,
-            })
-        }
-        Ok(Outcome::Error { message, location }) => {
-            session.stop(true);
-            Err(ScanError {
-                message: format!("{destination}: {}", terminal_text(&message)),
-                location,
-            })
-        }
-        Err(error) => {
-            let (line, column) = (error.line(), error.column());
-            Err(session.fail(true, |status| match status {
-                Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
-                _ => format!(
-                    "invalid SSH audit stream at line {line}, column {column} ({})",
-                    exit(status)
-                ),
-            }))
+            Err(error) => {
+                let (line, column) = (error.line(), error.column());
+                Err(session.fail(true, |status| match status {
+                    Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
+                    _ => format!(
+                        "invalid SSH audit stream at line {line}, column {column} ({})",
+                        exit(status)
+                    ),
+                }))
+            }
         }
     }
 }

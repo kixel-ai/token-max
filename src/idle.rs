@@ -18,10 +18,11 @@ use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
-    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution, IdleCheck,
-    IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
-    PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar, Scan,
-    ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowControl,
+    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
+    IdleCheck, IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind,
+    PerBucket, PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming,
+    Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate,
+    WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sum, add_costs, price_components, price_part, server_cost,

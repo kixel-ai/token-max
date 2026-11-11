@@ -14,9 +14,10 @@ use crate::skills::skill_file;
 use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
-    Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
-    Millis, Observed, Owner, Profiles, References, Request, RequestEvidence, ResultTotals, Scope, Size,
-    Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
+    Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus,
+    Linkage, Location, Millis, Observed, Owner, Profiles, References, Request, RequestEvidence,
+    ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via,
+    Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -3549,7 +3550,7 @@ mod tests {
         let revision = scan
             .components
             .iter()
-            .find(|c| &*c.id == &**second.candidates.iter().next().unwrap())
+            .find(|c| c.id == *second.candidates.iter().next().unwrap())
             .unwrap();
         assert_eq!(
             revision.instruction_size,
@@ -3597,7 +3598,10 @@ mod tests {
             .unwrap();
         assert_eq!(opaque.size.characters, None);
         // The identity is of the serialized string, quotes included.
-        assert_eq!(opaque.size.fingerprint.to_string(), identity("\"0123456789\""));
+        assert_eq!(
+            opaque.size.fingerprint.to_string(),
+            identity("\"0123456789\"")
+        );
 
         let mut c = ExposureCollector::new(None);
         let mut feed = Feed::new("/p/session.jsonl", Harness::Codex, &["codex"]);
@@ -3857,7 +3861,10 @@ mod tests {
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0].name, identity("s"));
         assert_eq!(bodies[0].targets, [target("skill", "plugin:known")]);
-        assert_eq!(&*bodies[0].provenance, "observed-tool-result-not-wire-proof");
+        assert_eq!(
+            &*bodies[0].provenance,
+            "observed-tool-result-not-wire-proof"
+        );
         assert_eq!(scan.requests[0].view.candidates.len(), 3);
     }
 
@@ -4265,7 +4272,10 @@ mod tests {
             "\"a\\u001f\\\"\\n\u{2028}é\""
         );
         assert_eq!(measure_size(Some("🌲木abc")).characters, Some(5));
-        assert_eq!(measure_size(None).fingerprint.to_string(), identity("opaque"));
+        assert_eq!(
+            measure_size(None).fingerprint.to_string(),
+            identity("opaque")
+        );
         let value = json!({ "name": "x", "n": [1, 2.5] });
         assert_eq!(
             Content::Json(&value).measure().fingerprint.to_string(),

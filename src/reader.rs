@@ -20,8 +20,8 @@ use crate::discovery::{
 };
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness,
-    Id, IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
+    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness, Id,
+    IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
     Request, RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall, Snapshot,
     StructuralEvent, Text, Usage,
 };

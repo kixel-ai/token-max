@@ -194,6 +194,24 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn ids_hold_digests_compactly_and_print_as_recorded() {
+        let hex = identity("event");
+        assert_eq!(Id::from(hex.as_str()), digest("event"));
+        for text in [
+            hex.as_str(),
+            "modeled:claude:abc:0",
+            &hex.to_uppercase(),
+            &hex[1..],
+        ] {
+            let id = Id::from(text);
+            assert_eq!(id.to_string(), text);
+            assert_eq!(serde_json::to_value(&id).unwrap(), json!(text));
+            assert_eq!(serde_json::from_value::<Id>(json!(text)).unwrap(), id);
+        }
+        assert!(matches!(Id::from(hex.to_uppercase()), Id::Text(_)));
+    }
+
+    #[test]
     fn labels_reject_free_text() {
         assert_eq!(
             label(&json!("claude-opus-5-5")),

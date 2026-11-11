@@ -49,12 +49,6 @@ impl From<String> for Id {
     }
 }
 
-impl PartialEq<&str> for Id {
-    fn eq(&self, other: &&str) -> bool {
-        *self == Id::from(*other)
-    }
-}
-
 impl std::fmt::Display for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -78,7 +72,9 @@ impl Serialize for Id {
 
 impl<'de> Deserialize<'de> for Id {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(Id::from(<std::borrow::Cow<'de, str>>::deserialize(deserializer)?.as_ref()))
+        Ok(Id::from(
+            <std::borrow::Cow<'de, str>>::deserialize(deserializer)?.as_ref(),
+        ))
     }
 }
 

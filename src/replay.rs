@@ -14,8 +14,8 @@ use crate::idle::{IdleOptions, idle_checks};
 use crate::keepalive::{KeepaliveOptions, keepalive_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
-    CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness, Id,
-    HistoricalCost, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
+    CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
+    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
     RequestEvidence, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
     UnlinkedSensitivity, Usage, UsageEstimate, WindowBasisKind,
 };

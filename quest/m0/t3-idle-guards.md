@@ -17,10 +17,9 @@ advisory in 0.1.0; drop).
 - Rebuild each gap's guards from T3's `orchestration_events`: thread
   archive, settle and snooze events, pending runtime requests and
   merge-backs, as of the gap.
-- Once this lands with the two required quests, this is the only remaining
+- Once this lands with the required quest, this is the only remaining
   blocker for that mode.
 
 ## Required
 
-- [Price sessions whose T3 owner was removed](/quest/m0/t3-removed-owners.md) - removed-instance sessions stop making current profiles advisory
 - [Resolve the inherited T3 Claude window](/quest/m0/t3-inherited-window.md) - instances that inherit the native window get it priced

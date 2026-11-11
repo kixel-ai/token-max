@@ -565,7 +565,6 @@ mod tests {
             scan(&ScanOptions {
                 discovery,
                 since: None,
-                full: true,
             })
             .unwrap()
         }

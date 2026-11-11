@@ -33,8 +33,6 @@ pub struct ScanOptions {
     pub discovery: DiscoveryOptions,
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,
-    /// Keep evidence that only `--json-full` reports, which no check reads.
-    pub full: bool,
 }
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -1686,7 +1684,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
         since,
-        exposure: ExposureCollector::new(since, options.full),
+        exposure: ExposureCollector::new(since),
         strings: Interner::default(),
         requests: Requests::default(),
         events: vec![],

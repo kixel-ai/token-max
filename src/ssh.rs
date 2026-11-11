@@ -58,13 +58,10 @@ const UNSUPPORTED: i32 = 3;
 const NOT_INSTALLED: i32 = 127;
 const SSH_FAILED: i32 = 255;
 
-fn remote_command(since: Option<Millis>, full: bool) -> String {
+fn remote_command(since: Option<Millis>) -> String {
     let mut command = format!("sh -c '{SCRIPT}' sh --ssh-scan");
     if let Some(since) = since {
         command.push_str(&format!(" --since '{}'", iso(since)));
-    }
-    if full {
-        command.push_str(" --json-full");
     }
     command
 }
@@ -135,7 +132,7 @@ impl Drop for Session {
 }
 
 /// Scan one destination with its installed `token-max`, failing on any error there.
-pub fn audit(destination: &str, since: Option<Millis>, full: bool) -> Result<Remote, ScanError> {
+pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanError> {
     let mut command = Command::new("ssh");
     command
         .args(["-T", "-x", "-a"])
@@ -150,7 +147,7 @@ pub fn audit(destination: &str, since: Option<Millis>, full: bool) -> Result<Rem
         .args(["-o", "ControlPersist=no"])
         .arg("--")
         .arg(destination)
-        .arg(remote_command(since, full))
+        .arg(remote_command(since))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Login scripts may print anything; failures are reported from exit statuses.
@@ -262,7 +259,7 @@ fn exit(status: Option<i32>) -> String {
 ///
 /// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
 /// scan stops when stdin closes, which happens when the coordinator or its connection ends.
-pub fn serve(since: Option<Millis>, full: bool) -> u8 {
+pub fn serve(since: Option<Millis>) -> u8 {
     std::thread::spawn(|| {
         let _ = io::copy(&mut io::stdin(), &mut io::sink());
         std::process::exit(2);
@@ -277,11 +274,7 @@ pub fn serve(since: Option<Millis>, full: bool) -> u8 {
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let discovery = DiscoveryOptions::host()?;
-        scan(&ScanOptions {
-            discovery,
-            since,
-            full,
-        })
+        scan(&ScanOptions { discovery, since })
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
     let (outcome, code) = match result {

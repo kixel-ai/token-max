@@ -1,4 +1,4 @@
-//! Shared data types. Serialized names match JSON report schema version 1.
+//! Shared data types. Serialized names match the JSON report.
 
 use crate::collections::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -1495,7 +1495,6 @@ pub struct Component {
     pub owner: Owner,
     pub group: Option<String>,
     pub provenance: String,
-    pub locations: Vec<Location>,
     pub first_seen: Millis,
     pub current: Current,
     pub scope: Scope,
@@ -1585,7 +1584,6 @@ pub struct Invocation {
     pub version: Option<String>,
     pub time: Millis,
     pub profiles: Vec<String>,
-    pub locations: Vec<Location>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2113,11 +2111,11 @@ pub struct ExposureSummary {
     pub assumptions: Vec<String>,
 }
 
-/// Stable versioned machine output, independent of terminal presentation.
+/// One host's analysis, which `--json` and the text report each present.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
-    /// Always 1.
+    /// Always 2.
     pub schema_version: u32,
     pub generated_at: String,
     pub scan: Scan,

@@ -890,7 +890,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
     out.notes("Exposure assumption", &report.exposure.assumptions);
     out.blank();
     out.line(
-        "Repeated evidence is grouped; cache and attempt identifiers are examples. --json-full provides every period, witness and modeled compaction in the complete structured report (schema version 1).",
+        "Repeated evidence is grouped; cache and attempt identifiers are examples.",
         0,
         0,
     );
@@ -1331,7 +1331,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 out.field(
                     "Idle context sizes",
                     &format!(
-                        "{} distinct sizes ({} unknown); {}; full size and period evidence: --json-full",
+                        "{} distinct sizes ({} unknown); {}",
                         scenario.by_context.len(),
                         scenario
                             .by_context
@@ -1480,8 +1480,11 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
         out.field(
             "Attempt",
             &format!(
-                "{count} attempts; example {}: {}; {}; output budget {} (not observed output); full basis: --json-full",
-                e.request, label(&e.evidence), e.reason, or_unknown(e.max_output_tokens)
+                "{count} attempts; example {}: {}; {}; output budget {} (not observed output)",
+                e.request,
+                label(&e.evidence),
+                e.reason,
+                or_unknown(e.max_output_tokens)
             ),
         );
         for assumption in assumptions {
@@ -3485,7 +3488,7 @@ mod tests {
             speed_check(fast, "explicit fastMode false"),
         ];
         Report {
-            schema_version: 1,
+            schema_version: 2,
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 t3: vec![],
@@ -4326,7 +4329,7 @@ mod tests {
         ));
         assert!(!rendered.contains("Idle period:"));
         assert!(!rendered.contains("Idle by context:"));
-        assert!(rendered.contains("--json-full provides every period"));
+        assert!(rendered.contains("Repeated evidence is grouped"));
         assert_eq!(json(&report), before);
     }
 

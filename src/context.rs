@@ -1391,7 +1391,6 @@ mod tests {
             owner: Owner::Context,
             group: None,
             provenance: "synthetic".into(),
-            locations: vec![],
             first_seen: 0,
             current: crate::model::Current::Unresolved,
             scope: if members.is_empty() {
@@ -1716,7 +1715,6 @@ mod tests {
                 version: None,
                 time,
                 profiles: vec!["b".into()],
-                locations: vec![],
             })
             .collect(),
             ..ExposureScan::default()
@@ -2348,7 +2346,6 @@ mod tests {
             version: None,
             time,
             profiles: vec!["profile".into()],
-            locations: vec![],
         }
     }
 

@@ -992,7 +992,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         max_cost_per_use_usd,
     });
     Ok(Report {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: iso(now),
         prices: PriceSource {
             source: catalog.source.clone(),

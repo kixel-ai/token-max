@@ -234,7 +234,6 @@ pub(crate) fn report(mut report: Report) -> Value {
         "invocations": exposure.invocations.len(), "visibility": visibility,
         "toolCalls": exposure.tool_calls, "toolResults": exposure.tool_results
     });
-    report.schema_version = 2;
     let mut result = value(report);
     result["checks"] = value(checks);
     result["compactions"] = charges;
@@ -268,7 +267,6 @@ mod tests {
             owner: Owner::Skills,
             group: None,
             provenance: "observed-tool-result-not-wire-proof".into(),
-            locations: vec![],
             first_seen: 0,
             current: Current::Unresolved,
             scope: Scope::Component,
@@ -325,7 +323,6 @@ mod tests {
             owner: Owner::Context,
             group: None,
             provenance: "synthetic".into(),
-            locations: vec![],
             first_seen: 0,
             current: Current::Unresolved,
             scope: Scope::Component,

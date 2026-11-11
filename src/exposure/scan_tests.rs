@@ -135,7 +135,6 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             codex_requirements_file: text(&w.home.join("requirements.toml")),
         },
         since,
-        full: true,
     }
 }
 
@@ -1365,9 +1364,11 @@ fn skill_references_need_a_known_catalog_and_native_user_aliases_keep_repeated_m
     .unwrap();
     let requests = kinds(&data.exposure, InvocationKind::SkillRequest);
     assert_eq!(requests.len(), 2);
-    assert!(requests.iter().all(
-        |i| i.identity_basis == IdentityBasis::ContentOccurrence && i.locations.len() == 2
-    ));
+    assert!(
+        requests
+            .iter()
+            .all(|i| i.identity_basis == IdentityBasis::ContentOccurrence)
+    );
     assert_eq!(
         kinds(&data.exposure, InvocationKind::SkillReference).len(),
         4

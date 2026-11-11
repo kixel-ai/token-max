@@ -170,7 +170,6 @@ impl Workspace {
                 codex_requirements_file: text(self.home.join("requirements.toml")),
             },
             since: None,
-            full: true,
         }
     }
 }

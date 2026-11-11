@@ -2999,7 +2999,6 @@ mod tests {
                     codex_requirements_file: text(&w.home.join("requirements.toml")),
                 },
                 since: None,
-                full: true,
             }
         }
 

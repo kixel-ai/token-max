@@ -171,3 +171,9 @@ interleaved lines, several recent). ✅ price a custom `ANTHROPIC_BASE_URL` as
 the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
+
+## Required
+
+- [Price sessions whose T3 owner was removed](/quest/m0/t3-removed-owners.md) - removed-instance sessions stop making current profiles advisory
+- [Resolve the inherited T3 Claude window](/quest/m0/t3-inherited-window.md) - instances that inherit the native window get it priced
+- [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps

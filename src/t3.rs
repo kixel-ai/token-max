@@ -2067,7 +2067,11 @@ mod tests {
             let scan = scan(&w.scan_options()).unwrap();
             let r = &scan.requests[0];
             // Recorded uses follow the request's resolved owners.
-            assert_eq!(scan.exposure.tool_calls[0].profiles, r.profiles.to_vec());
+            let mut owners = r.profiles.to_vec();
+            owners.sort();
+            let mut credited = scan.exposure.tool_calls[0].profiles.clone();
+            credited.sort();
+            assert_eq!(credited, owners);
             let t3 = &scan.t3[0];
             let current = scan
                 .profiles

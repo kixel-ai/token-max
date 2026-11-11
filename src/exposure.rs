@@ -180,7 +180,7 @@ struct FileObservations {
 struct ToolResult {
     tool: Text,
     harness: Harness,
-    session: Text,
+    sessions: Vec<Text>,
     profiles: Vec<Text>,
     characters: i64,
 }
@@ -199,7 +199,7 @@ struct TextPrefix {
 struct ToolCall {
     name: Text,
     harness: Harness,
-    session: Text,
+    sessions: Vec<Text>,
     profiles: Vec<Text>,
     time: Millis,
 }
@@ -574,7 +574,12 @@ impl ExposureCollector {
     }
 
     /// Link derived views to deduplicated requests, retaining conflicts instead of choosing a copy.
-    pub fn finish(self, requests: &[Request], since: Option<Millis>) -> ExposureScan {
+    pub fn finish(
+        self,
+        requests: &[Request],
+        context: &[Request],
+        since: Option<Millis>,
+    ) -> ExposureScan {
         let ExposureCollector {
             calls,
             results,
@@ -679,10 +684,11 @@ impl ExposureCollector {
         drop(views);
         drop(lists);
 
-        // Uses belong to their session's resolved owners, which T3 ownership can narrow
-        // below the profiles sharing the transcript's home.
+        // Uses belong to their sessions' resolved owners, which T3 ownership can narrow
+        // below the profiles sharing the transcript's home. Earlier requests count, since a
+        // session's use can fall inside the window after its last request.
         let mut owners: HashMap<(Harness, &str), Vec<Text>> = HashMap::default();
-        for r in requests {
+        for r in context.iter().chain(requests) {
             let owner = owners.entry((r.harness, &r.session)).or_default();
             for p in r.profiles.iter() {
                 if !owner.iter().any(|o| **o == **p) {
@@ -690,17 +696,27 @@ impl ExposureCollector {
                 }
             }
         }
-        let owned = |harness: Harness, session: &str, profiles: &mut Vec<Text>| {
-            if let Some(owner) = owners.get(&(harness, session)) {
-                profiles.clone_from(owner);
+        // A session without requests keeps the profiles its transcripts gave every copy.
+        let owned = |harness: Harness, sessions: &[Text], profiles: &mut Vec<Text>| {
+            let found: Vec<_> = sessions
+                .iter()
+                .map(|s| owners.get(&(harness, &**s)))
+                .collect();
+            if found.iter().all(Option::is_some) {
+                profiles.clear();
+            }
+            for p in found.into_iter().flatten().flatten() {
+                if !profiles.contains(p) {
+                    profiles.push(p.clone());
+                }
             }
         };
         let calls = calls.into_values().map(|mut c| {
-            owned(c.harness, &c.session, &mut c.profiles);
+            owned(c.harness, &c.sessions, &mut c.profiles);
             c
         });
         let results = results.into_values().map(|mut r| {
-            owned(r.harness, &r.session, &mut r.profiles);
+            owned(r.harness, &r.sessions, &mut r.profiles);
             r
         });
 
@@ -754,19 +770,18 @@ impl ExposureCollector {
                     {
                         i.turn = Some(recorded.clone());
                     }
-                    let mut profiles: Vec<String> = vec![];
-                    for p in i
+                    let found: Vec<_> = i
                         .sessions
                         .iter()
-                        .filter_map(|s| owners.get(&(i.harness, s.as_str())))
-                        .flatten()
-                    {
-                        if !profiles.iter().any(|o| **o == **p) {
-                            profiles.push(p.to_string());
-                        }
+                        .map(|s| owners.get(&(i.harness, s.as_str())))
+                        .collect();
+                    if found.iter().all(Option::is_some) {
+                        i.profiles.clear();
                     }
-                    if !profiles.is_empty() {
-                        i.profiles = profiles;
+                    for p in found.into_iter().flatten().flatten() {
+                        if !i.profiles.iter().any(|o| **o == **p) {
+                            i.profiles.push(p.to_string());
+                        }
                     }
                     i
                 })
@@ -817,13 +832,16 @@ impl ExposureCollector {
                 let entry = ToolCall {
                     name,
                     harness: file.harness,
-                    session: self.session.clone(),
+                    sessions: vec![],
                     profiles: vec![],
                     time,
                 };
                 self.calls.entry(id.to_string()).or_insert(entry)
             }
         };
+        if !entry.sessions.contains(&self.session) {
+            entry.sessions.push(self.session.clone());
+        }
         for profile in &file.profiles {
             if !entry.profiles.contains(profile) {
                 entry.profiles.push(profile.clone());
@@ -852,10 +870,13 @@ impl ExposureCollector {
             .or_insert_with(|| ToolResult {
                 tool,
                 harness: file.harness,
-                session: self.session.clone(),
+                sessions: vec![],
                 profiles: vec![],
                 characters,
             });
+        if !entry.sessions.contains(&self.session) {
+            entry.sessions.push(self.session.clone());
+        }
         for profile in &file.profiles {
             if !entry.profiles.contains(profile) {
                 entry.profiles.push(profile.clone());
@@ -3417,7 +3438,7 @@ mod tests {
                 assistant(1, json!([])),
             ],
         );
-        let scan = c.finish(&[feed.request("r1", 5, Some("api-1"))], None);
+        let scan = c.finish(&[feed.request("r1", 5, Some("api-1"))], &[], None);
         let view = &scan.requests[0].view;
         assert_eq!(view.prefix, 3);
         assert_eq!(view.linkage, Linkage::Wire);
@@ -3502,7 +3523,7 @@ mod tests {
         let requests: Vec<Request> = (1..=4)
             .map(|n| feed.request(&format!("r{n}"), n as u64, Some(&format!("api-{n}"))))
             .collect();
-        let scan = c.finish(&requests, None);
+        let scan = c.finish(&requests, &[], None);
         let items = |n: usize| {
             let references = scan.requests[n].view.references.as_ref().unwrap();
             references
@@ -3566,7 +3587,7 @@ mod tests {
             feed.request("r2", 5, None),
             feed.request("r3", 6, None),
         ];
-        let scan = c.finish(&requests, Some(millis(4)));
+        let scan = c.finish(&requests, &[], Some(millis(4)));
         let [first, second, third] = [0, 1, 2].map(|i| &scan.requests[i].view);
         assert_eq!(first.linkage, Linkage::Chronological);
         assert_eq!(first.coverage, TextCoverage::Partial);
@@ -3627,7 +3648,7 @@ mod tests {
             ],
         );
         let requests = [3, 5, 7].map(|line| feed.request(&format!("r{line}"), line, None));
-        let scan = c.finish(&requests, None);
+        let scan = c.finish(&requests, &[], None);
         assert_eq!(scan.requests[0].view.candidates.len(), 3);
         assert_eq!(scan.requests[1].view.removed.len(), 1);
         assert_eq!(scan.requests[1].view.candidates.len(), 2);
@@ -3704,7 +3725,7 @@ mod tests {
                 assistant(3, call("c3", "mcp__docs__read")),
             ],
         );
-        let scan = c.finish(&[], Some(millis(1)));
+        let scan = c.finish(&[], &[], Some(millis(1)));
         let summary: Vec<(&str, Vec<&str>, u64, Millis)> = scan
             .tool_calls
             .iter()
@@ -3726,6 +3747,30 @@ mod tests {
         let call = &scan.invocations[0];
         assert_eq!(call.kind, InvocationKind::McpCall);
         assert_eq!(call.profiles, ["work", "home"]);
+    }
+
+    #[test]
+    fn uses_follow_every_copying_sessions_owners() {
+        let mut c = ExposureCollector::new(Some(millis(1)));
+        let profiles = ["home", "native", "removed"];
+        let call = |session: &str, second: u32| {
+            json!({ "type": "assistant", "timestamp": at(second), "sessionId": session,
+                    "message": { "content": [tool_use("c1", "Bash", json!({}))] } })
+        };
+        Feed::new("/p/a.jsonl", Harness::Claude, &profiles).all(&mut c, vec![call("s1", 2)]);
+        Feed::new("/p/b.jsonl", Harness::Claude, &profiles).all(&mut c, vec![call("s2", 3)]);
+        let owned = |session: &str, owner: &str| Request {
+            session: identity(session).into(),
+            profiles: vec![owner.to_string()].into(),
+            ..make_request()
+        };
+        // s1's requests all precede the window; s2 copied its call under another owner.
+        let scan = c.finish(
+            &[owned("s2", "home")],
+            &[owned("s1", "removed")],
+            Some(millis(1)),
+        );
+        assert_eq!(scan.tool_calls[0].profiles, ["home", "removed"]);
     }
 
     #[test]
@@ -3752,7 +3797,7 @@ mod tests {
             ],
         );
         let requests = [1, 3, 5, 7].map(|line| feed.request(&format!("r{line}"), line, None));
-        let scan = c.finish(&requests, Some(millis(2)));
+        let scan = c.finish(&requests, &[], Some(millis(2)));
         type Held<'a> = (u64, Vec<(&'a str, i64, bool)>);
         let held: Vec<Held> = scan
             .requests
@@ -3805,7 +3850,7 @@ mod tests {
             ],
         );
         let requests = [feed.request("r", 8, None)];
-        let scan = c.finish(&requests, None);
+        let scan = c.finish(&requests, &[], None);
         let view = &scan.requests[0].view;
         let names: Vec<(&str, Category)> = view
             .candidates
@@ -3862,7 +3907,7 @@ mod tests {
                 assistant(4, json!([])),
             ],
         );
-        let scan = c.finish(&[feed.request("r", 5, None)], None);
+        let scan = c.finish(&[feed.request("r", 5, None)], &[], None);
         let summary: Vec<(InvocationKind, InvocationStatus, Via)> = scan
             .invocations
             .iter()
@@ -3922,7 +3967,7 @@ mod tests {
                     ),
                 ],
             );
-            let scan = c.finish(&[feed.request("r", 3, None)], None);
+            let scan = c.finish(&[feed.request("r", 3, None)], &[], None);
             scan.invocations
                 .iter()
                 .map(|i| (i.kind, i.target.clone(), i.group.clone()))
@@ -3974,7 +4019,7 @@ mod tests {
                 json!({ "type": "token_usage_record", "timestamp": at(2) }),
             ],
         );
-        let scan = c.finish(&[feed.request("r", 4, None)], None);
+        let scan = c.finish(&[feed.request("r", 4, None)], &[], None);
         let uses: Vec<_> = scan
             .invocations
             .iter()
@@ -4019,7 +4064,7 @@ mod tests {
                 user(2, json!(format!("<command-name>/{full}</command-name>"))),
                 assistant(3, json!([tool_use("s", "Skill", json!({ "skill": full }))])),
             ]);
-            let scan = c.finish(&[feed.request("r", 4, None)], None);
+            let scan = c.finish(&[feed.request("r", 4, None)], &[], None);
             let uses: Vec<_> = scan
                 .invocations
                 .iter()
@@ -4060,7 +4105,7 @@ mod tests {
                 assistant(8, json!([])),
             ],
         );
-        let scan = c.finish(&[feed.request("r", 9, None)], None);
+        let scan = c.finish(&[feed.request("r", 9, None)], &[], None);
         let calls: Vec<_> = scan
             .invocations
             .iter()
@@ -4104,7 +4149,7 @@ mod tests {
                 user(5, json!("<command-name>/pdf</command-name>")),
             ],
         );
-        let scan = c.finish(&[feed.request("r", 6, None)], None);
+        let scan = c.finish(&[feed.request("r", 6, None)], &[], None);
         assert!(
             scan.invocations
                 .iter()
@@ -4141,7 +4186,7 @@ mod tests {
             b.all(&mut c, records(second));
             let mut request = a.request("r", 3, None);
             request.locations.extend(b.request("r", 3, None).locations);
-            c.finish(&[request], None)
+            c.finish(&[request], &[], None)
         };
         let same = scan("listing");
         assert_eq!(same.requests[0].view.linkage, Linkage::Chronological);
@@ -4166,7 +4211,7 @@ mod tests {
         assert_eq!(error.message, "invalid context text");
         c.invalidate();
         feed.push(&mut c, assistant(1, json!([]))).unwrap();
-        let scan = c.finish(&[feed.request("r", 2, None)], None);
+        let scan = c.finish(&[feed.request("r", 2, None)], &[], None);
         let view = &scan.requests[0].view;
         assert_eq!(view.coverage, TextCoverage::Unknown);
         assert!(view.reasons.iter().any(|r| r == INVALIDATED));
@@ -4275,7 +4320,7 @@ mod tests {
         let requests: Vec<Request> = (1..=5)
             .map(|n| feed.request(&format!("r{n}"), lines[n - 1], Some(&format!("api-{n}"))))
             .collect();
-        let scan = c.finish(&requests, None);
+        let scan = c.finish(&requests, &[], None);
         let sizes: Vec<Option<i64>> = scan
             .requests
             .iter()
@@ -4366,7 +4411,7 @@ mod tests {
                     "state":{"host_skills":{"body":"- foo: x (file: /skills/foo/SKILL.md)"}}}}),
                 json!({"type":"event_msg", "timestamp":at(1), "payload":{"type":"user_message", "message":"$foo"}}),
             ]);
-            let scan = c.finish(&[feed.request("r", 2, None)], None);
+            let scan = c.finish(&[feed.request("r", 2, None)], &[], None);
             assert_eq!(scan.invocations.len(), 1);
             assert_eq!(scan.invocations[0].kind, InvocationKind::SkillRequest);
         }

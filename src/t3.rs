@@ -686,6 +686,7 @@ pub(crate) fn discover(
                     applicable: enabled && !unresolved_env,
                     minimum_claude_patch: None,
                     comparison_unknown: None,
+                    unset: false,
                 };
             } else if harness == Harness::Claude {
                 profile.compaction.default.comparison_unknown = Some("T3 inherits native per-model/project/launch window controls; effective launch scope is unresolved".into());

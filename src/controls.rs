@@ -5,8 +5,8 @@ use crate::collections::{HashMap, IndexMap};
 use serde_json::{Map, Value};
 
 use crate::model::{
-    BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, Harness, IdleControl,
-    Location, Millis, SpeedControl, WindowControl,
+    BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, EventKind, Harness,
+    IdleAttribution, IdleControl, Location, Millis, Scan, SpeedControl, TunedWindow, WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -486,8 +486,11 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
                 minimum_claude_patch: None,
                 comparison_unknown: (!supported)
                     .then(|| "effective Codex threshold scope is unsupported".into()),
+                unset: false,
             },
             models,
+            capped: false,
+            tuned: IndexMap::default(),
         });
     }
     let env_key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -563,6 +566,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             applicable: value.is_some() && !disabled,
             minimum_claude_patch: Some(if suffix { 304 } else { 288 }),
             comparison_unknown: None,
+            unset: value.is_none() && !disabled,
         })
     };
     for scope in scopes {
@@ -580,6 +584,8 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
     Ok(CompactionControls {
         default: resolve(None)?,
         models,
+        capped: environment.is("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1"),
+        tuned: IndexMap::default(),
     })
 }
 
@@ -640,7 +646,136 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
             ..current.clone()
         };
     }
-    current.clone()
+    let mut control = current.clone();
+    if control.unset
+        && let Some(tuned) = compaction.tuned.get(canonical)
+    {
+        control.reason = tuned.reason.clone();
+        if let Some(value) = tuned.value {
+            control.value = Some(value);
+            control.applicable = true;
+            // Tuned windows differ by model, so only the model's own row changes one alone.
+            if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
+                control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
+            }
+        }
+    }
+    control
+}
+
+/// Claude Code's documented window when none is set, checked 2026-11-11 at
+/// <https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds>.
+const TUNED_MILLION: i64 = 967_000;
+const TUNED_STANDARD: i64 = 200_000;
+
+/// Whether Claude Code documents an undated model as running a native 1M window, or a 200k one;
+/// None for an ID the documented table does not cover.
+fn native_million(model: &str) -> Option<bool> {
+    let family = claude_family(model)?;
+    let mut parts = model["claude-".len() + family.len() + 1..].split('-');
+    let number = |part: &str| {
+        (!part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| part.parse::<u32>().ok())
+            .flatten()
+    };
+    let major = number(parts.next()?)?;
+    let minor = parts.next().map_or(Some(0), number)?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let version = (major, minor);
+    match family {
+        "fable" => Some(true),
+        "sonnet" => Some(version >= (5, 0)),
+        "opus" => Some(version >= (4, 7)),
+        "haiku" if version == (5, 5) => Some(true),
+        "haiku" if version < (5, 5) => Some(false),
+        _ => None,
+    }
+}
+
+/// Fill each Claude profile's tuned window for every model it used: the trigger of its latest
+/// automatic compaction on that model, else Claude Code's documented default.
+pub fn tune_windows(scan: &mut Scan) {
+    let Scan {
+        profiles,
+        requests,
+        events,
+        cache_context,
+        ..
+    } = scan;
+    let undated = |model: &str| strip_dated(model, 8).unwrap_or(model).to_string();
+    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+        let mut largest: IndexMap<String, i64> = IndexMap::default();
+        for r in cache_context.requests.iter().chain(requests.iter()) {
+            if !r.profiles.contains(&profile.id) {
+                continue;
+            }
+            for p in &r.parts {
+                if let Some(model) = &p.model {
+                    let size = largest.entry(undated(model)).or_default();
+                    *size = (*size).max(p.usage.input.unwrap_or(0));
+                }
+            }
+        }
+        let mut observed: IndexMap<String, (Millis, i64)> = IndexMap::default();
+        for e in events.iter() {
+            if let (
+                EventKind::Compaction,
+                Some("auto"),
+                IdleAttribution::Unknown,
+                Some(model),
+                Some(tokens),
+            ) = (
+                e.kind,
+                e.trigger.as_deref(),
+                e.idle_attribution,
+                &e.model,
+                e.pre_tokens,
+            ) && e.profiles.contains(&profile.id)
+                && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+            {
+                let latest = observed.entry(undated(model)).or_insert((e.time, tokens));
+                if e.time >= latest.0 {
+                    *latest = (e.time, tokens);
+                }
+            }
+        }
+        let capped = profile.compaction.capped;
+        for (model, size) in largest {
+            let (value, reason) = match (observed.get(&model), native_million(&model)) {
+                // The cap holds even an explicit window, so a trigger from before it cannot lift it.
+                (_, Some(_)) if capped => (
+                    Some(TUNED_STANDARD),
+                    "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
+                ),
+                (Some(&(_, tokens)), _) => (
+                    Some(tokens),
+                    format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
+                ),
+                (None, Some(true)) => (
+                    Some(TUNED_MILLION),
+                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
+                ),
+                (None, Some(false)) if size <= TUNED_STANDARD => (
+                    Some(TUNED_STANDARD),
+                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
+                ),
+                (None, Some(false)) => (
+                    None,
+                    "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
+                ),
+                (None, None) => (
+                    None,
+                    "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
+                ),
+            };
+            profile
+                .compaction
+                .tuned
+                .insert(model, TunedWindow { value, reason });
+        }
+    }
 }
 
 /// Whether a current documented Claude model supports fast speed, without resolving custom aliases.
@@ -1495,6 +1630,27 @@ mod tests {
             .unwrap_err();
             assert!(error.message.contains(key));
             assert_eq!(&*error.location.unwrap().file, file);
+        }
+    }
+
+    #[test]
+    fn documented_windows_follow_the_model_generation() {
+        for (model, million) in [
+            ("claude-fable-5", Some(true)),
+            ("claude-sonnet-5", Some(true)),
+            ("claude-sonnet-4-6", Some(false)),
+            ("claude-opus-4-7", Some(true)),
+            ("claude-opus-4-6", Some(false)),
+            ("claude-opus-4", Some(false)),
+            ("claude-haiku-5-5", Some(true)),
+            ("claude-haiku-4-5", Some(false)),
+            ("claude-haiku-6", None),
+            ("claude-mythos-5", None),
+            ("claude-3-5-sonnet", None),
+            ("claude-opus-4-+6", None),
+            ("claude-opus-4-6-v1", None),
+        ] {
+            assert_eq!(native_million(model), million, "{model}");
         }
     }
 }

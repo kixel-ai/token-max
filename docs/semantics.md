@@ -253,13 +253,32 @@ Pre-window usage may calibrate geometry and cache evidence but is never charged.
 Claude's current environment, user file and managed file resolve to the owning
 window control. Per-model values override a global value within one scope; a
 higher scope's global value beats a lower scope's per-model value. Dated native
-model IDs share the undated row, with exact matches preferred. Unknown tuned
-defaults are not guessed. The latest recorded client version is the applicability
-assumption. Per-model controls require v2.1.288; environment suffixes require
+model IDs share the undated row, with exact matches preferred. The latest recorded
+client version is the applicability assumption.
+
+When no setting names a window, each model the profile used gets Claude Code's
+tuned window, owned by that model's `modelSettings` row because the defaults
+differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every documented
+model at 200k. Otherwise the trigger of the profile's latest automatic, non-idle
+compaction on the model comes first, since the server can retune the default
+without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
+checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
+Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
+Sonnet and Haiku models.
+A recorded request above 200k on an older model leaves its default unresolved,
+because a `[1m]` variant may have set it; so does a model ID outside that table,
+such as a gateway alias or Mythos. Per-model controls require v2.1.288; environment suffixes require
 v2.1.304. Project, launch and per-agent overrides remain an explicit limitation of
 the observed-file analysis. See [Claude model configuration](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)
 and [settings reference](https://code.claude.com/docs/en/settings-reference#modelsettings),
 checked 2026-11-07. Disabled compaction stays advisory.
+
+When the current window is larger than a priced candidate, the text report also
+cites Anthropic's guidance that accuracy and recall degrade as context grows
+([context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows),
+[compaction overview](https://platform.claude.com/docs/en/build-with-claude/compaction),
+checked 2026-11-11). The guidance is advisory: it adds no size cutoff and puts
+no dollar value on quality.
 
 Codex's explicit `model_auto_compact_token_limit` is a total-context threshold by
 default. An unset limit, unresolved named profile, or `body_after_prefix` scope

@@ -824,6 +824,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let since = since.or(scan.since);
     let compactions = compaction_charges(&mut scan, catalog);
     crate::t3::attribute_compactions(&mut scan, &compactions);
+    crate::controls::tune_windows(&mut scan);
     let scan = scan;
     let estimates = estimate_usage(&scan);
     let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::default();

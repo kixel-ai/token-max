@@ -21,8 +21,11 @@ use crate::prices::{
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 
-const SOURCES: [&str; 4] = [
+const SOURCES: [&str; 7] = [
     "https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction (2026-11-07)",
+    "https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds (2026-11-11)",
+    "https://platform.claude.com/docs/en/build-with-claude/context-windows (2026-11-11)",
+    "https://platform.claude.com/docs/en/build-with-claude/compaction (2026-11-11)",
     "https://code.claude.com/docs/en/settings-reference#modelsettings (2026-11-07)",
     "https://developers.openai.com/codex/config-reference (2026-11-07)",
     "https://developers.openai.com/api/docs/guides/compaction (2026-11-07)",
@@ -1616,6 +1619,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 bucket: "all",
                 model,
                 models: models.clone(),
+                unset: control.unset && control.value.is_some(),
                 baseline_cost: baseline_cost.clone(),
                 observed_summary_cost: observed_summary_cost.clone(),
                 ttls: ttls.clone(),
@@ -2175,6 +2179,98 @@ mod tests {
     }
 
     /// Recommendations and savings the TypeScript implementation reports for the same scans.
+    #[test]
+    fn unset_windows_take_the_latest_observed_trigger_else_the_documented_default() {
+        let mut scan = data(4);
+        let unset = |env: &Env| controls(Harness::Claude, json!({}), env, "settings.json");
+        scan.profiles[0].compaction = unset(&Env::default());
+        for (model, write) in [
+            ("claude-fable-5-2", 1000),
+            ("claude-opus-4-6", 150000),
+            ("claude-sonnet-4-6", 250000),
+            ("gateway-opus", 1000),
+        ] {
+            let mut r = at(model, model, HOUR);
+            r.model = Some(model.into());
+            r.parts[0].model = Some(model.into());
+            r.parts[0].usage = writes(write);
+            scan.requests.push(r);
+        }
+        let mut later = boundary();
+        later.time = 10;
+        later.pre_tokens = Some(310000);
+        // Neither an idle compaction nor a manual one shows where the window triggers.
+        let mut idle = boundary();
+        idle.time = 20;
+        idle.pre_tokens = Some(150000);
+        idle.idle_attribution = IdleAttribution::Notice;
+        let mut manual = boundary();
+        manual.time = 30;
+        manual.pre_tokens = Some(150000);
+        manual.trigger = Some("manual".into());
+        scan.events.extend([later, idle, manual]);
+        crate::controls::tune_windows(&mut scan);
+        let window = |scan: &Scan, model| window_control(&scan.profiles[0].compaction, Some(model));
+        let observed = window(&scan, "claude-opus-5-5-20261101");
+        assert_eq!(observed.value, Some(310000));
+        assert!(observed.applicable);
+        assert_eq!(
+            observed.owner,
+            "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow"
+        );
+        assert_eq!(window(&scan, "claude-fable-5-2").value, Some(967_000));
+        assert_eq!(window(&scan, "claude-opus-4-6").value, Some(200_000));
+        // A [1m] variant may have run the request above 200k, and the gateway ID is undocumented.
+        for model in ["claude-sonnet-4-6", "gateway-opus"] {
+            let control = window(&scan, model);
+            assert_eq!(control.value, None);
+            assert!(!control.applicable);
+            assert!(control.reason.contains("default is not established"));
+        }
+
+        let mut capped = scan.clone();
+        let mut env = Env::default();
+        env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        capped.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut capped);
+        assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
+        assert_eq!(window(&capped, "claude-sonnet-4-6").value, Some(200_000));
+        assert_eq!(window(&capped, "claude-opus-5-5").value, Some(200_000));
+
+        env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
+        capped.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut capped);
+        let disabled = window(&capped, "claude-fable-5-2");
+        assert_eq!(disabled.value, None);
+        assert_eq!(disabled.owner, "settings.json:autoCompactWindow");
+    }
+
+    #[test]
+    fn an_unset_window_is_priced_against_its_tuned_default() {
+        let mut scan = data(4);
+        scan.profiles[0].compaction =
+            controls(Harness::Claude, json!({}), &Env::default(), "settings.json");
+        assert_eq!(checks(&scan)[0].base.action, Action::Advisory);
+        crate::controls::tune_windows(&mut scan);
+        let observed = &checks(&scan)[0];
+        assert_eq!(observed.base.current, Some(300000));
+        assert_eq!(
+            observed.base.owner,
+            "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow"
+        );
+        assert_ne!(observed.base.action, Action::Advisory);
+        assert!(observed.base.savings_usd.is_some());
+
+        scan.events[0].trigger = Some("manual".into());
+        scan.profiles[0].compaction.tuned.clear();
+        crate::controls::tune_windows(&mut scan);
+        let documented = &checks(&scan)[0];
+        assert_eq!(documented.base.current, Some(967_000));
+        assert!(documented.unset);
+        assert!(documented.base.assumptions[0].contains("documented default"));
+        assert_ne!(documented.base.action, Action::Advisory);
+    }
+
     #[test]
     fn checks_match_the_typescript_recommendations() {
         type Expected = (
@@ -3054,6 +3150,7 @@ mod tests {
             }
             assert!(compact.contains("Current:400000tokens"));
             assert!(compact.contains("Suggested:100000tokens"));
+            assert!(text(&report, None, false).contains("degrade as context grows (context rot)"));
             assert!(compact.contains("ConditionalTTLbaseline:main5m;subagent5m"));
             for scenario in &check.scenarios {
                 assert!(compact.contains(&format!("Candidatewindow:{}tokens", scenario.window)));

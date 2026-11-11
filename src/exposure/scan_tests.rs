@@ -264,7 +264,7 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
     let hash = e
         .components
         .iter()
-        .find(|c| c.provenance == "opaque-schema-identity")
+        .find(|c| &*c.provenance == "opaque-schema-identity")
         .unwrap();
     assert_eq!(hash.size.characters, None);
     assert_eq!(hash.size.recorded_tokens, None);
@@ -1143,7 +1143,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     let member = e
         .components
         .iter()
-        .find(|c| c.id == aggregate.members[0])
+        .find(|c| *c.id == *aggregate.members[0])
         .unwrap();
     assert_eq!(
         member.size.characters,
@@ -1168,7 +1168,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     assert!(
         e.components
             .iter()
-            .any(|c| c.provenance == "provided-additional-tools" && c.size.characters.is_some())
+            .any(|c| &*c.provenance == "provided-additional-tools" && c.size.characters.is_some())
     );
     assert!(!leaks(e, &["SYNTHETIC_PRIVATE"]));
 }
@@ -1308,7 +1308,7 @@ fn deferred_definitions_keep_active_revisions_and_repeated_results_stay_in_histo
     let active = e
         .components
         .iter()
-        .find(|c| c.provenance == "prompt-snapshot-tool")
+        .find(|c| &*c.provenance == "prompt-snapshot-tool")
         .unwrap();
     assert!(has(&e.requests[1].view.candidates, &active.id));
     assert!(!has(&e.requests[1].view.removed, &active.id));
@@ -1482,7 +1482,7 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
     assert!(
         e.components
             .iter()
-            .any(|c| c.provenance == "unclassified-rendered-attachment")
+            .any(|c| &*c.provenance == "unclassified-rendered-attachment")
     );
     let error = transcript(
         Harness::Claude,
@@ -1515,7 +1515,7 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
             .exposure
             .components
             .iter()
-            .any(|c| c.provenance == "world-state-metadata-only")
+            .any(|c| &*c.provenance == "world-state-metadata-only")
     );
 }
 

@@ -1537,7 +1537,7 @@ impl Category {
 pub struct Size {
     pub characters: Option<i64>,
     pub recorded_tokens: Option<i64>,
-    pub fingerprint: String,
+    pub fingerprint: Id,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1560,14 +1560,18 @@ pub enum Scope {
 pub struct Component {
     #[serde(flatten)]
     pub size: Size,
-    pub id: String,
-    pub key: String,
+    /// The revision, sharing the copy that indexes it.
+    #[serde(with = "crate::wire::text")]
+    pub id: Text,
+    pub key: Id,
     /// Readable name: a tool, skill, server or file path, never content.
     pub name: String,
     pub category: Category,
     pub owner: Owner,
     pub group: Option<String>,
-    pub provenance: String,
+    /// One of a few fixed descriptions, shared across components.
+    #[serde(with = "crate::wire::text")]
+    pub provenance: Text,
     pub first_seen: Millis,
     pub current: Current,
     pub scope: Scope,
@@ -1677,7 +1681,7 @@ pub enum TextCoverage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct References {
-    pub base: Option<String>,
+    pub base: Option<Id>,
     pub keep: Option<i64>,
     #[serde(with = "crate::wire::ids")]
     pub tail: Ids,
@@ -1898,8 +1902,10 @@ pub struct ExposureView {
     pub complete_characters: Option<i64>,
     /// How many leading components are the recorded tools and system prompt, in cache-prefix order.
     pub prefix: usize,
-    pub wire_model: Option<String>,
-    pub reasons: Vec<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub wire_model: Option<Text>,
+    /// Views repeat a few fixed reasons, so they share one copy of each list.
+    pub reasons: std::sync::Arc<[String]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

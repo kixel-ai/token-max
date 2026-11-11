@@ -14,8 +14,8 @@ use crate::skills::skill_file;
 use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
-    Harness, IdentityBasis, Ids, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
-    Millis, Observed, Owner, References, Request, RequestEvidence, ResultTotals, Scope, Size,
+    Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
+    Millis, Observed, Owner, Profiles, References, Request, RequestEvidence, ResultTotals, Scope, Size,
     Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
@@ -25,7 +25,7 @@ pub fn measure_size(text: Option<&str>) -> Size {
     Size {
         characters: text.map(|t| t.chars().count() as i64),
         recorded_tokens: None,
-        fingerprint: identity(text.unwrap_or("opaque")),
+        fingerprint: safe::digest(text.unwrap_or("opaque")),
     }
 }
 
@@ -97,11 +97,13 @@ pub fn calibrate(scan: &ExposureScan, requests: &[Request]) -> Vec<Calibration> 
 /// Collect derived metadata in the reader's frozen, single parsing pass.
 pub struct ExposureCollector {
     since: Option<Millis>,
-    // Tool calls by call id, so copies in other transcript files count once.
-    calls: IndexMap<String, ToolCall>,
-    // Tool results by call id, for the same reason.
-    results: IndexMap<String, ToolResult>,
+    // Tool calls by call id digest, so copies in other transcript files count once.
+    calls: IndexMap<CallKey, ToolCall>,
+    // Tool results by call id digest, for the same reason.
+    results: IndexMap<CallKey, ToolResult>,
     names: HashSet<Text>,
+    // One shared copy of each profile set calls and results are seen under.
+    profile_sets: Interner,
     // The tool each call id in the current file belongs to.
     call_tools: HashMap<String, Text>,
     // Tool output characters the current conversation holds, by tool, and whether any was opaque.
@@ -157,6 +159,8 @@ pub struct ExposureCollector {
     pending_tools: HashMap<String, PendingTool>,
     lists: HashSet<Ids>,
     views: HashSet<Arc<ExposureView>>,
+    // One shared copy of each list of reasons views give.
+    reasons: HashMap<Vec<&'static str>, Arc<[String]>>,
     // The last view created, whose lists the next one usually extends.
     previous: Option<Arc<ExposureView>>,
 }
@@ -165,7 +169,7 @@ pub struct ExposureCollector {
 struct File {
     name: String,
     harness: Harness,
-    profiles: Vec<Text>,
+    profiles: Profiles,
     subagent: bool,
     basename: String,
 }
@@ -177,9 +181,16 @@ struct FileObservations {
     results: HashMap<u64, Arc<ResultTotals>>,
 }
 
+/// A tool call id's digest; only equality matters, and call ids run to dozens of characters.
+type CallKey = [u8; 32];
+
+fn call_key(id: &str) -> CallKey {
+    Sha256::digest(id.as_bytes()).into()
+}
+
 struct ToolResult {
     tool: Text,
-    profiles: Vec<Text>,
+    profiles: Profiles,
     characters: i64,
 }
 
@@ -196,7 +207,7 @@ struct TextPrefix {
 
 struct ToolCall {
     name: Text,
-    profiles: Vec<Text>,
+    profiles: Profiles,
     time: Millis,
 }
 
@@ -260,7 +271,7 @@ impl Content<'_> {
                 Size {
                     characters: Some(sink.characters as i64),
                     recorded_tokens: None,
-                    fingerprint: hex(sink.hash.finalize()),
+                    fingerprint: Id::Digest(sink.hash.finalize().into()),
                 }
             }
             Content::Opaque(value) => Size {
@@ -359,6 +370,7 @@ impl ExposureCollector {
             calls: IndexMap::default(),
             results: IndexMap::default(),
             names: HashSet::default(),
+            profile_sets: Interner::default(),
             call_tools: HashMap::default(),
             held: IndexMap::default(),
             held_epoch: 0,
@@ -397,6 +409,7 @@ impl ExposureCollector {
             lists: HashSet::default(),
             previous: None,
             views: HashSet::default(),
+            reasons: HashMap::default(),
         }
     }
 
@@ -579,6 +592,7 @@ impl ExposureCollector {
             observations,
             mut lists,
             mut views,
+            reasons: mut reason_lists,
             turn_aliases,
             ..
         } = self;
@@ -649,11 +663,14 @@ impl ExposureCollector {
                         complete_characters: None,
                         prefix: 0,
                         wire_model: None,
-                        reasons: vec![if found.is_empty() {
-                            "no observed request context".into()
-                        } else {
-                            "copied/inherited histories disagree on exposure".into()
-                        }],
+                        reasons: reasons(
+                            &mut reason_lists,
+                            &[if found.is_empty() {
+                                "no observed request context"
+                            } else {
+                                "copied/inherited histories disagree on exposure"
+                            }],
+                        ),
                     };
                     view.inherited = inherited(&mut lists, &view);
                     intern_view(&mut views, view)
@@ -767,23 +784,15 @@ impl ExposureCollector {
             return;
         };
         let file = self.file.as_ref().expect("observing a file");
-        let entry = match self.calls.get_mut(id) {
-            Some(entry) => entry,
-            None => {
-                let name = intern(&mut self.names, name);
-                let entry = ToolCall {
-                    name,
-                    profiles: vec![],
-                    time,
-                };
-                self.calls.entry(id.to_string()).or_insert(entry)
-            }
+        let entry = match self.calls.entry(call_key(id)) {
+            indexmap::map::Entry::Occupied(entry) => entry.into_mut(),
+            indexmap::map::Entry::Vacant(entry) => entry.insert(ToolCall {
+                name: intern(&mut self.names, name),
+                profiles: self.profile_sets.profiles(&[]),
+                time,
+            }),
         };
-        for profile in &file.profiles {
-            if !entry.profiles.contains(profile) {
-                entry.profiles.push(profile.clone());
-            }
-        }
+        entry.profiles = self.profile_sets.union(&entry.profiles, &file.profiles);
     }
 
     /// Add one tool result to the conversation, and to its tool's window totals.
@@ -801,30 +810,22 @@ impl ExposureCollector {
             return;
         }
         let file = self.file.as_ref().expect("observing a file");
-        let entry = self
-            .results
-            .entry(id.to_string())
-            .or_insert_with(|| ToolResult {
+        let entry = match self.results.entry(call_key(id)) {
+            indexmap::map::Entry::Occupied(entry) => entry.into_mut(),
+            indexmap::map::Entry::Vacant(entry) => entry.insert(ToolResult {
                 tool,
-                profiles: vec![],
+                profiles: self.profile_sets.profiles(&[]),
                 characters,
-            });
-        for profile in &file.profiles {
-            if !entry.profiles.contains(profile) {
-                entry.profiles.push(profile.clone());
-            }
-        }
+            }),
+        };
+        entry.profiles = self.profile_sets.union(&entry.profiles, &file.profiles);
     }
 
     fn switch(&mut self, snapshot: &Snapshot) {
         self.file = Some(File {
             name: snapshot.file.clone(),
             harness: snapshot.harness,
-            profiles: snapshot
-                .profiles
-                .iter()
-                .map(|p| Text::from(p.as_str()))
-                .collect(),
+            profiles: self.profile_sets.profiles(&snapshot.profiles),
             subagent: is_subagent(&snapshot.file),
             basename: basename(&snapshot.file).to_string(),
         });
@@ -955,8 +956,8 @@ impl ExposureCollector {
                 let component = Component {
                     instruction_size: None,
                     size: size.clone(),
-                    id: revision.to_string(),
-                    key: key.to_string(),
+                    id: revision.clone(),
+                    key: Id::from(&**key),
                     name: new.name.to_string(),
                     category,
                     owner: if skill { Owner::Skills } else { Owner::Context },
@@ -964,7 +965,7 @@ impl ExposureCollector {
                         Grouping::Name => group(new.name),
                         Grouping::Fixed(g) => g.map(str::to_string),
                     },
-                    provenance: new.provenance.to_string(),
+                    provenance: intern(&mut self.names, new.provenance),
                     first_seen: at,
                     current: crate::model::Current::Unresolved,
                     scope: if !member
@@ -1171,8 +1172,8 @@ impl ExposureCollector {
             if !prior.sessions.iter().any(|s| **s == *self.session) {
                 prior.sessions.push(self.session.to_string());
             }
-            for profile in &file.profiles {
-                if !prior.profiles.iter().any(|p| **p == **profile) {
+            for profile in file.profiles.iter() {
+                if !prior.profiles.contains(profile) {
                     prior.profiles.push(profile.to_string());
                 }
             }
@@ -1215,13 +1216,14 @@ impl ExposureCollector {
     fn chronological(&mut self) -> Arc<ExposureView> {
         let current: Vec<Text> = self.active.values().map(|(r, _)| r.clone()).collect();
         let any = !current.is_empty();
-        let mut reasons = vec![CHRONOLOGICAL.to_string()];
+        let mut listed = vec![CHRONOLOGICAL];
         if self.invalidated {
-            reasons.push(INVALIDATED.into());
+            listed.push(INVALIDATED);
         }
         if self.uncertain {
-            reasons.push(UNCERTAIN.into());
+            listed.push(UNCERTAIN);
         }
+        let reasons = reasons(&mut self.reasons, &listed);
         let removed = self.pending_removed.iter().cloned().collect();
         let deferred = self.deferred.iter().cloned().collect();
         let view = ExposureView {
@@ -1444,7 +1446,7 @@ impl ExposureCollector {
                         ScanError::new("unresolved surfaced definition reference")
                     })?;
                     let component = &self.components[&*same];
-                    let key = Text::from(component.key.as_str());
+                    let key = Text::from(component.key.to_string());
                     let category = component.category;
                     if let Some((prior, _)) = self.active.get(&key)
                         && *prior != same
@@ -1660,15 +1662,15 @@ impl ExposureCollector {
                 TextCoverage::CompleteText
             },
             references: Some(References {
-                base,
+                base: base.map(Id::from),
                 keep,
                 tail: Ids::new(None, tail),
                 items,
             }),
             complete_characters: complete,
             prefix,
-            wire_model: label(field(params, "model")),
-            reasons: vec![reason.to_string()],
+            wire_model: label(field(params, "model")).map(|m| intern(&mut self.names, &m)),
+            reasons: reasons(&mut self.reasons, &[reason]),
         };
         let reference = id(raw.get("id"))?;
         let view = self.view(view);
@@ -2355,9 +2357,9 @@ fn output_characters(output: Option<&Value>) -> (i64, bool) {
 
 /// Count each tool's results and its largest one per profile set, after merging copies.
 fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
-    let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::default();
+    let mut result: IndexMap<(Text, Vec<String>), ToolResults> = IndexMap::default();
     for r in results {
-        let mut profiles = r.profiles;
+        let mut profiles = r.profiles.to_vec();
         profiles.sort_by(|a, b| js_cmp(a, b));
         result
             .entry((r.tool.clone(), profiles.clone()))
@@ -2367,7 +2369,7 @@ fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
             })
             .or_insert_with(|| ToolResults {
                 name: r.tool.to_string(),
-                profiles: profiles.iter().map(|p| p.to_string()).collect(),
+                profiles: profiles.clone(),
                 results: 1,
                 largest_characters: r.characters,
             });
@@ -2377,9 +2379,9 @@ fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
 
 /// Count each tool's calls per profile set, after merging copies of one call.
 fn tool_calls(calls: impl Iterator<Item = ToolCall>) -> Vec<ToolCalls> {
-    let mut result: IndexMap<(Text, Vec<Text>), ToolCalls> = IndexMap::default();
+    let mut result: IndexMap<(Text, Vec<String>), ToolCalls> = IndexMap::default();
     for call in calls {
-        let mut profiles = call.profiles;
+        let mut profiles = call.profiles.to_vec();
         profiles.sort_by(|a, b| js_cmp(a, b));
         result
             .entry((call.name.clone(), profiles.clone()))
@@ -2389,7 +2391,7 @@ fn tool_calls(calls: impl Iterator<Item = ToolCall>) -> Vec<ToolCalls> {
             })
             .or_insert_with(|| ToolCalls {
                 name: call.name.to_string(),
-                profiles: profiles.iter().map(|p| p.to_string()).collect(),
+                profiles: profiles.clone(),
                 calls: 1,
                 last_used: call.time,
             });
@@ -2430,6 +2432,19 @@ fn intern_view(views: &mut HashSet<Arc<ExposureView>>, view: ExposureView) -> Ar
     let view = Arc::new(view);
     views.insert(view.clone());
     view
+}
+
+/// The shared copy of a list of reasons.
+fn reasons(
+    pool: &mut HashMap<Vec<&'static str>, Arc<[String]>>,
+    list: &[&'static str],
+) -> Arc<[String]> {
+    if let Some(found) = pool.get(list) {
+        return found.clone();
+    }
+    let shared: Arc<[String]> = list.iter().map(|r| r.to_string()).collect();
+    pool.insert(list.to_vec(), shared.clone());
+    shared
 }
 
 fn intern(pool: &mut HashSet<Text>, value: &str) -> Text {
@@ -3070,16 +3085,6 @@ impl Sink for Measure {
     }
 }
 
-/// The lowercase hex digest, as `safe::identity` prints it.
-fn hex(digest: impl IntoIterator<Item = u8>) -> String {
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((byte & 15) as u32, 16).unwrap());
-    }
-    out
-}
-
 fn json<S: Sink>(value: &Value, sink: &mut S) {
     match value {
         Value::Null => sink.put("null"),
@@ -3335,7 +3340,7 @@ mod tests {
     fn category(scan: &ExposureScan, id: &str) -> Category {
         scan.components
             .iter()
-            .find(|c| c.id == id)
+            .find(|c| &*c.id == id)
             .unwrap()
             .category
     }
@@ -3410,7 +3415,7 @@ mod tests {
         let member = scan
             .components
             .iter()
-            .find(|c| c.id == listing.members[0])
+            .find(|c| *c.id == *listing.members[0])
             .unwrap();
         assert_eq!(
             member.size.characters,
@@ -3523,7 +3528,7 @@ mod tests {
         let [first, second, third] = [0, 1, 2].map(|i| &scan.requests[i].view);
         assert_eq!(first.linkage, Linkage::Chronological);
         assert_eq!(first.coverage, TextCoverage::Partial);
-        assert_eq!(first.reasons, [CHRONOLOGICAL]);
+        assert_eq!(*first.reasons, [CHRONOLOGICAL]);
         assert_eq!(second.candidates.len(), 1);
         assert_ne!(
             second.candidates.iter().next(),
@@ -3544,7 +3549,7 @@ mod tests {
         let revision = scan
             .components
             .iter()
-            .find(|c| c.id.as_str() == &**second.candidates.iter().next().unwrap())
+            .find(|c| &*c.id == &**second.candidates.iter().next().unwrap())
             .unwrap();
         assert_eq!(
             revision.instruction_size,
@@ -3588,11 +3593,11 @@ mod tests {
         let opaque = scan
             .components
             .iter()
-            .find(|c| c.provenance == "opaque-schema-identity")
+            .find(|c| &*c.provenance == "opaque-schema-identity")
             .unwrap();
         assert_eq!(opaque.size.characters, None);
         // The identity is of the serialized string, quotes included.
-        assert_eq!(opaque.size.fingerprint, identity("\"0123456789\""));
+        assert_eq!(opaque.size.fingerprint.to_string(), identity("\"0123456789\""));
 
         let mut c = ExposureCollector::new(None);
         let mut feed = Feed::new("/p/session.jsonl", Harness::Codex, &["codex"]);
@@ -3764,7 +3769,7 @@ mod tests {
             .candidates
             .iter()
             .map(|id| {
-                let c = scan.components.iter().find(|c| c.id == **id).unwrap();
+                let c = scan.components.iter().find(|c| *c.id == **id).unwrap();
                 (c.name.as_str(), c.category)
             })
             .collect();
@@ -3852,7 +3857,7 @@ mod tests {
         assert_eq!(bodies.len(), 2);
         assert_eq!(bodies[0].name, identity("s"));
         assert_eq!(bodies[0].targets, [target("skill", "plugin:known")]);
-        assert_eq!(bodies[0].provenance, "observed-tool-result-not-wire-proof");
+        assert_eq!(&*bodies[0].provenance, "observed-tool-result-not-wire-proof");
         assert_eq!(scan.requests[0].view.candidates.len(), 3);
     }
 
@@ -4104,7 +4109,7 @@ mod tests {
         assert_eq!(view.linkage, Linkage::Unknown);
         assert_eq!(view.candidates.len(), 2);
         assert_eq!(
-            view.reasons,
+            *view.reasons,
             ["copied/inherited histories disagree on exposure"]
         );
         assert_eq!(different.visibility.len(), 2);
@@ -4140,7 +4145,7 @@ mod tests {
                 complete_characters: Some(characters),
                 prefix: 0,
                 wire_model: Some(model.into()),
-                reasons: vec![],
+                reasons: [].into(),
             })
         };
         let exposure = |request: &str, characters: i64, model: &str| Exposure {
@@ -4260,10 +4265,10 @@ mod tests {
             "\"a\\u001f\\\"\\n\u{2028}é\""
         );
         assert_eq!(measure_size(Some("🌲木abc")).characters, Some(5));
-        assert_eq!(measure_size(None).fingerprint, identity("opaque"));
+        assert_eq!(measure_size(None).fingerprint.to_string(), identity("opaque"));
         let value = json!({ "name": "x", "n": [1, 2.5] });
         assert_eq!(
-            Content::Json(&value).measure().fingerprint,
+            Content::Json(&value).measure().fingerprint.to_string(),
             identity(r#"{"name":"x","n":[1,2.5]}"#)
         );
         assert_eq!(js_string(Some(&json!([1, null, "a"]))), "1,,a");

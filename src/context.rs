@@ -672,7 +672,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .collect();
     let requests: HashMap<&str, &Request> = input.requests.iter().map(|r| (&*r.id, r)).collect();
     let components: HashMap<&str, &Component> =
-        scan.components.iter().map(|c| (c.id.as_str(), c)).collect();
+        scan.components.iter().map(|c| (&*c.id, c)).collect();
     let mut interned = Pieces::default();
     let mut owners: HashMap<Vec<String>, usize> = HashMap::default();
     let mut owner_profiles: Vec<Vec<String>> = vec![];
@@ -1385,7 +1385,7 @@ mod tests {
                 fingerprint: id.into(),
             },
             id: id.into(),
-            key: format!("{}:{name}", category.as_str()),
+            key: format!("{}:{name}", category.as_str()).into(),
             name: name.into(),
             category,
             owner: Owner::Context,
@@ -1420,7 +1420,7 @@ mod tests {
                 complete_characters: Some(characters),
                 prefix,
                 wire_model: Some("claude-opus-5-5".into()),
-                reasons: vec![],
+                reasons: [].into(),
             }),
             results: None,
         }

@@ -179,6 +179,8 @@ struct FileObservations {
 
 struct ToolResult {
     tool: Text,
+    harness: Harness,
+    session: Text,
     profiles: Vec<Text>,
     characters: i64,
 }
@@ -196,6 +198,8 @@ struct TextPrefix {
 
 struct ToolCall {
     name: Text,
+    harness: Harness,
+    session: Text,
     profiles: Vec<Text>,
     time: Millis,
 }
@@ -675,6 +679,31 @@ impl ExposureCollector {
         drop(views);
         drop(lists);
 
+        // Uses belong to their session's resolved owners, which T3 ownership can narrow
+        // below the profiles sharing the transcript's home.
+        let mut owners: HashMap<(Harness, &str), Vec<Text>> = HashMap::default();
+        for r in requests {
+            let owner = owners.entry((r.harness, &r.session)).or_default();
+            for p in r.profiles.iter() {
+                if !owner.iter().any(|o| **o == **p) {
+                    owner.push(p.as_str().into());
+                }
+            }
+        }
+        let owned = |harness: Harness, session: &str, profiles: &mut Vec<Text>| {
+            if let Some(owner) = owners.get(&(harness, session)) {
+                profiles.clone_from(owner);
+            }
+        };
+        let calls = calls.into_values().map(|mut c| {
+            owned(c.harness, &c.session, &mut c.profiles);
+            c
+        });
+        let results = results.into_values().map(|mut r| {
+            owned(r.harness, &r.session, &mut r.profiles);
+            r
+        });
+
         let visibility = visibility(requests, &exposures, &invocations, since);
 
         let mut used = vec![false; components.len()];
@@ -725,12 +754,26 @@ impl ExposureCollector {
                     {
                         i.turn = Some(recorded.clone());
                     }
+                    let mut profiles: Vec<String> = vec![];
+                    for p in i
+                        .sessions
+                        .iter()
+                        .filter_map(|s| owners.get(&(i.harness, s.as_str())))
+                        .flatten()
+                    {
+                        if !profiles.iter().any(|o| **o == **p) {
+                            profiles.push(p.to_string());
+                        }
+                    }
+                    if !profiles.is_empty() {
+                        i.profiles = profiles;
+                    }
                     i
                 })
                 .collect(),
             visibility,
-            tool_calls: tool_calls(calls.into_values()),
-            tool_results: tool_results(results.into_values()),
+            tool_calls: tool_calls(calls),
+            tool_results: tool_results(results),
         }
     }
 
@@ -773,6 +816,8 @@ impl ExposureCollector {
                 let name = intern(&mut self.names, name);
                 let entry = ToolCall {
                     name,
+                    harness: file.harness,
+                    session: self.session.clone(),
                     profiles: vec![],
                     time,
                 };
@@ -806,6 +851,8 @@ impl ExposureCollector {
             .entry(id.to_string())
             .or_insert_with(|| ToolResult {
                 tool,
+                harness: file.harness,
+                session: self.session.clone(),
                 profiles: vec![],
                 characters,
             });

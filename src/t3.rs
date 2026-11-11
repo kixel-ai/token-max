@@ -2060,8 +2060,14 @@ mod tests {
                 json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}},"elsewhere":{"driver":"codex","config":{"homePath":other}}}}),
             );
             seed(&db(&root), "codex", owner);
+            let session = w.codex.join("sessions/test.jsonl");
+            let mut transcript = fs::read_to_string(&session).unwrap();
+            transcript.push_str("{\"type\":\"response_item\",\"timestamp\":\"2026-01-01T00:00:06Z\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"call_id\":\"k1\"}}\n");
+            write(&session, transcript);
             let scan = scan(&w.scan_options()).unwrap();
             let r = &scan.requests[0];
+            // Recorded uses follow the request's resolved owners.
+            assert_eq!(scan.exposure.tool_calls[0].profiles, r.profiles.to_vec());
             let t3 = &scan.t3[0];
             let current = scan
                 .profiles

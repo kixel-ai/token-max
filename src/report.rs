@@ -14,7 +14,7 @@ use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, Control, ControlValue, Cost, Coverage, EstimateEvidence,
     Evidence, Harness, KeepaliveCheck, Millis, PeriodStatus, Profile, Report, RequestEvidence,
-    Scalar, T3TextGeneration, Ttl, UsageEstimate, Verdict,
+    Scalar, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -1536,7 +1536,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
             }
             .into();
         }
-        CheckResult::T3Idle(_) => return "Lowest aggregate estimated cost among off, conditional on-return acceptance and conditional proactive server liveness; unavailable lifecycle or summary evidence stays unpriced.".into(),
+        CheckResult::T3Idle(_) => return "Lowest estimated changed cost among off, conditional on-return acceptance and conditional proactive server liveness; unavailable lifecycle or summary evidence stays unpriced.".into(),
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
                 "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
@@ -1778,7 +1778,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             }
             "Too many requests lack recorded usage to compare windows.".into()
         }
-        CheckResult::T3Idle(_) => "T3 lifecycle, observed expiry or compatible summary evidence is unavailable; the current mode alone does not establish generation.".into(),
+        CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
             let periods = &i.after_recommendations.periods;
             if !periods.is_empty()
@@ -1804,6 +1804,56 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             unreachable!("handled above")
         }
     }
+}
+
+/// The modes T3 could price, and the first input the others lack.
+fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
+    let scenarios = &c.after_recommendations.scenarios;
+    let priced: Vec<String> = scenarios
+        .iter()
+        .filter_map(|s| {
+            let usd = s.cost.total_usd?;
+            Some(format!(
+                "{} {}",
+                s.mode.as_str(),
+                per_month(usd, r.since, r.until)
+            ))
+        })
+        .collect();
+    let priced = if priced.is_empty() {
+        String::new()
+    } else {
+        format!("Changed cost per month: {}. ", priced.join(", "))
+    };
+    let unpriced: Vec<&str> = scenarios
+        .iter()
+        .filter(|s| s.cost.total_usd.is_none())
+        .map(|s| s.mode.as_str())
+        .collect();
+    let reasons: IndexSet<&str> = scenarios
+        .iter()
+        .flat_map(|s| s.cost.unknown.iter().map(String::as_str))
+        .collect();
+    let Some(first) = reasons.first() else {
+        if c.after_recommendations.periods.is_empty() {
+            return "No main-thread idle gaps in this window to compare.".into();
+        }
+        // Every mode is priced, so only a disabled instance or ownership keeps it advisory.
+        return format!(
+            "{priced}The instance is disabled or its sessions' ownership is unresolved, so no mode is recommended."
+        );
+    };
+    let more = match reasons.len() - 1 {
+        0 => String::new(),
+        1 => " (and 1 other missing input)".into(),
+        n => format!(" (and {n} other missing inputs)"),
+    };
+    let modes = match unpriced[..] {
+        _ if unpriced.len() == scenarios.len() => "No mode is priced".into(),
+        [mode] => format!("{mode} is unpriced"),
+        _ => format!("{} are unpriced", unpriced.join(" and ")),
+    };
+    format!("{priced}{modes}: {first}{more}.")
 }
 
 /// How to turn off a namespaced skill, which `skillOverrides` does not reach.

@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::model::{Location, Millis};
+use crate::model::{Id, Location, Millis};
 
 /// An error whose message is safe for terminal and JSON diagnostics.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -64,6 +64,11 @@ pub fn originator(value: &Value) -> Option<String> {
     label(&Value::from(text.replace(' ', "_")))
         .filter(|_| valid)
         .map(|_| text.to_string())
+}
+
+/// [`identity`] held as its digest.
+pub fn digest(value: &str) -> Id {
+    Id::Digest(Sha256::digest(value.as_bytes()).into())
 }
 
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.

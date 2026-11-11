@@ -9,6 +9,79 @@ pub type Millis = i64;
 /// A shared immutable string, for identifiers repeated across many records.
 pub type Text = std::sync::Arc<str>;
 
+/// An opaque identifier. Nearly every one is a SHA-256 hex digest, held as its 32 bytes
+/// rather than 64 characters; any other text, such as a modeled event's, is kept as is.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum Id {
+    Digest([u8; 32]),
+    Text(Box<str>),
+}
+
+impl From<&str> for Id {
+    fn from(text: &str) -> Self {
+        let digit = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        };
+        let b = text.as_bytes();
+        if b.len() == 64 {
+            let mut digest = [0; 32];
+            if digest.iter_mut().enumerate().all(|(i, out)| {
+                match (digit(b[2 * i]), digit(b[2 * i + 1])) {
+                    (Some(high), Some(low)) => {
+                        *out = high << 4 | low;
+                        true
+                    }
+                    _ => false,
+                }
+            }) {
+                return Id::Digest(digest);
+            }
+        }
+        Id::Text(text.into())
+    }
+}
+
+impl From<String> for Id {
+    fn from(text: String) -> Self {
+        Id::from(text.as_str())
+    }
+}
+
+impl PartialEq<&str> for Id {
+    fn eq(&self, other: &&str) -> bool {
+        *self == Id::from(*other)
+    }
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Id::Digest(digest) => digest.iter().try_for_each(|b| write!(f, "{b:02x}")),
+            Id::Text(text) => f.write_str(text),
+        }
+    }
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.to_string())
+    }
+}
+
+impl Serialize for Id {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Id::from(<std::borrow::Cow<'de, str>>::deserialize(deserializer)?.as_ref()))
+    }
+}
+
 /// One shared copy of each distinct string and profile set the records of a scan repeat.
 #[derive(Default)]
 pub struct Interner {
@@ -420,7 +493,7 @@ pub struct Pricing {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralEvent {
-    pub id: String,
+    pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
     pub harness: Harness,
@@ -447,7 +520,7 @@ pub struct StructuralEvent {
     pub duration_ms: Option<i64>,
     #[serde(with = "crate::wire::opt_text")]
     pub tool: Option<Text>,
-    pub tool_id: Option<String>,
+    pub tool_id: Option<Id>,
     pub settings: Settings,
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
@@ -847,7 +920,7 @@ pub struct Cost {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionCharge {
-    pub event: String,
+    pub event: Id,
     pub request: Option<Text>,
     pub evidence: Evidence,
     pub cost: Cost,
@@ -1013,7 +1086,7 @@ pub struct TtlCheck {
 /// An observed compaction event and the request that resumed after it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CompactionBasis {
-    pub event: String,
+    pub event: Id,
     pub request: Text,
 }
 
@@ -1190,7 +1263,7 @@ pub enum PeriodOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeriodCalibration {
-    pub events: Vec<String>,
+    pub events: Vec<Id>,
     pub summary_tokens: i64,
     pub prefix_tokens: i64,
 }
@@ -1209,7 +1282,7 @@ pub struct IdlePeriod {
     pub confirmed: bool,
     pub return_timing: ReturnTiming,
     pub outcome: PeriodOutcome,
-    pub event: Option<String>,
+    pub event: Option<Id>,
     pub version: Option<Text>,
     pub client: Option<Text>,
     pub flag_state: Option<&'static str>,

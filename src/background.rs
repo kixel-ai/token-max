@@ -617,7 +617,7 @@ mod tests {
 
     fn prompt(time: Millis) -> StructuralEvent {
         StructuralEvent {
-            id: format!("prompt-{time}"),
+            id: format!("prompt-{time}").into(),
             origins: vec![],
             harness: Harness::Claude,
             session: "session".into(),

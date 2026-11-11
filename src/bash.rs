@@ -5,7 +5,7 @@ use crate::collections::{HashMap, IndexSet};
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BashCapCheck, BashCapControl, BashWaits, Bucket, CheckBase, Cost, EventKind, Evidence,
-    Harness, Millis, Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck,
+    Harness, Id, Millis, Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck,
 };
 use crate::prices::{Catalog, add_costs, unit_rates, unknown_cost, zero_cost};
 
@@ -141,14 +141,14 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     let (ttl, ttl_basis) = evaluation_ttl(ttls, profile, &requests);
 
     let mine = |e: &&StructuralEvent| e.profiles.contains(&profile.id) && selected(e.time);
-    let mut ends: HashMap<(&str, &str), &StructuralEvent> = HashMap::default();
+    let mut ends: HashMap<(&str, &Id), &StructuralEvent> = HashMap::default();
     for e in scan
         .events
         .iter()
         .filter(mine)
         .filter(|e| e.kind == EventKind::ToolEnd)
     {
-        if let Some(id) = e.tool_id.as_deref() {
+        if let Some(id) = &e.tool_id {
             ends.entry((&e.session, id))
                 .and_modify(|end| {
                     if e.time < end.time {
@@ -170,7 +170,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
         };
         let Some(end) = start
             .tool_id
-            .as_deref()
+            .as_ref()
             .and_then(|id| ends.get(&(start.session.as_ref(), id)))
         else {
             continue;

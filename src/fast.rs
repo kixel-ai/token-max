@@ -1,11 +1,11 @@
 //! Rate-only fast-mode premiums at the current profile's speed setting.
 
-use indexmap::IndexSet;
+use crate::collections::IndexSet;
 
 use crate::controls::claude_fast_support;
 use crate::model::{
     Action, BillingPart, CheckBase, Cost, CurrentPremium, Evidence, Harness, Millis,
-    ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl,
+    ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl, Text,
 };
 use crate::prices::{Catalog, add_costs, price_components, unknown_cost, zero_cost};
 
@@ -48,8 +48,8 @@ fn premium(r: &Request, p: &BillingPart) -> Option<bool> {
 
 fn with_speed(p: &BillingPart, tier: Option<&str>, speed: Option<&str>) -> BillingPart {
     BillingPart {
-        tier: tier.map(str::to_string),
-        speed: speed.map(str::to_string),
+        tier: tier.map(Text::from),
+        speed: speed.map(Text::from),
         ..p.clone()
     }
 }
@@ -263,7 +263,8 @@ fn check(
         Some(_) => Action::Change,
     };
     let change = action == Action::Change;
-    let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
+    let history_profiles: IndexSet<&String> =
+        requests.iter().flat_map(|r| r.profiles.iter()).collect();
     let mut uncertainty = vec![
         control.reason.clone(),
         "account/server policy, availability, cloud-managed defaults, launch overrides and live session toggles not observed in local files may override these defaults".into(),
@@ -394,7 +395,11 @@ mod tests {
             ..usage
         });
         r.parts = vec![fast, standard];
-        r.server_tools = Some([("web_search_requests".to_string(), 999)].into());
+        r.server_tools = Some(
+            [("web_search_requests".to_string(), 999)]
+                .into_iter()
+                .collect(),
+        );
         scan(control(Some("fast"), true), vec![r])
     }
 
@@ -487,7 +492,8 @@ mod tests {
                 ("a".to_string(), control(Some("ultrafast"), true)),
                 ("b".to_string(), control(Some("standard"), true)),
             ]
-            .into(),
+            .into_iter()
+            .collect(),
         );
         s
     }
@@ -545,7 +551,7 @@ mod tests {
         fn options(w: &Workspace) -> DiscoveryOptions {
             DiscoveryOptions {
                 home: text(&w.home),
-                env: Env::new(),
+                env: Env::default(),
                 claude_dirs: vec![],
                 codex_dirs: vec![],
                 t3_dirs: vec![],
@@ -607,7 +613,7 @@ mod tests {
                         file: "managed",
                     },
                 ],
-                &Env::new(),
+                &Env::default(),
             )
             .unwrap()
         }
@@ -632,7 +638,7 @@ mod tests {
 
         fn request(profile: &Profile) -> Request {
             Request {
-                profiles: vec![profile.id.clone()],
+                profiles: vec![profile.id.clone()].into(),
                 ..make_request()
             }
         }
@@ -671,7 +677,11 @@ mod tests {
                         ..base
                     },
                 ],
-                server_tools: Some([("web_search_requests".to_string(), 999)].into()),
+                server_tools: Some(
+                    [("web_search_requests".to_string(), 999)]
+                        .into_iter()
+                        .collect(),
+                ),
                 ..request(claude(&s))
             };
             s.requests = vec![r.clone()];
@@ -803,7 +813,8 @@ mod tests {
                     ("CLAUDE_CONFIG_DIR".to_string(), text(&w.claude)),
                     ("CLAUDE_CODE_DISABLE_FAST_MODE".to_string(), "1".to_string()),
                 ]
-                .into(),
+                .into_iter()
+                .collect(),
                 ..options(&w)
             });
             assert_eq!(
@@ -1020,7 +1031,8 @@ mod tests {
                         control(Harness::Codex, json!({ "service_tier": "default" })),
                     ),
                 ]
-                .into(),
+                .into_iter()
+                .collect(),
             );
             let p = p.clone();
             s.requests = vec![

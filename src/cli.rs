@@ -12,7 +12,7 @@ use serde::Serialize;
 use serde_json::ser::Formatter;
 
 use crate::discovery::DiscoveryOptions;
-use crate::model::{Location, Millis, Report, Verdict};
+use crate::model::{Location, Millis, Verdict};
 use crate::prices::{PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
@@ -34,8 +34,7 @@ Usage: token-max [options]
   --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
-  --json                  Compact aggregate report, schema version 2
-  --json-full             Full per-request evidence, schema version 1
+  --json                  Aggregate JSON report, schema version 2
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
@@ -80,7 +79,6 @@ struct Values {
     since: Option<String>,
     max_cost_per_use: Option<String>,
     json: bool,
-    json_full: bool,
     offline: bool,
     plain: bool,
     details: bool,
@@ -117,7 +115,6 @@ impl Values {
     fn flag(&mut self, name: &str) -> Option<&mut bool> {
         Some(match name {
             "json" => &mut self.json,
-            "json-full" => &mut self.json_full,
             "offline" => &mut self.offline,
             "plain" => &mut self.plain,
             "details" => &mut self.details,
@@ -427,13 +424,13 @@ fn diagnose(json: bool, error: &ScanError) {
 /// What a successful run prints, decided before anything is written.
 enum Output {
     Text(String),
-    Json(Box<JsonReport>),
+    Json(Box<serde_json::Value>),
     Hosts(Hosts),
     /// Already streamed, as an SSH audit destination does.
     Written,
 }
 
-/// The JSON report of a run with `--ssh`, using the selected schema for every host.
+/// The JSON report of a run with `--ssh`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Hosts {
@@ -445,14 +442,7 @@ struct Hosts {
 struct HostReport {
     /// The SSH destination, or null for this host.
     ssh: Option<String>,
-    report: JsonReport,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum JsonReport {
-    Full(Box<Report>),
-    Compact(serde_json::Value),
+    report: serde_json::Value,
 }
 
 fn now() -> Millis {
@@ -464,14 +454,13 @@ fn now() -> Millis {
 
 /// Run one atomic scan, returning the output and exit code without writing either.
 fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
-    let mut values = parse(args).ok_or_else(|| ScanError::new("invalid arguments; use --help"))?;
+    let values = parse(args).ok_or_else(|| ScanError::new("invalid arguments; use --help"))?;
     if values.help {
         return Ok((Output::Text(help()), 0));
     }
     if values.version {
         return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
     }
-    values.json |= values.json_full;
     // An empty value is absent, as JavaScript treats a falsy option.
     let since = match values.since.as_deref() {
         None | Some("") => None,
@@ -534,23 +523,32 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     // Every host scans at once; the first failure stops the rest.
     let (sender, results) = mpsc::channel();
     let mut hosts: Vec<Option<String>> = vec![];
+    // A lone local scan runs on this thread, so the analysis reuses the memory the scan
+    // frees rather than leaving it to another thread's allocator arena.
+    let mut inline = None;
     if local {
         let mut discovery = DiscoveryOptions::host()?;
         discovery.claude_dirs = values.claude_dirs;
         discovery.codex_dirs = values.codex_dirs;
         discovery.t3_dirs = values.t3_dirs;
-        let sender = sender.clone();
         let index = hosts.len();
         hosts.push(None);
-        thread::spawn(move || {
-            let result = panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
+        let job = move || {
+            panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
                 .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
                 .map(|scan| Remote {
                     scan,
                     home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-                });
-            let _ = sender.send((index, result));
-        });
+                })
+        };
+        if remote {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send((index, job()));
+            });
+        } else {
+            inline = Some((index, job));
+        }
     }
     for destination in values.ssh {
         let sender = sender.clone();
@@ -570,6 +568,9 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     });
     let mut scans: Vec<Option<Remote>> = hosts.iter().map(|_| None).collect();
     let scanned = (|| {
+        if let Some((index, job)) = inline {
+            scans[index] = Some(job()?);
+        }
         for (index, result) in results {
             scans[index] = Some(result?);
         }
@@ -633,12 +634,10 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
                 .any(|c| c.verdict == Some(Verdict::Off));
         code = code.max(u8::from(change));
         if values.json {
-            let report = if values.json_full {
-                JsonReport::Full(Box::new(report))
-            } else {
-                JsonReport::Compact(crate::compact::report(report))
-            };
-            reports.push(HostReport { ssh, report });
+            reports.push(HostReport {
+                ssh,
+                report: crate::compact::report(report),
+            });
             continue;
         }
         let host = Host {
@@ -665,7 +664,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         (false, _) => Output::Text(text),
         (true, false) => Output::Json(Box::new(reports.pop().expect("one host").report)),
         (true, true) => Output::Hosts(Hosts {
-            schema_version: if values.json_full { 1 } else { 2 },
+            schema_version: 2,
             hosts: reports,
         }),
     };
@@ -685,9 +684,7 @@ pub fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let json = args
-        .iter()
-        .any(|a| matches!(a.as_str(), "--json" | "--json-full"));
+    let json = args.iter().any(|a| a == "--json");
     let handler = ctrlc::set_handler(move || {
         let committed = COMMITTED.lock().unwrap_or_else(PoisonError::into_inner);
         if *committed {

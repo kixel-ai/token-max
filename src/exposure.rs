@@ -3,10 +3,9 @@
 //! Raw records are observed transiently; only counts, fingerprints, opaque identities and
 //! readable names (tools, skills, servers, file paths) are retained.
 
-use std::collections::{HashMap, HashSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::sync::Arc;
 
-use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
 
@@ -38,10 +37,10 @@ pub fn cohort(r: &Request) -> String {
 
 /// Calibrate complete text-only wire inputs against observed, single-request input totals.
 pub fn calibrate(scan: &ExposureScan, requests: &[Request]) -> Vec<Calibration> {
-    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (r.id.as_str(), r)).collect();
-    let mut result: IndexMap<String, (Calibration, i64, i64)> = IndexMap::new();
+    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, r)).collect();
+    let mut result: IndexMap<String, (Calibration, i64, i64)> = IndexMap::default();
     for exposure in &scan.requests {
-        let Some(r) = by_id.get(exposure.request.as_str()) else {
+        let Some(r) = by_id.get(&*exposure.request) else {
             continue;
         };
         let Some(model) = r.model.as_deref().filter(|m| !m.is_empty()) else {
@@ -311,12 +310,6 @@ impl<'a> New<'a> {
     }
 }
 
-/// Where and when a component was seen.
-struct At<'a> {
-    location: &'a Location,
-    time: Millis,
-}
-
 /// One raw record and its surroundings.
 struct Line<'a> {
     raw: &'a Map<String, Value>,
@@ -328,11 +321,9 @@ struct Line<'a> {
 }
 
 impl Line<'_> {
-    fn at(&self) -> At<'_> {
-        At {
-            location: self.location,
-            time: self.time.unwrap_or(0),
-        }
+    /// When a component in this record was seen.
+    fn at(&self) -> Millis {
+        self.time.unwrap_or(0)
     }
 }
 
@@ -365,47 +356,47 @@ impl ExposureCollector {
     pub fn new(since: Option<Millis>) -> Self {
         Self {
             since,
-            calls: IndexMap::new(),
-            results: IndexMap::new(),
-            names: HashSet::new(),
-            call_tools: HashMap::new(),
-            held: IndexMap::new(),
+            calls: IndexMap::default(),
+            results: IndexMap::default(),
+            names: HashSet::default(),
+            call_tools: HashMap::default(),
+            held: IndexMap::default(),
             held_epoch: 0,
             epochs: 0,
             held_snapshot: None,
-            provided: HashSet::new(),
-            components: IndexMap::new(),
-            invocations: IndexMap::new(),
-            observations: HashMap::new(),
+            provided: HashSet::default(),
+            components: IndexMap::default(),
+            invocations: IndexMap::default(),
+            observations: HashMap::default(),
             file: None,
-            active: IndexMap::new(),
-            pending_removed: IndexSet::new(),
+            active: IndexMap::default(),
+            pending_removed: IndexSet::default(),
             session: Text::from(""),
             session_cache: None,
             turn: None,
             turn_from_user: false,
             turn_available: false,
-            turn_aliases: HashMap::new(),
+            turn_aliases: HashMap::default(),
             client: None,
             version: None,
             uncertain: true,
-            deferred: IndexSet::new(),
-            digests: HashMap::new(),
-            known_skills: HashMap::new(),
-            codex_skill_paths: HashMap::new(),
-            typed_skills: HashSet::new(),
-            synced_skills: HashMap::new(),
-            user_aliases: HashMap::new(),
-            surfaced: HashMap::new(),
-            shapes: HashMap::new(),
-            blobs: HashMap::new(),
+            deferred: IndexSet::default(),
+            digests: HashMap::default(),
+            known_skills: HashMap::default(),
+            codex_skill_paths: HashMap::default(),
+            typed_skills: HashSet::default(),
+            synced_skills: HashMap::default(),
+            user_aliases: HashMap::default(),
+            surfaced: HashMap::default(),
+            shapes: HashMap::default(),
+            blobs: HashMap::default(),
             blob_epoch: 0,
-            prefixes: HashMap::new(),
+            prefixes: HashMap::default(),
             invalidated: false,
-            pending_tools: HashMap::new(),
-            lists: HashSet::new(),
+            pending_tools: HashMap::default(),
+            lists: HashSet::default(),
             previous: None,
-            views: HashSet::new(),
+            views: HashSet::default(),
         }
     }
 
@@ -508,7 +499,7 @@ impl ExposureCollector {
                 self.component(
                     New::active(category, name, "provided-additional-tools"),
                     Content::Json(v),
-                    &line.at(),
+                    line.at(),
                 );
                 self.provided.insert(component_key(category, name).into());
             }
@@ -605,7 +596,7 @@ impl ExposureCollector {
             ids
         };
         // Final views by the one observed view they derive from.
-        let mut settled: HashMap<usize, Arc<ExposureView>> = HashMap::new();
+        let mut settled: HashMap<usize, Arc<ExposureView>> = HashMap::default();
         let mut exposures = Vec::with_capacity(requests.len());
         for r in requests {
             let found: Vec<&Arc<ExposureView>> = r
@@ -613,7 +604,7 @@ impl ExposureCollector {
                 .iter()
                 .filter_map(|l| {
                     let file = observations.get(&*l.file)?;
-                    let observed = r.reference.as_ref().and_then(|x| file.refs.get(x));
+                    let observed = r.reference.as_ref().and_then(|x| file.refs.get(&**x));
                     observed.or_else(|| file.lines.get(&l.line))
                 })
                 .collect();
@@ -689,7 +680,7 @@ impl ExposureCollector {
         let mut used = vec![false; components.len()];
         let mut queue = vec![];
         // Lists are interned, so each distinct one is visited once.
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         for e in &exposures {
             let v = &e.view;
             let lists = [
@@ -723,11 +714,7 @@ impl ExposureCollector {
                 .into_values()
                 .zip(used)
                 .filter(|&(_, used)| used)
-                .map(|(mut c, _)| {
-                    // One location per sighting, so growth slack adds up over a long history.
-                    c.locations.shrink_to_fit();
-                    c
-                })
+                .map(|(c, _)| c)
                 .collect(),
             requests: exposures,
             invocations: invocations
@@ -934,7 +921,7 @@ impl ExposureCollector {
     }
 
     /// Record one sighting of a component revision and return its id.
-    fn component(&mut self, new: New<'_>, content: Content<'_>, at: &At<'_>) -> Text {
+    fn component(&mut self, new: New<'_>, content: Content<'_>, at: Millis) -> Text {
         let key: Text = component_key(new.category, new.name).into();
         let size = content.measure();
         let revision = identity(&format!("{key}:{}", size.fingerprint));
@@ -950,18 +937,10 @@ impl ExposureCollector {
         id
     }
 
-    fn place(
-        &mut self,
-        new: New<'_>,
-        key: &Text,
-        revision: &str,
-        size: &Size,
-        at: &At<'_>,
-    ) -> Text {
+    fn place(&mut self, new: New<'_>, key: &Text, revision: &str, size: &Size, at: Millis) -> Text {
         let revision = match self.components.get_full_mut(revision) {
             Some((_, id, existing)) => {
-                existing.locations.push(at.location.clone());
-                existing.first_seen = existing.first_seen.min(at.time);
+                existing.first_seen = existing.first_seen.min(at);
                 id.clone()
             }
             None => {
@@ -986,8 +965,7 @@ impl ExposureCollector {
                         Grouping::Fixed(g) => g.map(str::to_string),
                     },
                     provenance: new.provenance.to_string(),
-                    locations: vec![at.location.clone()],
-                    first_seen: at.time,
+                    first_seen: at,
                     current: crate::model::Current::Unresolved,
                     scope: if !member
                         && matches!(category, Category::SkillListing | Category::Other)
@@ -1030,7 +1008,7 @@ impl ExposureCollector {
         revision
     }
 
-    fn place_shaped(&mut self, placed: &Placed, provenance: &'static str, at: &At<'_>) -> Text {
+    fn place_shaped(&mut self, placed: &Placed, provenance: &'static str, at: Millis) -> Text {
         let new = New {
             category: placed.category,
             name: &placed.name,
@@ -1072,7 +1050,7 @@ impl ExposureCollector {
     }
 
     /// A rendered skill listing and one member span per `- name: description` line.
-    fn listing(&mut self, key: &str, body: &str, provenance: &'static str, at: &At<'_>) -> Text {
+    fn listing(&mut self, key: &str, body: &str, provenance: &'static str, at: Millis) -> Text {
         let aggregate = self.component(
             New::active(Category::SkillListing, key, provenance),
             Content::Text(body),
@@ -1173,11 +1151,11 @@ impl ExposureCollector {
             target("mcp", name)
         };
 
-        self.invocation(target, input, time, line.location);
+        self.invocation(target, input, time);
         Ok(())
     }
 
-    fn invocation(&mut self, target: String, input: Invoke, time: Millis, location: &Location) {
+    fn invocation(&mut self, target: String, input: Invoke, time: Millis) {
         let file = self.file.as_ref().expect("observing a file");
         let id = identity(&format!(
             "{}:{}:{}",
@@ -1190,7 +1168,6 @@ impl ExposureCollector {
                 prior.target = target;
                 prior.via = input.via;
             }
-            prior.locations.push(location.clone());
             if !prior.sessions.iter().any(|s| **s == *self.session) {
                 prior.sessions.push(self.session.to_string());
             }
@@ -1225,7 +1202,6 @@ impl ExposureCollector {
             version: self.version.clone(),
             time,
             profiles: file.profiles.iter().map(|p| p.to_string()).collect(),
-            locations: vec![location.clone()],
         };
         self.invocations.insert(id, invocation);
     }
@@ -1310,12 +1286,12 @@ impl ExposureCollector {
                 self.clear(Some(category));
                 let body = text(Some(body))?;
                 if category == Category::SkillListing {
-                    self.listing(field, body, "world-state-rendered", &at);
+                    self.listing(field, body, "world-state-rendered", at);
                 } else {
                     self.component(
                         New::active(category, field, "world-state-rendered"),
                         Content::Text(body),
-                        &at,
+                        at,
                     );
                 }
             } else if !v.is_empty() {
@@ -1323,7 +1299,7 @@ impl ExposureCollector {
                 self.component(
                     New::active(category, field, "world-state-metadata-only"),
                     Content::Opaque(value),
-                    &at,
+                    at,
                 );
             }
         }
@@ -1345,7 +1321,7 @@ impl ExposureCollector {
                 } else {
                     (Content::Opaque(value), "opaque-schema-identity")
                 };
-                self.component(New::active(category, name, provenance), content, &at);
+                self.component(New::active(category, name, provenance), content, at);
             }
         }
         // Boolean policy flags cannot establish the rendered plugin/app instruction body.
@@ -1357,7 +1333,7 @@ impl ExposureCollector {
                 self.component(
                     New::active(category, field, "world-state-policy-only"),
                     Content::Opaque(value),
-                    &at,
+                    at,
                 );
             }
         }
@@ -1379,7 +1355,7 @@ impl ExposureCollector {
                 "listing",
                 text(a.get("content"))?,
                 "rendered-skill-listing",
-                &at,
+                at,
             );
         } else if kind_is("instructions") {
             for v in array(a.get("files"))? {
@@ -1389,7 +1365,7 @@ impl ExposureCollector {
                 self.component(
                     New::active(Category::Instructions, path, "instruction-attachment"),
                     Content::Text(content),
-                    &at,
+                    at,
                 );
             }
         } else if kind_is("prompt_snapshot") {
@@ -1399,14 +1375,14 @@ impl ExposureCollector {
             self.component(
                 New::active(Category::Other, "system-prompt", "prompt-snapshot-system"),
                 Content::Text(&prompt),
-                &at,
+                at,
             );
             for v in array(a.get("tools"))? {
                 let name = text(record(Some(v))?.get("name"))?;
                 self.component(
                     New::active(Category::McpSchema, name, "prompt-snapshot-tool"),
                     Content::Json(v),
-                    &at,
+                    at,
                 );
             }
         } else if matches!(
@@ -1446,7 +1422,7 @@ impl ExposureCollector {
                     self.component(
                         New::active(category, name, "attachment-delta"),
                         Content::Text(body),
-                        &at,
+                        at,
                     );
                 }
             } else if !lines.is_empty() {
@@ -1455,7 +1431,7 @@ impl ExposureCollector {
                 self.component(
                     New::active(category, &name, "unmapped-rendered-delta"),
                     Content::Text(&body),
-                    &at,
+                    at,
                 );
             }
             for v in array(a.get("surfacedDefinitions"))? {
@@ -1467,8 +1443,7 @@ impl ExposureCollector {
                     let same = self.surfaced.get(&reference).cloned().ok_or_else(|| {
                         ScanError::new("unresolved surfaced definition reference")
                     })?;
-                    let component = &mut self.components[&*same];
-                    component.locations.push(line.location.clone());
+                    let component = &self.components[&*same];
                     let key = Text::from(component.key.as_str());
                     let category = component.category;
                     if let Some((prior, _)) = self.active.get(&key)
@@ -1485,7 +1460,7 @@ impl ExposureCollector {
                     self.component(
                         New::active(Category::McpSchema, name, "surfaced-tool-definition"),
                         Content::Json(body),
-                        &at,
+                        at,
                     )
                 };
                 let uuid = id(raw.get("uuid"))?;
@@ -1512,7 +1487,7 @@ impl ExposureCollector {
                     grouping: Grouping::Fixed(None),
                     targets: None,
                 };
-                self.component(new, Content::Json(v), &at);
+                self.component(new, Content::Json(v), at);
             }
         } else if let Some(rendered) = raw.get("rendered") {
             // Unknown attachment categories still contribute visible derived evidence.
@@ -1538,7 +1513,7 @@ impl ExposureCollector {
             self.component(
                 New::active(Category::Other, &name, "unclassified-rendered-attachment"),
                 Content::Text(&body),
-                &at,
+                at,
             );
         }
         Ok(())
@@ -1595,9 +1570,9 @@ impl ExposureCollector {
             self.clear(Some(Category::ToolSchema));
             self.clear(Some(Category::McpSchema));
             for tool in &shape.tools {
-                components.push(self.place_shaped(tool, "shape-tool", &at));
+                components.push(self.place_shaped(tool, "shape-tool", at));
             }
-            components.push(self.place_shaped(&shape.system, "shape-system", &at));
+            components.push(self.place_shaped(&shape.system, "shape-system", at));
             let leading: HashSet<&str> = components.iter().map(|c| &**c).collect();
             let rest: Vec<Text> = self
                 .active
@@ -1632,13 +1607,13 @@ impl ExposureCollector {
                 components.push(self.component(
                     New::active(tool_category(name), name, "wire-tool"),
                     Content::Json(v),
-                    &at,
+                    at,
                 ));
             }
             components.push(self.component(
                 New::active(Category::Other, "wire-system", "wire-system"),
                 Content::Json(&params["system"]),
-                &at,
+                at,
             ));
             if complete_text(params)? {
                 let mut sink = Chars(0);
@@ -1757,7 +1732,7 @@ impl ExposureCollector {
                         })
                 }));
         let mut block_ids = vec![];
-        let mut typed_aliases = HashMap::new();
+        let mut typed_aliases = HashMap::default();
         for (index, v) in blocks.iter().enumerate() {
             let b = object(v);
             let source = match present(raw.get("uuid")).or(present(item.get("id"))) {
@@ -1911,7 +1886,7 @@ impl ExposureCollector {
                         group: tool.group.clone(),
                         basis: IdentityBasis::Recorded,
                     };
-                    self.invocation(tool.target.clone(), invoke, time, line.location);
+                    self.invocation(tool.target.clone(), invoke, time);
                     if !failed {
                         let content = match b.get("content") {
                             Some(Value::String(s)) => Content::Text(s),
@@ -1930,11 +1905,7 @@ impl ExposureCollector {
                             grouping: Grouping::Fixed(tool.group.as_deref()),
                             targets: Some(vec![tool.target]),
                         };
-                        let at = At {
-                            location: line.location,
-                            time,
-                        };
-                        self.component(new, content, &at);
+                        self.component(new, content, time);
                     }
                 }
             }
@@ -2032,7 +2003,7 @@ impl ExposureCollector {
                         "observed-mcp-result-not-wire-proof",
                     ),
                     Content::Json(result),
-                    &line.at(),
+                    line.at(),
                 );
             }
         }
@@ -2073,7 +2044,7 @@ impl ExposureCollector {
                     self.component(
                         New::active(Category::SkillBody, path, "identified-file-read-output"),
                         Content::Text(output),
-                        &line.at(),
+                        line.at(),
                     );
                 }
             }
@@ -2174,8 +2145,8 @@ fn visibility(
     }
     // Requests with the same cohort and listed components open the same windows. Grouping
     // them first preserves the order in which each window first appears.
-    let mut cohorts: HashMap<Cohort<'_>, usize> = HashMap::new();
-    let mut groups: IndexMap<(usize, usize, usize), Group<'_>> = IndexMap::new();
+    let mut cohorts: HashMap<Cohort<'_>, usize> = HashMap::default();
+    let mut groups: IndexMap<(usize, usize, usize), Group<'_>> = IndexMap::default();
     for (r, e) in requests.iter().zip(exposures) {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
         profiles.sort_unstable();
@@ -2196,15 +2167,15 @@ fn visibility(
         let g = groups.entry(key).or_insert_with(|| Group {
             r,
             view: e.view.clone(),
-            sessions: HashSet::new(),
+            sessions: HashSet::default(),
             since: r.time,
             until: r.end_time,
         });
-        g.sessions.insert(r.session.as_str());
+        g.sessions.insert(&*r.session);
         g.since = g.since.min(r.time);
         g.until = g.until.max(r.end_time);
     }
-    let mut windows: IndexMap<(usize, Option<Text>), Window<'_>> = IndexMap::new();
+    let mut windows: IndexMap<(usize, Option<Text>), Window<'_>> = IndexMap::default();
     for (&(cohort, _, _), g) in &groups {
         let listed: Vec<Option<Text>> =
             if g.view.components.is_empty() && g.view.candidates.is_empty() {
@@ -2222,7 +2193,7 @@ fn visibility(
                 .entry((cohort, component))
                 .or_insert_with(|| Window {
                     r: g.r,
-                    sessions: HashSet::new(),
+                    sessions: HashSet::default(),
                     since: since.unwrap_or(g.r.time),
                     until: g.r.end_time,
                 });
@@ -2252,7 +2223,7 @@ fn visibility(
         }
     }
     // A window counts a call recorded in any of its sessions, so per-session summaries combine.
-    let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::new();
+    let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::default();
     for i in invocations
         .values()
         .filter(|i| since.is_none_or(|s| i.time >= s))
@@ -2277,6 +2248,7 @@ fn visibility(
                 .or_insert(call);
         }
     }
+    let reasons: Arc<[String]> = VISIBILITY_REASONS.iter().map(|r| r.to_string()).collect();
     windows
         .into_iter()
         .map(|((_, component), w)| {
@@ -2302,7 +2274,7 @@ fn visibility(
                 } else {
                     Visible::Partial
                 },
-                component: component.map(|c| c.to_string()),
+                component,
                 direct_calls: if calls.is_some_and(|c| c.direct) {
                     Observed::Observed
                 } else {
@@ -2319,7 +2291,7 @@ fn visibility(
                     Observed::Unknown
                 },
                 automatic_unused: false,
-                reasons: VISIBILITY_REASONS.iter().map(|r| r.to_string()).collect(),
+                reasons: reasons.clone(),
             }
         })
         .collect()
@@ -2383,7 +2355,7 @@ fn output_characters(output: Option<&Value>) -> (i64, bool) {
 
 /// Count each tool's results and its largest one per profile set, after merging copies.
 fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
-    let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::new();
+    let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::default();
     for r in results {
         let mut profiles = r.profiles;
         profiles.sort_by(|a, b| js_cmp(a, b));
@@ -2405,7 +2377,7 @@ fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
 
 /// Count each tool's calls per profile set, after merging copies of one call.
 fn tool_calls(calls: impl Iterator<Item = ToolCall>) -> Vec<ToolCalls> {
-    let mut result: IndexMap<(Text, Vec<Text>), ToolCalls> = IndexMap::new();
+    let mut result: IndexMap<(Text, Vec<Text>), ToolCalls> = IndexMap::default();
     for call in calls {
         let mut profiles = call.profiles;
         profiles.sort_by(|a, b| js_cmp(a, b));
@@ -3316,12 +3288,12 @@ mod tests {
         fn request(&self, id: &str, line: u64, reference: Option<&str>) -> Request {
             Request {
                 id: id.into(),
-                reference: reference.map(identity),
+                reference: reference.map(|r| identity(r).into()),
                 locations: vec![Location {
                     file: self.file.clone(),
                     line,
                 }],
-                profiles: self.snapshot.profiles.clone(),
+                profiles: self.snapshot.profiles.clone().into(),
                 ..make_request()
             }
         }
@@ -3706,7 +3678,6 @@ mod tests {
         assert_eq!(scan.invocations.len(), 1);
         let call = &scan.invocations[0];
         assert_eq!(call.kind, InvocationKind::McpCall);
-        assert_eq!(call.locations.len(), 2);
         assert_eq!(call.profiles, ["work", "home"]);
     }
 
@@ -3872,7 +3843,6 @@ mod tests {
         let skill = &scan.invocations[4];
         assert_eq!(skill.target, target("skill", "plugin:known"));
         assert_eq!(skill.group, Some(identity("plugin:plugin")));
-        assert_eq!(skill.locations.len(), 2);
         // Only successful results become bodies, keyed by call and targeting what was called.
         let bodies: Vec<&Component> = scan
             .components

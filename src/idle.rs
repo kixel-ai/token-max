@@ -1,18 +1,17 @@
 //! Idle compaction checks: find idle request gaps, replay a summary at the estimated
 //! near-expiry trigger with idle compaction on and off, and compare the aggregate cost.
 
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::borrow::Cow;
 use std::cell::{OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use indexmap::map::Entry;
-use indexmap::{IndexMap, IndexSet};
 use serde_json::{Map, Number, Value};
 
 use crate::cache::{CacheBoundaries, ttl_milliseconds};
 use crate::compaction::{
-    CompactionSample, CompactionSamples, WindowEvents, WindowOptions, WindowSetting,
+    CompactionSample, CompactionSamples, Modeled, WindowEvents, WindowOptions, WindowSetting,
     compaction_samples, replay_windows,
 };
 use crate::controls::{Env, SettingsScope, idle_controls, window_control};
@@ -22,11 +21,11 @@ use crate::model::{
     CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, IdleAttribution, IdleCheck,
     IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
     PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar, Scan,
-    ScenarioWindow, StructuralEvent, Ttl, TtlCheck, Usage, UsageEstimate, WindowControl,
+    ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowControl,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, add_costs, price_components, price_part, server_cost, unknown_cost,
-    zero_cost,
+    Catalog, PRICE_SOURCES, Sum, add_costs, price_components, price_part, server_cost,
+    unknown_cost, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
 
@@ -46,7 +45,7 @@ pub struct IdleOptions<'a> {
     pub scan: &'a Scan,
     pub catalog: &'a Catalog,
     pub summaries: &'a [CompactionCharge],
-    pub estimates: &'a IndexMap<String, UsageEstimate>,
+    pub estimates: &'a IndexMap<Text, UsageEstimate>,
     pub ttls: &'a [&'a TtlCheck],
     pub windows: &'a [&'a CompactionCheck],
     pub since: Option<Millis>,
@@ -205,7 +204,8 @@ fn settings_control(profile: &Profile) -> IdleControl {
         config: &config,
         file: &profile.settings_file,
     }];
-    let mut control = idle_controls(&scopes, &Env::new()).unwrap_or_else(|error| panic!("{error}"));
+    let mut control =
+        idle_controls(&scopes, &Env::default()).unwrap_or_else(|error| panic!("{error}"));
     if profile.t3.is_some() {
         control.ttl = Some(profile.ttl.clone());
         control.compaction = Some(profile.compaction.clone());
@@ -226,7 +226,7 @@ impl<'p> Scopes<'p> {
         Self {
             profile,
             fallback: OnceCell::new(),
-            windows: RefCell::new(HashMap::new()),
+            windows: RefCell::new(HashMap::default()),
         }
     }
 
@@ -291,7 +291,7 @@ impl<'p> Scopes<'p> {
 /// A selected replayed part, kept for the shared baseline cost.
 struct Selected {
     part: usize,
-    request: String,
+    request: Text,
     compaction: bool,
     cost: Cost,
 }
@@ -305,7 +305,7 @@ struct Replay<'a> {
     modeled: Vec<StructuralEvent>,
     selected: Vec<Selected>,
     /// Every request in time order, with replayed parts.
-    requests: Vec<Cow<'a, Request>>,
+    requests: Vec<Modeled<'a>>,
 }
 
 /// The cohort a calibration sample can stand in for; every field must match exactly.
@@ -370,37 +370,29 @@ struct ReplayIndex<'r> {
 
 impl<'r> ReplayIndex<'r> {
     fn new(
-        requests: &'r [Cow<'r, Request>],
+        requests: &'r [Modeled<'r>],
         events: &[&'r StructuralEvent],
         samples: &'r CompactionSamples<'r>,
         since: Millis,
     ) -> Self {
         let mut index = Self {
-            conversations: IndexMap::new(),
-            events: HashMap::new(),
-            requests: HashMap::new(),
-            boundaries: HashMap::new(),
-            by_id: HashMap::new(),
-            selected_events: HashSet::new(),
-            calibration: HashMap::new(),
+            conversations: IndexMap::default(),
+            events: HashMap::default(),
+            requests: HashMap::default(),
+            boundaries: HashMap::default(),
+            by_id: HashMap::default(),
+            selected_events: HashSet::default(),
+            calibration: HashMap::default(),
         };
         for r in requests.iter().map(AsRef::as_ref) {
             if r.agent != Agent::Subagent && r.parts.iter().any(is_conversation) {
-                index
-                    .conversations
-                    .entry(r.session.as_str())
-                    .or_default()
-                    .push(r);
+                index.conversations.entry(&*r.session).or_default().push(r);
             }
-            index
-                .requests
-                .entry(r.session.as_str())
-                .or_default()
-                .push(r);
-            index.by_id.insert(r.id.as_str(), r);
+            index.requests.entry(&*r.session).or_default().push(r);
+            index.by_id.insert(&*r.id, r);
         }
         // The last event with each identity, like a JavaScript Map built from the array.
-        let mut by_id: HashMap<&str, &StructuralEvent> = HashMap::new();
+        let mut by_id: HashMap<&str, &StructuralEvent> = HashMap::default();
         for &e in events {
             by_id.insert(e.id.as_str(), e);
             if e.time >= since {
@@ -417,7 +409,7 @@ impl<'r> ReplayIndex<'r> {
                 }
             }
         }
-        let mut groups: HashMap<SampleKey, Vec<&CompactionSample>> = HashMap::new();
+        let mut groups: HashMap<SampleKey, Vec<&CompactionSample>> = HashMap::default();
         for s in &samples.samples {
             if let Some(key) = sample_key(s.request, s.p) {
                 groups.entry(key).or_default().push(s);
@@ -541,7 +533,8 @@ fn warm(now: Millis, time: Option<Millis>, lifetime: Millis) -> bool {
 
 /// Combine states with the same path, keeping first-seen order and dropping zero weights.
 fn merge(states: Vec<State>) -> Vec<State> {
-    let mut grouped: IndexMap<Path, State> = IndexMap::with_capacity(states.len());
+    let mut grouped: IndexMap<Path, State> =
+        IndexMap::with_capacity_and_hasher(states.len(), Default::default());
     for state in states {
         if state.weight == 0.0 {
             continue;
@@ -629,69 +622,6 @@ fn changed_cost(
         &difference(&a.ordinary, &b.ordinary),
         &output,
     ])
-}
-
-/// A running `add_costs`, so a run's charges need not be kept.
-#[derive(Clone, Debug)]
-struct Sum {
-    known: f64,
-    total: Option<f64>,
-    unknown: IndexSet<String>,
-    assumptions: IndexSet<String>,
-}
-
-impl Sum {
-    fn new() -> Self {
-        Self {
-            known: 0.0,
-            total: Some(0.0),
-            unknown: IndexSet::new(),
-            assumptions: IndexSet::new(),
-        }
-    }
-
-    fn add(&mut self, cost: &Cost) {
-        self.add_scaled(cost, 1.0);
-    }
-
-    /// Add `scale(cost, weight)` without building it.
-    fn add_scaled(&mut self, cost: &Cost, weight: f64) {
-        if weight == 0.0 {
-            self.known += 0.0;
-            self.total = self.total.map(|t| t + 0.0);
-            return;
-        }
-        self.known += if weight == 1.0 {
-            cost.known_usd
-        } else {
-            cost.known_usd * weight
-        };
-        self.total = match (self.total, cost.total_usd) {
-            (Some(sum), Some(value)) => {
-                Some(sum + if weight == 1.0 { value } else { value * weight })
-            }
-            _ => None,
-        };
-        for reason in &cost.unknown {
-            if !self.unknown.contains(reason.as_str()) {
-                self.unknown.insert(reason.clone());
-            }
-        }
-        for assumption in &cost.assumptions {
-            if !self.assumptions.contains(assumption.as_str()) {
-                self.assumptions.insert(assumption.clone());
-            }
-        }
-    }
-
-    fn cost(self) -> Cost {
-        Cost {
-            known_usd: self.known,
-            total_usd: self.total,
-            unknown: self.unknown.into_iter().collect(),
-            assumptions: self.assumptions.into_iter().collect(),
-        }
-    }
 }
 
 /// A run's charges in total and per period.
@@ -790,11 +720,11 @@ impl<'r, 'x> Runner<'r, 'x> {
         periods: &[IdlePeriod],
         ttls: &Ttls,
     ) -> Self {
-        let mut first: HashMap<&str, usize> = HashMap::new();
+        let mut first: HashMap<&str, usize> = HashMap::default();
         let canonical = periods
             .iter()
             .enumerate()
-            .map(|(i, p)| *first.entry(p.request.as_str()).or_insert(i))
+            .map(|(i, p)| *first.entry(&*p.request).or_insert(i))
             .collect();
         let mut runner = Self {
             catalog: context.catalog,
@@ -817,17 +747,14 @@ impl<'r, 'x> Runner<'r, 'x> {
         scenario: &Ttls,
         late: bool,
     ) -> Vec<Session<'r>> {
-        let mut groups: IndexMap<&str, Vec<usize>> = IndexMap::new();
+        let mut groups: IndexMap<&str, Vec<usize>> = IndexMap::default();
         for (i, p) in self.prepared.iter().enumerate() {
-            groups
-                .entry(p.previous.session.as_str())
-                .or_default()
-                .push(i);
+            groups.entry(&*p.previous.session).or_default().push(i);
         }
         groups
             .into_iter()
             .map(|(session, ps)| {
-                let mut idle_by_event: HashMap<&str, usize> = HashMap::new();
+                let mut idle_by_event: HashMap<&str, usize> = HashMap::default();
                 for &i in &ps {
                     if let Some(b) = self.prepared[i].boundary {
                         idle_by_event.insert(b.id.as_str(), i);
@@ -904,7 +831,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             by_period: vec![None; self.prepared.len()],
         };
         let mut resumed = 0.0;
-        let mut charged: HashSet<&str> = HashSet::new();
+        let mut charged: HashSet<&str> = HashSet::default();
         for session in sessions {
             let mut states = vec![State {
                 weight: 1.0,
@@ -1218,7 +1145,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                     }
                     Tick::Request { r, ref ttls } => {
                         let messages = r.parts.iter().filter(|p| is_conversation(p)).count();
-                        let summary = self.summaries.requests.contains(r.id.as_str());
+                        let summary = self.summaries.requests.contains(&*r.id);
                         for state in &mut states {
                             for p in &r.parts {
                                 if p.kind == PartKind::Compaction && summary {
@@ -1278,7 +1205,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             if on {
                 for &i in &session.periods {
                     if periods[i].status == PeriodStatus::Unknown {
-                        let cost = unknown_cost(periods[i].reason.clone());
+                        let cost = unknown_cost(periods[i].reason);
                         if point {
                             periods[i].summary_cost = cost.clone();
                         }
@@ -1302,7 +1229,7 @@ impl<'r, 'x> Runner<'r, 'x> {
 /// One Claude profile's requests, events and controls, shared by every replay and owner.
 struct Profiled<'a> {
     catalog: &'a Catalog,
-    estimates: &'a IndexMap<String, UsageEstimate>,
+    estimates: &'a IndexMap<Text, UsageEstimate>,
     all_summaries: &'a [CompactionCharge],
     summaries: Summaries<'a>,
     scopes: Scopes<'a>,
@@ -1325,10 +1252,7 @@ impl<'a> Profiled<'a> {
             selected: vec![],
             requests: vec![],
         };
-        // Later duplicates win, like a JavaScript Map keyed by request and part.
-        let mut replayed: HashMap<String, HashMap<usize, BillingPart>> = HashMap::new();
-        let mut untouched: HashSet<&'a str> = HashSet::new();
-        let no_estimates = IndexMap::new();
+        let no_estimates = IndexMap::default();
         for group in self.groups.values() {
             let source = group
                 .iter()
@@ -1337,7 +1261,7 @@ impl<'a> Profiled<'a> {
                 .unwrap_or(group[0]);
             let scope = self.scopes.scope(source);
             let policy = self.scopes.ttls(scope, ttls);
-            let owned = |scope: Scope, model: &Option<String>| {
+            let owned = |scope: Scope, model: &Option<Text>| {
                 self.scopes.window(scope, model.as_deref()).owner.clone()
             };
             let keys: Vec<&ScenarioWindow> = windows
@@ -1391,70 +1315,70 @@ impl<'a> Profiled<'a> {
                 estimated_parts: Some(&simulation.estimated_parts),
                 attempt_scenario: Default::default(),
             };
-            let items = replay_parts(
-                simulation.requests.iter().map(AsRef::as_ref),
-                [&self.window_events.cache, &extra],
-                &options,
-            );
-            for item in items {
-                if item.selected {
-                    result.selected.push(Selected {
-                        part: item.part,
-                        request: item.request.id.clone(),
-                        compaction: item.p.kind == PartKind::Compaction,
-                        cost: item.components.total(),
-                    });
-                }
-                match replayed.get_mut(item.request.id.as_str()) {
-                    Some(parts) => {
-                        parts.insert(item.part, item.p);
+            // Each request's replayed parts, which a replay yields together and in order;
+            // None while they match its recorded parts.
+            let mut replaced: Vec<Option<Vec<BillingPart>>> =
+                Vec::with_capacity(simulation.requests.len());
+            {
+                let mut items = replay_parts(
+                    simulation.requests.iter().map(AsRef::as_ref),
+                    [&self.window_events.cache, &extra],
+                    &options,
+                )
+                .peekable();
+                for r in &simulation.requests {
+                    // Requests the windows left alone still carry an unapplied usage estimate.
+                    let estimate = if simulation.applied {
+                        None
+                    } else {
+                        self.estimates.get(&r.id).and_then(|e| e.part.as_ref())
+                    };
+                    let base = estimate.map_or(r.parts.as_slice(), std::slice::from_ref);
+                    let mut parts: Option<Vec<BillingPart>> = estimate.map(|_| base.to_vec());
+                    while let Some(item) = items.next_if(|i| std::ptr::eq(i.request, &**r)) {
+                        if item.selected {
+                            result.selected.push(Selected {
+                                part: item.part,
+                                request: item.request.id.clone(),
+                                compaction: item.p.kind == PartKind::Compaction,
+                                cost: item.components.total(),
+                            });
+                        }
+                        if item.p != base[item.part] || parts.is_some() {
+                            parts.get_or_insert_with(|| base.to_vec())[item.part] = item.p;
+                        }
                     }
-                    None => {
-                        let parts = HashMap::from([(item.part, item.p)]);
-                        replayed.insert(item.request.id.clone(), parts);
-                    }
+                    replaced.push(parts.filter(|parts| *parts != r.parts));
                 }
+                debug_assert!(items.next().is_none(), "replays follow their requests");
             }
-            if !simulation.applied {
-                untouched.extend(group.iter().map(|r| r.id.as_str()));
-            }
-            result.requests.extend(simulation.requests);
+            result
+                .requests
+                .extend(
+                    simulation
+                        .requests
+                        .into_iter()
+                        .zip(replaced)
+                        .map(|(mut r, parts)| {
+                            if let Some(parts) = parts {
+                                r.to_mut().parts = parts;
+                            }
+                            r
+                        }),
+                );
             result.modeled.extend(simulation.events);
             result
                 .added
                 .extend(simulation.added.into_iter().map(|a| a.summary_cost));
-            result.errors.extend(simulation.errors);
+            result
+                .errors
+                .extend(simulation.errors.into_iter().map(String::from));
         }
-        let mut requests = std::mem::take(&mut result.requests);
-        requests.sort_by(|a, b| {
+        result.requests.sort_by(|a, b| {
             a.time
                 .cmp(&b.time)
                 .then_with(|| locale_compare(&a.id, &b.id))
         });
-        result.requests = requests
-            .into_iter()
-            .map(|r| {
-                let estimate = if untouched.contains(r.id.as_str()) {
-                    self.estimates.get(&r.id).and_then(|e| e.part.as_ref())
-                } else {
-                    None
-                };
-                let base = estimate.map_or(r.parts.as_slice(), std::slice::from_ref);
-                let found = replayed.get(r.id.as_str());
-                let parts: Vec<BillingPart> = base
-                    .iter()
-                    .enumerate()
-                    .map(|(i, p)| found.and_then(|f| f.get(&i)).unwrap_or(p).clone())
-                    .collect();
-                if parts == r.parts {
-                    r
-                } else {
-                    let mut owned = r.into_owned();
-                    owned.parts = parts;
-                    Cow::Owned(owned)
-                }
-            })
-            .collect();
         result
     }
 
@@ -1469,7 +1393,7 @@ impl<'a> Profiled<'a> {
         let mut prepared = vec![];
         let mut periods = vec![];
         // The first window owning each (owner, model), as `find` would return.
-        let mut lookup: HashMap<(&str, Option<&str>), Option<i64>> = HashMap::new();
+        let mut lookup: HashMap<(&str, Option<&str>), Option<i64>> = HashMap::default();
         for w in windows {
             for model in &w.models {
                 lookup
@@ -1491,8 +1415,8 @@ impl<'a> Profiled<'a> {
             let mut activity_index = 0;
             let mut turn_start = Millis::MIN;
             let mut turn_end = Millis::MIN;
-            let mut pending: HashSet<&str> = HashSet::new();
-            let mut old: HashMap<&str, &Scalar> = HashMap::new();
+            let mut pending: HashSet<&str> = HashSet::default();
+            let mut old: HashMap<&str, &Scalar> = HashMap::default();
             for (position, &r) in group.iter().enumerate() {
                 let scope = self.scopes.scope(r);
                 let c = self.scopes.control(scope);
@@ -1526,10 +1450,11 @@ impl<'a> Profiled<'a> {
                     }
                 }
                 let flag_state = if supported(r.version.as_deref(), 314) {
-                    Some("not-required".to_string())
+                    Some("not-required")
                 } else {
                     match old.get("idleCompactionAvailable") {
-                        Some(Scalar::Bool(b)) => Some(b.to_string()),
+                        Some(Scalar::Bool(true)) => Some("true"),
+                        Some(Scalar::Bool(false)) => Some("false"),
                         _ => None,
                     }
                 };
@@ -1582,7 +1507,7 @@ impl<'a> Profiled<'a> {
                 let below =
                     matches!((context_tokens, c.threshold), (Some(t), Some(min)) if t < min);
                 let narrow = matches!((window, c.threshold), (Some(w), Some(min)) if w <= min);
-                let flag_off = flag_state.as_deref().is_none_or(|f| f == "false");
+                let flag_off = flag_state.is_none_or(|f| f == "false");
                 let (status, reason) = if gap_ms < EARLY {
                     (
                         PeriodStatus::Censored,
@@ -1648,7 +1573,7 @@ impl<'a> Profiled<'a> {
                     context_tokens,
                     gap_ms,
                     status,
-                    reason: reason.to_string(),
+                    reason,
                     confirmed: eligible && turn_end >= r.end_time && turn_end < r.time + EARLY,
                     return_timing: if next.is_none() {
                         ReturnTiming::Final
@@ -1686,19 +1611,19 @@ impl<'a> Profiled<'a> {
                 });
             }
         }
-        let truthy = |text: &Option<String>| text.clone().filter(|t| !t.is_empty());
-        let mut cohorts: IndexMap<(String, String, String), ActivationCohort> = IndexMap::new();
+        let truthy = |text: &Option<Text>| text.clone().filter(|t| !t.is_empty());
+        let mut cohorts: IndexMap<(Text, Text, &str), ActivationCohort> = IndexMap::default();
         for (p, item) in periods.iter().zip(&prepared) {
             if p.status != PeriodStatus::Eligible || truthy(&p.resume).is_none() || !item.known_on {
                 continue;
             }
             let (Some(version), Some(client), Some(flag_state)) =
-                (truthy(&p.version), truthy(&p.client), p.flag_state.clone())
+                (truthy(&p.version), truthy(&p.client), p.flag_state)
             else {
                 continue;
             };
             let c = cohorts
-                .entry((version.clone(), client.clone(), flag_state.clone()))
+                .entry((version.clone(), client.clone(), flag_state))
                 .or_insert(ActivationCohort {
                     version,
                     client,
@@ -1726,9 +1651,9 @@ impl<'a> Profiled<'a> {
                 continue;
             }
             // Cohorts never hold a missing or empty version or client, so a missing value matches none.
-            let c = match (&p.version, &p.client, &p.flag_state) {
+            let c = match (&p.version, &p.client, p.flag_state) {
                 (Some(version), Some(client), Some(flag_state)) => {
-                    cohorts.get(&(version.clone(), client.clone(), flag_state.clone()))
+                    cohorts.get(&(version.clone(), client.clone(), flag_state))
                 }
                 _ => None,
             };
@@ -1737,7 +1662,8 @@ impl<'a> Profiled<'a> {
                 Some(c) => format!(
                     "same version/client/flag known-on returned applied fraction {}/{}; final periods use that same fraction with no second liveness factor",
                     c.applied, c.eligible
-                ),
+                )
+                .into(),
                 None => "documented-trigger fallback: left open and awake, one summary; final periods have the same assumed activation and no return benefit".into(),
             };
         }
@@ -1767,7 +1693,7 @@ impl<'a> Profiled<'a> {
             .collect();
         let mut common = Sum::new();
         for s in &replay.selected {
-            if !(s.compaction && idle_requests.contains(s.request.as_str())) {
+            if !(s.compaction && idle_requests.contains(&*s.request)) {
                 common.add(&s.cost);
             }
         }
@@ -1848,7 +1774,7 @@ impl<'a> Profiled<'a> {
         });
         let delta_usd = if unknown.is_empty() { delta(&on) } else { None };
         // Group once by size, keeping first-seen size order and period order within each.
-        let mut sizes: IndexMap<Option<i64>, Vec<usize>> = IndexMap::new();
+        let mut sizes: IndexMap<Option<i64>, Vec<usize>> = IndexMap::default();
         for (i, p) in periods.iter().enumerate() {
             sizes.entry(p.context_tokens).or_default().push(i);
         }
@@ -1953,14 +1879,14 @@ fn current_windows(scopes: &Scopes, main: &[&Request]) -> Vec<ScenarioWindow> {
     // A request whose scope was already seen adds no new (owner, model) pair.
     let main_scopes: IndexSet<Scope> = main.iter().map(|r| scopes.scope(r)).collect();
     let mut current_windows: Vec<ScenarioWindow> = vec![];
-    let mut seen: HashSet<(String, Option<&str>)> = HashSet::new();
+    let mut seen: HashSet<(String, Option<&str>)> = HashSet::default();
     for &scope in &main_scopes {
         for &model in &models {
             let c = scopes.window(scope, model);
             if seen.insert((c.owner.clone(), model)) {
                 current_windows.push(ScenarioWindow {
                     owner: c.owner.clone(),
-                    models: vec![model.map(str::to_string)],
+                    models: vec![model.map(Text::from)],
                     value: c.value,
                 });
             }
@@ -2035,13 +1961,13 @@ fn profile_checks<'a>(
     events.sort_by_key(|e| e.time);
     let since = options.since.unwrap_or(first);
     let now = options.now;
-    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for &r in &requests {
-        groups.entry(r.session.as_str()).or_default().push(r);
+        groups.entry(&*r.session).or_default().push(r);
     }
     let mut summaries = Summaries {
-        by_event: HashMap::new(),
-        requests: HashSet::new(),
+        by_event: HashMap::default(),
+        requests: HashSet::default(),
     };
     for s in options.summaries {
         summaries.by_event.insert(s.event.as_str(), s);
@@ -2079,45 +2005,53 @@ fn profile_checks<'a>(
         }
     }
     // Each owner keeps its first position and its last request's control.
-    let mut controls: IndexMap<&str, &IdleControl> = IndexMap::new();
+    let mut controls: IndexMap<&str, &IdleControl> = IndexMap::default();
     for r in &main {
         let c = scopes.control(scopes.scope(r));
         controls.insert(c.owner.as_str(), c);
     }
-    let current = profiled.replay(&current_ttls, &current_windows);
+    // Each replay covers the whole history, so the current one is released before the next.
+    let current_settings: Vec<IdleScenario> = {
+        let current = profiled.replay(&current_ttls, &current_windows);
+        let current_events = all_events(&events, &current.modeled);
+        let current_index = ReplayIndex::new(
+            &current.requests,
+            &current_events,
+            &profiled.calibration,
+            since,
+        );
+        controls
+            .keys()
+            .map(|&owner| {
+                profiled.scenario(
+                    &current,
+                    &current_index,
+                    owner,
+                    &current_ttls,
+                    &current_windows,
+                    "idle on/off at current TTL and current window controls",
+                )
+            })
+            .collect()
+    };
     let recommended = profiled.replay(&after_ttls, &recommended_windows);
-    let current_events = all_events(&events, &current.modeled);
     let recommended_events = all_events(&events, &recommended.modeled);
-    let current_index = ReplayIndex::new(
-        &current.requests,
-        &current_events,
-        &profiled.calibration,
-        since,
-    );
     let recommended_index = ReplayIndex::new(
         &recommended.requests,
         &recommended_events,
         &profiled.calibration,
         since,
     );
-    let history_profiles: IndexSet<&String> = main.iter().flat_map(|r| &r.profiles).collect();
-    let request_ids: HashSet<&str> = requests.iter().map(|r| r.id.as_str()).collect();
+    let history_profiles: IndexSet<&String> = main.iter().flat_map(|r| r.profiles.iter()).collect();
+    let request_ids: HashSet<&str> = requests.iter().map(|r| &*r.id).collect();
     let usage_estimates: Vec<UsageEstimate> = options
         .estimates
         .values()
-        .filter(|e| request_ids.contains(e.request.as_str()))
+        .filter(|e| request_ids.contains(&*e.request))
         .cloned()
         .collect();
     let elapsed = now - since;
-    for (&owner, &c) in &controls {
-        let current_settings = profiled.scenario(
-            &current,
-            &current_index,
-            owner,
-            &current_ttls,
-            &current_windows,
-            "idle on/off at current TTL and current window controls",
-        );
+    for ((&owner, &c), current_settings) in controls.iter().zip(current_settings) {
         let after = profiled.scenario(
             &recommended,
             &recommended_index,
@@ -2272,20 +2206,17 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         let samples = compaction_samples(&requests, &events, options.summaries);
         let first = requests.iter().map(|r| r.time).min();
         let since = options.since.or(first);
-        let mut groups = IndexMap::new();
+        let mut groups = IndexMap::default();
         for &r in &requests {
-            groups
-                .entry(r.session.as_str())
-                .or_insert_with(Vec::new)
-                .push(r);
+            groups.entry(&*r.session).or_insert_with(Vec::new).push(r);
         }
         let profiled = Profiled {
             catalog: options.catalog,
             estimates: options.estimates,
             all_summaries: options.summaries,
             summaries: Summaries {
-                by_event: HashMap::new(),
-                requests: HashSet::new(),
+                by_event: HashMap::default(),
+                requests: HashSet::default(),
             },
             scopes: Scopes::new(profile),
             since: since.unwrap_or(options.now),
@@ -2454,7 +2385,7 @@ fn t3_comparison(
     let ttl = ttls.main;
     let requests: Vec<&Request> = replay.requests.iter().map(AsRef::as_ref).collect();
     let events = all_events(events, &replay.modeled);
-    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::new();
+    let mut groups: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for &r in requests.iter().filter(|r| {
         r.agent == Agent::Main
             && r.t3.as_ref().is_none_or(|t| t.idle_mode.is_none())
@@ -2463,16 +2394,16 @@ fn t3_comparison(
         groups.entry(&r.session).or_default().push(r);
     }
     // Index once: per-request scans of every request and event are quadratic on real histories.
-    let mut natives: HashMap<&str, &Request> = HashMap::new();
+    let mut natives: HashMap<&str, &Request> = HashMap::default();
     for n in options
         .scan
         .requests
         .iter()
         .chain(&options.scan.cache_context.requests)
     {
-        natives.entry(n.id.as_str()).or_insert(n);
+        natives.entry(&*n.id).or_insert(n);
     }
-    let mut boundaries: HashMap<&str, Vec<&StructuralEvent>> = HashMap::new();
+    let mut boundaries: HashMap<&str, Vec<&StructuralEvent>> = HashMap::default();
     for &e in events
         .iter()
         .filter(|e| e.idle_attribution == IdleAttribution::T3)
@@ -2502,7 +2433,7 @@ fn t3_comparison(
             // previous request's end bounds the start from below.
             let start_floor = i.checked_sub(1).map(|j| group[j].end_time);
             let meta = r.t3.as_ref();
-            let native = natives.get(r.id.as_str()).copied();
+            let native = natives.get(&*r.id).copied();
             let message = r.parts.iter().find(|p| is_message(p));
             let tokens = match meta.and_then(|t| t.used_tokens) {
                 Some(tokens) => (|| {
@@ -2529,7 +2460,7 @@ fn t3_comparison(
             let trigger = expires
                 .filter(|t| completed < *t)
                 .map(|t| (t - T3_LEAD).max(completed));
-            let boundary = boundaries.get(r.session.as_str()).and_then(|b| {
+            let boundary = boundaries.get(&*r.session).and_then(|b| {
                 b.iter()
                     .copied()
                     .find(|e| e.time > r.end_time && e.time <= end)
@@ -2640,7 +2571,7 @@ fn t3_comparison(
             };
             periods.push(IdlePeriod {
                 request:r.id.clone(), resume:next.map(|r|r.id.clone()),session:r.session.clone(),context_tokens:tokens,
-                gap_ms:end-r.end_time,status,reason:reason.into(),confirmed:observed.is_some(),
+                gap_ms:end-r.end_time,status,reason,confirmed:observed.is_some(),
                 return_timing:if next.is_none(){ReturnTiming::Final}else if expires.is_some_and(|t|end>=t){ReturnTiming::AfterExpiry}else{ReturnTiming::BeforeExpiry},
                 outcome:if observed.is_some(){PeriodOutcome::Applied}else{PeriodOutcome::Unobserved},event:boundary.map(|e|e.id.clone()),version:r.version.clone(),client:r.client.clone(),flag_state:None,
                 activation:if status==PeriodStatus::Eligible{Some(1.0)}else{None},activation_basis:"conditional server liveness or on-return acceptance; absent generation is unobserved".into(),summary_cost:zero_cost(),calibration:None,
@@ -2721,7 +2652,7 @@ fn t3_replay(
         Boundary(&'a StructuralEvent),
         Generate(usize),
     }
-    let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::new();
+    let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
     let idle_ids: HashSet<&str> = events
         .iter()
         .filter(|e| e.idle_attribution == IdleAttribution::T3)
@@ -2748,15 +2679,14 @@ fn t3_replay(
     let baseline: HashMap<(&str, usize), &Cost> = replay
         .selected
         .iter()
-        .map(|s| ((s.request.as_str(), s.part), &s.cost))
+        .map(|s| ((&*s.request, s.part), &s.cost))
         .collect();
     // Each mode charges only what it changes. Charges every mode shares, including the
     // window replay's added summaries, server fees and the removal of recorded idle runs,
     // cancel in the comparison, so their missing usage cannot block it.
     let mut costs: Vec<Cost> = replay.errors.iter().cloned().map(unknown_cost).collect();
     if requests.iter().any(|r| {
-        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
-            && !idle_requests.contains(r.id.as_str())
+        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some()) && !idle_requests.contains(&*r.id)
     }) {
         costs.push(unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
     }
@@ -2805,8 +2735,7 @@ fn t3_replay(
                     let idle_run = r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some());
                     for (part, p) in r.parts.iter().enumerate() {
                         if idle_run
-                            || (idle_requests.contains(r.id.as_str())
-                                && p.kind == PartKind::Compaction)
+                            || (idle_requests.contains(&*r.id) && p.kind == PartKind::Compaction)
                         {
                             continue;
                         }
@@ -2866,7 +2795,7 @@ fn t3_replay(
                                 })
                             };
                             if selected && (offset != 0 || changed) {
-                                costs.push(match (altered.as_ref(), baseline.get(&(r.id.as_str(), part))) {
+                                costs.push(match (altered.as_ref(), baseline.get(&(&*r.id, part))) {
                                     (None, _) => unknown_cost("T3 counterfactual carried prefix or effective TTL is unavailable"),
                                     (_, None) => unknown_cost("shared cache replay did not price this native part"),
                                     (Some(altered), _) if altered == p => zero_cost(),
@@ -2899,7 +2828,7 @@ fn t3_replay(
                     let charge = options.summaries.iter().find(|s| s.event == e.id);
                     if e.idle_attribution == IdleAttribution::T3 {
                         let next = requests.iter().copied().find(|r| {
-                            r.session == e.session.as_ref()
+                            r.session == e.session
                                 && r.time > e.time
                                 && r.agent == Agent::Main
                                 && r.t3.as_ref().is_none_or(|t| t.idle_mode.is_none())
@@ -3122,7 +3051,7 @@ mod tests {
             session: "sample".into(),
             time: 2 * MINUTE,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()],
+            profiles: vec!["profile".into()].into(),
             location: Location {
                 file: "synthetic".into(),
                 line: 1,
@@ -3139,7 +3068,7 @@ mod tests {
             duration_ms: Some(1000),
             tool: None,
             tool_id: None,
-            settings: IndexMap::new(),
+            settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,
@@ -3170,7 +3099,7 @@ mod tests {
         StructuralEvent {
             idle_attribution: IdleAttribution::Notice,
             trigger: Some("auto".into()),
-            request: request.map(str::to_string),
+            request: request.map(Text::from),
             ..session_event(id, EventKind::Compaction, session, minute)
         }
     }
@@ -3180,7 +3109,7 @@ mod tests {
         user.insert("idleCompaction".into(), Value::Bool(false));
         user.insert("autoCompactWindow".into(), Value::from(400_000));
         let managed = Map::new();
-        let env = Env::new();
+        let env = Env::default();
         let ttl = |value, owner: &str| crate::model::TtlControl {
             value: Some(value),
             owner: owner.into(),
@@ -3198,7 +3127,7 @@ mod tests {
                 subagent: ttl(Ttl::FiveMinutes, "settings.json:subagentPromptCacheTtl"),
             },
             provider: Some("anthropic".into()),
-            settings: IndexMap::from([("idleCompaction".to_string(), Scalar::Bool(false))]),
+            settings: IndexMap::from_iter([("idleCompaction".to_string(), Scalar::Bool(false))]),
             mcp_servers: vec![],
             compaction: compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
@@ -3225,8 +3154,8 @@ mod tests {
             speed_directories: None,
             idle_directories: None,
             background: vec![],
-            background_directories: IndexMap::new(),
-            background_requests: IndexMap::new(),
+            background_directories: IndexMap::default(),
+            background_requests: IndexMap::default(),
             t3: None,
         }
     }
@@ -3263,7 +3192,7 @@ mod tests {
     struct Policies {
         ttls: Vec<TtlCheck>,
         windows: Vec<CompactionCheck>,
-        estimates: IndexMap<String, UsageEstimate>,
+        estimates: IndexMap<Text, UsageEstimate>,
         /// Overrides the scan's window start.
         since: Option<Millis>,
     }
@@ -3313,7 +3242,7 @@ mod tests {
         scenario
             .periods
             .iter()
-            .find(|p| p.request == request)
+            .find(|p| &*p.request == request)
             .expect("period")
     }
 
@@ -3499,7 +3428,7 @@ mod tests {
             let mut s = data(vec![request("final", 100.0, 300_000)], vec![]);
             let last = s.requests.len() - 1;
             match mode {
-                "sample" => s.requests.retain(|r| r.id != "summary"),
+                "sample" => s.requests.retain(|r| &*r.id != "summary"),
                 "version" => s.requests[last].version = None,
                 "desktop" => s.requests[last].client = Some("claude-desktop".into()),
                 "flags" => s.requests[last].version = Some("2.1.300".into()),
@@ -3527,11 +3456,11 @@ mod tests {
             basis: vec!["synthetic recorded attempt input".into()],
             part: Some(part),
             max_output_tokens: None,
-            reason: "comparison-only input estimate".into(),
+            reason: "comparison-only input estimate",
             assumptions: vec![],
         };
         let policies = Policies {
-            estimates: IndexMap::from([("estimated".to_string(), estimate)]),
+            estimates: IndexMap::from_iter([("estimated".into(), estimate)]),
             since: Some(100 * MINUTE),
             ..Policies::default()
         };
@@ -3696,11 +3625,13 @@ mod tests {
             s.events.insert(
                 0,
                 StructuralEvent {
-                    settings: IndexMap::from([
+                    settings: [
                         ("idleCompaction".to_string(), Scalar::Bool(true)),
                         ("promptCacheTtl".to_string(), Scalar::Text("1h".into())),
                         ("autoCompactEnabled".to_string(), Scalar::Bool(true)),
-                    ]),
+                    ]
+                    .into_iter()
+                    .collect(),
                     ..session_event(
                         &format!("settings-{session}"),
                         EventKind::Settings,
@@ -3714,7 +3645,7 @@ mod tests {
             id: as_id.into(),
             session: "different-sample".into(),
             version: Some("2.1.315".into()),
-            ..s.requests.iter().find(|r| r.id == id).unwrap().clone()
+            ..s.requests.iter().find(|r| &*r.id == id).unwrap().clone()
         };
         let copies = [
             copy("summary", "different-summary"),
@@ -3869,7 +3800,7 @@ mod tests {
             !c.after_recommendations
                 .periods
                 .iter()
-                .any(|p| p.request == "before")
+                .any(|p| &*p.request == "before")
         );
     }
 
@@ -3882,7 +3813,7 @@ mod tests {
         ];
         let c = check(&data(target, vec![]), 200.0);
         let a = &c.after_recommendations;
-        let order: Vec<&str> = a.periods.iter().map(|p| p.request.as_str()).collect();
+        let order: Vec<&str> = a.periods.iter().map(|p| &*p.request).collect();
         assert_eq!(order, ["sample-resume", "a", "b", "c"]);
         let groups: Vec<(Option<i64>, u64)> =
             a.by_context.iter().map(|g| (g.tokens, g.periods)).collect();
@@ -4190,11 +4121,11 @@ mod tests {
                     0,
                     ttl,
                 );
-                r.t3 = Some(T3Request {
-                    thread: r.session.clone(),
-                    run: r.id.clone(),
-                    attempt: r.id.clone(),
-                    provider_turn: r.id.clone(),
+                r.t3 = Some(Box::new(T3Request {
+                    thread: r.session.to_string(),
+                    run: r.id.to_string(),
+                    attempt: r.id.to_string(),
+                    provider_turn: r.id.to_string(),
                     status: "completed".into(),
                     completed_at: Some(r.end_time),
                     usage_updated_at: Some(r.end_time),
@@ -4202,7 +4133,7 @@ mod tests {
                     cache_expires_at: Some(r.end_time + ttl_milliseconds(ttl)),
                     idle_mode: None,
                     lifecycle_eligible: Some(true),
-                });
+                }));
             }
         }
         scan
@@ -4216,7 +4147,7 @@ mod tests {
             scan: &scan,
             catalog: &catalog,
             summaries: &summaries,
-            estimates: &IndexMap::new(),
+            estimates: &IndexMap::default(),
             ttls: &[],
             windows: &[],
             since: None,
@@ -4260,7 +4191,7 @@ mod tests {
             .current_settings
             .periods
             .iter()
-            .find(|p| p.request == "a")
+            .find(|p| &*p.request == "a")
             .unwrap();
         assert_eq!(p.status, PeriodStatus::Eligible);
         assert_eq!(p.return_timing, ReturnTiming::AfterExpiry);
@@ -4318,7 +4249,7 @@ mod tests {
                 .current_settings
                 .periods
                 .iter()
-                .find(|p| p.request == "final")
+                .find(|p| &*p.request == "final")
                 .unwrap()
                 .status,
             PeriodStatus::Censored
@@ -4353,7 +4284,7 @@ mod tests {
         let mut identity = observed
             .requests
             .iter()
-            .find(|r| r.id == "a")
+            .find(|r| &*r.id == "a")
             .unwrap()
             .t3
             .clone()
@@ -4363,7 +4294,7 @@ mod tests {
         observed
             .requests
             .iter_mut()
-            .find(|r| r.id == "idle")
+            .find(|r| &*r.id == "idle")
             .unwrap()
             .t3 = Some(identity.clone());
         let mut boundary = session_event("idle-boundary", EventKind::Compaction, "target", 4.0);
@@ -4391,13 +4322,13 @@ mod tests {
     fn t3_missing_projection_or_calibration_stays_unknown_and_disabled_advisory() {
         use crate::model::T3IdleMode::*;
         let mut scan = t3_data(vec![request("a", 0.0, 300_000)], Ttl::FiveMinutes, Off);
-        scan.requests.iter_mut().find(|r| r.id == "a").unwrap().t3 = None;
+        scan.requests.iter_mut().find(|r| &*r.id == "a").unwrap().t3 = None;
         let check = t3_check(&scan, 10.0);
         assert!(check.current_settings.scenarios[2].cost.total_usd.is_none());
         assert_eq!(check.base.action, Action::Advisory);
         let mut scan = t3_data(vec![request("a", 0.0, 300_000)], Ttl::OneHour, Off);
         scan.events.clear();
-        scan.requests.retain(|r| r.session != "sample");
+        scan.requests.retain(|r| &*r.session != "sample");
         let check = t3_check(&scan, 70.0);
         assert!(check.current_settings.scenarios[2].cost.total_usd.is_none());
         scan.profiles[0].t3.as_mut().unwrap().enabled = false;
@@ -4407,7 +4338,7 @@ mod tests {
                 scan: &scan,
                 catalog: &prices(),
                 summaries: &[],
-                estimates: &IndexMap::new(),
+                estimates: &IndexMap::default(),
                 ttls: &[],
                 windows: &[],
                 since: None,
@@ -4420,7 +4351,7 @@ mod tests {
     fn t3_meta<'s>(scan: &'s mut Scan, id: &str) -> &'s mut crate::model::T3Request {
         scan.requests
             .iter_mut()
-            .find(|r| r.id == id)
+            .find(|r| *r.id == *id)
             .unwrap()
             .t3
             .as_mut()
@@ -4474,11 +4405,11 @@ mod tests {
         );
         // No 5m-cache timer can fire within three minutes of the request start, joined to
         // T3 or not. Without a linked start, the previous request's end bounds it.
-        scan.requests.iter_mut().find(|r| r.id == "a").unwrap().t3 = None;
+        scan.requests.iter_mut().find(|r| &*r.id == "a").unwrap().t3 = None;
         let check = t3_check(&scan, 2.5);
         let status = |check: &crate::model::T3IdleCheck, id: &str| {
             let periods = &check.current_settings.periods;
-            periods.iter().find(|p| p.request == id).unwrap().status
+            periods.iter().find(|p| *p.request == *id).unwrap().status
         };
         assert_eq!(status(&check, "a"), PeriodStatus::Censored);
         let proactive = &check.current_settings.scenarios[2];
@@ -4487,7 +4418,7 @@ mod tests {
             (Some(0.0), 0)
         );
         // With no earlier request, `a` may have started long before its first record.
-        scan.requests.retain(|r| r.id != "p");
+        scan.requests.retain(|r| &*r.id != "p");
         assert_eq!(status(&t3_check(&scan, 2.5), "a"), PeriodStatus::Unknown);
 
         // T3 dates expiry from the request start; a run completing inside the lead starts
@@ -4499,7 +4430,7 @@ mod tests {
         );
         scan.requests
             .iter_mut()
-            .find(|r| r.id == "a")
+            .find(|r| &*r.id == "a")
             .unwrap()
             .end_time = 4 * MINUTE;
         let a = t3_meta(&mut scan, "a");

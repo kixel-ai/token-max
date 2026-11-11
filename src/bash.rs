@@ -133,7 +133,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
         })
         .collect();
     requests.sort_by_key(|r| r.time);
-    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (r.id.as_str(), *r)).collect();
+    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
     let mut sessions: HashMap<&str, Vec<&Request>> = HashMap::default();
     for &r in &requests {
         sessions.entry(&r.session).or_default().push(r);
@@ -196,7 +196,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
                 .copied()
         });
         // Parallel waits can share one next request, whose rewrite counts once.
-        if next.is_none_or(|r| priced.insert(r.id.as_str())) {
+        if next.is_none_or(|r| priced.insert(&*r.id)) {
             costs.push(miss(catalog, issuing, next));
         }
     }
@@ -214,7 +214,8 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     if let Some(cap) = recommended.filter(|cap| control.default_timeout > *cap) {
         replacement += &format!(" and env.BASH_DEFAULT_TIMEOUT_MS: \"{cap}\"");
     }
-    let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
+    let history_profiles: IndexSet<&String> =
+        requests.iter().flat_map(|r| r.profiles.iter()).collect();
     let mut uncertainty = vec![
         "project/local settings and launch environments are not read; only user/managed settings and the active profile's environment".into(),
     ];

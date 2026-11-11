@@ -135,6 +135,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             codex_requirements_file: text(&w.home.join("requirements.toml")),
         },
         since,
+        full: true,
     }
 }
 
@@ -645,7 +646,7 @@ fn copied_history_is_one_request_exposure_and_conflicting_copies_stay_unknown() 
     assert_eq!(view.linkage, Linkage::Unknown);
     assert!(view.reasons.join(",").contains("disagree"));
     assert_eq!(
-        data.requests[0].id,
+        *data.requests[0].id,
         format!("codex:{}", identity("response-1"))
     );
 }

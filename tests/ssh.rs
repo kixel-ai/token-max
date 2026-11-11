@@ -912,7 +912,7 @@ fn destinations_and_directory_flags_are_unambiguous() {
         (&["--ssh", "a", "--ssh", "a"], "--ssh a is selected twice"),
         (&["--include-local"], "--include-local requires --ssh"),
         (&["--ssh", "a", "--claude-dir", "x"], "add --include-local"),
-        (&["--ssh-scan", "--json-full"], "invalid arguments"),
+        (&["--ssh-scan", "--json"], "invalid arguments"),
         (&["--ssh", "-x"], "invalid arguments"),
     ] {
         let (status, stdout, stderr) = hosts.run(args);

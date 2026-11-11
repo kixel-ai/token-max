@@ -9,6 +9,117 @@ pub type Millis = i64;
 /// A shared immutable string, for identifiers repeated across many records.
 pub type Text = std::sync::Arc<str>;
 
+/// One shared copy of each distinct string and profile set the records of a scan repeat.
+#[derive(Default)]
+pub struct Interner {
+    texts: crate::collections::HashSet<Text>,
+    profiles: crate::collections::HashSet<Profiles>,
+    tools: crate::collections::HashSet<ServerTools>,
+}
+
+impl Interner {
+    /// The shared copy of `value`.
+    pub fn text(&mut self, value: &str) -> Text {
+        if let Some(text) = self.texts.get(value) {
+            return text.clone();
+        }
+        let text = Text::from(value);
+        self.texts.insert(text.clone());
+        text
+    }
+
+    /// Replace `slot` with its shared copy.
+    pub fn share(&mut self, slot: &mut Option<Text>) {
+        if let Some(text) = slot {
+            *text = self.text(text);
+        }
+    }
+
+    /// The shared copy of a profile set.
+    pub fn profiles(&mut self, ids: &[String]) -> Profiles {
+        if let Some(profiles) = self.profiles.get(ids) {
+            return profiles.clone();
+        }
+        let profiles = Profiles::from(ids);
+        self.profiles.insert(profiles.clone());
+        profiles
+    }
+
+    /// `profiles` followed by any of `items` it lacks, as `[...new Set([...a, ...b])]` would.
+    pub fn union(&mut self, profiles: &Profiles, items: &[String]) -> Profiles {
+        if items.iter().all(|item| profiles.contains(item)) {
+            return profiles.clone();
+        }
+        let mut ids = profiles.to_vec();
+        for item in items {
+            if !ids.contains(item) {
+                ids.push(item.clone());
+            }
+        }
+        self.profiles(&ids)
+    }
+
+    /// Share every repeated string of a request, keeping its unique identifiers as they are.
+    pub fn request(&mut self, r: &mut Request) {
+        r.session = self.text(&r.session);
+        for slot in [
+            &mut r.model,
+            &mut r.provider,
+            &mut r.source,
+            &mut r.trigger,
+            &mut r.turn,
+            &mut r.version,
+            &mut r.client,
+            &mut r.cwd,
+        ] {
+            self.share(slot);
+        }
+        for p in &mut r.parts {
+            for slot in [&mut p.model, &mut p.tier, &mut p.speed, &mut p.geo] {
+                self.share(slot);
+            }
+        }
+        if let Some(speed) = &mut r.requested_speed {
+            self.share(&mut speed.tier);
+            self.share(&mut speed.speed);
+        }
+        for issue in &mut r.issues {
+            *issue = self.text(issue);
+        }
+        r.profiles = self.profiles(&r.profiles);
+        if let Some(tools) = &mut r.server_tools {
+            match self.tools.get(tools) {
+                Some(shared) => *tools = shared.clone(),
+                None => {
+                    self.tools.insert(tools.clone());
+                }
+            }
+        }
+        r.parts.shrink_to_fit();
+        r.locations.shrink_to_fit();
+        r.issues.shrink_to_fit();
+    }
+
+    /// Share every repeated string of a structural event.
+    pub fn event(&mut self, e: &mut StructuralEvent) {
+        e.session = self.text(&e.session);
+        for slot in [
+            &mut e.model,
+            &mut e.version,
+            &mut e.client,
+            &mut e.cwd,
+            &mut e.tool,
+        ] {
+            self.share(slot);
+        }
+        for origin in &mut e.origins {
+            origin.session = self.text(&origin.session);
+        }
+        e.profiles = self.profiles(&e.profiles);
+        e.origins.shrink_to_fit();
+    }
+}
+
 /// The two locally supported transcript formats.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -150,11 +261,15 @@ pub enum PartKind {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BillingPart {
     pub kind: PartKind,
-    pub model: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub model: Option<Text>,
     pub usage: Usage,
-    pub tier: Option<String>,
-    pub speed: Option<String>,
-    pub geo: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub tier: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub speed: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub geo: Option<Text>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -199,42 +314,59 @@ pub struct Attempt {
 /// Requested controls never establish the billed response tier.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestedSpeed {
-    pub tier: Option<String>,
-    pub speed: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub tier: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub speed: Option<Text>,
 }
 
 /// One deduplicated model request, with no message content.
+///
+/// Strings are shared: a request holds references to values that thousands of requests
+/// repeat, such as its model, session and profiles, so a full history fits in memory.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub evidence: RequestEvidence,
-    pub id: String,
+    #[serde(with = "crate::wire::text")]
+    pub id: Text,
     pub harness: Harness,
-    pub session: String,
+    #[serde(with = "crate::wire::text")]
+    pub session: Text,
     pub agent: Agent,
     pub time: Millis,
     pub end_time: Millis,
-    pub model: Option<String>,
-    pub provider: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub model: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub provider: Option<Text>,
     pub api: Api,
-    pub source: Option<String>,
-    pub trigger: Option<String>,
-    pub reference: Option<String>,
-    pub turn: Option<String>,
-    pub version: Option<String>,
-    pub client: Option<String>,
-    pub cwd: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub source: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub trigger: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub reference: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub turn: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub version: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub client: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub cwd: Option<Text>,
     pub parts: Vec<BillingPart>,
-    pub server_tools: Option<IndexMap<String, i64>>,
-    pub profiles: Vec<String>,
+    pub server_tools: Option<ServerTools>,
+    pub profiles: Profiles,
     pub locations: Vec<Location>,
     pub accounting: Accounting,
     pub attempt: Option<Attempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
-    pub issues: Vec<String>,
+    #[serde(with = "crate::wire::texts")]
+    pub issues: Vec<Text>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub t3: Option<T3Request>,
+    pub t3: Option<Box<T3Request>>,
 }
 
 /// A safe location under one conversation alias.
@@ -277,11 +409,11 @@ pub enum Scalar {
 /// Preceding pricing metadata from the same file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {
-    pub model: Option<String>,
-    pub provider: Option<String>,
-    pub tier: Option<String>,
-    pub speed: Option<String>,
-    pub geo: Option<String>,
+    pub model: Option<Text>,
+    pub provider: Option<Text>,
+    pub tier: Option<Text>,
+    pub speed: Option<Text>,
+    pub geo: Option<Text>,
 }
 
 /// Structural context and timing evidence, never a billed boundary request.
@@ -292,24 +424,31 @@ pub struct StructuralEvent {
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
     pub harness: Harness,
+    #[serde(with = "crate::wire::text")]
     pub session: Text,
     pub time: Millis,
     pub kind: EventKind,
-    pub profiles: Vec<String>,
+    pub profiles: Profiles,
     pub location: Location,
-    pub request: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub request: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
     pub model: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
     pub version: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
     pub client: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
     pub cwd: Option<Text>,
     pub trigger: Option<String>,
     pub precomputed: Option<bool>,
     pub pre_tokens: Option<i64>,
     pub post_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
-    pub tool: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub tool: Option<Text>,
     pub tool_id: Option<String>,
-    pub settings: IndexMap<String, Scalar>,
+    pub settings: Settings,
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
@@ -317,7 +456,90 @@ pub struct StructuralEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellCall>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub t3: Option<T3Request>,
+    pub t3: Option<Box<T3Request>>,
+}
+
+/// Recorded settings values by key; most events carry none, so they hold no map.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Settings(Option<Box<IndexMap<String, Scalar>>>);
+
+impl Settings {
+    /// Settings holding `values`.
+    pub fn new(values: IndexMap<String, Scalar>) -> Self {
+        Self((!values.is_empty()).then(|| Box::new(values)))
+    }
+
+    /// The value recorded for `key`.
+    pub fn get(&self, key: &str) -> Option<&Scalar> {
+        self.0.as_ref()?.get(key)
+    }
+
+    /// Every recorded key and value, in recorded order.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Scalar)> {
+        self.0.iter().flat_map(|values| values.iter())
+    }
+
+    /// Whether no value is recorded.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+impl FromIterator<(String, Scalar)> for Settings {
+    fn from_iter<I: IntoIterator<Item = (String, Scalar)>>(items: I) -> Self {
+        Self::new(items.into_iter().collect())
+    }
+}
+
+impl From<IndexMap<String, Scalar>> for Settings {
+    fn from(values: IndexMap<String, Scalar>) -> Self {
+        Self::new(values)
+    }
+}
+
+impl Serialize for Settings {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for Settings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        IndexMap::deserialize(deserializer).map(Settings::new)
+    }
+}
+
+/// The profiles a record belongs to, shared by every record with the same set.
+pub type Profiles = std::sync::Arc<[String]>;
+
+/// Server-tool request counts by name, in recorded order. Nearly every request records the
+/// same counts, so requests share one copy.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct ServerTools(std::sync::Arc<[(String, i64)]>);
+
+impl ServerTools {
+    /// Each tool's name and count, in recorded order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, i64)> {
+        self.0.iter().map(|(name, count)| (name.as_str(), *count))
+    }
+}
+
+impl FromIterator<(String, i64)> for ServerTools {
+    fn from_iter<I: IntoIterator<Item = (String, i64)>>(items: I) -> Self {
+        Self(items.into_iter().collect())
+    }
+}
+
+impl Serialize for ServerTools {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_map(self.iter())
+    }
+}
+
+impl<'de> Deserialize<'de> for ServerTools {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        IndexMap::<String, i64>::deserialize(deserializer).map(|tools| tools.into_iter().collect())
+    }
 }
 
 /// What a Claude Bash call asked for and how it ended, never its command or output.
@@ -626,7 +848,7 @@ pub struct Cost {
 #[serde(rename_all = "camelCase")]
 pub struct CompactionCharge {
     pub event: String,
-    pub request: Option<String>,
+    pub request: Option<Text>,
     pub evidence: Evidence,
     pub cost: Cost,
     pub ttl_cost: PerTtl<Cost>,
@@ -644,12 +866,12 @@ pub enum EstimateEvidence {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageEstimate {
-    pub request: String,
+    pub request: Text,
     pub evidence: EstimateEvidence,
-    pub basis: Vec<String>,
+    pub basis: Vec<Text>,
     pub part: Option<BillingPart>,
     pub max_output_tokens: Option<i64>,
-    pub reason: String,
+    pub reason: &'static str,
     pub assumptions: Vec<String>,
 }
 
@@ -673,13 +895,13 @@ pub enum PrefixEvidence {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CachePredecessor {
-    pub request: String,
+    pub request: Text,
     pub part: usize,
     pub time: Millis,
     pub state: KnownState,
     pub prefix_evidence: PrefixEvidence,
     pub cohort_known: bool,
-    pub reason: String,
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -693,13 +915,13 @@ pub enum ReplayOutcome {
 /// Evidence for one selected request's counterfactual cache geometry, independent of prices.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CacheReplayEvidence {
-    pub request: String,
+    pub request: Text,
     pub part: usize,
     pub ttl: Ttl,
     pub state: KnownState,
     pub predecessors: Vec<CachePredecessor>,
     pub outcome: ReplayOutcome,
-    pub reason: String,
+    pub reason: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -792,14 +1014,14 @@ pub struct TtlCheck {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CompactionBasis {
     pub event: String,
-    pub request: String,
+    pub request: Text,
 }
 
 /// One extra modeled compaction and the observations supporting its geometry.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddedCompaction {
-    pub request: String,
+    pub request: Text,
     pub input_tokens: i64,
     pub summary_tokens: i64,
     pub prefix_tokens: i64,
@@ -841,8 +1063,8 @@ pub struct CompactionCheck {
     pub base: CheckBase<i64>,
     /// Always "all".
     pub bucket: &'static str,
-    pub model: Option<String>,
-    pub models: Vec<Option<String>>,
+    pub model: Option<Text>,
+    pub models: Vec<Option<Text>>,
     pub baseline_cost: Cost,
     pub observed_summary_cost: Cost,
     pub ttls: PerBucket<Option<Ttl>>,
@@ -893,7 +1115,7 @@ pub struct BackgroundCheck {
     pub base: CheckBase<bool>,
     pub feature: BackgroundFeature,
     /// Recorded directories whose requests this control applies to; null means absent.
-    pub directories: Vec<Option<String>>,
+    pub directories: Vec<Option<Text>>,
     /// Current ownership and any unresolved scope or selection.
     pub reason: String,
     /// The setting that turns it off.
@@ -977,22 +1199,22 @@ pub struct PeriodCalibration {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdlePeriod {
-    pub request: String,
-    pub resume: Option<String>,
-    pub session: String,
+    pub request: Text,
+    pub resume: Option<Text>,
+    pub session: Text,
     pub context_tokens: Option<i64>,
     pub gap_ms: i64,
     pub status: PeriodStatus,
-    pub reason: String,
+    pub reason: &'static str,
     pub confirmed: bool,
     pub return_timing: ReturnTiming,
     pub outcome: PeriodOutcome,
     pub event: Option<String>,
-    pub version: Option<String>,
-    pub client: Option<String>,
-    pub flag_state: Option<String>,
+    pub version: Option<Text>,
+    pub client: Option<Text>,
+    pub flag_state: Option<&'static str>,
     pub activation: Option<f64>,
-    pub activation_basis: String,
+    pub activation_basis: std::borrow::Cow<'static, str>,
     pub summary_cost: Cost,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calibration: Option<PeriodCalibration>,
@@ -1008,7 +1230,7 @@ pub struct OnOff<T> {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ScenarioWindow {
     pub owner: String,
-    pub models: Vec<Option<String>>,
+    pub models: Vec<Option<Text>>,
     pub value: Option<i64>,
 }
 
@@ -1023,9 +1245,9 @@ pub struct ContextDelta {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActivationCohort {
-    pub version: String,
-    pub client: String,
-    pub flag_state: String,
+    pub version: Text,
+    pub client: Text,
+    pub flag_state: &'static str,
     pub applied: u64,
     pub eligible: u64,
     pub fraction: f64,
@@ -1569,7 +1791,7 @@ impl std::fmt::Debug for Ids {
 /// Serialized by [`crate::wire`], which shares views and result totals once per SSH stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exposure {
-    pub request: String,
+    pub request: Text,
     /// Identical views are shared, since consecutive requests usually carry the same context.
     pub view: std::sync::Arc<ExposureView>,
     /// Tool output the conversation held when the request was sent.
@@ -1628,10 +1850,13 @@ pub enum Observed {
 #[serde(rename_all = "camelCase")]
 pub struct Visibility {
     pub harness: Harness,
-    pub client: Option<String>,
-    pub version: Option<String>,
-    pub profiles: Vec<String>,
-    pub component: Option<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub client: Option<Text>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub version: Option<Text>,
+    pub profiles: Profiles,
+    #[serde(with = "crate::wire::opt_text")]
+    pub component: Option<Text>,
     pub since: Millis,
     pub until: Millis,
     pub exposure: Visible,
@@ -1640,7 +1865,8 @@ pub struct Visibility {
     pub typed_skills: Observed,
     /// Always false.
     pub automatic_unused: bool,
-    pub reasons: Vec<String>,
+    /// The same reasons for every row, so rows share one list.
+    pub reasons: std::sync::Arc<[String]>,
 }
 
 /// How often one tool was called within the window, per profile set.
@@ -1680,7 +1906,7 @@ pub struct ExposureScan {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CalibrationSample {
-    pub request: String,
+    pub request: Text,
     pub characters: i64,
     pub tokens: i64,
 }

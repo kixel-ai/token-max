@@ -37,10 +37,10 @@ pub fn cohort(r: &Request) -> String {
 
 /// Calibrate complete text-only wire inputs against observed, single-request input totals.
 pub fn calibrate(scan: &ExposureScan, requests: &[Request]) -> Vec<Calibration> {
-    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (r.id.as_str(), r)).collect();
+    let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, r)).collect();
     let mut result: IndexMap<String, (Calibration, i64, i64)> = IndexMap::default();
     for exposure in &scan.requests {
-        let Some(r) = by_id.get(exposure.request.as_str()) else {
+        let Some(r) = by_id.get(&*exposure.request) else {
             continue;
         };
         let Some(model) = r.model.as_deref().filter(|m| !m.is_empty()) else {
@@ -97,6 +97,9 @@ pub fn calibrate(scan: &ExposureScan, requests: &[Request]) -> Vec<Calibration> 
 /// Collect derived metadata in the reader's frozen, single parsing pass.
 pub struct ExposureCollector {
     since: Option<Millis>,
+    // Whether to keep evidence only the full report shows: every sighting of a component
+    // and each request's message digests. Both grow with every request of a long history.
+    full: bool,
     // Tool calls by call id, so copies in other transcript files count once.
     calls: IndexMap<String, ToolCall>,
     // Tool results by call id, for the same reason.
@@ -360,10 +363,11 @@ const VISIBILITY_REASONS: [&str; 3] = [
 ];
 
 impl ExposureCollector {
-    /// A collector whose tool-call counts start at `since`.
-    pub fn new(since: Option<Millis>) -> Self {
+    /// A collector whose tool-call counts start at `since`, keeping full-report evidence if `full`.
+    pub fn new(since: Option<Millis>, full: bool) -> Self {
         Self {
             since,
+            full,
             calls: IndexMap::default(),
             results: IndexMap::default(),
             names: HashSet::default(),
@@ -612,7 +616,7 @@ impl ExposureCollector {
                 .iter()
                 .filter_map(|l| {
                     let file = observations.get(&*l.file)?;
-                    let observed = r.reference.as_ref().and_then(|x| file.refs.get(x));
+                    let observed = r.reference.as_ref().and_then(|x| file.refs.get(&**x));
                     observed.or_else(|| file.lines.get(&l.line))
                 })
                 .collect();
@@ -957,9 +961,12 @@ impl ExposureCollector {
         size: &Size,
         at: &At<'_>,
     ) -> Text {
+        let full = self.full;
         let revision = match self.components.get_full_mut(revision) {
             Some((_, id, existing)) => {
-                existing.locations.push(at.location.clone());
+                if full {
+                    existing.locations.push(at.location.clone());
+                }
                 existing.first_seen = existing.first_seen.min(at.time);
                 id.clone()
             }
@@ -1466,8 +1473,11 @@ impl ExposureCollector {
                     let same = self.surfaced.get(&reference).cloned().ok_or_else(|| {
                         ScanError::new("unresolved surfaced definition reference")
                     })?;
+                    let full = self.full;
                     let component = &mut self.components[&*same];
-                    component.locations.push(line.location.clone());
+                    if full {
+                        component.locations.push(line.location.clone());
+                    }
                     let key = Text::from(component.key.as_str());
                     let category = component.category;
                     if let Some((prior, _)) = self.active.get(&key)
@@ -1683,7 +1693,7 @@ impl ExposureCollector {
             } else {
                 TextCoverage::CompleteText
             },
-            references: Some(References {
+            references: self.full.then(|| References {
                 base,
                 keep,
                 tail: Ids::new(None, tail),
@@ -2199,7 +2209,7 @@ fn visibility(
             since: r.time,
             until: r.end_time,
         });
-        g.sessions.insert(r.session.as_str());
+        g.sessions.insert(&*r.session);
         g.since = g.since.min(r.time);
         g.until = g.until.max(r.end_time);
     }
@@ -2276,6 +2286,7 @@ fn visibility(
                 .or_insert(call);
         }
     }
+    let reasons: Arc<[String]> = VISIBILITY_REASONS.iter().map(|r| r.to_string()).collect();
     windows
         .into_iter()
         .map(|((_, component), w)| {
@@ -2301,7 +2312,7 @@ fn visibility(
                 } else {
                     Visible::Partial
                 },
-                component: component.map(|c| c.to_string()),
+                component,
                 direct_calls: if calls.is_some_and(|c| c.direct) {
                     Observed::Observed
                 } else {
@@ -2318,7 +2329,7 @@ fn visibility(
                     Observed::Unknown
                 },
                 automatic_unused: false,
-                reasons: VISIBILITY_REASONS.iter().map(|r| r.to_string()).collect(),
+                reasons: reasons.clone(),
             }
         })
         .collect()
@@ -3315,12 +3326,12 @@ mod tests {
         fn request(&self, id: &str, line: u64, reference: Option<&str>) -> Request {
             Request {
                 id: id.into(),
-                reference: reference.map(identity),
+                reference: reference.map(|r| identity(r).into()),
                 locations: vec![Location {
                     file: self.file.clone(),
                     line,
                 }],
-                profiles: self.snapshot.profiles.clone(),
+                profiles: self.snapshot.profiles.clone().into(),
                 ..make_request()
             }
         }
@@ -3375,7 +3386,7 @@ mod tests {
         ]);
         let system = json!([{ "type": "text", "text": "system" }]);
         let message = json!({ "role": "user", "content": "hello" });
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -3462,7 +3473,7 @@ mod tests {
                 .extend(extra.as_object().unwrap().clone());
             r
         };
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -3504,13 +3515,57 @@ mod tests {
             3
         );
 
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         let first = request(1, json!({ "keep": 0, "tail": [], "requestDigest": "d" }));
         feed.push(&mut c, first).unwrap();
         let second = request(2, json!({ "base": "d", "keep": 1, "tail": [] }));
         let error = feed.push(&mut c, second).unwrap_err();
         assert_eq!(error.message, "invalid request digest prefix length");
+    }
+
+    #[test]
+    fn only_full_reports_keep_sightings_and_digest_lists() {
+        let tools = json!([{ "name": "Bash", "description": "run", "input_schema": {} }]);
+        let scan = |full: bool| {
+            let mut c = ExposureCollector::new(None, full);
+            let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
+            let request = |n: u32| {
+                json!({ "type": "api-request", "id": format!("api-{n}"), "timestamp": at(n),
+                        "shapeHash": "shape", "keep": 0, "tail": ["m1"],
+                        "params": { "model": "claude-opus-5-5" } })
+            };
+            feed.all(
+                &mut c,
+                vec![
+                    json!({ "type": "api-request-shape", "shapeHash": "shape",
+                            "shape": { "system": [], "tools": tools } }),
+                    request(1),
+                    request(2),
+                ],
+            );
+            let requests: Vec<Request> = (1..=2)
+                .map(|n| feed.request(&format!("r{n}"), n as u64, Some(&format!("api-{n}"))))
+                .collect();
+            c.finish(&requests, None)
+        };
+        let (full, compact) = (scan(true), scan(false));
+        let bash = |scan: &ExposureScan| {
+            scan.components
+                .iter()
+                .find(|c| c.name == "Bash")
+                .unwrap()
+                .locations
+                .len()
+        };
+        assert_eq!(bash(&full), 2);
+        assert_eq!(bash(&compact), 1);
+        for (full, compact) in full.requests.iter().zip(&compact.requests) {
+            assert!(full.view.references.is_some());
+            assert!(compact.view.references.is_none());
+            assert_eq!(full.view.components, compact.view.components);
+            assert_eq!(full.view.prefix, compact.view.prefix);
+        }
     }
 
     #[test]
@@ -3522,7 +3577,7 @@ mod tests {
                         "files": [{ "path": "/repo/CLAUDE.md", "content": content }] }),
             )
         };
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -3585,7 +3640,7 @@ mod tests {
     #[test]
     fn world_state_tracks_opaque_identities_and_compaction() {
         let token = |second: u32| json!({ "type": "token_usage_record", "timestamp": at(second) });
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/session.jsonl", Harness::Codex, &["codex"]);
         feed.all(
             &mut c,
@@ -3621,7 +3676,7 @@ mod tests {
         // The identity is of the serialized string, quotes included.
         assert_eq!(opaque.size.fingerprint, identity("\"0123456789\""));
 
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/session.jsonl", Harness::Codex, &["codex"]);
         let invalid = json!({ "type": "world_state", "payload": { "state": { "tools": [] } } });
         let error = feed.push(&mut c, invalid).unwrap_err();
@@ -3665,7 +3720,7 @@ mod tests {
     #[test]
     fn tool_calls_count_once_across_files() {
         let call = |id: &str, name: &str| json!([tool_use(id, name, json!({}))]);
-        let mut c = ExposureCollector::new(Some(millis(1)));
+        let mut c = ExposureCollector::new(Some(millis(1)), true);
         let mut a = Feed::new("/p/a.jsonl", Harness::Claude, &["work"]);
         let mut b = Feed::new("/q/b.jsonl", Harness::Claude, &["home"]);
         a.all(
@@ -3712,7 +3767,7 @@ mod tests {
     #[test]
     fn tool_output_is_held_by_tool_until_compaction() {
         let result = |id: &str, content: Value| json!([{ "type": "tool_result", "tool_use_id": id, "content": content }]);
-        let mut c = ExposureCollector::new(Some(millis(2)));
+        let mut c = ExposureCollector::new(Some(millis(2)), true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -3763,7 +3818,7 @@ mod tests {
     #[test]
     fn codex_outputs_calls_and_provided_tools() {
         let item = |second: u32, payload: Value| json!({ "type": "response_item", "timestamp": at(second), "payload": payload });
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
         feed.all(
             &mut c,
@@ -3814,7 +3869,7 @@ mod tests {
     #[test]
     fn skill_calls_differ_from_requests_references_and_loads() {
         let result = |id: &str, error: bool| json!({ "type": "tool_result", "tool_use_id": id, "content": "body", "is_error": error });
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -3888,7 +3943,7 @@ mod tests {
     #[test]
     fn a_short_name_reaches_a_synced_skill_unless_another_skill_owns_it() {
         let resolved = |names: Value| {
-            let mut c = ExposureCollector::new(None);
+            let mut c = ExposureCollector::new(None, true);
             let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
             feed.all(
                 &mut c,
@@ -3943,7 +3998,7 @@ mod tests {
 
     #[test]
     fn codex_skill_names_do_not_gain_claude_aliases() {
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
         feed.all(
             &mut c,
@@ -3993,7 +4048,7 @@ mod tests {
             ("research", false),
         ] {
             let full = format!("anthropic-skills:{name}");
-            let mut c = ExposureCollector::new(None);
+            let mut c = ExposureCollector::new(None, true);
             let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
             feed.all(&mut c, vec![
                 attachment(0, json!({ "type": "skill_listing", "content": "synced listing", "names": [full] })),
@@ -4026,7 +4081,7 @@ mod tests {
 
     #[test]
     fn replacing_a_catalog_refreshes_synced_aliases() {
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -4073,7 +4128,7 @@ mod tests {
 
     #[test]
     fn explicit_typed_names_are_evidence_separate_from_the_catalog() {
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -4116,7 +4171,7 @@ mod tests {
             ]
         };
         let scan = |second: &str| {
-            let mut c = ExposureCollector::new(None);
+            let mut c = ExposureCollector::new(None, true);
             let mut a = Feed::new("/s/a.jsonl", Harness::Codex, &["codex"]);
             let mut b = Feed::new("/s/b.jsonl", Harness::Codex, &["codex"]);
             a.all(&mut c, records("listing"));
@@ -4141,7 +4196,7 @@ mod tests {
 
     #[test]
     fn invalidated_context_is_disclosed() {
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         let bad = attachment(0, json!({ "type": "skill_listing", "content": { "x": 1 } }));
         let error = feed.push(&mut c, bad).unwrap_err();
@@ -4228,7 +4283,7 @@ mod tests {
                 .extend(extra.as_object().unwrap().clone());
             r
         };
-        let mut c = ExposureCollector::new(None);
+        let mut c = ExposureCollector::new(None, true);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);
         feed.all(
             &mut c,
@@ -4338,7 +4393,7 @@ mod tests {
     #[test]
     fn malformed_optional_codex_turn_ids_do_not_discard_exposure_records() {
         for turn_id in [json!(""), json!(42)] {
-            let mut c = ExposureCollector::new(None);
+            let mut c = ExposureCollector::new(None, true);
             let mut feed = Feed::new("/p/rollout.jsonl", Harness::Codex, &["codex"]);
             feed.all(&mut c, vec![
                 json!({"type":"session_meta", "timestamp":at(0), "payload":{"id":"s"}}),

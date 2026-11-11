@@ -75,9 +75,11 @@ category and provenance instead. This preserves feature coverage without listing
 every message/call. Per-setting request coverage stays in `context` and checks.
 
 Full evidence is streamed to stdout without building a serialized copy of the
-history in memory. It can still produce many gigabytes. Compact output releases
-evidence before building its JSON representation, but scanning and analysis still
-retain historical metadata in memory. `--since` selects billing and coverage;
+history in memory. It can still produce many gigabytes. Only `--json-full` keeps
+every sighting of a component and each request's message digest lists while
+scanning, since no check reads them. Compact output releases evidence before
+building its JSON representation, but scanning and analysis still retain
+historical metadata in memory. `--since` selects billing and coverage;
 it does not discard older catalogs, ownership, aliases, calibration or cache
 context needed to interpret the selected requests. Neither form changes or
 writes transcripts or settings.
@@ -85,8 +87,9 @@ writes transcripts or settings.
 With `--ssh`, the envelope is `{"schemaVersion": 2, "hosts": [...]}` for
 `--json`, and version 1 for `--json-full`. Each `hosts[]` contains `ssh` (null
 for this host) and `report` in that same schema. The private SSH scan protocol
-still transfers the complete metadata required for analysis with shared values;
-the output choice is applied by the coordinator. Destinations need the same
+still transfers the complete metadata required for analysis with shared values,
+plus the evidence only `--json-full` reports when it is requested; the coordinator
+applies the output choice. Destinations need the same
 build, including its scan-schema fingerprint. Costs are independent per host.
 
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`

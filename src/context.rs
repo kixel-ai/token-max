@@ -670,8 +670,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .into_iter()
         .map(|c| (c.cohort, c.tokens_per_character))
         .collect();
-    let requests: HashMap<&str, &Request> =
-        input.requests.iter().map(|r| (r.id.as_str(), r)).collect();
+    let requests: HashMap<&str, &Request> = input.requests.iter().map(|r| (&*r.id, r)).collect();
     let components: HashMap<&str, &Component> =
         scan.components.iter().map(|c| (c.id.as_str(), c)).collect();
     let mut interned = Pieces::default();
@@ -684,11 +683,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
-        .filter_map(|exposure| Some((exposure, *requests.get(exposure.request.as_str())?)))
+        .filter_map(|exposure| Some((exposure, *requests.get(&*exposure.request)?)))
         .collect();
     ordered.sort_by_key(|(_, r)| r.time);
     for (exposure, r) in ordered {
-        let mut profiles = r.profiles.clone();
+        let mut profiles = r.profiles.to_vec();
         profiles.sort();
         let owner = match owners.get(&profiles) {
             Some(&id) => id,
@@ -771,7 +770,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             }));
         }
         let prior_results = previous
-            .get(r.session.as_str())
+            .get(&*r.session)
             .and_then(|p| p.results)
             .filter(|p| {
                 exposure
@@ -906,7 +905,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .filter(|&cached| cached > 0 && total <= cached as f64)
             .or(end);
         let prior = previous.insert(
-            r.session.as_str(),
+            &*r.session,
             Prior {
                 input: end,
                 content_end,
@@ -1723,9 +1722,9 @@ mod tests {
             ..ExposureScan::default()
         };
         let mut r1 = request("r1", 1, 0, 0, 300);
-        r1.profiles = vec!["b".into(), "a".into()];
+        r1.profiles = vec!["b".into(), "a".into()].into();
         let mut r2 = request("r2", 2, 0, 0, 100);
-        r2.profiles = vec!["a".into(), "b".into()];
+        r2.profiles = vec!["a".into(), "b".into()].into();
         (scan, vec![r1, r2])
     }
 
@@ -1993,7 +1992,7 @@ mod tests {
         scan.requests.push(e);
         let mut r3 = request("r3", 3, 0, 0, 100);
         r3.harness = Harness::Codex;
-        r3.profiles = vec!["b".into()];
+        r3.profiles = vec!["b".into()].into();
         requests.push(r3);
         let rows = costs(&scan, &requests, 1.0);
         let claude = rows

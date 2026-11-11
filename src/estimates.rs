@@ -4,7 +4,7 @@ use crate::collections::{HashMap, HashSet, IndexMap};
 
 use crate::model::{
     BillingPart, EstimateEvidence, EventKind, Harness, Millis, PartKind, Request, RequestEvidence,
-    Scan, Usage, UsageEstimate,
+    Scan, Text, Usage, UsageEstimate,
 };
 
 fn same_input(a: &BillingPart, b: &BillingPart) -> bool {
@@ -26,7 +26,7 @@ fn same_input(a: &BillingPart, b: &BillingPart) -> bool {
 }
 
 /// Whether a recorded string is present and nonempty.
-fn present(value: &Option<String>) -> bool {
+fn present(value: &Option<Text>) -> bool {
     value.as_deref().is_some_and(|s| !s.is_empty())
 }
 
@@ -37,7 +37,7 @@ fn profile_key(r: &Request) -> String {
 }
 
 /// Estimate isolated attempts from matching or same-cache-lifetime growing input brackets.
-pub fn estimate_usage(scan: &Scan) -> IndexMap<String, UsageEstimate> {
+pub fn estimate_usage(scan: &Scan) -> IndexMap<Text, UsageEstimate> {
     let mut result = IndexMap::default();
     let mut boundaries: HashMap<&str, Vec<Millis>> = HashMap::default();
     for event in scan.cache_context.boundaries.iter().chain(&scan.events) {
@@ -57,7 +57,7 @@ pub fn estimate_usage(scan: &Scan) -> IndexMap<String, UsageEstimate> {
     let mut sessions: IndexMap<&str, Vec<&Request>> = IndexMap::default();
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
         if r.harness == Harness::Claude {
-            sessions.entry(r.session.as_str()).or_default().push(r);
+            sessions.entry(&*r.session).or_default().push(r);
         }
     }
     for group in sessions.values_mut() {
@@ -76,16 +76,14 @@ pub fn estimate_usage(scan: &Scan) -> IndexMap<String, UsageEstimate> {
                 basis: vec![],
                 part: None,
                 max_output_tokens: attempt.max_output_tokens,
-                reason: "no matching adjacent recorded input evidence".into(),
+                reason: "no matching adjacent recorded input evidence",
                 assumptions: vec![],
             };
             if let (Some(before), Some(after)) = (
                 index.checked_sub(1).map(|i| group[i]),
                 group.get(index + 1).copied(),
             ) {
-                let times = boundaries
-                    .get(r.session.as_str())
-                    .map_or(&[][..], Vec::as_slice);
+                let times = boundaries.get(&*r.session).map_or(&[][..], Vec::as_slice);
                 estimate(&mut e, r, before, after, times);
             }
             result.insert(r.id.clone(), e);
@@ -106,8 +104,7 @@ fn estimate(
     let (Some(p), Some(next), Some(pending)) =
         (before.parts.first(), after.parts.first(), r.parts.first())
     else {
-        e.reason =
-            "adjacent requests do not supply matching measured single-part input evidence".into();
+        e.reason = "adjacent requests do not supply matching measured single-part input evidence";
         return;
     };
     if before.parts.len() != 1
@@ -119,8 +116,7 @@ fn estimate(
         || pending.usage.read.is_some()
         || pending.usage.write.is_some()
     {
-        e.reason =
-            "adjacent requests do not supply matching measured single-part input evidence".into();
+        e.reason = "adjacent requests do not supply matching measured single-part input evidence";
         return;
     }
     let files: HashSet<&str> = r.locations.iter().map(|l| &*l.file).collect();
@@ -146,10 +142,10 @@ fn estimate(
                 || profile_key(n) != profiles
         })
     {
-        e.reason = "no matching source/model/provider/version/client/profile provenance and nonoverlapping file-local brackets".into();
+        e.reason = "no matching source/model/provider/version/client/profile provenance and nonoverlapping file-local brackets";
         return;
     }
-    let contradicts = |a: &Option<String>, b: &Option<String>| a.is_some() && a != b;
+    let contradicts = |a: &Option<Text>, b: &Option<Text>| a.is_some() && a != b;
     if p.kind == PartKind::Unknown
         || p.kind != pending.kind
         || p.model != r.model
@@ -162,7 +158,7 @@ fn estimate(
         || contradicts(&pending.speed, &p.speed)
         || contradicts(&pending.geo, &p.geo)
     {
-        e.reason = "brackets lack matching recorded input/cache/pricing metadata or contradict the request".into();
+        e.reason = "brackets lack matching recorded input/cache/pricing metadata or contradict the request";
         return;
     }
     let exact = same_input(p, next);
@@ -183,12 +179,12 @@ fn estimate(
             .is_some_and(|read| read > 0 && read >= previous_prefix)
         && input_before_new_writes >= p.usage.input;
     if !exact && !growing {
-        e.reason = "no matching geometry or growing-context warm-read evidence within the five-minute cache lifetime".into();
+        e.reason = "no matching geometry or growing-context warm-read evidence within the five-minute cache lifetime";
         return;
     }
     let first_after = times.partition_point(|&t| t <= before.time);
     if times.get(first_after).is_some_and(|&t| t <= after.time) {
-        e.reason = "matching brackets are interrupted by a compaction boundary".into();
+        e.reason = "matching brackets are interrupted by a compaction boundary";
         return;
     }
     let source = if exact { p } else { next };
@@ -220,8 +216,7 @@ fn estimate(
         "matching adjacent input geometry and pricing metadata in the same conversation/file"
     } else {
         "growing-context downstream cache-read evidence within one five-minute cache lifetime, with matching pricing/provenance"
-    }
-    .into();
+    };
     e.assumptions = vec![
         if exact {
             "one billed API attempt with the same input/cache geometry and model/tier/speed/geography as both recorded brackets; this is not measured execution or prefix identity"
@@ -307,7 +302,7 @@ mod tests {
         let estimates = estimate_usage(&scan(requests));
         let e = &estimates["attempt"];
         assert_eq!(e.evidence, EstimateEvidence::Estimated);
-        assert_eq!(e.basis, ["before", "after"]);
+        assert_eq!(e.basis, [Text::from("before"), Text::from("after")]);
         assert_eq!(e.max_output_tokens, Some(100));
         let u = e.part.as_ref().unwrap().usage;
         assert_eq!(

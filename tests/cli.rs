@@ -663,6 +663,7 @@ fn explicit_windows_match_the_library_replay() {
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
             },
             since: Some(since),
+            full: true,
         })
         .unwrap();
         let report = analyze(AnalyzeOptions {

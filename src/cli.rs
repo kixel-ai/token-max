@@ -482,8 +482,9 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         Some(value) => max_cost_per_use(value)?,
     };
     if values.ssh_scan {
-        // A destination scans with its own discovery; only the window crosses SSH.
-        let other = values.json
+        // A destination scans with its own discovery; only the window and whether to keep
+        // full-report evidence cross SSH.
+        let other = (values.json && !values.json_full)
             || values.offline
             || values.plain
             || values.details
@@ -498,7 +499,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         if other {
             return Err(ScanError::new("invalid arguments; use --help"));
         }
-        return Ok((Output::Written, ssh::serve(since)));
+        return Ok((Output::Written, ssh::serve(since, values.json_full)));
     }
     for (index, destination) in values.ssh.iter().enumerate() {
         ssh::destination(destination)?;
@@ -513,6 +514,8 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         return Err(ScanError::new("--include-local requires --ssh"));
     }
     let local = !remote || values.include_local;
+    // Evidence only the full report shows is kept just for it.
+    let full = values.json_full;
     if !local
         && !(values.claude_dirs.is_empty()
             && values.codex_dirs.is_empty()
@@ -534,30 +537,45 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     // Every host scans at once; the first failure stops the rest.
     let (sender, results) = mpsc::channel();
     let mut hosts: Vec<Option<String>> = vec![];
+    // A lone local scan runs on this thread, so the analysis reuses the memory the scan
+    // frees rather than leaving it to another thread's allocator arena.
+    let mut inline = None;
     if local {
         let mut discovery = DiscoveryOptions::host()?;
         discovery.claude_dirs = values.claude_dirs;
         discovery.codex_dirs = values.codex_dirs;
         discovery.t3_dirs = values.t3_dirs;
-        let sender = sender.clone();
         let index = hosts.len();
         hosts.push(None);
-        thread::spawn(move || {
-            let result = panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(|scan| Remote {
-                    scan,
-                    home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-                });
-            let _ = sender.send((index, result));
-        });
+        let job = move || {
+            panic::catch_unwind(|| {
+                scan(&ScanOptions {
+                    discovery,
+                    since,
+                    full,
+                })
+            })
+            .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+            .map(|scan| Remote {
+                scan,
+                home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+            })
+        };
+        if remote {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send((index, job()));
+            });
+        } else {
+            inline = Some((index, job));
+        }
     }
     for destination in values.ssh {
         let sender = sender.clone();
         let index = hosts.len();
         hosts.push(Some(destination.clone()));
         thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::audit(&destination, since))
+            let result = panic::catch_unwind(|| ssh::audit(&destination, since, full))
                 .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
             let _ = sender.send((index, result));
         });
@@ -570,6 +588,9 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     });
     let mut scans: Vec<Option<Remote>> = hosts.iter().map(|_| None).collect();
     let scanned = (|| {
+        if let Some((index, job)) = inline {
+            scans[index] = Some(job()?);
+        }
         for (index, result) in results {
             scans[index] = Some(result?);
         }

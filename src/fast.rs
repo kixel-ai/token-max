@@ -5,7 +5,7 @@ use crate::collections::IndexSet;
 use crate::controls::claude_fast_support;
 use crate::model::{
     Action, BillingPart, CheckBase, Cost, CurrentPremium, Evidence, Harness, Millis,
-    ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl,
+    ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl, Text,
 };
 use crate::prices::{Catalog, add_costs, price_components, unknown_cost, zero_cost};
 
@@ -48,8 +48,8 @@ fn premium(r: &Request, p: &BillingPart) -> Option<bool> {
 
 fn with_speed(p: &BillingPart, tier: Option<&str>, speed: Option<&str>) -> BillingPart {
     BillingPart {
-        tier: tier.map(str::to_string),
-        speed: speed.map(str::to_string),
+        tier: tier.map(Text::from),
+        speed: speed.map(Text::from),
         ..p.clone()
     }
 }
@@ -263,7 +263,8 @@ fn check(
         Some(_) => Action::Change,
     };
     let change = action == Action::Change;
-    let history_profiles: IndexSet<&String> = requests.iter().flat_map(|r| &r.profiles).collect();
+    let history_profiles: IndexSet<&String> =
+        requests.iter().flat_map(|r| r.profiles.iter()).collect();
     let mut uncertainty = vec![
         control.reason.clone(),
         "account/server policy, availability, cloud-managed defaults, launch overrides and live session toggles not observed in local files may override these defaults".into(),
@@ -564,6 +565,7 @@ mod tests {
             scan(&ScanOptions {
                 discovery,
                 since: None,
+                full: true,
             })
             .unwrap()
         }
@@ -637,7 +639,7 @@ mod tests {
 
         fn request(profile: &Profile) -> Request {
             Request {
-                profiles: vec![profile.id.clone()],
+                profiles: vec![profile.id.clone()].into(),
                 ..make_request()
             }
         }

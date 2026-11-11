@@ -180,7 +180,7 @@ fn visibility(scan: &ExposureScan) -> Value {
         .collect::<crate::collections::HashMap<_, _>>();
     groups(scan.visibility.iter().map(|v| json!({
         "component": v.component.as_ref().map(|id| {
-            let c = components[id.as_str()];
+            let c = components[&**id];
             // These names identify individual messages/calls, not settings. Keep
             // their semantic target and provenance without recreating a call catalog.
             let name = (!matches!(c.provenance.as_str(),
@@ -280,7 +280,7 @@ mod tests {
             harness: Harness::Claude,
             client: None,
             version: None,
-            profiles: vec!["profile".into()],
+            profiles: ["profile".to_string()].into(),
             component: Some(id.into()),
             since: 0,
             until: 1,
@@ -289,7 +289,7 @@ mod tests {
             nested_calls: Visible::Unknown,
             typed_skills: Observed::Unknown,
             automatic_unused: false,
-            reasons: vec!["synthetic incomplete invocation coverage".into()],
+            reasons: ["synthetic incomplete invocation coverage".to_string()].into(),
         };
         let scan = ExposureScan {
             components: vec![component("call-a"), component("call-b")],
@@ -337,7 +337,7 @@ mod tests {
             harness: Harness::Claude,
             client: None,
             version: None,
-            profiles: vec!["profile".into()],
+            profiles: ["profile".to_string()].into(),
             component: Some(id.into()),
             since: 0,
             until: 1,
@@ -346,7 +346,7 @@ mod tests {
             nested_calls: Visible::Unknown,
             typed_skills: Observed::Unknown,
             automatic_unused: false,
-            reasons: vec!["synthetic incomplete exposure".into()],
+            reasons: ["synthetic incomplete exposure".to_string()].into(),
         };
         let scan = ExposureScan {
             components: vec![

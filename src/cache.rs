@@ -6,7 +6,7 @@ use indexmap::Equivalent;
 
 use crate::model::{
     Agent, BillingPart, CachePredecessor, CacheReplayEvidence, EventKind, Harness, KnownState,
-    Millis, PartKind, PrefixEvidence, ReplayOutcome, Request, StructuralEvent, Ttl, Usage,
+    Millis, PartKind, PrefixEvidence, ReplayOutcome, Request, StructuralEvent, Text, Ttl, Usage,
 };
 
 const MINUTE: Millis = 60_000;
@@ -321,7 +321,7 @@ pub struct Replayed {
     pub p: BillingPart,
     /// Whether the possible predecessors imply different cache reads/writes.
     pub unknown: bool,
-    pub evidence: Option<CacheReplayEvidence>,
+    pub evidence: Option<Box<CacheReplayEvidence>>,
 }
 
 struct Session {
@@ -365,7 +365,7 @@ impl CacheBoundaries {
 
 /// Replay explicit cache states, preserving unknown histories across cohorts and windows.
 pub struct CacheChain<'b> {
-    sessions: HashMap<String, Session>,
+    sessions: HashMap<Text, Session>,
     /// Boundary layers. Histories reset when a boundary in any layer passes, so a prebuilt
     /// index plus a few extra events replays exactly like one index of their concatenation.
     boundaries: Vec<&'b CacheBoundaries>,
@@ -492,7 +492,7 @@ impl<'b> CacheChain<'b> {
             let evidence = if state == KnownState::Known && !unknown {
                 None
             } else if !states.is_empty() || unknown {
-                Some(CacheReplayEvidence {
+                Some(Box::new(CacheReplayEvidence {
                     request: r.id.clone(),
                     part: touch.part,
                     ttl,
@@ -505,8 +505,8 @@ impl<'b> CacheChain<'b> {
                     } else {
                         ReplayOutcome::Invariant
                     },
-                    reason: reason.to_string(),
-                })
+                    reason,
+                }))
             } else {
                 None
             };
@@ -535,17 +535,27 @@ impl<'b> CacheChain<'b> {
                 Some(_) if touch.estimated => PrefixEvidence::Estimated,
                 Some(_) => PrefixEvidence::Measured,
             };
-            let mut reason = match prefix_evidence {
-                PrefixEvidence::Unknown => "request cache usage/execution is not established",
-                PrefixEvidence::Estimated => {
-                    "cache prefix estimated from measured request brackets"
+            macro_rules! cohort {
+                ($reason:literal) => {
+                    if complete {
+                        $reason
+                    } else {
+                        concat!(
+                            $reason,
+                            "; cache cohort has unrecorded model/provider/speed/kind/agent"
+                        )
+                    }
+                };
+            }
+            let reason = match prefix_evidence {
+                PrefixEvidence::Unknown => {
+                    cohort!("request cache usage/execution is not established")
                 }
-                PrefixEvidence::Measured => "recorded cache prefix",
-            }
-            .to_string();
-            if !complete {
-                reason.push_str("; cache cohort has unrecorded model/provider/speed/kind/agent");
-            }
+                PrefixEvidence::Estimated => {
+                    cohort!("cache prefix estimated from measured request brackets")
+                }
+                PrefixEvidence::Measured => cohort!("recorded cache prefix"),
+            };
             let state = State {
                 kind,
                 prefix,
@@ -805,7 +815,7 @@ mod tests {
             session: "original".into(),
             time: 18 * 60000,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()],
+            profiles: vec!["profile".into()].into(),
             location,
             request: None,
             model: None,
@@ -819,7 +829,7 @@ mod tests {
             duration_ms: None,
             tool: None,
             tool_id: None,
-            settings: IndexMap::default(),
+            settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
             t3: None,

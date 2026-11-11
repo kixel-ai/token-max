@@ -89,8 +89,8 @@ pub fn make_request() -> Request {
         client: Some("sdk-ts".into()),
         cwd: None,
         parts: vec![message_part(claude_usage(ClaudeUsage::default()))],
-        server_tools: Some(IndexMap::default()),
-        profiles: vec!["profile".into()],
+        server_tools: Some(Default::default()),
+        profiles: vec!["profile".into()].into(),
         locations: vec![Location {
             file: "synthetic".into(),
             line: 1,
@@ -170,6 +170,7 @@ impl Workspace {
                 codex_requirements_file: text(self.home.join("requirements.toml")),
             },
             since: None,
+            full: true,
         }
     }
 }

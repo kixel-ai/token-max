@@ -428,18 +428,13 @@ impl<'a> Out<'a> {
         let mut unrecorded = 0;
         for e in values {
             let group = groups
-                .entry((e.ttl, e.state, e.outcome, e.reason.as_str()))
+                .entry((e.ttl, e.state, e.outcome, e.reason))
                 .or_insert((0usize, e));
             group.0 += 1;
             unrecorded += usize::from(e.predecessors.is_empty());
             for p in &e.predecessors {
                 let group = predecessors
-                    .entry((
-                        p.state,
-                        p.prefix_evidence,
-                        p.cohort_known,
-                        p.reason.as_str(),
-                    ))
+                    .entry((p.state, p.prefix_evidence, p.cohort_known, p.reason))
                     .or_insert((0usize, p));
                 group.0 += 1;
             }
@@ -1280,7 +1275,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 let mut groups = IndexMap::default();
                 for p in &comparison.periods {
                     *groups
-                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .entry((p.status, p.return_timing, p.outcome, p.reason))
                         .or_insert(0usize) += 1;
                 }
                 for ((status, timing, outcome, reason), count) in groups {
@@ -1349,7 +1344,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 let mut groups = IndexMap::default();
                 for p in &scenario.periods {
                     *groups
-                        .entry((p.status, p.return_timing, p.outcome, p.reason.as_str()))
+                        .entry((p.status, p.return_timing, p.outcome, p.reason))
                         .or_insert(0usize) += 1;
                 }
                 for ((status, timing, outcome, reason), count) in groups {
@@ -1476,7 +1471,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
     let mut attempts = IndexMap::default();
     for e in r.usage_estimates {
         let group = attempts
-            .entry((e.evidence, e.max_output_tokens, e.reason.as_str()))
+            .entry((e.evidence, e.max_output_tokens, e.reason))
             .or_insert((0usize, e, IndexSet::default()));
         group.0 += 1;
         group.2.extend(&e.assumptions);
@@ -1583,7 +1578,7 @@ fn setting_name(result: &CheckResult) -> String {
             crate::model::Bucket::Subagent => "Subagent prompt cache TTL".into(),
         },
         CheckResult::Compaction(c) => {
-            let models: Vec<&str> = c.models.iter().flatten().map(String::as_str).collect();
+            let models: Vec<&str> = c.models.iter().flatten().map(|m| &**m).collect();
             if models.is_empty() {
                 "Auto-compact window".into()
             } else {
@@ -3038,7 +3033,7 @@ mod tests {
                 basis: vec![],
                 part: None,
                 max_output_tokens: Some(2048),
-                reason: "no supported input estimate".into(),
+                reason: "no supported input estimate",
                 assumptions: vec!["synthetic attempt assumption".into()],
             }],
             cache_evidence: vec![CacheReplayEvidence {
@@ -3053,10 +3048,10 @@ mod tests {
                     state: KnownState::Unknown,
                     prefix_evidence: PrefixEvidence::Unknown,
                     cohort_known: false,
-                    reason: "synthetic witness reason".into(),
+                    reason: "synthetic witness reason",
                 }],
                 outcome: ReplayOutcome::Unknown,
-                reason: "synthetic unresolved predecessor".into(),
+                reason: "synthetic unresolved predecessor",
             }],
             sensitivity: TtlSensitivity {
                 cold_prefix1h_usd: Some(1.5),
@@ -3118,7 +3113,7 @@ mod tests {
                     state: KnownState::Estimated,
                     predecessors: vec![],
                     outcome: ReplayOutcome::Estimated,
-                    reason: "synthetic geometry".into(),
+                    reason: "synthetic geometry",
                 }],
                 sensitivity: WindowSensitivity {
                     larger_summary_savings_usd: Some(0.015),
@@ -3134,19 +3129,19 @@ mod tests {
     fn period(status: PeriodStatus, resume: Option<&str>) -> IdlePeriod {
         IdlePeriod {
             request: "synthetic-idle-request".into(),
-            resume: resume.map(String::from),
+            resume: resume.map(Text::from),
             session: "session".into(),
             context_tokens: Some(180_000),
             gap_ms: 3_700_000,
             status,
-            reason: "synthetic gap".into(),
+            reason: "synthetic gap",
             confirmed: status == PeriodStatus::Eligible,
             return_timing: ReturnTiming::AfterExpiry,
             outcome: PeriodOutcome::Unobserved,
             event: None,
             version: Some("2.1.314".into()),
             client: None,
-            flag_state: Some("on".into()),
+            flag_state: Some("on"),
             activation: Some(1.0 / 3.0),
             activation_basis: "synthetic cohort".into(),
             summary_cost: cost(Some(0.875), 0.875),
@@ -3187,7 +3182,7 @@ mod tests {
             activation_cohorts: vec![ActivationCohort {
                 version: "2.1.314".into(),
                 client: "cli".into(),
-                flag_state: "on".into(),
+                flag_state: "on",
                 applied: 1,
                 eligible: 3,
                 fraction: 1.0 / 3.0,
@@ -3306,9 +3301,9 @@ mod tests {
             .into_iter()
             .map(|(i, input)| {
                 let mut r = make_request();
-                r.id = format!("request-{i}");
+                r.id = format!("request-{i}").into();
                 r.time = NOV1 + i * 1000;
-                r.profiles = vec!["profile".into()];
+                r.profiles = vec!["profile".into()].into();
                 r.parts[0].usage.input = Some(input);
                 r
             })
@@ -4266,7 +4261,7 @@ mod tests {
             .unwrap();
         let eligible = period(PeriodStatus::Eligible, Some("return"));
         let mut unknown = period(PeriodStatus::Unknown, None);
-        unknown.reason = "unresolved synthetic setting".into();
+        unknown.reason = "unresolved synthetic setting";
         let mut periods = vec![eligible; 100];
         periods.push(unknown);
         idle.after_recommendations.periods = periods;
@@ -4314,7 +4309,7 @@ mod tests {
             basis: vec![],
             part: None,
             max_output_tokens: Some(2048),
-            reason: "no supported input estimate".into(),
+            reason: "no supported input estimate",
             assumptions: vec!["synthetic attempt assumption".into()],
         });
         result.cache_evidence.push(CacheReplayEvidence {
@@ -4323,7 +4318,7 @@ mod tests {
             ttl: Ttl::OneHour,
             state: KnownState::Unknown,
             outcome: ReplayOutcome::Unknown,
-            reason: "synthetic unresolved predecessor".into(),
+            reason: "synthetic unresolved predecessor",
             predecessors: vec![CachePredecessor {
                 request: "synthetic-cache-predecessor".into(),
                 part: 0,
@@ -4331,7 +4326,7 @@ mod tests {
                 state: KnownState::Unknown,
                 prefix_evidence: PrefixEvidence::Unknown,
                 cohort_known: false,
-                reason: "synthetic witness reason".into(),
+                reason: "synthetic witness reason",
             }],
         });
         let result = result.clone();
@@ -4366,7 +4361,7 @@ mod tests {
         for value in values {
             assert!(compact.contains(&super::tests::compact(value)), "{value}");
         }
-        assert!(text.contains(&result.cache_evidence[0].request));
+        assert!(text.contains(&*result.cache_evidence[0].request));
         assert!(text.contains("Predecessor:"));
         let unknown_fixed = report
             .checks

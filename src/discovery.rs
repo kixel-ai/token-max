@@ -763,7 +763,7 @@ pub fn discover_claude_controls(
                 );
                 profile
                     .background_requests
-                    .insert(request.id.clone(), controls);
+                    .insert(request.id.to_string(), controls);
             }
             let config = merged(&[&user, &project, &legacy, &local, &managed]);
             idle.ttl = Some(ttl_controls(&TtlSources {
@@ -814,7 +814,7 @@ pub fn discover_claude_controls(
                 );
                 profile
                     .background_requests
-                    .insert(request.id.clone(), controls);
+                    .insert(request.id.to_string(), controls);
             }
         }
     }
@@ -1672,8 +1672,8 @@ mod tests {
 
     fn request(profile: &Profile, cwd: Option<&Path>) -> Request {
         Request {
-            profiles: vec![profile.id.clone()],
-            cwd: cwd.map(text),
+            profiles: vec![profile.id.clone()].into(),
+            cwd: cwd.map(|c| text(c).into()),
             ..make_request()
         }
     }
@@ -2267,7 +2267,7 @@ mod tests {
             ..r.clone()
         };
         discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&hosted)).unwrap();
-        let c = &claude(&d).background_requests[&hosted.id];
+        let c = &claude(&d).background_requests[&*hosted.id];
         assert!(c.iter().all(|c| c.value.is_none()));
         assert!(c[0].reason.contains("launch precedence"));
     }
@@ -2300,10 +2300,10 @@ mod tests {
         .into_iter()
         .enumerate()
         .map(|(i, (session, cwd, client))| Request {
-            id: format!("r{i}"),
+            id: format!("r{i}").into(),
             session: session.into(),
             time: i as i64,
-            client: client.map(String::from),
+            client: client.map(crate::model::Text::from),
             ..request(p, Some(cwd))
         })
         .collect();
@@ -2561,8 +2561,8 @@ mod tests {
             .clone();
         let req = Request {
             harness: Harness::Codex,
-            profiles: vec![id.clone()],
-            cwd: Some(text(&cwd)),
+            profiles: vec![id.clone()].into(),
+            cwd: Some(text(&cwd).into()),
             ..make_request()
         };
         let recap = |d: &Discovery| {
@@ -2603,7 +2603,7 @@ mod tests {
         assert_eq!(recap(&d).value, None);
         assert!(recap(&d).reason.contains("--profile"));
         let gone = Request {
-            cwd: Some(text(&w.home.join("gone"))),
+            cwd: Some(text(&w.home.join("gone")).into()),
             ..req.clone()
         };
         let absent = Request { cwd: None, ..req };
@@ -2615,7 +2615,7 @@ mod tests {
                 .all(|c| c.value.is_none())
         );
         assert!(
-            p.background_directories[&gone.cwd.unwrap()][0]
+            p.background_directories[&*gone.cwd.unwrap()][0]
                 .value
                 .is_none()
         );

@@ -234,6 +234,43 @@ pub mod text {
     }
 }
 
+/// `#[serde(with)]` for an optional shared string.
+pub mod opt_text {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(text: &Option<Text>, serializer: S) -> Result<S::Ok, S::Error> {
+        text.as_ref().map(SharedText).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Text>, D::Error> {
+        Option::<Element>::deserialize(deserializer).map(|e| e.map(|e| e.0))
+    }
+}
+
+/// `#[serde(with)]` for a list of shared strings.
+pub mod texts {
+    use super::*;
+
+    pub fn serialize<S: Serializer>(texts: &[Text], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(texts.iter().map(SharedText))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Text>, D::Error> {
+        Vec::<Element>::deserialize(deserializer).map(|e| e.into_iter().map(|e| e.0).collect())
+    }
+}
+
+/// A shared string read as a list element or optional value.
+struct Element(Text);
+
+impl<'de> Deserialize<'de> for Element {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        text::deserialize(d).map(Element)
+    }
+}
+
 /// `#[serde(with)]` for a shared identifier list.
 pub mod ids {
     use super::*;
@@ -309,7 +346,7 @@ impl Serialize for Exposure {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if encoding() {
             let mut s = serializer.serialize_struct("Exposure", 3)?;
-            s.serialize_field("request", &self.request)?;
+            s.serialize_field("request", &SharedText(&self.request))?;
             s.serialize_field("view", &SharedView(&self.view))?;
             s.serialize_field("results", &self.results.clone().map(SharedResults))?;
             return s.end();
@@ -333,7 +370,8 @@ impl<'de> Deserialize<'de> for Exposure {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Wire {
-            request: String,
+            #[serde(with = "text")]
+            request: Text,
             #[serde(deserialize_with = "view")]
             view: Arc<ExposureView>,
             results: Option<SharedResults>,
@@ -412,12 +450,6 @@ impl<'de> Deserialize<'de> for Ids {
             base: Option<u64>,
             keep: usize,
             tail: Vec<Element>,
-        }
-        struct Element(Text);
-        impl<'de> Deserialize<'de> for Element {
-            fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-                text::deserialize(d).map(Element)
-            }
         }
         struct V;
         impl<'de> Visitor<'de> for V {

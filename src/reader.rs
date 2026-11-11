@@ -5,6 +5,7 @@
 
 use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::fs::File;
+use std::hash::BuildHasher;
 use std::io::{ErrorKind, Read};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,9 +21,9 @@ use crate::discovery::{
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
     Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness,
-    IdleAttribution, Location, Millis, Origin, PartKind, Pricing, Profile, Request,
-    RequestEvidence, RequestedSpeed, Scan, ScanCoverage, ShellCall, Snapshot, StructuralEvent,
-    Text, Usage,
+    IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
+    Request, RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall, Snapshot,
+    StructuralEvent, Text, Usage,
 };
 use crate::safe::{ScanError, count, id, identity, iso, label, object, timestamp};
 
@@ -32,6 +33,8 @@ pub struct ScanOptions {
     pub discovery: DiscoveryOptions,
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,
+    /// Keep evidence that only `--json-full` reports, which no check reads.
+    pub full: bool,
 }
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -210,22 +213,27 @@ fn fill(usage: &mut Usage, old: &Usage) {
     }
 }
 
+/// A safe label as a shared string.
+fn text(value: &Value) -> Option<Text> {
+    label(value).map(Text::from)
+}
+
 fn part(
     u: &Map<String, Value>,
-    model: Option<String>,
+    model: Option<Text>,
     kind: PartKind,
 ) -> Result<BillingPart, ScanError> {
     Ok(BillingPart {
         kind,
-        model: label(member(u, "model")).or(model),
+        model: text(member(u, "model")).or(model),
         usage: usage_of(u, Harness::Claude)?,
-        tier: label(member(u, "service_tier")),
-        speed: label(member(u, "speed")),
-        geo: label(member(u, "inference_geo")),
+        tier: text(member(u, "service_tier")),
+        speed: text(member(u, "speed")),
+        geo: text(member(u, "inference_geo")),
     })
 }
 
-fn claude_parts(raw: &Value, model: Option<String>) -> Result<Vec<BillingPart>, ScanError> {
+fn claude_parts(raw: &Value, model: Option<Text>) -> Result<Vec<BillingPart>, ScanError> {
     let u = object(raw);
     let iterations = match u.get("iterations") {
         None | Some(Value::Null) => return Ok(vec![part(u, model, PartKind::Message)?]),
@@ -249,13 +257,13 @@ fn claude_parts(raw: &Value, model: Option<String>) -> Result<Vec<BillingPart>, 
             let mut p = part(iteration, model.clone(), kind)?;
             let advisor = kind == PartKind::Advisor;
             if p.tier.is_none() && !advisor {
-                p.tier = label(member(u, "service_tier"));
+                p.tier = text(member(u, "service_tier"));
             }
             if p.speed.is_none() && !advisor {
-                p.speed = label(member(u, "speed"));
+                p.speed = text(member(u, "speed"));
             }
             if p.geo.is_none() {
-                p.geo = label(member(u, "inference_geo"));
+                p.geo = text(member(u, "inference_geo"));
             }
             Ok(p)
         })
@@ -556,15 +564,16 @@ struct Context {
     session: Text,
     agent: Agent,
     model: Option<Text>,
-    provider: Option<String>,
+    provider: Option<Text>,
     client: Option<Text>,
     version: Option<Text>,
-    turn: Option<String>,
-    trigger: Option<String>,
-    tier: Option<String>,
-    source: Option<String>,
+    turn: Option<Text>,
+    trigger: Option<Text>,
+    tier: Option<Text>,
+    source: Option<Text>,
     cwd: Option<Text>,
     pricing: Option<Arc<Pricing>>,
+    profiles: Profiles,
 }
 
 /// Replace `slot` only when the value changes, so unchanged records keep sharing one copy.
@@ -584,7 +593,7 @@ struct FileState {
 }
 
 impl FileState {
-    fn new(snapshot: &Snapshot) -> Self {
+    fn new(snapshot: &Snapshot, strings: &mut Interner) -> Self {
         let subagent = is_subagent(&snapshot.file);
         Self {
             context: Context {
@@ -604,6 +613,7 @@ impl FileState {
                 source: None,
                 cwd: None,
                 pricing: None,
+                profiles: strings.profiles(&snapshot.profiles),
             },
             subagent,
             session_raw: None,
@@ -640,7 +650,7 @@ fn event(
         session: context.session.clone(),
         time,
         kind,
-        profiles: snapshot.profiles.clone(),
+        profiles: context.profiles.clone(),
         location: location.clone(),
         request: None,
         model: context.model.clone(),
@@ -654,7 +664,7 @@ fn event(
         duration_ms: None,
         tool: None,
         tool_id: None,
-        settings: IndexMap::default(),
+        settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
         t3: None,
@@ -672,13 +682,13 @@ fn request(
 ) -> Request {
     Request {
         evidence: RequestEvidence::Measured,
-        id: format!("{}:{identity}", harness_name(snapshot.harness)),
+        id: format!("{}:{identity}", harness_name(snapshot.harness)).into(),
         harness: snapshot.harness,
-        session: context.session.to_string(),
+        session: context.session.clone(),
         agent: context.agent,
         time,
         end_time: time,
-        model: context.model.as_deref().map(String::from),
+        model: context.model.clone(),
         provider: context.provider.clone(),
         api: match snapshot.harness {
             Harness::Claude => Api::Messages,
@@ -688,12 +698,12 @@ fn request(
         trigger: context.trigger.clone(),
         reference: None,
         turn: context.turn.clone(),
-        version: context.version.as_deref().map(String::from),
-        client: context.client.as_deref().map(String::from),
-        cwd: context.cwd.as_deref().map(String::from),
+        version: context.version.clone(),
+        client: context.client.clone(),
+        cwd: context.cwd.clone(),
         parts: vec![],
         server_tools: None,
-        profiles: snapshot.profiles.clone(),
+        profiles: context.profiles.clone(),
         locations: vec![location.clone()],
         accounting: Accounting::Individual,
         attempt: None,
@@ -706,10 +716,10 @@ fn request(
     }
 }
 
-/// `[...new Set([...target, ...items])]` for the few profiles or issues a record carries.
+/// `[...new Set([...target, ...items])]` for the few issues a record carries.
 ///
 /// Targets are built duplicate-free, so appending unseen items gives the same order.
-fn union(target: &mut Vec<String>, items: Vec<String>) {
+fn union(target: &mut Vec<Text>, items: Vec<Text>) {
     for item in items {
         if !target.contains(&item) {
             target.push(item);
@@ -729,38 +739,160 @@ struct Link {
     boundary: Option<String>,
 }
 
+/// Requests in first-seen order, and each one's position by id, so the scan can take the
+/// list without copying it.
+#[derive(Default)]
+struct Requests {
+    list: Vec<Request>,
+    ids: HashMap<Text, usize>,
+}
+
+/// Each event's position by id without a second copy of the id: a position is found by the
+/// id's hash and confirmed against the event, and ids sharing a hash fall back to a map.
+#[derive(Default)]
+struct EventIndex {
+    hasher: foldhash::fast::RandomState,
+    by_hash: HashMap<u64, usize>,
+    collisions: HashMap<String, usize>,
+}
+
+impl EventIndex {
+    fn get(&self, events: &[StructuralEvent], id: &str) -> Option<usize> {
+        match self.by_hash.get(&self.hasher.hash_one(id)) {
+            Some(&index) if events[index].id == id => Some(index),
+            Some(_) => self.collisions.get(id).copied(),
+            None => None,
+        }
+    }
+
+    /// Record a new event's position; its id must not be indexed yet.
+    fn insert(&mut self, id: &str, index: usize) {
+        match self.by_hash.entry(self.hasher.hash_one(id)) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(index);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                self.collisions.insert(id.to_string(), index);
+            }
+        }
+    }
+}
+
+/// What an API request record adds to the requests that answer it.
+struct RefFacts {
+    source: Option<Text>,
+    attempt: Option<Attempt>,
+    requested_speed: Option<RequestedSpeed>,
+    time: Millis,
+    profiles: Profiles,
+}
+
+impl RefFacts {
+    fn of(r: &Request) -> Self {
+        Self {
+            source: r.source.clone(),
+            attempt: r.attempt.clone(),
+            requested_speed: r.requested_speed.clone(),
+            time: r.time,
+            profiles: r.profiles.clone(),
+        }
+    }
+}
+
+/// The last API request record read for one reference.
+enum Ref {
+    /// No request answers it yet, so it may become a request itself.
+    Pending(Box<Request>),
+    /// A request answers it, so only what the record adds to that request is kept.
+    Linked(RefFacts),
+}
+
+impl Ref {
+    fn profiles(&self) -> &Profiles {
+        match self {
+            Ref::Pending(r) => &r.profiles,
+            Ref::Linked(facts) => &facts.profiles,
+        }
+    }
+}
+
+/// API request records by reference, and the references stored requests answer.
+#[derive(Default)]
+struct Refs {
+    records: IndexMap<Text, Ref>,
+    answered: HashSet<Text>,
+}
+
+impl Refs {
+    /// Keep the latest record for `reference`, reduced once a request answers it.
+    fn record(&mut self, reference: Text, r: Request) {
+        let record = if self.answered.contains(&reference) {
+            Ref::Linked(RefFacts::of(&r))
+        } else {
+            Ref::Pending(Box::new(r))
+        };
+        self.records.insert(reference, record);
+    }
+
+    /// Note that a stored request answers `reference`.
+    fn answer(&mut self, reference: Option<Text>) {
+        let Some(reference) = reference else { return };
+        if let Some(record) = self.records.get_mut(&reference)
+            && let Ref::Pending(r) = record
+        {
+            let facts = RefFacts::of(r);
+            *record = Ref::Linked(facts);
+        }
+        self.answered.insert(reference);
+    }
+}
+
+impl Requests {
+    #[cfg(test)]
+    fn get(&self, id: &str) -> Option<&Request> {
+        self.ids.get(id).map(|&index| &self.list[index])
+    }
+}
+
 /// State shared across every file of one scan.
 struct Reader {
     since: Option<Millis>,
     exposure: ExposureCollector,
-    requests: IndexMap<String, Request>,
+    strings: Interner,
+    requests: Requests,
     // Events in arrival order, and each one's position by id.
     events: Vec<StructuralEvent>,
-    event_ids: HashMap<String, usize>,
+    event_ids: EventIndex,
     // Only explicit compaction lineage can connect a notice to its boundary.
     // Ordinary messages stop the walk; a missing parent is not a historical match.
     compact_parents: HashMap<Key, Option<Link>>,
     notice_parents: HashMap<String, HashSet<Option<Key>>>,
-    refs: IndexMap<String, Request>,
-    issues: IndexSet<String>,
+    refs: Refs,
+    issues: IndexSet<Text>,
     modern_totals: HashSet<String>,
     legacy: Vec<(Request, String)>,
 }
 
 impl Reader {
-    fn add(&mut self, r: Request) {
-        add(&mut self.requests, r);
+    fn add(&mut self, mut r: Request) {
+        self.strings.request(&mut r);
+        let answered = add(&mut self.requests, &mut self.strings, r);
+        self.refs.answer(answered);
     }
 
-    fn add_event(&mut self, e: StructuralEvent) {
-        match self.event_ids.get(&e.id) {
-            Some(&index) => {
+    fn add_event(&mut self, mut e: StructuralEvent) {
+        match self.event_ids.get(&self.events, &e.id) {
+            Some(index) => {
                 let previous = &mut self.events[index];
-                union(&mut previous.profiles, e.profiles);
+                previous.profiles = self.strings.union(&previous.profiles, &e.profiles);
+                for origin in &mut e.origins {
+                    origin.session = self.strings.text(&origin.session);
+                }
                 previous.origins.extend(e.origins);
             }
             None => {
-                self.event_ids.insert(e.id.clone(), self.events.len());
+                self.strings.event(&mut e);
+                self.event_ids.insert(&e.id, self.events.len());
                 self.events.push(e);
             }
         }
@@ -864,15 +996,16 @@ impl Reader {
                 _ => id(member(raw, "id"))?,
             };
             let mut pending = request(snapshot, location, context, time, reference.clone());
+            let reference = Text::from(reference);
             pending.reference = recorded.map(|_| reference.clone());
             pending.agent = if is_true(raw, "isSidechain") || subagent {
                 Agent::Subagent
             } else {
                 Agent::Main
             };
-            pending.source = label(member(raw, "querySource"));
+            pending.source = text(member(raw, "querySource"));
             let params = nested(raw, "params");
-            pending.model = label(member(params, "model"));
+            pending.model = text(member(params, "model"));
             pending.attempt = Some(Attempt {
                 max_output_tokens: match count(params.get("max_tokens")) {
                     Ok(budget) => budget,
@@ -887,8 +1020,8 @@ impl Reader {
                 },
             });
             pending.requested_speed = Some(RequestedSpeed {
-                tier: label(member(params, "service_tier")),
-                speed: label(member(params, "speed")),
+                tier: text(member(params, "service_tier")),
+                speed: text(member(params, "speed")),
             });
             // Attempt parameters are requested, not proof of the billed tier/speed.
             pending.parts = vec![BillingPart {
@@ -897,19 +1030,18 @@ impl Reader {
                 usage: Usage::default(),
                 tier: None,
                 speed: None,
-                geo: label(member(params, "inference_geo")),
+                geo: text(member(params, "inference_geo")),
             }];
             pending.evidence = RequestEvidence::Unknown;
             pending.issues.push(
                 "api request has no linked assistant usage; failed/in-flight/hidden request billing is unknown"
                     .into(),
             );
-            if let Some(prior) = self.refs.get(&reference) {
-                let mut profiles = prior.profiles.clone();
-                union(&mut profiles, std::mem::take(&mut pending.profiles));
-                pending.profiles = profiles;
+            if let Some(prior) = self.refs.records.get(&reference) {
+                pending.profiles = self.strings.union(prior.profiles(), &pending.profiles);
             }
-            self.refs.insert(reference, pending);
+            self.strings.request(&mut pending);
+            self.refs.record(reference, pending);
             return Ok(());
         }
         let assistant = kind == Some("assistant") && !is_true(raw, "isApiErrorMessage");
@@ -922,11 +1054,11 @@ impl Reader {
             {
                 set(&mut context.model, Some(&model));
                 let pricing = Pricing {
-                    model: Some(model),
+                    model: context.model.clone(),
                     provider: context.provider.clone(),
-                    tier: label(member(u, "service_tier")),
-                    speed: label(member(u, "speed")),
-                    geo: label(member(u, "inference_geo")),
+                    tier: text(member(u, "service_tier")),
+                    speed: text(member(u, "speed")),
+                    geo: text(member(u, "inference_geo")),
                 };
                 if context.pricing.as_deref() != Some(&pricing) {
                     context.pricing = Some(Arc::new(pricing));
@@ -957,9 +1089,9 @@ impl Reader {
                 _ => id(recorded.unwrap_or(&NULL))?,
             };
             let mut r = request(snapshot, location, context, time, name);
-            r.model = label(member(m, "model"));
-            r.reference = opaque(raw, "requestRef")?;
-            r.source = label(member(raw, "querySource"));
+            r.model = text(member(m, "model"));
+            r.reference = opaque(raw, "requestRef")?.map(Text::from);
+            r.source = text(member(raw, "querySource"));
             r.agent = if is_true(raw, "isSidechain") || subagent {
                 Agent::Subagent
             } else {
@@ -979,6 +1111,7 @@ impl Reader {
             }
             r.server_tools = if selected {
                 numeric_tools(object(usage).get("server_tool_use"))?
+                    .map(|tools| tools.into_iter().collect())
             } else {
                 None
             };
@@ -1000,7 +1133,7 @@ impl Reader {
                             EventKind::ToolStart,
                             string(b, "id"),
                         );
-                        e.tool = label(member(b, "name"));
+                        e.tool = text(member(b, "name"));
                         e.tool_id = opaque(b, "id")?;
                         e.request = Some(request_id.clone());
                         if is(b, "name", "Bash") {
@@ -1036,9 +1169,9 @@ impl Reader {
                 e.duration_ms = count(meta.get("durationMs"))?;
             }
             e.request = if let Some(reference) = opaque(raw, "requestRef")? {
-                Some(format!("ref:{reference}"))
+                Some(format!("ref:{reference}").into())
             } else {
-                opaque(meta, "requestId")?.map(|r| format!("claude:{r}"))
+                opaque(meta, "requestId")?.map(|r| format!("claude:{r}").into())
             };
             self.add_event(e);
         } else if kind == Some("system")
@@ -1145,7 +1278,7 @@ impl Reader {
             }
             context.session =
                 id(coalesce(p.get("id"), p.get("session_id")).unwrap_or(&NULL))?.into();
-            context.provider = label(member(p, "model_provider"));
+            context.provider = text(member(p, "model_provider"));
             let source = member(p, "source");
             set(
                 &mut context.client,
@@ -1153,7 +1286,7 @@ impl Reader {
                 crate::safe::originator(member(p, "originator")).as_deref(),
             );
             let spawned = truthy(object(source).get("subagent"));
-            context.source = label(source).or_else(|| spawned.then(|| "subagent".into()));
+            context.source = text(source).or_else(|| spawned.then(|| "subagent".into()));
             set(
                 &mut context.version,
                 label(member(p, "cli_version")).as_deref(),
@@ -1182,8 +1315,8 @@ impl Reader {
                 set(&mut context.cwd, Some(cwd));
             }
             set(&mut context.model, label(member(p, "model")).as_deref());
-            context.turn = opaque(p, "turn_id")?;
-            context.tier = label(member(p, "service_tier"));
+            context.turn = opaque(p, "turn_id")?.map(Text::from);
+            context.tier = text(member(p, "service_tier"));
             if let Some(time) = time
                 && selected
             {
@@ -1195,7 +1328,7 @@ impl Reader {
                     EventKind::Settings,
                     string(p, "turn_id"),
                 );
-                e.settings = structural_settings(p);
+                e.settings = structural_settings(p).into();
                 self.add_event(e);
             }
         } else if kind == Some("token_usage_record") {
@@ -1211,7 +1344,7 @@ impl Reader {
                 id(member(p, "response_id"))?,
             );
             r.turn = match opaque(p, "turn_id")? {
-                Some(turn) => Some(turn),
+                Some(turn) => Some(turn.into()),
                 None => context.turn.clone(),
             };
             r.parts = vec![BillingPart {
@@ -1322,6 +1455,7 @@ impl Reader {
                 speed: None,
                 geo: None,
             }];
+            self.strings.request(&mut r);
             self.legacy.push((r, total_key));
         } else if kind == Some("compacted") && selected {
             let time = time.ok_or_else(|| ScanError::new("missing compaction timestamp"))?;
@@ -1338,7 +1472,7 @@ impl Reader {
                 EventKind::Compaction,
                 key,
             );
-            e.request = opaque(p, "compaction_response_id")?.map(|r| format!("codex:{r}"));
+            e.request = opaque(p, "compaction_response_id")?.map(|r| format!("codex:{r}").into());
             self.add_event(e);
         } else if kind == Some("event_msg")
             && matches!(
@@ -1348,10 +1482,10 @@ impl Reader {
         {
             if payload_kind == Some("task_started") {
                 if let Some(turn) = opaque(p, "turn_id")? {
-                    context.turn = Some(turn);
+                    context.turn = Some(turn.into());
                 }
-                context.trigger = label(member(p, "turn_trigger"))
-                    .or_else(|| label(member(nested(p, "turn_attribution"), "turn_trigger")));
+                context.trigger = text(member(p, "turn_trigger"))
+                    .or_else(|| text(member(nested(p, "turn_attribution"), "turn_trigger")));
             }
             let applied = nested(p, "thread_settings");
             let settings_applied = payload_kind == Some("thread_settings_applied");
@@ -1359,13 +1493,13 @@ impl Reader {
                 if let Some(tier) = label(member(applied, "service_tier"))
                     .or_else(|| label(member(p, "service_tier")))
                 {
-                    context.tier = Some(tier);
+                    context.tier = Some(tier.into());
                 }
                 if let Some(model) = label(member(applied, "model")) {
                     set(&mut context.model, Some(&model));
                 }
                 if let Some(provider) = label(member(applied, "model_provider_id")) {
-                    context.provider = Some(provider);
+                    context.provider = Some(provider.into());
                 }
             }
             if let Some(time) = time
@@ -1382,7 +1516,7 @@ impl Reader {
                     _ => EventKind::Settings,
                 };
                 let mut e = event(snapshot, location, context, time, kind, key);
-                e.settings = structural_settings(if settings_applied { applied } else { p });
+                e.settings = structural_settings(if settings_applied { applied } else { p }).into();
                 self.add_event(e);
             }
         } else if kind == Some("response_item")
@@ -1410,7 +1544,7 @@ impl Reader {
                     kind,
                     string(p, "call_id"),
                 );
-                e.tool = label(member(p, "name"));
+                e.tool = text(member(p, "name"));
                 e.tool_id = opaque(p, "call_id")?;
                 self.add_event(e);
             }
@@ -1419,17 +1553,22 @@ impl Reader {
     }
 }
 
-fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
-    let Some(previous) = requests.get_mut(&r.id) else {
-        requests.insert(r.id.clone(), r);
-        return;
+/// Merge a request into its earlier copy; `r` shares the interner's strings. Returns the
+/// reference the stored request newly answers.
+fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Option<Text> {
+    let Some(&index) = requests.ids.get(&r.id) else {
+        let answered = r.reference.clone();
+        requests.ids.insert(r.id.clone(), requests.list.len());
+        requests.list.push(r);
+        return answered;
     };
-    union(&mut previous.profiles, std::mem::take(&mut r.profiles));
+    let previous = &mut requests.list[index];
+    previous.profiles = strings.union(&previous.profiles, &r.profiles);
     previous.locations.append(&mut r.locations);
     previous.time = previous.time.min(r.time);
     previous.end_time = previous.end_time.max(r.end_time);
     if previous.harness == Harness::Codex {
-        let conflict = |a: &Option<String>, b: &Option<String>| {
+        let conflict = |a: &Option<Text>, b: &Option<Text>| {
             a.as_ref()
                 .zip(b.as_ref())
                 .is_some_and(|(a, b)| crate::prices::tier_name(a) != crate::prices::tier_name(b))
@@ -1442,7 +1581,7 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
         {
             union(
                 &mut previous.issues,
-                vec!["conflicting effective service tiers".into()],
+                vec![strings.text("conflicting effective service tiers")],
             );
         }
         if let (Some(a), Some(b)) = (&previous.requested_speed, &r.requested_speed)
@@ -1450,7 +1589,7 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
         {
             union(
                 &mut previous.issues,
-                vec!["conflicting requested service tiers".into()],
+                vec![strings.text("conflicting requested service tiers")],
             );
         }
         if previous.requested_speed.is_none() {
@@ -1496,8 +1635,10 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
             previous.server_tools = r.server_tools;
         }
     }
+    let mut answered = None;
     if previous.reference.is_none() {
         previous.reference = r.reference;
+        answered = previous.reference.clone();
     }
     if previous.source.is_none() {
         previous.source = r.source;
@@ -1506,6 +1647,7 @@ fn add(requests: &mut IndexMap<String, Request>, mut r: Request) {
         previous.provider = r.provider;
     }
     union(&mut previous.issues, r.issues);
+    answered
 }
 
 /// The profiles among `all` that a history is shared by.
@@ -1544,13 +1686,14 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     let has_t3 = profiles.iter().any(|p| p.t3.is_some());
     let mut reader = Reader {
         since,
-        exposure: ExposureCollector::new(since),
-        requests: IndexMap::default(),
+        exposure: ExposureCollector::new(since, options.full),
+        strings: Interner::default(),
+        requests: Requests::default(),
         events: vec![],
-        event_ids: HashMap::default(),
+        event_ids: EventIndex::default(),
         compact_parents: HashMap::default(),
         notice_parents: HashMap::default(),
-        refs: IndexMap::default(),
+        refs: Refs::default(),
         issues: IndexSet::default(),
         modern_totals: HashSet::default(),
         legacy: vec![],
@@ -1558,7 +1701,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
-        let mut file = FileState::new(&view);
+        let mut file = FileState::new(&view, &mut reader.strings);
         for record in read_snapshot(snapshot)? {
             let (raw, location) = record?;
             reader
@@ -1571,12 +1714,13 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     }
     let Reader {
         exposure,
+        mut strings,
         mut requests,
         mut events,
         event_ids,
         compact_parents,
         notice_parents,
-        refs,
+        mut refs,
         mut issues,
         modern_totals,
         legacy,
@@ -1584,23 +1728,39 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     } = reader;
     for (r, total_key) in legacy {
         if !modern_totals.contains(&total_key) {
-            add(&mut requests, r);
+            let answered = add(&mut requests, &mut strings, r);
+            refs.answer(answered);
         }
     }
-    let linked: HashSet<String> = requests
-        .values()
-        .filter_map(|r| r.reference.clone())
-        .collect();
-    for (reference, r) in &refs {
-        if !linked.contains(reference) {
-            add(&mut requests, r.clone());
+    // Records no request answers become requests themselves.
+    let Refs {
+        records: mut refs,
+        answered,
+    } = refs;
+    drop(answered);
+    let mut unanswered = vec![];
+    for record in refs.values_mut() {
+        if let Ref::Pending(r) = record {
+            let facts = RefFacts::of(r);
+            let Ref::Pending(r) = std::mem::replace(record, Ref::Linked(facts)) else {
+                unreachable!("matched as pending")
+            };
+            unanswered.push(*r);
         }
     }
-    let mut ref_to_request: HashMap<String, String> = HashMap::default();
-    for r in requests.values_mut() {
+    for r in unanswered {
+        add(&mut requests, &mut strings, r);
+    }
+    let Requests {
+        list: mut requests,
+        ids,
+    } = requests;
+    drop(ids);
+    let mut ref_to_request: HashMap<Text, Text> = HashMap::default();
+    for r in &mut requests {
         if let Some(reference) = &r.reference {
             ref_to_request.insert(reference.clone(), r.id.clone());
-            if let Some(found) = refs.get(reference) {
+            if let Some(Ref::Linked(found)) = refs.get(reference) {
                 if r.source.is_none() {
                     r.source = found.source.clone();
                 }
@@ -1609,7 +1769,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                     r.requested_speed = found.requested_speed.clone();
                 }
                 r.time = r.time.min(found.time);
-                union(&mut r.profiles, found.profiles.clone());
+                r.profiles = strings.union(&r.profiles, &found.profiles);
             }
         }
         if r.source.as_deref().is_some_and(|s| s.starts_with("agent:")) {
@@ -1623,26 +1783,29 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         if r.provider.is_none()
             && let Some(Some(provider)) = agreed(&sharing(&profiles, &r.profiles))
         {
-            r.provider = Some(provider);
-            r.issues
-                .push("provider inferred from current profile settings applied to history".into());
+            r.provider = Some(strings.text(&provider));
+            r.issues.push(
+                strings.text("provider inferred from current profile settings applied to history"),
+            );
         }
         if r.harness == Harness::Claude && r.provider.is_none() {
             if sharing(&profiles, &r.profiles)
                 .iter()
                 .all(|p| p.provider.is_none())
             {
-                r.provider = Some("anthropic".into());
+                r.provider = Some(strings.text("anthropic"));
                 r.issues.push(
-                    "public Anthropic API equivalent; historical endpoint not recorded".into(),
+                    strings
+                        .text("public Anthropic API equivalent; historical endpoint not recorded"),
                 );
             } else {
-                r.issues.push(
-                    "shared history has conflicting current provider conditions; historical endpoint unknown"
-                        .into(),
-                );
+                r.issues.push(strings.text(
+                    "shared history has conflicting current provider conditions; historical endpoint unknown",
+                ));
             }
         }
+        r.locations.shrink_to_fit();
+        r.issues.shrink_to_fit();
     }
     // Events share their pricing context, so fill each shared copy once per provider. Each
     // entry keeps its source alive, so no other copy can reuse the address it is keyed by.
@@ -1660,7 +1823,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             let key = (Arc::as_ptr(pricing) as usize, provider);
             let (_, shared) = filled.entry(key).or_insert_with_key(|(_, provider)| {
                 let shared = Arc::new(Pricing {
-                    provider: Some(provider.clone()),
+                    provider: Some(provider.as_str().into()),
                     ..(**pricing).clone()
                 });
                 (pricing.clone(), shared)
@@ -1679,8 +1842,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     // Every request and event stays in memory, so sort in place: a stable slice sort would
     // buffer half of them, and splitting at the window keeps the selected part where it is.
     // Request IDs are a harness name and a hex digest, where byte order is locale order.
-    requests.sort_by_cached_key(|_, r| (r.time, r.id.clone()));
-    let mut requests: Vec<Request> = requests.into_values().collect();
+    requests.sort_by_cached_key(|r| (r.time, r.id.clone()));
     events.sort_by_cached_key(|e| e.time);
     discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
     discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
@@ -1741,7 +1903,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         deferred_files: snapshots.iter().filter(|s| s.deferred_bytes > 0).count() as u64,
         skipped_lines: snapshots.iter().map(|s| s.skipped_lines).sum(),
         skipped_files: snapshots.iter().filter(|s| s.skipped_lines > 0).count() as u64,
-        issues: issues.into_iter().collect(),
+        issues: issues.into_iter().map(|issue| issue.to_string()).collect(),
     };
     Ok(Scan {
         snapshot_started_at,
@@ -1775,7 +1937,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
 /// Attribution only ever sets `notice`, so the order notices are visited in does not matter.
 fn attribute_idle(
     events: &mut [StructuralEvent],
-    ids: &HashMap<String, usize>,
+    ids: &EventIndex,
     compact_parents: &HashMap<Key, Option<Link>>,
     notice_parents: &HashMap<String, HashSet<Option<Key>>>,
 ) {
@@ -1801,7 +1963,7 @@ fn attribute_idle(
                 break;
             };
             if let Some(boundary) = &link.boundary {
-                if let Some(&boundary) = ids.get(boundary)
+                if let Some(boundary) = ids.get(events, boundary)
                     && let boundary = &mut events[boundary]
                     && boundary.trigger.as_deref() == Some("auto")
                     && boundary.time <= time
@@ -1848,58 +2010,60 @@ mod tests {
         r.parts[0].tier = Some("priority".into());
         let mut missing = r.clone();
         missing.parts[0].tier = None;
-        let mut requests = IndexMap::default();
-        add(&mut requests, r.clone());
-        add(&mut requests, missing.clone());
-        assert_eq!(requests[&r.id].parts[0].tier.as_deref(), Some("priority"));
-        requests.clear();
-        add(&mut requests, missing);
-        add(&mut requests, r.clone());
-        assert_eq!(requests[&r.id].parts[0].tier.as_deref(), Some("priority"));
+        let s = &mut Interner::default();
+        let mut requests = Requests::default();
+        add(&mut requests, s, r.clone());
+        add(&mut requests, s, missing.clone());
+        let get = |requests: &Requests| requests.get(&r.id).unwrap().clone();
+        assert_eq!(get(&requests).parts[0].tier.as_deref(), Some("priority"));
+        requests = Requests::default();
+        add(&mut requests, s, missing);
+        add(&mut requests, s, r.clone());
+        assert_eq!(get(&requests).parts[0].tier.as_deref(), Some("priority"));
         r.parts[0].tier = Some("default".into());
-        add(&mut requests, r.clone());
-        add(&mut requests, r.clone());
+        add(&mut requests, s, r.clone());
+        add(&mut requests, s, r.clone());
         assert_eq!(
-            requests[&r.id]
+            get(&requests)
                 .issues
                 .iter()
-                .filter(|s| *s == "conflicting effective service tiers")
+                .filter(|s| &***s == "conflicting effective service tiers")
                 .count(),
             1
         );
         assert!(
-            requests[&r.id]
+            get(&requests)
                 .issues
                 .iter()
-                .any(|s| s == "conflicting effective service tiers")
+                .any(|s| &**s == "conflicting effective service tiers")
         );
-        requests.clear();
+        requests = Requests::default();
         r.parts[0].tier = None;
         r.requested_speed = Some(RequestedSpeed {
             tier: Some("fast".into()),
             speed: None,
         });
-        add(&mut requests, r.clone());
+        add(&mut requests, s, r.clone());
         r.requested_speed.as_mut().unwrap().tier = Some("priority".into());
-        add(&mut requests, r.clone());
-        assert!(requests[&r.id].issues.is_empty());
+        add(&mut requests, s, r.clone());
+        assert!(get(&requests).issues.is_empty());
         r.requested_speed.as_mut().unwrap().tier = Some("default".into());
-        add(&mut requests, r.clone());
+        add(&mut requests, s, r.clone());
         assert!(
-            requests[&r.id]
+            get(&requests)
                 .issues
                 .iter()
-                .any(|s| s == "conflicting requested service tiers")
+                .any(|s| &**s == "conflicting requested service tiers")
         );
-        requests.clear();
+        requests = Requests::default();
         r.requested_speed = None;
         r.parts[0].tier = Some("priority".into());
-        add(&mut requests, r.clone());
+        add(&mut requests, s, r.clone());
         let mut summary = r.clone();
         summary.parts[0].kind = PartKind::Compaction;
         summary.parts[0].tier = Some("default".into());
-        add(&mut requests, summary);
-        assert!(requests[&r.id].issues.is_empty());
+        add(&mut requests, s, summary);
+        assert!(get(&requests).issues.is_empty());
     }
 
     fn since(options: ScanOptions, instant: &str) -> ScanOptions {

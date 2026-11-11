@@ -13,8 +13,8 @@ use crate::controls::{
     scoped_environment, speed_controls,
 };
 use crate::model::{
-    Agent, BackgroundControl, Harness, Location, PerBucket, Profile, Request, RootOrigin,
-    RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Harness, IdleControl, Location, PerBucket, Profile, Request,
+    RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -633,6 +633,31 @@ fn unresolved_background(controls: &mut [BackgroundControl], reason: &str) {
     }
 }
 
+/// Whether a recorded working directory still exists as an absolute directory.
+fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
+    match fs::metadata(cwd) {
+        Ok(meta) => Ok(meta.is_dir() && std::path::Path::new(cwd).is_absolute()),
+        Err(e) if absent(e.kind()) => Ok(false),
+        Err(_) => Err(error("cannot inspect working directory", cwd, 0)),
+    }
+}
+
+/// The project, legacy local and local settings files Claude reads at an existing `cwd`.
+fn claude_project_files(cwd: &str, options: &DiscoveryOptions) -> Result<[String; 3], ScanError> {
+    let paths = project_directories(cwd, &[".git".into()])?;
+    let root = paths.last().expect("cwd is included");
+    let local_root = claude_local_root(root, options)?;
+    Ok([
+        join(&[cwd, ".claude", "settings.json"]),
+        join(&[cwd, ".claude", "settings.local.json"]),
+        join(&[
+            local_root.as_deref().unwrap_or(cwd),
+            ".claude",
+            "settings.local.json",
+        ]),
+    ])
+}
+
 /// Resolve current project/local controls at recorded directories, preserving every owner.
 pub fn discover_claude_controls(
     options: &DiscoveryOptions,
@@ -676,12 +701,7 @@ pub fn discover_claude_controls(
             .background_directories
             .insert(String::new(), unknown);
         for cwd in directories(relevant.into_iter()) {
-            let exists = match fs::metadata(cwd) {
-                Ok(meta) => meta.is_dir() && std::path::Path::new(cwd).is_absolute(),
-                Err(e) if absent(e.kind()) => false,
-                Err(_) => return Err(error("cannot inspect working directory", cwd, 0)),
-            };
-            if !exists {
+            if !existing_directory(cwd)? {
                 let mut controls = profile.background.clone();
                 unresolved_background(
                     &mut controls,
@@ -703,16 +723,7 @@ pub fn discover_claude_controls(
                 }
                 continue;
             }
-            let paths = project_directories(cwd, &[".git".into()])?;
-            let root = paths.last().expect("cwd is included");
-            let local_root = claude_local_root(root, options)?;
-            let project_file = join(&[cwd, ".claude", "settings.json"]);
-            let legacy_file = join(&[cwd, ".claude", "settings.local.json"]);
-            let local_file = join(&[
-                local_root.as_deref().unwrap_or(cwd),
-                ".claude",
-                "settings.local.json",
-            ]);
+            let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
             let project = settings(&project_file, Harness::Claude)?;
             let legacy = settings(&legacy_file, Harness::Claude)?;
             let local = settings(&local_file, Harness::Claude)?;
@@ -818,6 +829,86 @@ pub fn discover_claude_controls(
             }
         }
     }
+    // A T3 instance that inherits its window reads it from the same project/local files,
+    // under the instance's own environment; its other controls stay T3's.
+    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+        let Some(env) = profile
+            .t3
+            .as_ref()
+            .and_then(|t| t.inherited_window.as_ref())
+        else {
+            continue;
+        };
+        let user = settings(&profile.settings_file, Harness::Claude)?;
+        let managed = settings(managed_file, Harness::Claude)?;
+        let user_scope = SettingsScope {
+            config: &user,
+            file: &profile.settings_file,
+        };
+        let managed_scope = SettingsScope {
+            config: &managed,
+            file: managed_file,
+        };
+        // T3 reads only the window and TTL from a directory's control.
+        let base = IdleControl {
+            ttl: Some(profile.ttl.clone()),
+            ..idle_controls(&[user_scope, managed_scope], env)?
+        };
+        let mut directories_controls = IndexMap::default();
+        for cwd in directories(
+            requests
+                .iter()
+                .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id)),
+        ) {
+            let compaction = if existing_directory(cwd)? {
+                let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
+                let project = settings(&project_file, Harness::Claude)?;
+                let legacy = settings(&legacy_file, Harness::Claude)?;
+                let local = settings(&local_file, Harness::Claude)?;
+                let scopes = [
+                    user_scope,
+                    SettingsScope {
+                        config: &project,
+                        file: &project_file,
+                    },
+                    SettingsScope {
+                        config: &legacy,
+                        file: &legacy_file,
+                    },
+                    SettingsScope {
+                        config: &local,
+                        file: &local_file,
+                    },
+                    managed_scope,
+                ];
+                compaction_controls(&CompactionSources {
+                    harness: Harness::Claude,
+                    user: &user,
+                    managed: &managed,
+                    env,
+                    file: &profile.settings_file,
+                    managed_file,
+                    scopes: Some(&scopes),
+                })?
+            } else {
+                let mut compaction = profile.compaction.clone();
+                for control in
+                    std::iter::once(&mut compaction.default).chain(compaction.models.values_mut())
+                {
+                    control.comparison_unknown = Some("recorded working directory no longer exists; its project/local window is unresolved".into());
+                }
+                compaction
+            };
+            directories_controls.insert(
+                cwd.to_string(),
+                IdleControl {
+                    compaction: Some(compaction),
+                    ..base.clone()
+                },
+            );
+        }
+        profile.idle_directories = Some(directories_controls);
+    }
     Ok(())
 }
 
@@ -906,12 +997,7 @@ pub fn discover_codex_controls(
         };
         let cwds = directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)));
         for cwd in cwds {
-            let exists = match fs::metadata(cwd) {
-                Ok(meta) => meta.is_dir() && std::path::Path::new(cwd).is_absolute(),
-                Err(e) if absent(e.kind()) => false,
-                Err(_) => return Err(error("cannot inspect working directory", cwd, 0)),
-            };
-            if !exists {
+            if !existing_directory(cwd)? {
                 let mut controls = base.clone();
                 unresolved_background(
                     &mut controls,

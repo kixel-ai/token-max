@@ -520,22 +520,54 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             eprintln!("token-max: {message}...");
         }
     };
-    // Every destination scans at once on its own host, but only one scan is held here at a
-    // time: each is read when its turn to be analyzed comes, and the first failure stops the
-    // rest. The local scan runs on this thread, so the analysis reuses the memory the scan frees
-    // rather than leaving it to another thread's allocator arena.
-    let mut hosts: Vec<Option<String>> = vec![];
-    if local {
-        hosts.push(None);
+    // Every host scans at once and the first failure stops the rest, but only one scan is held
+    // here at a time: a destination announces that its scan is ready and sends it only when its
+    // turn to be analyzed comes. A lone local scan runs on this thread, so the analysis reuses
+    // the memory the scan frees rather than leaving it to another thread's allocator arena.
+    enum Ready {
+        Local(Box<Remote>),
+        Remote(Box<ssh::Connection>),
     }
-    let (sender, connected) = mpsc::channel();
-    let destinations = values.ssh.len();
-    for (index, destination) in values.ssh.into_iter().enumerate() {
+    let failed = || ScanError::new("analysis failed; no report produced");
+    let (sender, ready) = mpsc::channel();
+    let mut hosts: Vec<Option<String>> = vec![];
+    let mut inline = None;
+    if local {
+        let mut discovery = DiscoveryOptions::host()?;
+        discovery.claude_dirs = values.claude_dirs;
+        discovery.codex_dirs = values.codex_dirs;
+        discovery.t3_dirs = values.t3_dirs;
+        hosts.push(None);
+        let job = move || {
+            panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
+                .unwrap_or_else(|_| Err(failed()))
+                .map(|scan| {
+                    Ready::Local(Box::new(Remote {
+                        scan,
+                        home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+                    }))
+                })
+        };
+        if remote {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send((0, job()));
+            });
+        } else {
+            inline = Some(job);
+        }
+    }
+    for destination in values.ssh {
+        let index = hosts.len();
         hosts.push(Some(destination.clone()));
         let sender = sender.clone();
         thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::connect(&destination, since))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let result = panic::catch_unwind(|| {
+                let mut connection = ssh::connect(&destination, since)?;
+                connection.ready()?;
+                Ok(Ready::Remote(Box::new(connection)))
+            })
+            .unwrap_or_else(|_| Err(failed()));
             let _ = sender.send((index, result));
         });
     }
@@ -546,26 +578,9 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         (false, _) => "Scanning SSH hosts",
     });
     let analyzed = (|| {
-        // Destinations report a setup failure, such as a missing install, before scanning, and
-        // the first one to fail stops the rest.
-        let mut connections: Vec<Option<ssh::Connection>> =
-            (0..destinations).map(|_| None).collect();
-        for (index, result) in connected {
-            connections[index] = Some(result?);
-        }
-        let mut connections = connections.into_iter();
-        let mut local_scan = None;
-        if local {
-            let mut discovery = DiscoveryOptions::host()?;
-            discovery.claude_dirs = values.claude_dirs;
-            discovery.codex_dirs = values.codex_dirs;
-            discovery.t3_dirs = values.t3_dirs;
-            let scan = panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))?;
-            local_scan = Some(Remote {
-                scan,
-                home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-            });
+        let mut slots: Vec<Option<Ready>> = hosts.iter().map(|_| None).collect();
+        if let Some(job) = inline {
+            slots[0] = Some(job()?);
         }
         phase("Loading public prices");
         let cache = match values.price_cache {
@@ -606,17 +621,17 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         let mut code = 0;
         let mut text = String::new();
         let mut reports = vec![];
-        for ssh in &hosts {
-            let Remote { scan, home } = match local_scan.take() {
-                Some(scan) => scan,
-                None => {
-                    let connection = connections
-                        .next()
-                        .flatten()
-                        .expect("every destination connected");
-                    panic::catch_unwind(AssertUnwindSafe(|| connection.receive())).unwrap_or_else(
-                        |_| Err(ScanError::new("analysis failed; no report produced")),
-                    )?
+        let mut ready = ready.iter();
+        for (index, ssh) in hosts.iter().enumerate() {
+            while slots[index].is_none() {
+                let (host, result) = ready.next().expect("every host reports once");
+                slots[host] = Some(result?);
+            }
+            let Remote { scan, home } = match slots[index].take().expect("this host is ready") {
+                Ready::Local(scan) => *scan,
+                Ready::Remote(connection) => {
+                    panic::catch_unwind(AssertUnwindSafe(|| connection.receive()))
+                        .unwrap_or_else(|_| Err(failed()))?
                 }
             };
             // Each host's observation ends once its scan is complete.

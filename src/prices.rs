@@ -118,6 +118,12 @@ struct ModelPrice {
     tiers: Vec<Tier>,
     legacy: Option<Rates>,
     invalid: bool,
+    /// The catalog's model family, such as `claude-haiku`.
+    family: Option<String>,
+    /// The ISO release date, which orders a family's models.
+    release: Option<String>,
+    /// Not deprecated, replies in text and calls tools, so it could run an agent.
+    agentic: bool,
 }
 
 /// Catalog stores only numeric pricing metadata, keyed by exact provider and model.
@@ -139,6 +145,41 @@ impl Catalog {
         self.model(provider, model)
             .into_iter()
             .flat_map(|m| m.tiers.iter().map(|t| t.size))
+    }
+
+    /// The provider's cheapest current model that can run an agent: of the newest
+    /// non-deprecated, tool-calling text model in each family, the one with the lowest
+    /// output then input rate.
+    pub fn cheapest(&self, provider: &str) -> Option<&str> {
+        let mut newest: HashMap<&str, (&String, &ModelPrice)> = HashMap::default();
+        for (name, price) in self.models.get(provider)? {
+            let rates = price.base;
+            if !price.agentic
+                || price.invalid
+                || rates.input.is_none()
+                || rates.output.is_none()
+                || rates.read.is_none()
+            {
+                continue;
+            }
+            let family = price.family.as_deref().unwrap_or(name);
+            let newer = newest
+                .get(family)
+                .is_none_or(|(n, p)| (&price.release, name) > (&p.release, *n));
+            if newer {
+                newest.insert(family, (name, price));
+            }
+        }
+        newest
+            .into_values()
+            .min_by(|(a, x), (b, y)| {
+                let key = |p: &ModelPrice| (p.base.output, p.base.input);
+                key(x)
+                    .partial_cmp(&key(y))
+                    .expect("finite rates")
+                    .then(a.cmp(b))
+            })
+            .map(|(name, _)| name.as_str())
     }
 }
 
@@ -215,11 +256,21 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
         Some(value) if truthy(value) => Some(rates(value)?),
         _ => None,
     };
+    let model = object(value);
+    let text_output = object(model.get("modalities").unwrap_or(&Value::Null))
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|output| output.iter().any(|m| m == "text"));
     Ok(ModelPrice {
         base: rates(cost)?,
         tiers,
         legacy,
         invalid,
+        family: model.get("family").and_then(label),
+        release: model.get("release_date").and_then(label),
+        agentic: text_output
+            && model.get("tool_call") == Some(&Value::Bool(true))
+            && model.get("status").and_then(Value::as_str) != Some("deprecated"),
     })
 }
 
@@ -1858,5 +1909,34 @@ mod tests {
         assert_eq!(price_part(&c, &r, &fast).total_usd, Some(standard * 2.0));
         c.remove_model("openai", "gpt-5.6");
         assert_eq!(price_part(&c, &r, &fast).total_usd, None);
+    }
+
+    #[test]
+    fn the_cheapest_model_is_the_newest_agentic_model_of_the_cheapest_family() {
+        let model = |family: &str, release: &str, output: f64, extra: &str| {
+            format!(
+                r#"{{"family":"{family}","release_date":"{release}","tool_call":true,"modalities":{{"output":["text"]}},"cost":{{"input":1,"output":{output},"cache_read":0.1}}{extra}}}"#
+            )
+        };
+        let catalog = parse_catalog(
+            format!(
+                r#"{{"p":{{"models":{{"small-old":{},"small-new":{},"big":{},"retired":{},"image":{},"unpriced":{}}}}}}}"#,
+                model("small", "2026-01-01", 1.0, ""),
+                model("small", "2026-06-01", 2.0, ""),
+                model("big", "2026-06-01", 5.0, ""),
+                model("retired", "2026-06-01", 0.5, r#","status":"deprecated""#),
+                r#"{"family":"image","release_date":"2026-06-01","tool_call":true,"modalities":{"output":["image"]},"cost":{"input":1,"output":0.1,"cache_read":0.1}}"#,
+                r#"{"family":"unpriced","release_date":"2026-06-01","tool_call":true,"modalities":{"output":["text"]},"cost":{"input":1,"output":0.1}}"#,
+            )
+            .as_bytes(),
+        )
+        .ok()
+        .unwrap();
+        // The older, cheaper model of a family is no longer current.
+        assert_eq!(catalog.cheapest("p"), Some("small-new"));
+        assert_eq!(catalog.cheapest("other"), None);
+        let fixture = crate::test_support::prices();
+        assert_eq!(fixture.cheapest("anthropic"), Some("claude-haiku-5-5"));
+        assert_eq!(fixture.cheapest("openai"), Some("gpt-6.1-sol"));
     }
 }

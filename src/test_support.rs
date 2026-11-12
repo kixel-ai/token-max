@@ -195,6 +195,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         reason: "explicit setting".into(),
     };
     Profile {
+        agents: Default::default(),
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),

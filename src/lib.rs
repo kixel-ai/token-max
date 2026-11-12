@@ -26,6 +26,7 @@ pub mod scenarios;
 pub mod sessions;
 mod skills;
 pub mod ssh;
+mod subagents;
 pub mod t3;
 pub mod terminal;
 pub mod wire;

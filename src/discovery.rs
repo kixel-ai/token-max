@@ -70,7 +70,7 @@ pub struct Discovery {
 }
 
 /// A safe error naming a path without its contents.
-fn error(message: &str, file: &str, line: u64) -> ScanError {
+pub(crate) fn error(message: &str, file: &str, line: u64) -> ScanError {
     ScanError::at(
         message,
         Location {
@@ -81,7 +81,7 @@ fn error(message: &str, file: &str, line: u64) -> ScanError {
 }
 
 /// Node's `ENOENT` and `ENOTDIR`, which both mean the path is not there.
-fn absent(kind: ErrorKind) -> bool {
+pub(crate) fn absent(kind: ErrorKind) -> bool {
     matches!(kind, ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
@@ -107,7 +107,7 @@ fn normalize_segments(path: &str, above_root: bool) -> String {
 
 /// Node's POSIX `path.join`.
 #[cfg(not(windows))]
-fn join(parts: &[&str]) -> String {
+pub(crate) fn join(parts: &[&str]) -> String {
     let joined = parts
         .iter()
         .filter(|p| !p.is_empty())
@@ -135,7 +135,7 @@ fn join(parts: &[&str]) -> String {
 
 /// Node's POSIX `path.resolve` for one path, relative to the process working directory.
 #[cfg(not(windows))]
-fn resolve(path: &str) -> String {
+pub(crate) fn resolve(path: &str) -> String {
     let full = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -149,7 +149,7 @@ fn resolve(path: &str) -> String {
 
 /// Node's POSIX `path.dirname`.
 #[cfg(not(windows))]
-fn dirname(path: &str) -> &str {
+pub(crate) fn dirname(path: &str) -> &str {
     let bytes = path.as_bytes();
     if bytes.is_empty() {
         return ".";
@@ -186,7 +186,7 @@ pub(crate) fn realpath(path: &str) -> std::io::Result<String> {
 
 /// Node's win32 `path.join`: join the non-empty parts and normalize them lexically.
 #[cfg(windows)]
-fn join(parts: &[&str]) -> String {
+pub(crate) fn join(parts: &[&str]) -> String {
     let mut path = std::path::PathBuf::new();
     for part in parts.iter().filter(|p| !p.is_empty()) {
         path.push(part);
@@ -221,7 +221,7 @@ fn lexical(path: &std::path::Path) -> String {
 
 /// Node's win32 `path.resolve` for one path, relative to the process working directory.
 #[cfg(windows)]
-fn resolve(path: &str) -> String {
+pub(crate) fn resolve(path: &str) -> String {
     std::path::absolute(path)
         .map(|absolute| lexical(&absolute))
         .unwrap_or_else(|_| path.to_string())
@@ -229,7 +229,7 @@ fn resolve(path: &str) -> String {
 
 /// Node's win32 `path.dirname`: a root is its own parent.
 #[cfg(windows)]
-fn dirname(path: &str) -> &str {
+pub(crate) fn dirname(path: &str) -> &str {
     match std::path::Path::new(path).parent().and_then(|p| p.to_str()) {
         Some("") => ".",
         Some(parent) => parent,
@@ -308,7 +308,7 @@ fn toml_json(value: toml::Value) -> Option<Value> {
 }
 
 /// Read a settings file; a missing file is empty, anything unreadable or malformed fails.
-fn settings(file: &str, harness: Harness) -> Result<Map<String, Value>, ScanError> {
+pub(crate) fn settings(file: &str, harness: Harness) -> Result<Map<String, Value>, ScanError> {
     let bytes = match fs::read(file) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Map::new()),
@@ -503,14 +503,14 @@ fn merged(configs: &[&Map<String, Value>]) -> Map<String, Value> {
 }
 
 /// Each distinct recorded working directory, in first-seen order.
-fn directories<'a>(requests: impl Iterator<Item = &'a Request>) -> IndexSet<&'a str> {
+pub(crate) fn directories<'a>(requests: impl Iterator<Item = &'a Request>) -> IndexSet<&'a str> {
     requests
         .filter_map(|r| r.cwd.as_deref().filter(|cwd| !cwd.is_empty()))
         .collect()
 }
 
 /// Directories from the recorded cwd up to the nearest project marker, closest first.
-fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<String>, ScanError> {
+pub(crate) fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<String>, ScanError> {
     let mut paths = vec![];
     let mut path = cwd;
     loop {
@@ -634,7 +634,7 @@ fn unresolved_background(controls: &mut [BackgroundControl], reason: &str) {
 }
 
 /// Whether a recorded working directory still exists as an absolute directory.
-fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
+pub(crate) fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
     match fs::metadata(cwd) {
         Ok(meta) => Ok(meta.is_dir() && std::path::Path::new(cwd).is_absolute()),
         Err(e) if absent(e.kind()) => Ok(false),
@@ -643,7 +643,10 @@ fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
 }
 
 /// The project, legacy local and local settings files Claude reads at an existing `cwd`.
-fn claude_project_files(cwd: &str, options: &DiscoveryOptions) -> Result<[String; 3], ScanError> {
+pub(crate) fn claude_project_files(
+    cwd: &str,
+    options: &DiscoveryOptions,
+) -> Result<[String; 3], ScanError> {
     let paths = project_directories(cwd, &[".git".into()])?;
     let root = paths.last().expect("cwd is included");
     let local_root = claude_local_root(root, options)?;
@@ -917,6 +920,42 @@ pub fn discover_claude_controls(
 /// Codex keys that let a profile or project file change speed, model or gates.
 const CODEX_SPEED_KEYS: [&str; 4] = ["model", "model_provider", "service_tier", "features"];
 
+/// Codex's project root markers from its system and user settings, `.git` by default.
+pub(crate) fn codex_markers(
+    scopes: &[SettingsScope],
+    file: &str,
+) -> Result<Vec<String>, ScanError> {
+    match scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.config.get("project_root_markers"))
+    {
+        None => Ok(vec![".git".into()]),
+        Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(values
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()),
+        Some(_) => Err(error("invalid project_root_markers", file, 1)),
+    }
+}
+
+/// A directory's current Codex trust level: the exact directory's, then its project root's.
+/// Trust is never inferred from the fact that requests exist.
+pub(crate) fn codex_trust<'a>(
+    scopes: &[SettingsScope<'a>],
+    cwd: &str,
+    root: &str,
+) -> Option<&'a str> {
+    [cwd, root].into_iter().find_map(|path| {
+        scopes.iter().rev().find_map(|scope| {
+            members(scope.config.get("projects"))
+                .get(path)
+                .and_then(|p| p.get("trust_level"))
+                .and_then(Value::as_str)
+        })
+    })
+}
+
 /// Resolve Codex project controls without inferring trust or a selected launch profile.
 pub fn discover_codex_controls(
     options: &DiscoveryOptions,
@@ -987,24 +1026,7 @@ pub fn discover_codex_controls(
         profile
             .background_directories
             .insert(String::new(), unknown);
-        let markers = base_scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.config.get("project_root_markers"));
-        let markers: Vec<String> = match markers {
-            None => vec![".git".into()],
-            Some(Value::Array(values)) if values.iter().all(Value::is_string) => values
-                .iter()
-                .map(|v| v.as_str().unwrap().to_string())
-                .collect(),
-            Some(_) => {
-                return Err(error(
-                    "invalid project_root_markers",
-                    &profile.settings_file,
-                    1,
-                ));
-            }
-        };
+        let markers = codex_markers(&base_scopes, &profile.settings_file)?;
         let mine: Vec<&Request> = requests
             .iter()
             .filter(|r| r.profiles.contains(&profile.id))
@@ -1024,15 +1046,7 @@ pub fn discover_codex_controls(
             }
             let paths = project_directories(cwd, &markers)?;
             let root = paths.last().expect("cwd is included");
-            // Exact cwd, then project root; never infer trust from the fact requests exist.
-            let trust = [cwd, root.as_str()].into_iter().find_map(|path| {
-                base_scopes.iter().rev().find_map(|scope| {
-                    members(scope.config.get("projects"))
-                        .get(path)
-                        .and_then(|p| p.get("trust_level"))
-                        .and_then(Value::as_str)
-                })
-            });
+            let trust = codex_trust(&base_scopes, cwd, root);
             let mut layers = Vec::new();
             for path in &paths {
                 if trust == Some("untrusted") {
@@ -1145,7 +1159,7 @@ fn named_profile_file(name: &str) -> bool {
 }
 
 /// Named profile files in stable order, shared by control discovery.
-fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> {
+pub(crate) fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> {
     let unreadable = || error("cannot read settings", root, 0);
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|_| unreadable())? {
@@ -1621,6 +1635,7 @@ pub(crate) fn profile(
         background_requests: IndexMap::default(),
         memory: Some(memory),
         t3: None,
+        agents: crate::model::AgentControls::default(),
     })
 }
 

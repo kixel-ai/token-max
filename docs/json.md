@@ -119,6 +119,25 @@ the model's row for a user or managed global window, followed by the same
 variable suffix, or `(capped at <n>)` when the model's own window caps it.
 `profiles[].compaction.contexts` lists each capping context window by model.
 
+`subagents[]` has one row per Claude subagent type or Codex agent role and
+profile set, most expensive first: `kind` (`unrecorded` when no record names
+it), `native` (true for a Codex subagent source such as `review` or `compact`,
+which never shares a row with a role of the same name), `runs`, `requests`, `priced`, `cost`, `models` and `efforts` (request
+counts by recorded value, `unrecorded` when absent), `sources` (run counts by
+`source` of `call`, `definition`, `setting`, `inherited` or `unknown`, with a
+`detail`), `cheapest` (the provider's cheapest current catalog model, or null),
+`reprice` (the same recorded tokens on `cheapest`; null when every request ran
+on it or `cheapest` is null), `modelSetting` and `effortSetting`. Rows are
+evidence: they carry no verdict and never change the exit code. `scan.subagents`
+is the count of subagent transcripts, and `profiles[].agents` holds the current
+subagent model and effort settings, Codex's `review` and `session` models, and
+agent definition files (name, file, model, effort and modification time, never
+the prompt). `declared` maps each Codex role a config layer declares with a
+description but no role file to the config file declaring it. Its `directories` maps each recorded subagent working directory
+whose project settings or agent files change them to that directory's controls,
+with `unresolved` giving the reason they cannot be established, such as a Codex
+project whose trust is not recorded.
+
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
 instance ownership. The `t3-idle-compaction` check keeps all three policy costs;
 its `currentSettings.periods` and

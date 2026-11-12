@@ -43,6 +43,8 @@ struct Facts {
     /// fork's copied records keep their original times.
     created: Option<Millis>,
     id: Option<String>,
+    /// The Codex thread this one was forked from.
+    forked_from: Option<String>,
     parent: Option<String>,
     cwd: Option<Text>,
     branches: Vec<Branch>,
@@ -106,6 +108,7 @@ impl Sessions {
                 entry.or_insert_with(|| Facts {
                     created: None,
                     id: None,
+                    forked_from: None,
                     parent: None,
                     cwd: None,
                     branches: vec![],
@@ -166,6 +169,10 @@ impl Sessions {
                     .parent
                     .take()
                     .or_else(|| native(parent.map(Value::from).as_ref()));
+                facts.forked_from = facts
+                    .forked_from
+                    .take()
+                    .or_else(|| native(meta.get("forked_from_id")));
                 facts.review |= meta.get("source").and_then(|s| s.get("subagent"))
                     == Some(&Value::from("review"));
                 branch(meta.get("git").and_then(|git| git.get("branch")))
@@ -248,19 +255,36 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
             held.entry(file).or_default().push(key);
         }
     }
-    let created = |key: &Text| facts.get(key).and_then(|f| f.created);
+    let ids: HashMap<&str, &Facts> = facts
+        .values()
+        .filter_map(|f| Some((f.id.as_deref()?, f)))
+        .collect();
+    // Sources rank before their forks, by recorded lineage and then by when they began.
+    let rank = |key: &Text| {
+        let mut f = facts.get(key);
+        let created = f.and_then(|f| f.created).unwrap_or(Millis::MAX);
+        let mut depth = 0;
+        // Bounded so a cycle in recorded lineage cannot loop.
+        while depth < facts.len()
+            && let Some(source) = f.and_then(|f| ids.get(f.forked_from.as_deref()?))
+        {
+            f = Some(source);
+            depth += 1;
+        }
+        (depth, created)
+    };
     // A Codex fork copies its source's records under its own `session_meta`, so a request in
-    // several rollouts belongs to the thread that began first, whichever the reader read
-    // first. Claude records name their own session, which the reader already keeps.
+    // several rollouts belongs to the source, whichever the reader read first. Claude records
+    // name their own session, which the reader already keeps.
     let owner = |r: &'s Request| -> &'s Text {
-        let own = created(&r.session);
+        let own = rank(&r.session);
         r.locations
             .iter()
             .filter_map(|l| held.get(&*l.file))
             .flatten()
-            .filter_map(|key| Some((created(key)?, *key)))
-            .min_by_key(|(time, _)| *time)
-            .filter(|(time, _)| own.is_none_or(|own| *time < own))
+            .map(|key| (rank(key), *key))
+            .min_by_key(|(rank, _)| *rank)
+            .filter(|(rank, _)| *rank < own)
             .map_or(&r.session, |(_, key)| key)
     };
     let mut sessions: IndexMap<&Text, Totals> = IndexMap::default();
@@ -549,11 +573,6 @@ mod tests {
 
     #[test]
     fn a_codex_forks_copied_requests_stay_with_its_source_whichever_is_read_first() {
-        let w = Workspace::new();
-        let meta = |id: &str, time: &str| {
-            json!({"type": "session_meta", "timestamp": time,
-                "payload": {"id": id, "source": "exec", "model_provider": "openai"}})
-        };
         let usage = |id: &str, time: &str| {
             json!({"type": "token_usage_record", "timestamp": time,
                 "payload": {"response_id": id, "turn_id": "turn", "usage": {
@@ -563,34 +582,48 @@ mod tests {
         let context = json!({"type": "turn_context", "timestamp": "2026-11-01T00:00:00Z",
             "payload": {"turn_id": "turn", "model": "gpt-6.1-sol"}});
         let copied = usage("response-a", "2026-11-01T00:00:01Z");
-        // The fork's rollout sorts first, so the reader meets the copy before the original.
-        write(
-            &w.codex.join("sessions/a-fork.jsonl"),
-            &[
-                meta("fork", "2026-11-01T01:00:00Z"),
-                context.clone(),
-                copied.clone(),
-                usage("response-b", "2026-11-01T01:00:01Z"),
-            ],
-            "",
-        );
-        write(
-            &w.codex.join("sessions/b-source.jsonl"),
-            &[meta("source", "2026-11-01T00:00:00Z"), context, copied],
-            "",
-        );
-        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
-        let found: Vec<_> = sessions
-            .iter()
-            .map(|s| (s.session.as_deref(), s.models[0].requests, &*s.start))
-            .collect();
-        assert_eq!(
-            found,
-            [
-                (Some("source"), 1, "2026-11-01T00:00:01.000Z"),
-                (Some("fork"), 1, "2026-11-01T01:00:01.000Z"),
-            ]
-        );
+        // A fork begins after its source, or records its lineage when the times tie.
+        for (forked_at, lineage) in [("01:00", None), ("00:00", Some("source"))] {
+            let w = Workspace::new();
+            let meta = |id: &str, time: &str, source: Option<&str>| {
+                json!({"type": "session_meta", "timestamp": format!("2026-11-01T{time}:00Z"),
+                    "payload": {"id": id, "source": "exec", "model_provider": "openai",
+                        "forked_from_id": source}})
+            };
+            // The fork's rollout sorts first, so the reader meets the copy before the original.
+            write(
+                &w.codex.join("sessions/a-fork.jsonl"),
+                &[
+                    meta("fork", forked_at, lineage),
+                    context.clone(),
+                    copied.clone(),
+                    usage("response-b", "2026-11-01T01:00:01Z"),
+                ],
+                "",
+            );
+            write(
+                &w.codex.join("sessions/b-source.jsonl"),
+                &[
+                    meta("source", "00:00", None),
+                    context.clone(),
+                    copied.clone(),
+                ],
+                "",
+            );
+            let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+            let found: Vec<_> = sessions
+                .iter()
+                .map(|s| (s.session.as_deref(), s.models[0].requests, &*s.start))
+                .collect();
+            assert_eq!(
+                found,
+                [
+                    (Some("source"), 1, "2026-11-01T00:00:01.000Z"),
+                    (Some("fork"), 1, "2026-11-01T01:00:01.000Z"),
+                ],
+                "{forked_at}"
+            );
+        }
     }
 
     #[test]

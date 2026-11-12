@@ -1363,7 +1363,7 @@ mod tests {
 
     fn boundary(session: &str, time: Millis, post: Option<i64>) -> StructuralEvent {
         StructuralEvent {
-            id: format!("boundary:{session}:{time}"),
+            id: format!("boundary:{session}:{time}").into(),
             session: "other-alias".into(),
             origins: vec![crate::model::Origin {
                 session: session.into(),

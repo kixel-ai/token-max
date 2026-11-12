@@ -73,7 +73,3 @@ Codex (0.167.0, source `openai/codex` tag `rust-v0.167.0`;
 Docs: update the README sample (`~/.claude/CLAUDE.md` line) and
 `docs/semantics.md` instruction-budget notes, which today would still list
 MEMORY.md as a fixed instruction file.
-
-## Related
-
-- [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - the tier colors this line uses

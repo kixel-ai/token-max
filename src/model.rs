@@ -623,7 +623,7 @@ pub struct ShellCall {
     pub timed_out: bool,
 }
 
-/// A current window control, without inventing a tuned model default.
+/// A current window control and the setting that owns it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowControl {
@@ -635,6 +635,17 @@ pub struct WindowControl {
     pub minimum_claude_patch: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison_unknown: Option<String>,
+    /// No setting names a window, so Claude Code's tuned window for the model applies.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unset: bool,
+}
+
+/// Claude Code's window for one model when no setting names one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TunedWindow {
+    /// The trigger in tokens, or None when neither a compaction nor the documented table establishes it.
+    pub value: Option<i64>,
+    pub reason: String,
 }
 
 /// A current TTL control for one bucket.
@@ -650,6 +661,15 @@ pub struct TtlControl {
 pub struct CompactionControls {
     pub default: WindowControl,
     pub models: IndexMap<String, WindowControl>,
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at a 200k window.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub capped: bool,
+    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size a model ID Claude Code does not recognize.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub declared: bool,
+    /// Tuned windows by undated model ID, for every model the profile used.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub tuned: IndexMap<String, TunedWindow>,
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
@@ -1138,6 +1158,9 @@ pub struct CompactionCheck {
     pub bucket: &'static str,
     pub model: Option<Text>,
     pub models: Vec<Option<Text>>,
+    /// No setting names the window, so `current` is Claude Code's tuned window for the model.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unset: bool,
     pub baseline_cost: Cost,
     pub observed_summary_cost: Cost,
     pub ttls: PerBucket<Option<Ttl>>,

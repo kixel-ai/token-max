@@ -2908,19 +2908,22 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
         Harness::Codex => {
             // The system and user configuration are read, and projects or named
             // profiles that set it leave it unresolved; command-line overrides are unseen.
-            // A resolved budget is shared by the selected profiles; name the file that sets it.
-            let set = profiles
-                .iter()
-                .filter(|p| c.profiles.contains(&p.id))
-                .find_map(|p| p.instruction_budget_file.as_deref());
+            // A resolved budget is shared by the selected profiles; name every source of it.
+            let mut sources: Vec<String> = vec![];
+            for p in profiles.iter().filter(|p| c.profiles.contains(&p.id)) {
+                let source = match &p.instruction_budget_file {
+                    Some(file) => format!("{file} sets"),
+                    None => "Codex loads by default".into(),
+                };
+                if !sources.contains(&source) {
+                    sources.push(source);
+                }
+            }
             let limit = |budget: usize| {
                 format!(
                     "the {} bytes {} (project_doc_max_bytes), counting headers and wrappers",
                     count(budget as u64),
-                    match set {
-                        Some(file) => format!("{file} sets"),
-                        None => "Codex loads by default".into(),
-                    }
+                    sources.join(" and ")
                 )
             };
             let unseen = "A command-line override is not recorded.";
@@ -5197,7 +5200,20 @@ mod tests {
             .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
         let mut both = agents(100);
         both.profiles.push("other".into());
-        assert_eq!(verdict(&both, &[profile.clone(), other]).1, Mark::Unknown);
+        assert_eq!(
+            verdict(&both, &[profile.clone(), other.clone()]).1,
+            Mark::Unknown
+        );
+        // The same budget from different sources names each of them.
+        other
+            .settings
+            .insert("project_doc_max_bytes".into(), Scalar::Number(32768.0));
+        other.instruction_budget_file = Some("/other/config.toml".into());
+        let mixed = instruction_row(&both, &[profile.clone(), other], &out).evidence;
+        assert!(
+            mixed.contains("Codex loads by default and /other/config.toml sets"),
+            "{mixed}"
+        );
         let evidence =
             |c: &ContextCost, profiles: &[Profile]| instruction_row(c, profiles, &out).evidence;
         let default = evidence(&agents(32_768), std::slice::from_ref(&profile));

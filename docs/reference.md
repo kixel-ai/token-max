@@ -150,8 +150,8 @@ kept below that. A Codex AGENTS.md is compared with the selected profiles'
 `project_doc_max_bytes` from the system and user configuration (32 KiB by
 default): the recorded rendered bytes include headers and wrappers, so under
 the budget it is kept, and at or above it Codex may have truncated it, which is
-worth considering. The evidence names whether the budget is the default or the
-user's own. A project `.codex/config.toml` at a recorded directory or a named
+worth considering. The evidence names the file that sets the budget, or says
+it is the default. A project `.codex/config.toml` at a recorded directory or a named
 profile that sets it gives no verdict, since the transcripts do not record
 which applied; neither do profiles with different or unreadable budgets, or
 records with no rendered text. Command-line overrides and original file sizes

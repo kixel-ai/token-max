@@ -76,6 +76,10 @@ Fast mode should be off. Extend the existing skills catalog quest rather
 than create a second owner for it. Model and review effort selection remain
 outside this expansion.
 
+Amended 2026-11-11 (maintainer, /quest-plan): ✅ report each Claude subagent
+type's and Codex agent role's model, effort and cost as evidence in m0
+(rejected: m1). Quest's own model routing tables stay out.
+
 Also requested 2026-11-06: ✅ a polished terminal report and one-command
 distribution in m0 (npm then; crates.io since the Rust rewrite). The crate
 and the command are both `token-max`. Keep the report
@@ -174,8 +178,11 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 
 ## Required
 
+- [Report each subagent type's model and cost](/quest/m0/subagent-models.md) - every Claude subagent type and Codex role shows its cost, model, effort and source, and a cheapest-model reprice
 - [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
 - [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history
 - [Price sessions whose T3 owner was removed](/quest/m0/t3-removed-owners.md) - removed-instance sessions stop making current profiles advisory
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
 - [Export priced sessions as JSON](/quest/m0/session-export.md) - moq-dev/quest's `quest usage` ties each session, sub-agents included, to a PR
+- [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each
+- [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - every line is colored by verdict and shows total cost and uses

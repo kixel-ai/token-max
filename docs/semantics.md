@@ -993,3 +993,61 @@ Sources, checked 2026-11-08:
 [Claude environment variables](https://code.claude.com/docs/en/env-vars),
 [tools reference](https://code.claude.com/docs/en/tools-reference) and
 [prompt caching](https://code.claude.com/docs/en/prompt-caching).
+
+## Subagent models
+
+`Report.subagents` gives each Claude subagent type and Codex agent role one
+line per set of profiles: its runs (subagent transcripts), requests, cost, the
+recorded models and efforts, where each run's model came from, and the same
+recorded tokens on the provider's cheapest current model. The lines are
+evidence only. They never recommend a model, add nothing to the settings
+snippet and never change the exit code: a cheaper model or lower effort trades
+capability, and the main agent's extra work after a weaker subagent lands in
+its own requests, where transcripts cannot attribute it.
+
+The reader names a Claude subagent from the `agentType`, `isBuiltIn`, `isFork`,
+`model` and `effort` keys of the `agent-*.meta.json` beside its transcript, and
+never its `description`. Without that file, the records' `attributionAgent` or
+`querySource` `agent:builtin:<type>` names it. A Codex thread is named by its
+`source.subagent.thread_spawn.agent_role`, null meaning `default`; other
+subagent sources, such as `review`, keep their source name. Each request keeps
+its recorded effort: Claude's per-record `effort`, Codex's `turn_context`
+`effort` or applied `reasoning_effort`.
+
+A run's model source follows Claude Code 2.1.322: the Agent call's `model`,
+then the agent definition's `model:`, then `CLAUDE_CODE_SUBAGENT_MODEL`, then
+the main model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` drops the call and definition
+models. A user or project agent file with a built-in's name replaces it. Built-in
+Explore and Plan say `inherit`, so the variable never reaches them; Explore is
+capped at Opus on the first-party API when the main model ranks above it
+(Fable, Mythos), unless
+`CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP` is set, and ran on Haiku before
+Claude Code 2.1.198. Forks always run on the main model. Codex 0.167 applies an
+agent role file's `model`, then the `spawn_agent` call's `model`, then
+`[agents] default_subagent_model`, then the parent thread's model; a review uses
+`review_model`, else the session model. Efforts follow the same order with
+Claude's `effort:` and `CLAUDE_CODE_SUBAGENT_EFFORT`, and Codex's
+`model_reasoning_effort` and `default_subagent_reasoning_effort`.
+
+History records the requested call model but not the settings, so the source
+reads today's agent files (the profile's `agents/` and each subagent working
+directory's `.claude/agents/` up to its Git root, or Codex role files) and
+settings, then checks the rule against the recorded model and the parent's
+model at spawn. A run is unknown when its agent file changed after it started,
+no current file defines a custom type, the version or parent model is not
+recorded, or the recorded model is not what the rule gives, for example after
+a setting changed or a Codex `spawn_agent` call asked for another model.
+
+The cheapest current model is, among the provider's catalog models that are not
+deprecated, call tools and reply in text, the newest of each family with the
+lowest output then input rate: the newest Haiku for Anthropic, the cheapest
+current GPT for OpenAI. The reprice swaps only the model on each recorded part,
+keeping its tokens, cache categories, speed and geography, so it assumes the
+same turns. A type already on that model is not repriced. A lower effort changes
+the output tokens, so its cost is not measured.
+
+Sources, checked 2026-11-11: the Claude Code 2.1.322 binary and
+[changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)
+(2.1.198, 2.1.284), and Codex
+[0.167](https://github.com/openai/codex/tree/rust-v0.167.0/codex-rs/core/src/agent)
+`child_config.rs` and `role.rs`.

@@ -3,6 +3,7 @@
 Replay this host's Claude Code and Codex transcripts at public API prices and
 recommend cheaper cache TTL, compaction-window, native Claude idle-compaction,
 standard-speed and Bash timeout-cap settings, and price keepalive pings.
+It also shows what each subagent type cost and which model it ran on.
 Transcripts and settings stay read-only.
 No prompt, reply, summary, tool argument, or tool output text is kept in the result
 or printed. This is an API-price equivalent, not a subscription bill.
@@ -473,3 +474,23 @@ read, at the write rate minus the read rate. Background commands and the user's
 own processes are unaffected by the cap. Codex's
 `background_terminal_max_timeout` bounds one poll of a background terminal,
 and each poll reads the cache, so it is not checked.
+
+## Subagent models
+
+A **Subagents** section gives every Claude Code subagent type (Explore, Plan,
+general-purpose, forks and each custom agent) and every Codex agent role its own
+line: what it cost over how many runs, the models and reasoning efforts it ran
+on, where its model came from, and what the same recorded tokens would cost on
+the provider's cheapest current model (the newest Haiku, or the cheapest
+current GPT). Each line names the settings that change the model and the
+effort, such as `model:` and `effort:` in `~/.claude/agents/Explore.md`, or a
+Codex role file's `model` and `[agents] default_subagent_model`. A file that
+replaces a built-in such as Explore must restate its tool restriction and
+system prompt.
+
+The lines are evidence, never recommendations, and do not change the exit code:
+a cheaper model trades capability, and the main agent's extra work after a
+weaker subagent cannot be attributed. The reprice assumes the same turns, and a
+lower effort's cost cannot be measured. The source is unknown when today's
+settings and agent files do not explain the recorded model, for example after a
+file changed. See [subagent models](docs/semantics.md#subagent-models).

@@ -94,6 +94,19 @@ automatic-compaction trigger or the documented default. Its owner is then the
 model's `modelSettings` row, and Claude `profiles[].compaction.tuned` lists
 the tuned window and reason for every model it used.
 
+`subagents[]` has one row per Claude subagent type or Codex agent role and
+profile set, most expensive first: `kind` (`unrecorded` when no record names
+it), `runs`, `requests`, `priced`, `cost`, `models` and `efforts` (request
+counts by recorded value, `unrecorded` when absent), `sources` (run counts by
+`source` of `call`, `definition`, `setting`, `inherited` or `unknown`, with a
+`detail`), `cheapest` (the provider's cheapest current catalog model, or null),
+`reprice` (the same recorded tokens on `cheapest`; null when every request ran
+on it or `cheapest` is null), `modelSetting` and `effortSetting`. Rows are
+evidence: they carry no verdict and never change the exit code. `scan.subagents`
+is the count of subagent transcripts, and `profiles[].agents` holds the current
+subagent model and effort settings and agent definition files (name, file,
+model, effort and modification time, never the prompt).
+
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
 instance ownership. The `t3-idle-compaction` check keeps all three policy costs;
 its `currentSettings.periods` and

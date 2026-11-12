@@ -666,16 +666,17 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
             control.value = Some(value);
             control.applicable = true;
             // Tuned windows differ by model, so only the model's own row changes one alone; they
-            // also differ by what sizes the context, so scopes sized apart never share an owner.
+            // also differ by what sizes the context, so scopes sized apart never share an owner,
+            // even where the model's own row is already the owner, as with an explicit "auto".
             if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
-                let row = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
-                control.owner = match Sizing::of(compaction, canonical) {
-                    Sizing::Native => row,
-                    Sizing::Capped => format!("{row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)"),
-                    Sizing::Declared(tokens) => {
-                        format!("{row} (under CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens})")
-                    }
-                };
+                control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
+            }
+            match Sizing::of(compaction, canonical) {
+                Sizing::Native => {}
+                Sizing::Capped => control.owner += " (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)",
+                Sizing::Declared(tokens) => {
+                    control.owner += &format!(" (under CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens})");
+                }
             }
         }
     }

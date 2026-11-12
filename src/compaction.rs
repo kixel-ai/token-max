@@ -2280,6 +2280,16 @@ mod tests {
             &Env::default(),
             "project.json",
         );
+        let auto = |env: &Env| {
+            controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-fable-5-2": {"autoCompactWindow": "auto"}}}),
+                env,
+                "project.json",
+            )
+        };
+        let mut cap = Env::default();
+        cap.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
         directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
             ("/open".to_string(), directory(unset(&Env::default()))),
             (
@@ -2296,6 +2306,8 @@ mod tests {
             ),
             ("/explicit".to_string(), directory(explicit)),
             ("/aliased".to_string(), directory(aliased)),
+            ("/auto".to_string(), directory(auto(&Env::default()))),
+            ("/auto-capped".to_string(), directory(auto(&cap))),
         ]));
         // A trigger counts only under the sizing it ran with and without an explicit window.
         for (time, cwd, model, tokens) in [
@@ -2337,6 +2349,16 @@ mod tests {
         assert_eq!(
             declared.owner,
             "settings.json:modelSettings.gateway-opus.autoCompactWindow (under CLAUDE_CODE_MAX_CONTEXT_TOKENS=300000)"
+        );
+        // A row that already names the model takes the sizing too.
+        let auto_row = "project.json:modelSettings.claude-fable-5-2.autoCompactWindow";
+        let auto = scoped("/auto", "claude-fable-5-2");
+        assert_eq!((auto.value, auto.owner.as_str()), (Some(400000), auto_row));
+        let auto_capped = scoped("/auto-capped", "claude-fable-5-2");
+        assert_eq!(auto_capped.value, Some(200_000));
+        assert_eq!(
+            auto_capped.owner,
+            format!("{auto_row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
         );
         // Another declared value, or none, sizes the ID differently, so the trigger is not theirs.
         assert_eq!(scoped("/redeclared", "gateway-opus").value, None);

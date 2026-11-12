@@ -870,8 +870,8 @@ naming why: a project layer that sets memories in a project whose trust is not
 recorded, a named config profile (or legacy `profiles` entry) that sets
 memories, a named profile's `project_root_markers` or `projects` that could
 add or drop a `.codex/config.toml` above the session's directory that sets
-them, or a T3 instance whose launch arguments or environment could override
-them. Its turn-off advice then also names each file that sets memories, since
+them, or a T3 instance whose launch arguments, secret environment values or
+machine policy could override them (as for Claude Code's T3 instances). Its turn-off advice then also names each file that sets memories, since
 the user setting alone would not override them. Fully resolved settings keep a
 definite on or off. A session there that carried a summary at its latest
 request while the settings turn memory off is noted, and requests that recorded no context leave the cost

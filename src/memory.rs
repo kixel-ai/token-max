@@ -130,13 +130,14 @@ fn check(
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
-    // A T3 instance's launch arguments and environment can override native settings.
+    // A T3 instance's launch arguments, environment and machine policy can override
+    // native settings.
     let unresolved = control.unresolved.clone().or_else(|| {
         profile
             .t3
             .as_ref()
-            .filter(|t| !t.ownership_resolved)
-            .map(|_| "the T3 instance's launch arguments or environment can override the setting, and which apply is unresolved".to_string())
+            .filter(|t| t.enabled && t.settings_unresolved)
+            .map(|_| "the T3 instance's launch arguments, a secret environment value or machine policy can override the setting, and which apply is unresolved".to_string())
     });
     let current = unresolved.is_none().then_some(on);
     // Claude Code adds its prompt section whenever memory is on. Codex adds a summary

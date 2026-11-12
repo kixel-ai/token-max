@@ -4177,6 +4177,7 @@ mod tests {
             idle_mode: mode,
             idle_owner: "t3/settings.json:idleCompaction".into(),
             ownership_resolved: true,
+            settings_unresolved: false,
             limitations: vec![],
             inherited_window: None,
         });

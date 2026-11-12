@@ -849,6 +849,10 @@ pub struct T3Instance {
     pub idle_mode: T3IdleMode,
     pub idle_owner: String,
     pub ownership_resolved: bool,
+    /// Whether launch arguments, a secret environment value or machine policy could
+    /// override native settings in ways discovery does not resolve.
+    #[serde(default)]
+    pub settings_unresolved: bool,
     pub limitations: Vec<String>,
     /// The instance's environment when it inherits the native settings window, which
     /// discovery resolves at each recorded project like a native profile's.

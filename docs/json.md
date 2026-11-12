@@ -51,11 +51,10 @@ and `keep` once it is off, whatever it cost; it never makes a change. Its
 files read back, priced like the `memory` context row) plus `writesUsd` (writes
 estimated at the output price), either null when unpriced. `reads` and `writes`
 count its uses, and `off`/`offFile` name the setting that turns it off.
-`offFile` is null for an environment variable, and for Claude Code memory that
-a request shows on against an off setting, where `off` names the project
-settings files instead. When some requests recorded no context, `coverage`
-counts those that did (`priced`) out of all (`total`), and `savingsUsd` is a
-lower bound. The
+`offFile` is null for an environment variable. Today's setting decides
+`current`; sessions whose requests disagree with it are noted in `uncertainty`.
+When some requests recorded no context, `coverage` counts those that did
+(`priced`) out of all (`total`), and `savingsUsd` is a lower bound. The
 `memory` context row has a control but never a verdict.
 
 Keepalive checks keep their complete shape, including every

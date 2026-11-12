@@ -62,18 +62,16 @@ pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
         .collect()
 }
 
-/// When each main-agent session began. Both harnesses read the memory setting when a
-/// session starts, so one begun before a change keeps the old value: the session that
-/// started last, at its latest request, shows the current one.
-pub(crate) fn session_starts<'a>(
-    requests: impl Iterator<Item = &'a Request>,
-) -> HashMap<&'a str, Millis> {
+/// The main-agent request whose working directory auto memory's setting is read at:
+/// the latest request of the session that started last.
+pub(crate) fn deciding_request<'a>(requests: &[&'a Request]) -> Option<&'a Request> {
+    let main = || requests.iter().copied().filter(|r| r.agent == Agent::Main);
     let mut starts: HashMap<&str, Millis> = HashMap::default();
-    for r in requests.filter(|r| r.agent == Agent::Main) {
+    for r in main() {
         let start = starts.entry(&*r.session).or_insert(r.time);
         *start = (*start).min(r.time);
     }
-    starts
+    main().max_by_key(|r| (starts[&*r.session], r.time))
 }
 
 fn check(
@@ -90,8 +88,11 @@ fn check(
         .iter()
         .filter(|r| r.harness == profile.harness && r.profiles.contains(&profile.id))
         .collect();
-    // What each main-agent request whose context was recorded carried, by session.
-    let mut seen: Vec<(&str, Millis, bool)> = vec![];
+    // Today's setting decides whether memory is on, as it does for every other check.
+    // Each main-agent session's latest recorded request shows what that session
+    // loaded; for Claude, only sessions in the directory the setting was read at.
+    let decider = deciding_request(&mine);
+    let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
     for e in &scan.exposure.requests {
@@ -121,21 +122,24 @@ fn check(
         {
             unmeasured += 1;
         }
-        if r.agent == Agent::Main {
-            seen.push((&r.session, r.time, !memory.is_empty()));
+        let here = r.harness == Harness::Codex || decider.is_some_and(|d| d.cwd == r.cwd);
+        if r.agent == Agent::Main && here {
+            let seen = sessions.entry(&r.session).or_insert((r.time, false));
+            if r.time >= seen.0 {
+                *seen = (r.time, !memory.is_empty());
+            }
         }
     }
-    let starts = session_starts(mine.iter().copied());
-    let observed = seen
-        .iter()
-        .max_by_key(|&&(session, time, _)| (starts[session], time))
-        .map(|&(_, _, on)| on);
-    // Claude Code always adds its prompt section while memory is on, so that request
-    // settles it. Codex adds a summary only once one has been written.
-    let on = match profile.harness {
-        Harness::Claude => observed.unwrap_or(control.value),
-        Harness::Codex => control.value || observed == Some(true),
-    };
+    let on = control.value;
+    // Claude Code adds its prompt section whenever memory is on. Codex adds a summary
+    // only once one has been written, so its absence shows nothing.
+    let disagree = sessions
+        .values()
+        .filter(|&&(_, carried)| match profile.harness {
+            Harness::Claude => carried != on,
+            Harness::Codex => carried && !on,
+        })
+        .count();
     let rows: Vec<&ContextCost> = input
         .context
         .iter()
@@ -222,23 +226,19 @@ fn check(
         uncertainty.push("Codex extracts and consolidates memories in requests it records only in telemetry, so their cost is not measurable here".into());
         uncertainty.push("Codex shell reads of the memories folder count as uses, but their output stays on the shell tool's line".into());
     }
-    if observed.is_some_and(|o| o != control.value) {
+    if disagree > 0 {
         uncertainty.push(format!(
-            "the latest session to start {} memory, unlike {}",
-            if on { "carried" } else { "did not carry" },
-            control.owner
+            "{disagree} of {} sessions{} {} memory at their latest request, though {} turns it {}: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
+            sessions.len(),
+            match profile.harness {
+                Harness::Claude => " in the directory the setting was read at",
+                Harness::Codex => "",
+            },
+            if on { "did not carry" } else { "still carried" },
+            control.owner,
+            if on { "on" } else { "off" },
         ));
     }
-    // Claude Code on against an off setting: a project setting or the session's
-    // environment turned it on, which this scan does not resolve per directory.
-    let (off, off_file) = if profile.harness == Harness::Claude && on && !control.value {
-        (
-            "\"autoMemoryEnabled\": false in any project .claude/settings.json or .claude/settings.local.json that turns it on".to_string(),
-            None,
-        )
-    } else {
-        (control.off.clone(), control.off_file.clone())
-    };
     let (action, recommended) = if on {
         (Action::Advisory, Some(false))
     } else {
@@ -289,8 +289,8 @@ fn check(
             sources: SOURCES.map(String::from).into(),
         },
         harness: profile.harness,
-        off,
-        off_file,
+        off: control.off.clone(),
+        off_file: control.off_file.clone(),
         context_usd,
         writes_usd,
         reads,

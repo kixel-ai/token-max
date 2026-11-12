@@ -833,16 +833,18 @@ measured apart from the rest of the recorded system prompt and placed right
 after it; `MEMORY.md` is placed like any other attachment. Both form the
 `memory` context row. A request that loads `MEMORY.md` without such a section,
 as subagents do, leaves any memory instructions elsewhere in its prompt
-unmeasured, and the check says how many did. Claude Code reads the setting when
-a session starts, so a session begun before a change keeps the old value: the
-main-agent session that started last, at its latest request with a recorded
-shape, decides whether memory is on, since the section is present whenever it
-is; settings decide only without one. The setting that owns it is
-resolved at that request's working directory, including the project's
-`.claude/settings.json` and `.claude/settings.local.json`. When the request
-carries memory against an off setting anyway, because its directory is gone or
-the session's environment differed, the check names the project settings files
-rather than the setting that is already off.
+unmeasured, and the check says how many did. Today's setting decides whether
+memory is on, as every other check reads today's settings. It is resolved at the
+working directory of the latest request in the main-agent session that started
+last, including the project's `.claude/settings.json` and
+`.claude/settings.local.json`, so `offFile` names the file that owns it. Claude
+Code reads the setting when a session starts, so a session begun before a change
+keeps the old value until it restarts. When main-agent sessions in that
+directory disagree with the setting at their latest request with a recorded
+shape, such as one that still carries the `# Memory` section after memory was
+turned off, the check notes how many, without changing its verdict. The scan
+cannot see an environment variable set only in the process that launched
+Claude Code.
 
 Uses are Read, Write, Edit and MultiEdit calls on files in a memory directory:
 `<root>/projects/<project>/memory/` under the profile root or alias, or the
@@ -859,9 +861,10 @@ tagged `memories.instructions` holding `memory_summary.md`, split into several
 parts when long; earlier versions start it with `## Memory`. A full world
 state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
-is gone. A summary in the latest
-request shows memory is on whatever the settings say; its absence proves
-nothing, since the summary appears only once one has been written. Uses are
+is gone. The settings decide whether memory is on; a session that carried a
+summary at its latest request while they turn memory off is noted, as for
+Claude Code. A missing summary shows nothing, since it appears only once one has
+been written. Uses are
 the dedicated `memories` tools (`list`, `read` and `search` as reads,
 `add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token
 rule of thumb) and shell reads under `<codex home>/memories/` or

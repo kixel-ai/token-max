@@ -2354,10 +2354,25 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
 }
 
+/// The note auto memory's check gives when recorded sessions disagree with the setting.
+fn memory_note(check: &crate::model::MemoryCheck) -> Option<&str> {
+    check
+        .base
+        .uncertainty
+        .iter()
+        .find(|u| u.contains("a session keeps the setting it started with"))
+        .map(String::as_str)
+}
+
 #[test]
-fn claude_auto_memory_off_in_the_latest_session_is_kept_off() {
+fn claude_auto_memory_turned_off_is_kept_off() {
     let w = Workspace::new();
     let root = std::fs::canonicalize(&w.claude).unwrap();
+    std::fs::write(
+        w.claude.join("settings.json"),
+        r#"{ "autoMemoryEnabled": false }"#,
+    )
+    .unwrap();
     let records = claude_memory_session(&root.to_string_lossy(), false);
     std::fs::write(
         w.claude.join("projects/project/main.jsonl"),
@@ -2367,17 +2382,16 @@ fn claude_auto_memory_off_in_the_latest_session_is_kept_off() {
     let data = scan(&options(&w, None)).unwrap();
     assert_eq!(categories(&data.exposure, Category::Memory), 0);
     let first = report(&data, 1.0);
-    assert_eq!(
-        memory_check(&first, Harness::Claude).base.current,
-        Some(false)
-    );
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(memory_note(check), None);
     let rendered = text(&first);
     assert!(!rendered.contains("Consider turning off\n"));
     let keep = &rendered[rendered.find("Keep\n").unwrap()..];
     assert!(labelled(keep, "Auto memory", |s| s == ": off. Costs nothing."));
 
     // Turned off after an earlier session used it: still kept off, but what it cost
-    // in the window shows.
+    // in the window shows, and the earlier session is noted.
     let root = root.to_string_lossy();
     std::fs::write(
         w.claude.join("projects/project/early.jsonl"),
@@ -2393,6 +2407,9 @@ fn claude_auto_memory_off_in_the_latest_session_is_kept_off() {
     let check = memory_check(&turned_off, Harness::Claude);
     assert_eq!(check.base.current, Some(false));
     assert!(check.writes_usd.unwrap() > 0.0);
+    assert!(memory_note(check).unwrap().starts_with(
+        "1 of 2 sessions in the directory the setting was read at still carried memory"
+    ));
     let text = text(&turned_off);
     let keep = &text[text.find("Keep\n").unwrap()..];
     assert!(labelled(
@@ -2400,22 +2417,6 @@ fn claude_auto_memory_off_in_the_latest_session_is_kept_off() {
         "Auto memory",
         then(": off. Cost", "; used 2 times (1 read, 1 write).")
     ));
-
-    // A session begun before the change keeps memory and makes the newest request,
-    // but the session that started since shows what loads now.
-    let mut early = claude_memory_session(&root, true);
-    early.push(json!({
-        "type": "api-request", "id": "api-50", "timestamp": at(50), "sessionId": "session",
-        "shapeHash": "shape", "keep": 0, "tail": ["m1"], "requestDigest": "d50",
-        "params": { "model": "claude-opus-5-5" },
-    }));
-    early.push(assistant(50, json!([])));
-    std::fs::write(w.claude.join("projects/project/early.jsonl"), jsonl(&early)).unwrap();
-    let resumed = report(&scan(&options(&w, None)).unwrap(), 1.0);
-    assert_eq!(
-        memory_check(&resumed, Harness::Claude).base.current,
-        Some(false)
-    );
 }
 
 /// The same records as a later session, with their own ids.
@@ -2445,7 +2446,7 @@ fn later(records: Vec<Value>) -> Vec<Value> {
 }
 
 #[test]
-fn claude_auto_memory_on_against_an_off_setting_points_at_project_settings() {
+fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
     let w = Workspace::new();
     let root = std::fs::canonicalize(&w.claude).unwrap();
     std::fs::write(
@@ -2453,18 +2454,41 @@ fn claude_auto_memory_on_against_an_off_setting_points_at_project_settings() {
         r#"{ "autoMemoryEnabled": false }"#,
     )
     .unwrap();
-    std::fs::write(
-        w.claude.join("projects/project/main.jsonl"),
-        jsonl(&claude_memory_session(&root.to_string_lossy(), true)),
-    )
-    .unwrap();
+    // Every recorded session started before the setting changed and still carries
+    // memory, and one of them made the newest request: today's setting decides.
+    let mut early = claude_memory_session(&root.to_string_lossy(), true);
+    early.push(json!({
+        "type": "api-request", "id": "api-50", "timestamp": at(50), "sessionId": "session",
+        "shapeHash": "shape", "keep": 0, "tail": ["m1"], "requestDigest": "d50",
+        "params": { "model": "claude-opus-5-5" },
+    }));
+    early.push(assistant(50, json!([])));
+    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&early)).unwrap();
     let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
     let check = memory_check(&first, Harness::Claude);
-    assert_eq!(check.base.current, Some(true));
-    assert_eq!(check.off_file, None);
-    assert!(check.off.contains(".claude/settings.local.json"));
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(check.base.action, crate::model::Action::Keep);
+    assert_eq!(check.off, r#""autoMemoryEnabled": false"#);
+    assert!(
+        check
+            .off_file
+            .as_deref()
+            .unwrap()
+            .ends_with("settings.json")
+    );
+    assert_eq!(
+        memory_note(check).unwrap(),
+        format!(
+            "1 of 1 sessions in the directory the setting was read at still carried memory at their latest request, though {}:autoMemoryEnabled turns it off: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
+            check.off_file.as_deref().unwrap()
+        )
+    );
+    let rendered = text(&first);
+    assert!(!rendered.contains("settings.local.json"));
+    let keep = &rendered[rendered.find("Keep\n").unwrap()..];
+    assert!(labelled(keep, "Auto memory", then(": off. Cost", "")));
 
-    // A project setting at the latest request's directory owns it, even when the
+    // A project setting at the latest session's directory owns it, even when the
     // user setting agrees.
     std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
     let project = w.home.join("project");
@@ -2631,17 +2655,35 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     let memory = row(&r, crate::context::CODEX_MEMORY);
     assert_eq!(memory.calls, Some(3));
     assert_eq!(memory.requests, 1);
-    // Off by default, but a summary in the latest request shows it is on.
+    // Off by default: the session that carried a summary is noted, not taken as on.
     let check = memory_check(&r, Harness::Codex);
-    assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.base.current, Some(false));
     assert_eq!(check.off, "features.memories = false");
     assert_eq!(check.context_usd, memory.estimated_usd);
+    assert!(
+        memory_note(check)
+            .unwrap()
+            .starts_with("1 of 1 sessions still carried memory")
+    );
     assert!(labelled(
         &text(&r),
         "Codex memories",
-        then(": on -> off. Opinion: ", "")
+        then(": off. Cost", "")
     ));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
+
+    // Turned on in settings, it is advised off.
+    std::fs::write(w.codex.join("config.toml"), "[features]\nmemories = true\n").unwrap();
+    let on = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&on, Harness::Codex);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(memory_note(check), None);
+    assert!(labelled(
+        &text(&on),
+        "Codex memories",
+        then(": on -> off. Opinion: ", "")
+    ));
+    std::fs::remove_file(w.codex.join("config.toml")).unwrap();
 
     // Compaction rebuilds the developer context: a summary its replacement history
     // carries stays, and one it leaves out is gone.

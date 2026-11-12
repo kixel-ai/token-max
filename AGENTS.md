@@ -19,11 +19,7 @@ from transcripts, and to help the user decide what to enable or disable.
 
 Development:
 
-- The dev shell (`nix develop`, or direnv's `use flake`) provides the Rust
-  toolchain, `just`, and `quest`, pinned by `flake.lock`.
-- `just check` runs everything CI runs on Linux: formatting, clippy with
-  warnings as errors, tests, and `quest check`.
 - Tests use small synthetic transcripts checked into the repository, never
   real sessions.
 
-Quests: before any work, run `quest context` and follow it.
+Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.

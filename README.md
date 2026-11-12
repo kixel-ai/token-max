@@ -109,7 +109,7 @@ missing evidence (exit 0), green for a setting already at its recommended value.
 ## More
 
 - [Reference](https://github.com/kixelated/token-max/blob/main/docs/reference.md):
-  every flag, report section and check, including `--json`, `--ssh`, T3 Code
+  every flag, report section and check, including `--ssh`, T3 Code
   and the `token-max sessions` export.
 - [Replay semantics](https://github.com/kixelated/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.

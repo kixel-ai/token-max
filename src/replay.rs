@@ -857,7 +857,6 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                     })
                     .count() as u64,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
-                evidence: "estimated",
                 cost: add_costs(&costs),
             }
         })
@@ -1005,7 +1004,6 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .collect(),
     };
     Ok(Report {
-        schema_version: 2,
         generated_at: iso(now),
         prices: PriceSource {
             source: catalog.source.clone(),

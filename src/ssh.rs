@@ -15,7 +15,7 @@ use crate::discovery::DiscoveryOptions;
 use crate::model::Millis;
 use crate::reader::{ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
-use crate::wire::{self, Format, Header, Outcome, Printed, Request, Stream};
+use crate::wire::{self, Header, Outcome, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -232,11 +232,11 @@ pub fn audit(
     std::thread::spawn(move || {
         let _ = steps.send(Step::Outcome(stream.outcome()));
     });
-    let mut json = None;
+    let mut requested = false;
     let outcome = loop {
         match arrived.recv() {
             Ok(Step::Request(request)) => {
-                json = Some(matches!(request.format, Format::Json));
+                requested = true;
                 if let Some(stdin) = session.stdin.as_mut() {
                     // A destination that already failed has stopped reading; its outcome says why.
                     let _ = wire::write(&mut BufWriter::new(stdin), &request);
@@ -251,7 +251,7 @@ pub fn audit(
     match outcome {
         Ok(Outcome::Report {
             since: scanned,
-            printed,
+            text,
             change,
         }) => {
             let status = session.stop(false).and_then(|s| s.code());
@@ -266,17 +266,12 @@ pub fn audit(
                     "{destination}: token-max scanned a different window than requested"
                 )));
             }
-            let Some(json) = json else {
+            if !requested {
                 return Err(ScanError::new(format!(
                     "{destination}: token-max sent a report before its request"
                 )));
-            };
-            if json != matches!(printed, Printed::Json(_)) {
-                return Err(ScanError::new(format!(
-                    "{destination}: token-max printed a different format than requested"
-                )));
             }
-            Ok(Rendered { printed, change })
+            Ok(Rendered { text, change })
         }
         Ok(Outcome::Error { message, location }) => {
             session.stop(true);
@@ -352,10 +347,10 @@ pub fn serve(since: Option<Millis>) -> u8 {
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
     let (outcome, code) = match result {
-        Ok(Rendered { printed, change }) => (
+        Ok(Rendered { text, change }) => (
             Outcome::Report {
                 since,
-                printed,
+                text,
                 change,
             },
             0,

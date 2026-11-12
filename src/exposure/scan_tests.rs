@@ -177,9 +177,9 @@ fn text(report: &Report) -> String {
     )
 }
 
-/// Whether the serialized value contains any of `needles`.
-fn leaks(value: &impl serde::Serialize, needles: &[&str]) -> bool {
-    let text = serde_json::to_string(value).unwrap();
+/// Whether any field of the value holds any of `needles`.
+fn leaks(value: &impl std::fmt::Debug, needles: &[&str]) -> bool {
+    let text = format!("{value:?}");
     needles.iter().any(|n| text.contains(n))
 }
 
@@ -277,7 +277,7 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
     assert!(
         e.visibility
             .iter()
-            .all(|v| !v.automatic_unused && v.nested_calls == Visible::Unknown)
+            .all(|v| v.nested_calls == Visible::Unknown)
     );
     assert!(!leaks(e, &["SYNTHETIC_PRIVATE", "0123456789"]));
 }
@@ -569,9 +569,7 @@ fn typed_skill_aliases_deduplicate_while_nested_calls_and_script_references_stay
     assert!(
         e.visibility
             .iter()
-            .all(|v| v.nested_calls == Visible::Partial
-                && v.typed_skills == Observed::Observed
-                && !v.automatic_unused)
+            .all(|v| v.nested_calls == Visible::Partial && v.typed_skills == Observed::Observed)
     );
     assert!(!leaks(&data, &["SYNTHETIC_PRIVATE"]));
 }
@@ -1884,13 +1882,10 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
     assert!(output.contains("not promised savings"));
     assert!(output.contains("Visibility is incomplete"));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
-    let compact = crate::compact::report(r.clone());
     assert!(
-        compact["context"]
-            .as_array()
-            .unwrap()
+        r.context
             .iter()
-            .any(|c| c["skill"]["loaded"] == 1)
+            .any(|c| c.skill.as_ref().is_some_and(|s| s.loaded == 1))
     );
 }
 

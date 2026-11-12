@@ -5,7 +5,7 @@ any transcript. It streams one newline-terminated JSON record at a time. Raw
 objects live only through that line's normalization; retained data contains
 counts, opaque identities, times, and whitelisted structural metadata. A file
 that changes identity or shrinks fails. Appended bytes are outside the snapshot.
-`--json` reports the file count, frozen and deferred bytes, and skipped lines. Metadata storage grows with requests/events, not transcript text.
+The report counts skipped lines, and `--details` the files with a deferred final line. Metadata storage grows with requests/events, not transcript text.
 
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
@@ -64,7 +64,7 @@ inspected 2026-11-07, defines these counters and their accumulation.
 Counts are measured evidence where individually recorded; cumulative differences
 are estimated and unverifiable deltas are unknown. Costs are estimates at the
 catalog's present public API rates. Missing costs have both a known subtotal and
-a null total, with reasons. An internal model is never replaced with a public one.
+an unknown total, with reasons. An internal model is never replaced with a public one.
 A Claude profile with a custom `ANTHROPIC_BASE_URL`, such as a gateway or proxy,
 still speaks the Anthropic API and is priced as the public Anthropic API
 equivalent. Unsupported providers/tiers are not assigned standard rates.
@@ -117,8 +117,8 @@ most the largest priced difference. A winner is recommended only when that bound
 cannot flip the sign; otherwise the check stays unknown. A handful of failed or
 in-flight requests therefore cannot hide a clear winner, while a close call stays
 unresolved. `coverage` gives the priced and total part counts, and the TTL result
-adds `oneHourSavingsUsd` so a kept setting can state its margin. Scenario totals
-still keep null and the unknown reasons.
+adds the 1h saving so a kept setting can state its margin. Scenario totals
+still stay unknown with their reasons.
 
 The maintainer's [B1 cache-state decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6710296074)
 uses explicit known, estimated and unknown predecessor states. A recorded cache
@@ -135,9 +135,9 @@ in that cohort, while a zero-cache
 request cannot renew or erase an older cached prefix. Pre-window states are replayed
 without charging them or adding them to the selected request count.
 
-`cacheEvidence` reports predecessor request/part IDs, times, state and the outcome
+Cache evidence records predecessor request/part IDs, times, state and the outcome
 of each uncertain or estimated transition. Each predecessor separately records
-`prefixEvidence` (measured/estimated/unknown) and `cohortKnown`, so an estimated
+whether its prefix is measured, estimated or unknown and whether its cohort is known, so an estimated
 prefix with missing cohort metadata retains both facts. Witnesses cover the latest possible
 expired/recent predecessors and the prefix extrema in the 5-to-60-minute range;
 they are not a duplicate inventory of every attempt. Every original attempt stays
@@ -148,11 +148,11 @@ subtotal for the request. If the geometry is invariant, the comparison can be
 priced while predecessor attribution remains unknown. This is an evidence test,
 not a demand that every sensitivity scenario favor the aggregate winner.
 
-`comparisonCost` contains cache charges. `fixedCost` contains ordinary input,
+The cache comparison contains cache charges. The fixed cost contains ordinary input,
 output, server fees and unmatched summary proxies. TTL changes preserve total
 input/context tier and output under the fixed-behavior assumption, so these fixed
 terms cancel even when their price or token count is unknown. Full scenario totals
-retain null and the reason. Recorded zero cache reads/writes need no cache price;
+stay unknown with the reason. Recorded zero cache reads/writes need no cache price;
 missing cache counters cannot be cancelled as if they were zero. An unsupported
 model/context tier needed for nonzero cache charges keeps the comparison unpriced.
 Mixed agent/source TTLs preserve the available history; a transition is inferred
@@ -181,7 +181,7 @@ directly. Claude does
 not record a complete settings-change history; matching observed metadata cannot
 prove that unrecorded controls stayed unchanged. Consecutive unlinked attempts,
 missing brackets, shrinking geometry, inconsistent warm reads, expired growing-context brackets and
-differing attribution remain unsupported. `usageEstimates` names the bracket
+differing attribution remain unsupported. A usage estimate records the bracket
 request IDs, estimated input geometry, recorded output limit when available,
 assumptions, and reasons. Equal counts do not prove equal content or prefix identity.
 
@@ -328,9 +328,8 @@ median first post-boundary prefix, which can contain instructions, retained item
 and new context. Added passes require linked billed summary output. Claude `postTokens` remains
 a proxy only for unmatched observed charges in the baseline; it cannot
 establish output size for calibrating additional passes. Disagreeing summary-model
-attribution leaves the affected comparison unpriced. JSON gives each supporting
-boundary and resumed request identity. The new prefix is cold on the resumed
-request, whose charge already includes it; `prefixCost` is attribution, not another
+attribution leaves the affected comparison unpriced. The new prefix is cold on the resumed
+request, whose charge already includes it; the prefix cost is attribution, not another
 charge to add. Subsequent growing prefixes reuse only within the chosen Claude
 lifetime or the documented default 30m billed Codex lifetime. A new prefix cannot
 inherit external warming of the replaced transcript.
@@ -507,7 +506,7 @@ is a range. Every cap compares the
 same fully priced sessions; unresolved sessions leave the aggregate winner
 unknown, without bounding their cost by unrelated priced sessions.
 
-Current ping state is unknown (`current: null`): scheduled-task metadata does
+Current ping state is unknown: scheduled-task metadata does
 not establish a task's purpose, and recorded turns remain ordinary activity.
 There are no task-ID flags or text heuristics. Every result stays advisory and
 never changes the exit code, including a priced recommendation for no pings.
@@ -586,8 +585,8 @@ priced but whose instructions are not, is unpriced for that request. Each piece'
 tokens are charged at the slot they fall in: cached reads, then 1h writes, then
 5m writes, then ordinary input, at the request's model, provider and context
 tier. A request whose calibrated pieces exceed its recorded input is left
-unpriced rather than clipped. `costUsd` covers priced requests only;
-`estimatedUsd` scales it to every request that carried the piece and is null
+unpriced rather than clipped. A piece's cost covers priced requests only; its
+estimate scales that to every request that carried the piece and is unknown
 when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
 once. Skill listings split into their member skills plus the listing framing;
 Codex rendered catalogs split into path-identified
@@ -616,7 +615,7 @@ Tool results are `tool-output` rows, one per tool and one per MCP server. A
 result stays in the conversation until it compacts: output the previous request
 held is carried, and output beyond it is new, under the bounds above. A result
 that is not plain text, such as an image, leaves its row unpriced for that
-request. `calls` counts results in the window and `largestCharacters` the
+request. The report counts results in the window and the characters of the
 largest one. The report lists each beside the cap that limits it:
 `bashOutputMaxChars` or `BASH_MAX_OUTPUT_LENGTH` for Claude's Bash (about 30,000
 characters when unset), `MAX_MCP_OUTPUT_TOKENS` for Claude MCP servers (25,000
@@ -711,9 +710,9 @@ observations never prove nonuse.
 
 An absolute-path `[[skills.config]]` entry with `enabled = false` removes a
 Codex skill entirely, including explicit invocation, so typed requests count.
-The JSON control uses `path: ["skills", "config"]`, an object `value` containing
-`path` and `enabled`, and `append: true`; generated TOML appends array-of-table
-entries rather than replacing existing controls. Last matching entries win;
+Its control is `skills.config`, an entry containing `path` and `enabled`;
+generated TOML appends array-of-table entries rather than replacing existing
+controls. Last matching entries win;
 restart Codex after changing config. `allow_implicit_invocation: false` changes
 invocation policy and is not claimed to remove listing cost.
 
@@ -931,7 +930,7 @@ a root marker, so discovery never walks into its parent checkout.
 Each distinct control retains only its applicable main requests, working
 directories, owner, disable snippet and pricing coverage. Missing or relative
 working directories, unknown trust with project overrides and unresolved
-selection have a null current value, unknown cost and no recommendation.
+selection have an unknown current value, unknown cost and no recommendation.
 Current values model the selected history; they do not prove historical enablement.
 Only allowlisted control metadata is retained, never other settings,
 environment values or file contents.
@@ -1061,11 +1060,11 @@ The stream is private to one build. The destination writes a header naming the
 package version and a fingerprint of the stream's types, and starts scanning.
 The coordinator loads prices meanwhile and writes one request on the
 destination's stdin: the price catalog, `--max-cost-per-use`, and the report
-format (JSON, or text with this terminal's width, color and Unicode settings,
+format (this terminal's width, color and Unicode settings,
 `--details` and the host's label). The destination then writes either its
 printed report, its window and whether it recommends a change, or its safe
 diagnostic, then ends the stream. Any other build, a truncated or trailing
-value, a report in another format or window than requested, or a nonzero exit
+value, a report for another window than requested, or a nonzero exit
 fails the run. The coordinator prints a destination's text with every terminal
 control escaped except line breaks and, when color is on, the color sequences
 reports use.

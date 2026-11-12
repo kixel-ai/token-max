@@ -1201,11 +1201,12 @@ fn ancestors_setting_codex_memory(
     user: &str,
     home: &str,
 ) -> Result<Vec<String>, ScanError> {
-    // cwd comes from realpath, so normalize the home alike, such as Windows' `\\?\` prefix.
-    // A home that does not exist cannot be an ancestor of a real cwd.
-    let home = realpath(home).unwrap_or_default();
+    // Normalize both alike, such as symlinks and Windows' `\\?\` prefix, so the stop
+    // matches. A path that no longer exists is compared as recorded.
+    let cwd = realpath(cwd).unwrap_or_else(|_| cwd.to_string());
+    let home = realpath(home).unwrap_or_else(|_| home.to_string());
     let mut files = vec![];
-    let mut path = cwd;
+    let mut path = cwd.as_str();
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
         if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
@@ -1909,7 +1910,7 @@ mod tests {
         let w = Workspace::new();
         let home = w.home.join("user");
         let cwd = home.join("repo/nested");
-        for dir in [&w.home, &home.join("repo"), &cwd] {
+        for dir in [&w.home, &home, &home.join("repo"), &cwd] {
             std::fs::create_dir_all(dir.join(".codex")).unwrap();
             std::fs::write(
                 dir.join(".codex/config.toml"),
@@ -1918,13 +1919,14 @@ mod tests {
             .unwrap();
         }
         let file = |dir: &Path| text(&dir.join(".codex/config.toml"));
-        let found = |home: &Path| {
-            ancestors_setting_codex_memory(&text(&cwd), &file(&w.codex), &text(home)).unwrap()
+        let found = |stop: &Path| {
+            ancestors_setting_codex_memory(&text(&cwd), &file(&home), &text(stop)).unwrap()
         };
-        // Above the home is no one's project.
+        // The home's own is the user layer, and above the home is no one's project.
         assert_eq!(found(&home), [file(&cwd), file(&home.join("repo"))]);
-        // Outside the home, the walk reaches the filesystem root.
-        assert!(found(&cwd.join("elsewhere")).contains(&file(&w.home)));
+        // Outside the home, the walk reaches the filesystem root, still skipping the user's.
+        let outside = found(&cwd.join("elsewhere"));
+        assert!(outside.contains(&file(&w.home)) && !outside.contains(&file(&home)));
     }
 
     #[cfg(windows)]

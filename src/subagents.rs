@@ -496,7 +496,9 @@ pub fn discover(
                 }
                 // A profile chosen with --profile, which no record names, can replace them.
                 let overrides = |config: &serde_json::Map<String, Value>| {
-                    config.contains_key("agents") || config.contains_key("review_model")
+                    ["agents", "review_model", "project_root_markers", "projects"]
+                        .iter()
+                        .any(|key| config.contains_key(*key))
                 };
                 let mut selectable: Vec<String> = members(user.get("profiles"))
                     .iter()
@@ -1774,11 +1776,18 @@ mod tests {
             w.codex.join("cheap.config.toml"),
             "[agents]\ndefault_subagent_model = \"gpt-6-luna\"\n",
         );
+        // Root markers change which project layers apply.
+        put(
+            w.codex.join("flat.config.toml"),
+            "project_root_markers = []\n",
+        );
         let profile = discover_in(&w, Harness::Codex, &[&project]);
         let reason = profile.agents.unresolved.clone().unwrap();
         let named = path(&w.codex.join("cheap.config.toml"));
         assert!(
-            reason.contains(&named) && reason.contains("profiles.legacy"),
+            reason.contains(&named)
+                && reason.contains("flat.config.toml")
+                && reason.contains("profiles.legacy"),
             "{reason}"
         );
         assert!(!reason.contains("fast.config.toml"), "{reason}");

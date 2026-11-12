@@ -1439,8 +1439,14 @@ impl Reader {
                 } else {
                     label(subagent).or_else(|| label(member(object(subagent), "other")))
                 };
-                let parent = match crate::sessions::codex_thread(p).1 {
-                    Some(parent) => Some(id(&Value::from(parent))?.into()),
+                // A spawn names its immediate parent, while `session_id` is the root thread;
+                // a review or other native source names only that root.
+                let parent = match native {
+                    true => crate::sessions::codex_thread(p).1.map(Value::from),
+                    false => spawn.get("parent_thread_id").cloned(),
+                };
+                let parent = match parent {
+                    Some(parent) => Some(id(&parent)?.into()),
                     None => None,
                 };
                 let session = context.session.clone();
@@ -2446,10 +2452,8 @@ mod tests {
                 "timestamp": "2026-11-01T00:00:00Z",
                 "payload": { "id": id, "source": source, "model_provider": "openai" },
             });
-            // A review names its parent only as the root thread.
-            if id == "thread-review" {
-                meta["payload"]["session_id"] = json!("thread-a");
-            }
+            // Every thread names its root; a review names no other parent.
+            meta["payload"]["session_id"] = json!("thread-root");
             meta
         };
         let spawn = |role: Value| {
@@ -2493,9 +2497,12 @@ mod tests {
             kinds,
             [("default", false), ("explorer", false), ("review", true)]
         );
-        let parent = data.subagents[0].parent.as_ref();
-        assert!(parent.is_some());
-        assert!(data.subagents.iter().all(|s| s.parent.as_ref() == parent));
+        // Spawns keep their immediate parent; only the review falls back to the root.
+        let parent = |thread: &str| Some(Text::from(id(&json!(thread)).unwrap()));
+        for s in &data.subagents {
+            let expected = if s.native { "thread-root" } else { "thread-a" };
+            assert_eq!(s.parent, parent(expected), "{}", s.kind);
+        }
         assert!(
             data.requests
                 .iter()

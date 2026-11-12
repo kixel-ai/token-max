@@ -768,6 +768,7 @@ pub(crate) fn discover(
                     minimum_claude_patch: None,
                     comparison_unknown: None,
                     unset: false,
+                    setting: None,
                 };
             }
             let resolved = enabled && !unresolved_env && !launch_unresolved && !policy_unresolved;

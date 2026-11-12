@@ -268,7 +268,16 @@ Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
 Sonnet and Haiku models.
 A recorded request above 200k on an older model leaves its default unresolved,
 because a `[1m]` variant may have set it; so does a model ID outside that table,
-such as a gateway alias or Mythos. Per-model controls require v2.1.288; environment suffixes require
+such as a gateway alias or Mythos.
+Claude Code caps any window at the model's context window, so an explicit window
+above 200k replays at 200k where that cap holds: every model in the table, and an
+ID outside it unless `CLAUDE_CODE_MAX_CONTEXT_TOKENS` sizes it, under
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`; and an older model unless a recorded request
+above 200k shows its `[1m]` variant ran. The report names both the setting's value
+and the capped window. A capped user or managed global window is owned by the
+model's `modelSettings` row, the only setting that changes it alone; a capped
+environment or T3 window applies to every model, so it stays advisory.
+Per-model controls require v2.1.288; environment suffixes require
 v2.1.304. Project, launch and per-agent overrides remain an explicit limitation of
 the observed-file analysis. See [Claude model configuration](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)
 and [settings reference](https://code.claude.com/docs/en/settings-reference#modelsettings),

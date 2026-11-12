@@ -487,11 +487,13 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
                 comparison_unknown: (!supported)
                     .then(|| "effective Codex threshold scope is unsupported".into()),
                 unset: false,
+                setting: None,
             },
             models,
             capped: false,
             declared: false,
             tuned: IndexMap::default(),
+            contexts: IndexMap::default(),
         });
     }
     let env_key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -568,6 +570,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             minimum_claude_patch: Some(if suffix { 304 } else { 288 }),
             comparison_unknown: None,
             unset: value.is_none() && !disabled,
+            setting: None,
         })
     };
     for scope in scopes {
@@ -597,6 +600,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
                     && text.parse::<u64>().is_ok_and(|n| n > 0)
             }),
         tuned: IndexMap::default(),
+        contexts: IndexMap::default(),
     })
 }
 
@@ -618,6 +622,10 @@ fn strip_dated(text: &str, digits: usize) -> Option<&str> {
     let tail = tail.strip_prefix('-')?;
     tail.bytes().all(|b| b.is_ascii_digit()).then_some(head)
 }
+
+/// Why a capped window that applies to every model stays advisory.
+pub const CAPPED_SHARED: &str =
+    "the window applies to every model, so no setting changes this model's capped window alone";
 
 /// Exact model settings win; known dated Claude IDs share their undated model row.
 pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> WindowControl {
@@ -670,6 +678,25 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
                 control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
             }
         }
+    } else if let (Some(setting), Some(&context)) =
+        (control.value, compaction.contexts.get(canonical))
+        && setting > context
+    {
+        control.setting = Some(setting);
+        control.value = Some(context);
+        let mut reason = format!(
+            "Claude Code caps this {setting}-token window at the model's {context}-token context window"
+        );
+        // The cap differs by model, so only the model's own row changes its window alone; a
+        // variable or T3 window above every row would change other models too.
+        if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
+            control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
+        } else if !control.owner.contains(":modelSettings.") {
+            control.owner = format!("{} (capped at {context})", control.owner);
+            control.applicable = false;
+            reason += &format!(" and {CAPPED_SHARED}");
+        }
+        control.reason = format!("{reason}; {}", control.reason);
     }
     control
 }
@@ -705,8 +732,22 @@ fn native_million(model: &str) -> Option<bool> {
     }
 }
 
+/// The model's context window when Claude Code holds it below the 1M maximum: 200k under the 1M
+/// opt-out, unless only a declared window sizes the ID, and on a model documented at 200k
+/// unless a recorded request larger than that shows its `[1m]` variant ran.
+fn context_window(compaction: &CompactionControls, model: &str, largest: i64) -> Option<i64> {
+    let documented = native_million(model);
+    let held = if compaction.capped {
+        documented.is_some() || !compaction.declared
+    } else {
+        documented == Some(false) && largest <= TUNED_STANDARD
+    };
+    held.then_some(TUNED_STANDARD)
+}
+
 /// Fill each Claude profile's tuned window for every model it used: the trigger of its latest
-/// automatic compaction on that model, else Claude Code's documented default.
+/// automatic compaction on that model, else Claude Code's documented default. Also fill each
+/// model's context window, which caps an explicit window, in the profile and every directory.
 pub fn tune_windows(scan: &mut Scan) {
     let Scan {
         profiles,
@@ -752,15 +793,33 @@ pub fn tune_windows(scan: &mut Scan) {
                 }
             }
         }
-        let CompactionControls {
-            capped, declared, ..
-        } = profile.compaction;
+        // Directories share the profile's history, so its largest requests stand for each.
+        let directories = profile
+            .idle_directories
+            .iter_mut()
+            .flat_map(|d| d.values_mut());
+        for compaction in profile
+            .idle
+            .iter_mut()
+            .chain(directories)
+            .filter_map(|c| c.compaction.as_mut())
+            .chain([&mut profile.compaction])
+        {
+            compaction.contexts = largest
+                .iter()
+                .filter_map(|(model, &size)| {
+                    Some((model.clone(), context_window(compaction, model, size)?))
+                })
+                .collect();
+        }
+        let capped = profile.compaction.capped;
         for (model, size) in largest {
             let documented = native_million(&model);
+            let context = profile.compaction.contexts.get(&model);
             let (value, reason) = match (observed.get(&model), documented) {
                 // The cap holds even an explicit window, so a trigger from before it cannot lift
                 // it; only a declared window can size an ID Claude Code does not recognize.
-                _ if capped && (documented.is_some() || !declared) => (
+                _ if capped && context.is_some() => (
                     Some(TUNED_STANDARD),
                     "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
                 ),

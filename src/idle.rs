@@ -3557,6 +3557,7 @@ mod tests {
             model: None,
             models: vec![],
             unset: false,
+            setting: None,
             baseline_cost: zero_cost(),
             observed_summary_cost: zero_cost(),
             ttls: PerBucket::default(),

@@ -9,6 +9,7 @@ use serde_json::Value;
 use crate::context::{
     SYNCED_SKILLS, config_patch, control_text, setting_rows, settings_patch, typed_only,
 };
+use crate::controls::CAPPED_SHARED;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
@@ -1175,6 +1176,12 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
                 .map(|m| m.as_deref().map_or_else(|| "unknown".into(), display))
                 .collect();
             out.field("Models", &models.join(", "));
+            if let Some(setting) = c.setting {
+                out.field(
+                    "Window setting",
+                    &format!("{setting} tokens, capped at the model's context window"),
+                );
+            }
             out.field(
                 "Conditional TTL baseline",
                 &format!(
@@ -1793,6 +1800,9 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
                     "The current window setting could not be resolved."
                 }
                 .into();
+            }
+            if r.uncertainty.iter().any(|u| u.contains(CAPPED_SHARED)) {
+                return format!("The model's context window caps it, and {CAPPED_SHARED}.");
             }
             if c.scenarios
                 .iter()
@@ -2468,10 +2478,19 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let check_line = |c: &(&CheckResult, Common<'_>), out: &Out<'_>| {
         let (result, r) = c;
         let mut head = format!("{}: {}", name(r, result, out), setting_value(r.current));
-        if let CheckResult::Compaction(c) = result
-            && c.unset
-        {
-            head += " (default)";
+        if let CheckResult::Compaction(c) = result {
+            if c.unset {
+                head += " (default)";
+            }
+            // The setting's own value, then the window the model's context leaves it.
+            if let Some(setting) = c.setting {
+                head = format!(
+                    "{}: {} tokens, capped at {}",
+                    name(r, result, out),
+                    count(setting),
+                    setting_value(r.current)
+                );
+            }
         }
         match action(c) {
             Action::Change => {
@@ -3184,6 +3203,7 @@ mod tests {
             model: Some("claude-opus-5-5".into()),
             models: vec![Some("claude-opus-5-5".into())],
             unset: false,
+            setting: None,
             baseline_cost: cost(Some(1234567.891), 1234567.891),
             observed_summary_cost: cost(None, 0.125),
             ttls: PerBucket {
@@ -3694,6 +3714,27 @@ mod tests {
             "T3 gone (removed from T3 settings); 2000 requests"
         )));
         assert!(rendered.contains(&compact("T3 removed: 3 requests of instance gone")));
+    }
+
+    #[test]
+    fn a_capped_window_names_the_setting_and_the_effective_window() {
+        let mut report = synthetic();
+        let mut base = check_base(Action::Keep, Some(200_000), Some(200_000));
+        base.owner =
+            format!("{ROOT}/settings.json:modelSettings.claude-opus-5-5.autoCompactWindow");
+        let mut check = compaction_check(base);
+        if let CheckResult::Compaction(c) = &mut check {
+            c.setting = Some(400_000);
+        }
+        report.checks = vec![check];
+        let summary = compact(&text(&report, Some(400), false));
+        assert!(summary.contains(&compact(
+            "Auto-compact window (claude-opus-5-5): 400,000 tokens, capped at 200,000 tokens."
+        )));
+        let details = compact(&text(&report, Some(400), true));
+        assert!(details.contains(&compact(
+            "400000 tokens, capped at the model's context window"
+        )));
     }
 
     #[test]

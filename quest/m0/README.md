@@ -202,6 +202,7 @@ against the published release.
 - [Remove the JSON report](/quest/m0/remove-json.md) - no `--json` flag, schema or `docs/json.md`; tests assert on the text report
 - [Run the report as an interactive doctor](/quest/m0/doctor.md) - `token-max doctor` walks through each change and writes a user settings file only after a yes
 - [Move the repository to the kixel-ai organization](/quest/m0/kixel-ai.md) - `kixel-ai/token-max`, with its protections and every reference updated
+- [Land PRs through GitHub's merge queue](/quest/m0/merge-queue.md) - one landing no longer sends every other PR back to merge `main`
 - [Ship prebuilt binaries with cargo-dist](/quest/m0/binaries.md) - release binaries, shell and PowerShell installers, cargo-binstall and a Nix package
 - [Serve install.sh and run.sh from max.kixel.ai](/quest/m0/install-site.md) - one curl line installs, another runs `doctor` once without installing
 - [Report each subagent type's model and cost](/quest/m0/subagent-models.md) - every Claude subagent type and Codex role shows its cost, model, effort and source, and a cheapest-model reprice

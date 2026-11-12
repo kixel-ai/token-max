@@ -205,7 +205,8 @@ window as their baseline. Claude controls resolve environment overrides,
 managed and user settings, including `modelSettings.<model>.autoCompactWindow`;
 Codex uses `model_auto_compact_token_limit`. An unset Claude window uses each
 model's latest observed automatic-compaction trigger, else Claude Code's
-documented default. Unresolved defaults, disabled
+documented default. A window larger than the model's context window replays
+at that context window, as Claude Code caps it. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
 advisory. No settings are edited.
 

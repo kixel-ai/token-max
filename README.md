@@ -89,8 +89,8 @@ they cost and how often they were used. One never used is recommended off,
 whatever it cost. One that cost more than `--max-cost-per-use` (default $1) per
 use is worth considering off, an advisory that exits 0; the rest are kept. An
 unused one stays an advisory when the window cannot rule out a use: it was first
-sent after the window began, or, for a Codex skill, its uses are only partly
-recorded. A Claude skill's uses count only the model's own calls, because hiding it
+sent after the window began, an unreadable transcript line could hold a call,
+or, for a Codex skill, its uses are only partly recorded. A Claude skill's uses count only the model's own calls, because hiding it
 with `skillOverrides` set to `user-invocable-only` still lets you type `/name`.
 Skills synced from claude.ai share one line, since only `syncClaudeAiSkills`
 turns them off in settings, and that also removes typed uses, so those count.

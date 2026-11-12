@@ -985,11 +985,18 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(String::from)
         .collect(),
     };
+    let incomplete: HashSet<String> = scan
+        .snapshots
+        .iter()
+        .filter(|s| s.skipped_lines > 0 || s.deferred_bytes > 0)
+        .flat_map(|s| s.profiles.iter().cloned())
+        .collect();
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
         profiles: &scan.profiles,
         catalog,
+        incomplete: &incomplete,
         max_cost_per_use_usd,
     });
     Ok(Report {

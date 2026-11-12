@@ -148,6 +148,8 @@ pub struct ContextInput<'a> {
     pub profiles: &'a [Profile],
     /// Public prices.
     pub catalog: &'a Catalog,
+    /// Profiles whose transcripts have unreadable or deferred lines, which could hold a use.
+    pub incomplete: &'a HashSet<String>,
     /// Suggest turning a used piece off when it cost more than this per use.
     pub max_cost_per_use_usd: f64,
 }
@@ -1292,8 +1294,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 (&c.control, c.current, c.estimated_usd, c.calls)
                 && c.tier_unknown_requests == 0
             {
-                // Codex catalog skill uses are only partly recorded, so their nonuse is unproven.
-                let visible = row.from_start && c.skill.is_none();
+                // Codex catalog skill uses are only partly recorded, and an unreadable or
+                // deferred line could hold a call, so their nonuse is unproven.
+                let visible = row.from_start
+                    && c.skill.is_none()
+                    && !c.profiles.iter().any(|p| input.incomplete.contains(p));
                 c.verdict = Some(match calls {
                     _ if usd <= 0.0 => Verdict::Keep,
                     0 if visible => Verdict::Off,
@@ -1473,6 +1478,7 @@ mod tests {
             requests,
             profiles: &profiles,
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: limit,
         })
     }
@@ -1597,6 +1603,17 @@ mod tests {
         // Used, but above the limit per use: advisory.
         let rows = costs(&scan, &requests, docs / 2.0);
         assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Consider));
+        // An unreadable or deferred line in the profile's transcripts could hold a call.
+        let profiles = [crate::test_support::make_profile("profile", "/synthetic")];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            incomplete: &HashSet::from_iter(["profile".to_string()]),
+            max_cost_per_use_usd: 1.0,
+        });
+        assert_eq!(row(&rows, "Artifact").verdict, Some(Verdict::Consider));
         // First sent after the window's first request, so the window cannot rule out a use.
         scan.requests.insert(
             0,
@@ -1671,6 +1688,7 @@ mod tests {
             requests: &requests,
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: 1.0,
         });
         assert_eq!(row(&rows, "/repo/CLAUDE.md").requests, 2);
@@ -1959,6 +1977,7 @@ mod tests {
                     requests: std::slice::from_ref(&r),
                     profiles: std::slice::from_ref(&profile),
                     catalog: &prices(),
+                    incomplete: &HashSet::default(),
                     max_cost_per_use_usd: 1.0,
                 });
                 let server = &costs[0];
@@ -2201,6 +2220,7 @@ mod tests {
             requests: &requests,
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: 1.0,
         });
         // A quarter token per character. The first request read nothing from cache;
@@ -2259,6 +2279,7 @@ mod tests {
                 requests: &requests,
                 profiles: std::slice::from_ref(&profile),
                 catalog: &prices(),
+                incomplete: &HashSet::default(),
                 max_cost_per_use_usd: 1.0,
             });
             let apps = row(&rows, "codex_apps");
@@ -2349,6 +2370,7 @@ mod tests {
             ],
             profiles: &[profile("a", "docs-server"), profile("b", "docs_server")],
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: 1.0,
         });
         let of = |name: &str, profile: &str| {

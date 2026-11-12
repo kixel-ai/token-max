@@ -641,8 +641,10 @@ model's Skill calls, since a hidden skill can still be typed, except where the
 switch removes the skill entirely, where typed requests count too. A piece still sent
 today with a positive cost and no recorded use is recommended off (`verdict:
 "off"`, exit 1), whatever the amount, when its profile's first shaped request in
-the window already carried it. One first sent later, or a Codex catalog skill,
-whose uses are only partly recorded, gets `"consider"`, an advisory that exits
+the window already carried it and none of that profile's transcripts has an
+unreadable or deferred line, which could hold a call. One first sent later, one
+whose profile's transcripts are incomplete, or a Codex catalog skill, whose
+uses are only partly recorded, gets `"consider"`, an advisory that exits
 0, since the window cannot rule out a use. A used piece whose `estimatedUsd`
 divided by its uses (`costPerUseUsd`) exceeds `maxCostPerUseUsd` (default $1,
 `--max-cost-per-use`) also gets `"consider"`; otherwise it is kept. The ratio

@@ -1,6 +1,6 @@
 //! Shared data types. Serialized names match the JSON report.
 
-use crate::collections::IndexMap;
+use crate::collections::{HashSet, IndexMap};
 use serde::{Deserialize, Serialize};
 
 /// Milliseconds since the Unix epoch.
@@ -736,6 +736,12 @@ pub struct T3State {
     /// Requests whose T3 or native control owner stays unresolved, counted by cause.
     #[serde(default)]
     pub unresolved: IndexMap<String, u64>,
+    /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
+    #[serde(default)]
+    pub removed: IndexMap<String, u64>,
+    /// Every instance the settings name, which tells a removed owner from one not selected.
+    #[serde(skip)]
+    pub(crate) instances: HashSet<String>,
     /// The model T3 resolves for generated text; absent for a state that was not read.
     pub text_generation: Option<T3TextGeneration>,
 }

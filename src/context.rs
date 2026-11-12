@@ -686,6 +686,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .filter_map(|exposure| Some((exposure, *requests.get(&*exposure.request)?)))
         .collect();
     ordered.sort_by_key(|(_, r)| r.time);
+    // A request no selected profile owns, such as a removed T3 instance's, has no setting to change.
+    let selected: HashSet<&str> = input.profiles.iter().map(|p| p.id.as_str()).collect();
+    ordered.retain(|(_, r)| r.profiles.iter().any(|p| selected.contains(p.as_str())));
     for (exposure, r) in ordered {
         let mut profiles = r.profiles.to_vec();
         profiles.sort();
@@ -1443,10 +1446,18 @@ mod tests {
     }
 
     fn costs(scan: &ExposureScan, requests: &[Request], limit: f64) -> Vec<ContextCost> {
+        let ids: HashSet<&str> = requests
+            .iter()
+            .flat_map(|r| r.profiles.iter().map(String::as_str))
+            .collect();
+        let profiles: Vec<Profile> = ids
+            .into_iter()
+            .map(|id| crate::test_support::make_profile(id, "/synthetic"))
+            .collect();
         context_costs(&ContextInput {
             scan,
             requests,
-            profiles: &[],
+            profiles: &profiles,
             catalog: &prices(),
             max_cost_per_use_usd: limit,
         })
@@ -1623,6 +1634,22 @@ mod tests {
         assert_eq!((new.requests, new.priced), (2, 1));
         assert!(close(new.cost_usd, 300.0 * WRITE1H));
         assert!(file.current && new.current);
+    }
+
+    #[test]
+    fn requests_no_selected_profile_owns_price_no_context() {
+        let (scan, mut requests) = attachments();
+        let profile = crate::test_support::make_profile("profile", "/synthetic");
+        requests[0].profiles = vec!["t3:/state:removed".into()].into();
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: std::slice::from_ref(&profile),
+            catalog: &prices(),
+            max_cost_per_use_usd: 1.0,
+        });
+        assert_eq!(row(&rows, "/repo/CLAUDE.md").requests, 2);
+        assert!(rows.iter().all(|c| c.profiles == ["profile"]));
     }
 
     fn overshoot() -> (ExposureScan, Vec<Request>) {

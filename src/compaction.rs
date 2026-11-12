@@ -1803,6 +1803,7 @@ mod tests {
         let n = requests.len() as u64;
         Scan {
             t3: vec![],
+            sessions: Default::default(),
             snapshot_started_at: crate::safe::iso(0),
             snapshot_finished_at: crate::safe::iso(0),
             since: None,
@@ -1873,6 +1874,7 @@ mod tests {
                 version: e.version.clone(),
                 client: e.client.clone(),
                 cwd: e.cwd.clone(),
+                effort: None,
                 profiles: e.profiles.clone(),
                 locations: vec![e.location.clone()],
                 accounting: Accounting::Individual,

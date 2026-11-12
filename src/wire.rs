@@ -580,7 +580,14 @@ mod tests {
         assert!(!text.contains("SYNTHETIC_PRIVATE"));
         assert!(!report.contains("\"epoch\""));
         assert_eq!(text.matches("\"epoch\":17").count(), 1);
+        // Native session IDs, which only the local session export prints, stay on the host.
+        assert!(!text.contains("session-a") && !scan.sessions.is_empty());
         let decoded = decode(&bytes).unwrap();
+        assert!(decoded.sessions.is_empty());
+        let scan = Scan {
+            sessions: Default::default(),
+            ..scan
+        };
         assert_eq!(decoded, scan);
         let views = &decoded.exposure.requests;
         assert!(Arc::ptr_eq(&views[0].view, &views[1].view));
@@ -608,6 +615,7 @@ mod tests {
     #[test]
     fn long_unsent_digest_chains_are_not_nested() {
         let mut scan = sample();
+        scan.sessions = Default::default();
         let mut items = Ids::from(vec!["0".into()]);
         for n in 1..1000 {
             items = Ids::new(Some((&items, n)), vec![n.to_string().into()].into());

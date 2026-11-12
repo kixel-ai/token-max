@@ -3185,6 +3185,7 @@ mod tests {
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
             t3: vec![],
+            sessions: Default::default(),
         }
     }
 

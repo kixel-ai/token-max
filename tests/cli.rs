@@ -543,6 +543,54 @@ fn arguments_follow_strict_parse_args() {
     }
 }
 
+#[test]
+fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
+    let w = Workspace::new();
+    w.fixture();
+    let before = std::fs::read(w.transcript()).unwrap();
+    let base = prices_args(&w);
+    let invoke = |extra: &[&str]| {
+        let mut all = vec!["sessions"];
+        all.extend(args(&base, extra));
+        run(&mut command(&w, &all))
+    };
+    let (status, stdout, stderr) = invoke(&[]);
+    assert_eq!((status, &*stderr), (0, ""));
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+    assert_eq!(std::fs::read(w.transcript()).unwrap(), before);
+    let lines: Vec<Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["harness"], "claude");
+    assert_eq!(lines[0]["session"], "session-a");
+    assert_eq!(lines[0]["files"], json!([text(&w.transcript())]));
+    assert!(lines[0]["costUsd"].as_f64().unwrap() > 0.0);
+    // After the fixture's requests, nothing is selected.
+    assert_eq!(
+        invoke(&["--since", "2030-01-01"]),
+        (0, String::new(), String::new())
+    );
+    for extra in [
+        &["--json"][..],
+        &["--details"],
+        &["--ssh", "devbox"],
+        &["-v"],
+    ] {
+        let (status, stdout, stderr) = invoke(extra);
+        assert_eq!((status, &*stdout), (2, ""), "{extra:?}");
+        assert_eq!(
+            stderr,
+            "{\"error\":\"invalid arguments; use token-max sessions --help\"}\n"
+        );
+    }
+    let (status, help, _) = invoke(&["--help"]);
+    assert!(status == 0 && help.starts_with("token-max sessions:"));
+    let (_, help, _) = run(&mut command(&w, &["--help"]));
+    assert!(help.contains("token-max sessions [options]"));
+}
+
 /// Floats print as JavaScript prints them: integers without a fraction, no `1.0`.
 #[test]
 fn json_numbers_print_like_javascript() {

@@ -71,6 +71,7 @@ impl Interner {
             &mut r.version,
             &mut r.client,
             &mut r.cwd,
+            &mut r.effort,
         ] {
             self.share(slot);
         }
@@ -355,6 +356,9 @@ pub struct Request {
     pub client: Option<Text>,
     #[serde(with = "crate::wire::opt_text")]
     pub cwd: Option<Text>,
+    /// The recorded reasoning effort, such as `high`.
+    #[serde(with = "crate::wire::opt_text")]
+    pub effort: Option<Text>,
     pub parts: Vec<BillingPart>,
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
@@ -2103,6 +2107,9 @@ pub struct Scan {
     pub coverage: ScanCoverage,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub t3: Vec<T3State>,
+    /// Native session identities, which only the local session export prints.
+    #[serde(skip)]
+    pub sessions: crate::sessions::Sessions,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

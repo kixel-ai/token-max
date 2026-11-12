@@ -1538,13 +1538,14 @@ fn metadata(
                 let found = items.entry(key.clone()).or_default();
                 match (text_column(row, 0), text_column(row, 1).as_deref()) {
                     (Some(thread), Some("claudeAgent")) => {
-                        if !found.threads.contains_key(&thread) {
+                        if let std::collections::hash_map::Entry::Vacant(e) =
+                            found.threads.entry(thread)
+                        {
                             let linked = bool_column(row, 3) == Some(true)
                                 || owner_event
-                                    .query_row(rusqlite::params![thread, bound], |r| r.get(0))?;
+                                    .query_row(rusqlite::params![e.key(), bound], |r| r.get(0))?;
                             // Legacy nullable owners block uniqueness, not other rows.
-                            let instance = text_column(row, 2).unwrap_or_default();
-                            found.threads.insert(thread, (instance, linked));
+                            e.insert((text_column(row, 2).unwrap_or_default(), linked));
                         }
                     }
                     _ => found.orphaned = true,

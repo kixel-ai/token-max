@@ -41,6 +41,14 @@ dollars remain available, but recommendation savings and winners stay unresolved
 when affected costs depend on missing tiers. Unsupported tier
 scenarios have a null total and explicit unknown reasons, never a zero total.
 
+The `auto-memory` check, one per profile, is `advisory` while auto memory is on
+and `keep` once it is off, whatever it cost; it never makes a change. Its
+`savingsUsd` is auto memory's total cost: `contextUsd` (loaded memory and memory
+files read back, priced like the `memory` context row) plus `writesUsd` (writes
+estimated at the output price), either null when unpriced. `reads` and `writes`
+count its uses, and `off`/`offFile` name the setting that turns it off. The
+`memory` context row has a control but never a verdict.
+
 Keepalive checks keep their complete shape, including every
 cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
 Their period coverage, unknown current ping state, unpriced periods and unresolved

@@ -623,7 +623,8 @@ model-facing tool names may be sanitized or shortened, so unmatched names get
 no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
 A recommendation to disable the server covers its individual tool changes,
 so the settings snippet does not add redundant per-tool blocks.
-Instruction files have no switch. Core tools, the system prompt
+Instruction files have no switch; Claude's MEMORY.md is auto memory, not an
+instruction file (see [Auto memory](#auto-memory)). Core tools, the system prompt
 and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
@@ -776,6 +777,53 @@ Current provider guidance distinguishes skill discovery from body loading:
 [Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
+
+## Auto memory
+
+`auto-memory` checks each profile once. It is advisory while memory is on and
+keep once it is off, and never exits 1: notes the agent writes for itself skip
+the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
+slop, so it is not recommended whatever it cost. `--max-cost-per-use` does not
+apply. The check reports the total cost, the reads and writes, and the setting
+that turns it off; its `savingsUsd` is that total.
+
+[Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
+memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or
+`autoMemoryEnabled: false` says otherwise. While it is on, the system prompt has
+a `# Memory` section and the `instructions` attachment carries `MEMORY.md` as
+type `AutoMem`. The section, from its heading to the next top-level heading, is
+measured apart from the rest of the recorded system prompt and placed right
+after it; `MEMORY.md` is placed like any other attachment. Both form the
+`memory` context row. A request that loads `MEMORY.md` without such a section,
+as subagents do, leaves any memory instructions elsewhere in its prompt
+unmeasured, and the check says how many did. The latest main-agent request with
+a recorded shape decides whether memory is on, since the section is present
+whenever it is; settings decide only without one.
+
+Uses are Read, Write, Edit and MultiEdit calls on files in a memory directory:
+`<root>/projects/<project>/memory/` under the profile root or alias, or the
+directory a loaded `MEMORY.md` came from, which `autoMemoryDirectory` can move.
+Read results move from the Read tool's output row to the memory row. The input a
+write sent, which the model generated, is estimated at the output price of the
+request whose reply made the call, using that model's calibrated token ratio;
+writes without one stay unpriced rather than zero.
+
+[Codex](https://developers.openai.com/codex/memories) memories are off unless
+`features.memories = true`; `memories.use_memories = false` keeps them out of
+the prompt. With each full context Codex 0.167.0 adds a developer message part
+tagged `memories.instructions` holding `memory_summary.md`, split into several
+parts when long; earlier versions start it with `## Memory`. It stays in
+context until the next full context replaces it. A summary in the latest
+request shows memory is on whatever the settings say; its absence proves
+nothing, since the summary appears only once one has been written. Uses are
+the dedicated `memories` tools (`list`, `read` and `search` as reads,
+`add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token
+rule of thumb) and shell reads under `<codex home>/memories/` or
+`memories_v2/`. Dedicated tool output moves to the memory row; shell output
+stays on the shell's row. Extraction and consolidation run as requests Codex
+records only in telemetry, so their cost is not measured. No local session has
+enabled Codex memories, so its tests use synthetic records derived from the
+0.167.0 source.
 
 ## Background generation
 

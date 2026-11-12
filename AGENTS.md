@@ -13,6 +13,10 @@ from transcripts, and to help the user decide what to enable or disable.
   Report what each one cost and how often it was used. Recommend turning it
   off when it cost more than `--max-cost-per-use` (default $1) per recorded
   use, counting no use as one; otherwise recommend keeping it.
+- Auto memory is the exception: advise turning it off whatever it cost, as an
+  advisory that exits 0. Unreviewed notes the agent writes for itself
+  encourage slop; durable guidance belongs in a reviewed, checked-in
+  `CLAUDE.md` or `AGENTS.md`.
 - Show every setting and feature on its own line with its cost. Name the
   setting that turns each one off, and say plainly when a cost can't be
   measured rather than hiding the setting.

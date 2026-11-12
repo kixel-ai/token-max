@@ -27,7 +27,3 @@ prompts, chosen options marked ✅:
 Color stays an addition to text labels: `NO_COLOR` and `--plain` still
 render the same words, and the JSON verdicts are unchanged. Update the
 README's color note and sample report in the same PR.
-
-## Related
-
-- [Report auto memory's total cost](/quest/m0/auto-memory.md) - the first yellow-by-policy line

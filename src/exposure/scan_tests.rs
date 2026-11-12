@@ -2255,7 +2255,11 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
     let root = std::fs::canonicalize(&w.claude).unwrap();
     let root = root.to_string_lossy();
     let records = claude_memory_session(&root, true);
-    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&records)).unwrap();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
     let data = scan(&options(&w, None)).unwrap();
     let e = &data.exposure;
     let component = |name: &str| e.components.iter().find(|c| c.name == name).unwrap();
@@ -2337,11 +2341,18 @@ fn claude_auto_memory_off_in_the_latest_request_is_kept_off() {
     let w = Workspace::new();
     let root = std::fs::canonicalize(&w.claude).unwrap();
     let records = claude_memory_session(&root.to_string_lossy(), false);
-    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&records)).unwrap();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
     let data = scan(&options(&w, None)).unwrap();
     assert_eq!(categories(&data.exposure, Category::Memory), 0);
     let report = report(&data, 1.0);
-    assert_eq!(memory_check(&report, Harness::Claude).base.current, Some(false));
+    assert_eq!(
+        memory_check(&report, Harness::Claude).base.current,
+        Some(false)
+    );
     let text = text(&report);
     assert!(!text.contains("Not recommended\n"));
     let keep = &text[text.find("Keep\n").unwrap()..];

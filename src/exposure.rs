@@ -1530,7 +1530,9 @@ impl ExposureCollector {
                 // Auto memory's MEMORY.md arrives beside the CLAUDE.md files.
                 let category = if is(f, "type", "AutoMem") {
                     let dir = &path[..path.len() - basename(path).len()];
-                    self.memory_dirs.insert(dir.to_string());
+                    if !dir.is_empty() {
+                        self.memory_dirs.insert(dir.to_string());
+                    }
                     Category::Memory
                 } else {
                     Category::Instructions

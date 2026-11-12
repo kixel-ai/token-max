@@ -75,7 +75,7 @@ as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
 The default report says what was read, then puts every setting and feature on
-one line under **Change**, **Keep**, or **Not enough evidence**, with dollar
+one line under **Change**, **Not recommended**, **Keep**, or **Not enough evidence**, with dollar
 amounts per 30 days at the window's rate. Settings that don't change the
 experience, such as the cache TTL, name the current and suggested values, the
 savings, and the file that owns the setting. Not enough evidence says why in one
@@ -96,6 +96,13 @@ also removes explicit invocation. Same-named copies are flagged even without
 prices, with one copy retained. Repeated discovery of the same path needs the
 redundant source removed. Zero observations do not prove nonuse, and listing
 cost is not promised savings: Codex can backfill the freed catalog space.
+Auto memory, Claude Code's `MEMORY.md` and system prompt section or Codex's
+memory summary, is **Not recommended** while it is on: notes the agent writes for
+itself skip review and encourage slop, so durable guidance belongs in a reviewed,
+checked-in CLAUDE.md or AGENTS.md. Its line shows the total cost of the loaded
+memory, the memory files read back and the writes, and how often it was read or
+written, but `--max-cost-per-use` does not apply and it does not cause exit 1. A
+profile with memory off shows it under **Keep**.
 Instruction files, Claude plugin skills, which `skillOverrides` does not reach, and the
 system prompt, core tools such as Bash and Read, and the skill and subagent
 lists have no switch and are listed after the verdicts.
@@ -179,6 +186,9 @@ Change
   Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.
   Artifact tool: on -> off. Costs $90; never used.
   Skill example: on -> only when you type /example. Costs $12; the model used it 2 times ($6 each).
+
+Not recommended
+  Auto memory: on -> off. Not recommended: notes the agent writes for itself skip review, which encourages slop. Keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md instead. Costs $8; used 3 times (1 read, 2 writes). Set "autoMemoryEnabled": false in ~/.claude/settings.json.
 
 Keep
   Fast mode: off.

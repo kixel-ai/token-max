@@ -31,3 +31,5 @@ README's color note and sample report in the same PR.
 ## Related
 
 - [Report auto memory's total cost](/quest/m0/auto-memory.md) - the first yellow-by-policy line
+- [Remove the JSON report](/quest/m0/remove-json.md) - removes the JSON verdicts this quest leaves unchanged
+- [Run the report as an interactive doctor](/quest/m0/doctor.md) - on a terminal, exit 1 no longer marks a red line

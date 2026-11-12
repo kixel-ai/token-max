@@ -23,6 +23,13 @@ Decided 2026-11-11 (maintainer, /quest-plan in moq-dev/quest,
     it quest's PR records; keeping ccusage and quest's own reader
 - Milestone: ✅ m0 (rejected: m1)
 
+Decided 2026-11-11 (maintainer, /quest-plan for
+[doctor](/quest/m0/doctor.md)): ✅ the export is the sub-command
+`token-max sessions` (rejected: `token-max export`, `token-max usage`; a
+flag beside `--json`, which is being
+[removed](/quest/m0/remove-json.md)). People run `doctor`; each machine
+output is its own sub-command.
+
 Why quest needs it: ccusage folds a Claude Code sub-agent's records into
 its parent's session ID. quest reads only the parent's log, so a
 `/quest-spawn` sub-agent's work on a quest branch counted as its
@@ -31,8 +38,7 @@ could not be tied to any PR.
 
 Agent's choices, for the implementer to revisit:
 
-- Shape it to the CLI's existing options, such as a flag beside `--json`,
-  with `--since` selecting the files.
+- `--since` selects the files.
 - A sub-agent file is its own record, since its branch differs from its
   coordinator's. `src/t3.rs` already maps a sub-agent file to its parent.
 - Claude Code sometimes writes an interleaved, malformed line in the middle

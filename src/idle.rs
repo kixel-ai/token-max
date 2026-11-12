@@ -3118,6 +3118,7 @@ mod tests {
         };
         Profile {
             agents: Default::default(),
+            instruction_budget_unresolved: None,
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),

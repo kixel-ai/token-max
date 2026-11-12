@@ -196,6 +196,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
     };
     Profile {
         agents: Default::default(),
+        instruction_budget_unresolved: None,
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),

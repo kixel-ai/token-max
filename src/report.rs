@@ -2366,11 +2366,14 @@ fn mcp_guidance<'a>(costs: impl Iterator<Item = &'a ContextCost>) -> Vec<Loading
     guidance
 }
 
-/// The `project_doc_max_bytes` budget every profile that loaded an AGENTS.md shares, if they agree.
-fn agents_budget(c: &ContextCost, profiles: &[Profile]) -> Option<usize> {
-    let budgets: crate::collections::HashSet<Option<usize>> = profiles
-        .iter()
-        .filter(|p| c.profiles.contains(&p.id))
+/// The `project_doc_max_bytes` budget every profile that loaded an AGENTS.md shares,
+/// or why it is unknown.
+fn agents_budget(c: &ContextCost, profiles: &[Profile]) -> Result<usize, String> {
+    let selected = || profiles.iter().filter(|p| c.profiles.contains(&p.id));
+    if let Some(reason) = selected().find_map(|p| p.instruction_budget_unresolved.as_ref()) {
+        return Err(format!("{reason}."));
+    }
+    let budgets: crate::collections::HashSet<Option<usize>> = selected()
         .map(|p| match p.settings.get("project_doc_max_bytes") {
             None => Some(32 * 1024),
             Some(Scalar::Number(n)) if *n >= 0.0 && n.fract() == 0.0 && *n < usize::MAX as f64 => {
@@ -2379,10 +2382,12 @@ fn agents_budget(c: &ContextCost, profiles: &[Profile]) -> Option<usize> {
             _ => None,
         })
         .collect();
-    if budgets.len() == 1 {
-        budgets.into_iter().next().flatten()
-    } else {
-        None
+    match budgets.into_iter().collect::<Vec<_>>()[..] {
+        [Some(budget)] => Ok(budget),
+        _ => Err(
+            "The selected profiles' project_doc_max_bytes budgets are unavailable or differ."
+                .into(),
+        ),
     }
 }
 
@@ -2441,10 +2446,10 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
         Harness::Codex => {
             let budget = agents_budget(c, profiles);
             vec![format!(
-                "Recorded rendered AGENTS.md: {} UTF-8 bytes, including any headers or wrappers. {}The project_doc_max_bytes default is 32768 bytes across the source instruction chain. Rendered bytes cannot establish whether that source chain exceeded its budget. Project/CLI overrides and original source-file sizes are unavailable; loaded text may already be truncated. Trim or scope guidance to preserve important instructions. Length alone does not establish quality. https://learn.chatgpt.com/docs/agent-configuration/agents-md",
+                "Recorded rendered AGENTS.md: {} UTF-8 bytes, including any headers or wrappers. {}The project_doc_max_bytes default is 32768 bytes across the source instruction chain. Rendered bytes cannot establish whether that source chain exceeded its budget. Command-line overrides and original source-file sizes are unavailable; loaded text may already be truncated. Trim or scope guidance to preserve important instructions. Length alone does not establish quality. https://learn.chatgpt.com/docs/agent-configuration/agents-md",
                 size.bytes,
                 budget.map_or_else(
-                    || "Selected profile budgets are unavailable or differ. ".into(),
+                    |reason| format!("{reason} "),
                     |n| format!("Selected profile budget: {n} bytes. ")
                 )
             )]
@@ -2901,8 +2906,8 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
             row
         }
         Harness::Codex => {
-            // Only the user configuration is read; a system, trusted-project or
-            // command-line project_doc_max_bytes can replace it unseen.
+            // The system and user configuration are read, and projects or named
+            // profiles that set it leave it unresolved; command-line overrides are unseen.
             let set = profiles.iter().any(|p| {
                 c.profiles.contains(&p.id) && p.settings.contains_key("project_doc_max_bytes")
             });
@@ -2917,18 +2922,16 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
                     }
                 )
             };
-            let unseen = "A system, project or command-line override is not visible here.";
+            let unseen = "A command-line override is not recorded.";
             let mut row = match agents_budget(c, profiles) {
-                None => {
+                Err(reason) => {
                     let mut row = Row::new(Claim::Official, Mark::Unknown, name);
-                    row.evidence = not_enough(
-                        "The selected profiles' project_doc_max_bytes budgets are unavailable or differ.",
-                    );
+                    row.evidence = not_enough(&reason);
                     row
                 }
                 // Rendered bytes include headers and wrappers, so only reaching the
                 // budget can mean Codex truncated the source files.
-                Some(budget) if size.bytes >= budget => {
+                Ok(budget) if size.bytes >= budget => {
                     let mut row = Row::new(Claim::Official, Mark::Consider, name);
                     row.evidence = format!(
                         "At or above {}, so Codex may have cut it short. Trim or scope it to keep the important instructions. {unseen}",
@@ -2936,7 +2939,7 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
                     );
                     row
                 }
-                Some(budget) => {
+                Ok(budget) => {
                     let mut row = Row::new(Claim::Official, Mark::Keep, name);
                     row.evidence = format!("Under {}. {unseen}", limit(budget));
                     row
@@ -5201,7 +5204,10 @@ mod tests {
             default.contains("32,768 bytes Codex loads by default"),
             "{default}"
         );
-        assert!(default.contains("override is not visible"), "{default}");
+        assert!(
+            default.contains("command-line override is not recorded"),
+            "{default}"
+        );
         profile
             .settings
             .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
@@ -5211,6 +5217,15 @@ mod tests {
         let set = evidence(&agents(70_000), profiles);
         assert!(set.contains("65,536 bytes your Codex config sets"), "{set}");
         assert!(!set.contains("default"), "{set}");
+        // A project or named profile that can set it leaves no verdict.
+        profile.instruction_budget_unresolved =
+            Some("/repo/.codex/config.toml can set project_doc_max_bytes for some runs".into());
+        let profiles = std::slice::from_ref(&profile);
+        assert_eq!(verdict(&agents(100), profiles).1, Mark::Unknown);
+        assert!(
+            evidence(&agents(100), profiles)
+                .starts_with("Not enough evidence: /repo/.codex/config.toml can set")
+        );
     }
 
     #[test]

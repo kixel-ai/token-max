@@ -147,14 +147,15 @@ inventing per-app costs or a settings patch.
 Instruction files are Official lines. A CLAUDE.md is worth considering
 shorter at 200 recorded lines or more, Claude Code's documented guidance, and
 kept below that. A Codex AGENTS.md is compared with the selected profiles'
-`project_doc_max_bytes` in the user configuration (32 KiB by default): the
-recorded rendered bytes include headers and wrappers, so under the budget it is
-kept, and at or above it Codex may have truncated it, which is worth
-considering. The evidence names whether the budget is the default or the
-user's own, and says that a system, trusted-project or command-line override,
-which can replace it, is not visible. Profiles with different or unreadable
-budgets, and records with no rendered text, give no verdict. Original file
-sizes are unavailable.
+`project_doc_max_bytes` from the system and user configuration (32 KiB by
+default): the recorded rendered bytes include headers and wrappers, so under
+the budget it is kept, and at or above it Codex may have truncated it, which is
+worth considering. The evidence names whether the budget is the default or the
+user's own. A project `.codex/config.toml` at a recorded directory or a named
+profile that sets it gives no verdict, since the transcripts do not record
+which applied; neither do profiles with different or unreadable budgets, or
+records with no rendered text. Command-line overrides and original file sizes
+are unavailable.
 Length alone is not a quality score. Other instruction files Claude loads have
 no size guidance and get a Measured line with their cost. Output-cap lines
 still recommend no value because truncation-related read-back cannot be priced

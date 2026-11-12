@@ -985,11 +985,13 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(String::from)
         .collect(),
     };
+    let incomplete = crate::context::incomplete_profiles(&scan.snapshots);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
         profiles: &scan.profiles,
         catalog,
+        incomplete: &incomplete,
         max_cost_per_use_usd,
     });
     Ok(Report {

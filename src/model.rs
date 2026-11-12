@@ -2066,7 +2066,11 @@ pub enum ContextKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
+    /// Never used across a window that would have recorded a use: a recommended change.
     Off,
+    /// Worth considering off, an advisory: it cost more than the limit per use, or no
+    /// use was recorded but the window cannot rule one out.
+    Consider,
     Keep,
 }
 
@@ -2118,10 +2122,11 @@ pub struct ContextCost {
     pub last_used: Option<Millis>,
     /// Whether the profile's most recent request still carried it.
     pub current: bool,
-    /// estimatedUsd divided by uses, counting no use as one; null without both.
+    /// estimatedUsd divided by uses; null without a price or a recorded use.
     pub cost_per_use_usd: Option<f64>,
-    /// "off" above the cost-per-use limit; null when unpriced, unswitchable,
-    /// no longer sent, tier-sensitive, or covered by a server-off verdict.
+    /// "off" when never used, "consider" above the cost-per-use limit or when
+    /// nonuse is unproven, else "keep"; null when unpriced, unswitchable, no
+    /// longer sent, tier-sensitive, or covered by a server-off verdict.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,

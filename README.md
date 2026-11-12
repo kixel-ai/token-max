@@ -75,17 +75,22 @@ as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
 The default report says what was read, then puts every setting and feature on
-one line under **Change**, **Keep**, or **Not enough evidence**, with dollar
-amounts per 30 days at the window's rate. Settings that don't change the
+one line under **Change**, **Keep**, or **Not enough evidence**. Comparisons
+between setting values are per 30 days at the window's rate, so checks with
+different windows compare; what features, context and long Bash waits cost,
+and how often they were used, are totals over the whole window. Settings that don't change the
 experience, such as the cache TTL, name the current and suggested values, the
 savings, and the file that owns the setting. Not enough evidence says why in one
 sentence, such as two options being too close to call. Unresolved current
 ownership stays there and does not cause exit 1.
 
 Features sent with every request, such as a tool, MCP server or skill, show what
-they cost and how often they were used. One is recommended off when it cost more
-than `--max-cost-per-use` (default $1) per use, counting no use as one; the rest
-are kept. A Claude skill's uses count only the model's own calls, because hiding it
+they cost and how often they were used. One never used is recommended off,
+whatever it cost. One that cost more than `--max-cost-per-use` (default $1) per
+use is worth considering off, an advisory that exits 0; the rest are kept. An
+unused one stays an advisory when the window cannot rule out a use: it was first
+sent after the window began, an unreadable transcript line could hold a call,
+or, for a Codex skill, its uses are only partly recorded. A Claude skill's uses count only the model's own calls, because hiding it
 with `skillOverrides` set to `user-invocable-only` still lets you type `/name`.
 Skills synced from claude.ai share one line, since only `syncClaudeAiSkills`
 turns them off in settings, and that also removes typed uses, so those count.
@@ -156,8 +161,10 @@ summarize modeled compactions; geometry sources are listed once. Identifiers in
 grouped cache and attempt evidence are examples. Nothing is hidden behind an interactive prompt
 or a top-N limit. The layout wraps long paths and
 names on narrow terminals. Redirected output keeps each field on one line so
-paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
-disables color, and `--plain` also disables decorative Unicode. Redirected output
+paths remain copyable. On terminals, color repeats each line's verdict: red
+for a recommended change (exit 1), yellow for an advisory or missing evidence
+(exit 0), and green for a setting or feature already at its recommended value.
+Color never replaces the words; `NO_COLOR` disables it, and `--plain` also disables decorative Unicode. Redirected output
 is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
 with exit 2 and no success report.
 Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
@@ -172,13 +179,15 @@ Estimated with public API prices, not your subscription bill. Nothing was change
 Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
 
-3 setting changes recommended.
-Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than $1 per use (--max-cost-per-use).
+2 setting changes recommended.
+Setting comparisons are per 30 days at this window's rate; what features and context cost, and how often they were used, are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
 
 Change
   Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.
   Artifact tool: on -> off. Costs $90; never used.
-  Skill example: on -> only when you type /example. Costs $12; the model used it 2 times ($6 each).
+
+Consider turning off
+  Skill example: on. Costs $12; the model used it 2 times ($6 each). Hide it from the model: "skillOverrides": {"example": "user-invocable-only"}.
 
 Keep
   Fast mode: off.
@@ -189,14 +198,11 @@ Not enough evidence
 
 No setting turns these off
   ~/.claude/CLAUDE.md: costs $5. Shorten it, or move parts into path-scoped rules or skills.
-  System prompt, core tools such as Bash and Read, and the skill and subagent lists: cost $210.
+  System prompt, core tools such as Bash and Read, and the skill and subagent lists: $210.
 
 To turn these off, merge this into ~/.claude/settings.json, adding to any lists already there:
   {
-    "enableArtifact": false,
-    "skillOverrides": {
-      "example": "user-invocable-only"
-    }
+    "enableArtifact": false
   }
 ```
 
@@ -448,8 +454,10 @@ Missing directories, unknown trust and unrecorded profile selection stay advisor
 Current files are applied to history as an estimate, not proof of past settings.
 
 Neither client logs these requests, so suggestion and recap costs are estimated
-at each recorded interactive-terminal turn where they would have run, and their
-uses count as one against `--max-cost-per-use`. Goal check-ins and Codex recaps
+at each recorded interactive-terminal turn where they would have run. Their uses
+are not recorded either, so one never counts as unused: a whole cost above
+`--max-cost-per-use` is worth considering off, an advisory, and one below it is
+kept. Goal check-ins and Codex recaps
 cannot be told apart in transcripts, so their cost is shown as unknown.
 
 ## Bash timeout cap

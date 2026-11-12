@@ -1107,7 +1107,7 @@ fn named_profile_file(name: &str) -> bool {
 }
 
 /// Named profile files in stable order, shared by control discovery.
-fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> {
+pub(crate) fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> {
     let unreadable = || error("cannot read settings", root, 0);
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|_| unreadable())? {

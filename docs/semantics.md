@@ -1056,7 +1056,7 @@ its recorded effort: Claude's per-record `effort`, Codex's `turn_context`
 A run's model source follows Claude Code 2.1.322: the Agent call's `model`,
 then the agent definition's `model:`, then `CLAUDE_CODE_SUBAGENT_MODEL`, then
 the main model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` drops the call and definition
-models. A user or project agent file with a built-in's name replaces it. Built-in
+models, so the line then names the variable as the setting to change. A user or project agent file with a built-in's name replaces it. Built-in
 Explore and Plan say `inherit`, so the variable never reaches them; Explore is
 capped at Opus on the first-party API when the main model ranks above it
 (Fable, Mythos), unless
@@ -1064,7 +1064,10 @@ capped at Opus on the first-party API when the main model ranks above it
 Claude Code 2.1.198. Forks always run on the main model. Codex 0.167 applies an
 agent role file's `model`, then the `spawn_agent` call's `model`, then
 `[agents] default_subagent_model`, then the parent thread's model; a review uses
-`review_model`, else the session model. Efforts follow the same order with
+`review_model`, else its parent's model, or the configured session model when
+no parent is recorded. A Codex subagent's parent is the
+thread its `session_meta` names: the spawning thread, or for a review its root
+`session_id`. Efforts follow the same order with
 Claude's `effort:` and `CLAUDE_CODE_SUBAGENT_EFFORT`, and Codex's
 `model_reasoning_effort` and `default_subagent_reasoning_effort`.
 
@@ -1080,7 +1083,10 @@ an earlier one; a role without a description is ignored, and one declared
 with a description but no role file runs on the default subagent model or the
 parent's), and project layers
 only for a project its config trusts. A project whose layers change the
-subagent settings but whose trust is not recorded makes its runs unknown. A
+subagent settings but whose trust is not recorded makes its runs unknown, and
+so does a named profile (`NAME.config.toml`, or a legacy `[profiles.NAME]`
+table) that sets `[agents]` or `review_model`, since history does not record
+which `--profile` a run used. A
 directory that no longer exists uses the profile's controls. A run's start and
 its parent's model come from all scanned history, including requests before
 `--since`. A run is unknown when its agent file changed after it started,

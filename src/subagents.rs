@@ -13,7 +13,7 @@ use crate::collections::{HashMap, IndexMap, IndexSet};
 use crate::controls::{Env, SettingsScope, js_string, members, scoped_environment};
 use crate::discovery::{
     DiscoveryOptions, codex_markers, codex_trust, directories, error, existing_directory, join,
-    project_directories, realpath, resolve, settings,
+    named_profile_files, project_directories, realpath, resolve, settings,
 };
 use crate::model::{
     Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile, Request,
@@ -494,6 +494,29 @@ pub fn discover(
                     let folder = crate::discovery::dirname(file);
                     codex_layer(&mut agents, &mut roles, config, file, folder)?;
                 }
+                // A profile chosen with --profile, which no record names, can replace them.
+                let overrides = |config: &serde_json::Map<String, Value>| {
+                    config.contains_key("agents") || config.contains_key("review_model")
+                };
+                let mut selectable: Vec<String> = members(user.get("profiles"))
+                    .iter()
+                    .filter(|(_, p)| p.as_object().is_some_and(overrides))
+                    .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
+                    .collect();
+                if profile.t3.is_none() {
+                    for name in named_profile_files(&profile.root)? {
+                        let file = join(&[&profile.root, &name]);
+                        if overrides(&settings(&file, Harness::Codex)?) {
+                            selectable.push(file);
+                        }
+                    }
+                }
+                if !selectable.is_empty() {
+                    agents.unresolved = Some(format!(
+                        "{} can override subagent settings, but which profile a run selected is not recorded",
+                        selectable.join(", ")
+                    ));
+                }
                 let scopes = [
                     SettingsScope {
                         config: &system,
@@ -823,7 +846,7 @@ fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSo
         });
     }
     let (source, detail, expect) = if native {
-        // A review records no parent thread, so its session model is the configured one.
+        // A review that records no parent thread runs on the configured session model.
         match (&controls.review, &controls.session) {
             (Some(review), _) => (
                 ModelSource::Setting,
@@ -899,7 +922,7 @@ fn settings_text(
     fork: bool,
     native: bool,
 ) -> (String, String) {
-    match profile.harness {
+    let mut texts = match profile.harness {
         Harness::Claude if fork => (
             "none; a fork always runs on the main model".into(),
             "none; a fork runs at the main conversation's effort".into(),
@@ -982,7 +1005,18 @@ fn settings_text(
                 ),
             }
         }
+    };
+    // The forced variable replaces the Agent call's and the agent file's model.
+    if profile.harness == Harness::Claude && controls.force && !fork {
+        texts.0 = match &controls.model {
+            Some(setting) => format!(
+                "{}, which CLAUDE_CODE_SUBAGENT_MODEL_FORCE applies over the Agent call and agent files",
+                setting.owner
+            ),
+            None => "CLAUDE_CODE_SUBAGENT_MODEL; CLAUDE_CODE_SUBAGENT_MODEL_FORCE ignores the Agent call's and agent files' model".into(),
+        };
     }
+    texts
 }
 
 /// Count values, most common first, ties in first-seen order.
@@ -1338,6 +1372,14 @@ mod tests {
         assert_eq!(
             source(&sonnet_call, &forced, "general-purpose"),
             ModelSource::Setting
+        );
+        // So the guidance names the forced setting, not the agent file it overrides.
+        let profile = make_profile("profile", "/home/.claude");
+        let (model, _) = settings_text(&profile, &forced, "Explore", false, false);
+        assert!(
+            model.starts_with("settings.json:env.CLAUDE_CODE_SUBAGENT_MODEL,")
+                && !model.contains("model: in"),
+            "{model}"
         );
     }
 
@@ -1708,6 +1750,32 @@ mod tests {
         let (model, _) = settings_text(&profile, inside, "reviewer", false, false);
         let file = path(&project.join(".claude").join("agents").join("reviewer.md"));
         assert!(model.contains(&file), "{model}");
+    }
+
+    #[test]
+    fn a_codex_profile_that_can_replace_subagent_settings_leaves_them_unresolved() {
+        let w = Workspace::new();
+        let project = w.home.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        put(w.codex.join("fast.config.toml"), "model = \"gpt-6-luna\"\n");
+        let profile = discover_in(&w, Harness::Codex, &[&project]);
+        assert_eq!(profile.agents.unresolved, None);
+        put(
+            w.codex.join("config.toml"),
+            "[profiles.legacy]\nreview_model = \"gpt-6-luna\"\n",
+        );
+        put(
+            w.codex.join("cheap.config.toml"),
+            "[agents]\ndefault_subagent_model = \"gpt-6-luna\"\n",
+        );
+        let profile = discover_in(&w, Harness::Codex, &[&project]);
+        let reason = profile.agents.unresolved.unwrap();
+        let named = path(&w.codex.join("cheap.config.toml"));
+        assert!(
+            reason.contains(&named) && reason.contains("profiles.legacy"),
+            "{reason}"
+        );
+        assert!(!reason.contains("fast.config.toml"), "{reason}");
     }
 
     #[test]

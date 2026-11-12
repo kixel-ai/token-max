@@ -1439,8 +1439,8 @@ impl Reader {
                 } else {
                     label(subagent).or_else(|| label(member(object(subagent), "other")))
                 };
-                let parent = match spawn.get("parent_thread_id") {
-                    Some(parent) => Some(id(parent)?.into()),
+                let parent = match crate::sessions::codex_thread(p).1 {
+                    Some(parent) => Some(id(&Value::from(parent))?.into()),
                     None => None,
                 };
                 let session = context.session.clone();
@@ -2441,11 +2441,16 @@ mod tests {
     fn codex_subagents_are_named_by_role_or_source_with_their_effort() {
         let w = Workspace::new();
         let thread = |id: &str, source: Value| {
-            json!({
+            let mut meta = json!({
                 "type": "session_meta",
                 "timestamp": "2026-11-01T00:00:00Z",
                 "payload": { "id": id, "source": source, "model_provider": "openai" },
-            })
+            });
+            // A review names its parent only as the root thread.
+            if id == "thread-review" {
+                meta["payload"]["session_id"] = json!("thread-a");
+            }
+            meta
         };
         let spawn = |role: Value| {
             json!({ "subagent": { "thread_spawn": {
@@ -2478,20 +2483,19 @@ mod tests {
             );
         }
         let data = scan(&options(&w)).unwrap();
-        let mut kinds: Vec<(&str, bool, bool)> = data
+        let mut kinds: Vec<(&str, bool)> = data
             .subagents
             .iter()
-            .map(|s| (s.kind.as_str(), s.parent.is_some(), s.native))
+            .map(|s| (s.kind.as_str(), s.native))
             .collect();
         kinds.sort();
         assert_eq!(
             kinds,
-            [
-                ("default", true, false),
-                ("explorer", true, false),
-                ("review", false, true)
-            ]
+            [("default", false), ("explorer", false), ("review", true)]
         );
+        let parent = data.subagents[0].parent.as_ref();
+        assert!(parent.is_some());
+        assert!(data.subagents.iter().all(|s| s.parent.as_ref() == parent));
         assert!(
             data.requests
                 .iter()

@@ -638,6 +638,9 @@ pub struct WindowControl {
     /// No setting names a window, so Claude Code's tuned window for the model applies.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
+    /// The window a setting names when the model's context window caps it; `value` is the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting: Option<i64>,
 }
 
 /// Claude Code's window for one model when no setting names one.
@@ -670,6 +673,10 @@ pub struct CompactionControls {
     /// Tuned windows by undated model ID, for every model the profile used.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tuned: IndexMap<String, TunedWindow>,
+    /// Context windows by undated model ID, for each used model Claude Code holds below the 1M
+    /// maximum; any window larger than its model's runs at this size.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub contexts: IndexMap<String, i64>,
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
@@ -1167,6 +1174,9 @@ pub struct CompactionCheck {
     /// No setting names the window, so `current` is Claude Code's tuned window for the model.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
+    /// The window a setting names when the model's context window caps it; `current` is the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<i64>,
     pub baseline_cost: Cost,
     pub observed_summary_cost: Cost,
     pub ttls: PerBucket<Option<Ttl>>,

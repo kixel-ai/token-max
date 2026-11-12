@@ -100,6 +100,11 @@ or `(under CLAUDE_CODE_MAX_CONTEXT_TOKENS=<n>)` when that variable sizes the
 model. Claude `profiles[].compaction.tuned` lists the tuned window and reason
 for every model it used, and `profiles[].compaction.declared` holds the
 positive `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value.
+A check whose explicit window exceeds the model's context window has `setting`
+with the setting's value and `current` with that context window. Its owner is
+the model's row for a user or managed global window, followed by the same
+variable suffix, or `(capped at <n>)` when the model's own window caps it.
+`profiles[].compaction.contexts` lists each capping context window by model.
 
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
 instance ownership. The `t3-idle-compaction` check keeps all three policy costs;

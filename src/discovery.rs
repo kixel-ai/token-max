@@ -1648,10 +1648,14 @@ pub(crate) fn profile(
         scopes: None,
     });
     let mut settings = structural_settings(config);
-    if !claude && !settings.contains_key(AGENTS_BUDGET) {
-        // The system config sets Codex's instruction budget unless the user's replaces it.
-        if let Some(value) = structural_settings(&system).shift_remove(AGENTS_BUDGET) {
+    let mut instruction_budget_file = None;
+    if !claude {
+        if settings.contains_key(AGENTS_BUDGET) {
+            instruction_budget_file = Some(settings_file.clone());
+        } else if let Some(value) = structural_settings(&system).shift_remove(AGENTS_BUDGET) {
+            // The system config sets Codex's instruction budget unless the user's replaces it.
             settings.insert(AGENTS_BUDGET.into(), value);
+            instruction_budget_file = Some(system_file.to_string());
         }
     }
     if claude {
@@ -1730,6 +1734,7 @@ pub(crate) fn profile(
         memory: Some(memory),
         t3: None,
         agents: crate::model::AgentControls::default(),
+        instruction_budget_file,
         instruction_budget_unresolved: None,
     })
 }
@@ -2797,8 +2802,17 @@ mod tests {
                 p.instruction_budget_unresolved.clone(),
             )
         };
+        let file = |d: &Discovery| {
+            d.profiles
+                .iter()
+                .find(|p| p.harness == Harness::Codex)
+                .unwrap()
+                .instruction_budget_file
+                .clone()
+        };
         let mut d = discover(&options(&w)).unwrap();
         assert_eq!(budget(&d).0, Some(Scalar::Number(8192.0)));
+        assert_eq!(file(&d), Some(text(&w.home.join("system.toml"))));
         // The user's own value replaces the system's.
         write(
             w.codex.join("config.toml"),
@@ -2806,6 +2820,7 @@ mod tests {
         );
         d = discover(&options(&w)).unwrap();
         assert_eq!(budget(&d).0, Some(Scalar::Number(65536.0)));
+        assert_eq!(file(&d), Some(text(&w.codex.join("config.toml"))));
         let id = d
             .profiles
             .iter()

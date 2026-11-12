@@ -1759,6 +1759,7 @@ mod tests {
     fn data(count: i64) -> Scan {
         let profile = Profile {
             agents: Default::default(),
+            instruction_budget_file: None,
             instruction_budget_unresolved: None,
             id: "profile".into(),
             harness: Harness::Claude,

@@ -2908,17 +2908,18 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
         Harness::Codex => {
             // The system and user configuration are read, and projects or named
             // profiles that set it leave it unresolved; command-line overrides are unseen.
-            let set = profiles.iter().any(|p| {
-                c.profiles.contains(&p.id) && p.settings.contains_key("project_doc_max_bytes")
-            });
+            // A resolved budget is shared by the selected profiles; name the file that sets it.
+            let set = profiles
+                .iter()
+                .filter(|p| c.profiles.contains(&p.id))
+                .find_map(|p| p.instruction_budget_file.as_deref());
             let limit = |budget: usize| {
                 format!(
                     "the {} bytes {} (project_doc_max_bytes), counting headers and wrappers",
                     count(budget as u64),
-                    if set {
-                        "your Codex config sets"
-                    } else {
-                        "Codex loads by default"
+                    match set {
+                        Some(file) => format!("{file} sets"),
+                        None => "Codex loads by default".into(),
                     }
                 )
             };
@@ -5211,11 +5212,15 @@ mod tests {
         profile
             .settings
             .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
+        profile.instruction_budget_file = Some("/etc/codex/config.toml".into());
         let profiles = std::slice::from_ref(&profile);
         assert_eq!(verdict(&agents(40_000), profiles).1, Mark::Keep);
-        // A configured budget is named as the user's own, not as the default.
+        // A configured budget names the file that sets it, not the default.
         let set = evidence(&agents(70_000), profiles);
-        assert!(set.contains("65,536 bytes your Codex config sets"), "{set}");
+        assert!(
+            set.contains("65,536 bytes /etc/codex/config.toml sets"),
+            "{set}"
+        );
         assert!(!set.contains("default"), "{set}");
         // A project or named profile that can set it leaves no verdict.
         profile.instruction_budget_unresolved =

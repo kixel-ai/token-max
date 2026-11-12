@@ -77,5 +77,4 @@ in the PR. The same PR updates the README's sample and
 
 ## Related
 
-- [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - its yellow line is the first Opinion advisory
 - [Run the report as an interactive doctor](/quest/m0/doctor.md) - offers the red lines first, in this order

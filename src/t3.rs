@@ -2155,9 +2155,11 @@ mod tests {
                 .iter()
                 .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
                 .unwrap();
+            // `ownership_resolved` also reflects platform policy (always unresolved on
+            // Windows), so check the marker shared-history ambiguity leaves on the TTL.
             assert_eq!(
-                current.t3.as_ref().unwrap().ownership_resolved,
-                removed,
+                current.ttl.main.reason.contains("shared native history"),
+                !removed,
                 "{owner}"
             );
             if removed {

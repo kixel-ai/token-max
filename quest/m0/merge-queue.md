@@ -16,15 +16,9 @@ reruns became a cost; in that session, main's "branch must be up to date"
 rule made each of about 13 landings send the other open PRs back for a
 merge of `main` and a fresh CI run, about 10 extra merges in all.
 
-- Merge queues are unavailable on personal repositories, so this waits for
-  the move to kixel-ai.
 - Enable the queue on `main` with squash merges and the `Check` job as its
   required check, and run `Check` on `merge_group` events in
   `.github/workflows/`. Drop the up-to-date requirement in its favor.
 - `quest merge` enqueues a PR on a base with a merge queue; update
   `CONTRIBUTING.md`'s landing steps to match, including whether
   `quest land watch` runs beside the queue.
-
-## Required
-
-- [Move the repository to the kixel-ai organization](/quest/m0/kixel-ai.md) - merge queues need an organization-owned repository

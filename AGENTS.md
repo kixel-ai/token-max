@@ -11,8 +11,9 @@ from transcripts, and to help the user decide what to enable or disable.
   the cheaper value outright.
 - Others trade cost for capability, such as a tool, skill or MCP server.
   Report what each one cost and how often it was used. Recommend turning it
-  off when it cost more than `--max-cost-per-use` (default $1) per recorded
-  use, counting no use as one; otherwise recommend keeping it.
+  off when it was never used (red, exit 1). When it cost more than
+  `--max-cost-per-use` (default $1) per recorded use, suggest turning it off
+  as an advisory (yellow, exit 0); otherwise recommend keeping it (green).
 - Show every setting and feature on its own line with its cost. Name the
   setting that turns each one off, and say plainly when a cost can't be
   measured rather than hiding the setting.

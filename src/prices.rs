@@ -1079,6 +1079,11 @@ pub fn unit_rates(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<Uni
     })
 }
 
+/// One part's per-token output price; None when unpriced.
+pub fn output_rate(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<f64> {
+    Some(selected_rates(catalog, r, p).ok()?.rates.output? / 1e6)
+}
+
 /// One part's input as consecutive spans of its prompt prefix, each with its
 /// token count and per-token price: cache reads, then cache writes, then
 /// ordinary input, which runs to the end. None when usage or a price is missing,

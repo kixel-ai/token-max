@@ -81,6 +81,15 @@ also removes explicit invocation. Same-named copies are flagged even without
 prices, with one copy retained. Repeated discovery of the same path needs the
 redundant source removed. Zero observations do not prove nonuse, and listing
 cost is not promised savings: Codex can backfill the freed catalog space.
+Auto memory, Claude Code's `MEMORY.md` and system prompt section or Codex's
+memory summary, is worth considering off while it is on, or may be on because
+a Codex setting such as a `--profile` selection is not recorded, on the maintainer's
+opinion rather than a measurement: notes the agent writes for itself skip
+review and encourage slop, so durable guidance belongs in a reviewed,
+checked-in CLAUDE.md or AGENTS.md. Its line shows the total cost of the loaded
+memory, the memory files read back and the writes, and how often it was read or
+written, but `--max-cost-per-use` does not apply and it does not cause exit 1. A
+profile with memory off shows it under **Keep**.
 Instruction files, Claude plugin skills, which `skillOverrides` does not reach, and the
 system prompt, core tools such as Bash and Read, and the skill and subagent
 lists have no switch and are listed after the verdicts.

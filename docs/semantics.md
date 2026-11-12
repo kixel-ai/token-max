@@ -645,7 +645,8 @@ model-facing tool names may be sanitized or shortened, so unmatched names get
 no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
 A recommendation to disable the server covers its individual tool changes,
 so the settings snippet does not add redundant per-tool blocks.
-Instruction files have no switch. Core tools, the system prompt
+Instruction files have no switch; Claude's MEMORY.md is auto memory, not an
+instruction file (see [Auto memory](#auto-memory)). Core tools, the system prompt
 and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
@@ -808,6 +809,86 @@ Current provider guidance distinguishes skill discovery from body loading:
 [Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
+
+## Auto memory
+
+`auto-memory` checks each profile once. It is advisory while memory is on and
+keep once it is off, and never exits 1: notes the agent writes for itself skip
+the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
+slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not
+apply. The check reports the total cost, the reads and writes, and the setting
+that turns it off; its `savingsUsd` is that total. Once memory is off, the line
+still shows what it cost and how often it was used earlier in the window.
+Requests that recorded no context leave the memory they loaded unmeasured. When
+no request recorded one, the cost is unknown rather than zero; otherwise the
+total is a lower bound, shown as "at least", and `coverage` counts the requests
+that recorded their context.
+
+[Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
+memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or
+`autoMemoryEnabled: false` says otherwise. While it is on, the system prompt has
+a `# Memory` section and the `instructions` attachment carries `MEMORY.md` as
+type `AutoMem`. The section, from its heading to the next top-level heading, is
+measured apart from the rest of the recorded system prompt and placed right
+after it; `MEMORY.md` is placed like any other attachment. Both form the
+`memory` context row. A request that loads `MEMORY.md` without such a section,
+as subagents do, leaves any memory instructions elsewhere in its prompt
+unmeasured, and the check says how many did. Today's setting decides whether
+memory is on, as every other check reads today's settings. It is resolved at the
+working directory of the latest main-agent request, where the user worked most
+recently, including the project's `.claude/settings.json` and
+`.claude/settings.local.json`, so `offFile` names the file that owns it. Claude
+Code reads the setting when a session starts, so a session begun before a change
+keeps the old value until it restarts. When main-agent sessions in that
+directory disagree with the setting at their latest request with a recorded
+shape, such as one that still carries the `# Memory` section after memory was
+turned off, the check notes how many, without changing its verdict. The scan
+cannot see an environment variable set only in the process that launched
+Claude Code.
+
+Uses are Read, Write, Edit and MultiEdit calls on files in a memory directory:
+`<root>/projects/<project>/memory/` under the profile root or alias, or the
+directory a loaded `MEMORY.md` came from, which `autoMemoryDirectory` can move.
+Read results move from the Read tool's output row to the memory row. The input a
+write sent, which the model generated, is estimated at the output price of the
+request whose reply made the call, using that model's calibrated token ratio;
+writes without one stay unpriced rather than zero.
+
+[Codex](https://developers.openai.com/codex/memories) memories are off unless
+`features.memories = true`, or both `memories.use_memories = false` (which
+keeps them out of the prompt) and `memories.generate_memories = false` (which
+stops new ones) are set. With each full context Codex 0.167.0 adds a developer message part
+tagged `memories.instructions` holding `memory_summary.md`, split into several
+parts when long; earlier versions start it with `## Memory`. A full world
+state leaves it in context. Compaction rebuilds it: the summary in the
+`compacted` record's `replacement_history` takes its place, and without one it
+is gone. The settings decide whether memory is on, resolved like Claude Code's
+at the latest main-agent request's directory, including the `.codex/config.toml` layers of
+a trusted project. When something the scan cannot record could change that, the
+state is unknown and the line is a yellow advisory that memories may be on,
+naming why: a project layer that sets memories in a project whose trust is not
+recorded, a named config profile (or legacy `profiles` entry) that sets
+memories, a named profile's `project_root_markers` or `projects` that could
+add or drop a `.codex/config.toml` above the session's directory that sets
+them, or a T3 instance whose launch arguments, secret environment values or
+machine policy could override them (as for Claude Code's T3 instances). Its turn-off advice then also names each file that sets memories, since
+the user setting alone would not override them. Fully resolved settings keep a
+definite on or off. A session there that carried a summary at its latest
+request while the settings turn memory off is noted, and requests that recorded no context leave the cost
+a lower bound or unknown even with memories off now, since they may have run
+while memories were on. A missing summary shows nothing, since it appears only once one has
+been written. Uses are
+the dedicated `memories` tools (`list`, `read` and `search` as reads,
+`add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token
+rule of thumb) and shell reads under `<codex home>/memories/` or
+`memories_v2/`. Dedicated tool output moves to the memory row; shell output
+stays on the shell's row. Extraction and consolidation run as requests Codex
+records only in telemetry, so their cost is not measured: wherever memories may
+have run in the window (not definitely off, used or loaded, or with a
+`memories` or `memories_v2` store under the Codex home, which Codex creates only
+once it generates memories), the line says so and its total is a lower bound. No local session has
+enabled Codex memories, so its tests use synthetic records derived from the
+0.167.0 source.
 
 ## Background generation
 

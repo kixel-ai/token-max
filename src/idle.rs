@@ -3158,6 +3158,7 @@ mod tests {
             background: vec![],
             background_directories: IndexMap::default(),
             background_requests: IndexMap::default(),
+            memory: None,
             t3: None,
         }
     }
@@ -4176,6 +4177,7 @@ mod tests {
             idle_mode: mode,
             idle_owner: "t3/settings.json:idleCompaction".into(),
             ownership_resolved: true,
+            settings_unresolved: false,
             limitations: vec![],
             inherited_window: None,
         });

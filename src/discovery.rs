@@ -9,12 +9,12 @@ use serde_json::{Map, Value};
 
 use crate::controls::{
     CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, bash_cap_control,
-    claude_background, codex_background, compaction_controls, idle_controls, js_string, members,
-    scoped_environment, speed_controls,
+    claude_background, claude_memory, codex_background, codex_memory, compaction_controls,
+    idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
-    Agent, BackgroundControl, Harness, IdleControl, Location, PerBucket, Profile, Request,
-    RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Harness, IdleControl, Location, MemoryControl, PerBucket, Profile,
+    Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -687,6 +687,8 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
+        // Auto memory's setting is read at the latest main-agent request's directory.
+        let latest = crate::memory::deciding_request(&relevant).and_then(|r| r.cwd.clone());
         if relevant
             .iter()
             .any(|r| r.cwd.as_deref().is_none_or(str::is_empty))
@@ -755,6 +757,12 @@ pub fn discover_claude_controls(
             let speed = speed_controls(Harness::Claude, &scopes, local_env)?;
             let mut idle = idle_controls(&scopes, local_env)?;
             let background = claude_background(&scopes, local_env)?;
+            if latest.as_deref() == Some(cwd) {
+                profile.memory = Some(MemoryControl {
+                    directory: Some(cwd.into()),
+                    ..claude_memory(&scopes, local_env)?
+                });
+            }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
                 settings_env
@@ -980,9 +988,19 @@ pub fn discover_codex_controls(
             );
         }
         let mut marker_selection = legacy_selection;
+        // Profiles that set memories, which a --profile selection could apply.
+        let mut memory_profiles: Vec<String> = members(user.get("profiles"))
+            .values()
+            .any(|p| sets_codex_memory(members(Some(p))))
+            .then(|| profile.settings_file.clone())
+            .into_iter()
+            .collect();
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
+            if sets_codex_memory(&config) {
+                memory_profiles.push(file.clone());
+            }
             marker_selection |=
                 config.contains_key("project_root_markers") || config.contains_key("projects");
             if members(config.get("tui")).contains_key("auto_recap") {
@@ -1001,6 +1019,14 @@ pub fn discover_codex_controls(
                 );
             }
         }
+        // Named profiles can set memories too, and which one launched is not recorded.
+        let profile_memory = (!memory_profiles.is_empty()).then_some(
+            "a named config profile sets memories, and --profile selection is not recorded",
+        );
+        if let Some(memory) = &mut profile.memory {
+            memory.unresolved = profile_memory.map(String::from);
+            memory.overrides = memory_profiles.clone();
+        }
         profile.background = base.clone();
         let mut unknown = base.clone();
         unresolved_background(
@@ -1011,7 +1037,14 @@ pub fn discover_codex_controls(
             .background_directories
             .insert(String::new(), unknown);
         let markers = codex_markers(&base_scopes, &profile.settings_file)?;
-        let cwds = directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)));
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| r.profiles.contains(&profile.id))
+            .collect();
+        // Memories' setting is read at the latest main-agent request's directory, as
+        // for Claude.
+        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.clone());
+        let cwds = directories(mine.iter().copied());
         for cwd in cwds {
             if !existing_directory(cwd)? {
                 let mut controls = base.clone();
@@ -1059,6 +1092,53 @@ pub fn discover_codex_controls(
                         .map(|(file, config)| SettingsScope { config, file }),
                 );
             }
+            if latest.as_deref() == Some(cwd) {
+                // Codex reads a project's config only once the project is trusted.
+                let trusted = if trust == Some("trusted") {
+                    &scopes[..]
+                } else {
+                    &base_scopes[..]
+                };
+                let untrusted: Vec<String> = layers
+                    .iter()
+                    .filter(|(_, config)| trust.is_none() && sets_codex_memory(config))
+                    .map(|(file, _)| file.clone())
+                    .collect();
+                let untrusted_layer = !untrusted.is_empty();
+                // A named profile's project_root_markers or projects can change which
+                // project layers apply, which matters only where one sets memories.
+                let moved = if marker_selection {
+                    ancestors_setting_codex_memory(cwd, &profile.settings_file)?
+                } else {
+                    vec![]
+                };
+                let moved_layer = !moved.is_empty();
+                let mut overrides = memory_profiles.clone();
+                for file in untrusted.into_iter().chain(moved) {
+                    if !overrides.contains(&file) {
+                        overrides.push(file);
+                    }
+                }
+                let reasons: Vec<&str> = [
+                    untrusted_layer.then_some(
+                        "a project .codex/config.toml sets memories, but the project's trust is not recorded",
+                    ),
+                    moved_layer.then_some(
+                        "a .codex/config.toml above the latest session's directory sets memories, and a named config profile that can change which project config applies may have been selected",
+                    ),
+                    profile_memory,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                profile.memory = Some(MemoryControl {
+                    directory: Some(cwd.into()),
+                    unresolved: (!reasons.is_empty()).then(|| reasons.join("; ")),
+                    overrides,
+                    stored: codex_memory_stored(&profile.root),
+                    ..codex_memory(trusted, &profile.settings_file)?
+                });
+            }
             let has_override = trust != Some("untrusted")
                 && layers
                     .iter()
@@ -1094,6 +1174,39 @@ pub fn discover_codex_controls(
         }
     }
     Ok(())
+}
+
+/// Whether a Codex config sets whether memories are on, used or generated.
+fn sets_codex_memory(config: &Map<String, Value>) -> bool {
+    let memories = members(config.get("memories"));
+    members(config.get("features")).contains_key("memories")
+        || memories.contains_key("use_memories")
+        || memories.contains_key("generate_memories")
+}
+
+/// Whether a Codex home holds a memory store, which Codex writes only once it has
+/// generated memories.
+fn codex_memory_stored(root: &str) -> bool {
+    ["memories", "memories_v2"]
+        .iter()
+        .any(|name| std::path::Path::new(&join(&[root, name])).is_dir())
+}
+
+/// Every `.codex/config.toml` from `cwd` up to the filesystem root, other than the
+/// user's own, that sets memories, whichever of them a project root would include.
+fn ancestors_setting_codex_memory(cwd: &str, user: &str) -> Result<Vec<String>, ScanError> {
+    let mut files = vec![];
+    let mut path = cwd;
+    loop {
+        let file = join(&[path, ".codex", "config.toml"]);
+        if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
+            files.push(file);
+        }
+        if dirname(path) == path {
+            return Ok(files);
+        }
+        path = dirname(path);
+    }
 }
 
 /// Whether a file name selects a named Codex profile, as in `--profile NAME`.
@@ -1556,6 +1669,14 @@ pub(crate) fn profile(
     } else {
         codex_background(&speed_scopes)?
     };
+    let memory = if claude {
+        claude_memory(&speed_scopes, local_env)?
+    } else {
+        MemoryControl {
+            stored: codex_memory_stored(&canonical),
+            ..codex_memory(&speed_scopes, &settings_file)?
+        }
+    };
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1576,6 +1697,7 @@ pub(crate) fn profile(
         background,
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
+        memory: Some(memory),
         t3: None,
         agents: crate::model::AgentControls::default(),
     })

@@ -758,6 +758,9 @@ pub struct Profile {
     /// Request-specific overrides when session transitions or launch precedence are unresolved.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
+    /// Auto memory's current setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryControl>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t3: Option<T3Instance>,
     /// Current controls that choose subagent models and efforts.
@@ -846,6 +849,10 @@ pub struct T3Instance {
     pub idle_mode: T3IdleMode,
     pub idle_owner: String,
     pub ownership_resolved: bool,
+    /// Whether launch arguments, a secret environment value or machine policy could
+    /// override native settings in ways discovery does not resolve.
+    #[serde(default)]
+    pub settings_unresolved: bool,
     pub limitations: Vec<String>,
     /// The instance's environment when it inherits the native settings window, which
     /// discovery resolves at each recorded project like a native profile's.
@@ -931,6 +938,33 @@ pub enum BackgroundFeature {
     GoalCheckIns,
     /// Codex's recap while the terminal is unfocused.
     AutoRecaps,
+}
+
+/// Whether auto memory is on in current settings, and the setting that turns it off.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryControl {
+    pub value: bool,
+    /// Where the effective value comes from.
+    pub owner: String,
+    /// The setting that turns it off.
+    pub off: String,
+    /// The file to set it in; null for an environment variable.
+    pub off_file: Option<String>,
+    /// The working directory it was resolved at, the latest session's; null when
+    /// only profile-wide settings were read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// Why a setting that may apply could not be resolved, such as an unrecorded
+    /// project trust or profile selection; null when it resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
+    /// Files whose memory settings may override `offFile` but could not be resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
+    /// Whether Codex's memory store exists, so memories were generated at some point.
+    #[serde(default)]
+    pub stored: bool,
 }
 
 /// One background feature's current state and the control that owns it.
@@ -1323,6 +1357,36 @@ pub struct BackgroundCheck {
     pub lost_warming: Cost,
 }
 
+/// Auto memory's cost over the window. It is advised off whatever it cost, since
+/// notes the agent writes for itself are not reviewed like checked-in instructions.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCheck {
+    /// Current and recommended values: true is on.
+    #[serde(flatten)]
+    pub base: CheckBase<bool>,
+    pub harness: Harness,
+    /// The setting that turns it off.
+    pub off: String,
+    /// The file to set it in; null for an environment variable.
+    pub off_file: Option<String>,
+    /// Loaded memory and the memory files read back, priced like other context; null when unpriced.
+    pub context_usd: Option<f64>,
+    /// Memory writes at the output price, estimated from their characters; null when unpriced.
+    pub writes_usd: Option<f64>,
+    pub reads: u64,
+    pub writes: u64,
+    /// Why whether it is on could not be resolved, making `current` null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
+    /// Files whose memory settings may override `offFile`, to turn it off in too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
+    /// Whether Codex may have extracted or consolidated memories in the window, which
+    /// is never measured, so the total is a lower bound.
+    pub unmeasured_generation: bool,
+}
+
 /// Foreground Bash calls that held the cache idle, and what their misses cost.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1591,6 +1655,8 @@ pub enum CheckResult {
     BashCap(BashCapCheck),
     #[serde(rename = "keepalive")]
     Keepalive(KeepaliveCheck),
+    #[serde(rename = "auto-memory")]
+    Memory(MemoryCheck),
 }
 
 impl CheckResult {
@@ -1605,6 +1671,7 @@ impl CheckResult {
             CheckResult::Background(c) => c.base.action,
             CheckResult::BashCap(c) => c.base.action,
             CheckResult::Keepalive(c) => c.base.action,
+            CheckResult::Memory(c) => c.base.action,
         }
     }
 }
@@ -1627,6 +1694,9 @@ pub enum Category {
     PluginInstructions,
     AppInstructions,
     ManagedInstructions,
+    /// Auto memory the harness loads on its own: Claude's MEMORY.md and system
+    /// prompt section, or Codex's memory summary.
+    Memory,
     Other,
 }
 
@@ -1646,6 +1716,7 @@ impl Category {
             Category::PluginInstructions => "plugin-instructions",
             Category::AppInstructions => "app-instructions",
             Category::ManagedInstructions => "managed-instructions",
+            Category::Memory => "memory",
             Category::Other => "other",
         }
     }
@@ -2099,6 +2170,31 @@ pub struct ExposureScan {
     pub tool_calls: Vec<ToolCalls>,
     /// Selected-window output of each tool, deduplicated by call id.
     pub tool_results: Vec<ToolResults>,
+    /// Selected-window reads and writes of auto memory, deduplicated by call id.
+    #[serde(default)]
+    pub memory: Vec<MemoryUse>,
+}
+
+/// Whether the agent read or wrote auto memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryAccess {
+    Read,
+    Write,
+}
+
+/// One read or write of auto memory by the agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryUse {
+    pub harness: Harness,
+    pub access: MemoryAccess,
+    pub profiles: Vec<String>,
+    pub time: Millis,
+    /// Characters of the tool input that wrote it, which the model generated as output.
+    pub characters: Option<i64>,
+    /// The request whose reply made the call, when its record was found.
+    pub request: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -2151,6 +2247,8 @@ pub enum ContextKind {
     System,
     /// A tool's output, carried in the conversation after the call that returned it.
     ToolOutput,
+    /// Auto memory: its loaded context and the memory files the agent read.
+    Memory,
     Other,
 }
 

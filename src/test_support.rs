@@ -1,4 +1,4 @@
-//! Synthetic requests and checkout-local scratch profiles for unit tests.
+//! Synthetic requests and isolated scratch profiles for unit tests.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -121,7 +121,8 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// An isolated home with empty Claude and Codex profiles under the checkout's `.tmp/`.
+/// An isolated home with empty Claude and Codex profiles in the system temp directory,
+/// outside any checkout or real home whose settings discovery would read as a project's.
 pub struct Workspace {
     pub home: PathBuf,
     pub claude: PathBuf,
@@ -131,13 +132,14 @@ pub struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!(
-                "test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+        let home = std::env::temp_dir().join(format!(
+            "token-max-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        // Tests compare discovered paths, which resolve symlinks such as macOS's /var.
+        let home = std::fs::canonicalize(&home).unwrap();
         let claude = home.join(".claude");
         let codex = home.join(".codex");
         std::fs::create_dir_all(claude.join("projects/project")).unwrap();

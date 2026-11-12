@@ -2608,9 +2608,9 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     let coverage = check.base.coverage.unwrap();
     assert_eq!((coverage.priced, coverage.total), (2, 3));
     assert!(check.base.savings_usd.unwrap() > 0.0);
-    // The long temporary path wraps the line, and its length moves the cents,
-    // since the loaded paths are part of the priced context.
-    let both = text(&both).replace("\n  ", " ");
+    // The temporary path's length moves the cents, since the loaded paths are part
+    // of the priced context.
+    let both = text(&both);
     assert!(labelled(
         &both,
         "Auto memory",

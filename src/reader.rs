@@ -1063,8 +1063,14 @@ impl Reader {
                 }
             }
         }
-        // Earlier user turns still count toward thresholds such as a recap's three turns.
-        if !selected && !matches!(kind, Some("assistant" | "user")) && !compact_boundary {
+        let notice = kind == Some("system")
+            && is(raw, "subtype", "informational")
+            && is(raw, "level", "notice")
+            && string(raw, "content").is_some_and(idle_notice);
+        // Earlier user turns still count toward thresholds such as a recap's three turns, and an
+        // earlier idle notice still marks its boundary as no window trigger.
+        if !selected && !matches!(kind, Some("assistant" | "user")) && !compact_boundary && !notice
+        {
             return Ok(());
         }
         let context = &file.context;
@@ -1165,6 +1171,9 @@ impl Reader {
                 e.pre_tokens = count(meta.get("preTokens"))?;
                 e.post_tokens = count(meta.get("postTokens"))?;
                 e.duration_ms = count(meta.get("durationMs"))?;
+            } else {
+                // A pre-window trigger still shows the current window; its other counts are never read.
+                e.pre_tokens = count(meta.get("preTokens")).ok().flatten();
             }
             e.request = if let Some(reference) = opaque(raw, "requestRef")? {
                 Some(format!("ref:{reference}").into())
@@ -1172,11 +1181,7 @@ impl Reader {
                 opaque(meta, "requestId")?.map(|r| format!("claude:{r}").into())
             };
             self.add_event(e);
-        } else if kind == Some("system")
-            && is(raw, "subtype", "informational")
-            && is(raw, "level", "notice")
-            && string(raw, "content").is_some_and(idle_notice)
-        {
+        } else if notice {
             let time = time.ok_or_else(|| ScanError::new("missing idle notice timestamp"))?;
             let mut e = event(
                 snapshot,
@@ -2636,19 +2641,25 @@ mod tests {
                 notice("third", "message"),
             ]),
         );
-        let data = scan(&options(&w)).unwrap();
-        let attribution: Vec<_> = data
-            .events
-            .iter()
-            .filter(|e| e.kind == EventKind::Compaction)
-            .map(|e| (e.trigger.as_deref(), e.idle_attribution))
-            .collect();
+        fn attribution(events: &[StructuralEvent]) -> Vec<(Option<&str>, IdleAttribution)> {
+            events
+                .iter()
+                .filter(|e| e.kind == EventKind::Compaction)
+                .map(|e| (e.trigger.as_deref(), e.idle_attribution))
+                .collect()
+        }
         let expected = [
             (Some("auto"), IdleAttribution::Notice),
             (Some("manual"), IdleAttribution::Unknown),
             (Some("auto"), IdleAttribution::Unknown),
         ];
-        assert_eq!(attribution, expected);
+        let data = scan(&options(&w)).unwrap();
+        assert_eq!(attribution(&data.events), expected);
         assert!(!private(&data));
+        // Notices before --since still mark their boundaries, which stay as cache context.
+        let mut before = options(&w);
+        before.since = Some(crate::safe::parse_instant("2026-11-01T00:01:00Z").unwrap());
+        let data = scan(&before).unwrap();
+        assert_eq!(attribution(&data.cache_context.boundaries), expected);
     }
 }

@@ -18,4 +18,3 @@ advisory in 0.1.0; drop).
   archive, settle and snooze events, pending runtime requests and
   merge-backs, as of the gap.
 - This is the only remaining blocker for that mode.
-

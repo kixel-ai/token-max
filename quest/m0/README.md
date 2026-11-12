@@ -179,8 +179,7 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 ## Required
 
 - [Report each subagent type's model and cost](/quest/m0/subagent-models.md) - every Claude subagent type and Codex role shows its cost, model, effort and source, and a cheapest-model reprice
-- [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
-- [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history
+- [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history, and hosts are analyzed one at a time
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
 - [Resolve Claude sessions by T3 turn items](/quest/m0/t3-turn-items.md) - `/clear` sessions and shelled-out `claude -p` runs stop keeping native profiles advisory
 - [Cap explicit windows at the model's context window](/quest/m0/window-cap.md) - explicit windows replay at the window that actually ran

@@ -18,10 +18,11 @@ use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
-    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, IdleAttribution, IdleCheck,
-    IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
-    PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar, Scan,
-    ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowControl,
+    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
+    IdleCheck, IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind,
+    PerBucket, PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming,
+    Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate,
+    WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sum, add_costs, price_components, price_part, server_cost,
@@ -364,7 +365,7 @@ struct ReplayIndex<'r> {
     /// The last request with each identity.
     by_id: HashMap<&'r str, &'r Request>,
     /// Identities with an event at or after the window start.
-    selected_events: HashSet<&'r str>,
+    selected_events: HashSet<&'r Id>,
     calibration: HashMap<SampleKey<'r>, Calibration<'r>>,
 }
 
@@ -392,11 +393,11 @@ impl<'r> ReplayIndex<'r> {
             index.by_id.insert(&*r.id, r);
         }
         // The last event with each identity, like a JavaScript Map built from the array.
-        let mut by_id: HashMap<&str, &StructuralEvent> = HashMap::default();
+        let mut by_id: HashMap<&Id, &StructuralEvent> = HashMap::default();
         for &e in events {
-            by_id.insert(e.id.as_str(), e);
+            by_id.insert(&e.id, e);
             if e.time >= since {
-                index.selected_events.insert(e.id.as_str());
+                index.selected_events.insert(&e.id);
             }
             for (i, origin) in e.origins.iter().enumerate() {
                 let session = &*origin.session;
@@ -696,7 +697,7 @@ struct Session<'r> {
 /// Charges shared by every profile.
 struct Summaries<'a> {
     /// The last charge for each event, like a JavaScript Map built from the array.
-    by_event: HashMap<&'a str, &'a CompactionCharge>,
+    by_event: HashMap<&'a Id, &'a CompactionCharge>,
     requests: HashSet<&'a str>,
 }
 
@@ -754,10 +755,10 @@ impl<'r, 'x> Runner<'r, 'x> {
         groups
             .into_iter()
             .map(|(session, ps)| {
-                let mut idle_by_event: HashMap<&str, usize> = HashMap::default();
+                let mut idle_by_event: HashMap<&Id, usize> = HashMap::default();
                 for &i in &ps {
                     if let Some(b) = self.prepared[i].boundary {
-                        idle_by_event.insert(b.id.as_str(), i);
+                        idle_by_event.insert(&b.id, i);
                     }
                 }
                 let requests = ReplayIndex::session(&self.index.requests, session);
@@ -770,7 +771,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                 }
                 for &e in boundaries {
                     let key = tick_key(e.time, true, keyed.len());
-                    let idle = idle_by_event.get(e.id.as_str()).copied();
+                    let idle = idle_by_event.get(&e.id).copied();
                     let source = idle
                         .map(|i| self.prepared[i].previous)
                         .or_else(|| {
@@ -778,7 +779,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             self.index.by_id.get(id).copied()
                         })
                         .unwrap_or(requests[0]);
-                    let summary = self.summaries.by_event.get(e.id.as_str()).copied();
+                    let summary = self.summaries.by_event.get(&e.id).copied();
                     let id = summary.and_then(|s| s.request.as_deref()).unwrap_or("");
                     let tick = Tick::Boundary {
                         e,
@@ -831,7 +832,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             by_period: vec![None; self.prepared.len()],
         };
         let mut resumed = 0.0;
-        let mut charged: HashSet<&str> = HashSet::default();
+        let mut charged: HashSet<&Id> = HashSet::default();
         for session in sessions {
             let mut states = vec![State {
                 weight: 1.0,
@@ -916,7 +917,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let sample = c.samples[0];
                             if point {
                                 periods[i].calibration = Some(PeriodCalibration {
-                                    events: c.samples.iter().map(|s| s.event.to_string()).collect(),
+                                    events: c.samples.iter().map(|s| s.event.clone()).collect(),
                                     summary_tokens: g.output,
                                     prefix_tokens: g.prefix,
                                 });
@@ -1025,10 +1026,10 @@ impl<'r, 'x> Runner<'r, 'x> {
                         let summary_request = summary
                             .and_then(|s| s.request.as_deref())
                             .filter(|r| !r.is_empty());
-                        let allocated = !charged.contains(e.id.as_str())
+                        let allocated = !charged.contains(&e.id)
                             && (summary_request.is_none()
                                 || summary.is_some_and(|s| s.cost.total_usd != Some(0.0)));
-                        charged.insert(e.id.as_str());
+                        charged.insert(&e.id);
                         // Changed input to the observed summary under each carried context.
                         let extra = |state: &State| -> Option<Cost> {
                             let linked = linked.filter(|_| !billed.is_empty())?;
@@ -1415,7 +1416,7 @@ impl<'a> Profiled<'a> {
             let mut activity_index = 0;
             let mut turn_start = Millis::MIN;
             let mut turn_end = Millis::MIN;
-            let mut pending: HashSet<&str> = HashSet::default();
+            let mut pending: HashSet<&Id> = HashSet::default();
             let mut old: HashMap<&str, &Scalar> = HashMap::default();
             for (position, &r) in group.iter().enumerate() {
                 let scope = self.scopes.scope(r);
@@ -1489,10 +1490,10 @@ impl<'a> Profiled<'a> {
                             turn_end = e.time;
                         }
                         EventKind::ToolStart => {
-                            pending.insert(e.tool_id.as_deref().unwrap_or(&e.id));
+                            pending.insert(e.tool_id.as_ref().unwrap_or(&e.id));
                         }
                         EventKind::ToolEnd => {
-                            if let Some(id) = e.tool_id.as_deref().filter(|id| !id.is_empty()) {
+                            if let Some(id) = &e.tool_id {
                                 pending.remove(id);
                             }
                         }
@@ -1681,14 +1682,14 @@ impl<'a> Profiled<'a> {
         baseline: &str,
     ) -> IdleScenario {
         let (prepared, mut periods, activation_cohorts) = self.periods(index, ttls, windows, owner);
-        let idle_events: HashSet<&str> = prepared
+        let idle_events: HashSet<&Id> = prepared
             .iter()
-            .filter_map(|p| p.boundary.map(|b| b.id.as_str()))
+            .filter_map(|p| p.boundary.map(|b| &b.id))
             .collect();
         let idle_requests: HashSet<&str> = self
             .all_summaries
             .iter()
-            .filter(|s| idle_events.contains(s.event.as_str()) && s.cost.total_usd != Some(0.0))
+            .filter(|s| idle_events.contains(&s.event) && s.cost.total_usd != Some(0.0))
             .filter_map(|s| s.request.as_deref().filter(|r| !r.is_empty()))
             .collect();
         let mut common = Sum::new();
@@ -1699,8 +1700,8 @@ impl<'a> Profiled<'a> {
         }
         for s in self.all_summaries {
             if s.request.as_deref().is_none_or(str::is_empty)
-                && !idle_events.contains(s.event.as_str())
-                && index.selected_events.contains(s.event.as_str())
+                && !idle_events.contains(&s.event)
+                && index.selected_events.contains(&s.event)
             {
                 common.add(&s.cost);
             }
@@ -1970,7 +1971,7 @@ fn profile_checks<'a>(
         requests: HashSet::default(),
     };
     for s in options.summaries {
-        summaries.by_event.insert(s.event.as_str(), s);
+        summaries.by_event.insert(&s.event, s);
         if let Some(r) = s.request.as_deref().filter(|r| !r.is_empty()) {
             summaries.requests.insert(r);
         }
@@ -2653,15 +2654,15 @@ fn t3_replay(
         Generate(usize),
     }
     let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
-    let idle_ids: HashSet<&str> = events
+    let idle_ids: HashSet<&Id> = events
         .iter()
         .filter(|e| e.idle_attribution == IdleAttribution::T3)
-        .map(|e| e.id.as_str())
+        .map(|e| &e.id)
         .collect();
     let idle_requests: HashSet<&str> = options
         .summaries
         .iter()
-        .filter(|s| idle_ids.contains(s.event.as_str()))
+        .filter(|s| idle_ids.contains(&s.event))
         .filter_map(|s| s.request.as_deref())
         .collect();
     for &r in requests {
@@ -2898,7 +2899,7 @@ fn t3_replay(
                                 (s.summary.usage.input.unwrap_or(0)
                                     - events
                                         .iter()
-                                        .find(|e| e.id == s.event)
+                                        .find(|e| e.id == *s.event)
                                         .and_then(|e| e.pre_tokens)
                                         .unwrap_or(s.summary.usage.input.unwrap_or(0)))
                                 .max(0)
@@ -2947,7 +2948,7 @@ fn t3_replay(
                     if mode == T3IdleMode::BeforeCacheExpires {
                         periods[*i].summary_cost = cost;
                         periods[*i].calibration = Some(PeriodCalibration {
-                            events: matches.iter().map(|s| s.event.into()).collect(),
+                            events: matches.iter().map(|s| s.event.clone()).collect(),
                             summary_tokens: output,
                             prefix_tokens: full,
                         });
@@ -3538,7 +3539,7 @@ mod tests {
             for kind in [EventKind::TurnStart, EventKind::TurnEnd] {
                 let mut s = data(vec![request("final", 100.0, 300_000)], vec![]);
                 s.events.push(StructuralEvent {
-                    tool_id: tool_id.map(str::to_string),
+                    tool_id: tool_id.map(Id::from),
                     ..session_event("abandoned", EventKind::ToolStart, "target", 50.0)
                 });
                 s.events

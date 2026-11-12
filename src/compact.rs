@@ -176,14 +176,14 @@ fn visibility(scan: &ExposureScan) -> Value {
     let components = scan
         .components
         .iter()
-        .map(|c| (c.id.as_str(), c))
+        .map(|c| (&*c.id, c))
         .collect::<crate::collections::HashMap<_, _>>();
     groups(scan.visibility.iter().map(|v| json!({
         "component": v.component.as_ref().map(|id| {
             let c = components[&**id];
             // These names identify individual messages/calls, not settings. Keep
             // their semantic target and provenance without recreating a call catalog.
-            let name = (!matches!(c.provenance.as_str(),
+            let name = (!matches!(&*c.provenance,
                 "unclassified-rendered-attachment" | "observed-tool-result-not-wire-proof" | "unmapped-rendered-delta"
             )).then_some(&c.name);
             json!({"name": name, "category": c.category, "targets": c.targets, "provenance": c.provenance})

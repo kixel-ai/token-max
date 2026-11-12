@@ -273,7 +273,12 @@ Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
 Sonnet and Haiku models.
 A recorded request above 200k on an older model leaves its default unresolved,
 because a `[1m]` variant may have set it; so does a model ID outside that table,
-such as a gateway alias or Mythos.
+such as a gateway alias or Mythos, unless `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
+set. Claude Code then [compacts](https://code.claude.com/docs/en/model-config#which-ids-claude_code_max_context_tokens-applies-to)
+(checked 2026-11-11) a provider or custom ID at the declared window, which is
+assumed as its default unless the ID is a bare `claude-` name, where the variable
+applies only with compaction off, or a recorded request above the declared
+window without the 1M opt-out shows a `[1m]` spelling ran, which ignores it.
 Claude Code caps any window at the model's context window, so a larger explicit
 window replays at that context window where it is known: 200k under
 `CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, or for an older model unless a recorded

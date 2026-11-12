@@ -9,9 +9,10 @@ identical, and the runtime is no worse than after
 
 ## Plan
 
-Decided 2026-11-11 (maintainer, /quest-plan): ✅ after
-[cutting the redundant memory](/quest/m0/memory-cheap-wins.md) (rejected:
-the fold alone; the cheap wins alone). ✅ m0 (rejected: m1). ✅ the
+Decided 2026-11-11 (maintainer, /quest-plan): ✅ after cutting the
+redundant memory in
+[kixelated/token-max#56](https://github.com/kixelated/token-max/pull/56)
+(rejected: the fold alone; the cheap wins alone). ✅ m0 (rejected: m1). ✅ the
 implementer chooses between one pass and two by measurement against the
 runtime bound (rejected: one pass only; two passes regardless of time).
 
@@ -39,9 +40,6 @@ Options for the implementer:
   request to one owner session, or merge outputs by request id.
 
 Rough floor from reading the structs: 100-150 bytes per request and 60-100
-per event, about 0.3-0.4 GB for 1M requests, against about 6 KB per request
-today.
-
-## Required
-
-- [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
+per event, about 0.3-0.4 GB for 1M requests, against about 5 KB per request
+today. The largest transient is now T3 enrichment's SQLite joins, about 0.9 GB
+on the maintainer's host.

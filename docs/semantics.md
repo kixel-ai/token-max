@@ -922,9 +922,11 @@ diagnostic, then the end of the stream. Any other build, a truncated or
 trailing value, a reference to an unsent value, or a nonzero exit fails the
 run. Strings, identifier lists, exposure views, tool-output totals and
 message-digest chains are sent once and then referenced by index, so the stream and the coordinator's
-copy keep the sharing the destination's scan had in memory. The coordinator
-reads the stream as it arrives rather than buffering it, and checks that the
-scan covers the requested window.
+copy keep the sharing the destination's scan had in memory. Every destination
+scans at once, but the coordinator reads a destination's stream only when that
+host's analysis starts, so it holds one scan at a time. It reads the stream as
+it arrives rather than buffering it, and checks that the scan covers the
+requested window.
 
 Background controls, their owning files and pre-window prompts and requests
 travel with the scan, so background estimates use the destination's settings

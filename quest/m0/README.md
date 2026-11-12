@@ -10,8 +10,10 @@ For each setting it prints the current value, the recommended one, the file
 or tool that owns it, and the evidence. Where costs can be quantified, it
 shows estimated net savings over the window and per month; otherwise it
 gives an applicable provider-guidance warning and says the dollars are
-unknown. It exits nonzero when anything should change and never edits
-settings. moq-dev/quest's `SETUP.md` points to it.
+unknown. On a terminal, `token-max doctor` offers each change it can make to
+a user settings file and writes it only after a yes; without one it prints
+the report and exits nonzero when anything should change. moq-dev/quest's
+`SETUP.md` points to it.
 
 ## Plan
 
@@ -176,8 +178,32 @@ the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
 
+Decided 2026-11-11 (maintainer, /quest-plan after an audit of the premise):
+✅ people run `token-max doctor`, which is interactive and offers to apply
+its recommendations, superseding recommend only; ✅ each machine output is
+its own sub-command with a named consumer, such as `token-max sessions`,
+and `--json` is removed; ✅ the repository moves to kixel-ai and keeps the
+name token-max. The reasons and rejected options are in the
+[doctor](/quest/m0/doctor.md), [JSON removal](/quest/m0/remove-json.md) and
+[kixel-ai](/quest/m0/kixel-ai.md) quests. Where this entry and an older one
+disagree, such as "never edits settings", "both text and JSON" or
+"Repository: ✅ kixelated", this one holds.
+
+Decided 2026-11-11 (maintainer, /quest-plan for that audit's follow-ups):
+✅ 0.1.0 ships [prebuilt binaries](/quest/m0/binaries.md) built by
+cargo-dist, with `install.sh` and `run.sh` at
+[max.kixel.ai](/quest/m0/install-site.md); ✅ the report is
+[sectioned by kind of claim](/quest/m0/claim-tiers.md): Measured, Official
+and Opinion. The epic's end-to-end validation also runs both curl lines
+against the published release.
+
 ## Required
 
+- [Remove the JSON report](/quest/m0/remove-json.md) - no `--json` flag, schema or `docs/json.md`; tests assert on the text report
+- [Run the report as an interactive doctor](/quest/m0/doctor.md) - `token-max doctor` walks through each change and writes a user settings file only after a yes
+- [Move the repository to the kixel-ai organization](/quest/m0/kixel-ai.md) - `kixel-ai/token-max`, with its protections and every reference updated
+- [Ship prebuilt binaries with cargo-dist](/quest/m0/binaries.md) - release binaries, shell and PowerShell installers, cargo-binstall and a Nix package
+- [Serve install.sh and run.sh from max.kixel.ai](/quest/m0/install-site.md) - one curl line installs, another runs `doctor` once without installing
 - [Report each subagent type's model and cost](/quest/m0/subagent-models.md) - every Claude subagent type and Codex role shows its cost, model, effort and source, and a cheapest-model reprice
 - [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history, and hosts are analyzed one at a time
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
@@ -185,3 +211,4 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 - [Price unset gateway windows at the declared context size](/quest/m0/gateway-windows.md) - gateway model IDs with a declared window get priced compaction comparisons
 - [Export priced sessions as JSON](/quest/m0/session-export.md) - moq-dev/quest's `quest usage` ties each session, sub-agents included, to a PR
 - [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each
+- [Section the report by kind of claim](/quest/m0/claim-tiers.md) - Measured, Official and Opinion sections, with color carrying the verdict

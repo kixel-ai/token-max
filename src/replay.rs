@@ -93,6 +93,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         version: event.version.clone(),
         client: event.client.clone(),
         cwd: event.cwd.clone(),
+        effort: None,
         profiles: event.profiles.clone(),
         locations: vec![event.location.clone()],
         accounting: Accounting::Individual,
@@ -1005,6 +1006,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         exposure,
         context,
         max_cost_per_use_usd,
+        subagents: crate::subagents::subagent_costs(&scan, catalog),
         checks,
         assumptions: [
             "host-local read-only analysis; network access is only for public prices",
@@ -1061,6 +1063,7 @@ mod tests {
         window.applicable = false;
         let n = requests.len() as u64;
         Scan {
+            subagents: vec![],
             t3: vec![],
             snapshot_started_at: iso(0),
             snapshot_finished_at: iso(0),

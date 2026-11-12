@@ -1032,6 +1032,7 @@ mod tests {
             })
             .unwrap_or_default();
         Scan {
+            subagents: vec![],
             snapshot_started_at: String::new(),
             snapshot_finished_at: String::new(),
             since: Some(0),

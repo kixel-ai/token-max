@@ -71,6 +71,7 @@ impl Interner {
             &mut r.version,
             &mut r.client,
             &mut r.cwd,
+            &mut r.effort,
         ] {
             self.share(slot);
         }
@@ -355,6 +356,9 @@ pub struct Request {
     pub client: Option<Text>,
     #[serde(with = "crate::wire::opt_text")]
     pub cwd: Option<Text>,
+    /// The reasoning effort the request was sent with, when recorded.
+    #[serde(with = "crate::wire::opt_text")]
+    pub effort: Option<Text>,
     pub parts: Vec<BillingPart>,
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
@@ -680,6 +684,48 @@ pub struct Profile {
     pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub t3: Option<T3Instance>,
+    /// Current controls that choose subagent models and efforts.
+    #[serde(default)]
+    pub agents: AgentControls,
+}
+
+/// A setting's current value and the file or variable that sets it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Owned {
+    pub value: String,
+    pub owner: String,
+}
+
+/// The current settings that choose subagent models and efforts, which history does not record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentControls {
+    /// Claude's `CLAUDE_CODE_SUBAGENT_MODEL` or Codex's `agents.default_subagent_model`.
+    pub model: Option<Owned>,
+    /// Claude's `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`.
+    pub effort: Option<Owned>,
+    /// Claude's `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which drops call and definition models.
+    pub force: bool,
+    /// Claude's `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`, which lets Explore inherit any main model.
+    pub explore_uncapped: bool,
+    /// Codex's `review_model`.
+    pub review: Option<Owned>,
+    /// Agent definition files: Claude `agents/*.md`, Codex agent role files.
+    pub definitions: Vec<AgentDefinition>,
+}
+
+/// One agent definition file's model and effort, never its prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinition {
+    pub name: String,
+    pub file: String,
+    /// The project directory whose agents it defines; None for the profile's own agents.
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// When the file last changed, so runs from before a change are not attributed to it.
+    pub modified: Option<Millis>,
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.
@@ -855,6 +901,28 @@ pub struct Snapshot {
     /// Complete lines that were not valid JSON objects, such as truncated or interleaved writes.
     pub skipped_lines: u64,
     pub lines: u64,
+}
+
+/// One subagent transcript's type and what its spawn requested, never its task.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    pub harness: Harness,
+    #[serde(with = "crate::wire::text")]
+    pub session: Text,
+    /// The conversation that spawned it, when recorded.
+    #[serde(with = "crate::wire::opt_text")]
+    pub parent: Option<Text>,
+    /// Claude's agent type; Codex's agent role (`default` when unnamed) or other subagent source.
+    pub kind: String,
+    /// Whether Claude recorded it as built in; None when unrecorded.
+    pub built_in: Option<bool>,
+    /// A Claude fork, which always runs on its parent's model.
+    pub fork: bool,
+    /// The model the spawning call requested, when recorded.
+    pub model: Option<String>,
+    /// The effort the spawning call requested, when recorded.
+    pub effort: Option<String>,
 }
 
 /// A price may be partially known without pretending the known subtotal is the total.
@@ -2053,6 +2121,73 @@ pub struct ContextCost {
 }
 
 // ---------------------------------------------------------------------------
+// Subagent costs.
+
+/// Where a subagent run's model came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelSource {
+    /// The spawning call's `model`.
+    Call,
+    /// The agent definition or role file, or a built-in agent's own definition.
+    Definition,
+    /// A setting for every subagent without a definition model.
+    Setting,
+    /// The parent conversation's model.
+    Inherited,
+    /// History and current settings cannot settle it.
+    Unknown,
+}
+
+/// How many requests or runs share one value.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Share {
+    pub name: String,
+    pub count: u64,
+}
+
+/// How many runs took their model from one source.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SourceShare {
+    pub source: ModelSource,
+    /// The setting, file or rule behind it, or why it is unknown.
+    pub detail: String,
+    pub runs: u64,
+}
+
+/// What one subagent type or agent role cost and ran on; evidence, never a recommendation.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentCost {
+    pub harness: Harness,
+    pub profiles: Vec<String>,
+    /// Claude's agent type, or Codex's agent role or subagent source; `unrecorded` when no record names it.
+    pub kind: String,
+    /// Subagent transcripts of this type in the window.
+    pub runs: u64,
+    pub requests: u64,
+    /// Requests with a complete price.
+    pub priced: u64,
+    /// The API-price equivalent of its recorded requests.
+    pub cost: Cost,
+    /// Requests by recorded model, most first.
+    pub models: Vec<Share>,
+    /// Requests by recorded effort, most first; `unrecorded` when none was recorded.
+    pub efforts: Vec<Share>,
+    /// Runs by where their model came from, most first.
+    pub sources: Vec<SourceShare>,
+    /// The provider's cheapest current model in the price catalog, when it has one.
+    pub cheapest: Option<String>,
+    /// The same recorded tokens priced on `cheapest`, assuming the same turns; None when
+    /// every request already ran on it or no cheapest model is known.
+    pub reprice: Option<Cost>,
+    /// The settings that change its model.
+    pub model_setting: String,
+    /// The settings that change its effort; a lower effort changes output tokens, so its cost is unmeasured.
+    pub effort_setting: String,
+}
+
+// ---------------------------------------------------------------------------
 // Scan and report.
 
 /// Pre-window Claude metadata supplies cache evidence, never selected billing or coverage.
@@ -2095,6 +2230,9 @@ pub struct Scan {
     pub exposure: ExposureScan,
     pub cache_context: CacheContext,
     pub coverage: ScanCoverage,
+    /// Each subagent transcript's type and spawn request, by session.
+    #[serde(default)]
+    pub subagents: Vec<Subagent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub t3: Vec<T3State>,
 }
@@ -2154,6 +2292,8 @@ pub struct Report {
     pub context: Vec<ContextCost>,
     /// A piece that cost more than this per use is recommended off.
     pub max_cost_per_use_usd: f64,
+    /// What each subagent type or agent role cost and ran on, as evidence only.
+    pub subagents: Vec<SubagentCost>,
     pub checks: Vec<CheckResult>,
     pub assumptions: Vec<String>,
 }

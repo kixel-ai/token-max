@@ -3116,6 +3116,7 @@ mod tests {
             reason: "explicit".into(),
         };
         Profile {
+            agents: Default::default(),
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -3173,6 +3174,7 @@ mod tests {
         events.extend(boundaries);
         events.sort_by_key(|e| e.time);
         Scan {
+            subagents: vec![],
             snapshot_started_at: "1970-01-01T00:00:00.000Z".into(),
             snapshot_finished_at: "1970-01-01T00:00:00.000Z".into(),
             since: None,

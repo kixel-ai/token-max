@@ -70,7 +70,7 @@ pub struct Discovery {
 }
 
 /// A safe error naming a path without its contents.
-fn error(message: &str, file: &str, line: u64) -> ScanError {
+pub(crate) fn error(message: &str, file: &str, line: u64) -> ScanError {
     ScanError::at(
         message,
         Location {
@@ -81,7 +81,7 @@ fn error(message: &str, file: &str, line: u64) -> ScanError {
 }
 
 /// Node's `ENOENT` and `ENOTDIR`, which both mean the path is not there.
-fn absent(kind: ErrorKind) -> bool {
+pub(crate) fn absent(kind: ErrorKind) -> bool {
     matches!(kind, ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
 
@@ -107,7 +107,7 @@ fn normalize_segments(path: &str, above_root: bool) -> String {
 
 /// Node's POSIX `path.join`.
 #[cfg(not(windows))]
-fn join(parts: &[&str]) -> String {
+pub(crate) fn join(parts: &[&str]) -> String {
     let joined = parts
         .iter()
         .filter(|p| !p.is_empty())
@@ -135,7 +135,7 @@ fn join(parts: &[&str]) -> String {
 
 /// Node's POSIX `path.resolve` for one path, relative to the process working directory.
 #[cfg(not(windows))]
-fn resolve(path: &str) -> String {
+pub(crate) fn resolve(path: &str) -> String {
     let full = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -149,7 +149,7 @@ fn resolve(path: &str) -> String {
 
 /// Node's POSIX `path.dirname`.
 #[cfg(not(windows))]
-fn dirname(path: &str) -> &str {
+pub(crate) fn dirname(path: &str) -> &str {
     let bytes = path.as_bytes();
     if bytes.is_empty() {
         return ".";
@@ -186,7 +186,7 @@ pub(crate) fn realpath(path: &str) -> std::io::Result<String> {
 
 /// Node's win32 `path.join`: join the non-empty parts and normalize them lexically.
 #[cfg(windows)]
-fn join(parts: &[&str]) -> String {
+pub(crate) fn join(parts: &[&str]) -> String {
     let mut path = std::path::PathBuf::new();
     for part in parts.iter().filter(|p| !p.is_empty()) {
         path.push(part);
@@ -221,7 +221,7 @@ fn lexical(path: &std::path::Path) -> String {
 
 /// Node's win32 `path.resolve` for one path, relative to the process working directory.
 #[cfg(windows)]
-fn resolve(path: &str) -> String {
+pub(crate) fn resolve(path: &str) -> String {
     std::path::absolute(path)
         .map(|absolute| lexical(&absolute))
         .unwrap_or_else(|_| path.to_string())
@@ -229,7 +229,7 @@ fn resolve(path: &str) -> String {
 
 /// Node's win32 `path.dirname`: a root is its own parent.
 #[cfg(windows)]
-fn dirname(path: &str) -> &str {
+pub(crate) fn dirname(path: &str) -> &str {
     match std::path::Path::new(path).parent().and_then(|p| p.to_str()) {
         Some("") => ".",
         Some(parent) => parent,
@@ -308,7 +308,7 @@ fn toml_json(value: toml::Value) -> Option<Value> {
 }
 
 /// Read a settings file; a missing file is empty, anything unreadable or malformed fails.
-fn settings(file: &str, harness: Harness) -> Result<Map<String, Value>, ScanError> {
+pub(crate) fn settings(file: &str, harness: Harness) -> Result<Map<String, Value>, ScanError> {
     let bytes = match fs::read(file) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Map::new()),
@@ -503,14 +503,14 @@ fn merged(configs: &[&Map<String, Value>]) -> Map<String, Value> {
 }
 
 /// Each distinct recorded working directory, in first-seen order.
-fn directories<'a>(requests: impl Iterator<Item = &'a Request>) -> IndexSet<&'a str> {
+pub(crate) fn directories<'a>(requests: impl Iterator<Item = &'a Request>) -> IndexSet<&'a str> {
     requests
         .filter_map(|r| r.cwd.as_deref().filter(|cwd| !cwd.is_empty()))
         .collect()
 }
 
 /// Directories from the recorded cwd up to the nearest project marker, closest first.
-fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<String>, ScanError> {
+pub(crate) fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<String>, ScanError> {
     let mut paths = vec![];
     let mut path = cwd;
     loop {
@@ -634,7 +634,7 @@ fn unresolved_background(controls: &mut [BackgroundControl], reason: &str) {
 }
 
 /// Whether a recorded working directory still exists as an absolute directory.
-fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
+pub(crate) fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
     match fs::metadata(cwd) {
         Ok(meta) => Ok(meta.is_dir() && std::path::Path::new(cwd).is_absolute()),
         Err(e) if absent(e.kind()) => Ok(false),
@@ -1563,6 +1563,7 @@ pub(crate) fn profile(
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
         t3: None,
+        agents: crate::model::AgentControls::default(),
     })
 }
 

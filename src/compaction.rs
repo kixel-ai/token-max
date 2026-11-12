@@ -1757,6 +1757,7 @@ mod tests {
     /// One measured compaction calibrates `count` hourly 150k-token requests under a 400k window.
     fn data(count: i64) -> Scan {
         let profile = Profile {
+            agents: Default::default(),
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -1802,6 +1803,7 @@ mod tests {
         // Coverage and snapshot times match the TypeScript fixture, which the text report prints.
         let n = requests.len() as u64;
         Scan {
+            subagents: vec![],
             t3: vec![],
             snapshot_started_at: crate::safe::iso(0),
             snapshot_finished_at: crate::safe::iso(0),
@@ -1856,6 +1858,7 @@ mod tests {
             }
             let pricing = Pricing::clone(e.pricing.as_ref().unwrap());
             let proxy = Request {
+                effort: None,
                 evidence: RequestEvidence::Estimated,
                 id: identity(&e.id).into(),
                 harness: e.harness,

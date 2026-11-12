@@ -223,6 +223,7 @@ pub(crate) fn report(mut report: Report) -> Value {
     });
     drop(snapshots);
     let requests = std::mem::take(&mut scan.requests).len();
+    let subagents = std::mem::take(&mut scan.subagents).len();
     let events = std::mem::take(&mut scan.events).len();
     let cache = std::mem::take(&mut scan.cache_context);
     let cache_counts = json!({"requests": cache.requests.len(), "boundaries": cache.boundaries.len(), "prompts": cache.prompts.len()});
@@ -241,6 +242,7 @@ pub(crate) fn report(mut report: Report) -> Value {
     let scan = &mut result["scan"];
     scan["snapshots"] = files;
     scan["requests"] = value(requests);
+    scan["subagents"] = value(subagents);
     scan["events"] = value(events);
     scan["cacheContext"] = cache_counts;
     scan["exposure"] = exposure;

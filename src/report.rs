@@ -7,7 +7,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::context::{
-    SYNCED_SKILLS, config_patch, control_text, setting_rows, settings_patch, typed_only,
+    SYNCED_SKILLS, config_patch, control_text, incomplete_profiles, setting_rows, settings_patch,
+    typed_only,
 };
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
@@ -2463,6 +2464,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     if pieces.iter().any(|c| c.priced < c.requests) {
         out.line("Some feature costs are scaled from their priced requests; --details shows each row's coverage.", 0, PLAIN);
     }
+    let incomplete = incomplete_profiles(&report.scan.snapshots);
     let piece = |c: &ContextCost, out: &Out<'_>| {
         let label = piece_label(c, out) + &suffix(c, out);
         let cost = c.estimated_usd.map_or_else(
@@ -2493,10 +2495,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             Some(Verdict::Consider) if c.skill.is_some() => format!("{label}: on. {cost}; {uses}."),
             Some(Verdict::Consider) => format!(
                 "{label}: on. {cost}; {uses}{}. {}: {}.",
-                if c.calls == Some(0) {
-                    ", but it was first sent during the window"
-                } else {
-                    ""
+                // The two reasons context verdicts leave nonuse unproven outside the Codex catalog.
+                match c.calls {
+                    Some(0) if c.profiles.iter().any(|p| incomplete.contains(p)) => {
+                        ", but an unreadable transcript line could hold a use"
+                    }
+                    Some(0) => ", but it was first sent during the window",
+                    _ => "",
                 },
                 if typed {
                     "Hide it from the model"
@@ -4753,6 +4758,11 @@ mod tests {
         late.context[0].verdict = Some(Verdict::Consider);
         assert!(text(&late, Some(400), false).contains(
             "Costs $5; the model never used it, but it was first sent during the window. Hide it from the model:"
+        ));
+        late.scan.snapshots[0].skipped_lines = 1;
+        late.scan.snapshots[0].profiles = late.context[0].profiles.clone();
+        assert!(text(&late, Some(400), false).contains(
+            "Costs $5; the model never used it, but an unreadable transcript line could hold a use. Hide it from the model:"
         ));
         report.scan.since = Some(instant(&report.generated_at) - 3_600_000);
         report.context.push(ContextCost {

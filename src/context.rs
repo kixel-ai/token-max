@@ -154,6 +154,15 @@ pub struct ContextInput<'a> {
     pub max_cost_per_use_usd: f64,
 }
 
+/// Profiles whose transcripts have unreadable or deferred lines, which could hold a use.
+pub fn incomplete_profiles(snapshots: &[crate::model::Snapshot]) -> HashSet<String> {
+    snapshots
+        .iter()
+        .filter(|s| s.skipped_lines > 0 || s.deferred_bytes > 0)
+        .flat_map(|s| s.profiles.iter().cloned())
+        .collect()
+}
+
 /// Context setting rows whose controls are not covered by a server recommendation.
 pub fn setting_rows(costs: &[ContextCost]) -> impl Iterator<Item = &ContextCost> {
     costs.iter().flat_map(|c| {

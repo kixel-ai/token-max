@@ -1,29 +1,42 @@
 # token-max
 
-A Rust CLI that replays this host's Claude Code and Codex
-transcripts against public API prices. It only reads transcripts and settings;
-it never edits them and never prints prompt or reply text.
+A Rust CLI that reads this host's Claude Code and Codex transcripts and
+settings and tells a person which settings to change. Most advice about agent
+configuration is asserted, not measured; this tool shows its evidence.
 
-Its job is to put an estimated dollar amount on every setting it can measure
-from transcripts, and to help the user decide what to enable or disable.
+Every recommendation is one of three kinds, and its line says which:
 
-- Some settings don't change the experience, such as the cache TTL. Recommend
-  the cheaper value outright.
-- Others trade cost for capability, such as a tool, skill or MCP server.
-  Report what each one cost and how often it was used. Recommend turning it
-  off when it cost more than `--max-cost-per-use` (default $1) per recorded
-  use, counting no use as one; otherwise recommend keeping it.
-- Show every setting and feature on its own line with its cost. Name the
-  setting that turns each one off, and say plainly when a cost can't be
-  measured rather than hiding the setting.
+- **Measured**: replayed from the user's own transcripts at public API prices.
+  Name what the replay holds constant and what it could not measure.
+- **Documented**: the provider's own guidance, cited, beside whatever the
+  transcripts show.
+- **Opinion**: the maintainer's preference, such as avoiding auto memory in
+  repositories that have an AGENTS.md. Label it as one, and show the
+  measurement that makes it apply to this user.
 
-Development:
+Never present one kind as another. Say plainly when a cost can't be measured
+rather than hiding the setting or guessing a number.
 
-- The dev shell (`nix develop`, or direnv's `use flake`) provides the Rust
-  toolchain, `just`, and `quest`, pinned by `flake.lock`.
-- `just check` runs everything CI runs on Linux: formatting, clippy with
-  warnings as errors, tests, and `quest check`.
+- A setting that changes only the bill, such as the cache TTL, gets the
+  cheaper value recommended outright.
+- One that trades cost for capability, such as a tool, skill or MCP server,
+  shows what it cost and how often it was used. Recommend turning it off when
+  it cost more than `--max-cost-per-use` (default $1) per recorded use,
+  counting no use as one; otherwise recommend keeping it.
+- Show every setting and feature on its own line, and name the setting that
+  changes it.
+
+`token-max doctor` is the command people run. It is interactive: it walks
+through the recommendations and offers to apply each one, editing a settings
+file only after showing the change and getting a yes. Machine-readable output
+for other tools, such as quest's session export, lives in other commands and
+never shapes `doctor`.
+
+- Never edit a transcript, and never print or keep prompt or reply text.
+- The README is for someone deciding whether to run the tool. Per-check
+  behavior and caveats go in `docs/`.
 - Tests use small synthetic transcripts checked into the repository, never
   real sessions.
+- `just check` runs everything CI runs on Linux.
 
 Quests: before any work, run `quest context` and follow it.

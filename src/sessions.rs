@@ -28,7 +28,7 @@ pub(crate) struct Record<'a> {
     pub selected: bool,
 }
 
-/// A Git branch a session's records name, from the first to the last selected one.
+/// A Git branch a session's records name, from the first to the last that named it.
 #[derive(Clone, Debug, PartialEq)]
 struct Branch {
     name: String,
@@ -47,7 +47,11 @@ struct Facts {
     forked_from: Option<String>,
     parent: Option<String>,
     cwd: Option<Text>,
+    /// Branches the selected records name.
     branches: Vec<Branch>,
+    /// The last branch named before the window, listed when no selected record names one,
+    /// since Codex names its branch only in `session_meta`.
+    before_window: Option<Branch>,
     review: bool,
     files: Vec<Text>,
 }
@@ -112,6 +116,7 @@ impl Sessions {
                     parent: None,
                     cwd: None,
                     branches: vec![],
+                    before_window: None,
                     review: false,
                     files: vec![],
                 });
@@ -178,18 +183,23 @@ impl Sessions {
                 branch(meta.get("git").and_then(|git| git.get("branch")))
             }
         };
-        if let (Some(time), Some(name), true) = (record.time, name, record.selected) {
-            match facts.branches.iter_mut().find(|b| b.name == name) {
-                Some(b) => {
-                    b.first = b.first.min(time);
-                    b.last = b.last.max(time);
-                }
-                None => facts.branches.push(Branch {
-                    name: name.to_string(),
-                    first: time,
-                    last: time,
-                }),
+        let (Some(time), Some(name)) = (record.time, name) else {
+            return;
+        };
+        let at = || Branch {
+            name: name.to_string(),
+            first: time,
+            last: time,
+        };
+        if !record.selected {
+            if facts.before_window.as_ref().is_none_or(|b| b.last <= time) {
+                facts.before_window = Some(at());
             }
+        } else if let Some(b) = facts.branches.iter_mut().find(|b| b.name == name) {
+            b.first = b.first.min(time);
+            b.last = b.last.max(time);
+        } else {
+            facts.branches.push(at());
         }
     }
 }
@@ -332,9 +342,15 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
             row.output_tokens += u.output.unwrap_or(0);
             row.cost_usd += cost.known_usd;
             row.complete &= priced && cost.total_usd.is_some();
+            // A request counts once in each row its parts reach.
+            if !r.parts[..index]
+                .iter()
+                .any(|q| q.model.as_deref() == key.0)
+            {
+                row.requests += 1;
+            }
             // Server fees belong to the request, which its first part stands for.
             if index == 0 {
-                row.requests += 1;
                 row.cost_usd += server.known_usd;
                 row.complete &= server.total_usd.is_some();
             }
@@ -364,7 +380,10 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
                 review: facts.is_some_and(|f| f.review),
                 cwd: facts.and_then(|f| f.cwd.as_deref().map(str::to_string)),
                 branches: facts
-                    .map(|f| &f.branches[..])
+                    .map(|f| match &f.before_window {
+                        Some(before) if f.branches.is_empty() => std::slice::from_ref(before),
+                        _ => &f.branches[..],
+                    })
                     .unwrap_or_default()
                     .iter()
                     .map(|b| BranchSpan {
@@ -546,7 +565,10 @@ mod tests {
         };
         thread("root", json!("exec"), None);
         thread("review", json!({"subagent": "review"}), Some("root"));
-        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+        // The window opens after `session_meta`, the only record naming the branch.
+        let mut options = w.scan_options();
+        options.since = Some(1_793_491_200_500);
+        let sessions = export(&scan(&options).unwrap(), &prices());
         let found: Vec<_> = sessions
             .iter()
             .map(|s| (s.session.as_deref(), s.parent.as_deref(), s.review))
@@ -560,7 +582,13 @@ mod tests {
         );
         for s in &sessions {
             assert_eq!(s.harness, Harness::Codex);
-            assert_eq!(s.branches[0].name, "quest/m0/a");
+            let at = "2026-11-01T00:00:00.000Z".to_string();
+            let branch = BranchSpan {
+                name: "quest/m0/a".into(),
+                first: at.clone(),
+                last: at,
+            };
+            assert_eq!(s.branches, [branch]);
             let m = &s.models[0];
             let found = (
                 m.model.as_deref(),
@@ -659,5 +687,43 @@ mod tests {
         );
         let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
         assert_eq!(sessions[0].models[0].effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn a_request_counts_once_in_each_model_row_its_parts_reach() {
+        let w = Workspace::new();
+        let mut reply = reply("session", "r", "2026-11-01T00:00:01Z", "main", "high");
+        let usage = reply["message"]["usage"].clone();
+        let iteration = |kind: &str, model: Option<&str>| {
+            let mut i = usage.clone();
+            i["type"] = json!(kind);
+            if let Some(model) = model {
+                i["model"] = json!(model);
+            }
+            i
+        };
+        reply["message"]["usage"]["iterations"] = json!([
+            iteration("message", None),
+            iteration("message", None),
+            iteration("advisor_message", Some("claude-haiku-5-5")),
+        ]);
+        write(
+            &w.claude.join("projects/project/session.jsonl"),
+            &[reply],
+            "",
+        );
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+        let rows: Vec<_> = sessions[0]
+            .models
+            .iter()
+            .map(|m| (m.model.as_deref(), m.requests, m.output_tokens))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                (Some("claude-opus-5-5"), 1, 100),
+                (Some("claude-haiku-5-5"), 1, 50)
+            ]
+        );
     }
 }

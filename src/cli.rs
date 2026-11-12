@@ -83,11 +83,13 @@ Prints one JSON object per line for each Claude Code or Codex session with a req
 window, ordered by its first request. A Claude subagent and a Codex review or spawned thread
 are sessions of their own. Fields: harness; session, its native ID; parent, the session it
 was spawned from; review, whether Codex marked it a review; cwd; branches, each Git branch
-its records name with the first and last time; start and end of its requests; models, one
-entry per model and reasoning effort with requests, inputTokens (uncached), cacheWriteTokens,
-cacheReadTokens, outputTokens, costUsd and complete; costUsd; complete; skippedLines, the
-unreadable lines in its files; files. A cost is a lower bound when complete is false: a
-request could not be priced, or a file had unreadable or unfinished lines.
+its records in the window name with the first and last time, or else the last named before
+it; start and end of its requests; models, one entry per model and reasoning effort with
+requests (each request once in every entry it reaches), inputTokens (uncached),
+cacheWriteTokens, cacheReadTokens, outputTokens, costUsd and complete; costUsd; complete;
+skippedLines, the unreadable lines in its files; files. A cost is a lower bound when
+complete is false: a request could not be priced, or a file had unreadable or unfinished
+lines.
 
 Public API-price estimates, not subscription bills. Reads transcripts only and prints no
 prompt or reply text. Errors go to stderr as JSON.

@@ -470,6 +470,12 @@ enum Scanned {
     Remote(Rendered),
 }
 
+/// What reaches the coordinator while hosts scan, in whatever order it finishes.
+enum Arrival {
+    Prices(Result<Catalog, ScanError>),
+    Host(usize, Result<Scanned, ScanError>),
+}
+
 /// What one host's scan is analyzed and printed with.
 pub struct Render<'a> {
     pub catalog: &'a Catalog,
@@ -731,7 +737,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         if remote {
             let sender = sender.clone();
             thread::spawn(move || {
-                let _ = sender.send((index, job()));
+                let _ = sender.send(Arrival::Host(index, job()));
             });
         } else {
             inline = Some((index, job));
@@ -747,10 +753,9 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             let result = panic::catch_unwind(|| ssh::audit(&destination, since, receiver))
                 .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
                 .map(Scanned::Remote);
-            let _ = sender.send((index, result));
+            let _ = sender.send(Arrival::Host(index, result));
         });
     }
-    drop(sender);
     phase(match (local, remote) {
         (true, false) => "Scanning local histories",
         (true, true) => "Scanning local histories and SSH hosts",
@@ -764,42 +769,56 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             .map(|(index, job)| job().map(|scan| (index, scan)))
             .transpose()?;
         phase("Loading public prices");
-        let catalog = load_prices(&prices)?;
-        for (request, format) in requests {
-            // A destination that already failed reports itself through `results`.
-            let _ = request.send(Request {
-                catalog: catalog.clone(),
-                max_cost_per_use_usd,
-                format,
-            });
-        }
-        phase("Checking settings");
-        let mut finish = |index: usize, scanned: Scanned| -> Result<(), ScanError> {
-            rendered[index] = Some(match scanned {
-                Scanned::Local(scan) => render(
-                    *scan,
-                    Render {
-                        catalog: &catalog,
-                        since,
-                        now: now(),
-                        max_cost_per_use_usd,
-                        format: &local_format,
-                        home: home.as_deref(),
-                    },
-                )?,
-                Scanned::Remote(report) => report,
-            });
-            Ok(())
-        };
-        if let Some((index, scanned)) = inline {
-            finish(index, scanned)?;
-        }
-        for (index, result) in results {
-            finish(index, result?)?;
+        // Prices load beside the scans, so whichever fails first stops the run at once.
+        thread::spawn(move || {
+            let catalog = panic::catch_unwind(|| load_prices(&prices))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send(Arrival::Prices(catalog));
+        });
+        let mut catalog = None;
+        // Hosts that finished before the prices arrived.
+        let mut scanned: Vec<_> = inline.into_iter().collect();
+        for arrival in results {
+            match arrival {
+                Arrival::Host(index, result) => scanned.push((index, result?)),
+                Arrival::Prices(loaded) => {
+                    let loaded = loaded?;
+                    for (request, format) in std::mem::take(&mut requests) {
+                        // A destination that already failed reports itself through `results`.
+                        let _ = request.send(Request {
+                            catalog: loaded.clone(),
+                            max_cost_per_use_usd,
+                            format,
+                        });
+                    }
+                    phase("Checking settings");
+                    catalog = Some(loaded);
+                }
+            }
+            let Some(catalog) = &catalog else { continue };
+            for (index, scanned) in scanned.drain(..) {
+                rendered[index] = Some(match scanned {
+                    Scanned::Local(scan) => render(
+                        *scan,
+                        Render {
+                            catalog,
+                            since,
+                            now: now(),
+                            max_cost_per_use_usd,
+                            format: &local_format,
+                            home: home.as_deref(),
+                        },
+                    )?,
+                    Scanned::Remote(report) => report,
+                });
+            }
         }
         Ok(())
     })();
-    audited.inspect_err(|_| ssh::cancel())?;
+    audited.inspect_err(|_| {
+        cancel_downloads();
+        ssh::cancel();
+    })?;
     let sections = hosts.len();
     let mut code = 0;
     let mut text = String::new();

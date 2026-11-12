@@ -6,6 +6,7 @@ use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
@@ -852,6 +853,72 @@ fn cancelling_stops_and_reaps_every_destination() {
             "destination still running"
         );
     }
+}
+
+#[test]
+fn prices_and_destinations_stop_the_run_whichever_fails_first() {
+    let hosts = Hosts::new();
+    let mkfifo = |name: &str| {
+        let path = hosts.root.join(name);
+        let fifo = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo creates a named pipe at a path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        path
+    };
+    // Reading a pipe waits for a writer: this one never gets one.
+    let stalled = mkfifo("stalled.json");
+    // The slow destination writes invalid prices here once it is scanning.
+    let invalid = mkfifo("invalid.json");
+    let header = hosts.header();
+    hosts.replace(
+        "slow",
+        "token-max",
+        &format!("echo '{header}'; printf '{{' > \"$TEST_ROOT/invalid.json\"; exec sleep 600"),
+    );
+    for (destination, prices, expected) in [
+        (
+            "unreachable",
+            &stalled,
+            "token-max: unreachable: SSH connection failed",
+        ),
+        ("slow", &invalid, "token-max: invalid public price catalog"),
+    ] {
+        let mut child = hosts
+            .command(&[
+                "--ssh",
+                destination,
+                "--prices-file",
+                prices.to_str().unwrap(),
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("{destination}: still waiting after its first failure");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert_eq!(output.status.code(), Some(2), "{destination}: {stderr}");
+        assert_eq!(output.stdout, b"", "{destination}");
+        assert!(stderr.starts_with(expected), "{destination}: {stderr}");
+    }
+    let pid: i32 = std::fs::read_to_string(hosts.root.join("slow.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: signal 0 only checks whether the process exists.
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "destination still running"
+    );
 }
 
 #[test]

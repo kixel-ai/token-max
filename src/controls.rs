@@ -975,6 +975,16 @@ pub fn tune_windows(scan: &mut Scan) {
                         None,
                         "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
                     ),
+                    // Claude Code compacts a provider or custom ID it cannot resolve at the
+                    // declared window, but not a bare claude- name, nor an unrecognized [1m]
+                    // spelling, which a recorded request above the declared window shows ran.
+                    (Sizing::Declared(tokens), None, None)
+                        if !model.starts_with("claude-")
+                            && compaction.contexts.contains_key(model) =>
+                    (
+                        compaction.contexts.get(model).copied(),
+                        format!("no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code compacts this unrecognized ID at CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens}"),
+                    ),
                     (_, None, None) => (
                         None,
                         "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),

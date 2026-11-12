@@ -49,7 +49,9 @@ estimated at the output price), either null when unpriced. `reads` and `writes`
 count its uses, and `off`/`offFile` name the setting that turns it off.
 `offFile` is null for an environment variable, and for Claude Code memory that
 a request shows on against an off setting, where `off` names the project
-settings files instead. The
+settings files instead. When some requests recorded no context, `coverage`
+counts those that did (`priced`) out of all (`total`), and `savingsUsd` is a
+lower bound. The
 `memory` context row has a control but never a verdict.
 
 Keepalive checks keep their complete shape, including every

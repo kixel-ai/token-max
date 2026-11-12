@@ -2429,11 +2429,39 @@ fn claude_auto_memory_on_against_an_off_setting_points_at_project_settings() {
         jsonl(&claude_memory_session(&root.to_string_lossy(), true)),
     )
     .unwrap();
-    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
-    let check = memory_check(&report, Harness::Claude);
+    let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&first, Harness::Claude);
     assert_eq!(check.base.current, Some(true));
     assert_eq!(check.off_file, None);
     assert!(check.off.contains(".claude/settings.local.json"));
+
+    // A project setting at the latest request's directory owns it, even when the
+    // user setting agrees.
+    std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    let local = project.join(".claude/settings.local.json");
+    std::fs::write(&local, r#"{ "autoMemoryEnabled": true }"#).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let records: Vec<Value> = claude_memory_session(&root.to_string_lossy(), true)
+        .into_iter()
+        .map(|mut r| {
+            r["cwd"] = json!(project.to_string_lossy());
+            r
+        })
+        .collect();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(
+        check.off_file.as_deref(),
+        Some(&*std::fs::canonicalize(&local).unwrap().to_string_lossy())
+    );
 }
 
 #[test]
@@ -2458,8 +2486,8 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
         jsonl(&records),
     )
     .unwrap();
-    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
-    let check = memory_check(&report, Harness::Claude);
+    let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&first, Harness::Claude);
     assert_eq!(check.context_usd, None);
     assert_eq!(check.base.savings_usd, None);
     assert!(
@@ -2469,6 +2497,27 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
             .iter()
             .any(|u| u.contains("loaded memory is unmeasured"))
     );
+
+    // Beside a session that recorded its context, the total is a lower bound.
+    std::fs::write(
+        w.claude.join("projects/project/later.jsonl"),
+        jsonl(&later(claude_memory_session(&root.to_string_lossy(), true))),
+    )
+    .unwrap();
+    let both = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&both, Harness::Claude);
+    let coverage = check.base.coverage.unwrap();
+    assert_eq!((coverage.priced, coverage.total), (2, 3));
+    assert!(check.base.savings_usd.unwrap() > 0.0);
+    // The long temporary path wraps the line.
+    assert!(labelled(
+        &text(&both).replace("\n  ", " "),
+        "Auto memory",
+        then(
+            ": on -> off. ",
+            "Costs at least <$0.01, from the 66.6% of requests that recorded their context;"
+        )
+    ));
 }
 
 #[test]

@@ -2539,13 +2539,24 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         if let CheckResult::Memory(m) = result {
             let cost = match r.savings_usd {
                 Some(usd) => format!(
-                    "Costs {}",
+                    "Costs {}{}",
+                    match r.coverage {
+                        Some(_) => "at least ",
+                        None => "",
+                    },
                     match r.monthly_savings_usd {
                         Some(m) => about(m),
                         None => monthly(usd, r.since, r.until),
                     }
                 ),
                 None => "Cost unknown".into(),
+            };
+            let cost = match r.coverage {
+                Some(c) if r.savings_usd.is_some() => format!(
+                    "{cost}, from the {}% of requests that recorded their context",
+                    percent(c.priced, c.total)
+                ),
+                _ => cost,
             };
             return match action(c) {
                 Action::Keep if memory_free(m) => format!("{head}. Costs nothing."),

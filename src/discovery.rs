@@ -684,6 +684,12 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
+        // Auto memory's owner is the one at the latest request's directory, which
+        // decides whether memory is on now.
+        let latest = relevant
+            .iter()
+            .max_by_key(|r| r.time)
+            .and_then(|r| r.cwd.clone());
         if relevant
             .iter()
             .any(|r| r.cwd.as_deref().is_none_or(str::is_empty))
@@ -752,6 +758,9 @@ pub fn discover_claude_controls(
             let speed = speed_controls(Harness::Claude, &scopes, local_env)?;
             let mut idle = idle_controls(&scopes, local_env)?;
             let background = claude_background(&scopes, local_env)?;
+            if latest.as_deref() == Some(cwd) {
+                profile.memory = Some(claude_memory(&scopes, local_env)?);
+            }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
                 settings_env

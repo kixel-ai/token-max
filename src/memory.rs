@@ -251,7 +251,11 @@ fn check(
             .into(),
             baseline: "the recorded requests without auto memory's loaded context, reads and writes, holding all other work constant".into(),
             requests: rows.iter().map(|c| c.requests).sum(),
-            coverage: None,
+            // With requests that recorded no context, the total is a lower bound.
+            coverage: (unrecorded > 0).then(|| crate::model::Coverage {
+                priced: (mine.len() - unrecorded) as u64,
+                total: mine.len() as u64,
+            }),
             savings_usd: total,
             monthly_savings_usd: monthly,
             break_even: None,

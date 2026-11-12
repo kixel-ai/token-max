@@ -244,9 +244,11 @@ stays unpriced when those histories imply different cache charges, while invaria
 charges can still be compared.
 
 Compaction-window comparisons run after the recommended TTLs and use the current
-explicit window as their baseline. Claude controls resolve environment overrides,
+window as their baseline. Claude controls resolve environment overrides,
 managed and user settings, including `modelSettings.<model>.autoCompactWindow`;
-Codex uses `model_auto_compact_token_limit`. Unresolved tuned defaults, disabled
+Codex uses `model_auto_compact_token_limit`. An unset Claude window uses each
+model's latest observed automatic-compaction trigger, else Claude Code's
+documented default. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
 advisory. No settings are edited.
 

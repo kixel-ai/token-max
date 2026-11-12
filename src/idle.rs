@@ -3556,6 +3556,7 @@ mod tests {
             bucket: "all",
             model: None,
             models: vec![],
+            unset: false,
             baseline_cost: zero_cost(),
             observed_summary_cost: zero_cost(),
             ttls: PerBucket::default(),
@@ -4111,6 +4112,7 @@ mod tests {
             idle_owner: "t3/settings.json:idleCompaction".into(),
             ownership_resolved: true,
             limitations: vec![],
+            inherited_window: None,
         });
         for r in &mut scan.requests {
             r.client = Some("t3-code".into());

@@ -178,7 +178,6 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 - [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
 - [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history
 - [Price sessions whose T3 owner was removed](/quest/m0/t3-removed-owners.md) - removed-instance sessions stop making current profiles advisory
-- [Resolve the inherited T3 Claude window](/quest/m0/t3-inherited-window.md) - instances that inherit the native window get it priced
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
 - [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each
 - [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - every line is colored by verdict and shows total cost and uses

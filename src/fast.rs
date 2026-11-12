@@ -716,7 +716,6 @@ mod tests {
             assert_eq!(result.observed.premium_parts, 1);
             assert_eq!(result.observed.standard_parts, 1);
             assert_eq!(result.current_estimate.priced_parts, 2);
-            let json = serde_json::to_string(&report).unwrap();
             assert!(format_report(&report, ReportOptions::default()).contains("Fast mode ["));
             let details = format_report(
                 &report,
@@ -734,7 +733,6 @@ mod tests {
             ] {
                 assert!(details.contains(expected), "{expected}");
             }
-            assert_eq!(serde_json::to_string(&report).unwrap(), json);
             let profile = s
                 .profiles
                 .iter_mut()

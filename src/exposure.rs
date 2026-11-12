@@ -2648,7 +2648,6 @@ fn visibility(
                 } else {
                     Observed::Unknown
                 },
-                automatic_unused: false,
                 reasons: reasons.clone(),
             }
         })

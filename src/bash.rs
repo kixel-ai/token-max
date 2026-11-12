@@ -486,8 +486,8 @@ mod tests {
             )),
             "{text}"
         );
-        let json = serde_json::to_string(&report).unwrap();
-        assert!(!json.contains("SYNTHETIC_PRIVATE") && !text.contains("SYNTHETIC_PRIVATE"));
+        assert!(!format!("{report:?}").contains("SYNTHETIC_PRIVATE"));
+        assert!(!text.contains("SYNTHETIC_PRIVATE"));
     }
 
     #[test]

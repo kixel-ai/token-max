@@ -3,8 +3,6 @@
 use std::fmt::Write as _;
 
 use crate::collections::{IndexMap, IndexSet};
-use serde::Serialize;
-use serde_json::Value;
 
 use crate::context::{
     CLAUDE_MEMORY, CODEX_MEMORY, SYNCED_SKILLS, config_patch, control_text, incomplete_profiles,
@@ -23,7 +21,7 @@ use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
 
-/// How to lay out the text report; presentation never changes analysis or the JSON report.
+/// How to lay out the text report; presentation never changes the analysis.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ReportOptions<'a> {
     /// Terminal width to wrap to; None keeps each line whole.
@@ -162,12 +160,16 @@ fn capitalize(text: &str) -> String {
     }
 }
 
-/// The serialized name of a schema enum, such as "eligible".
-fn label<T: Serialize>(value: &T) -> String {
-    match serde_json::to_value(value) {
-        Ok(Value::String(name)) => name,
-        _ => unreachable!("schema enums serialize as strings"),
+/// A unit variant's name in kebab case, such as "not-applied".
+fn label(value: &impl std::fmt::Debug) -> String {
+    let mut name = String::new();
+    for c in format!("{value:?}").chars() {
+        if c.is_ascii_uppercase() && !name.is_empty() {
+            name.push('-');
+        }
+        name.push(c.to_ascii_lowercase());
     }
+    name
 }
 
 fn or_unknown(value: Option<impl ToString>) -> String {
@@ -3360,7 +3362,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         PLAIN,
     );
     out.line(
-        "--details shows the evidence and assumptions behind each line; --json is for scripts.",
+        "--details shows the evidence and assumptions behind each line.",
         0,
         PLAIN,
     );
@@ -4031,7 +4033,6 @@ mod tests {
         ];
         Report {
             subagents: vec![],
-            schema_version: 2,
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 subagents: vec![],
@@ -4085,7 +4086,6 @@ mod tests {
                 priced_requests: 1000,
                 conditional_requests: 0,
                 tier_sensitivity: vec![],
-                evidence: "estimated",
                 cost: cost(None, 1500.0),
             }],
             compactions: vec![CompactionCharge {
@@ -4293,7 +4293,7 @@ mod tests {
         let snippet = &text[text.find("To turn these off").unwrap()..];
         let json = &snippet[snippet.find('{').unwrap()..snippet.find("\n  }\n").unwrap() + 4];
         assert_eq!(
-            serde_json::from_str::<Value>(json).unwrap(),
+            serde_json::from_str::<serde_json::Value>(json).unwrap(),
             serde_json::json!({ "enableArtifact": false })
         );
     }
@@ -4417,11 +4417,9 @@ mod tests {
             2
         );
         assert!(!detailed.contains("Recommended off: mcp_servers.docs.disabled_tools"));
-        // Both JSON projections retain costs inside the server, without a second top-level row.
-        let json = serde_json::to_value(&report.context).unwrap();
-        assert_eq!(json.as_array().unwrap().len(), 1);
-        assert_eq!(json[0]["details"][0]["estimatedUsd"], 5.0);
-        assert!(json[0].get("guidance").is_none());
+        // The server keeps the tool's cost inside it, without a second top-level row.
+        assert_eq!(report.context.len(), 1);
+        assert_eq!(report.context[0].details[0].estimated_usd, Some(5.0));
     }
 
     #[test]
@@ -4821,10 +4819,6 @@ mod tests {
             .expect("a claude-cache-ttl check")
     }
 
-    fn json(report: &Report) -> String {
-        serde_json::to_string(report).unwrap()
-    }
-
     #[test]
     fn recommendations_lead_advisory_and_keep_findings_with_separate_baselines_and_complete_narrow_output()
      {
@@ -4877,7 +4871,6 @@ mod tests {
             CheckResult::Ttl(keep),
             CheckResult::Ttl(change),
         ];
-        let before = json(&report);
         for width in [28, 40, 80] {
             let text = text(&report, Some(width), true);
             let at = |s: &str| text.find(s).expect(s);
@@ -4909,88 +4902,10 @@ mod tests {
                 "decomposed filename must not be NFC-normalized"
             );
         }
-        assert_eq!(
-            json(&report),
-            before,
-            "rendering must not alter JSON or analysis"
-        );
     }
 
     #[test]
-    fn compact_json_keeps_every_check_cost_and_unknown_condition() {
-        let mut report = synthetic();
-        for check in &mut report.checks {
-            if let CheckResult::Idle(check) = check {
-                check.after_recommendations.periods[0].summary_cost = cost(None, 0.875);
-            }
-        }
-        let full = serde_json::to_value(&report).unwrap();
-        let compact = crate::compact::report(report);
-        assert_eq!(compact["schemaVersion"], 2);
-        for field in [
-            "context",
-            "historical",
-            "prices",
-            "assumptions",
-            "maxCostPerUseUsd",
-        ] {
-            assert_eq!(compact[field], full[field], "{field}");
-        }
-        assert_eq!(compact["scan"]["coverage"], full["scan"]["coverage"]);
-        assert_eq!(compact["scan"]["profiles"], full["scan"]["profiles"]);
-        let mut expected = full["checks"].clone();
-        let mut actual = compact["checks"].clone();
-        // Only these documented evidence fields change shape. All setting-specific
-        // dollars, missing-cost reasons, coverage and conditional baselines must match.
-        fn remove_evidence(row: &mut serde_json::Value) {
-            let object = row.as_object_mut().unwrap();
-            for key in [
-                "usageEstimates",
-                "cacheEvidence",
-                "periods",
-                "byContext",
-                "added",
-            ] {
-                object.remove(key);
-            }
-            for scenario in ["currentSettings", "afterRecommendations"] {
-                if let Some(s) = object.get_mut(scenario) {
-                    remove_evidence(s);
-                }
-            }
-            if let Some(scenarios) = object.get_mut("scenarios") {
-                for scenario in scenarios.as_array_mut().unwrap() {
-                    remove_evidence(scenario);
-                }
-            }
-        }
-        for (expected, actual) in expected
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .zip(actual.as_array_mut().unwrap())
-        {
-            remove_evidence(expected);
-            remove_evidence(actual);
-        }
-        assert_eq!(actual, expected);
-        let idle = compact["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["check"] == "idle-compaction")
-            .unwrap();
-        assert!(idle["afterRecommendations"]["periods"]["summaryCost"]["totalUsd"].is_null());
-        assert!(
-            !idle["afterRecommendations"]["periods"]["summaryCost"]["unknown"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn repeated_idle_evidence_is_grouped_without_changing_json() {
+    fn repeated_idle_evidence_is_grouped() {
         let mut report = synthetic();
         let idle = report
             .checks
@@ -5007,7 +4922,6 @@ mod tests {
         periods.push(unknown);
         idle.after_recommendations.periods = periods;
         idle.current_settings.periods.clear();
-        let before = json(&report);
         let rendered = text(&report, None, true);
         assert!(
             rendered.contains("100 periods; eligible; after-expiry; unobserved; synthetic gap")
@@ -5018,7 +4932,6 @@ mod tests {
         assert!(!rendered.contains("Idle period:"));
         assert!(!rendered.contains("Idle by context:"));
         assert!(rendered.contains("Repeated evidence is grouped"));
-        assert_eq!(json(&report), before);
     }
 
     #[test]
@@ -5128,7 +5041,7 @@ mod tests {
     }
 
     #[test]
-    fn terminal_controls_in_all_metadata_and_prose_are_escaped_while_json_retains_exact_metadata() {
+    fn terminal_controls_in_all_metadata_and_prose_are_escaped() {
         let mut report = synthetic_report();
         let hostile = "synthetic\x1b]8;;https://invalid\x07\r\n\t\u{9b}31m\u{202e}reversed\u{2066}\u{200e}\u{200f}\u{61c}";
         let result = ttl_mut(&mut report);
@@ -5150,8 +5063,6 @@ mod tests {
         };
         assert!(!text.chars().any(unsafe_char), "{text:?}");
         assert!(compact(&text).contains("\\u009b31m\\u202ereversed\\u2066"));
-        let parsed: Value = serde_json::from_str(&json(&report)).unwrap();
-        assert_eq!(parsed["checks"][0]["owner"], hostile);
     }
 
     #[test]
@@ -5241,7 +5152,7 @@ mod tests {
         let start = lines.iter().position(|l| l.trim() == "{").unwrap();
         let end = start + lines[start..].iter().position(|l| *l == "  }").unwrap();
         assert_eq!(
-            serde_json::from_str::<Value>(&lines[start..=end].join("\n")).unwrap(),
+            serde_json::from_str::<serde_json::Value>(&lines[start..=end].join("\n")).unwrap(),
             serde_json::json!({"skillOverrides": {name: "user-invocable-only"}})
         );
         // Feature and context costs are totals over the window, however short.

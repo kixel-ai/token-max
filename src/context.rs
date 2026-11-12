@@ -1900,14 +1900,6 @@ mod tests {
         assert_eq!(off.verdict, Some(Verdict::Off));
         assert!(off.details.iter().all(|d| d.verdict.is_none()));
         assert!(off.details.iter().any(|d| d.control.is_some()));
-        let json = serde_json::to_value(off).unwrap();
-        assert!(
-            json["details"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|d| d["verdict"].is_null())
-        );
         let discovery = row(&server.details, "mcp__docs");
         assert_eq!(
             (discovery.kind, discovery.tokens, discovery.calls),

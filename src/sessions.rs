@@ -259,7 +259,10 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
         .values()
         .filter_map(|f| Some((f.id.as_deref()?, f)))
         .collect();
-    // Sources rank before their forks, by recorded lineage and then by when they began.
+    // Sources rank before their forks. A fork's `session_meta` is written when it is forked,
+    // after its source began, so time decides even when an intermediate fork's rollout is
+    // missing. Lineage depth breaks only an exact tie: where the recorded chain connects two
+    // forks, the descendant's depth is greater.
     let rank = |key: &Text| {
         let mut f = facts.get(key);
         let created = f.and_then(|f| f.created).unwrap_or(Millis::MAX);
@@ -271,7 +274,7 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
             f = Some(source);
             depth += 1;
         }
-        (depth, created)
+        (created, depth)
     };
     // A Codex fork copies its source's records under its own `session_meta`, so a request in
     // several rollouts belongs to the source, whichever the reader read first. Claude records
@@ -582,8 +585,14 @@ mod tests {
         let context = json!({"type": "turn_context", "timestamp": "2026-11-01T00:00:00Z",
             "payload": {"turn_id": "turn", "model": "gpt-6.1-sol"}});
         let copied = usage("response-a", "2026-11-01T00:00:01Z");
-        // A fork begins after its source, or records its lineage when the times tie.
-        for (forked_at, lineage) in [("01:00", None), ("00:00", Some("source"))] {
+        // A fork begins after its source, or records its lineage when the times tie. The
+        // last case's fork came through a fork whose rollout is gone, while the source is
+        // itself a recorded fork, so lineage depth alone would rank the fork first.
+        for (forked_at, lineage, source_lineage) in [
+            ("01:00", None, None),
+            ("00:00", Some("source"), None),
+            ("01:00", Some("gone"), Some("root")),
+        ] {
             let w = Workspace::new();
             let meta = |id: &str, time: &str, source: Option<&str>| {
                 json!({"type": "session_meta", "timestamp": format!("2026-11-01T{time}:00Z"),
@@ -604,10 +613,15 @@ mod tests {
             write(
                 &w.codex.join("sessions/b-source.jsonl"),
                 &[
-                    meta("source", "00:00", None),
+                    meta("source", "00:00", source_lineage),
                     context.clone(),
                     copied.clone(),
                 ],
+                "",
+            );
+            write(
+                &w.codex.join("sessions/c-root.jsonl"),
+                &[meta("root", "00:00", None)],
                 "",
             );
             let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
@@ -621,7 +635,7 @@ mod tests {
                     (Some("source"), 1, "2026-11-01T00:00:01.000Z"),
                     (Some("fork"), 1, "2026-11-01T01:00:01.000Z"),
                 ],
-                "{forked_at}"
+                "{forked_at} {lineage:?}"
             );
         }
     }

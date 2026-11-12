@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, EventKind, Harness,
-    IdleAttribution, IdleControl, Location, Millis, Scan, SpeedControl, TunedWindow, WindowControl,
+    IdleAttribution, IdleControl, Location, MemoryControl, Millis, Scan, SpeedControl, TunedWindow,
+    WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -343,6 +344,82 @@ pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundContro
         off: format!("{key} = false"),
         off_file: Some(file.into()),
     }])
+}
+
+/// Claude auto memory, on by default: `CLAUDE_CODE_DISABLE_AUTO_MEMORY` in the
+/// environment or settings env wins over `autoMemoryEnabled`.
+/// <https://code.claude.com/docs/en/memory#auto-memory>
+pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryControl, ScanError> {
+    let key = "autoMemoryEnabled";
+    let variable = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+    let environment = scoped_environment(scopes, env);
+    if let Some(disabled) = environment.values.get(variable).and_then(env_flag) {
+        let owner = environment.owners[variable].clone();
+        let scope = scopes
+            .iter()
+            .find(|s| owner == format!("{}:env.{variable}", s.file));
+        return Ok(MemoryControl {
+            value: !disabled,
+            owner,
+            off: match scope {
+                Some(_) => format!("\"env\": {{\"{variable}\": \"1\"}}"),
+                None => format!("{variable}=1"),
+            },
+            off_file: scope.map(|s| s.file.to_string()),
+            directory: None,
+            unresolved: None,
+            overrides: vec![],
+            stored: false,
+        });
+    }
+    let first = scopes.first().map_or("settings.json", |s| s.file);
+    let (value, owner, file) = match scoped_bool(scopes, key)? {
+        Some((value, file)) => (value, format!("{file}:{key}"), file),
+        None => (true, format!("{first}:{key} (default)"), first),
+    };
+    Ok(MemoryControl {
+        value,
+        owner,
+        off: format!("\"{key}\": false"),
+        off_file: Some(file.into()),
+        directory: None,
+        unresolved: None,
+        overrides: vec![],
+        stored: false,
+    })
+}
+
+/// Codex memories, off by default: `features.memories` turns them on.
+/// `memories.use_memories = false` only keeps them out of the prompt and
+/// `memories.generate_memories = false` only stops new ones, so both together are
+/// off too. Scopes run from lowest to highest precedence; `user` is the file a
+/// default is set in.
+/// <https://learn.chatgpt.com/docs/customization/memories>
+pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryControl, ScanError> {
+    let key = "features.memories";
+    let (enabled, file, owner) = match scoped_bool(scopes, key)? {
+        Some((value, file)) => (value, file, format!("{file}:{key}")),
+        None => (false, user, format!("{user}:{key} (default)")),
+    };
+    let used = scoped_bool(scopes, "memories.use_memories")?;
+    let generated = scoped_bool(scopes, "memories.generate_memories")?;
+    let (value, owner) = match (used, generated) {
+        (Some((false, used)), Some((false, generated))) if enabled => (
+            false,
+            format!("{used}:memories.use_memories and {generated}:memories.generate_memories"),
+        ),
+        _ => (enabled, owner),
+    };
+    Ok(MemoryControl {
+        value,
+        owner,
+        off: format!("{key} = false"),
+        off_file: Some(file.into()),
+        directory: None,
+        unresolved: None,
+        overrides: vec![],
+        stored: false,
+    })
 }
 
 /// A positive millisecond count as Claude Code parses it: a leading integer, or an integral exponent form.
@@ -1390,6 +1467,76 @@ mod tests {
         }])
         .unwrap_err();
         assert_eq!(error.message, "invalid tui.auto_recap");
+    }
+
+    #[test]
+    fn memory_controls_follow_the_environment_then_settings_with_harness_defaults() {
+        let user = map(json!({ "autoMemoryEnabled": false }));
+        let managed = map(json!({ "env": { "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0" } }));
+        let scope = |config, file| SettingsScope { config, file };
+        let empty = Map::new();
+        let default = claude_memory(&[scope(&empty, "user.json")], &Env::default()).unwrap();
+        assert_eq!(
+            (default.value, default.owner.as_str(), default.off.as_str()),
+            (
+                true,
+                "user.json:autoMemoryEnabled (default)",
+                r#""autoMemoryEnabled": false"#
+            )
+        );
+        let set = claude_memory(&[scope(&user, "user.json")], &Env::default()).unwrap();
+        assert!(!set.value);
+        // The environment wins over the setting, whether from the shell or settings env.
+        let shell = env(&[("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")]);
+        let forced = claude_memory(&[scope(&empty, "user.json")], &shell).unwrap();
+        assert_eq!(
+            (forced.value, forced.off.as_str(), forced.off_file),
+            (false, "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", None)
+        );
+        let scoped = claude_memory(
+            &[scope(&user, "user.json"), scope(&managed, "managed.json")],
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (scoped.value, scoped.off_file.as_deref()),
+            (true, Some("managed.json"))
+        );
+
+        let codex = |config: Value| {
+            let config = map(config);
+            codex_memory(
+                &[SettingsScope {
+                    config: &config,
+                    file: "config.toml",
+                }],
+                "config.toml",
+            )
+            .unwrap()
+        };
+        assert!(!codex(json!({})).value);
+        let on = codex(json!({ "features": { "memories": true } }));
+        assert_eq!(
+            (on.value, on.off.as_str()),
+            (true, "features.memories = false")
+        );
+        // Keeping them out of the prompt alone still generates new ones.
+        let unused = codex(json!({
+            "features": { "memories": true },
+            "memories": { "use_memories": false },
+        }));
+        assert!(unused.value);
+        let inert = codex(json!({
+            "features": { "memories": true },
+            "memories": { "use_memories": false, "generate_memories": false },
+        }));
+        assert_eq!(
+            (inert.value, inert.owner.as_str()),
+            (
+                false,
+                "config.toml:memories.use_memories and config.toml:memories.generate_memories"
+            )
+        );
     }
 
     // Ported from compaction.test.ts: "effective per-model controls honor managed scope, environment ownership and dated IDs".

@@ -212,6 +212,57 @@ fn fill(usage: &mut Usage, old: &Usage) {
     }
 }
 
+/// What a Codex `session_meta` says about its thread, parsed once for the report and the
+/// session export.
+pub(crate) struct CodexThread<'a> {
+    pub id: Option<&'a str>,
+    /// The thread it was spawned from: a spawn's immediate parent, or the root that a native
+    /// source such as `review` names as `session_id`.
+    pub parent: Option<&'a str>,
+    /// Set when a subagent source spawned it.
+    pub spawn: Option<CodexSpawn>,
+}
+
+/// How a Codex subagent was spawned.
+pub(crate) struct CodexSpawn {
+    /// Its agent role (`default` when unnamed) or, when native, its source such as `review`.
+    pub kind: Option<String>,
+    /// A subagent source such as `review`, which no agent role defines.
+    pub native: bool,
+}
+
+impl<'a> CodexThread<'a> {
+    pub(crate) fn parse(meta: &'a Map<String, Value>) -> Self {
+        let str = |v: Option<&'a Value>| v.and_then(Value::as_str).filter(|s| !s.is_empty());
+        let id = str(meta.get("id")).or_else(|| str(meta.get("session_id")));
+        let source = member(meta, "source");
+        let subagent = object(source).get("subagent");
+        let thread_spawn = subagent
+            .and_then(Value::as_object)
+            .and_then(|s| s.get("thread_spawn"));
+        let spawn_map = object(thread_spawn.unwrap_or(&NULL));
+        // `session_id` is the root thread, so a nested spawn's own parent comes first; older
+        // spawns name it at the top level.
+        let parent = str(spawn_map.get("parent_thread_id"))
+            .or_else(|| str(meta.get("parent_thread_id")))
+            .or_else(|| str(meta.get("session_id")).filter(|root| Some(*root) != id));
+        let spawn = truthy(subagent).then(|| {
+            let native = thread_spawn.is_none();
+            let kind = if native {
+                let subagent = subagent.unwrap_or(&NULL);
+                label(subagent).or_else(|| label(member(object(subagent), "other")))
+            } else {
+                match coalesce(spawn_map.get("agent_role"), spawn_map.get("agent_type")) {
+                    None | Some(Value::Null) => Some("default".into()),
+                    Some(role) => label(role),
+                }
+            };
+            CodexSpawn { kind, native }
+        });
+        Self { id, parent, spawn }
+    }
+}
+
 /// A safe label as a shared string.
 fn text(value: &Value) -> Option<Text> {
     label(value).map(Text::from)
@@ -1425,28 +1476,11 @@ impl Reader {
                 Value::String(_) => Agent::Main,
                 _ => Agent::Unknown,
             };
-            if context.agent == Agent::Subagent {
-                let subagent = member(object(source), "subagent");
-                let spawn = nested(object(subagent), "thread_spawn");
-                // A spawned thread names its role, null meaning the default; other subagents
-                // are named by their source, such as `review`.
-                let native = !object(subagent).contains_key("thread_spawn");
-                let kind = if !native {
-                    match coalesce(spawn.get("agent_role"), spawn.get("agent_type")) {
-                        None | Some(Value::Null) => Some("default".into()),
-                        Some(role) => label(role),
-                    }
-                } else {
-                    label(subagent).or_else(|| label(member(object(subagent), "other")))
-                };
-                // A spawn names its immediate parent, while `session_id` is the root thread;
-                // a review or other native source names only that root.
-                let parent = match native {
-                    true => crate::sessions::codex_thread(p).1.map(Value::from),
-                    false => spawn.get("parent_thread_id").cloned(),
-                };
-                let parent = match parent {
-                    Some(parent) => Some(id(&parent)?.into()),
+            let thread = CodexThread::parse(p);
+            if let Some(spawn) = thread.spawn {
+                let CodexSpawn { kind, native } = spawn;
+                let parent = match thread.parent {
+                    Some(parent) => Some(id(&Value::from(parent))?.into()),
                     None => None,
                 };
                 let session = context.session.clone();
@@ -1882,6 +1916,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         earlier: vec![],
         sessions: Sessions::default(),
     };
+    reader.exposure.roots(&profiles);
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();

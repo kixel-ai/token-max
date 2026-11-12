@@ -650,7 +650,8 @@ model-facing tool names may be sanitized or shortened, so unmatched names get
 no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
 A recommendation to disable the server covers its individual tool changes,
 so the settings snippet does not add redundant per-tool blocks.
-Instruction files have no switch. Core tools, the system prompt
+Instruction files have no switch; Claude's MEMORY.md is auto memory, not an
+instruction file (see [Auto memory](#auto-memory)). Core tools, the system prompt
 and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
@@ -814,6 +815,86 @@ Current provider guidance distinguishes skill discovery from body loading:
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
 
+## Auto memory
+
+`auto-memory` checks each profile once. It is advisory while memory is on and
+keep once it is off, and never exits 1: notes the agent writes for itself skip
+the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
+slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not
+apply. The check reports the total cost, the reads and writes, and the setting
+that turns it off; its `savingsUsd` is that total. Once memory is off, the line
+still shows what it cost and how often it was used earlier in the window.
+Requests that recorded no context leave the memory they loaded unmeasured. When
+no request recorded one, the cost is unknown rather than zero; otherwise the
+total is a lower bound, shown as "at least", and `coverage` counts the requests
+that recorded their context.
+
+[Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
+memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or
+`autoMemoryEnabled: false` says otherwise. While it is on, the system prompt has
+a `# Memory` section and the `instructions` attachment carries `MEMORY.md` as
+type `AutoMem`. The section, from its heading to the next top-level heading, is
+measured apart from the rest of the recorded system prompt and placed right
+after it; `MEMORY.md` is placed like any other attachment. Both form the
+`memory` context row. A request that loads `MEMORY.md` without such a section,
+as subagents do, leaves any memory instructions elsewhere in its prompt
+unmeasured, and the check says how many did. Today's setting decides whether
+memory is on, as every other check reads today's settings. It is resolved at the
+working directory of the latest main-agent request, where the user worked most
+recently, including the project's `.claude/settings.json` and
+`.claude/settings.local.json`, so `offFile` names the file that owns it. Claude
+Code reads the setting when a session starts, so a session begun before a change
+keeps the old value until it restarts. When main-agent sessions in that
+directory disagree with the setting at their latest request with a recorded
+shape, such as one that still carries the `# Memory` section after memory was
+turned off, the check notes how many, without changing its verdict. The scan
+cannot see an environment variable set only in the process that launched
+Claude Code.
+
+Uses are Read, Write, Edit and MultiEdit calls on files in a memory directory:
+`<root>/projects/<project>/memory/` under the profile root or alias, or the
+directory a loaded `MEMORY.md` came from, which `autoMemoryDirectory` can move.
+Read results move from the Read tool's output row to the memory row. The input a
+write sent, which the model generated, is estimated at the output price of the
+request whose reply made the call, using that model's calibrated token ratio;
+writes without one stay unpriced rather than zero.
+
+[Codex](https://developers.openai.com/codex/memories) memories are off unless
+`features.memories = true`, or both `memories.use_memories = false` (which
+keeps them out of the prompt) and `memories.generate_memories = false` (which
+stops new ones) are set. With each full context Codex 0.167.0 adds a developer message part
+tagged `memories.instructions` holding `memory_summary.md`, split into several
+parts when long; earlier versions start it with `## Memory`. A full world
+state leaves it in context. Compaction rebuilds it: the summary in the
+`compacted` record's `replacement_history` takes its place, and without one it
+is gone. The settings decide whether memory is on, resolved like Claude Code's
+at the latest main-agent request's directory, including the `.codex/config.toml` layers of
+a trusted project. When something the scan cannot record could change that, the
+state is unknown and the line is a yellow advisory that memories may be on,
+naming why: a project layer that sets memories in a project whose trust is not
+recorded, a named config profile (or legacy `profiles` entry) that sets
+memories, a named profile's `project_root_markers` or `projects` that could
+add or drop a `.codex/config.toml` above the session's directory that sets
+them, or a T3 instance whose launch arguments, secret environment values or
+machine policy could override them (as for Claude Code's T3 instances). Its turn-off advice then also names each file that sets memories, since
+the user setting alone would not override them. Fully resolved settings keep a
+definite on or off. A session there that carried a summary at its latest
+request while the settings turn memory off is noted, and requests that recorded no context leave the cost
+a lower bound or unknown even with memories off now, since they may have run
+while memories were on. A missing summary shows nothing, since it appears only once one has
+been written. Uses are
+the dedicated `memories` tools (`list`, `read` and `search` as reads,
+`add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token
+rule of thumb) and shell reads under `<codex home>/memories/` or
+`memories_v2/`. Dedicated tool output moves to the memory row; shell output
+stays on the shell's row. Extraction and consolidation run as requests Codex
+records only in telemetry, so their cost is not measured: wherever memories may
+have run in the window (not definitely off, used or loaded, or with a
+`memories` or `memories_v2` store under the Codex home, which Codex creates only
+once it generates memories), the line says so and its total is a lower bound. No local session has
+enabled Codex memories, so its tests use synthetic records derived from the
+0.167.0 source.
+
 ## Background generation
 
 `background-generation` checks one feature each: Claude `prompt-suggestions`,
@@ -852,8 +933,8 @@ directories, owner, disable snippet and pricing coverage. Missing or relative
 working directories, unknown trust with project overrides and unresolved
 selection have a null current value, unknown cost and no recommendation.
 Current values model the selected history; they do not prove historical enablement.
-Only allowlisted control metadata is retained or sent through SSH, never other
-settings, environment values or file contents.
+Only allowlisted control metadata is retained, never other settings,
+environment values or file contents.
 
 Claude Code 2.1.319 sends suggestions and recaps as forks of the main
 conversation with `skipTranscript` and `skipCacheWrite`, so no transcript records
@@ -969,33 +1050,38 @@ commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
 the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
 `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
-snapshots, readers and exposure extraction produce the same scan a local run
-would; it fetches no prices and runs no checks. Its stderr is discarded, so
+snapshots, readers, exposure extraction and checks produce the same report a
+local run there would, priced from the catalog the coordinator sends and dated
+by the destination's own clock once its scan ends. Its stderr is discarded, so
 login-script output cannot reach the report; failures come from the stream or
 from the exit status of `ssh` (255), the shell (127 when token-max is missing)
 or the platform check.
 
-The stream is private to one build: a header naming the package version and a
-fingerprint of the scan types, then either the scan or the destination's safe
-diagnostic, then the end of the stream. Any other build, a truncated or
-trailing value, a reference to an unsent value, or a nonzero exit fails the
-run. Strings, identifier lists, exposure views, tool-output totals and
-message-digest chains are sent once and then referenced by index, so the stream and the coordinator's
-copy keep the sharing the destination's scan had in memory. The coordinator
-reads the stream as it arrives rather than buffering it, and checks that the
-scan covers the requested window.
+The stream is private to one build. The destination writes a header naming the
+package version and a fingerprint of the stream's types, and starts scanning.
+The coordinator loads prices meanwhile and writes one request on the
+destination's stdin: the price catalog, `--max-cost-per-use`, and the report
+format (JSON, or text with this terminal's width, color and Unicode settings,
+`--details` and the host's label). The destination then writes either its
+printed report, its window and whether it recommends a change, or its safe
+diagnostic, then ends the stream. Any other build, a truncated or trailing
+value, a report in another format or window than requested, or a nonzero exit
+fails the run. The coordinator prints a destination's text with every terminal
+control escaped except line breaks and, when color is on, the color sequences
+reports use.
 
-Background controls, their owning files and pre-window prompts and requests
-travel with the scan, so background estimates use the destination's settings
-and full eligibility history, just as a local run there would.
+The scan never leaves its host, so the coordinator holds at most its own scan
+however many hosts it audits, and each destination's memory is that of a local
+run there.
 
-Every host's scan is analyzed separately against one price catalog, so cache
-replay, profile ownership, coverage and settings never mix between hosts, and
-paths keep each host's meaning. A history copied between hosts is billed in
-each host's report, which is why amounts across hosts must not be added; no
-cross-host total is reported. The first failed host stops the others: their
-`ssh` processes are killed and reaped, and a destination stops scanning when
-its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
+Every host is analyzed separately against one price catalog, so cache replay,
+profile ownership, coverage and settings never mix between hosts, and paths
+keep each host's meaning. A history copied between hosts is billed in each
+host's report, which is why amounts across hosts must not be added; no
+cross-host total is reported. The first failure, of a host or of loading
+prices, stops the run at once: every `ssh` process is killed and reaped, a
+destination stops when its stdin closes, and a partial price download is
+deleted. SIGINT and SIGTERM do the same before exiting 2.
 
 ## Bash timeout cap
 

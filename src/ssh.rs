@@ -1,26 +1,21 @@
-//! Audits of selected SSH destinations, each scanned by the `token-max` installed there.
+//! Audits of selected SSH destinations, each run by the `token-max` installed there.
 //!
 //! The coordinator runs `token-max --ssh-scan` on each destination through the local OpenSSH
 //! client, with its configuration, authentication and host keys. The destination reads its own
-//! histories and settings and sends only the scan's metadata (see [`crate::wire`]); prices and
-//! every check run on the coordinator.
+//! histories and settings, prices and checks them with the coordinator's catalog, and sends
+//! back only its printed report (see [`crate::wire`]); its scan never leaves it.
 
-use std::io::{self, BufReader, BufWriter, Write};
+use std::io::{self, BufReader, BufWriter};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, mpsc};
 
+use crate::cli::{Render, Rendered, render};
 use crate::discovery::DiscoveryOptions;
-use crate::model::{Millis, Scan};
+use crate::model::Millis;
 use crate::reader::{ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
-use crate::wire::{self, Header, Outcome, Stream};
-
-/// One destination's scan and the home directory its paths are relative to.
-pub struct Remote {
-    pub scan: Scan,
-    pub home: Option<String>,
-}
+use crate::wire::{self, Format, Header, Outcome, Printed, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -94,7 +89,17 @@ pub fn cancel() {
     children.running.clear();
 }
 
-/// A running audit; dropping it before [`Session::finish`] stops it.
+/// What an audit waits for after the header, in whichever order it comes.
+enum Step {
+    /// This host's request, once it has prices.
+    Request(Request),
+    /// This host failed before sending a request.
+    Cancelled,
+    /// The destination's outcome, which may come before the request when it fails.
+    Outcome(Result<Outcome, serde_json::Error>),
+}
+
+/// A running audit; dropping it kills the child unless [`Session::stop`] already reaped it.
 struct Session {
     destination: String,
     id: u64,
@@ -131,8 +136,16 @@ impl Drop for Session {
     }
 }
 
-/// Scan one destination with its installed `token-max`, failing on any error there.
-pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanError> {
+/// Audit one destination with its installed `token-max`, failing on any error there.
+///
+/// The destination scans while this host loads prices; once `request` delivers the catalog and
+/// format, it analyzes and sends back its printed report. A destination that fails first is
+/// reported at once, without waiting for the request.
+pub fn audit(
+    destination: &str,
+    since: Option<Millis>,
+    request: mpsc::Receiver<Request>,
+) -> Result<Rendered, ScanError> {
     let mut command = Command::new("ssh");
     command
         .args(["-T", "-x", "-a"])
@@ -208,25 +221,62 @@ pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanErr
             )
         }));
     }
-    let outcome = stream.outcome();
+    // The destination may fail before this host has prices to send, so its outcome is read
+    // while the request is still pending.
+    let (steps, arrived) = mpsc::channel();
+    let forward = steps.clone();
+    std::thread::spawn(move || {
+        // Dropped without a request when this host fails first, and then stops every destination.
+        let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
+    });
+    std::thread::spawn(move || {
+        let _ = steps.send(Step::Outcome(stream.outcome()));
+    });
+    let mut json = None;
+    let outcome = loop {
+        match arrived.recv() {
+            Ok(Step::Request(request)) => {
+                json = Some(matches!(request.format, Format::Json));
+                if let Some(stdin) = session.stdin.as_mut() {
+                    // A destination that already failed has stopped reading; its outcome says why.
+                    let _ = wire::write(&mut BufWriter::new(stdin), &request);
+                }
+            }
+            Ok(Step::Outcome(outcome)) => break outcome,
+            Ok(Step::Cancelled) | Err(_) => {
+                return Err(ScanError::new("cancelled; no report produced"));
+            }
+        }
+    };
     match outcome {
-        Ok(Outcome::Scan(scan)) => {
+        Ok(Outcome::Report {
+            since: scanned,
+            printed,
+            change,
+        }) => {
             let status = session.stop(false).and_then(|s| s.code());
             if status != Some(0) {
                 return Err(ScanError::new(format!(
-                    "{destination}: token-max failed after sending its scan ({})",
+                    "{destination}: token-max failed after sending its report ({})",
                     exit(status)
                 )));
             }
-            if scan.since != since {
+            if scanned != since {
                 return Err(ScanError::new(format!(
                     "{destination}: token-max scanned a different window than requested"
                 )));
             }
-            Ok(Remote {
-                scan: *scan,
-                home: header.home,
-            })
+            let Some(json) = json else {
+                return Err(ScanError::new(format!(
+                    "{destination}: token-max sent a report before its request"
+                )));
+            };
+            if json != matches!(printed, Printed::Json(_)) {
+                return Err(ScanError::new(format!(
+                    "{destination}: token-max printed a different format than requested"
+                )));
+            }
+            Ok(Rendered { printed, change })
         }
         Ok(Outcome::Error { message, location }) => {
             session.stop(true);
@@ -255,30 +305,61 @@ fn exit(status: Option<i32>) -> String {
     }
 }
 
-/// Run as an SSH audit destination: stream this host's scan to stdout and return the exit code.
+/// Run as an SSH audit destination: audit this host, stream its report to stdout and return
+/// the exit code.
 ///
 /// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
-/// scan stops when stdin closes, which happens when the coordinator or its connection ends.
+/// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
+/// closes, which happens when the coordinator or its connection ends.
 pub fn serve(since: Option<Millis>) -> u8 {
-    std::thread::spawn(|| {
-        let _ = io::copy(&mut io::stdin(), &mut io::sink());
+    let (sender, requests) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdin = BufReader::new(io::stdin());
+        match Stream::new(&mut stdin).request() {
+            Ok(request) => {
+                let _ = sender.send(request);
+            }
+            // Not this build's coordinator, or it is gone.
+            Err(_) => std::process::exit(2),
+        }
+        let _ = io::copy(&mut stdin, &mut io::sink());
         std::process::exit(2);
     });
     let mut stdout = BufWriter::with_capacity(1 << 16, io::stdout().lock());
     let header = Header {
         token_max_scan: wire::build(),
-        home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
     };
     if wire::write(&mut stdout, &header).is_err() {
         return 2;
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
         let discovery = DiscoveryOptions::host()?;
-        scan(&ScanOptions { discovery, since })
+        let scan = scan(&ScanOptions { discovery, since })?;
+        // The stdin thread keeps the sender until it exits this process.
+        let request = requests.recv().expect("the request or an exit");
+        let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
+        render(
+            scan,
+            Render {
+                catalog: &request.catalog,
+                since,
+                now: crate::reader::now(),
+                max_cost_per_use_usd: request.max_cost_per_use_usd,
+                format: &request.format,
+                home: home.as_deref(),
+            },
+        )
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
     let (outcome, code) = match result {
-        Ok(scan) => (Outcome::Scan(Box::new(scan)), 0),
+        Ok(Rendered { printed, change }) => (
+            Outcome::Report {
+                since,
+                printed,
+                change,
+            },
+            0,
+        ),
         Err(error) => (
             Outcome::Error {
                 message: error.message,
@@ -287,7 +368,7 @@ pub fn serve(since: Option<Millis>) -> u8 {
             2,
         ),
     };
-    match wire::write(&mut stdout, &outcome).and_then(|()| stdout.flush()) {
+    match wire::write(&mut stdout, &outcome) {
         Ok(()) => code,
         Err(_) => 2,
     }

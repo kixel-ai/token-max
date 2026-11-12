@@ -69,7 +69,7 @@ Keepalive checks keep their complete shape, including every
 cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
 Their period coverage, unknown current ping state, unpriced periods and unresolved
 comparisons remain explicit. The sequential replay uses complete historical inputs
-before the output projection, including when the scan came from SSH.
+before the output projection, on SSH destinations too.
 
 These version 1 evidence fields change shape:
 
@@ -108,9 +108,9 @@ requests. The report never changes or writes transcripts or settings.
 
 With `--ssh`, the envelope is `{"schemaVersion": 2, "hosts": [...]}`. Each
 `hosts[]` contains `ssh` (null for this host) and `report` in that same schema.
-The private SSH scan protocol transfers the metadata the analysis needs with
-shared values; the coordinator analyzes and reports it. Destinations need the
-same build, including its scan-schema fingerprint. Costs are independent per host.
+Each destination analyzes its own scan with the coordinator's price catalog and
+sends back only this report. Destinations need the same build, including its
+stream fingerprint. Costs are independent per host.
 
 A compaction check has `unset: true` when no setting names its window, so its
 `current` is Claude Code's tuned window for the model: the latest observed

@@ -928,8 +928,8 @@ directories, owner, disable snippet and pricing coverage. Missing or relative
 working directories, unknown trust with project overrides and unresolved
 selection have a null current value, unknown cost and no recommendation.
 Current values model the selected history; they do not prove historical enablement.
-Only allowlisted control metadata is retained or sent through SSH, never other
-settings, environment values or file contents.
+Only allowlisted control metadata is retained, never other settings,
+environment values or file contents.
 
 Claude Code 2.1.319 sends suggestions and recaps as forks of the main
 conversation with `skipTranscript` and `skipCacheWrite`, so no transcript records
@@ -1045,33 +1045,38 @@ commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
 the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
 `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
-snapshots, readers and exposure extraction produce the same scan a local run
-would; it fetches no prices and runs no checks. Its stderr is discarded, so
+snapshots, readers, exposure extraction and checks produce the same report a
+local run there would, priced from the catalog the coordinator sends and dated
+by the destination's own clock once its scan ends. Its stderr is discarded, so
 login-script output cannot reach the report; failures come from the stream or
 from the exit status of `ssh` (255), the shell (127 when token-max is missing)
 or the platform check.
 
-The stream is private to one build: a header naming the package version and a
-fingerprint of the scan types, then either the scan or the destination's safe
-diagnostic, then the end of the stream. Any other build, a truncated or
-trailing value, a reference to an unsent value, or a nonzero exit fails the
-run. Strings, identifier lists, exposure views, tool-output totals and
-message-digest chains are sent once and then referenced by index, so the stream and the coordinator's
-copy keep the sharing the destination's scan had in memory. The coordinator
-reads the stream as it arrives rather than buffering it, and checks that the
-scan covers the requested window.
+The stream is private to one build. The destination writes a header naming the
+package version and a fingerprint of the stream's types, and starts scanning.
+The coordinator loads prices meanwhile and writes one request on the
+destination's stdin: the price catalog, `--max-cost-per-use`, and the report
+format (JSON, or text with this terminal's width, color and Unicode settings,
+`--details` and the host's label). The destination then writes either its
+printed report, its window and whether it recommends a change, or its safe
+diagnostic, then ends the stream. Any other build, a truncated or trailing
+value, a report in another format or window than requested, or a nonzero exit
+fails the run. The coordinator prints a destination's text with every terminal
+control escaped except line breaks and, when color is on, the color sequences
+reports use.
 
-Background controls, their owning files and pre-window prompts and requests
-travel with the scan, so background estimates use the destination's settings
-and full eligibility history, just as a local run there would.
+The scan never leaves its host, so the coordinator holds at most its own scan
+however many hosts it audits, and each destination's memory is that of a local
+run there.
 
-Every host's scan is analyzed separately against one price catalog, so cache
-replay, profile ownership, coverage and settings never mix between hosts, and
-paths keep each host's meaning. A history copied between hosts is billed in
-each host's report, which is why amounts across hosts must not be added; no
-cross-host total is reported. The first failed host stops the others: their
-`ssh` processes are killed and reaped, and a destination stops scanning when
-its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
+Every host is analyzed separately against one price catalog, so cache replay,
+profile ownership, coverage and settings never mix between hosts, and paths
+keep each host's meaning. A history copied between hosts is billed in each
+host's report, which is why amounts across hosts must not be added; no
+cross-host total is reported. The first failure, of a host or of loading
+prices, stops the run at once: every `ssh` process is killed and reaped, a
+destination stops when its stdin closes, and a partial price download is
+deleted. SIGINT and SIGTERM do the same before exiting 2.
 
 ## Bash timeout cap
 

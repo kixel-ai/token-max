@@ -367,6 +367,33 @@ fn token_range(mut values: impl Iterator<Item = i64>) -> String {
     }
 }
 
+/// An unstyled line.
+const PLAIN: &str = "";
+/// A heading's ANSI style.
+const BOLD: &str = "1";
+
+/// A verdict's ANSI color, which only repeats what the line's words say: red for
+/// a recommended change, yellow for an advisory, green for a value already right.
+fn tier(action: Action) -> &'static str {
+    match action {
+        Action::Change => "31",
+        Action::Advisory => "33",
+        Action::Keep => "32",
+    }
+}
+
+/// A feature row's color: its own verdict, red when its server's off covers it, and
+/// yellow when it can be switched off today but has no verdict. Other rows have no verdict.
+fn feature_tier(c: &ContextCost, covered: bool) -> &'static str {
+    match c.verdict {
+        Some(Verdict::Off) => tier(Action::Change),
+        _ if covered => tier(Action::Change),
+        Some(Verdict::Keep) => tier(Action::Keep),
+        None if c.current && c.control.is_some() => tier(Action::Advisory),
+        None => PLAIN,
+    }
+}
+
 /// The text being built, one wrapped line at a time.
 struct Out<'a> {
     text: String,
@@ -377,7 +404,7 @@ struct Out<'a> {
 }
 
 impl<'a> Out<'a> {
-    fn line(&mut self, text: &str, indent: usize, style: u8) {
+    fn line(&mut self, text: &str, indent: usize, style: &str) {
         // Escape metadata before wrapping or adding our own ANSI. Long paths are
         // hard-wrapped, never shortened; wide characters use terminal cell widths.
         let wrapped = wrap_text(
@@ -389,7 +416,7 @@ impl<'a> Out<'a> {
             },
         );
         for part in wrapped.split('\n') {
-            if self.options.color && style != 0 {
+            if self.options.color && !style.is_empty() {
                 let _ = write!(self.text, "\x1b[{style}m{part}\x1b[0m");
             } else {
                 self.text.push_str(part);
@@ -398,7 +425,7 @@ impl<'a> Out<'a> {
         }
     }
     fn blank(&mut self) {
-        self.line("", 0, 0);
+        self.line("", 0, PLAIN);
     }
     /// A line kept whole at any width, such as a JSON snippet.
     fn raw(&mut self, text: &str) {
@@ -407,10 +434,10 @@ impl<'a> Out<'a> {
     }
     fn section(&mut self, title: &str) {
         self.blank();
-        self.line(title, 0, 1);
+        self.line(title, 0, BOLD);
     }
     fn field(&mut self, name: &str, value: &str) {
-        self.line(&format!("{name}: {value}"), 2, 0);
+        self.line(&format!("{name}: {value}"), 2, PLAIN);
     }
     fn notes(&mut self, name: &str, values: &[String]) {
         for value in values.iter().collect::<IndexSet<_>>() {
@@ -481,7 +508,7 @@ impl<'a> Out<'a> {
             Some(host) => format!("token-max: {}", host.name),
             None => "token-max".into(),
         };
-        self.line(&title, 0, 1);
+        self.line(&title, 0, BOLD);
     }
     fn home(&self, path: &str) -> String {
         match &self.home {
@@ -611,7 +638,7 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
     }
     if out.options.details {
         for line in t3_text_generation(report, out) {
-            out.line(&line, 2, 0);
+            out.line(&line, 2, PLAIN);
         }
     }
 }
@@ -620,7 +647,11 @@ fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
     out.title();
     t3_coverage(report, out);
-    out.line("Public API-price estimates, not subscription bills.", 0, 0);
+    out.line(
+        "Public API-price estimates, not subscription bills.",
+        0,
+        PLAIN,
+    );
     let requests = &report.scan.requests;
     let earliest = requests.first().map(|r| r.time);
     out.field(
@@ -705,17 +736,17 @@ fn details(report: &Report, out: &mut Out<'_>) {
         "No applicable setting changes".into()
     });
     if report.scan.snapshots.is_empty() {
-        out.line("No transcript histories found. Select an existing profile with --claude-dir or --codex-dir; run after using that agent.", 0, 0);
+        out.line("No transcript histories found. Select an existing profile with --claude-dir or --codex-dir; run after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
         out.line(
             "No selected requests. Try an earlier --since or select another profile.",
             0,
-            0,
+            PLAIN,
         );
     } else if report.checks.is_empty()
         && !setting_rows(&report.context).any(|c| c.verdict.is_some())
     {
-        out.line("No applicable checks for the selected requests. Usage coverage does not establish that every setting is optimal.", 0, 0);
+        out.line("No applicable checks for the selected requests. Usage coverage does not establish that every setting is optimal.", 0, PLAIN);
     } else if changes == 0 {
         out.line(
             if report.checks.iter().any(|c| c.action() == Action::Advisory) {
@@ -724,23 +755,23 @@ fn details(report: &Report, out: &mut Out<'_>) {
                 "Available checks favor current settings. Coverage limits still apply."
             },
             0,
-            0,
+            PLAIN,
         );
     }
     if !report.checks.is_empty() {
         out.line(
             "Each check has its own baseline. Do not sum independent savings.",
             0,
-            0,
+            PLAIN,
         );
     }
 
     let groups = [
-        (Action::Change, "Recommended changes", 36),
-        (Action::Advisory, "Advisory findings", 33),
-        (Action::Keep, "Keep current settings", 0),
+        (Action::Change, "Recommended changes"),
+        (Action::Advisory, "Advisory findings"),
+        (Action::Keep, "Keep current settings"),
     ];
-    for (action, title, style) in groups {
+    for (action, title) in groups {
         let results: Vec<&CheckResult> = report
             .checks
             .iter()
@@ -751,7 +782,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
         }
         out.section(title);
         for result in results {
-            card(result, action, style, out);
+            card(result, action, out);
         }
     }
 
@@ -824,14 +855,14 @@ fn details(report: &Report, out: &mut Out<'_>) {
                 );
                 out.notes("Unknown", &scenario.cost.unknown);
             }
-            out.line("Tier scenarios replace only conditionally priced tiers, preserve recorded billing, and are not bounds on actual charges.", 0, 0);
+            out.line("Tier scenarios replace only conditionally priced tiers, preserve recorded billing, and are not bounds on actual charges.", 0, PLAIN);
         }
     }
     if report.historical.is_empty() {
         out.line(
             "Recorded-request cost: unknown; no selected request evidence.",
             0,
-            0,
+            PLAIN,
         );
     }
     let exposure = &report.scan.exposure;
@@ -892,12 +923,12 @@ fn details(report: &Report, out: &mut Out<'_>) {
     out.line(
         "Repeated evidence is grouped; cache and attempt identifiers are examples.",
         0,
-        0,
+        PLAIN,
     );
 }
 
 /// One check's full evidence card.
-fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
+fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
     let arrow = out.arrow;
     let r = common(result);
     out.blank();
@@ -910,7 +941,7 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
             label(&r.evidence)
         ),
         0,
-        style,
+        tier(action),
     );
     out.field("Profile", &out.profile_name(r.profile));
     out.field("Owner", &display(r.owner));
@@ -1616,6 +1647,18 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
     }
 }
 
+/// What a background generation cost over its whole window; its uses are never recorded.
+fn background_cost(r: &Common<'_>) -> String {
+    match r.savings_usd {
+        Some(usd) => format!(
+            "Costs {}{}; its uses are not recorded",
+            about(usd),
+            coverage_note(r)
+        ),
+        None => "Cost unknown; its uses are not recorded".into(),
+    }
+}
+
 /// A dollar amount per 30 days at the window's rate.
 fn per_month(usd: f64, since: Option<Millis>, until: Option<Millis>) -> String {
     match (since, until) {
@@ -1883,6 +1926,24 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
+/// How often a feature was used over the window. Only the model's calls count for a
+/// skill that stays typeable.
+fn uses(c: &ContextCost) -> String {
+    let typed = typed_only(c.control.as_ref());
+    match c.calls {
+        None => "recorded uses are unknown".into(),
+        Some(calls) if c.skill.is_some() => format!("{} observed skill turns", count(calls)),
+        Some(0) if typed => "the model never used it".into(),
+        Some(0) => "never used".into(),
+        Some(calls) => format!(
+            "{} {} time{}",
+            if typed { "the model used it" } else { "used" },
+            count(calls),
+            if calls == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 /// Codex counts positive request/load evidence, never inferring successful execution or nonuse.
 fn catalog_evidence(c: &ContextCost) -> String {
     let Some(s) = &c.skill else {
@@ -1913,7 +1974,7 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
     if !report.context.iter().any(|c| c.skill.is_some()) {
         return;
     }
-    out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. A request and confirmed loads in one user turn count as one use; absent turn boundaries, evidence is conservatively grouped within its session. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, 0);
+    out.line("Codex skill amounts are rendered listing costs, not promised savings: removing a skill can backfill the catalog or expand other descriptions. A request and confirmed loads in one user turn count as one use; absent turn boundaries, evidence is conservatively grouped within its session. Visibility is incomplete; zero observations do not prove nonuse. Disabling also removes explicit requests. allow_implicit_invocation = false is not a catalog-cost control.", 0, PLAIN);
     let mut seen = IndexSet::default();
     for c in report
         .context
@@ -1926,7 +1987,7 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
             || "an unresolved path; resolve the listed paths before disabling copies".into(),
             |p| out.home(p),
         );
-        out.line(&format!("Duplicate skill {}: {} same-named catalog entries. Preferred copy: {retained}; disable redundant paths. The preferred copy still follows --max-cost-per-use. Repeated entries of the same path need their duplicate discovery source removed. If a copy is symlinked, remove the redundant link at its source; transcripts cannot establish symlink identity.", c.name, count(s.duplicate_entries)), 2, 0);
+        out.line(&format!("Duplicate skill {}: {} same-named catalog entries. Preferred copy: {retained}; disable redundant paths. The preferred copy still follows --max-cost-per-use. Repeated entries of the same path need their duplicate discovery source removed. If a copy is symlinked, remove the redundant link at its source; transcripts cannot establish symlink identity.", c.name, count(s.duplicate_entries)), 2, PLAIN);
     }
 }
 
@@ -2180,7 +2241,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     out.line(
         "Estimated with public API prices, not your subscription bill. Nothing was changed.",
         0,
-        0,
+        PLAIN,
     );
     out.blank();
     out.line(
@@ -2201,10 +2262,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             ),
         },
         0,
-        0,
+        PLAIN,
     );
     for p in &report.scan.profiles {
-        out.line(&out.short_profile(&p.id), 2, 0);
+        out.line(&out.short_profile(&p.id), 2, PLAIN);
     }
     for group in &report.historical {
         if !group.tier_sensitivity.is_empty() {
@@ -2212,7 +2273,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 "Conditional Codex pricing [{}]: {} of {} requests priced; {} use assumed service tiers (supported historical requests, otherwise standard for omitted/auto). {}",
                 group.profiles.iter().map(|p| out.short_profile(p)).collect::<Vec<_>>().join(", "),
                 group.priced_requests, group.requests, group.conditional_requests, TIER_SENSITIVITY
-            ), 0, 0);
+            ), 0, PLAIN);
         }
     }
     if coverage.missing_usage > 0 {
@@ -2222,7 +2283,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 count(coverage.missing_usage)
             ),
             0,
-            0,
+            PLAIN,
         );
     }
     if coverage.skipped_lines > 0 {
@@ -2233,13 +2294,17 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 count(coverage.skipped_files)
             ),
             0,
-            0,
+            PLAIN,
         );
     }
     if report.scan.snapshots.is_empty() {
-        out.line("No transcript histories found. Select a profile with --claude-dir or --codex-dir after using that agent.", 0, 0);
+        out.line("No transcript histories found. Select a profile with --claude-dir or --codex-dir after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
-        out.line("Try an earlier --since or select another profile.", 0, 0);
+        out.line(
+            "Try an earlier --since or select another profile.",
+            0,
+            PLAIN,
+        );
     }
 
     let checks: Vec<(&CheckResult, Common<'_>)> =
@@ -2301,17 +2366,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         name
     };
-    let span = since.filter(|&s| until > s).map(|s| until - s);
-    // Everything is shown per 30 days so lines with different windows compare directly.
-    // Scaled by the real duration, however short, as monthlySavingsUsd is.
-    let monthly = |usd: f64, from: Option<Millis>, to: Option<Millis>| match (from, to) {
-        (Some(from), Some(to)) if to > from => about((usd * 30.0 * DAY) / (to - from) as f64),
-        _ => about(usd),
-    };
+    // Setting savings are shown per 30 days so checks with different windows compare
+    // directly. Feature costs stay totals over the read window, beside the uses they bought.
     let cost_text = |c: &ContextCost| {
         c.estimated_usd.map_or_else(
             || "cost unknown".into(),
-            |usd| format!("costs {}", monthly(usd, since, Some(until))),
+            |usd| format!("costs {}", about(usd)),
         )
     };
     let settings_file: IndexMap<&str, String> = report
@@ -2351,61 +2411,49 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             "No setting changes recommended.".into()
         },
         0,
-        1,
+        BOLD,
     );
     out.line(
         &format!(
-            "Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than {} per use (--max-cost-per-use).",
+            "Setting savings are per 30 days at this window's rate; feature and context costs and uses are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than {} per use (--max-cost-per-use).",
             about(report.max_cost_per_use_usd)
         ),
         0,
-        0,
+        PLAIN,
     );
     if report
         .checks
         .iter()
         .any(|c| matches!(c, CheckResult::Background(_)))
     {
-        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, 0);
+        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, PLAIN);
     }
     // Parent and detail coverage overlap; do not combine them into a percentage.
     if pieces.iter().any(|c| c.priced < c.requests) {
-        out.line("Some feature costs are scaled from their priced requests; --details shows each row's coverage.", 0, 0);
+        out.line("Some feature costs are scaled from their priced requests; --details shows each row's coverage.", 0, PLAIN);
     }
     let piece = |c: &ContextCost, out: &Out<'_>| {
         let label = piece_label(c, out) + &suffix(c, out);
         let cost = c.estimated_usd.map_or_else(
             || "Cost unknown".into(),
-            |usd| format!("Costs {}", monthly(usd, since, Some(until))),
+            |usd| format!("Costs {}", about(usd)),
         );
-        let calls = c.calls.unwrap_or(0);
-        // Only the model's calls count for a skill that stays typeable.
-        let typed = typed_only(c.control.as_ref());
+        let per_use = c
+            .cost_per_use_usd
+            .map_or_else(|| "cost unknown".into(), about);
         let uses = if c.skill.is_some() {
             format!(
-                "{} observed skill turns ({} per use, counting zero as one); {}. {}",
-                count(calls),
-                c.cost_per_use_usd
-                    .map_or_else(|| "cost unknown".into(), about),
+                "{} ({per_use} per use, counting zero as one); {}. {}",
+                uses(c),
                 catalog_evidence(c),
                 catalog_control(c)
             )
-        } else if calls == 0 {
-            if typed {
-                "the model never used it".to_string()
-            } else {
-                "never used".to_string()
-            }
+        } else if c.calls.unwrap_or(0) == 0 {
+            uses(c)
         } else {
-            format!(
-                "{} {} time{} ({} each)",
-                if typed { "the model used it" } else { "used" },
-                count(calls),
-                if calls == 1 { "" } else { "s" },
-                about(c.cost_per_use_usd.unwrap_or(0.0))
-            )
+            format!("{} ({per_use} each)", uses(c))
         };
-        let change = if typed {
+        let change = if typed_only(c.control.as_ref()) {
             format!("on {arrow} only when you type /{}", c.name)
         } else {
             format!("on {arrow} off")
@@ -2424,9 +2472,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         let cost = &w.miss_cost;
         let cost = match cost.total_usd {
-            Some(usd) => monthly(usd, r.since, r.until),
+            Some(usd) => per_month(usd, r.since, r.until),
             None if cost.known_usd > 0.0 => {
-                format!("at least {}", monthly(cost.known_usd, r.since, r.until))
+                format!("at least {}", per_month(cost.known_usd, r.since, r.until))
             }
             None => "an unknown amount".into(),
         };
@@ -2452,7 +2500,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     (Some(savings), _) => format!(
                         " Saves {}{}.",
                         match r.monthly_savings_usd {
-                            None => monthly(savings, r.since, r.until),
+                            None => per_month(savings, r.since, r.until),
                             Some(m) => about(m),
                         },
                         coverage_note(r)
@@ -2473,7 +2521,8 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 };
                 if let CheckResult::Background(b) = result {
                     return format!(
-                        "{head} {arrow} off.{saves} Its uses are not recorded. {}.",
+                        "{head} {arrow} off. {}. {}.",
+                        background_cost(r),
                         background_off(b, out)
                     );
                 }
@@ -2519,12 +2568,8 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 background_off(b, out)
             ),
             CheckResult::Background(b) => format!(
-                "{head}. Costs {}{}; its uses are not recorded. {} to turn it off.",
-                match r.monthly_savings_usd {
-                    Some(m) => about(m),
-                    None => monthly(r.savings_usd.unwrap_or(0.0), r.since, r.until),
-                },
-                coverage_note(r),
+                "{head}. {}. {} to turn it off.",
+                background_cost(r),
                 background_off(b, out)
             ),
             CheckResult::Ttl(t) if t.one_hour_savings_usd != 0.0 => {
@@ -2535,7 +2580,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 };
                 format!(
                     "{head}. Saves {} over {other}{}.",
-                    monthly(t.one_hour_savings_usd.abs(), r.since, r.until),
+                    per_month(t.one_hour_savings_usd.abs(), r.since, r.until),
                     coverage_note(r)
                 )
             }
@@ -2564,11 +2609,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         out.section("Change");
         for c in &changes {
             let text = check_line(c, out);
-            out.line(&text, 2, 36);
+            out.line(&text, 2, tier(Action::Change));
         }
         for c in &off {
             let text = piece(c, out);
-            out.line(&text, 2, 36);
+            out.line(&text, 2, tier(Action::Change));
         }
     }
     let keeps: Vec<&(&CheckResult, Common<'_>)> = checks
@@ -2584,11 +2629,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         out.section("Keep");
         for c in keeps {
             let text = check_line(c, out);
-            out.line(&text, 2, 0);
+            out.line(&text, 2, tier(Action::Keep));
         }
         for c in kept {
             let text = piece(c, out);
-            out.line(&text, 2, 0);
+            out.line(&text, 2, tier(Action::Keep));
         }
     }
     let unknown: Vec<&(&CheckResult, Common<'_>)> = checks
@@ -2603,23 +2648,24 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     if !unknown.is_empty() || !unpriced.is_empty() || !generation.is_empty() {
         out.section("Not enough evidence");
         for line in generation {
-            out.line(&line, 2, 0);
+            out.line(&line, 2, tier(Action::Advisory));
         }
         for c in unknown {
             let text = check_line(c, out);
-            out.line(&text, 2, 0);
+            out.line(&text, 2, tier(Action::Advisory));
         }
         for c in unpriced {
+            let uses = uses(c);
             let text = format!(
                 "{}{}: on. {}{} {}.",
                 piece_label(c, out),
                 suffix(c, out),
                 c.estimated_usd.map_or_else(
-                    || "Cost unknown: none of its requests could be priced.".into(),
+                    || format!("Cost unknown: none of its requests could be priced; {uses}."),
                     |usd| {
-                        let cost = monthly(usd, since, Some(until));
+                        let cost = about(usd);
                         if c.tier_unknown_requests > 0 {
-                            format!("Estimated cost {cost}; {} requests have unresolved tier evidence ({} priced using assumed tiers); keep/off unresolved because tier sensitivity could reverse it.", c.tier_unknown_requests, c.conditional_requests)
+                            format!("Estimated cost {cost}; {uses}; {} requests have unresolved tier evidence ({} priced using assumed tiers); keep/off unresolved because tier sensitivity could reverse it.", c.tier_unknown_requests, c.conditional_requests)
                         } else {
                             format!("Estimated cost {cost}; recorded uses are unknown, so keep/off is unresolved.")
                         }
@@ -2636,7 +2682,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     format!("Turn off: {}", control_text(c.control.as_ref().expect("switchable context"), c.harness))
                 }
             );
-            out.line(&text, 2, 0);
+            out.line(&text, 2, tier(Action::Advisory));
         }
     }
     let guided: Vec<_> = report
@@ -2655,12 +2701,16 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     if !guided.is_empty() || !loading.is_empty() {
         out.section("MCP loading and instruction budgets");
         for note in loading {
-            out.line(note, 2, 0);
+            out.line(note, 2, PLAIN);
         }
         for (c, notes) in guided {
-            out.line(&format!("{}{}:", piece_label(c, out), suffix(c, out)), 2, 0);
+            out.line(
+                &format!("{}{}:", piece_label(c, out), suffix(c, out)),
+                2,
+                PLAIN,
+            );
             for note in notes {
-                out.line(&note, 4, 0);
+                out.line(&note, 4, PLAIN);
             }
             for detail in c.details.iter().filter(|d| d.current) {
                 let cost = cost_text(detail);
@@ -2675,13 +2725,14 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         } else { String::new() }
                     }, |control| format!("; off: {}", control_text(control, detail.harness)))
                 };
-                let uses = detail
-                    .calls
-                    .map_or_else(String::new, |calls| format!("; {calls} recorded uses"));
                 out.line(
-                    &format!("{}: {cost}{uses}{control}.", piece_label(detail, out)),
+                    &format!(
+                        "{}: {cost}; {}{control}.",
+                        piece_label(detail, out),
+                        uses(detail)
+                    ),
                     4,
-                    0,
+                    feature_tier(detail, c.verdict == Some(Verdict::Off)),
                 );
             }
         }
@@ -2707,14 +2758,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             .chain(outputs.keys().filter(|k| k.1.is_none()))
             .cloned()
             .collect();
-        // Scaled to 30 days like every other line, without counting unknowns as $0.
-        let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
         for key in order {
             let rows = &outputs[&key];
-            let usd: Vec<Option<f64>> = rows
-                .iter()
-                .map(|c| c.estimated_usd.map(|usd| usd * scale))
-                .collect();
+            let usd: Vec<Option<f64>> = rows.iter().map(|c| c.estimated_usd).collect();
             let cost = match known_total(&usd) {
                 unknown if usd.iter().all(Option::is_none) => unknown,
                 total => format!("costs {total}"),
@@ -2740,12 +2786,18 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     )
                 }
             };
-            out.line(&text, 2, 0);
+            // A cap is a setting whose cost transcripts cannot weigh: an advisory.
+            let style = if key.1.is_some() {
+                tier(Action::Advisory)
+            } else {
+                PLAIN
+            };
+            out.line(&text, 2, style);
         }
         out.line(
             "A lower cap keeps less output in context but leaves the model to read the rest back, which transcripts cannot price, so no cap change is recommended.",
             2,
-            0,
+            PLAIN,
         );
     }
     // Context with no switch: worth seeing, but not a setting to change.
@@ -2768,10 +2820,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 suffix(c, out),
                 cost_text(c)
             );
-            out.line(&text, 2, 0);
+            out.line(&text, 2, PLAIN);
         }
         for c in fixed.iter().filter(|c| c.kind == ContextKind::Skill) {
-            let calls = c.calls.unwrap_or(0);
             let text = format!(
                 "{}{}: {}; {}. {}.",
                 piece_label(c, out),
@@ -2779,14 +2830,8 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 cost_text(c),
                 if c.skill.is_some() {
                     catalog_evidence(c)
-                } else if calls == 0 {
-                    "never used".into()
                 } else {
-                    format!(
-                        "used {} time{}",
-                        count(calls),
-                        if calls == 1 { "" } else { "s" }
-                    )
+                    uses(c)
                 },
                 if c.skill.is_some() {
                     catalog_control(c)
@@ -2794,7 +2839,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     PLUGIN_SKILL.into()
                 }
             );
-            out.line(&text, 2, 0);
+            out.line(&text, 2, PLAIN);
         }
         for c in fixed.iter().filter(|c| c.kind == ContextKind::McpServer) {
             let text = format!(
@@ -2803,10 +2848,8 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 suffix(c, out),
                 cost_text(c)
             );
-            out.line(&text, 2, 0);
+            out.line(&text, 2, PLAIN);
         }
-        // Scaled to 30 days like every other line, without counting unknowns as $0.
-        let scale = span.map_or(1.0, |span| (30.0 * DAY) / span as f64);
         let core: Vec<Option<f64>> = fixed
             .iter()
             .filter(|c| {
@@ -2815,7 +2858,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     ContextKind::Instructions | ContextKind::Skill | ContextKind::McpServer
                 )
             })
-            .map(|c| c.estimated_usd.map(|usd| usd * scale))
+            .map(|c| c.estimated_usd)
             .collect();
         if !core.is_empty() {
             out.line(
@@ -2824,7 +2867,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     known_total(&core)
                 ),
                 2,
-                0,
+                PLAIN,
             );
         }
     }
@@ -2843,7 +2886,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 "To turn these off, merge this into {file}, adding to any lists already there:"
             ),
             0,
-            0,
+            PLAIN,
         );
         // Never wrapped, so the snippet stays valid at any terminal width.
         let patch = if file.ends_with(".toml") {
@@ -2855,11 +2898,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.raw(&format!("  {row}"));
         }
     }
-    if span.is_some() && !pieces.is_empty() {
+    if since.is_some_and(|s| until > s) && !pieces.is_empty() {
         out.line(
             "Context costs assume nothing else changes when a piece is removed; cache writes and compaction can shift.",
             0,
-            0,
+            PLAIN,
         );
     }
     out.blank();
@@ -2880,17 +2923,17 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.home(&report.prices.source)
         ),
         0,
-        0,
+        PLAIN,
     );
     out.line(
         "Each line compares one setting with everything else unchanged; savings do not add up.",
         0,
-        0,
+        PLAIN,
     );
     out.line(
         "--details shows the evidence and assumptions behind each line; --json is for scripts.",
         0,
-        0,
+        PLAIN,
     );
 }
 
@@ -2913,10 +2956,10 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             about(report.max_cost_per_use_usd)
         ),
         0,
-        0,
+        PLAIN,
     );
     for note in mcp_guidance(report.context.iter()) {
-        out.line(note, 2, 0);
+        out.line(note, 2, PLAIN);
     }
     for (c, covered) in report.context.iter().flat_map(|parent| {
         std::iter::once((parent, false)).chain(
@@ -2975,9 +3018,9 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             String::new()
         };
         let text = format!("{}{profile}: {cost}{used}", piece_label(c, out));
-        out.line(&text, 2, 0);
+        out.line(&text, 2, feature_tier(c, covered));
         for note in context_guidance(c, &report.scan.profiles, &out.home(&c.name)) {
-            out.line(&note, 6, 0);
+            out.line(&note, 6, PLAIN);
         }
         out.notes("Pricing assumption", &c.assumptions);
         let size = c.tokens.map_or_else(String::new, |tokens| {
@@ -2997,7 +3040,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                 if c.current { "" } else { "; no longer sent" }
             ),
             6,
-            0,
+            PLAIN,
         );
         let text = match &c.control {
             _ if covered => "Covered by the server-off recommendation".into(),
@@ -3036,7 +3079,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             }
             None => "No setting turns this off".into(),
         };
-        out.line(&text, 6, 0);
+        out.line(&text, 6, PLAIN);
     }
     catalog_guidance(report, out);
 }
@@ -3702,7 +3745,7 @@ mod tests {
         assert!(has("  Fast mode: off."));
         assert!(has("  Subagent prompt cache TTL: 1h. Saves $4.20 over 5m."));
         assert!(has(
-            "  Workflow tool: on. Cost unknown: none of its requests could be priced. Turn off: \"enableWorkflows\": false."
+            "  Workflow tool: on. Cost unknown: none of its requests could be priced; never used. Turn off: \"enableWorkflows\": false."
         ));
         assert!(has(
             "  Idle compaction: on. On and off cost the same on recorded idle gaps, so neither is cheaper."
@@ -4103,8 +4146,21 @@ mod tests {
                     ..Default::default()
                 },
             );
-            assert!(styled.contains("\x1b[1m") && styled.contains("\x1b[36m"));
+            // Bold headings; red changes, yellow advisories and green keeps.
+            for style in ["1", "31", "33", "32"] {
+                assert!(styled.contains(&format!("\x1b[{style}m")), "{style}");
+            }
             assert_eq!(strip_ansi(&styled), plain);
+            if !details {
+                for (style, line) in [
+                    ("31", "  Artifact tool: on -> off."),
+                    ("32", "  Agent tool: on."),
+                    ("33", "  Workflow tool: on."),
+                    ("32", "  Fast mode: off."),
+                ] {
+                    assert!(styled.contains(&format!("\x1b[{style}m{line}")), "{line}");
+                }
+            }
         }
         assert_eq!(
             text(&report, None, true)
@@ -4586,7 +4642,8 @@ mod tests {
             serde_json::from_str::<Value>(&lines[start..=end].join("\n")).unwrap(),
             serde_json::json!({"skillOverrides": {name: "user-invocable-only"}})
         );
-        // The always-sent total uses the same exact scale as every other line.
+        // Feature and context costs are totals over the window, however short.
+        assert!(text(&report, Some(200), false).contains("Costs $5; the model never used it."));
         report.scan.since = Some(instant(&report.generated_at) - 3_600_000);
         report.context.push(ContextCost {
             kind: ContextKind::System,
@@ -4599,7 +4656,7 @@ mod tests {
             verdict: None,
             ..skill
         });
-        assert!(text(&report, Some(200), false).contains("skill and subagent lists: $720."));
+        assert!(text(&report, Some(200), false).contains("skill and subagent lists: $1."));
         let details = text(&report, Some(200), true);
         assert!(details.contains("1 recommended change"));
         assert!(!details.contains("No applicable"));

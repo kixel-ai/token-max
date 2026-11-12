@@ -75,8 +75,9 @@ as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
 The default report says what was read, then puts every setting and feature on
-one line under **Change**, **Keep**, or **Not enough evidence**, with dollar
-amounts per 30 days at the window's rate. Settings that don't change the
+one line under **Change**, **Keep**, or **Not enough evidence**. Setting
+savings are per 30 days at the window's rate; feature and context costs and
+use counts are totals over the whole window. Settings that don't change the
 experience, such as the cache TTL, name the current and suggested values, the
 savings, and the file that owns the setting. Not enough evidence says why in one
 sentence, such as two options being too close to call. Unresolved current
@@ -156,8 +157,10 @@ summarize modeled compactions; geometry sources are listed once. Identifiers in
 grouped cache and attempt evidence are examples. Nothing is hidden behind an interactive prompt
 or a top-N limit. The layout wraps long paths and
 names on narrow terminals. Redirected output keeps each field on one line so
-paths remain copyable. Color supports the labels on terminals; `NO_COLOR`
-disables color, and `--plain` also disables decorative Unicode. Redirected output
+paths remain copyable. On terminals, color repeats each line's verdict: red
+for a recommended change (exit 1), yellow for an advisory or missing evidence
+(exit 0), and green for a setting or feature already at its recommended value.
+Color never replaces the words; `NO_COLOR` disables it, and `--plain` also disables decorative Unicode. Redirected output
 is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
 with exit 2 and no success report.
 Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
@@ -173,7 +176,7 @@ Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
 
 3 setting changes recommended.
-Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than $1 per use (--max-cost-per-use).
+Setting savings are per 30 days at this window's rate; feature and context costs and uses are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than $1 per use (--max-cost-per-use).
 
 Change
   Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.
@@ -189,7 +192,7 @@ Not enough evidence
 
 No setting turns these off
   ~/.claude/CLAUDE.md: costs $5. Shorten it, or move parts into path-scoped rules or skills.
-  System prompt, core tools such as Bash and Read, and the skill and subagent lists: cost $210.
+  System prompt, core tools such as Bash and Read, and the skill and subagent lists: $210.
 
 To turn these off, merge this into ~/.claude/settings.json, adding to any lists already there:
   {

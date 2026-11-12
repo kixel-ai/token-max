@@ -564,8 +564,9 @@ must not be added together. A discovery listing and a subsequently surfaced
 schema remain distinct even when their names match.
 One-off attachments and skill bodies are excluded because no setting removes
 them up front. Rows group by the profiles that own each request, and recorded uses
-(tool calls, results and skill invocations) follow their session's owners. A
-request no selected profile owns, such as one of a T3 instance removed from
+(tool calls, results and skill invocations) follow the owners of each session
+that recorded them, or the profiles of its transcripts when that session has no
+request. A request no selected profile owns, such as one of a T3 instance removed from
 settings, has no setting to change and prices no row; it stays in the bill.
 
 Tool results are `tool-output` rows, one per tool and one per MCP server. A

@@ -113,7 +113,8 @@ pub struct ExposureCollector {
     // Tools the harness provides for the whole session, which a full world state does not replace.
     provided: HashSet<Text>,
     components: IndexMap<Text, Component>,
-    invocations: IndexMap<String, Invocation>,
+    // Invocations by id, with their copies; `sessions` and `profiles` are filled on finish.
+    invocations: IndexMap<String, (Invocation, Copies)>,
     observations: HashMap<Text, FileObservations>,
     file: Option<File>,
     // Active revision and category by component key, in JavaScript `Map` insertion order.
@@ -177,11 +178,25 @@ struct FileObservations {
     results: HashMap<u64, Arc<ResultTotals>>,
 }
 
+/// Each session that recorded one use, with the profiles of the transcripts it was copied into.
+type Copies = Vec<(Text, Vec<Text>)>;
+
+fn copy(copies: &mut Copies, session: &Text, profiles: &[Text]) {
+    let Some((_, known)) = copies.iter_mut().find(|(s, _)| s == session) else {
+        copies.push((session.clone(), profiles.to_vec()));
+        return;
+    };
+    for p in profiles {
+        if !known.contains(p) {
+            known.push(p.clone());
+        }
+    }
+}
+
 struct ToolResult {
     tool: Text,
     harness: Harness,
-    sessions: Vec<Text>,
-    profiles: Vec<Text>,
+    copies: Copies,
     characters: i64,
 }
 
@@ -199,8 +214,7 @@ struct TextPrefix {
 struct ToolCall {
     name: Text,
     harness: Harness,
-    sessions: Vec<Text>,
-    profiles: Vec<Text>,
+    copies: Copies,
     time: Millis,
 }
 
@@ -696,29 +710,37 @@ impl ExposureCollector {
                 }
             }
         }
-        // A session without requests keeps the profiles its transcripts gave every copy.
-        let owned = |harness: Harness, sessions: &[Text], profiles: &mut Vec<Text>| {
-            let found: Vec<_> = sessions
-                .iter()
-                .map(|s| owners.get(&(harness, &**s)))
-                .collect();
-            if found.iter().all(Option::is_some) {
-                profiles.clear();
-            }
-            for p in found.into_iter().flatten().flatten() {
-                if !profiles.contains(p) {
-                    profiles.push(p.clone());
+        // A session without requests keeps the profiles of the transcripts it was copied into.
+        let owned = |harness: Harness, copies: &Copies| {
+            let mut profiles: Vec<Text> = vec![];
+            for (session, fallback) in copies {
+                for p in owners.get(&(harness, &**session)).unwrap_or(fallback) {
+                    if !profiles.contains(p) {
+                        profiles.push(p.clone());
+                    }
                 }
             }
+            profiles
         };
-        let calls = calls.into_values().map(|mut c| {
-            owned(c.harness, &c.sessions, &mut c.profiles);
-            c
+        let calls = calls.into_values().map(|c| {
+            let profiles = owned(c.harness, &c.copies);
+            (c, profiles)
         });
-        let results = results.into_values().map(|mut r| {
-            owned(r.harness, &r.sessions, &mut r.profiles);
-            r
+        let results = results.into_values().map(|r| {
+            let profiles = owned(r.harness, &r.copies);
+            (r, profiles)
         });
+        let invocations: Vec<Invocation> = invocations
+            .into_values()
+            .map(|(mut i, copies)| {
+                i.profiles = owned(i.harness, &copies)
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect();
+                i.sessions = copies.into_iter().map(|(s, _)| s.to_string()).collect();
+                i
+            })
+            .collect();
 
         let visibility = visibility(requests, &exposures, &invocations, since);
 
@@ -763,25 +785,12 @@ impl ExposureCollector {
                 .collect(),
             requests: exposures,
             invocations: invocations
-                .into_values()
+                .into_iter()
                 .filter(|i| since.is_none_or(|s| i.time >= s))
                 .map(|mut i| {
                     if let Some(recorded) = i.turn.as_ref().and_then(|turn| turn_aliases.get(turn))
                     {
                         i.turn = Some(recorded.clone());
-                    }
-                    let found: Vec<_> = i
-                        .sessions
-                        .iter()
-                        .map(|s| owners.get(&(i.harness, s.as_str())))
-                        .collect();
-                    if found.iter().all(Option::is_some) {
-                        i.profiles.clear();
-                    }
-                    for p in found.into_iter().flatten().flatten() {
-                        if !i.profiles.iter().any(|o| **o == **p) {
-                            i.profiles.push(p.to_string());
-                        }
                     }
                     i
                 })
@@ -832,21 +841,13 @@ impl ExposureCollector {
                 let entry = ToolCall {
                     name,
                     harness: file.harness,
-                    sessions: vec![],
-                    profiles: vec![],
+                    copies: vec![],
                     time,
                 };
                 self.calls.entry(id.to_string()).or_insert(entry)
             }
         };
-        if !entry.sessions.contains(&self.session) {
-            entry.sessions.push(self.session.clone());
-        }
-        for profile in &file.profiles {
-            if !entry.profiles.contains(profile) {
-                entry.profiles.push(profile.clone());
-            }
-        }
+        copy(&mut entry.copies, &self.session, &file.profiles);
     }
 
     /// Add one tool result to the conversation, and to its tool's window totals.
@@ -870,18 +871,10 @@ impl ExposureCollector {
             .or_insert_with(|| ToolResult {
                 tool,
                 harness: file.harness,
-                sessions: vec![],
-                profiles: vec![],
+                copies: vec![],
                 characters,
             });
-        if !entry.sessions.contains(&self.session) {
-            entry.sessions.push(self.session.clone());
-        }
-        for profile in &file.profiles {
-            if !entry.profiles.contains(profile) {
-                entry.profiles.push(profile.clone());
-            }
-        }
+        copy(&mut entry.copies, &self.session, &file.profiles);
     }
 
     fn switch(&mut self, snapshot: &Snapshot) {
@@ -1231,19 +1224,12 @@ impl ExposureCollector {
             input.call,
             kind_name(input.kind)
         ));
-        if let Some(prior) = self.invocations.get_mut(&id) {
+        if let Some((prior, copies)) = self.invocations.get_mut(&id) {
             if input.via == Via::Typed {
                 prior.target = target;
                 prior.via = input.via;
             }
-            if !prior.sessions.iter().any(|s| **s == *self.session) {
-                prior.sessions.push(self.session.to_string());
-            }
-            for profile in &file.profiles {
-                if !prior.profiles.iter().any(|p| **p == **profile) {
-                    prior.profiles.push(profile.to_string());
-                }
-            }
+            copy(copies, &self.session, &file.profiles);
             if matches!(
                 input.status,
                 InvocationStatus::Completed | InvocationStatus::Failed
@@ -1260,7 +1246,7 @@ impl ExposureCollector {
             status: input.status,
             via: input.via,
             session: self.session.to_string(),
-            sessions: vec![self.session.to_string()],
+            sessions: vec![],
             identity_basis: input.basis,
             turn: (file.harness == Harness::Codex)
                 .then(|| self.turn.clone())
@@ -1269,9 +1255,10 @@ impl ExposureCollector {
             client: self.client.clone(),
             version: self.version.clone(),
             time,
-            profiles: file.profiles.iter().map(|p| p.to_string()).collect(),
+            profiles: vec![],
         };
-        self.invocations.insert(id, invocation);
+        let copies = vec![(self.session.clone(), file.profiles.clone())];
+        self.invocations.insert(id, (invocation, copies));
     }
 
     fn view(&mut self, view: ExposureView) -> Arc<ExposureView> {
@@ -2193,7 +2180,7 @@ impl ExposureCollector {
 fn visibility(
     requests: &[Request],
     exposures: &[Exposure],
-    invocations: &IndexMap<String, Invocation>,
+    invocations: &[Invocation],
     since: Option<Millis>,
 ) -> Vec<Visibility> {
     type Cohort<'a> = (Harness, Option<&'a str>, Option<&'a str>, Vec<&'a str>);
@@ -2293,7 +2280,7 @@ fn visibility(
     // A window counts a call recorded in any of its sessions, so per-session summaries combine.
     let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::default();
     for i in invocations
-        .values()
+        .iter()
         .filter(|i| since.is_none_or(|s| i.time >= s))
     {
         let call = Calls {
@@ -2422,10 +2409,9 @@ fn output_characters(output: Option<&Value>) -> (i64, bool) {
 }
 
 /// Count each tool's results and its largest one per profile set, after merging copies.
-fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
+fn tool_results(results: impl Iterator<Item = (ToolResult, Vec<Text>)>) -> Vec<ToolResults> {
     let mut result: IndexMap<(Text, Vec<Text>), ToolResults> = IndexMap::default();
-    for r in results {
-        let mut profiles = r.profiles;
+    for (r, mut profiles) in results {
         profiles.sort_by(|a, b| js_cmp(a, b));
         result
             .entry((r.tool.clone(), profiles.clone()))
@@ -2444,10 +2430,9 @@ fn tool_results(results: impl Iterator<Item = ToolResult>) -> Vec<ToolResults> {
 }
 
 /// Count each tool's calls per profile set, after merging copies of one call.
-fn tool_calls(calls: impl Iterator<Item = ToolCall>) -> Vec<ToolCalls> {
+fn tool_calls(calls: impl Iterator<Item = (ToolCall, Vec<Text>)>) -> Vec<ToolCalls> {
     let mut result: IndexMap<(Text, Vec<Text>), ToolCalls> = IndexMap::default();
-    for call in calls {
-        let mut profiles = call.profiles;
+    for (call, mut profiles) in calls {
         profiles.sort_by(|a, b| js_cmp(a, b));
         result
             .entry((call.name.clone(), profiles.clone()))
@@ -3752,25 +3737,33 @@ mod tests {
     #[test]
     fn uses_follow_every_copying_sessions_owners() {
         let mut c = ExposureCollector::new(Some(millis(1)));
-        let profiles = ["home", "native", "removed"];
-        let call = |session: &str, second: u32| {
+        let call = |id: &str, session: &str, second: u32| {
             json!({ "type": "assistant", "timestamp": at(second), "sessionId": session,
-                    "message": { "content": [tool_use("c1", "Bash", json!({}))] } })
+                    "message": { "content": [tool_use(id, "Bash", json!({}))] } })
         };
-        Feed::new("/p/a.jsonl", Harness::Claude, &profiles).all(&mut c, vec![call("s1", 2)]);
-        Feed::new("/p/b.jsonl", Harness::Claude, &profiles).all(&mut c, vec![call("s2", 3)]);
+        let mut feed = |file: &str, profiles: &[&str], records: Vec<Value>| {
+            Feed::new(file, Harness::Claude, profiles).all(&mut c, records);
+        };
+        feed(
+            "/p/a.jsonl",
+            &["home", "removed"],
+            vec![call("c1", "s1", 2), call("c2", "s1", 3)],
+        );
+        feed("/q/b.jsonl", &["native"], vec![call("c1", "s2", 2)]);
+        feed("/p/c.jsonl", &["home", "native"], vec![call("c2", "s3", 3)]);
         let owned = |session: &str, owner: &str| Request {
             session: identity(session).into(),
             profiles: vec![owner.to_string()].into(),
             ..make_request()
         };
-        // s1's requests all precede the window; s2 copied its call under another owner.
+        // s1's requests all precede the window, s2 recorded none, and s3 has its own owner.
         let scan = c.finish(
-            &[owned("s2", "home")],
+            &[owned("s3", "home")],
             &[owned("s1", "removed")],
             Some(millis(1)),
         );
-        assert_eq!(scan.tool_calls[0].profiles, ["home", "removed"]);
+        let profiles: Vec<_> = scan.tool_calls.iter().map(|t| t.profiles.clone()).collect();
+        assert_eq!(profiles, [["native", "removed"], ["home", "removed"]]);
     }
 
     #[test]

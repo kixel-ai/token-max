@@ -234,6 +234,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         background: vec![],
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
+        memory: None,
         t3: None,
     }
 }

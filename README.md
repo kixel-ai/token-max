@@ -77,6 +77,7 @@ tool output text is kept or printed.
 | Tools, skills and MCP servers | What each cost to send with every request, and how often it was used |
 | Instruction files | What each CLAUDE.md or AGENTS.md cost, beside the provider's size guidance |
 | Fast mode | What the premium cost; recommended off |
+| Auto memory | What loading, reading and writing it cost, and how often it was used; worth considering off |
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
 | Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
@@ -99,7 +100,8 @@ missing evidence (exit 0), green for a setting already at its recommended value.
 - A tool, skill or MCP server that was never used is recommended off. One that
   cost more than $1 per use (`--max-cost-per-use`) is worth considering off.
   You know what a use was worth; the report only knows what it cost.
-- Fast mode off is the maintainer's preference, not a measurement.
+- Fast mode off and auto memory off are the maintainer's preferences, not
+  measurements.
 - **Not enough evidence** says why in one sentence. A cost that cannot be
   measured is shown as unknown, never as zero.
 - Savings on different lines do not add up.

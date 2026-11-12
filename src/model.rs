@@ -425,7 +425,7 @@ pub struct Request {
     pub client: Option<Text>,
     #[serde(with = "crate::wire::opt_text")]
     pub cwd: Option<Text>,
-    /// The reasoning effort the request was sent with, when recorded.
+    /// The recorded reasoning effort, such as `high`.
     #[serde(with = "crate::wire::opt_text")]
     pub effort: Option<Text>,
     pub parts: Vec<BillingPart>,
@@ -2351,6 +2351,9 @@ pub struct Scan {
     pub subagents: Vec<Subagent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub t3: Vec<T3State>,
+    /// Native session identities, which only the local session export prints.
+    #[serde(skip)]
+    pub sessions: crate::sessions::Sessions,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

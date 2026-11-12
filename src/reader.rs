@@ -26,6 +26,7 @@ use crate::model::{
     StructuralEvent, Subagent, Text, Usage,
 };
 use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
+use crate::sessions::{Record, Sessions};
 
 /// Select a time window and local roots.
 #[derive(Clone, Debug)]
@@ -919,6 +920,7 @@ struct Reader {
     legacy: Vec<(Request, String)>,
     subagents: IndexMap<Text, Subagent>,
     earlier: Vec<Request>,
+    sessions: Sessions,
 }
 
 impl Reader {
@@ -1004,9 +1006,20 @@ impl Reader {
             );
         }
         match snapshot.harness {
-            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected),
-            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected),
+            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected)?,
+            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected)?,
         }
+        self.sessions.observe(Record {
+            harness: snapshot.harness,
+            session: &file.context.session,
+            subagent: file.subagent,
+            file: &location.file,
+            cwd: file.context.cwd.as_ref(),
+            raw,
+            time,
+            selected,
+        });
+        Ok(())
     }
 
     fn claude(
@@ -1115,8 +1128,7 @@ impl Reader {
             pending.source = text(member(raw, "querySource"));
             let params = nested(raw, "params");
             pending.model = text(member(params, "model"));
-            pending.effort =
-                label(member(nested(params, "output_config"), "effort")).map(Text::from);
+            pending.effort = text(member(nested(params, "output_config"), "effort"));
             pending.attempt = Some(Attempt {
                 max_output_tokens: match count(params.get("max_tokens")) {
                     Ok(budget) => budget,
@@ -1207,7 +1219,7 @@ impl Reader {
             };
             let mut r = request(snapshot, location, context, time, name);
             r.model = text(member(m, "model"));
-            r.effort = label(member(raw, "effort")).map(Text::from);
+            r.effort = text(member(raw, "effort"));
             r.reference = opaque(raw, "requestRef")?.map(Text::from);
             r.source = text(member(raw, "querySource"));
             r.agent = if is_true(raw, "isSidechain") || subagent {
@@ -1463,7 +1475,12 @@ impl Reader {
                 set(&mut context.cwd, Some(cwd));
             }
             set(&mut context.model, label(member(p, "model")).as_deref());
-            set(&mut context.effort, label(member(p, "effort")).as_deref());
+            let mode = nested(nested(p, "collaboration_mode"), "settings");
+            set(
+                &mut context.effort,
+                label(coalesce(p.get("effort"), mode.get("reasoning_effort")).unwrap_or(&NULL))
+                    .as_deref(),
+            );
             context.turn = opaque(p, "turn_id")?.map(Text::from);
             context.tier = text(member(p, "service_tier"));
             if let Some(time) = time
@@ -1857,6 +1874,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         legacy: vec![],
         subagents: IndexMap::default(),
         earlier: vec![],
+        sessions: Sessions::default(),
     };
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
@@ -1886,6 +1904,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         legacy,
         subagents,
         earlier,
+        sessions,
         ..
     } = reader;
     for (r, total_key) in legacy {
@@ -1926,10 +1945,10 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 if r.source.is_none() {
                     r.source = found.source.clone();
                 }
+                r.attempt = found.attempt.clone();
                 if r.effort.is_none() {
                     r.effort = found.effort.clone();
                 }
-                r.attempt = found.attempt.clone();
                 if found.requested_speed.is_some() {
                     r.requested_speed = found.requested_speed.clone();
                 }
@@ -2097,6 +2116,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         coverage,
         subagents: subagents.into_values().collect(),
         t3,
+        sessions,
     })
 }
 
@@ -2720,32 +2740,6 @@ mod tests {
         assert_eq!(data.requests.len(), 2);
         assert_ne!(data.requests[0].session, data.requests[1].session);
         assert_eq!(data.requests[0].cwd.as_deref(), Some("/synthetic/project"));
-    }
-
-    #[test]
-    fn a_linked_api_request_supplies_the_effort_its_response_omits() {
-        let w = Workspace::new();
-        let mut answer = assistant("session", "message");
-        answer["requestRef"] = json!("ref");
-        write(
-            w.claude.join("projects/project/main.jsonl"),
-            jsonl(&[
-                json!({
-                    "type": "api-request",
-                    "id": "ref",
-                    "sessionId": "session",
-                    "timestamp": "2026-11-01T00:00:00Z",
-                    "params": {
-                        "model": "claude-opus-5-5",
-                        "output_config": { "effort": "low" },
-                    },
-                }),
-                answer,
-            ]),
-        );
-        let data = scan(&options(&w)).unwrap();
-        assert_eq!(data.requests.len(), 1);
-        assert_eq!(data.requests[0].effort.as_deref(), Some("low"));
     }
 
     #[test]

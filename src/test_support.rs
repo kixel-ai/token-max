@@ -71,7 +71,6 @@ pub fn message_part(usage: Usage) -> BillingPart {
 /// One synthetic normalized request without reading a real session; override fields with `..make_request()`.
 pub fn make_request() -> Request {
     Request {
-        effort: None,
         evidence: RequestEvidence::Measured,
         id: "request".into(),
         harness: Harness::Claude,
@@ -89,6 +88,7 @@ pub fn make_request() -> Request {
         version: Some("2.1.314".into()),
         client: Some("sdk-ts".into()),
         cwd: None,
+        effort: None,
         parts: vec![message_part(claude_usage(ClaudeUsage::default()))],
         server_tools: Some(Default::default()),
         profiles: vec!["profile".into()].into(),

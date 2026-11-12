@@ -1067,6 +1067,7 @@ mod tests {
         Scan {
             subagents: vec![],
             t3: vec![],
+            sessions: Default::default(),
             snapshot_started_at: iso(0),
             snapshot_finished_at: iso(0),
             since: None,

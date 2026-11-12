@@ -367,6 +367,7 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
             },
             off_file: scope.map(|s| s.file.to_string()),
             directory: None,
+            unresolved: None,
         });
     }
     let first = scopes.first().map_or("settings.json", |s| s.file);
@@ -380,6 +381,7 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
         off: format!("\"{key}\": false"),
         off_file: Some(file.into()),
         directory: None,
+        unresolved: None,
     })
 }
 
@@ -403,6 +405,7 @@ pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryContro
         off: format!("{key} = false"),
         off_file: Some(file.into()),
         directory: None,
+        unresolved: None,
     })
 }
 

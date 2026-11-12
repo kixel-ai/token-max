@@ -949,9 +949,11 @@ pub fn discover_codex_controls(
             );
         }
         let mut marker_selection = legacy_selection;
+        let mut memory_profiles = false;
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
+            memory_profiles |= sets_codex_memory(&config);
             marker_selection |=
                 config.contains_key("project_root_markers") || config.contains_key("projects");
             if members(config.get("tui")).contains_key("auto_recap") {
@@ -969,6 +971,12 @@ pub fn discover_codex_controls(
                     base[0].owner
                 );
             }
+        }
+        // Named profiles can set memories too, and which one launched is not recorded.
+        let profile_memory = memory_profiles
+            .then(|| "named config profiles set memories; --profile selection is not recorded");
+        if let Some(memory) = &mut profile.memory {
+            memory.unresolved = profile_memory.map(String::from);
         }
         profile.background = base.clone();
         let mut unknown = base.clone();
@@ -1060,9 +1068,27 @@ pub fn discover_codex_controls(
                 );
             }
             if latest.as_deref() == Some(cwd) {
+                // Codex reads a project's config only once the project is trusted.
+                let trusted = if trust == Some("trusted") {
+                    &scopes[..]
+                } else {
+                    &base_scopes[..]
+                };
+                let untrusted_layer =
+                    trust.is_none() && layers.iter().any(|(_, config)| sets_codex_memory(config));
+                let reasons: Vec<&str> = [
+                    untrusted_layer.then_some(
+                        "a project .codex/config.toml sets memories, but the project's trust is not recorded",
+                    ),
+                    profile_memory,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
                 profile.memory = Some(MemoryControl {
                     directory: Some(cwd.into()),
-                    ..codex_memory(&scopes, &profile.settings_file)?
+                    unresolved: (!reasons.is_empty()).then(|| reasons.join("; ")),
+                    ..codex_memory(trusted, &profile.settings_file)?
                 });
             }
             let has_override = trust != Some("untrusted")
@@ -1100,6 +1126,12 @@ pub fn discover_codex_controls(
         }
     }
     Ok(())
+}
+
+/// Whether a Codex config sets whether memories are on or used.
+fn sets_codex_memory(config: &Map<String, Value>) -> bool {
+    members(config.get("features")).contains_key("memories")
+        || members(config.get("memories")).contains_key("use_memories")
 }
 
 /// Whether a file name selects a named Codex profile, as in `--profile NAME`.

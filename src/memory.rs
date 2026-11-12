@@ -94,7 +94,6 @@ fn check(
     let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
-    let mut carried_any = false;
     for e in &scan.exposure.requests {
         let Some(r) = requests.get(&*e.request) else {
             continue;
@@ -122,7 +121,6 @@ fn check(
         {
             unmeasured += 1;
         }
-        carried_any |= !memory.is_empty();
         let here = control.directory.is_none() || control.directory.as_deref() == r.cwd.as_deref();
         if r.agent == Agent::Main && here {
             let seen = sessions.entry(&r.session).or_insert((r.time, false));
@@ -146,9 +144,8 @@ fn check(
         .iter()
         .filter(|c| c.kind == ContextKind::Memory && c.profiles.contains(&profile.id))
         .collect();
-    // Requests whose context went unrecorded may have carried memory too. Codex
-    // carries none while its memories are off, and they are off by default, unless
-    // a recorded request or use shows they were on in the window.
+    // Requests whose context went unrecorded may have carried memory too, whatever
+    // today's setting says, since it may have been on when they ran.
     let unrecorded = mine
         .iter()
         .filter(|r| !recorded_requests.contains(&*r.id))
@@ -159,10 +156,6 @@ fn check(
         .iter()
         .filter(|m| m.harness == profile.harness && m.profiles.contains(&profile.id))
         .collect();
-    let unrecorded = match profile.harness {
-        Harness::Codex if !on && !carried_any && uses.is_empty() => 0,
-        _ => unrecorded,
-    };
     let context_usd = rows
         .iter()
         .map(|c| c.estimated_usd)
@@ -236,6 +229,12 @@ fn check(
     if profile.harness == Harness::Codex {
         uncertainty.push("Codex extracts and consolidates memories in requests it records only in telemetry, so their cost is not measurable here".into());
         uncertainty.push("Codex shell reads of the memories folder count as uses, but their output stays on the shell tool's line".into());
+    }
+    if let Some(reason) = &control.unresolved {
+        uncertainty.push(format!(
+            "{reason}, so whether those settings apply is unresolved; {} decides here",
+            control.owner
+        ));
     }
     if disagree > 0 {
         uncertainty.push(format!(

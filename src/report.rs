@@ -2640,7 +2640,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             };
             let cost = match r.coverage {
                 Some(c) if r.savings_usd.is_some() && c.priced == 0 => {
-                    format!("{cost}, from memory read back alone; no request recorded its context")
+                    format!(
+                        "{cost}, from memory's reads and writes alone; no request recorded its context"
+                    )
                 }
                 Some(c) if r.savings_usd.is_some() => format!(
                     "{cost}, from the {}% of requests that recorded their context",

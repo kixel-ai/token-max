@@ -2730,12 +2730,26 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     }
 
     // With no summary and no setting, Codex memories are off.
-    std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();
+    let context = world(
+        1,
+        json!({ "agents_md": { "text": "SYNTHETIC_PRIVATE_AGENTS" } }),
+        true,
+    );
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), context, billed(5)])).unwrap();
     let data = scan(&options(&w, None)).unwrap();
     assert!(labelled(
         &text(&report(&data, 1.0)),
         "Codex memories",
         |s| s == ": off. Costs nothing."
+    ));
+    // A request that recorded no context may have loaded memories while they were
+    // on, so turning them off does not make its cost zero.
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(labelled(
+        &text(&report(&data, 1.0)),
+        "Codex memories",
+        then(": off. Cost unknown", "")
     ));
 
     // A trusted project's config at the latest session's directory turns them on.
@@ -2757,4 +2771,14 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     let check = memory_check(&report(&data, 1.0), Harness::Codex).clone();
     assert_eq!(check.base.current, Some(true));
     assert_eq!(check.off_file.as_deref(), Some(&*project_config));
+
+    // Without a recorded trust decision, the project layer is not taken to apply,
+    // and the check says it could not tell.
+    std::fs::write(w.codex.join("config.toml"), "").unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let check = memory_check(&report(&data, 1.0), Harness::Codex).clone();
+    assert_eq!(check.base.current, Some(false));
+    assert!(check.base.uncertainty.iter().any(|u| u.starts_with(
+        "a project .codex/config.toml sets memories, but the project's trust is not recorded, so whether those settings apply is unresolved"
+    )));
 }

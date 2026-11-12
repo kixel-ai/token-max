@@ -899,6 +899,10 @@ pub struct MemoryControl {
     /// only profile-wide settings were read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
+    /// Why a setting that may apply could not be resolved, such as an unrecorded
+    /// project trust or profile selection; null when it resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
 }
 
 /// One background feature's current state and the control that owns it.

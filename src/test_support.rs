@@ -220,7 +220,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
             },
             models: IndexMap::default(),
             capped: false,
-            declared: false,
+            declared: None,
             tuned: IndexMap::default(),
             contexts: IndexMap::default(),
         },

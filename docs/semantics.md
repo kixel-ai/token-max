@@ -258,10 +258,15 @@ client version is the applicability assumption.
 
 When no setting names a window, each model the profile used gets Claude Code's
 tuned window, owned by that model's `modelSettings` row because the defaults
-differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
+differ by model. The profile's controls and each recorded directory's, which
+idle and keepalive read, are tuned under what sizes the model's context there.
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
 except an ID outside the table when `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size it.
+A window sized by either variable is owned by the row under that variable and
+value, so directories sized apart never share a replayed window.
 Otherwise the trigger of the profile's latest automatic, non-idle compaction on
-the model comes first, including one before `--since`, since the server can
+the model under the same sizing and no explicit window comes first, including
+one before `--since`, since the server can
 retune the default without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
 checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
 Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
@@ -269,14 +274,18 @@ Sonnet and Haiku models.
 A recorded request above 200k on an older model leaves its default unresolved,
 because a `[1m]` variant may have set it; so does a model ID outside that table,
 such as a gateway alias or Mythos.
-Claude Code caps any window at the model's context window, so an explicit window
-above 200k replays at 200k where that cap holds: every model in the table, and an
-ID outside it unless `CLAUDE_CODE_MAX_CONTEXT_TOKENS` sizes it, under
-`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`; and an older model unless a recorded request
-above 200k shows its `[1m]` variant ran. The report names both the setting's value
-and the capped window. A capped user or managed global window is owned by the
-model's `modelSettings` row, the only setting that changes it alone; a capped
-environment or T3 window applies to every model, so it stays advisory.
+Claude Code caps any window at the model's context window, so a larger explicit
+window replays at that context window where it is known: 200k under
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, or for an older model unless a recorded
+request above 200k shows its `[1m]` variant ran; and the
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` value for an ID outside the table, unless,
+without the opt-out, a recorded request above it shows a `[1m]` spelling ran.
+Without that variable, an ID outside the table may be one Claude Code
+recognizes, so its window stays uncapped. The report names both the setting's
+value and the capped window. A capped user or managed global window is owned by
+the model's `modelSettings` row, the only setting that changes it alone; a
+capped environment or T3 window applies to every model, so it stays advisory.
+Either owner then names what caps it, the variable and value or the cap itself.
 Per-model controls require v2.1.288; environment suffixes require
 v2.1.304. Project, launch and per-agent overrides remain an explicit limitation of
 the observed-file analysis. See [Claude model configuration](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)

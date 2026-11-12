@@ -2250,6 +2250,121 @@ mod tests {
         assert_eq!(window(&capped, "gateway-opus").value, None);
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
 
+        // Each recorded directory's controls, which idle and keepalive read, tune under what
+        // sizes their context, and directories sized apart never share an owner.
+        let directory = |compaction| crate::model::IdleControl {
+            value: None,
+            owner: String::new(),
+            threshold: None,
+            threshold_owner: String::new(),
+            auto_compact: None,
+            reason: String::new(),
+            resolved: true,
+            ttl: None,
+            compaction: Some(compaction),
+        };
+        let sized = |key: &str, value: &str| {
+            let mut env = Env::default();
+            env.insert(key.into(), value.into());
+            directory(unset(&env))
+        };
+        let mut directories = scan.clone();
+        let explicit = controls(
+            Harness::Claude,
+            json!({"autoCompactWindow": 250000}),
+            &Env::default(),
+            "project.json",
+        );
+        let aliased = controls(
+            Harness::Claude,
+            json!({"modelSettings": {"fable": {"autoCompactWindow": 500000}}}),
+            &Env::default(),
+            "project.json",
+        );
+        let auto = |env: &Env| {
+            controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-fable-5-2": {"autoCompactWindow": "auto"}}}),
+                env,
+                "project.json",
+            )
+        };
+        let mut cap = Env::default();
+        cap.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
+            ("/open".to_string(), directory(unset(&Env::default()))),
+            (
+                "/capped".to_string(),
+                sized("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1"),
+            ),
+            (
+                "/declared".to_string(),
+                sized("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "300000"),
+            ),
+            (
+                "/redeclared".to_string(),
+                sized("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "400000"),
+            ),
+            ("/explicit".to_string(), directory(explicit)),
+            ("/aliased".to_string(), directory(aliased)),
+            ("/auto".to_string(), directory(auto(&Env::default()))),
+            ("/auto-capped".to_string(), directory(auto(&cap))),
+        ]));
+        // A trigger counts only under the sizing it ran with and without an explicit window.
+        for (time, cwd, model, tokens) in [
+            (35, "/open", "claude-fable-5-2", 400000),
+            (40, "/capped", "claude-fable-5-2", 300000),
+            (45, "/declared", "gateway-opus", 280000),
+            (50, "/explicit", "claude-fable-5-2", 250000),
+            (55, "/aliased", "claude-fable-5-2", 500000),
+        ] {
+            let mut e = boundary();
+            e.time = time;
+            e.cwd = Some(cwd.into());
+            e.model = Some(model.into());
+            e.pre_tokens = Some(tokens);
+            directories.events.push(e);
+        }
+        crate::controls::tune_windows(&mut directories);
+        let scoped = |cwd: &str, model| {
+            let idle = &directories.profiles[0].idle_directories.as_ref().unwrap()[cwd];
+            window_control(idle.compaction.as_ref().unwrap(), Some(model))
+        };
+        let row = "settings.json:modelSettings.claude-fable-5-2.autoCompactWindow";
+        let profile = window(&directories, "claude-fable-5-2");
+        assert_eq!((profile.value, profile.owner.as_str()), (Some(400000), row));
+        assert_eq!(scoped("/open", "claude-fable-5-2"), profile);
+        // A declared window never sizes a documented model.
+        assert_eq!(scoped("/declared", "claude-fable-5-2"), profile);
+        let held = scoped("/capped", "claude-fable-5-2");
+        assert_eq!(held.value, Some(200_000));
+        assert_eq!(
+            held.owner,
+            format!("{row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
+        );
+        let explicit = scoped("/explicit", "claude-fable-5-2");
+        assert_eq!(explicit.value, Some(250000));
+        assert_eq!(explicit.owner, "project.json:autoCompactWindow");
+        let declared = scoped("/declared", "gateway-opus");
+        assert_eq!(declared.value, Some(280000));
+        assert_eq!(
+            declared.owner,
+            "settings.json:modelSettings.gateway-opus.autoCompactWindow (under CLAUDE_CODE_MAX_CONTEXT_TOKENS=300000)"
+        );
+        // A row that already names the model takes the sizing too.
+        let auto_row = "project.json:modelSettings.claude-fable-5-2.autoCompactWindow";
+        let auto = scoped("/auto", "claude-fable-5-2");
+        assert_eq!((auto.value, auto.owner.as_str()), (Some(400000), auto_row));
+        let auto_capped = scoped("/auto-capped", "claude-fable-5-2");
+        assert_eq!(auto_capped.value, Some(200_000));
+        assert_eq!(
+            auto_capped.owner,
+            format!("{auto_row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
+        );
+        // Another declared value, or none, sizes the ID differently, so the trigger is not theirs.
+        assert_eq!(scoped("/redeclared", "gateway-opus").value, None);
+        assert_eq!(window(&directories, "gateway-opus").value, None);
+
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
         capped.profiles[0].compaction = unset(&env);
         crate::controls::tune_windows(&mut capped);
@@ -2285,10 +2400,9 @@ mod tests {
         let opus = window(&top, "claude-opus-4-6");
         assert_eq!((opus.value, opus.setting), (Some(200_000), Some(400_000)));
         assert!(opus.applicable);
-        assert_eq!(
-            opus.owner,
-            "settings.json:modelSettings.claude-opus-4-6.autoCompactWindow"
-        );
+        let opus_row = "settings.json:modelSettings.claude-opus-4-6.autoCompactWindow";
+        assert_eq!(opus.owner, format!("{opus_row} (capped at 200000)"));
+        // Without a declared window, an ID outside the table may be one Claude Code recognizes.
         for model in ["claude-sonnet-4-6", "claude-opus-5-5", "gateway-opus"] {
             let control = window(&top, model);
             assert_eq!((control.value, control.setting), (Some(400_000), None));
@@ -2304,54 +2418,102 @@ mod tests {
         );
         let opus = window(&row, "claude-opus-4-6");
         assert_eq!((opus.value, opus.setting), (Some(200_000), Some(400_000)));
-        assert_eq!(
-            opus.owner,
-            "settings.json:modelSettings.claude-opus-4-6.autoCompactWindow"
-        );
+        assert_eq!(opus.owner, format!("{opus_row} (capped at 200000)"));
 
+        let held = " (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)";
         let mut env = Env::default();
         env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
         let capped = tuned(json!({"autoCompactWindow": 400000}), &env);
         for model in ["claude-opus-5-5", "claude-sonnet-4-6", "gateway-opus"] {
-            assert_eq!(window(&capped, model).value, Some(200_000));
+            let control = window(&capped, model);
+            assert_eq!(control.value, Some(200_000));
+            assert_eq!(
+                control.owner,
+                format!("settings.json:modelSettings.{model}.autoCompactWindow{held}")
+            );
         }
-        // A declared window sizes an unrecognized ID instead of the cap.
+        // A declared window sizes an unrecognized ID instead of the cap, and caps it in turn.
+        let gateway_row = "settings.json:modelSettings.gateway-opus.autoCompactWindow";
         env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
         let declared = tuned(json!({"autoCompactWindow": 400000}), &env);
         assert_eq!(window(&declared, "gateway-opus").value, Some(400_000));
         assert_eq!(window(&declared, "claude-opus-5-5").value, Some(200_000));
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "300000".into());
+        let declared = tuned(json!({"autoCompactWindow": 400000}), &env);
+        let gateway = window(&declared, "gateway-opus");
+        assert_eq!(
+            (gateway.value, gateway.setting),
+            (Some(300_000), Some(400_000))
+        );
+        assert_eq!(
+            gateway.owner,
+            format!("{gateway_row} (under CLAUDE_CODE_MAX_CONTEXT_TOKENS=300000)")
+        );
+        // Without the opt-out, a request above the declared window shows a [1m] spelling ran.
+        let mut small = Env::default();
+        small.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "500".into());
+        let escaped = tuned(json!({"autoCompactWindow": 400000}), &small);
+        assert_eq!(window(&escaped, "gateway-opus").value, Some(400_000));
+        small.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let held_small = tuned(json!({"autoCompactWindow": 400000}), &small);
+        assert_eq!(window(&held_small, "gateway-opus").value, Some(500));
 
         // The variable outranks every per-model row, so no setting changes one model alone.
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
         env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "400k".into());
         let shared = tuned(json!({}), &env);
         let opus = window(&shared, "claude-opus-5-5");
         assert_eq!((opus.value, opus.setting), (Some(200_000), Some(400_000)));
         assert!(!opus.applicable);
-        assert_eq!(
-            opus.owner,
-            "CLAUDE_CODE_AUTO_COMPACT_WINDOW (capped at 200000)"
-        );
+        assert_eq!(opus.owner, format!("CLAUDE_CODE_AUTO_COMPACT_WINDOW{held}"));
         assert!(opus.reason.contains(crate::controls::CAPPED_SHARED));
         let gateway = window(&shared, "gateway-opus");
         assert_eq!(gateway.owner, "CLAUDE_CODE_AUTO_COMPACT_WINDOW");
-
-        // A recorded directory's own opt-out caps its windows too.
-        let mut directory = scan.clone();
-        let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
-        idle.compaction = Some(controls(
-            Harness::Claude,
-            json!({"autoCompactWindow": 400000}),
-            &env,
-            "project.json",
-        ));
-        directory.profiles[0].idle_directories = Some(IndexMap::from_iter([("/p".into(), idle)]));
-        crate::controls::tune_windows(&mut directory);
-        let idle = &directory.profiles[0].idle_directories.as_ref().unwrap()["/p"];
-        let control = window_control(idle.compaction.as_ref().unwrap(), Some("claude-opus-5-5"));
+        let shared = tuned(json!({}), &{
+            let mut env = Env::default();
+            env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "400k".into());
+            env
+        });
         assert_eq!(
-            (control.value, control.setting),
+            window(&shared, "claude-opus-4-6").owner,
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW (capped at 200000)"
+        );
+        assert_eq!(
+            window(&shared, "claude-opus-5-5").owner,
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        );
+
+        // Directories sized apart cap one row differently, so they never share its owner.
+        let mut directories = scan.clone();
+        let row = json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}});
+        let directory = |env: &Env| {
+            let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
+            idle.compaction = Some(controls(Harness::Claude, row.clone(), env, "project.json"));
+            idle
+        };
+        let mut opt_out = Env::default();
+        opt_out.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
+            ("/open".into(), directory(&Env::default())),
+            ("/capped".into(), directory(&opt_out)),
+        ]));
+        crate::controls::tune_windows(&mut directories);
+        let scoped = |cwd: &str| {
+            let idle = &directories.profiles[0].idle_directories.as_ref().unwrap()[cwd];
+            window_control(idle.compaction.as_ref().unwrap(), Some("claude-opus-5-5"))
+        };
+        let project_row = "project.json:modelSettings.claude-opus-5-5.autoCompactWindow";
+        let open = scoped("/open");
+        assert_eq!(
+            (open.value, open.owner.as_str()),
+            (Some(400_000), project_row)
+        );
+        let held_row = scoped("/capped");
+        assert_eq!(
+            (held_row.value, held_row.setting),
             (Some(200_000), Some(400_000))
         );
+        assert_eq!(held_row.owner, format!("{project_row}{held}"));
 
         // The check replays the capped window and names the setting's own value.
         let mut scan = data(4);
@@ -2370,7 +2532,7 @@ mod tests {
         );
         assert_eq!(
             check.base.owner,
-            "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow"
+            format!("settings.json:modelSettings.claude-opus-5-5.autoCompactWindow{held}")
         );
         assert!(check.base.assumptions[0].contains("context window"));
     }

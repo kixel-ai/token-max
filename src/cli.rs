@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError, mpsc};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -528,33 +528,32 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     if local {
         hosts.push(None);
     }
-    let connections: Vec<_> = values
-        .ssh
-        .into_iter()
-        .map(|destination| {
-            hosts.push(Some(destination.clone()));
-            thread::spawn(move || {
-                panic::catch_unwind(|| ssh::connect(&destination, since))
-                    .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-            })
-        })
-        .collect();
+    let (sender, connected) = mpsc::channel();
+    let destinations = values.ssh.len();
+    for (index, destination) in values.ssh.into_iter().enumerate() {
+        hosts.push(Some(destination.clone()));
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let result = panic::catch_unwind(|| ssh::connect(&destination, since))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send((index, result));
+        });
+    }
+    drop(sender);
     phase(match (local, remote) {
         (true, false) => "Scanning local histories",
         (true, true) => "Scanning local histories and SSH hosts",
         (false, _) => "Scanning SSH hosts",
     });
     let analyzed = (|| {
-        // Destinations report a setup failure, such as a missing install, before scanning.
-        let mut connections = connections
-            .into_iter()
-            .map(|connection| {
-                connection
-                    .join()
-                    .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter();
+        // Destinations report a setup failure, such as a missing install, before scanning, and
+        // the first one to fail stops the rest.
+        let mut connections: Vec<Option<ssh::Connection>> =
+            (0..destinations).map(|_| None).collect();
+        for (index, result) in connected {
+            connections[index] = Some(result?);
+        }
+        let mut connections = connections.into_iter();
         let mut local_scan = None;
         if local {
             let mut discovery = DiscoveryOptions::host()?;
@@ -590,7 +589,6 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             offline: values.offline,
         })?;
         phase("Checking settings");
-        let now = now();
         let unicode_locale = env_nonempty("LC_ALL")
             .or_else(|| env_nonempty("LC_CTYPE"))
             .or_else(|| env_nonempty("LANG"))
@@ -612,17 +610,21 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             let Remote { scan, home } = match local_scan.take() {
                 Some(scan) => scan,
                 None => {
-                    let connection = connections.next().expect("one connection per destination");
+                    let connection = connections
+                        .next()
+                        .flatten()
+                        .expect("every destination connected");
                     panic::catch_unwind(AssertUnwindSafe(|| connection.receive())).unwrap_or_else(
                         |_| Err(ScanError::new("analysis failed; no report produced")),
                     )?
                 }
             };
+            // Each host's observation ends once its scan is complete.
             let report = analyze(AnalyzeOptions {
                 scan,
                 catalog: &catalog,
                 since,
-                now,
+                now: now(),
                 max_cost_per_use_usd,
             })?;
             let change = report

@@ -347,6 +347,7 @@ mod tests {
         let mut profile = make_profile("profile", "/synthetic/.claude");
         profile.speed = Some(speed);
         Scan {
+            subagents: vec![],
             snapshot_started_at: String::new(),
             snapshot_finished_at: String::new(),
             since: None,

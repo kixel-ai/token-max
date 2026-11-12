@@ -461,3 +461,25 @@ read, at the write rate minus the read rate. Background commands and the user's
 own processes are unaffected by the cap. Codex's
 `background_terminal_max_timeout` bounds one poll of a background terminal,
 and each poll reads the cache, so it is not checked.
+
+## Subagent models
+
+A **Subagents** section, after the verdicts, gives every Claude Code subagent
+type (Explore, Plan, general-purpose, forks and each custom agent) and every
+Codex agent role its own line: what it cost over how many runs, the models and
+reasoning efforts it ran on, where its model came from, and what the same
+recorded tokens would cost on the provider's cheapest current model (the
+newest Haiku, or the cheapest current GPT). Like feature costs, these are
+totals over the whole window. Each line names the settings that change the
+model and the effort, such as `model:` and `effort:` in
+`~/.claude/agents/Explore.md`, or a Codex role file's `model` and `[agents]
+default_subagent_model`. A file that replaces a built-in such as Explore must
+restate its tool restriction and system prompt.
+
+The lines are evidence, never recommendations: they have no color and do not
+change the exit code or the settings snippet. A cheaper model trades
+capability, and the main agent's extra work after a weaker subagent cannot be
+attributed. The reprice assumes the same turns, and a lower effort's cost
+cannot be measured. The source is unknown when today's settings and agent
+files do not explain the recorded model, for example after a file changed.
+See [subagent models](semantics.md#subagent-models).

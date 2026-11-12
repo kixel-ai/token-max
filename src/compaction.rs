@@ -1758,6 +1758,7 @@ mod tests {
     /// One measured compaction calibrates `count` hourly 150k-token requests under a 400k window.
     fn data(count: i64) -> Scan {
         let profile = Profile {
+            agents: Default::default(),
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -1803,6 +1804,7 @@ mod tests {
         // Coverage and snapshot times match the TypeScript fixture, which the text report prints.
         let n = requests.len() as u64;
         Scan {
+            subagents: vec![],
             t3: vec![],
             sessions: Default::default(),
             snapshot_started_at: crate::safe::iso(0),
@@ -3862,6 +3864,7 @@ mod tests {
                 requests: vec![summary],
                 boundaries: vec![event],
                 prompts: vec![],
+                ..CacheContext::default()
             };
             s.since = Some(1000);
             let report = report(&s);

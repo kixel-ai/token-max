@@ -15,8 +15,9 @@ use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, Control, ControlValue, Cost, Coverage, EstimateEvidence,
-    Evidence, Harness, KeepaliveCheck, Millis, PeriodStatus, Profile, Report, RequestEvidence,
-    Scalar, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Verdict,
+    Evidence, Harness, KeepaliveCheck, Millis, ModelSource, PeriodStatus, Profile, Report,
+    RequestEvidence, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
+    UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -529,6 +530,13 @@ impl<'a> Out<'a> {
             _ => path.to_string(),
         }
     }
+    /// `text` with every path under the home directory shown from `~`.
+    fn home_in(&self, text: &str) -> String {
+        match &self.home {
+            Some(dir) => text.replace(&format!("{dir}/"), "~/"),
+            None => text.to_string(),
+        }
+    }
     /// A profile by harness and quoted root, for evidence cards.
     fn profile_name(&self, id: &str) -> String {
         match self.profiles.get(id) {
@@ -818,6 +826,51 @@ fn details(report: &Report, out: &mut Out<'_>) {
 
     context_section(report, out);
 
+    if !report.subagents.is_empty() {
+        out.section("Subagents");
+        out.line(SUBAGENT_EVIDENCE, 0, PLAIN);
+        for c in &report.subagents {
+            let names: Vec<String> = c.profiles.iter().map(|p| out.profile_name(p)).collect();
+            out.blank();
+            out.line(
+                &format!("{} [{}]", subagent_name(c), names.join(", ")),
+                0,
+                BOLD,
+            );
+            out.field(
+                "Runs",
+                &format!(
+                    "{} runs; {} requests, {} priced",
+                    count(c.runs),
+                    count(c.requests),
+                    count(c.priced)
+                ),
+            );
+            out.cost("Cost", &c.cost);
+            out.field("Models", &shares(&c.models, c.requests));
+            out.field("Efforts", &shares(&c.efforts, c.requests));
+            for s in &c.sources {
+                out.field(
+                    "Model source",
+                    &format!(
+                        "{}: {} ({})",
+                        label(&s.source),
+                        out.home_in(&s.detail),
+                        runs(s.runs)
+                    ),
+                );
+            }
+            match (&c.cheapest, &c.reprice) {
+                (Some(model), Some(cost)) => {
+                    out.cost(&format!("Same tokens on {model}"), cost);
+                }
+                _ => out.field("Cheapest model", &reprice_text(c, &usd)),
+            }
+            out.field("Model setting", &out.home_in(&c.model_setting));
+            out.field("Effort setting", &out.home_in(&c.effort_setting));
+        }
+    }
+
     out.section("Recorded usage and coverage");
     out.field(
         "Attribution",
@@ -955,6 +1008,110 @@ fn details(report: &Report, out: &mut Out<'_>) {
         0,
         PLAIN,
     );
+}
+
+/// Why the subagent lines never recommend a change.
+const SUBAGENT_EVIDENCE: &str = "Subagent lines are evidence, not recommendations: a cheaper model or lower effort trades capability, and the main agent's extra work after a weaker subagent cannot be attributed, so no saving is claimed. A lower effort changes the output tokens, so its cost cannot be measured.";
+
+/// A subagent type by harness: a Claude agent type, a Codex role or other Codex subagent.
+fn subagent_name(c: &SubagentCost) -> String {
+    match (c.harness, c.kind.as_str()) {
+        (_, crate::reader::UNRECORDED) => {
+            format!("{} subagents of unrecorded type", label(&c.harness))
+        }
+        (Harness::Claude, kind) => format!("{kind} subagent"),
+        (Harness::Codex, kind) if c.native => format!("Codex {kind} subagent"),
+        (Harness::Codex, kind) => format!("{kind} agent role"),
+    }
+}
+
+/// A count of subagent runs.
+fn runs(n: u64) -> String {
+    format!("{} run{}", count(n), if n == 1 { "" } else { "s" })
+}
+
+/// Values with their share of `whole`, or the value alone when there is only one.
+fn shares(values: &[Share], whole: u64) -> String {
+    match values {
+        [one] => one.name.clone(),
+        _ => values
+            .iter()
+            .map(|s| format!("{} ({}%)", s.name, percent(s.count, whole)))
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// A cost scaled by `scale`, a known lower bound, or unknown.
+fn scaled(cost: &Cost, scale: &dyn Fn(f64) -> String) -> String {
+    match cost.total_usd {
+        Some(value) => scale(value),
+        None if cost.known_usd > 0.0 => format!("at least {}", scale(cost.known_usd)),
+        None => "an unknown amount".into(),
+    }
+}
+
+/// What the same tokens would cost on the provider's cheapest current model.
+fn reprice_text(c: &SubagentCost, scale: &dyn Fn(f64) -> String) -> String {
+    match (&c.cheapest, &c.reprice) {
+        (None, _) => "The price catalog has no cheapest current model for its provider.".into(),
+        (Some(model), None) => {
+            format!("It already ran on {model}, its provider's cheapest current model.")
+        }
+        (Some(model), Some(cost)) => format!(
+            "On {model} the same recorded tokens would cost {}, assuming the same turns.",
+            scaled(cost, scale)
+        ),
+    }
+}
+
+/// One subagent type's summary line after its name.
+fn subagent_line(c: &SubagentCost, scale: &dyn Fn(f64) -> String, out: &Out<'_>) -> String {
+    let coverage = if c.priced < c.requests {
+        format!(
+            " ({} of {} requests priced)",
+            count(c.priced),
+            count(c.requests)
+        )
+    } else {
+        String::new()
+    };
+    let effort = if c
+        .efforts
+        .iter()
+        .all(|e| e.name == crate::reader::UNRECORDED)
+    {
+        "an unrecorded effort".to_string()
+    } else {
+        format!("{} effort", shares(&c.efforts, c.requests))
+    };
+    let sources: Vec<String> = c
+        .sources
+        .iter()
+        .map(|s| {
+            let detail = out.home_in(&s.detail);
+            let detail = if s.source == ModelSource::Unknown {
+                format!("unknown, {detail}")
+            } else {
+                detail
+            };
+            if c.sources.len() == 1 {
+                detail
+            } else {
+                format!("{detail} ({})", runs(s.runs))
+            }
+        })
+        .collect();
+    format!(
+        "costs {}{coverage} over {}, on {} at {effort}. Model source: {}. {} Model setting: {}. Effort setting: {}.",
+        scaled(&c.cost, scale),
+        runs(c.runs),
+        shares(&c.models, c.requests),
+        sources.join("; "),
+        reprice_text(c, scale),
+        out.home_in(&c.model_setting),
+        out.home_in(&c.effort_setting),
+    )
 }
 
 /// One check's full evidence card.
@@ -2900,6 +3057,18 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             PLAIN,
         );
     }
+    if !report.subagents.is_empty() {
+        out.section("Subagents");
+        for c in &report.subagents {
+            let mut text = subagent_name(c);
+            if many {
+                let _ = write!(text, " [{}]", out.short_profile(&c.profiles[0]));
+            }
+            let _ = write!(text, ": {}", subagent_line(c, &about, out));
+            out.line(&text, 2, PLAIN);
+        }
+        out.line(SUBAGENT_EVIDENCE, 2, PLAIN);
+    }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
         .context
@@ -3666,9 +3835,11 @@ mod tests {
             speed_check(fast, "explicit fastMode false"),
         ];
         Report {
+            subagents: vec![],
             schema_version: 2,
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
+                subagents: vec![],
                 t3: vec![],
                 sessions: Default::default(),
                 snapshot_started_at: "2026-12-01T00:00:00.000Z".into(),
@@ -4318,6 +4489,85 @@ mod tests {
                 .matches("Identical fixed costs remain unknown")
                 .count(),
             2
+        );
+    }
+
+    #[test]
+    fn subagent_lines_are_evidence_that_never_count_as_changes() {
+        let mut report = synthetic();
+        let before = text(&report, None, false);
+        let cost = |usd: f64| Cost {
+            known_usd: usd,
+            total_usd: Some(usd),
+            unknown: vec![],
+            assumptions: vec![],
+        };
+        report.subagents.push(SubagentCost {
+            harness: Harness::Claude,
+            profiles: vec!["profile".into()],
+            kind: "Explore".into(),
+            native: false,
+            runs: 3,
+            requests: 10,
+            priced: 9,
+            cost: Cost {
+                total_usd: None,
+                ..cost(2.0)
+            },
+            models: vec![
+                Share {
+                    name: "claude-opus-5-5".into(),
+                    count: 9,
+                },
+                Share {
+                    name: "claude-haiku-4-5".into(),
+                    count: 1,
+                },
+            ],
+            efforts: vec![Share {
+                name: "medium".into(),
+                count: 10,
+            }],
+            sources: vec![SourceShare {
+                source: ModelSource::Unknown,
+                detail: "the Claude Code version is not recorded".into(),
+                runs: 3,
+            }],
+            cheapest: Some("claude-haiku-5-5".into()),
+            reprice: Some(cost(0.5)),
+            model_setting: "model: in /synthetic/.claude/agents/Explore.md".into(),
+            effort_setting: "effort: in /synthetic/.claude/agents/Explore.md".into(),
+        });
+        let summary = text(&report, None, false);
+        let first = |text: &str| {
+            text.lines()
+                .find(|l| l.contains("recommended"))
+                .map(str::to_string)
+        };
+        assert_eq!(first(&summary), first(&before));
+        let line = summary
+            .lines()
+            .find(|l| l.contains("Explore subagent"))
+            .unwrap();
+        for part in [
+            "(9 of 10 requests priced) over 3 runs",
+            "claude-opus-5-5 (90%), claude-haiku-4-5 (10%) at medium effort",
+            "Model source: unknown, the Claude Code version is not recorded.",
+            "On claude-haiku-5-5 the same recorded tokens would cost",
+            "Model setting: model: in /synthetic/.claude/agents/Explore.md.",
+        ] {
+            assert!(line.contains(part), "{part} in {line}");
+        }
+        assert!(summary.contains(SUBAGENT_EVIDENCE));
+        let details = text(&report, None, true);
+        assert!(
+            details.contains("Same tokens on claude-haiku-5-5: $0.50"),
+            "{details}"
+        );
+        assert!(
+            details.contains(
+                "Model source: unknown: the Claude Code version is not recorded (3 runs)"
+            )
         );
     }
 

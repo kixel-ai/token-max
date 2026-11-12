@@ -432,7 +432,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert_eq!(remote.base.action, Action::Change);
     let w = &remote.waits;
     assert_eq!((w.calls, w.long, w.timed_out, w.polling), (1, 1, 1, 1));
-    assert!(w.miss_cost.total_usd.unwrap() > 0.0);
+    assert!(w.miss_cost.total_usd.unwrap().to_f64() > 0.0);
 
     let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
     assert_eq!(status, 1, "{stderr}");
@@ -696,13 +696,13 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     let suggestions = feature(BackgroundFeature::PromptSuggestions);
     assert_eq!(suggestions.generations, Some(2));
     assert_eq!(suggestions.base.action, Action::Advisory);
-    assert!(suggestions.cost.total_usd.unwrap() > 0.0);
+    assert!(suggestions.cost.total_usd.unwrap().to_f64() > 0.0);
     assert_eq!(suggestions.off, "\"promptSuggestionEnabled\": false");
     assert_eq!(suggestions.off_file.as_deref(), settings.to_str());
     let recaps = feature(BackgroundFeature::SessionRecaps);
     assert_eq!(recaps.generations, Some(1));
-    assert!(recaps.cost.total_usd.unwrap() > 0.0);
-    assert!(recaps.lost_warming.total_usd.unwrap() > 0.0);
+    assert!(recaps.cost.total_usd.unwrap().to_f64() > 0.0);
+    assert!(recaps.lost_warming.total_usd.unwrap().to_f64() > 0.0);
     assert_eq!(
         recaps.off,
         "\"env\": {\"CLAUDE_CODE_ENABLE_AWAY_SUMMARY\": \"0\"}"

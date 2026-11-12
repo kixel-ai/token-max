@@ -75,15 +75,10 @@ Other joins span sessions or files and need a key that survives the fold:
   across the whole history.
 - Every first-seen ordered set or list, such as a cost's unknown reasons and
   assumptions, needs a global ordinal so a merged list keeps today's order.
-- Every cost total, saving and context cost that crosses sessions is an f64
-  sum taken in one global (time, id) order; partial sums merged in another
-  order change the low bits. [Sum costs in any order](/quest/m0/exact-sums.md)
-  settles how the fold keeps them identical.
+- Cost totals need no ordering: `Cost`, `PairedSavings`, session, context and
+  memory costs and keepalive's per-cap totals add `Usd`, an integer count of
+  2^-64 dollars, so partial sums merge exactly in any order. Values derived
+  from them, such as per-month rates, are f64 and are taken after the merge.
 
 Rough floor from reading the structs: 100-150 bytes per request and 60-100
 per event, about 0.3-0.4 GB for 1M requests.
-
-## Required
-
-- [Sum costs in any order](/quest/m0/exact-sums.md) - cost totals that come
-  out the same whatever order the fold merges sessions in

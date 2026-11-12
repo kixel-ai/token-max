@@ -996,11 +996,104 @@ pub struct Subagent {
     pub effort: Option<String>,
 }
 
+/// Dollars as a whole number of 2^-64 dollar steps, so totals are exact and come out the
+/// same whatever order their parts are added in, unlike f64 sums.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Usd(i128);
+
+impl Usd {
+    /// No dollars.
+    pub const ZERO: Self = Self(0);
+    /// Steps per dollar: a power of two, so converting scales an f64 exactly.
+    const STEPS: f64 = 18_446_744_073_709_551_616.0;
+
+    /// Round `usd` to the nearest step.
+    ///
+    /// Panics on a non-finite amount or one past ±2^63 dollars, which no price produces.
+    pub fn from_f64(usd: f64) -> Self {
+        let steps = (usd * Self::STEPS).round();
+        assert!(
+            steps.is_finite() && steps.abs() < 2f64.powi(127),
+            "dollar amount out of range: {usd}"
+        );
+        Self(steps as i128)
+    }
+
+    /// The nearest f64, for printing and comparing.
+    pub fn to_f64(self) -> f64 {
+        self.0 as f64 / Self::STEPS
+    }
+
+    /// `self` times `factor`, rounded to a step once.
+    pub fn scale(self, factor: f64) -> Self {
+        if factor == 1.0 {
+            self
+        } else {
+            Self::from_f64(self.to_f64() * factor)
+        }
+    }
+
+    /// The magnitude.
+    pub fn abs(self) -> Self {
+        Self(self.0.abs())
+    }
+
+    /// `self` times `n`, saturating instead of overflowing.
+    pub fn saturating_mul(self, n: u64) -> Self {
+        Self(self.0.saturating_mul(i128::from(n)))
+    }
+}
+
+impl std::ops::Add for Usd {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0)
+    }
+}
+
+impl std::ops::Sub for Usd {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        Self(self.0 - other.0)
+    }
+}
+
+impl std::ops::Neg for Usd {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self(-self.0)
+    }
+}
+
+impl std::ops::AddAssign for Usd {
+    fn add_assign(&mut self, other: Self) {
+        self.0 += other.0;
+    }
+}
+
+impl std::ops::SubAssign for Usd {
+    fn sub_assign(&mut self, other: Self) {
+        self.0 -= other.0;
+    }
+}
+
+impl std::iter::Sum for Usd {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, |a, b| a + b)
+    }
+}
+
+impl Serialize for Usd {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f64(self.to_f64())
+    }
+}
+
 /// A price may be partially known without pretending the known subtotal is the total.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cost {
-    pub known_usd: f64,
-    pub total_usd: Option<f64>,
+    pub known_usd: Usd,
+    pub total_usd: Option<Usd>,
     pub unknown: Vec<String>,
     pub assumptions: Vec<String>,
 }
@@ -2182,7 +2275,7 @@ pub struct ContextCost {
     /// Tokens it took in the most recent request that carried it.
     pub tokens: Option<i64>,
     /// API-price equivalent over the priced requests only.
-    pub cost_usd: f64,
+    pub cost_usd: Usd,
     /// cost_usd scaled to every request that carried it; None when none could be priced.
     pub estimated_usd: Option<f64>,
     /// Observed uses in the window; None when uses are not observable.

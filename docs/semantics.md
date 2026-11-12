@@ -1086,7 +1086,8 @@ only for a project its config trusts. A project whose layers change the
 subagent settings but whose trust is not recorded makes its runs unknown, and
 so does a named profile (`NAME.config.toml`, or a legacy `[profiles.NAME]`
 table) that sets `[agents]` or `review_model`, since history does not record
-which `--profile` a run used. A
+which `--profile` a run used. The setting lines then name the files that may
+override them. A
 directory that no longer exists uses the profile's controls. A run's start and
 its parent's model come from all scanned history, including requests before
 `--since`. A run is unknown when its agent file changed after it started,

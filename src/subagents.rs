@@ -1016,6 +1016,12 @@ fn settings_text(
             None => "CLAUDE_CODE_SUBAGENT_MODEL; CLAUDE_CODE_SUBAGENT_MODEL_FORCE ignores the Agent call's and agent files' model".into(),
         };
     }
+    // An untrusted project or a selectable profile may override the files named above.
+    if let Some(reason) = &controls.unresolved {
+        for text in [&mut texts.0, &mut texts.1] {
+            *text += &format!("; unresolved: {reason}");
+        }
+    }
     texts
 }
 
@@ -1769,13 +1775,18 @@ mod tests {
             "[agents]\ndefault_subagent_model = \"gpt-6-luna\"\n",
         );
         let profile = discover_in(&w, Harness::Codex, &[&project]);
-        let reason = profile.agents.unresolved.unwrap();
+        let reason = profile.agents.unresolved.clone().unwrap();
         let named = path(&w.codex.join("cheap.config.toml"));
         assert!(
             reason.contains(&named) && reason.contains("profiles.legacy"),
             "{reason}"
         );
         assert!(!reason.contains("fast.config.toml"), "{reason}");
+        let (model, effort) = settings_text(&profile, &profile.agents, "review", false, true);
+        assert!(
+            model.contains(&named) && effort.contains(&named),
+            "{model} {effort}"
+        );
     }
 
     #[test]

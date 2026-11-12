@@ -86,7 +86,8 @@ was spawned from; review, whether Codex marked it a review; cwd; branches, each 
 its records in the window name with the first and last time, or else the last named before
 it; start and end of its requests; models, one entry per model and reasoning effort with
 requests (each request once in every entry it reaches), inputTokens (uncached),
-cacheWriteTokens, cacheReadTokens, outputTokens, costUsd and complete; costUsd; complete;
+cacheWriteTokens, cacheReadTokens, outputTokens, costUsd and complete; costUsd, the exact
+total, which can differ in the last digit from adding the models' costUsd; complete;
 skippedLines, the unreadable lines in its files; files. A cost is a lower bound when
 complete is false: a request could not be priced, or a file had unreadable or unfinished
 lines.

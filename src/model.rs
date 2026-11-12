@@ -1025,7 +1025,10 @@ impl Usd {
         self.0 as f64 / Self::STEPS
     }
 
-    /// `self` times `factor`, rounded to a step once.
+    /// `self` times `factor`, rounded to a step.
+    ///
+    /// Scaling does not distribute over addition, so scale each charge before summing, never
+    /// a total, or the result depends on how the total was grouped.
     pub fn scale(self, factor: f64) -> Self {
         if factor == 1.0 {
             self

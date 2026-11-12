@@ -9,6 +9,11 @@ Every host is priced from this host's catalog, and the first failed host
 fails the whole run, as `--ssh` reports do today. Only the session lines
 cross SSH, never a scan or transcript text.
 
+Every line, local or remote, also carries `repositories`: the remote URLs
+of the Git checkout at the session's `cwd`, read on the host where it ran,
+or the repository a Codex session recorded. It is null when the checkout
+is gone, so a consumer never resolves another host's path on its own.
+
 Out of scope: merging a session that appears on several hosts, such as a
 history copied between them. Each host's copy is printed with its own
 `host`, and the consumer decides what to count, as the report never adds
@@ -28,12 +33,18 @@ request history could replace reading transcripts over SSH):
   folding a session found on several hosts into one line). quest's
   `quest usage` counts such a session once and says so; see
   [its quest](https://github.com/moq-dev/quest/blob/main/quest/m0/routing-evidence/usage-token-max.md).
+- Repository? quest matches sessions to PRs by repository and today reads
+  the remotes of each `cwd` on its own host, which for another host's path
+  is missing or a different checkout, so the host that ran a session
+  resolves them (raised by quest's review of
+  [moq-dev/quest#669](https://github.com/moq-dev/quest/pull/669)).
 - Milestone? ✅ m0 (rejected: m1), because quest's m0 routing evidence
   compares cost per PR across every host.
 
 Guidance: reuse the `--ssh-scan` stream in `src/ssh.rs` and `src/wire.rs`,
 with the request naming the export instead of a report format, and
 `--ssh` with directory flags needing `--include-local` as the report does.
+Read remotes from the checkout's Git config rather than running `git`.
 Update `SESSIONS_HELP`, the README's `sessions` line, and the SSH section of
 `docs/semantics.md`.
 

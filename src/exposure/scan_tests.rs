@@ -6,7 +6,7 @@ use super::*;
 use crate::context::control_text;
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
-use crate::model::{ContextCost, ContextKind, Report, Scan, Verdict};
+use crate::model::{ContextCost, ContextKind, MemoryAccess, Report, Scan, Verdict};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{ReportOptions, format_report};
@@ -2178,4 +2178,730 @@ fn a_one_letter_plugin_name_is_not_a_windows_drive() {
         data.exposure.invocations[0].group,
         Some(identity("plugin:a"))
     );
+}
+
+/// One Claude session, with auto memory's system prompt section and MEMORY.md when
+/// `memory` is on, that reads one memory file and writes another.
+fn claude_memory_session(root: &str, memory: bool) -> Vec<Value> {
+    let mut prompt = "SYNTHETIC_PRIVATE_INTRO\n".to_string();
+    if memory {
+        prompt += "# Memory\n\nSYNTHETIC_PRIVATE_MEMORY_GUIDE \"quoted\"\n\n";
+    }
+    prompt += "# Environment\nSYNTHETIC_PRIVATE_ENV\n";
+    let system = json!([{ "type": "text", "text": prompt }]);
+    let tools =
+        [json!({ "name": "Read", "description": "r", "input_schema": { "type": "object" } })];
+    // Without memory, the same calls touch ordinary files.
+    let dir = if memory {
+        format!("{root}/projects/project/memory")
+    } else {
+        "/repo/notes".into()
+    };
+    let mut files = vec![
+        json!({ "path": "/repo/CLAUDE.md", "type": "Project", "content": "SYNTHETIC_PRIVATE_RULES" }),
+    ];
+    if memory {
+        files.push(json!({ "path": format!("{dir}/MEMORY.md"), "type": "AutoMem", "content": "SYNTHETIC_PRIVATE_INDEX" }));
+    }
+    let request = |n: u32| {
+        json!({
+            "type": "api-request",
+            "id": format!("api-{n}"),
+            "timestamp": at(n),
+            "sessionId": "session",
+            "shapeHash": "shape",
+            "keep": 0,
+            "tail": ["m1"],
+            "requestDigest": format!("d{n}"),
+            "params": { "model": "claude-opus-5-5" },
+        })
+    };
+    vec![
+        attachment(0, json!({ "type": "instructions", "files": files })),
+        json!({
+            "type": "api-request-shape",
+            "sessionId": "session",
+            "timestamp": at(0),
+            "shapeHash": "shape",
+            "shape": { "system": system, "tools": tools },
+        }),
+        json!({ "type": "api-request-blob", "sessionId": "session", "hash": "m1", "message": { "role": "user", "content": "SYNTHETIC_PRIVATE_PROMPT" } }),
+        request(1),
+        assistant(
+            1,
+            json!([
+                { "type": "tool_use", "id": "read", "name": "Read", "input": { "file_path": format!("{dir}/note.md") } },
+                { "type": "tool_use", "id": "write", "name": "Write",
+                  "input": { "file_path": format!("{dir}/new.md"), "content": "SYNTHETIC_PRIVATE_NOTE" } },
+                { "type": "tool_use", "id": "other", "name": "Read", "input": { "file_path": "/repo/src/main.rs" } },
+            ]),
+        ),
+        json!({
+            "type": "user",
+            "timestamp": at(2),
+            "sessionId": "session",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "read", "content": "SYNTHETIC_PRIVATE_RECALLED" },
+                { "type": "tool_result", "tool_use_id": "write", "content": "ok" },
+                { "type": "tool_result", "tool_use_id": "other", "content": "SYNTHETIC_PRIVATE_SOURCE" },
+            ] },
+        }),
+        request(3),
+        assistant(3, json!([])),
+    ]
+}
+
+fn memory_check(report: &Report, harness: Harness) -> &crate::model::MemoryCheck {
+    report
+        .checks
+        .iter()
+        .find_map(|c| match c {
+            crate::model::CheckResult::Memory(m) if m.harness == harness => Some(m),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let root = root.to_string_lossy();
+    let records = claude_memory_session(&root, true);
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let e = &data.exposure;
+    let component = |name: &str| e.components.iter().find(|c| c.name == name).unwrap();
+    // The section is measured as JSON text, so its quotes count escaped.
+    let section = r#"# Memory\n\nSYNTHETIC_PRIVATE_MEMORY_GUIDE \"quoted\"\n\n"#;
+    let system = &records[1]["shape"]["system"];
+    let memory_section = component(MEMORY_SECTION);
+    assert_eq!(memory_section.category, Category::Memory);
+    assert_eq!(memory_section.size.characters, Some(section.len() as i64));
+    assert_eq!(
+        component("wire-system").size.characters,
+        Some((length(system) - section.len()) as i64)
+    );
+    assert_eq!(e.requests[0].view.prefix, 3);
+    let index = component(&format!("{root}/projects/project/memory/MEMORY.md"));
+    assert_eq!(index.category, Category::Memory);
+    assert_eq!(e.memory.len(), 2);
+    let write = e
+        .memory
+        .iter()
+        .find(|m| m.access == MemoryAccess::Write)
+        .unwrap();
+    assert_eq!(write.request.as_deref(), Some(&*data.requests[0].id));
+    assert!(write.characters.unwrap() > "SYNTHETIC_PRIVATE_NOTE".len() as i64);
+    // The memory file read back is memory's output, not the Read tool's.
+    let read: Vec<&str> = e.tool_results.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(read, [MEMORY_OUTPUT, "Write", "Read"]);
+
+    let report = report(&data, 1.0);
+    let memory = row(&report, crate::context::CLAUDE_MEMORY);
+    assert_eq!(memory.kind, ContextKind::Memory);
+    assert_eq!(memory.calls, Some(2));
+    assert_eq!(memory.verdict, None);
+    assert_eq!(
+        control_text(memory.control.as_ref().unwrap(), Harness::Claude),
+        r#""autoMemoryEnabled": false"#
+    );
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!((check.reads, check.writes), (1, 1));
+    assert!(check.writes_usd.unwrap() > 0.0);
+    assert_eq!(
+        check.base.savings_usd,
+        Some(memory.estimated_usd.unwrap() + check.writes_usd.unwrap())
+    );
+    let text = format_report(
+        &report,
+        ReportOptions {
+            width: None,
+            color: false,
+            unicode: false,
+            details: false,
+            host: None,
+        },
+    );
+    let advised = &text[text.find("Consider turning off\n").unwrap()..];
+    assert!(labelled(
+        advised,
+        "Auto memory",
+        then(
+            ": on -> off. Opinion: ",
+            "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+        )
+    ));
+    assert!(!text.contains("MEMORY.md"));
+    // Advice is not a change, so it leaves the exit code alone.
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+    );
+    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+}
+
+/// The note auto memory's check gives when recorded sessions disagree with the setting.
+fn memory_note(check: &crate::model::MemoryCheck) -> Option<&str> {
+    check
+        .base
+        .uncertainty
+        .iter()
+        .find(|u| u.contains("a session keeps the setting it started with"))
+        .map(String::as_str)
+}
+
+#[test]
+fn claude_auto_memory_turned_off_is_kept_off() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    std::fs::write(
+        w.claude.join("settings.json"),
+        r#"{ "autoMemoryEnabled": false }"#,
+    )
+    .unwrap();
+    let records = claude_memory_session(&root.to_string_lossy(), false);
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert_eq!(categories(&data.exposure, Category::Memory), 0);
+    let first = report(&data, 1.0);
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(memory_note(check), None);
+    let rendered = text(&first);
+    assert!(!rendered.contains("Consider turning off\n"));
+    let keep = &rendered[rendered.find("Keep\n").unwrap()..];
+    assert!(labelled(keep, "Auto memory", |s| s == ": off. Costs nothing."));
+
+    // Turned off after an earlier session used it: still kept off, but what it cost
+    // in the window shows, and the earlier session is noted.
+    let root = root.to_string_lossy();
+    std::fs::write(
+        w.claude.join("projects/project/early.jsonl"),
+        jsonl(&claude_memory_session(&root, true)),
+    )
+    .unwrap();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&later(claude_memory_session(&root, false))),
+    )
+    .unwrap();
+    let turned_off = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&turned_off, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert!(check.writes_usd.unwrap() > 0.0);
+    assert!(
+        memory_note(check)
+            .unwrap()
+            .starts_with("1 of 2 sessions still carried memory")
+    );
+    let text = text(&turned_off);
+    let keep = &text[text.find("Keep\n").unwrap()..];
+    assert!(labelled(
+        keep,
+        "Auto memory",
+        then(": off. Cost", "; used 2 times (1 read, 1 write).")
+    ));
+
+    // A T3 instance whose launch arguments or environment could override the
+    // setting leaves it unknown, advised off as it may be on.
+    let mut data = scan(&options(&w, None)).unwrap();
+    for profile in &mut data.profiles {
+        profile.t3 = Some(crate::model::T3Instance {
+            state: "/synthetic/t3".into(),
+            instance: "claudeAgent".into(),
+            enabled: true,
+            idle_mode: crate::model::T3IdleMode::Off,
+            idle_owner: "synthetic".into(),
+            ownership_resolved: false,
+            settings_unresolved: true,
+            limitations: vec![],
+            inherited_window: None,
+        });
+    }
+    let t3 = report(&data, 1.0);
+    let check = memory_check(&t3, Harness::Claude);
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert!(
+        check
+            .unresolved
+            .as_deref()
+            .unwrap()
+            .starts_with("the T3 instance's launch arguments")
+    );
+}
+
+/// The same records as a later session, with their own ids.
+fn later(records: Vec<Value>) -> Vec<Value> {
+    fn walk(key: &str, value: &mut Value) {
+        match value {
+            Value::Object(map) => map.iter_mut().for_each(|(k, v)| walk(k, v)),
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(key, v)),
+            Value::String(text) if key == "timestamp" => {
+                let second: u32 = text[17..19].parse().unwrap();
+                *text = at(second + 30);
+            }
+            Value::String(text) if key == "sessionId" => *text = "later".into(),
+            Value::String(text) if ["id", "requestRef", "uuid", "shapeHash"].contains(&key) => {
+                *text = format!("later-{text}");
+            }
+            _ => {}
+        }
+    }
+    records
+        .into_iter()
+        .map(|mut r| {
+            walk("", &mut r);
+            r
+        })
+        .collect()
+}
+
+#[test]
+fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    std::fs::write(
+        w.claude.join("settings.json"),
+        r#"{ "autoMemoryEnabled": false }"#,
+    )
+    .unwrap();
+    // Every recorded session started before the setting changed and still carries
+    // memory, and one of them made the newest request: today's setting decides.
+    let mut early = claude_memory_session(&root.to_string_lossy(), true);
+    early.push(json!({
+        "type": "api-request", "id": "api-50", "timestamp": at(50), "sessionId": "session",
+        "shapeHash": "shape", "keep": 0, "tail": ["m1"], "requestDigest": "d50",
+        "params": { "model": "claude-opus-5-5" },
+    }));
+    early.push(assistant(50, json!([])));
+    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&early)).unwrap();
+    let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(check.base.action, crate::model::Action::Keep);
+    assert_eq!(check.off, r#""autoMemoryEnabled": false"#);
+    assert!(
+        check
+            .off_file
+            .as_deref()
+            .unwrap()
+            .ends_with("settings.json")
+    );
+    assert_eq!(
+        memory_note(check).unwrap(),
+        format!(
+            "1 of 1 sessions still carried memory at their latest request, though {}:autoMemoryEnabled turns it off: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
+            check.off_file.as_deref().unwrap()
+        )
+    );
+    let rendered = text(&first);
+    assert!(!rendered.contains("settings.local.json"));
+    let keep = &rendered[rendered.find("Keep\n").unwrap()..];
+    assert!(labelled(keep, "Auto memory", then(": off. Cost", "")));
+
+    // A project setting at the latest session's directory owns it, even when the
+    // user setting agrees.
+    std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    let local = project.join(".claude/settings.local.json");
+    std::fs::write(&local, r#"{ "autoMemoryEnabled": true }"#).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let records: Vec<Value> = claude_memory_session(&root.to_string_lossy(), true)
+        .into_iter()
+        .map(|mut r| {
+            r["cwd"] = json!(project.to_string_lossy());
+            r
+        })
+        .collect();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.current, Some(true));
+    let local = std::fs::canonicalize(&local).unwrap();
+    let local = local.to_string_lossy();
+    assert_eq!(check.off_file.as_deref(), Some(&*local));
+    // The context row's details name the same setting, not the user settings file.
+    let details = format_report(
+        &report,
+        ReportOptions {
+            width: Some(1000),
+            color: false,
+            unicode: false,
+            details: true,
+            host: None,
+        },
+    );
+    assert!(details.lines().any(|l| {
+        l.trim_start()
+            .strip_prefix("Turn off: \"autoMemoryEnabled\": false in ")
+            .is_some_and(|file| {
+                std::path::Path::new(file).ends_with(
+                    std::path::Path::new("project")
+                        .join(".claude")
+                        .join("settings.local.json"),
+                )
+            })
+    }));
+}
+
+#[test]
+fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let file = format!(
+        "{}/projects/project/memory/MEMORY.md",
+        root.to_string_lossy()
+    );
+    let records = [
+        attachment(
+            0,
+            json!({ "type": "instructions", "files": [
+                { "path": file, "type": "AutoMem", "content": "SYNTHETIC_PRIVATE_INDEX" },
+            ] }),
+        ),
+        assistant(1, json!([])),
+    ];
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.context_usd, None);
+    assert_eq!(check.base.savings_usd, None);
+    assert!(
+        check
+            .base
+            .uncertainty
+            .iter()
+            .any(|u| u.contains("loaded memory is unmeasured"))
+    );
+
+    // Beside a session that recorded its context, the total is a lower bound.
+    std::fs::write(
+        w.claude.join("projects/project/later.jsonl"),
+        jsonl(&later(claude_memory_session(&root.to_string_lossy(), true))),
+    )
+    .unwrap();
+    let both = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&both, Harness::Claude);
+    let coverage = check.base.coverage.unwrap();
+    assert_eq!((coverage.priced, coverage.total), (2, 3));
+    assert!(check.base.savings_usd.unwrap() > 0.0);
+    // The long temporary path wraps the line, and its length moves the cents,
+    // since the loaded paths are part of the priced context.
+    let both = text(&both).replace("\n  ", " ");
+    assert!(labelled(
+        &both,
+        "Auto memory",
+        then(": on -> off. ", "Costs at least $0.")
+    ));
+    assert!(labelled(
+        &both,
+        "Auto memory",
+        then(
+            ": on -> off. ",
+            ", from the 66.6% of requests that recorded their context;"
+        )
+    ));
+}
+
+#[test]
+fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_default() {
+    let w = Workspace::new();
+    // Resolved as discovery resolves the profile root; a Windows shell names the file
+    // without the `\\?\` prefix `fs::canonicalize` adds.
+    let home = crate::discovery::realpath(&w.codex.to_string_lossy()).unwrap();
+    let records = [
+        codex_meta(),
+        turn(),
+        json!({
+            "type": "response_item",
+            "timestamp": at(1),
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    { "type": "input_text", "text": "SYNTHETIC_PRIVATE_PERMISSIONS" },
+                    { "type": "input_text", "text": "## Memory\nSYNTHETIC_PRIVATE_SUMMARY" },
+                    { "type": "input_text", "text": "SYNTHETIC_PRIVATE_CONTINUED" },
+                ],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["permissions", "memories.instructions", "memories.instructions"],
+                },
+            },
+        }),
+        // A full world state does not drop the summary.
+        world(
+            1,
+            json!({ "agents_md": { "text": "SYNTHETIC_PRIVATE_AGENTS" } }),
+            true,
+        ),
+        json!({
+            "type": "response_item",
+            "timestamp": at(2),
+            "payload": { "type": "function_call", "namespace": "memories", "name": "read",
+                         "call_id": "recall", "arguments": "{\"path\":\"SYNTHETIC_PRIVATE_PATH\"}" },
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": at(3),
+            "payload": { "type": "function_call_output", "call_id": "recall", "output": "SYNTHETIC_PRIVATE_RECALLED" },
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": at(3),
+            "payload": { "type": "function_call", "namespace": "memories", "name": "add_ad_hoc_note",
+                         "call_id": "note", "arguments": "{\"note\":\"SYNTHETIC_PRIVATE_NOTE\"}" },
+        }),
+        json!({
+            "type": "event_msg",
+            "timestamp": at(4),
+            "payload": { "type": "item_completed", "item": {
+                "type": "CommandExecution", "id": "shell", "exit_code": 0, "status": "completed",
+                "parsed_cmd": [{ "type": "read", "name": "notes.md", "path": format!("{home}/memories/notes.md"), "cmd": "cat" }],
+                "aggregated_output": "SYNTHETIC_PRIVATE_SHELL",
+            } },
+        }),
+        billed(5),
+    ];
+    let file = w.codex.join("sessions/main.jsonl");
+    std::fs::write(&file, jsonl(&records)).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let e = &data.exposure;
+    let summary = e
+        .components
+        .iter()
+        .find(|c| c.category == Category::Memory)
+        .unwrap();
+    assert_eq!(
+        summary.size.characters,
+        Some("## Memory\nSYNTHETIC_PRIVATE_SUMMARY\nSYNTHETIC_PRIVATE_CONTINUED".len() as i64)
+    );
+    assert!(has(&e.requests[0].view.candidates, &summary.id));
+    let accesses: Vec<MemoryAccess> = e.memory.iter().map(|m| m.access).collect();
+    assert_eq!(
+        accesses,
+        [MemoryAccess::Read, MemoryAccess::Write, MemoryAccess::Read]
+    );
+    let r = report(&data, 1.0);
+    let memory = row(&r, crate::context::CODEX_MEMORY);
+    assert_eq!(memory.calls, Some(3));
+    assert_eq!(memory.requests, 1);
+    // Off by default: the session that carried a summary is noted, not taken as on.
+    let check = memory_check(&r, Harness::Codex);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(check.off, "features.memories = false");
+    assert_eq!(check.context_usd, memory.estimated_usd);
+    assert!(
+        memory_note(check)
+            .unwrap()
+            .starts_with("1 of 1 sessions still carried memory")
+    );
+    assert!(labelled(
+        &text(&r),
+        "Codex memories",
+        then(
+            ": off. Cost unknown, and extraction and consolidation are not measured",
+            ""
+        )
+    ));
+    assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
+
+    // Turned on in settings, it is advised off.
+    std::fs::write(w.codex.join("config.toml"), "[features]\nmemories = true\n").unwrap();
+    let on = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&on, Harness::Codex);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(memory_note(check), None);
+    assert!(labelled(
+        &text(&on),
+        "Codex memories",
+        then(": on -> off. Opinion: ", "")
+    ));
+    std::fs::remove_file(w.codex.join("config.toml")).unwrap();
+
+    // Compaction rebuilds the developer context: a summary its replacement history
+    // carries stays, and one it leaves out is gone.
+    let developer = |text: &str| {
+        json!({ "type": "message", "role": "developer",
+                "content": [{ "type": "input_text", "text": text }],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["memories.instructions"] } })
+    };
+    for (history, kept) in [
+        (vec![developer("## Memory\nSYNTHETIC_PRIVATE_NEWER")], true),
+        (vec![], false),
+    ] {
+        let mut records = records[..3].to_vec();
+        records.push(json!({ "type": "compacted", "timestamp": at(2),
+                             "payload": { "message": "", "replacement_history": history } }));
+        records.push(billed(5));
+        std::fs::write(&file, jsonl(&records)).unwrap();
+        let data = scan(&options(&w, None)).unwrap();
+        let e = &data.exposure;
+        let carried = e.requests[0].view.candidates.iter().any(|id| {
+            e.components
+                .iter()
+                .any(|c| c.id == *id && c.category == Category::Memory)
+        });
+        assert_eq!(carried, kept);
+    }
+
+    // With no summary and no setting, Codex memories are off.
+    let context = world(
+        1,
+        json!({ "agents_md": { "text": "SYNTHETIC_PRIVATE_AGENTS" } }),
+        true,
+    );
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), context, billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(labelled(
+        &text(&report(&data, 1.0)),
+        "Codex memories",
+        |s| s == ": off. Costs nothing."
+    ));
+    // A memory store shows Codex generated memories at some point, in requests it
+    // records only in telemetry, so the line cannot say they cost nothing.
+    std::fs::create_dir_all(w.codex.join("memories")).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(labelled(
+        &text(&report(&data, 1.0)),
+        "Codex memories",
+        |s| s
+            == ": off. No measured cost, but extraction and consolidation are not measured; never read back or written."
+    ));
+    std::fs::remove_dir(w.codex.join("memories")).unwrap();
+    // A request that recorded no context may have loaded memories while they were
+    // on, so turning them off does not make its cost zero.
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(labelled(
+        &text(&report(&data, 1.0)),
+        "Codex memories",
+        then(": off. Cost unknown", "")
+    ));
+
+    // A trusted project's config at the latest session's directory turns them on.
+    let project = w.home.join("repo");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir_all(project.join(".codex")).unwrap();
+    let project = crate::discovery::realpath(&project.to_string_lossy()).unwrap();
+    let project_config = std::path::Path::new(&project)
+        .join(".codex")
+        .join("config.toml")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::write(&project_config, "[features]\nmemories = true\n").unwrap();
+    std::fs::write(
+        w.codex.join("config.toml"),
+        format!("[projects.{project:?}]\ntrust_level = \"trusted\"\n"),
+    )
+    .unwrap();
+    let mut meta = codex_meta();
+    meta["payload"]["cwd"] = json!(project);
+    std::fs::write(&file, jsonl(&[meta, turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let check = memory_check(&report(&data, 1.0), Harness::Codex).clone();
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.off_file.as_deref(), Some(&*project_config));
+
+    // Without a recorded trust decision, whether the project layer applies is
+    // unknown, so the state is too: a yellow advisory that it may be on.
+    std::fs::write(w.codex.join("config.toml"), "").unwrap();
+    let unresolved = |data: &crate::model::Scan| {
+        let r = report(data, 1.0);
+        let check = memory_check(&r, Harness::Codex).clone();
+        let wide = ReportOptions {
+            width: Some(1000),
+            color: false,
+            unicode: false,
+            details: false,
+            host: None,
+        };
+        (check, format_report(&r, wide))
+    };
+    let (check, rendered) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(
+        check.unresolved.as_deref(),
+        Some("a project .codex/config.toml sets memories, but the project's trust is not recorded")
+    );
+    let advised = &rendered[rendered.find("Consider turning off\n").unwrap()..];
+    assert!(labelled(
+        advised,
+        "Codex memories",
+        then(
+            ": may be on -> off. Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
+            "Set features.memories = false in "
+        )
+    ));
+    assert!(
+        !report(&scan(&options(&w, None)).unwrap(), 1.0)
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+    );
+
+    // Trusted, but a named profile that sets memories may have been selected.
+    let trusted = format!("[projects.{project:?}]\ntrust_level = \"trusted\"\n");
+    std::fs::write(w.codex.join("config.toml"), &trusted).unwrap();
+    let named = w.codex.join("loud.config.toml");
+    std::fs::write(&named, "[features]\nmemories = false\n").unwrap();
+    let (check, rendered) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert!(
+        check
+            .unresolved
+            .unwrap()
+            .starts_with("a named config profile sets memories")
+    );
+    // Turning it off in the user config alone would leave the profile's setting.
+    assert!(rendered.contains("loud.config.toml where it sets memories."));
+    std::fs::remove_file(&named).unwrap();
+
+    // A named profile that changes project roots matters only where a layer it could
+    // add or drop sets memories: here the root's layer, seen from a nested directory.
+    let nested = format!("{project}/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let mut meta = codex_meta();
+    meta["payload"]["cwd"] = json!(nested);
+    std::fs::write(&file, jsonl(&[meta, turn(), billed(5)])).unwrap();
+    std::fs::write(
+        w.codex.join("quiet.config.toml"),
+        "project_root_markers = []\n",
+    )
+    .unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert!(
+        check
+            .unresolved
+            .unwrap()
+            .starts_with("a .codex/config.toml above the latest session's directory sets memories")
+    );
+    std::fs::remove_file(&project_config).unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!((check.base.current, check.unresolved), (Some(false), None));
 }

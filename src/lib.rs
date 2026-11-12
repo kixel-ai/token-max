@@ -14,6 +14,7 @@ pub mod exposure;
 pub mod fast;
 pub mod idle;
 pub mod keepalive;
+pub mod memory;
 pub mod model;
 pub mod prices;
 pub mod reader;

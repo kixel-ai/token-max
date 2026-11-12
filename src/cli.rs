@@ -12,14 +12,15 @@ use serde::Serialize;
 use serde_json::ser::Formatter;
 
 use crate::discovery::DiscoveryOptions;
-use crate::model::{Location, Millis, Verdict};
-use crate::prices::{PriceOptions, cancel_downloads, load_prices};
+use crate::model::{Location, Millis, Scan, Verdict};
+use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{Host, ReportOptions, format_report};
 use crate::safe::{ScanError, display};
-use crate::ssh::{self, Remote};
+use crate::ssh;
 use crate::terminal::{WrapOptions, wrap_text};
+use crate::wire::{Format, Request};
 
 const HELP: &str = "token-max: cheaper agent settings from local usage
 
@@ -44,7 +45,8 @@ Usage: token-max [options]
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
-and needs this same version installed there; only metadata crosses SSH. Current settings are applied to the selected history;
+and needs this same version installed there; it prices its own history with this host's
+prices, and only its report crosses SSH. Current settings are applied to the selected history;
 checks can use different windows and baselines. Independent savings do not add.
 
 Examples:
@@ -456,6 +458,66 @@ enum Output {
     Written,
 }
 
+/// One host's audit before its report is printed: this host's scan, or a destination's report.
+enum Scanned {
+    Local(Box<Scan>),
+    Remote(Rendered),
+}
+
+/// What reaches the coordinator while hosts scan, in whatever order it finishes.
+enum Arrival {
+    Prices(Result<Catalog, ScanError>),
+    Host(usize, Result<Scanned, ScanError>),
+}
+
+/// What one host's scan is analyzed and printed with.
+pub struct Render<'a> {
+    pub catalog: &'a Catalog,
+    pub since: Option<Millis>,
+    pub now: Millis,
+    pub max_cost_per_use_usd: f64,
+    pub format: &'a Format,
+    /// The host's home directory, which its report shows as `~`.
+    pub home: Option<&'a str>,
+}
+
+/// One host's printed report, and whether it recommends a change.
+pub struct Rendered {
+    pub text: String,
+    pub change: bool,
+}
+
+/// Analyze one host's scan and print its report.
+pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
+    let report = analyze(AnalyzeOptions {
+        scan,
+        catalog: options.catalog,
+        since: options.since,
+        now: options.now,
+        max_cost_per_use_usd: options.max_cost_per_use_usd,
+    })?;
+    let change = report
+        .checks
+        .iter()
+        .any(|c| c.action() == crate::model::Action::Change)
+        || crate::context::setting_rows(&report.context).any(|c| c.verdict == Some(Verdict::Off));
+    let format = options.format;
+    let text = format_report(
+        &report,
+        ReportOptions {
+            width: format.width,
+            color: format.color,
+            unicode: format.unicode,
+            details: format.details,
+            host: format.host.as_deref().map(|name| Host {
+                name,
+                home: options.home,
+            }),
+        },
+    );
+    Ok(Rendered { text, change })
+}
+
 fn now() -> Millis {
     let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -601,9 +663,28 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             eprintln!("token-max: {message}...");
         }
     };
-    // Every host scans at once; the first failure stops the rest.
+    let unicode_locale = env_nonempty("LC_ALL")
+        .or_else(|| env_nonempty("LC_CTYPE"))
+        .or_else(|| env_nonempty("LANG"))
+        .is_some_and(|locale| {
+            let locale = locale.to_ascii_lowercase();
+            locale.contains("utf8") || locale.contains("utf-8")
+        });
+    let color = stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb;
+    // Each host's section is named once the run covers several.
+    let format = |host: Option<&str>| Format {
+        width: width(),
+        color,
+        unicode: stdout && !values.plain && !term_dumb && unicode_locale,
+        details: values.details,
+        host: host.map(str::to_string),
+    };
+    let prices = price_options(values.prices_file, values.price_cache, values.offline)?;
+    // Every host scans at once; the first failure stops the rest. Destinations analyze their
+    // own scans, so this host only ever holds its own.
     let (sender, results) = mpsc::channel();
     let mut hosts: Vec<Option<String>> = vec![];
+    let mut requests = vec![];
     // A lone local scan runs on this thread, so the analysis reuses the memory the scan
     // frees rather than leaving it to another thread's allocator arena.
     let mut inline = None;
@@ -617,15 +698,12 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         let job = move || {
             panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
                 .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(|scan| Remote {
-                    scan,
-                    home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-                })
+                .map(|scan| Scanned::Local(Box::new(scan)))
         };
         if remote {
             let sender = sender.clone();
             thread::spawn(move || {
-                let _ = sender.send((index, job()));
+                let _ = sender.send(Arrival::Host(index, job()));
             });
         } else {
             inline = Some((index, job));
@@ -635,83 +713,95 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         let sender = sender.clone();
         let index = hosts.len();
         hosts.push(Some(destination.clone()));
+        let (request, receiver) = mpsc::channel();
+        requests.push((request, format(Some(&destination))));
         thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::audit(&destination, since))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-            let _ = sender.send((index, result));
+            let result = panic::catch_unwind(|| ssh::audit(&destination, since, receiver))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(Scanned::Remote);
+            let _ = sender.send(Arrival::Host(index, result));
         });
     }
-    drop(sender);
     phase(match (local, remote) {
         (true, false) => "Scanning local histories",
         (true, true) => "Scanning local histories and SSH hosts",
         (false, _) => "Scanning SSH hosts",
     });
-    let mut scans: Vec<Option<Remote>> = hosts.iter().map(|_| None).collect();
-    let scanned = (|| {
-        if let Some((index, job)) = inline {
-            scans[index] = Some(job()?);
-        }
-        for (index, result) in results {
-            scans[index] = Some(result?);
-        }
+    let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
+    let local_format = format(remote.then_some("this host"));
+    let mut rendered: Vec<Option<Rendered>> = hosts.iter().map(|_| None).collect();
+    let audited = (|| {
+        let inline = inline
+            .map(|(index, job)| job().map(|scan| (index, scan)))
+            .transpose()?;
         phase("Loading public prices");
-        load_prices(&price_options(
-            values.prices_file,
-            values.price_cache,
-            values.offline,
-        )?)
-    })();
-    let catalog = scanned.inspect_err(|_| ssh::cancel())?;
-    phase("Checking settings");
-    let now = now();
-    let unicode_locale = env_nonempty("LC_ALL")
-        .or_else(|| env_nonempty("LC_CTYPE"))
-        .or_else(|| env_nonempty("LANG"))
-        .is_some_and(|locale| {
-            let locale = locale.to_ascii_lowercase();
-            locale.contains("utf8") || locale.contains("utf-8")
+        // Prices load beside the scans, so whichever fails first stops the run at once.
+        thread::spawn(move || {
+            let catalog = panic::catch_unwind(|| load_prices(&prices))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send(Arrival::Prices(catalog));
         });
-    let options = ReportOptions {
-        width: width(),
-        color: stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb,
-        unicode: stdout && !values.plain && !term_dumb && unicode_locale,
-        details: values.details,
-        host: None,
-    };
+        let mut catalog = None;
+        // Hosts that finished before the prices arrived.
+        let mut scanned: Vec<_> = inline.into_iter().collect();
+        for arrival in results {
+            match arrival {
+                Arrival::Host(index, result) => scanned.push((index, result?)),
+                Arrival::Prices(loaded) => {
+                    let loaded = loaded?;
+                    for (request, format) in std::mem::take(&mut requests) {
+                        // A destination that already failed reports itself through `results`.
+                        let _ = request.send(Request {
+                            catalog: loaded.clone(),
+                            max_cost_per_use_usd,
+                            format,
+                        });
+                    }
+                    phase("Checking settings");
+                    catalog = Some(loaded);
+                }
+            }
+            let Some(catalog) = &catalog else { continue };
+            for (index, scanned) in scanned.drain(..) {
+                rendered[index] = Some(match scanned {
+                    Scanned::Local(scan) => render(
+                        *scan,
+                        Render {
+                            catalog,
+                            since,
+                            now: now(),
+                            max_cost_per_use_usd,
+                            format: &local_format,
+                            home: home.as_deref(),
+                        },
+                    )?,
+                    Scanned::Remote(report) => report,
+                });
+            }
+        }
+        Ok(())
+    })();
+    audited.inspect_err(|_| {
+        cancel_downloads();
+        ssh::cancel();
+    })?;
     let sections = hosts.len();
     let mut code = 0;
     let mut text = String::new();
-    for (ssh, scan) in hosts.into_iter().zip(scans) {
-        let Remote { scan, home } = scan.expect("every host sent a result");
-        let report = analyze(AnalyzeOptions {
-            scan,
-            catalog: &catalog,
-            since,
-            now,
-            max_cost_per_use_usd,
-        })?;
-        let change = report
-            .checks
-            .iter()
-            .any(|c| c.action() == crate::model::Action::Change)
-            || crate::context::setting_rows(&report.context)
-                .any(|c| c.verdict == Some(Verdict::Off));
+    for (ssh, rendered) in hosts.into_iter().zip(rendered) {
+        let Rendered {
+            text: report,
+            change,
+        } = rendered.expect("every host sent a result");
         code = code.max(u8::from(change));
-        let host = Host {
-            name: ssh.as_deref().unwrap_or("this host"),
-            home: home.as_deref(),
-        };
         if !text.is_empty() {
             text.push('\n');
         }
-        text.push_str(&format_report(
-            &report,
-            ReportOptions {
-                host: remote.then_some(host),
-                ..options
-            },
-        ));
+        // A destination's report is its own text, so escape all but our own styles.
+        match ssh {
+            Some(_) => text.push_str(&crate::safe::remote_text(&report, color)),
+            None => text.push_str(&report),
+        }
     }
     if sections > 1 {
         text.push_str(

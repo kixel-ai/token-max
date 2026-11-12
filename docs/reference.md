@@ -18,7 +18,7 @@ profiles. Codex includes archived sessions; Claude includes nested subagents.
 T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
 and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir` and
 `--t3-dir` flags select only those roots across both harnesses. `--t3-dir`
-takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` and JSON show every discovered root's selection. A missing or
+takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
 
 ## Prices
@@ -81,6 +81,15 @@ also removes explicit invocation. Same-named copies are flagged even without
 prices, with one copy retained. Repeated discovery of the same path needs the
 redundant source removed. Zero observations do not prove nonuse, and listing
 cost is not promised savings: Codex can backfill the freed catalog space.
+Auto memory, Claude Code's `MEMORY.md` and system prompt section or Codex's
+memory summary, is worth considering off while it is on, or may be on because
+a Codex setting such as a `--profile` selection is not recorded, on the maintainer's
+opinion rather than a measurement: notes the agent writes for itself skip
+review and encourage slop, so durable guidance belongs in a reviewed,
+checked-in CLAUDE.md or AGENTS.md. Its line shows the total cost of the loaded
+memory, the memory files read back and the writes, and how often it was read or
+written, but `--max-cost-per-use` does not apply and it does not cause exit 1. A
+profile with memory off shows it under **Keep**.
 Instruction files, Claude plugin skills, which `skillOverrides` does not reach, and the
 system prompt, core tools such as Bash and Read, and the skill and subagent
 lists have no switch and are listed after the verdicts.
@@ -192,8 +201,8 @@ into another transcript, as a fork does, counts once, with its original
 session. A cost is a lower bound, marked `"complete": false`, when a request
 could not be priced or a transcript had unreadable or unfinished lines.
 Compaction summaries the transcripts never recorded are not estimated here.
-Native session IDs appear only in this export: the report hashes them, and SSH
-never carries them.
+Native session IDs appear only in this export: the report hashes them, and an
+SSH destination sends only its report.
 
 ## Cache TTL
 
@@ -326,10 +335,11 @@ token-max --ssh devbox --ssh user@laptop --include-local
 
 The destination runs `token-max --ssh-scan`, which discovers that host's own
 profiles from its home and environment, reads its transcripts and settings,
-and streams only the metadata the checks read, never prompt, reply or
-component text. It looks for `token-max` on the non-interactive `PATH` and in
-`~/.cargo/bin`. Prices and every check run on this host, with one price
-catalog. `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
+and runs every check there, priced from the one catalog this host loads and
+sends it. Only its finished report comes back, so its transcripts and scan
+never leave it, and this host never holds more than its own scan. It looks for
+`token-max` on the non-interactive `PATH` and in `~/.cargo/bin`.
+`--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 
 Each host is analyzed on its own and gets its own section, labeled with the

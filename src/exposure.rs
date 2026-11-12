@@ -15,9 +15,9 @@ use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
     Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, Millis, Observed, Owner, Profiles, References, Request, RequestEvidence,
-    ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls, ToolResults, Via,
-    Visibility, Visible,
+    Linkage, Location, MemoryAccess, MemoryUse, Millis, Observed, Owner, Profile, Profiles,
+    References, Request, RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage,
+    ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -102,6 +102,13 @@ pub struct ExposureCollector {
     calls: IndexMap<CallKey, ToolCall>,
     // Tool results by call id digest, for the same reason.
     results: IndexMap<CallKey, ToolResult>,
+    // Auto memory reads and writes by call id digest, for the same reason.
+    memory: IndexMap<CallKey, MemoryRecord>,
+    // Each profile's root and aliases, under which its auto memory lives.
+    roots: HashMap<String, Vec<String>>,
+    // Directories of the MEMORY.md files loaded in the current file, which
+    // `autoMemoryDirectory` can move outside the profile root.
+    memory_dirs: IndexSet<String>,
     names: HashSet<Text>,
     // One shared copy of each profile set calls and results are seen under.
     profile_sets: Interner,
@@ -176,6 +183,16 @@ struct File {
     profiles: Profiles,
     subagent: bool,
     basename: String,
+    /// Roots and aliases of the profiles that share it.
+    roots: Vec<String>,
+}
+
+/// One auto memory read or write, and the record that made it.
+struct MemoryRecord {
+    use_: MemoryUse,
+    copies: Copies,
+    file: Text,
+    line: u64,
 }
 
 #[derive(Default)]
@@ -257,6 +274,8 @@ struct PendingTool {
 /// A recorded request shape, measured once and placed on every request that uses it.
 struct Shape {
     system: Placed,
+    /// The system prompt's auto memory section, measured apart from the rest.
+    memory: Option<Placed>,
     tools: Vec<Placed>,
 }
 
@@ -272,8 +291,11 @@ struct Placed {
 
 impl Placed {
     fn new(category: Category, name: &str, content: Content<'_>, group: Option<String>) -> Self {
+        Self::sized(category, name, content.measure(), group)
+    }
+
+    fn sized(category: Category, name: &str, size: Size, group: Option<String>) -> Self {
         let key = component_key(category, name);
-        let size = content.measure();
         Placed {
             category,
             name: name.to_string(),
@@ -405,6 +427,9 @@ impl ExposureCollector {
             since,
             calls: IndexMap::default(),
             results: IndexMap::default(),
+            memory: IndexMap::default(),
+            roots: HashMap::default(),
+            memory_dirs: IndexSet::default(),
             names: HashSet::default(),
             profile_sets: Interner::default(),
             copies: HashSet::default(),
@@ -448,6 +473,20 @@ impl ExposureCollector {
             views: HashSet::default(),
             reasons: HashMap::default(),
         }
+    }
+
+    /// Learn where each profile keeps its auto memory, so reads and writes there count as its uses.
+    pub fn roots(&mut self, profiles: &[Profile]) {
+        self.roots = profiles
+            .iter()
+            .map(|p| {
+                let roots = std::iter::once(&p.root)
+                    .chain(&p.aliases)
+                    .cloned()
+                    .collect();
+                (p.id.clone(), roots)
+            })
+            .collect();
     }
 
     /// Invalidate context after tolerated corrupt pre-window metadata, without inventing removals.
@@ -534,9 +573,30 @@ impl ExposureCollector {
             self.uncertain = true;
             self.deferred.clear();
             self.forget_results();
+            // Codex rebuilds its developer context, memory summary included, into
+            // the replacement history; a summary it left out is gone.
+            if kind == Some("compacted")
+                && let Some(Value::Array(history)) = payload.get("replacement_history")
+            {
+                let key = component_key(Category::Memory, MEMORY_SUMMARY);
+                self.provided.remove(key.as_str());
+                self.remove(Category::Memory, MEMORY_SUMMARY);
+                for item in history {
+                    let item = object(item);
+                    if is(item, "type", "message") && is(item, "role", "developer") {
+                        self.memory_summary(item, line.at())?;
+                    }
+                }
+            }
         }
         if kind == Some("world_state") {
             self.world_state(&line)?;
+        }
+        if kind == Some("response_item")
+            && is(payload, "type", "message")
+            && is(payload, "role", "developer")
+        {
+            self.memory_summary(payload, line.at())?;
         }
         if kind == Some("attachment") {
             self.attachment(&line)?;
@@ -557,12 +617,7 @@ impl ExposureCollector {
         if kind == Some("api-request-shape") {
             let shape = record(raw.get("shape"))?;
             let hash = id(raw.get("shapeHash"))?;
-            let system = Placed::new(
-                Category::Other,
-                "wire-system",
-                shape.get("system").map_or(Content::Missing, Content::Json),
-                None,
-            );
+            let (system, memory) = split_system(shape.get("system"));
             let mut tools = vec![];
             for v in array(shape.get("tools"))? {
                 let name = text(record(Some(v))?.get("name"))?;
@@ -573,7 +628,14 @@ impl ExposureCollector {
                     group(name),
                 ));
             }
-            self.shapes.insert(hash, Arc::new(Shape { system, tools }));
+            self.shapes.insert(
+                hash,
+                Arc::new(Shape {
+                    system,
+                    memory,
+                    tools,
+                }),
+            );
         }
         if kind == Some("api-request-blob") {
             let hash = id(raw.get("hash"))?;
@@ -629,6 +691,7 @@ impl ExposureCollector {
         let ExposureCollector {
             calls,
             results,
+            memory,
             components,
             invocations,
             observations,
@@ -770,6 +833,13 @@ impl ExposureCollector {
             let profiles = owned(r.harness, &r.copies);
             (r, profiles)
         });
+        let memory = memory_uses(
+            memory.into_values().map(|m| {
+                let profiles = owned(m.use_.harness, &m.copies);
+                (m, profiles)
+            }),
+            requests,
+        );
         let invocations: Vec<Invocation> = invocations
             .into_values()
             .map(|(mut i, copies)| {
@@ -835,6 +905,7 @@ impl ExposureCollector {
             visibility,
             tool_calls: tool_calls(calls),
             tool_results: tool_results(results),
+            memory,
         }
     }
 
@@ -922,6 +993,84 @@ impl ExposureCollector {
         );
     }
 
+    /// Whether a file belongs to the current profile's auto memory: Claude's
+    /// `projects/<project>/memory/` under its root or a directory a loaded MEMORY.md
+    /// came from, or Codex's `memories/` or `memories_v2/` under its home.
+    fn memory_path(&self, path: &str) -> bool {
+        let file = self.file();
+        if file.harness == Harness::Claude
+            && self
+                .memory_dirs
+                .iter()
+                .any(|dir| path.len() > dir.len() && path.starts_with(dir.as_str()))
+        {
+            return true;
+        }
+        file.roots.iter().any(|root| {
+            let Some(rest) = path
+                .strip_prefix(root.as_str())
+                .and_then(|rest| rest.strip_prefix(['/', '\\']))
+            else {
+                return false;
+            };
+            let parts: Vec<&str> = rest.split(['/', '\\']).collect();
+            match file.harness {
+                Harness::Claude => {
+                    parts.len() > 3 && parts[0] == "projects" && parts[2] == "memory"
+                }
+                Harness::Codex => parts.len() > 1 && matches!(parts[0], "memories" | "memories_v2"),
+            }
+        })
+    }
+
+    /// Count one auto memory read or write, once per call id across copied files.
+    fn memory_use(
+        &mut self,
+        call: &str,
+        access: MemoryAccess,
+        characters: Option<i64>,
+        line: &Line<'_>,
+    ) {
+        let Some(time) = line.time.filter(|&t| self.since.is_none_or(|s| t >= s)) else {
+            return;
+        };
+        let file = self.file.as_ref().expect("observing a file");
+        let record = self
+            .memory
+            .entry(call_key(call))
+            .or_insert_with(|| MemoryRecord {
+                use_: MemoryUse {
+                    harness: file.harness,
+                    access,
+                    profiles: vec![],
+                    time,
+                    characters,
+                    request: None,
+                },
+                copies: Copies::from([]),
+                file: line.location.file.clone(),
+                line: line.location.line,
+            });
+        record.copies = copy(
+            &mut self.copies,
+            &mut self.profile_sets,
+            &record.copies,
+            &self.session,
+            &file.profiles,
+        );
+    }
+
+    /// Place the system prompt's memory section, or retire the last one when this prompt has none.
+    fn place_memory_section(&mut self, memory: Option<&Placed>, at: Millis) -> Option<Text> {
+        match memory {
+            Some(memory) => Some(self.place_shaped(memory, "system-memory-section", at)),
+            None => {
+                self.remove(Category::Memory, MEMORY_SECTION);
+                None
+            }
+        }
+    }
+
     fn switch(&mut self, snapshot: &Snapshot) {
         self.file = Some(File {
             name: snapshot.file.clone(),
@@ -929,7 +1078,15 @@ impl ExposureCollector {
             profiles: self.profile_sets.profiles(&snapshot.profiles),
             subagent: is_subagent(&snapshot.file),
             basename: basename(&snapshot.file).to_string(),
+            roots: snapshot
+                .profiles
+                .iter()
+                .filter_map(|p| self.roots.get(p))
+                .flatten()
+                .cloned()
+                .collect(),
         });
+        self.memory_dirs.clear();
         self.active.clear();
         self.pending_removed.clear();
         self.session = identity(&snapshot.file).into();
@@ -1449,6 +1606,38 @@ impl ExposureCollector {
         Ok(())
     }
 
+    /// Codex's memory summary, a developer message added with each full context.
+    /// Codex 0.167.0 tags its parts `memories.instructions`; each part it splits
+    /// off a long summary carries only that tag, while the first starts `## Memory`.
+    fn memory_summary(&mut self, p: &Map<String, Value>, at: Millis) -> Result<(), ScanError> {
+        let kinds = object(field(p, "internal_chat_message_metadata_passthrough"))
+            .get("content_item_kinds")
+            .and_then(Value::as_array);
+        let mut parts = vec![];
+        for (index, item) in array(p.get("content"))?.iter().enumerate() {
+            let Some(body) = object(item).get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            let tagged = kinds.and_then(|k| k.get(index)).and_then(Value::as_str)
+                == Some(MEMORY_INSTRUCTIONS);
+            if tagged || body.starts_with("## Memory\n") {
+                parts.push(body);
+            }
+        }
+        if parts.is_empty() {
+            return Ok(());
+        }
+        // Like provided tools, it stays until the next full context replaces it.
+        self.provided
+            .insert(component_key(Category::Memory, MEMORY_SUMMARY).into());
+        self.component(
+            New::active(Category::Memory, MEMORY_SUMMARY, "codex-memory-summary"),
+            Content::Text(&parts.join("\n")),
+            at,
+        );
+        Ok(())
+    }
+
     fn attachment(&mut self, line: &Line<'_>) -> Result<(), ScanError> {
         let raw = line.raw;
         let at = line.at();
@@ -1471,8 +1660,18 @@ impl ExposureCollector {
                 let f = record(Some(v))?;
                 let path = text(f.get("path"))?;
                 let content = text(f.get("content"))?;
+                // Auto memory's MEMORY.md arrives beside the CLAUDE.md files.
+                let category = if is(f, "type", "AutoMem") {
+                    let dir = &path[..path.len() - basename(path).len()];
+                    if !dir.is_empty() {
+                        self.memory_dirs.insert(dir.to_string());
+                    }
+                    Category::Memory
+                } else {
+                    Category::Instructions
+                };
                 self.component(
-                    New::active(Category::Instructions, path, "instruction-attachment"),
+                    New::active(category, path, "instruction-attachment"),
                     Content::Text(content),
                     at,
                 );
@@ -1682,6 +1881,7 @@ impl ExposureCollector {
                 components.push(self.place_shaped(tool, "shape-tool", at));
             }
             components.push(self.place_shaped(&shape.system, "shape-system", at));
+            components.extend(self.place_memory_section(shape.memory.as_ref(), at));
             let leading: HashSet<&str> = components.iter().map(|c| &**c).collect();
             let rest: Vec<Text> = self
                 .active
@@ -1700,13 +1900,17 @@ impl ExposureCollector {
                     messages
                         + shape.system.size.characters.unwrap_or(0)
                         + shape
+                            .memory
+                            .as_ref()
+                            .map_or(0, |m| m.size.characters.unwrap_or(0))
+                        + shape
                             .tools
                             .iter()
                             .map(|t| t.size.characters.unwrap_or(0))
                             .sum::<i64>(),
                 );
             }
-            prefix = shape.tools.len() + 1;
+            prefix = shape.tools.len() + 1 + usize::from(shape.memory.is_some());
         }
         if full {
             // Listed in cache-prefix order: tools, then system.
@@ -1719,11 +1923,9 @@ impl ExposureCollector {
                     at,
                 ));
             }
-            components.push(self.component(
-                New::active(Category::Other, "wire-system", "wire-system"),
-                Content::Json(&params["system"]),
-                at,
-            ));
+            let (system, memory) = split_system(params.get("system"));
+            components.push(self.place_shaped(&system, "wire-system", at));
+            components.extend(self.place_memory_section(memory.as_ref(), at));
             if complete_text(params)? {
                 let mut sink = Chars(0);
                 sink.put("{\"system\":");
@@ -1735,7 +1937,7 @@ impl ExposureCollector {
                 sink.put("}");
                 complete = Some(sink.0 as i64);
             }
-            prefix = tools.len() + 1;
+            prefix = tools.len() + 1 + usize::from(memory.is_some());
         }
         let wired = full || shape.is_some();
         let candidates = if wired {
@@ -2027,6 +2229,28 @@ impl ExposureCollector {
         let call = text(b.get("id"))?;
         self.call(call, name, line.time);
         let args = object(field(b, "input"));
+        let access = match name {
+            "Read" => Some(MemoryAccess::Read),
+            "Write" | "Edit" | "MultiEdit" => Some(MemoryAccess::Write),
+            _ => None,
+        };
+        if let Some(access) = access
+            && let Some(Value::String(path)) = args.get("file_path")
+            && self.memory_path(path)
+        {
+            let characters = match access {
+                MemoryAccess::Read => {
+                    // What it read back is memory's cost, not the Read tool's.
+                    let owner = intern(&mut self.names, MEMORY_OUTPUT);
+                    self.call_tools.insert(call.to_string(), owner);
+                    None
+                }
+                MemoryAccess::Write => b
+                    .get("input")
+                    .and_then(|v| Content::Json(v).measure().characters),
+            };
+            self.memory_use(call, access, characters, line);
+        }
         let (scope, kind, target_name) = if name == "Skill" {
             ("skill", InvocationKind::SkillCall, text(args.get("skill"))?)
         } else if name.starts_with("mcp__") {
@@ -2118,6 +2342,14 @@ impl ExposureCollector {
         }
         if completed && is(item, "type", "CommandExecution") {
             let parsed = array(item.get("parsed_cmd"))?;
+            for read in parsed.iter().map(object).filter(|c| is(c, "type", "read")) {
+                if let Some(Value::String(path)) = read.get("path")
+                    && self.memory_path(path)
+                {
+                    let call = format!("{}:{}", text(item.get("id"))?, id(read.get("path"))?);
+                    self.memory_use(&call, MemoryAccess::Read, None, line);
+                }
+            }
             let reads: Vec<&Map<String, Value>> = parsed
                 .iter()
                 .map(object)
@@ -2189,6 +2421,23 @@ impl ExposureCollector {
             let output_id = text(present(p.get("call_id")).or(p.get("id")))?;
             let owner = self.call_tools[call].clone();
             self.call_tools.insert(output_id.to_string(), owner);
+            // Codex's dedicated memory tools, which `memories.dedicated_tools` adds.
+            if let Some(tool) = name.strip_prefix("memories.") {
+                let owner = intern(&mut self.names, MEMORY_OUTPUT);
+                self.call_tools.insert(call.to_string(), owner.clone());
+                self.call_tools.insert(output_id.to_string(), owner);
+                let (access, characters) = if tool == "add_ad_hoc_note" {
+                    let characters = match present(p.get("arguments")).or(p.get("input")) {
+                        Some(Value::String(input)) => Some(input.chars().count() as i64),
+                        Some(v) => Content::Json(v).measure().characters,
+                        None => None,
+                    };
+                    (MemoryAccess::Write, characters)
+                } else {
+                    (MemoryAccess::Read, None)
+                };
+                self.memory_use(call, access, characters, line);
+            }
             let kind = if name.starts_with("mcp__") {
                 Some(InvocationKind::McpCall)
             } else if resource_tool(&name) {
@@ -2422,6 +2671,67 @@ fn codex_tool_name(bare: &str, namespace: Option<&str>) -> String {
 /// The owner of output from a tool whose call was not recorded.
 const UNKNOWN_TOOL: &str = "unknown";
 
+/// The owner of auto memory files read back into the conversation; no tool has a space in its name.
+pub(crate) const MEMORY_OUTPUT: &str = "auto memory";
+
+/// The name of the Claude system prompt's auto memory section.
+pub(crate) const MEMORY_SECTION: &str = "system-prompt";
+
+/// The name of Codex's memory summary.
+const MEMORY_SUMMARY: &str = "memory_summary";
+
+/// The content kind Codex gives its memory summary.
+const MEMORY_INSTRUCTIONS: &str = "memories.instructions";
+
+/// The recorded system prompt less its `# Memory` section, and that section on its own,
+/// both measured as their JSON text. Claude Code adds the section while auto memory is on.
+fn split_system(system: Option<&Value>) -> (Placed, Option<Placed>) {
+    let mut placed = Placed::new(
+        Category::Other,
+        "wire-system",
+        system.map_or(Content::Missing, Content::Json),
+        None,
+    );
+    let memory = system.and_then(memory_section).map(|section| {
+        let mut sink = Measure::default();
+        quote(section, &mut sink);
+        let characters = sink.characters as i64 - 2;
+        placed.size.characters = placed.size.characters.map(|c| c - characters);
+        let size = Size {
+            characters: Some(characters),
+            recorded_tokens: None,
+            fingerprint: Id::Digest(sink.hash.finalize().into()),
+        };
+        Placed::sized(Category::Memory, MEMORY_SECTION, size, None)
+    });
+    (placed, memory)
+}
+
+/// The `# Memory` section of a system prompt, from its heading to the next top-level one.
+fn memory_section(system: &Value) -> Option<&str> {
+    let texts: Vec<&str> = match system {
+        Value::String(text) => vec![text],
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| b.get("text")?.as_str())
+            .collect(),
+        _ => vec![],
+    };
+    texts.into_iter().find_map(|text| {
+        let mut start = None;
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            match start {
+                None if line.trim_end() == "# Memory" => start = Some(offset),
+                Some(start) if line.starts_with("# ") => return Some(&text[start..offset]),
+                _ => {}
+            }
+            offset += line.len();
+        }
+        start.map(|start| &text[start..])
+    })
+}
+
 /// The tool a result's output is filed under: an MCP server's tools share one owner.
 fn output_owner(name: &str) -> String {
     match name.strip_prefix("mcp__") {
@@ -2480,6 +2790,36 @@ fn tool_results(results: impl Iterator<Item = (ToolResult, Vec<String>)>) -> Vec
             });
     }
     result.into_values().collect()
+}
+
+/// Link each memory use to the request whose reply made it: the first one recorded at
+/// or after its line in the same file, else the last one before it.
+fn memory_uses(
+    records: impl Iterator<Item = (MemoryRecord, Vec<String>)>,
+    requests: &[Request],
+) -> Vec<MemoryUse> {
+    let mut lines: HashMap<&str, Vec<(u64, &Text)>> = HashMap::default();
+    for r in requests {
+        for l in &r.locations {
+            lines.entry(&l.file).or_default().push((l.line, &r.id));
+        }
+    }
+    for list in lines.values_mut() {
+        list.sort();
+    }
+    records
+        .map(|(record, profiles)| {
+            let mut use_ = record.use_;
+            use_.profiles = profiles;
+            use_.request = lines.get(&*record.file).and_then(|list| {
+                let at = list.partition_point(|(line, _)| *line < record.line);
+                list.get(at)
+                    .or(at.checked_sub(1).and_then(|i| list.get(i)))
+                    .map(|(_, id)| id.to_string())
+            });
+            use_
+        })
+        .collect()
 }
 
 /// Count each tool's calls per profile set, after merging copies of one call.

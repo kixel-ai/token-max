@@ -5,7 +5,7 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{calibrate, codex_server, cohort};
+use crate::exposure::{MEMORY_OUTPUT, calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
@@ -473,6 +473,7 @@ fn pieces(
                 deny(format!("mcp__{server}")),
             )
         }
+        Category::Memory => vec![(memory_piece(Harness::Claude, interned), characters)],
         Category::Agents => one(
             "other:agents".into(),
             ContextKind::Other,
@@ -570,13 +571,42 @@ fn codex_pieces(
             "Managed developer instructions".into(),
             None,
         ),
+        Category::Memory => return vec![(memory_piece(Harness::Codex, interned), characters)],
         _ => return vec![],
     };
     vec![(interned.intern(key, kind, name, control), characters)]
 }
 
+/// The report name for Claude's auto memory.
+pub const CLAUDE_MEMORY: &str = "Auto memory";
+
+/// The report name for Codex's memories.
+pub const CODEX_MEMORY: &str = "Codex memories";
+
+/// The piece for everything auto memory adds: its loaded context and the files read back.
+fn memory_piece(harness: Harness, interned: &mut Pieces<'_>) -> usize {
+    if harness == Harness::Codex {
+        interned.intern(
+            "codex:memory".into(),
+            ContextKind::Memory,
+            CODEX_MEMORY.into(),
+            disable(&["features", "memories"]),
+        )
+    } else {
+        interned.intern(
+            "memory".into(),
+            ContextKind::Memory,
+            CLAUDE_MEMORY.into(),
+            disable(&["autoMemoryEnabled"]),
+        )
+    }
+}
+
 /// The piece for one tool's output, filed under the tool, or its MCP server.
 fn output_piece(owner: &str, harness: Harness, interned: &mut Pieces<'_>) -> usize {
+    if owner == MEMORY_OUTPUT {
+        return memory_piece(harness, interned);
+    }
     let prefix = if harness == Harness::Codex {
         "codex:"
     } else {
@@ -1076,6 +1106,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 | ContextKind::McpTool
                 | ContextKind::Skill
                 | ContextKind::ToolOutput
+                | ContextKind::Memory
         ) {
             continue;
         }
@@ -1191,6 +1222,24 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             );
         }
     }
+    for m in &scan.memory {
+        let name = if m.harness == Harness::Codex {
+            CODEX_MEMORY
+        } else {
+            CLAUDE_MEMORY
+        };
+        credit(
+            families.get(&(ContextKind::Memory, name)),
+            ObservedUse {
+                profiles: &m.profiles,
+                time: m.time,
+                calls: 1,
+                invocation: None,
+                ambiguous: false,
+                fallback: false,
+            },
+        );
+    }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
         let indices = if i.harness == Harness::Codex {
@@ -1299,9 +1348,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .estimated_usd
                 .zip(c.calls.filter(|&calls| calls > 0))
                 .map(|(usd, calls)| usd / calls as f64);
+            // Auto memory is advised off by policy, never by its cost per use.
             if let (Some(_), true, Some(usd), Some(calls)) =
                 (&c.control, c.current, c.estimated_usd, c.calls)
                 && c.tier_unknown_requests == 0
+                && c.kind != ContextKind::Memory
             {
                 // Codex catalog skill uses are only partly recorded, and an unreadable or
                 // deferred line could hold a call, so their nonuse is unproven.

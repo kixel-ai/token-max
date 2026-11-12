@@ -3473,6 +3473,66 @@ mod tests {
     }
 
     #[test]
+    fn directories_sized_apart_replay_their_own_tuned_windows() {
+        let mut open = request("open", 100.0, 150_000);
+        open.cwd = Some("/open".into());
+        let mut capped = in_session(request("capped", 101.0, 150_000), "elsewhere");
+        capped.cwd = Some("/capped".into());
+        let mut s = data(vec![open, capped], vec![]);
+        let unset = |env: &Env| {
+            compaction_controls(&CompactionSources {
+                harness: Harness::Claude,
+                user: &Map::new(),
+                managed: &Map::new(),
+                env,
+                file: "settings.json",
+                managed_file: "managed.json",
+                scopes: None,
+            })
+            .unwrap()
+        };
+        let mut cap = Env::default();
+        cap.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let profile = &mut s.profiles[0];
+        profile.compaction = unset(&Env::default());
+        let idle = profile.idle.clone().unwrap();
+        profile.idle_directories = Some(IndexMap::from_iter([
+            (
+                "/open".to_string(),
+                IdleControl {
+                    compaction: Some(unset(&Env::default())),
+                    ..idle.clone()
+                },
+            ),
+            (
+                "/capped".to_string(),
+                IdleControl {
+                    compaction: Some(unset(&cap)),
+                    ..idle
+                },
+            ),
+        ]));
+        crate::controls::tune_windows(&mut s);
+        let row = "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow";
+        let windows: Vec<(String, Option<i64>)> = check(&s, 200.0)
+            .current_settings
+            .windows
+            .into_iter()
+            .map(|w| (w.owner, w.value))
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                (row.to_string(), Some(967_000)),
+                (
+                    format!("{row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)"),
+                    Some(200_000)
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn a_completed_or_replaced_turn_clears_abandoned_tool_waits() {
         for tool_id in [None, Some("abandoned")] {
             for kind in [EventKind::TurnStart, EventKind::TurnEnd] {

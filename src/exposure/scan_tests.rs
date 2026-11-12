@@ -2536,8 +2536,9 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
 #[test]
 fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_default() {
     let w = Workspace::new();
-    let home = std::fs::canonicalize(&w.codex).unwrap();
-    let home = home.to_string_lossy();
+    // Resolved as discovery resolves the profile root; a Windows shell names the file
+    // without the `\\?\` prefix `fs::canonicalize` adds.
+    let home = crate::discovery::realpath(&w.codex.to_string_lossy()).unwrap();
     let records = [
         codex_meta(),
         turn(),

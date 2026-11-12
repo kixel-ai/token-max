@@ -137,7 +137,8 @@ impl Workspace {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir_all(&home).unwrap();
+        // create_dir fails on an existing path, so a planted symlink is never followed.
+        std::fs::create_dir(&home).unwrap();
         // Tests compare discovered paths, which resolve symlinks such as macOS's /var.
         let home = std::fs::canonicalize(&home).unwrap();
         let claude = home.join(".claude");

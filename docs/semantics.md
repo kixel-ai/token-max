@@ -873,7 +873,8 @@ state is unknown and the line is a yellow advisory that memories may be on,
 naming why: a project layer that sets memories in a project whose trust is not
 recorded, a named config profile (or legacy `profiles` entry) that sets
 memories, a named profile's `project_root_markers` or `projects` that could
-add or drop a `.codex/config.toml` above the session's directory that sets
+add or drop a `.codex/config.toml` above the session's directory, up to the
+user's home (whose own `.codex` is the user layer), that sets
 them, or a T3 instance whose launch arguments, secret environment values or
 machine policy could override them (as for Claude Code's T3 instances). Its turn-off advice then also names each file that sets memories, since
 the user setting alone would not override them. Fully resolved settings keep a

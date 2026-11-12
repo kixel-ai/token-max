@@ -9,6 +9,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::model::{Api, BillingPart, Cost, Harness, PartKind, Request, TierScenario};
@@ -98,7 +99,7 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
 }
 
 /// Dollars per million tokens; absent rates stay unknown.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct Rates {
     input: Option<f64>,
     output: Option<f64>,
@@ -106,13 +107,13 @@ struct Rates {
     write: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Tier {
     size: f64,
     rates: Rates,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ModelPrice {
     base: Rates,
     tiers: Vec<Tier>,
@@ -127,7 +128,9 @@ struct ModelPrice {
 }
 
 /// Catalog stores only numeric pricing metadata, keyed by exact provider and model.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// SSH destinations receive it whole, so every host is priced from one catalog.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     models: HashMap<String, HashMap<String, ModelPrice>>,
     pub source: String,
@@ -1077,6 +1080,11 @@ pub fn unit_rates(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<Uni
         write1h: (input * 2.0) / 1e6,
         ordinary: input / 1e6,
     })
+}
+
+/// One part's per-token output price; None when unpriced.
+pub fn output_rate(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<f64> {
+    Some(selected_rates(catalog, r, p).ok()?.rates.output? / 1e6)
 }
 
 /// One part's input as consecutive spans of its prompt prefix, each with its

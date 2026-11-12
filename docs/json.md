@@ -45,11 +45,31 @@ dollars remain available, but recommendation savings and winners stay unresolved
 when affected costs depend on missing tiers. Unsupported tier
 scenarios have a null total and explicit unknown reasons, never a zero total.
 
+The `auto-memory` check, one per profile, is `advisory` while auto memory is on
+and `keep` once it is off, whatever it cost; it never makes a change. Its
+`savingsUsd` is auto memory's total cost: `contextUsd` (loaded memory and memory
+files read back, priced like the `memory` context row) plus `writesUsd` (writes
+estimated at the output price), either null when unpriced. `reads` and `writes`
+count its uses, and `off`/`offFile` name the setting that turns it off.
+`offFile` is null for a variable from the shell environment; a settings `env`
+entry names its settings file. Today's setting decides
+`current`; sessions whose requests disagree with it are noted in `uncertainty`.
+When a Codex setting the scan cannot resolve, such as a `--profile` selection,
+could change it, `current` is null, the check is `advisory`, `unresolved`
+says why, and `overrides` lists the files that set memories there, which need
+turning off too. `unmeasuredGeneration` is true for a Codex profile whose
+memories may have been extracted or consolidated in the window (not definitely
+off, used, loaded, or with a memory store under its home); those requests are
+recorded only in telemetry, so the total is a lower bound.
+When some requests recorded no context, `coverage` counts those that did
+(`priced`) out of all (`total`), and `savingsUsd` is a lower bound. The
+`memory` context row has a control but never a verdict.
+
 Keepalive checks keep their complete shape, including every
 cap's ping cost, recorded-work savings, net savings and immediate-close sensitivity.
 Their period coverage, unknown current ping state, unpriced periods and unresolved
 comparisons remain explicit. The sequential replay uses complete historical inputs
-before the output projection, including when the scan came from SSH.
+before the output projection, on SSH destinations too.
 
 These version 1 evidence fields change shape:
 
@@ -88,9 +108,9 @@ requests. The report never changes or writes transcripts or settings.
 
 With `--ssh`, the envelope is `{"schemaVersion": 2, "hosts": [...]}`. Each
 `hosts[]` contains `ssh` (null for this host) and `report` in that same schema.
-The private SSH scan protocol transfers the metadata the analysis needs with
-shared values; the coordinator analyzes and reports it. Destinations need the
-same build, including its scan-schema fingerprint. Costs are independent per host.
+Each destination analyzes its own scan with the coordinator's price catalog and
+sends back only this report. Destinations need the same build, including its
+stream fingerprint. Costs are independent per host.
 
 A compaction check has `unset: true` when no setting names its window, so its
 `current` is Claude Code's tuned window for the model: the latest observed

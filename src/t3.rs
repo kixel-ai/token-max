@@ -53,6 +53,7 @@ const ENVIRONMENT: &[&str] = &[
     "CLAUDE_CODE_PROMPT_CACHE_TTL",
     "CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL",
     "CLAUDE_CODE_DISABLE_FAST_MODE",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
     "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE",
     "BASH_MAX_OUTPUT_LENGTH",
@@ -809,6 +810,7 @@ pub(crate) fn discover(
                 idle_mode,
                 idle_owner,
                 ownership_resolved: resolved,
+                settings_unresolved: unresolved_env || launch_unresolved || policy_unresolved,
                 limitations,
                 // Without its own window, T3 passes no window, so Claude Code reads the
                 // same user, project and local settings as a native session.
@@ -2637,6 +2639,11 @@ mod tests {
         assert!(!flagged.t3.as_ref().unwrap().ownership_resolved);
         assert!(flagged.compaction.default.comparison_unknown.is_some());
         assert!(!instance(&data, "codex").t3.unwrap().ownership_resolved);
+        // Launch arguments that can replace settings leave them unresolved; sharing a
+        // root alone does not.
+        assert!(!chrome.t3.as_ref().unwrap().settings_unresolved);
+        assert!(flagged.t3.as_ref().unwrap().settings_unresolved);
+        assert!(instance(&data, "codex").t3.unwrap().settings_unresolved);
 
         let missing = w.home.join("removed");
         let requests: Vec<Request> = [Some(&project), Some(&missing), None]

@@ -97,12 +97,6 @@ fn branch(value: Option<&Value>) -> Option<&str> {
 }
 
 impl Sessions {
-    /// Whether no record named a session.
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.facts.is_empty()
-    }
-
     pub(crate) fn observe(&mut self, record: Record) {
         let index = match self.facts.get_index(self.last) {
             Some((key, _)) if key == record.session => self.last,

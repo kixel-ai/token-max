@@ -9,6 +9,75 @@ pub type Millis = i64;
 /// A shared immutable string, for identifiers repeated across many records.
 pub type Text = std::sync::Arc<str>;
 
+/// An opaque identifier. Nearly every one is a SHA-256 hex digest, held as its 32 bytes
+/// rather than 64 characters; any other text, such as a modeled event's, is kept as is.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum Id {
+    Digest([u8; 32]),
+    Text(Box<str>),
+}
+
+impl From<&str> for Id {
+    fn from(text: &str) -> Self {
+        let digit = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        };
+        let b = text.as_bytes();
+        if b.len() == 64 {
+            let mut digest = [0; 32];
+            if digest.iter_mut().enumerate().all(|(i, out)| {
+                match (digit(b[2 * i]), digit(b[2 * i + 1])) {
+                    (Some(high), Some(low)) => {
+                        *out = high << 4 | low;
+                        true
+                    }
+                    _ => false,
+                }
+            }) {
+                return Id::Digest(digest);
+            }
+        }
+        Id::Text(text.into())
+    }
+}
+
+impl From<String> for Id {
+    fn from(text: String) -> Self {
+        Id::from(text.as_str())
+    }
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Id::Digest(digest) => digest.iter().try_for_each(|b| write!(f, "{b:02x}")),
+            Id::Text(text) => f.write_str(text),
+        }
+    }
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.to_string())
+    }
+}
+
+impl Serialize for Id {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Id {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Id::from(
+            <std::borrow::Cow<'de, str>>::deserialize(deserializer)?.as_ref(),
+        ))
+    }
+}
+
 /// One shared copy of each distinct string and profile set the records of a scan repeat.
 #[derive(Default)]
 pub struct Interner {
@@ -424,7 +493,7 @@ pub struct Pricing {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralEvent {
-    pub id: String,
+    pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
     pub harness: Harness,
@@ -451,7 +520,7 @@ pub struct StructuralEvent {
     pub duration_ms: Option<i64>,
     #[serde(with = "crate::wire::opt_text")]
     pub tool: Option<Text>,
-    pub tool_id: Option<String>,
+    pub tool_id: Option<Id>,
     pub settings: Settings,
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
@@ -573,6 +642,9 @@ pub struct WindowControl {
     /// No setting names a window, so Claude Code's tuned window for the model applies.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
+    /// The window a setting names when the model's context window caps it; `value` is the cap.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setting: Option<i64>,
 }
 
 /// Claude Code's window for one model when no setting names one.
@@ -599,12 +671,16 @@ pub struct CompactionControls {
     /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at a 200k window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
-    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size a model ID Claude Code does not recognize.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub declared: bool,
+    /// The positive `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which may size a model ID Claude Code does not recognize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<u64>,
     /// Tuned windows by undated model ID, for every model the profile used.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tuned: IndexMap<String, TunedWindow>,
+    /// Context windows by undated model ID, for each used model Claude Code holds below the 1M
+    /// maximum; any window larger than its model's runs at this size.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub contexts: IndexMap<String, i64>,
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
@@ -714,6 +790,9 @@ pub struct AgentControls {
     pub session: Option<Owned>,
     /// Agent definition files: Claude `agents/*.md`, Codex agent role files.
     pub definitions: Vec<AgentDefinition>,
+    /// Codex roles a config layer declares with a description but no role file, by name, to
+    /// the config file declaring them. They run on the default subagent model or the parent's.
+    pub declared: IndexMap<String, String>,
     /// Why these controls may not be the ones a run used, such as a project of unknown trust.
     pub unresolved: Option<String>,
     /// The controls at each recorded subagent working directory whose project settings or
@@ -955,7 +1034,7 @@ pub struct Cost {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionCharge {
-    pub event: String,
+    pub event: Id,
     pub request: Option<Text>,
     pub evidence: Evidence,
     pub cost: Cost,
@@ -1121,7 +1200,7 @@ pub struct TtlCheck {
 /// An observed compaction event and the request that resumed after it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CompactionBasis {
-    pub event: String,
+    pub event: Id,
     pub request: Text,
 }
 
@@ -1176,6 +1255,9 @@ pub struct CompactionCheck {
     /// No setting names the window, so `current` is Claude Code's tuned window for the model.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
+    /// The window a setting names when the model's context window caps it; `current` is the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<i64>,
     pub baseline_cost: Cost,
     pub observed_summary_cost: Cost,
     pub ttls: PerBucket<Option<Ttl>>,
@@ -1301,7 +1383,7 @@ pub enum PeriodOutcome {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeriodCalibration {
-    pub events: Vec<String>,
+    pub events: Vec<Id>,
     pub summary_tokens: i64,
     pub prefix_tokens: i64,
 }
@@ -1320,7 +1402,7 @@ pub struct IdlePeriod {
     pub confirmed: bool,
     pub return_timing: ReturnTiming,
     pub outcome: PeriodOutcome,
-    pub event: Option<String>,
+    pub event: Option<Id>,
     pub version: Option<Text>,
     pub client: Option<Text>,
     pub flag_state: Option<&'static str>,
@@ -1575,7 +1657,7 @@ impl Category {
 pub struct Size {
     pub characters: Option<i64>,
     pub recorded_tokens: Option<i64>,
-    pub fingerprint: String,
+    pub fingerprint: Id,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1598,14 +1680,18 @@ pub enum Scope {
 pub struct Component {
     #[serde(flatten)]
     pub size: Size,
-    pub id: String,
-    pub key: String,
+    /// The revision, sharing the copy that indexes it.
+    #[serde(with = "crate::wire::text")]
+    pub id: Text,
+    pub key: Id,
     /// Readable name: a tool, skill, server or file path, never content.
     pub name: String,
     pub category: Category,
     pub owner: Owner,
     pub group: Option<String>,
-    pub provenance: String,
+    /// One of a few fixed descriptions, shared across components.
+    #[serde(with = "crate::wire::text")]
+    pub provenance: Text,
     pub first_seen: Millis,
     pub current: Current,
     pub scope: Scope,
@@ -1715,7 +1801,7 @@ pub enum TextCoverage {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct References {
-    pub base: Option<String>,
+    pub base: Option<Id>,
     pub keep: Option<i64>,
     #[serde(with = "crate::wire::ids")]
     pub tail: Ids,
@@ -1936,8 +2022,10 @@ pub struct ExposureView {
     pub complete_characters: Option<i64>,
     /// How many leading components are the recorded tools and system prompt, in cache-prefix order.
     pub prefix: usize,
-    pub wire_model: Option<String>,
-    pub reasons: Vec<String>,
+    #[serde(with = "crate::wire::opt_text")]
+    pub wire_model: Option<Text>,
+    /// Views repeat a few fixed reasons, so they share one copy of each list.
+    pub reasons: std::sync::Arc<[String]>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2069,7 +2157,11 @@ pub enum ContextKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Verdict {
+    /// Never used across a window that would have recorded a use: a recommended change.
     Off,
+    /// Worth considering off, an advisory: it cost more than the limit per use, or no
+    /// use was recorded but the window cannot rule one out.
+    Consider,
     Keep,
 }
 
@@ -2121,10 +2213,11 @@ pub struct ContextCost {
     pub last_used: Option<Millis>,
     /// Whether the profile's most recent request still carried it.
     pub current: bool,
-    /// estimatedUsd divided by uses, counting no use as one; null without both.
+    /// estimatedUsd divided by uses; null without a price or a recorded use.
     pub cost_per_use_usd: Option<f64>,
-    /// "off" above the cost-per-use limit; null when unpriced, unswitchable,
-    /// no longer sent, tier-sensitive, or covered by a server-off verdict.
+    /// "off" when never used, "consider" above the cost-per-use limit or when
+    /// nonuse is unproven, else "keep"; null when unpriced, unswitchable, no
+    /// longer sent, tier-sensitive, or covered by a server-off verdict.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,

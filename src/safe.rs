@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::model::{Location, Millis};
+use crate::model::{Id, Location, Millis};
 
 /// An error whose message is safe for terminal and JSON diagnostics.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -64,6 +64,11 @@ pub fn originator(value: &Value) -> Option<String> {
     label(&Value::from(text.replace(' ', "_")))
         .filter(|_| valid)
         .map(|_| text.to_string())
+}
+
+/// [`identity`] held as its digest.
+pub fn digest(value: &str) -> Id {
+    Id::Digest(Sha256::digest(value.as_bytes()).into())
 }
 
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.
@@ -187,6 +192,24 @@ pub fn terminal_text(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ids_hold_digests_compactly_and_print_as_recorded() {
+        let hex = identity("event");
+        assert_eq!(Id::from(hex.as_str()), digest("event"));
+        for text in [
+            hex.as_str(),
+            "modeled:claude:abc:0",
+            &hex.to_uppercase(),
+            &hex[1..],
+        ] {
+            let id = Id::from(text);
+            assert_eq!(id.to_string(), text);
+            assert_eq!(serde_json::to_value(&id).unwrap(), json!(text));
+            assert_eq!(serde_json::from_value::<Id>(json!(text)).unwrap(), id);
+        }
+        assert!(matches!(Id::from(hex.to_uppercase()), Id::Text(_)));
+    }
 
     #[test]
     fn labels_reject_free_text() {

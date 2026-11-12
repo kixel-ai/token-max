@@ -264,7 +264,7 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
     let hash = e
         .components
         .iter()
-        .find(|c| c.provenance == "opaque-schema-identity")
+        .find(|c| &*c.provenance == "opaque-schema-identity")
         .unwrap();
     assert_eq!(hash.size.characters, None);
     assert_eq!(hash.size.recorded_tokens, None);
@@ -810,15 +810,20 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert!((review.cost_usd / review.tokens.unwrap() as f64 / 4e-6 - 1.0).abs() < 0.01);
     assert_eq!(row(&report, "Claude Code system prompt").control, None);
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
-    // Every priced piece here costs well under the default $1 per use; an
-    // unpriced one gets no verdict.
+    // A priced piece never used is off, however little it cost; the used ones
+    // cost well under the default $1 per use. An unpriced one gets no verdict.
     assert!(report.context.iter().all(|c| {
         let priced = c.control.is_some() && c.estimated_usd.is_some();
-        c.verdict == priced.then_some(Verdict::Keep)
+        let expected = if c.calls == Some(0) {
+            Verdict::Off
+        } else {
+            Verdict::Keep
+        };
+        c.verdict == priced.then_some(expected)
     }));
 
-    // A piece is recommended off when its cost per use, counting no use as one,
-    // exceeds the limit. Typed skill requests would not count as uses.
+    // A used piece above the limit per use is only worth considering off. Typed
+    // skill requests would not count as uses.
     let strict = analyze(AnalyzeOptions {
         scan: data.clone(),
         catalog: &prices(),
@@ -829,8 +834,8 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     .unwrap();
     let verdict = |name: &str| row(&strict, name).verdict;
     assert_eq!(verdict("Artifact"), Some(Verdict::Off));
-    assert_eq!(verdict("docs"), Some(Verdict::Off));
-    assert_eq!(verdict("review"), Some(Verdict::Keep));
+    assert_eq!(verdict("docs"), Some(Verdict::Consider));
+    assert_eq!(verdict("review"), Some(Verdict::Off));
     assert_eq!(verdict("Bash"), None);
     let text = text(&strict);
     assert!(labelled(
@@ -841,18 +846,23 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert!(labelled(
         &text,
         "Skill review",
-        then(": on. Costs ", "; the model never used it.")
+        then(
+            ": on -> only when you type /review. Costs ",
+            "; the model never used it."
+        )
+    ));
+    assert!(labelled(
+        &text,
+        "MCP server docs",
+        then(
+            ": on. Costs ",
+            r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#
+        )
     ));
     let snippet = &text[text.find("To turn these off").unwrap()..];
     assert!(snippet.contains(r#""enableArtifact": false"#));
-    let denies_docs = snippet.match_indices(r#""deny": ["#).any(|(i, d)| {
-        let after = snippet[i + d.len()..].trim_start();
-        after
-            .strip_prefix(r#""mcp__docs""#)
-            .is_some_and(|rest| rest.trim_start().starts_with(']'))
-    });
-    assert!(denies_docs);
-    assert!(!snippet.contains("skillOverrides"));
+    assert!(snippet.contains(r#""review": "user-invocable-only""#));
+    assert!(!snippet.contains("mcp__docs"));
 }
 
 #[test]
@@ -1143,7 +1153,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     let member = e
         .components
         .iter()
-        .find(|c| c.id == aggregate.members[0])
+        .find(|c| *c.id == *aggregate.members[0])
         .unwrap();
     assert_eq!(
         member.size.characters,
@@ -1168,7 +1178,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     assert!(
         e.components
             .iter()
-            .any(|c| c.provenance == "provided-additional-tools" && c.size.characters.is_some())
+            .any(|c| &*c.provenance == "provided-additional-tools" && c.size.characters.is_some())
     );
     assert!(!leaks(e, &["SYNTHETIC_PRIVATE"]));
 }
@@ -1308,7 +1318,7 @@ fn deferred_definitions_keep_active_revisions_and_repeated_results_stay_in_histo
     let active = e
         .components
         .iter()
-        .find(|c| c.provenance == "prompt-snapshot-tool")
+        .find(|c| &*c.provenance == "prompt-snapshot-tool")
         .unwrap();
     assert!(has(&e.requests[1].view.candidates, &active.id));
     assert!(!has(&e.requests[1].view.removed, &active.id));
@@ -1482,7 +1492,7 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
     assert!(
         e.components
             .iter()
-            .any(|c| c.provenance == "unclassified-rendered-attachment")
+            .any(|c| &*c.provenance == "unclassified-rendered-attachment")
     );
     let error = transcript(
         Harness::Claude,
@@ -1515,7 +1525,7 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
             .exposure
             .components
             .iter()
-            .any(|c| c.provenance == "world-state-metadata-only")
+            .any(|c| &*c.provenance == "world-state-metadata-only")
     );
 }
 
@@ -1862,7 +1872,7 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
     let threshold = report(&priced, cost * 0.75);
     assert_eq!(
         skill_row(&threshold, "/skills/b/SKILL.md").verdict,
-        Some(Verdict::Off)
+        Some(Verdict::Consider)
     );
     assert_eq!(
         skill_row(&threshold, "/skills/b/SKILL.md").cost_per_use_usd,
@@ -1951,7 +1961,10 @@ fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_d
     }
     let r = report(&data, 0.0);
     assert_eq!(skill_row(&r, "/new/a/SKILL.md").calls, Some(1));
-    assert_eq!(skill_row(&r, "/new/a/SKILL.md").verdict, Some(Verdict::Off));
+    assert_eq!(
+        skill_row(&r, "/new/a/SKILL.md").verdict,
+        Some(Verdict::Consider)
+    );
     for path in ["/old/a/SKILL.md", "/old/b/SKILL.md"] {
         let c = skill_row(&r, path);
         assert_eq!((c.current, c.calls, c.verdict), (false, Some(0), None));

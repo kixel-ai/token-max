@@ -31,7 +31,7 @@ Usage: token-max [options]
   --t3-dir DIR            Select a T3 state directory (repeatable)
   --ssh HOST              Audit an SSH destination with the token-max installed there (repeatable)
   --include-local         Also audit this host when --ssh is given
-  --max-cost-per-use USD  Recommend turning off a tool, skill or MCP server that cost more than this per use (default: 1)
+  --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
   --json                  Aggregate JSON report, schema version 2

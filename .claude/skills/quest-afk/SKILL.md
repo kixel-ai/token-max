@@ -1,7 +1,7 @@
 ---
 name: quest-afk
-description: Keep quest work moving while the user is away, leaving every decision for their return.
+description: Keep this session's work going while the user is away, taking your recommendations and deferring merge picks until they return.
+allowed-tools: Bash(quest skill afk) PowerShell(quest skill afk)
 ---
 
-Run `quest skill afk` and follow its output.
-If `quest` is not installed, follow https://github.com/moq-dev/quest/blob/main/SETUP.md first.
+!`quest skill afk; echo "If quest skill afk printed an error instead of instructions, install quest as https://github.com/moq-dev/quest/blob/main/SETUP.md describes, then run quest skill afk and follow its output."`

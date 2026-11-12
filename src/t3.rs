@@ -13,7 +13,7 @@ use serde_json::{Map, Value, value::RawValue};
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
 use crate::model::*;
-use crate::safe::{ScanError, identity, iso, timestamp};
+use crate::safe::{ScanError, digest, identity, iso, timestamp};
 
 /// The upstream implementation whose settings and projections this adapter supports.
 pub const SOURCE: &str = "https://github.com/pingdotgg/t3code/tree/c4ce7b0fd74f6beb37ed6034f5c8416e5aa7e165 (2026-11-08)";
@@ -768,6 +768,7 @@ pub(crate) fn discover(
                     minimum_claude_patch: None,
                     comparison_unknown: None,
                     unset: false,
+                    setting: None,
                 };
             }
             let resolved = enabled && !unresolved_env && !launch_unresolved && !policy_unresolved;
@@ -859,7 +860,7 @@ pub(crate) struct NativeIds {
     /// A subagent session's key to its parent's, whose T3 owner it shares.
     parents: HashMap<String, String>,
     items: HashMap<String, Vec<String>>,
-    events: HashMap<String, String>,
+    events: HashMap<Id, String>,
     last_session: (String, String),
     last_turn: String,
     last_message: (String, String),
@@ -931,7 +932,7 @@ impl NativeIds {
             && let Some(uuid) = raw.get("uuid").and_then(Value::as_str)
         {
             self.events
-                .insert(identity(&format!("claude:compaction:{uuid}")), uuid.into());
+                .insert(digest(&format!("claude:compaction:{uuid}")), uuid.into());
         }
         if raw.get("type").and_then(Value::as_str) != Some("assistant") {
             return;
@@ -1586,11 +1587,17 @@ pub(crate) fn enrich(
         .iter()
         .filter_map(|r| native_request(r, ids))
         .collect();
-    for e in events.iter().filter(|e| ids.events.contains_key(&e.id)) {
+    // Join keys are text, and only the few events T3 can link need theirs.
+    let linkable: Vec<(&StructuralEvent, String)> = events
+        .iter()
+        .filter(|e| ids.events.contains_key(&e.id))
+        .map(|e| (e, e.id.to_string()))
+        .collect();
+    for (e, key) in &linkable {
         let root = ids.root(e.session.as_ref());
         if let Some(session) = ids.ids.get(root) {
             projections.push(NativeRequest {
-                id: &e.id,
+                id: key,
                 root,
                 native_session: session,
                 native_turns: vec![&ids.events[&e.id]],
@@ -1971,9 +1978,11 @@ pub(crate) fn enrich(
             .extend(r.profiles.iter().map(String::as_str));
     }
     for e in events {
-        if let Some(rows) = joins.get(&e.id)
+        let key = ids.events.contains_key(&e.id).then(|| e.id.to_string());
+        if let Some(key) = &key
+            && let Some(rows) = joins.get(key)
             && rows.len() == 1
-            && !invalid_joins.contains(&e.id)
+            && !invalid_joins.contains(key)
             && !rows[0].0.is_empty()
         {
             let (owner, joined) = &rows[0];

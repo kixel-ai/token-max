@@ -195,6 +195,8 @@ fn present(value: Option<&Value>) -> Option<bool> {
 struct Role {
     /// Its role file's model and effort; None for a declaration without a file.
     definition: Option<AgentDefinition>,
+    /// The config file that declares it, or its role file when discovered under `agents/`.
+    owner: String,
     /// Whether it has the description Codex requires of every role.
     described: bool,
 }
@@ -280,6 +282,7 @@ fn codex_layer(
                 name.clone(),
                 Role {
                     definition: None,
+                    owner: file.to_string(),
                     described,
                 },
             ),
@@ -297,6 +300,7 @@ fn codex_layer(
                     name,
                     Role {
                         definition: Some(definition),
+                        owner: file.to_string(),
                         described: described || own,
                     },
                 )
@@ -312,6 +316,7 @@ fn codex_layer(
         if let Some((name, described, definition)) = codex_role_file(&path, None) {
             layer.entry(name).or_insert(Role {
                 definition: Some(definition),
+                owner: path,
                 described,
             });
         }
@@ -320,7 +325,7 @@ fn codex_layer(
         if let Some(earlier) = roles.get(&name) {
             role.described |= earlier.described;
             if role.definition.is_none() {
-                role.definition = earlier.definition.clone();
+                role.definition.clone_from(&earlier.definition);
             }
         }
         // Codex ignores a role without a description, keeping any earlier one.
@@ -331,6 +336,11 @@ fn codex_layer(
     controls.definitions = roles
         .values()
         .filter_map(|r| r.definition.clone())
+        .collect();
+    controls.declared = roles
+        .iter()
+        .filter(|(_, r)| r.definition.is_none())
+        .map(|(name, r)| (name.clone(), r.owner.clone()))
         .collect();
     Ok(())
 }
@@ -775,8 +785,12 @@ fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSo
     {
         return unknown(format!("{} changed after this run started", file.file));
     }
-    // A custom role with no current file may have set a model that is gone now.
-    if !native && role.is_none() && !CODEX_ROLES.contains(&kind) {
+    // A custom role no layer defines any more may have set a model that is gone now.
+    if !native
+        && role.is_none()
+        && !CODEX_ROLES.contains(&kind)
+        && !controls.declared.contains_key(kind)
+    {
         return unknown(match kind {
             UNRECORDED => "no record names its agent role".into(),
             _ => format!("no current role file defines {kind}"),
@@ -831,11 +845,15 @@ fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSo
             format!("{detail}, but the parent's model is not recorded"),
         )
     } else {
+        // Only a spawned role has a spawn_agent call that could have named another model.
+        let call = if native {
+            ""
+        } else {
+            "; the spawn_agent call may have asked for it"
+        };
         (
             ModelSource::Unknown,
-            format!(
-                "ran on {recorded}, which current settings do not give ({detail}); the spawn_agent call may have asked for it"
-            ),
+            format!("ran on {recorded}, which current settings do not give ({detail}){call}"),
         )
     }
 }
@@ -922,10 +940,16 @@ fn settings_text(
                     ),
                 ),
                 None => (
-                    format!(
-                        "model in a role file named {kind} under {}, else [agents] default_subagent_model in {model_file}",
-                        join(&[&profile.root, "agents"])
-                    ),
+                    match controls.declared.get(kind) {
+                        // A declaration hides a discovered file of its name in the same layer.
+                        Some(file) => format!(
+                            "model in a role file named by config_file under [agents.{kind}] in {file}, else [agents] default_subagent_model in {model_file}"
+                        ),
+                        None => format!(
+                            "model in a role file named {kind} under {}, else [agents] default_subagent_model in {model_file}",
+                            join(&[&profile.root, "agents"])
+                        ),
+                    },
                     format!(
                         "model_reasoning_effort in that role file, else [agents] default_subagent_reasoning_effort in {effort_file}"
                     ),
@@ -1358,6 +1382,15 @@ mod tests {
             codex_source(&parent, &controls, "checker").0,
             ModelSource::Unknown
         );
+        // One a config layer still declares without a role file runs on the fallbacks.
+        controls
+            .declared
+            .insert("checker".into(), "config.toml".into());
+        assert_eq!(
+            codex_source(&parent, &controls, "checker").0,
+            ModelSource::Inherited
+        );
+        controls.declared.clear();
         // A review records no parent, so the configured session model stands in.
         let review_mode = Subagent {
             native: true,
@@ -1649,7 +1682,7 @@ mod tests {
         put(
             w.codex.join("config.toml"),
             &format!(
-                "[agents.legacy]\ndescription = \"x\"\nconfig_file = \"roles/legacy.toml\"\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                "[agents.legacy]\ndescription = \"x\"\nconfig_file = \"roles/legacy.toml\"\n[agents.checker]\ndescription = \"x\"\n[agents.ghost]\nnickname_candidates = []\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
                 path(&trusted)
             ),
         );
@@ -1671,6 +1704,11 @@ mod tests {
         assert_eq!(model("dup"), Some("gpt-user"));
         assert_eq!(model("reviewer"), Some("gpt-legacy"));
         assert_eq!(model("legacy"), None);
+        // A declaration without a role file is a role; one without a description is not.
+        let declared: Vec<&str> = agents.declared.keys().map(String::as_str).collect();
+        assert_eq!(declared, ["checker"]);
+        let (setting, _) = settings_text(&profile, agents, "checker", false, false);
+        assert!(setting.contains("[agents.checker]"), "{setting}");
         assert_eq!(agents.review, None);
         let inside = scoped(agents, Some(&path(&trusted)));
         assert_eq!(inside.review.as_ref().unwrap().value, "gpt-6-luna");

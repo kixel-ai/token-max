@@ -3,7 +3,8 @@
 ## Goal
 
 Peak memory grows with the largest session plus a small fixed record per
-request, not with the whole history. Reports and recommendations stay
+request, not with the whole history, and a multi-host run holds one host's
+scan at a time. Reports and recommendations stay
 identical, and the runtime is no worse than after
 [kixelated/token-max#49](https://github.com/kixelated/token-max/pull/49).
 
@@ -43,3 +44,14 @@ Rough floor from reading the structs: 100-150 bytes per request and 60-100
 per event, about 0.3-0.4 GB for 1M requests, against about 5 KB per request
 today. The largest transient is now T3 enrichment's SQLite joins, about 0.9 GB
 on the maintainer's host.
+
+Multi-host runs moved here from the cheap wins, decided 2026-11-11
+(maintainer, on [kixelated/token-max#56](https://github.com/kixelated/token-max/pull/56)):
+✅ keep the coordinator receiving every scan before analysis until this fold
+shrinks what each host sends (rejected: a `ready` notice with each scan left
+on its destination until its turn; gating each transfer on a request with
+an idle-connection watch; spilling received scans to temporary files). A
+scan left on its destination can fail unseen after `ready`, and a dropped
+connection then fails a run that holding every scan would finish. Buffering
+received bytes instead costs more than the loaded scan: 4.74 GB over SSH
+against 3.45 GB in memory on the maintainer's host.

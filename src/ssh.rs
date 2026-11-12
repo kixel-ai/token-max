@@ -7,7 +7,7 @@
 
 use std::io::{self, BufReader, BufWriter, Write};
 use std::panic::{self, AssertUnwindSafe};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::{Mutex, PoisonError};
 
 use crate::discovery::DiscoveryOptions;
@@ -119,18 +119,6 @@ impl Session {
         status
     }
 
-    /// The failure for a stream that broke off or is not a valid audit stream.
-    fn invalid(&mut self, error: &serde_json::Error) -> ScanError {
-        let (line, column) = (error.line(), error.column());
-        self.fail(true, |status| match status {
-            Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
-            _ => format!(
-                "invalid SSH audit stream at line {line}, column {column} ({})",
-                exit(status)
-            ),
-        })
-    }
-
     fn fail(&mut self, kill: bool, message: impl FnOnce(Option<i32>) -> String) -> ScanError {
         let status = self.stop(kill).and_then(|s| s.code());
         ScanError::new(format!("{}: {}", self.destination, message(status)))
@@ -143,18 +131,8 @@ impl Drop for Session {
     }
 }
 
-/// A destination that has started scanning; its scan is read only on [`Connection::receive`],
-/// and dropping it stops the audit.
-pub struct Connection {
-    session: Session,
-    stream: Stream<BufReader<ChildStdout>>,
-    since: Option<Millis>,
-    home: Option<String>,
-}
-
-/// Start scanning one destination with its installed `token-max`, once it shows it matches this
-/// build.
-pub fn connect(destination: &str, since: Option<Millis>) -> Result<Connection, ScanError> {
+/// Scan one destination with its installed `token-max`, failing on any error there.
+pub fn audit(destination: &str, since: Option<Millis>) -> Result<Remote, ScanError> {
     let mut command = Command::new("ssh");
     command
         .args(["-T", "-x", "-a"])
@@ -230,54 +208,43 @@ pub fn connect(destination: &str, since: Option<Millis>) -> Result<Connection, S
             )
         }));
     }
-    Ok(Connection {
-        session,
-        stream,
-        since,
-        home: header.home,
-    })
-}
-
-impl Connection {
-    /// Wait until the destination finishes scanning, failing on any error there; the scan stays
-    /// unread.
-    pub fn ready(&mut self) -> Result<(), ScanError> {
-        match self.stream.outcome() {
-            Ok(Outcome::Ready) => Ok(()),
-            Ok(Outcome::Error { message, location }) => {
-                self.session.stop(true);
-                Err(ScanError {
-                    message: format!("{}: {}", self.session.destination, terminal_text(&message)),
-                    location,
-                })
+    let outcome = stream.outcome();
+    match outcome {
+        Ok(Outcome::Scan(scan)) => {
+            let status = session.stop(false).and_then(|s| s.code());
+            if status != Some(0) {
+                return Err(ScanError::new(format!(
+                    "{destination}: token-max failed after sending its scan ({})",
+                    exit(status)
+                )));
             }
-            Err(error) => Err(self.session.invalid(&error)),
+            if scan.since != since {
+                return Err(ScanError::new(format!(
+                    "{destination}: token-max scanned a different window than requested"
+                )));
+            }
+            Ok(Remote {
+                scan: *scan,
+                home: header.home,
+            })
         }
-    }
-
-    /// Read the scan of a destination that is [`Connection::ready`].
-    pub fn receive(self) -> Result<Remote, ScanError> {
-        let Connection {
-            mut session,
-            mut stream,
-            since,
-            home,
-        } = self;
-        let destination = session.destination.clone();
-        let scan = stream.scan().map_err(|error| session.invalid(&error))?;
-        let status = session.stop(false).and_then(|s| s.code());
-        if status != Some(0) {
-            return Err(ScanError::new(format!(
-                "{destination}: token-max failed after sending its scan ({})",
-                exit(status)
-            )));
+        Ok(Outcome::Error { message, location }) => {
+            session.stop(true);
+            Err(ScanError {
+                message: format!("{destination}: {}", terminal_text(&message)),
+                location,
+            })
         }
-        if scan.since != since {
-            return Err(ScanError::new(format!(
-                "{destination}: token-max scanned a different window than requested"
-            )));
+        Err(error) => {
+            let (line, column) = (error.line(), error.column());
+            Err(session.fail(true, |status| match status {
+                Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
+                _ => format!(
+                    "invalid SSH audit stream at line {line}, column {column} ({})",
+                    exit(status)
+                ),
+            }))
         }
-        Ok(Remote { scan, home })
     }
 }
 
@@ -310,20 +277,18 @@ pub fn serve(since: Option<Millis>) -> u8 {
         scan(&ScanOptions { discovery, since })
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-    let written = match result {
-        Ok(scan) => wire::write(&mut stdout, &Outcome::Ready)
-            .and_then(|()| wire::write(&mut stdout, &scan))
-            .map(|()| 0),
-        Err(error) => wire::write(
-            &mut stdout,
-            &Outcome::Error {
+    let (outcome, code) = match result {
+        Ok(scan) => (Outcome::Scan(Box::new(scan)), 0),
+        Err(error) => (
+            Outcome::Error {
                 message: error.message,
                 location: error.location,
             },
-        )
-        .map(|()| 2),
+            2,
+        ),
     };
-    written
-        .and_then(|code| stdout.flush().map(|()| code))
-        .unwrap_or(2)
+    match wire::write(&mut stdout, &outcome).and_then(|()| stdout.flush()) {
+        Ok(()) => code,
+        Err(_) => 2,
+    }
 }

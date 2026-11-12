@@ -1,6 +1,6 @@
 //! The private SSH audit stream: a remote `token-max --ssh-scan` sends its scan as JSON.
 //!
-//! A stream is a [`Header`], then one [`Outcome`], then the scan if it is ready, each a JSON value. Strings, identifier
+//! A stream is a [`Header`], then one [`Outcome`], each a JSON value. Strings, identifier
 //! lists, exposure views, result totals and message digests shared in memory are sent once and
 //! then named by index, so the stream stays about as small as the scan it carries. The JSON
 //! report serializes the same types without sharing.
@@ -39,14 +39,11 @@ pub struct Header {
     pub home: Option<String>,
 }
 
-/// How the remote scan ended: ready to send it next, or a diagnostic as safe as a local one.
-///
-/// The scan follows only once the coordinator reads it, so a coordinator can learn that every
-/// destination finished, or that one failed, while holding none of their scans.
+/// How the remote scan ended: its metadata, or a diagnostic as safe as a local one.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
-    Ready,
+    Scan(Box<Scan>),
     Error {
         message: String,
         location: Option<Location>,
@@ -80,19 +77,10 @@ impl<R: Read> Stream<R> {
         Header::deserialize(&mut self.json)
     }
 
-    /// The outcome; a diagnostic must end the stream.
+    /// The outcome, which must end the stream.
     pub fn outcome(&mut self) -> Result<Outcome, serde_json::Error> {
-        let outcome = decode(&mut self.json)?;
-        if let Outcome::Error { .. } = outcome {
-            self.json.end()?;
-        }
-        Ok(outcome)
-    }
-
-    /// The scan a ready outcome announced, which must end the stream.
-    pub fn scan(&mut self) -> Result<Scan, serde_json::Error> {
-        let scan = decode(&mut self.json)?;
-        self.json.end().map(|()| scan)
+        let outcome = decode(&mut self.json);
+        outcome.and_then(|outcome| self.json.end().map(|()| outcome))
     }
 }
 
@@ -567,8 +555,7 @@ mod tests {
             home: Some("/home/user".into()),
         };
         write(&mut bytes, &header).unwrap();
-        write(&mut bytes, &Outcome::Ready).unwrap();
-        write(&mut bytes, &scan).unwrap();
+        write(&mut bytes, &Outcome::Scan(Box::new(scan))).unwrap();
         bytes
     }
 
@@ -576,7 +563,7 @@ mod tests {
         let mut stream = Stream::new(bytes);
         assert_eq!(stream.header()?.token_max_scan, build());
         match stream.outcome()? {
-            Outcome::Ready => stream.scan(),
+            Outcome::Scan(scan) => Ok(*scan),
             Outcome::Error { .. } => panic!("expected a scan"),
         }
     }

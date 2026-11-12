@@ -520,55 +520,43 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             eprintln!("token-max: {message}...");
         }
     };
-    // Every host scans at once and the first failure stops the rest. A destination announces
-    // that its scan is ready and sends it only when its turn to be analyzed comes, so every host
-    // reports ready or failed before analysis starts, yet only one remote scan is held here at a
-    // time. A lone local scan runs on this thread, so the analysis reuses the memory the scan
-    // frees rather than leaving it to another thread's allocator arena.
-    enum Ready {
-        Local(Box<Remote>),
-        Remote(Box<ssh::Connection>),
-    }
-    let failed = || ScanError::new("analysis failed; no report produced");
-    let (sender, ready) = mpsc::channel();
+    // Every host scans at once; the first failure stops the rest.
+    let (sender, results) = mpsc::channel();
     let mut hosts: Vec<Option<String>> = vec![];
+    // A lone local scan runs on this thread, so the analysis reuses the memory the scan
+    // frees rather than leaving it to another thread's allocator arena.
     let mut inline = None;
     if local {
         let mut discovery = DiscoveryOptions::host()?;
         discovery.claude_dirs = values.claude_dirs;
         discovery.codex_dirs = values.codex_dirs;
         discovery.t3_dirs = values.t3_dirs;
+        let index = hosts.len();
         hosts.push(None);
         let job = move || {
             panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
-                .unwrap_or_else(|_| Err(failed()))
-                .map(|scan| {
-                    Ready::Local(Box::new(Remote {
-                        scan,
-                        home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-                    }))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(|scan| Remote {
+                    scan,
+                    home: std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
                 })
         };
         if remote {
             let sender = sender.clone();
             thread::spawn(move || {
-                let _ = sender.send((0, job()));
+                let _ = sender.send((index, job()));
             });
         } else {
-            inline = Some(job);
+            inline = Some((index, job));
         }
     }
     for destination in values.ssh {
+        let sender = sender.clone();
         let index = hosts.len();
         hosts.push(Some(destination.clone()));
-        let sender = sender.clone();
         thread::spawn(move || {
-            let result = panic::catch_unwind(|| {
-                let mut connection = ssh::connect(&destination, since)?;
-                connection.ready()?;
-                Ok(Ready::Remote(Box::new(connection)))
-            })
-            .unwrap_or_else(|_| Err(failed()));
+            let result = panic::catch_unwind(|| ssh::audit(&destination, since))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
             let _ = sender.send((index, result));
         });
     }
@@ -578,13 +566,13 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         (true, true) => "Scanning local histories and SSH hosts",
         (false, _) => "Scanning SSH hosts",
     });
-    let analyzed = (|| {
-        let mut slots: Vec<Option<Ready>> = hosts.iter().map(|_| None).collect();
-        if let Some(job) = inline {
-            slots[0] = Some(job()?);
+    let mut scans: Vec<Option<Remote>> = hosts.iter().map(|_| None).collect();
+    let scanned = (|| {
+        if let Some((index, job)) = inline {
+            scans[index] = Some(job()?);
         }
-        for (host, result) in ready {
-            slots[host] = Some(result?);
+        for (index, result) in results {
+            scans[index] = Some(result?);
         }
         phase("Loading public prices");
         let cache = match values.price_cache {
@@ -599,81 +587,74 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
                 base.join("token-max").join("models.json")
             }
         };
-        let catalog = load_prices(&PriceOptions {
+        load_prices(&PriceOptions {
             file: values
                 .prices_file
                 .filter(|file| !file.is_empty())
                 .map(PathBuf::from),
             cache,
             offline: values.offline,
-        })?;
-        phase("Checking settings");
-        let unicode_locale = env_nonempty("LC_ALL")
-            .or_else(|| env_nonempty("LC_CTYPE"))
-            .or_else(|| env_nonempty("LANG"))
-            .is_some_and(|locale| {
-                let locale = locale.to_ascii_lowercase();
-                locale.contains("utf8") || locale.contains("utf-8")
-            });
-        let options = ReportOptions {
-            width: width(),
-            color: stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb,
-            unicode: stdout && !values.plain && !term_dumb && unicode_locale,
-            details: values.details,
-            host: None,
-        };
-        let mut code = 0;
-        let mut text = String::new();
-        let mut reports = vec![];
-        for (ssh, slot) in hosts.iter().zip(slots) {
-            let Remote { scan, home } = match slot.expect("every host reported ready") {
-                Ready::Local(scan) => *scan,
-                Ready::Remote(connection) => {
-                    panic::catch_unwind(AssertUnwindSafe(|| connection.receive()))
-                        .unwrap_or_else(|_| Err(failed()))?
-                }
-            };
-            // Each host's observation ends once its scan is complete.
-            let report = analyze(AnalyzeOptions {
-                scan,
-                catalog: &catalog,
-                since,
-                now: now(),
-                max_cost_per_use_usd,
-            })?;
-            let change = report
-                .checks
-                .iter()
-                .any(|c| c.action() == crate::model::Action::Change)
-                || crate::context::setting_rows(&report.context)
-                    .any(|c| c.verdict == Some(Verdict::Off));
-            code = code.max(u8::from(change));
-            if values.json {
-                reports.push(HostReport {
-                    ssh: ssh.clone(),
-                    report: crate::compact::report(report),
-                });
-                continue;
-            }
-            let host = Host {
-                name: ssh.as_deref().unwrap_or("this host"),
-                home: home.as_deref(),
-            };
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&format_report(
-                &report,
-                ReportOptions {
-                    host: remote.then_some(host),
-                    ..options
-                },
-            ));
-        }
-        Ok((code, text, reports))
+        })
     })();
-    let (code, mut text, mut reports) = analyzed.inspect_err(|_| ssh::cancel())?;
+    let catalog = scanned.inspect_err(|_| ssh::cancel())?;
+    phase("Checking settings");
+    let now = now();
+    let unicode_locale = env_nonempty("LC_ALL")
+        .or_else(|| env_nonempty("LC_CTYPE"))
+        .or_else(|| env_nonempty("LANG"))
+        .is_some_and(|locale| {
+            let locale = locale.to_ascii_lowercase();
+            locale.contains("utf8") || locale.contains("utf-8")
+        });
+    let options = ReportOptions {
+        width: width(),
+        color: stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb,
+        unicode: stdout && !values.plain && !term_dumb && unicode_locale,
+        details: values.details,
+        host: None,
+    };
     let sections = hosts.len();
+    let mut code = 0;
+    let mut text = String::new();
+    let mut reports = vec![];
+    for (ssh, scan) in hosts.into_iter().zip(scans) {
+        let Remote { scan, home } = scan.expect("every host sent a result");
+        let report = analyze(AnalyzeOptions {
+            scan,
+            catalog: &catalog,
+            since,
+            now,
+            max_cost_per_use_usd,
+        })?;
+        let change = report
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+            || crate::context::setting_rows(&report.context)
+                .any(|c| c.verdict == Some(Verdict::Off));
+        code = code.max(u8::from(change));
+        if values.json {
+            reports.push(HostReport {
+                ssh,
+                report: crate::compact::report(report),
+            });
+            continue;
+        }
+        let host = Host {
+            name: ssh.as_deref().unwrap_or("this host"),
+            home: home.as_deref(),
+        };
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format_report(
+            &report,
+            ReportOptions {
+                host: remote.then_some(host),
+                ..options
+            },
+        ));
+    }
     if sections > 1 && !values.json {
         text.push_str(
             "\nEach host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",

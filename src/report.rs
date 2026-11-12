@@ -314,6 +314,11 @@ fn memory_off(c: &MemoryCheck, out: &Out<'_>) -> String {
 /// Why auto memory is not recommended, whatever it cost.
 const MEMORY_ADVICE: &str = "Not recommended: notes the agent writes for itself skip review, which encourages slop. Keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md instead";
 
+/// Whether auto memory cost nothing and was never used in the window.
+fn memory_free(c: &MemoryCheck) -> bool {
+    c.base.savings_usd == Some(0.0) && c.reads + c.writes == 0
+}
+
 /// Auto memory's reads and writes, and what writes cost when they could not be priced.
 fn memory_uses(c: &MemoryCheck) -> String {
     let uses = c.reads + c.writes;
@@ -1582,8 +1587,11 @@ fn card(result: &CheckResult, action: Action, style: u8, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
-        CheckResult::Memory(_) if r.action == Action::Keep => {
+        CheckResult::Memory(m) if r.action == Action::Keep && memory_free(m) => {
             return "Off; it costs nothing.".into();
+        }
+        CheckResult::Memory(_) if r.action == Action::Keep => {
+            return "Off now; its cost and uses earlier in the window are shown for reference.".into();
         }
         CheckResult::Memory(_) => return format!("{MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use."),
         CheckResult::Background(b) => {
@@ -2540,7 +2548,8 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 None => "Cost unknown".into(),
             };
             return match action(c) {
-                Action::Keep => format!("{head}. Costs nothing."),
+                Action::Keep if memory_free(m) => format!("{head}. Costs nothing."),
+                Action::Keep => format!("{head}. {cost}; {}.", memory_uses(m)),
                 _ => format!(
                     "{head} {arrow} off. {MEMORY_ADVICE}. {cost}; {}. {}.",
                     memory_uses(m),

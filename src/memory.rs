@@ -79,6 +79,7 @@ fn check(
     // What each main-agent request whose context was recorded carried, latest last.
     let mut seen: Vec<(Millis, bool)> = vec![];
     let mut unmeasured = 0;
+    let mut recorded_requests = crate::collections::HashSet::default();
     for e in &scan.exposure.requests {
         let Some(r) = requests.get(&*e.request) else {
             continue;
@@ -94,6 +95,7 @@ fn check(
         if !recorded {
             continue;
         }
+        recorded_requests.insert(&*e.request);
         let memory: Vec<&Component> = ids
             .iter()
             .map(|id| components[&**id])
@@ -121,7 +123,22 @@ fn check(
         .iter()
         .filter(|c| c.kind == ContextKind::Memory && c.profiles.contains(&profile.id))
         .collect();
-    let context_usd = rows.iter().map(|c| c.estimated_usd).sum::<Option<f64>>();
+    // Requests whose context went unrecorded may have carried memory too. Codex
+    // carries none while its memories are off, and they are off by default.
+    let unrecorded = mine
+        .iter()
+        .filter(|r| !recorded_requests.contains(&*r.id))
+        .count();
+    let unrecorded = match profile.harness {
+        Harness::Claude => unrecorded,
+        Harness::Codex if on => unrecorded,
+        Harness::Codex => 0,
+    };
+    let context_usd = rows
+        .iter()
+        .map(|c| c.estimated_usd)
+        .sum::<Option<f64>>()
+        .filter(|_| !rows.is_empty() || unrecorded == 0);
     let uses: Vec<_> = scan
         .exposure
         .memory
@@ -161,7 +178,15 @@ fn check(
                 .to_string(),
         );
     }
-    if context_usd.is_none() {
+    if rows.is_empty() && unrecorded > 0 {
+        uncertainty.push(format!(
+            "none of {unrecorded} requests recorded their context, so loaded memory is unmeasured"
+        ));
+    } else if unrecorded > 0 {
+        uncertainty.push(format!(
+            "{unrecorded} requests did not record their context; memory they loaded is unmeasured"
+        ));
+    } else if context_usd.is_none() {
         uncertainty.push("no request that carried memory could be priced".into());
     }
     if writes > 0 && writes_usd.is_none() {
@@ -186,6 +211,16 @@ fn check(
             control.owner
         ));
     }
+    // Claude Code on against an off setting: a project setting or the session's
+    // environment turned it on, which this scan does not resolve per directory.
+    let (off, off_file) = if profile.harness == Harness::Claude && on && !control.value {
+        (
+            "\"autoMemoryEnabled\": false in any project .claude/settings.json or .claude/settings.local.json that turns it on".to_string(),
+            None,
+        )
+    } else {
+        (control.off.clone(), control.off_file.clone())
+    };
     let (action, recommended) = if on {
         (Action::Advisory, Some(false))
     } else {
@@ -232,8 +267,8 @@ fn check(
             sources: SOURCES.map(String::from).into(),
         },
         harness: profile.harness,
-        off: control.off.clone(),
-        off_file: control.off_file.clone(),
+        off,
+        off_file,
         context_usd,
         writes_usd,
         reads,

@@ -542,6 +542,21 @@ impl ExposureCollector {
             self.uncertain = true;
             self.deferred.clear();
             self.forget_results();
+            // Codex rebuilds its developer context, memory summary included, into
+            // the replacement history; a summary it left out is gone.
+            if kind == Some("compacted")
+                && let Some(Value::Array(history)) = payload.get("replacement_history")
+            {
+                let key = component_key(Category::Memory, MEMORY_SUMMARY);
+                self.provided.remove(key.as_str());
+                self.remove(Category::Memory, MEMORY_SUMMARY);
+                for item in history {
+                    let item = object(item);
+                    if is(item, "type", "message") && is(item, "role", "developer") {
+                        self.memory_summary(item, line.at())?;
+                    }
+                }
+            }
         }
         if kind == Some("world_state") {
             self.world_state(&line)?;
@@ -550,7 +565,7 @@ impl ExposureCollector {
             && is(payload, "type", "message")
             && is(payload, "role", "developer")
         {
-            self.memory_summary(&line)?;
+            self.memory_summary(payload, line.at())?;
         }
         if kind == Some("attachment") {
             self.attachment(&line)?;
@@ -1535,8 +1550,7 @@ impl ExposureCollector {
     /// Codex's memory summary, a developer message added with each full context.
     /// Codex 0.167.0 tags its parts `memories.instructions`; each part it splits
     /// off a long summary carries only that tag, while the first starts `## Memory`.
-    fn memory_summary(&mut self, line: &Line<'_>) -> Result<(), ScanError> {
-        let p = line.payload;
+    fn memory_summary(&mut self, p: &Map<String, Value>, at: Millis) -> Result<(), ScanError> {
         let kinds = object(field(p, "internal_chat_message_metadata_passthrough"))
             .get("content_item_kinds")
             .and_then(Value::as_array);
@@ -1560,7 +1574,7 @@ impl ExposureCollector {
         self.component(
             New::active(Category::Memory, MEMORY_SUMMARY, "codex-memory-summary"),
             Content::Text(&parts.join("\n")),
-            line.at(),
+            at,
         );
         Ok(())
     }

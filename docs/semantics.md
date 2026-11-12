@@ -789,7 +789,10 @@ keep once it is off, and never exits 1: notes the agent writes for itself skip
 the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
 slop, so it is not recommended whatever it cost. `--max-cost-per-use` does not
 apply. The check reports the total cost, the reads and writes, and the setting
-that turns it off; its `savingsUsd` is that total.
+that turns it off; its `savingsUsd` is that total. Once memory is off, the line
+still shows what it cost and how often it was used earlier in the window.
+Requests that recorded no context leave the memory they loaded unmeasured; when
+no request recorded one, the cost is unknown rather than zero.
 
 [Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
 memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or
@@ -802,7 +805,11 @@ after it; `MEMORY.md` is placed like any other attachment. Both form the
 as subagents do, leaves any memory instructions elsewhere in its prompt
 unmeasured, and the check says how many did. The latest main-agent request with
 a recorded shape decides whether memory is on, since the section is present
-whenever it is; settings decide only without one.
+whenever it is; settings decide only without one. When that request carries
+memory against an off user or managed setting, a project's
+`.claude/settings.json` or `.claude/settings.local.json`, or the session's
+environment, turned it on. The scan does not resolve those per directory, so the
+check names those files rather than the setting that is already off.
 
 Uses are Read, Write, Edit and MultiEdit calls on files in a memory directory:
 `<root>/projects/<project>/memory/` under the profile root or alias, or the
@@ -816,8 +823,10 @@ writes without one stay unpriced rather than zero.
 `features.memories = true`; `memories.use_memories = false` keeps them out of
 the prompt. With each full context Codex 0.167.0 adds a developer message part
 tagged `memories.instructions` holding `memory_summary.md`, split into several
-parts when long; earlier versions start it with `## Memory`. It stays in
-context until the next full context replaces it. A summary in the latest
+parts when long; earlier versions start it with `## Memory`. A full world
+state leaves it in context. Compaction rebuilds it: the summary in the
+`compacted` record's `replacement_history` takes its place, and without one it
+is gone. A summary in the latest
 request shows memory is on whatever the settings say; its absence proves
 nothing, since the summary appears only once one has been written. Uses are
 the dedicated `memories` tools (`list`, `read` and `search` as reads,

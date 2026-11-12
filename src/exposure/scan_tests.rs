@@ -2183,7 +2183,12 @@ fn claude_memory_session(root: &str, memory: bool) -> Vec<Value> {
     let system = json!([{ "type": "text", "text": prompt }]);
     let tools =
         [json!({ "name": "Read", "description": "r", "input_schema": { "type": "object" } })];
-    let dir = format!("{root}/projects/project/memory");
+    // Without memory, the same calls touch ordinary files.
+    let dir = if memory {
+        format!("{root}/projects/project/memory")
+    } else {
+        "/repo/notes".into()
+    };
     let mut files = vec![
         json!({ "path": "/repo/CLAUDE.md", "type": "Project", "content": "SYNTHETIC_PRIVATE_RULES" }),
     ];
@@ -2348,15 +2353,122 @@ fn claude_auto_memory_off_in_the_latest_request_is_kept_off() {
     .unwrap();
     let data = scan(&options(&w, None)).unwrap();
     assert_eq!(categories(&data.exposure, Category::Memory), 0);
-    let report = report(&data, 1.0);
+    let first = report(&data, 1.0);
     assert_eq!(
-        memory_check(&report, Harness::Claude).base.current,
+        memory_check(&first, Harness::Claude).base.current,
         Some(false)
     );
-    let text = text(&report);
-    assert!(!text.contains("Not recommended\n"));
-    let keep = &text[text.find("Keep\n").unwrap()..];
+    let rendered = text(&first);
+    assert!(!rendered.contains("Not recommended\n"));
+    let keep = &rendered[rendered.find("Keep\n").unwrap()..];
     assert!(labelled(keep, "Auto memory", |s| s == ": off. Costs nothing."));
+
+    // Turned off after an earlier session used it: still kept off, but what it cost
+    // in the window shows.
+    let root = root.to_string_lossy();
+    std::fs::write(
+        w.claude.join("projects/project/early.jsonl"),
+        jsonl(&claude_memory_session(&root, true)),
+    )
+    .unwrap();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&later(claude_memory_session(&root, false))),
+    )
+    .unwrap();
+    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert!(check.writes_usd.unwrap() > 0.0);
+    let text = text(&report);
+    let keep = &text[text.find("Keep\n").unwrap()..];
+    assert!(labelled(
+        keep,
+        "Auto memory",
+        then(": off. Cost", "; used 2 times (1 read, 1 write).")
+    ));
+}
+
+/// The same records as a later session, with their own ids.
+fn later(records: Vec<Value>) -> Vec<Value> {
+    fn walk(key: &str, value: &mut Value) {
+        match value {
+            Value::Object(map) => map.iter_mut().for_each(|(k, v)| walk(k, v)),
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(key, v)),
+            Value::String(text) if key == "timestamp" => {
+                let second: u32 = text[17..19].parse().unwrap();
+                *text = at(second + 30);
+            }
+            Value::String(text) if key == "sessionId" => *text = "later".into(),
+            Value::String(text) if ["id", "requestRef", "uuid", "shapeHash"].contains(&key) => {
+                *text = format!("later-{text}");
+            }
+            _ => {}
+        }
+    }
+    records
+        .into_iter()
+        .map(|mut r| {
+            walk("", &mut r);
+            r
+        })
+        .collect()
+}
+
+#[test]
+fn claude_auto_memory_on_against_an_off_setting_points_at_project_settings() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    std::fs::write(
+        w.claude.join("settings.json"),
+        r#"{ "autoMemoryEnabled": false }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&claude_memory_session(&root.to_string_lossy(), true)),
+    )
+    .unwrap();
+    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.off_file, None);
+    assert!(check.off.contains(".claude/settings.local.json"));
+}
+
+#[test]
+fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let file = format!(
+        "{}/projects/project/memory/MEMORY.md",
+        root.to_string_lossy()
+    );
+    let records = [
+        attachment(
+            0,
+            json!({ "type": "instructions", "files": [
+                { "path": file, "type": "AutoMem", "content": "SYNTHETIC_PRIVATE_INDEX" },
+            ] }),
+        ),
+        assistant(1, json!([])),
+    ];
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.context_usd, None);
+    assert_eq!(check.base.savings_usd, None);
+    assert!(
+        check
+            .base
+            .uncertainty
+            .iter()
+            .any(|u| u.contains("loaded memory is unmeasured"))
+    );
 }
 
 #[test]
@@ -2451,6 +2563,33 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         then(": on -> off. Not recommended: ", "")
     ));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
+
+    // Compaction rebuilds the developer context: a summary its replacement history
+    // carries stays, and one it leaves out is gone.
+    let developer = |text: &str| {
+        json!({ "type": "message", "role": "developer",
+                "content": [{ "type": "input_text", "text": text }],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["memories.instructions"] } })
+    };
+    for (history, kept) in [
+        (vec![developer("## Memory\nSYNTHETIC_PRIVATE_NEWER")], true),
+        (vec![], false),
+    ] {
+        let mut records = records[..3].to_vec();
+        records.push(json!({ "type": "compacted", "timestamp": at(2),
+                             "payload": { "message": "", "replacement_history": history } }));
+        records.push(billed(5));
+        std::fs::write(&file, jsonl(&records)).unwrap();
+        let data = scan(&options(&w, None)).unwrap();
+        let e = &data.exposure;
+        let carried = e.requests[0].view.candidates.iter().any(|id| {
+            e.components
+                .iter()
+                .any(|c| c.id == **id && c.category == Category::Memory)
+        });
+        assert_eq!(carried, kept);
+    }
 
     // With no summary and no setting, Codex memories are off.
     std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();

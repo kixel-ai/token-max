@@ -861,9 +861,10 @@ tagged `memories.instructions` holding `memory_summary.md`, split into several
 parts when long; earlier versions start it with `## Memory`. A full world
 state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
-is gone. The settings decide whether memory is on; a session that carried a
-summary at its latest request while they turn memory off is noted, as for
-Claude Code. A missing summary shows nothing, since it appears only once one has
+is gone. The settings decide whether memory is on, resolved like Claude Code's
+at the latest session's directory, including the `.codex/config.toml` layers of
+a project that is not untrusted; a session there that carried a summary at its
+latest request while they turn memory off is noted. A missing summary shows nothing, since it appears only once one has
 been written. Uses are
 the dedicated `memories` tools (`list`, `read` and `search` as reads,
 `add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token

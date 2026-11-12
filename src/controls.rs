@@ -366,6 +366,7 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
                 None => format!("{variable}=1"),
             },
             off_file: scope.map(|s| s.file.to_string()),
+            directory: None,
         });
     }
     let first = scopes.first().map_or("settings.json", |s| s.file);
@@ -378,15 +379,16 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
         owner,
         off: format!("\"{key}\": false"),
         off_file: Some(file.into()),
+        directory: None,
     })
 }
 
 /// Codex memories, off by default: `features.memories` turns them on, and
-/// `memories.use_memories = false` keeps them out of the prompt.
+/// `memories.use_memories = false` keeps them out of the prompt. Scopes run from
+/// lowest to highest precedence; `user` is the file a default is set in.
 /// <https://developers.openai.com/codex/memories>
-pub fn codex_memory(scopes: &[SettingsScope]) -> Result<MemoryControl, ScanError> {
+pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryControl, ScanError> {
     let key = "features.memories";
-    let user = scopes.last().map_or("config.toml", |s| s.file);
     let (enabled, file, owner) = match scoped_bool(scopes, key)? {
         Some((value, file)) => (value, file, format!("{file}:{key}")),
         None => (false, user, format!("{user}:{key} (default)")),
@@ -400,6 +402,7 @@ pub fn codex_memory(scopes: &[SettingsScope]) -> Result<MemoryControl, ScanError
         owner,
         off: format!("{key} = false"),
         off_file: Some(file.into()),
+        directory: None,
     })
 }
 
@@ -1476,10 +1479,13 @@ mod tests {
 
         let codex = |config: Value| {
             let config = map(config);
-            codex_memory(&[SettingsScope {
-                config: &config,
-                file: "config.toml",
-            }])
+            codex_memory(
+                &[SettingsScope {
+                    config: &config,
+                    file: "config.toml",
+                }],
+                "config.toml",
+            )
             .unwrap()
         };
         assert!(!codex(json!({})).value);

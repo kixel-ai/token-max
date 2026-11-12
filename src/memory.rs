@@ -9,7 +9,7 @@ use crate::context::CODEX_TOKENS_PER_CHARACTER;
 use crate::exposure::{MEMORY_SECTION, calibrate, cohort};
 use crate::model::{
     Action, Agent, Category, CheckBase, Component, ContextCost, ContextKind, Evidence, Harness,
-    Linkage, MemoryAccess, MemoryCheck, Millis, Profile, Request, Scan,
+    Linkage, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, Request, Scan,
 };
 use crate::prices::{Catalog, output_rate};
 
@@ -90,11 +90,11 @@ fn check(
         .collect();
     // Today's setting decides whether memory is on, as it does for every other check.
     // Each main-agent session's latest recorded request shows what that session
-    // loaded; for Claude, only sessions in the directory the setting was read at.
-    let decider = deciding_request(&mine);
+    // loaded; only sessions in the directory the setting was read at are compared.
     let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
+    let mut carried_any = false;
     for e in &scan.exposure.requests {
         let Some(r) = requests.get(&*e.request) else {
             continue;
@@ -122,7 +122,8 @@ fn check(
         {
             unmeasured += 1;
         }
-        let here = r.harness == Harness::Codex || decider.is_some_and(|d| d.cwd == r.cwd);
+        carried_any |= !memory.is_empty();
+        let here = control.directory.is_none() || control.directory.as_deref() == r.cwd.as_deref();
         if r.agent == Agent::Main && here {
             let seen = sessions.entry(&r.session).or_insert((r.time, false));
             if r.time >= seen.0 {
@@ -146,27 +147,27 @@ fn check(
         .filter(|c| c.kind == ContextKind::Memory && c.profiles.contains(&profile.id))
         .collect();
     // Requests whose context went unrecorded may have carried memory too. Codex
-    // carries none while its memories are off, and they are off by default.
+    // carries none while its memories are off, and they are off by default, unless
+    // a recorded request or use shows they were on in the window.
     let unrecorded = mine
         .iter()
         .filter(|r| !recorded_requests.contains(&*r.id))
         .count();
-    let unrecorded = match profile.harness {
-        Harness::Claude => unrecorded,
-        Harness::Codex if on => unrecorded,
-        Harness::Codex => 0,
-    };
-    let context_usd = rows
-        .iter()
-        .map(|c| c.estimated_usd)
-        .sum::<Option<f64>>()
-        .filter(|_| !rows.is_empty() || unrecorded == 0);
     let uses: Vec<_> = scan
         .exposure
         .memory
         .iter()
         .filter(|m| m.harness == profile.harness && m.profiles.contains(&profile.id))
         .collect();
+    let unrecorded = match profile.harness {
+        Harness::Codex if !on && !carried_any && uses.is_empty() => 0,
+        _ => unrecorded,
+    };
+    let context_usd = rows
+        .iter()
+        .map(|c| c.estimated_usd)
+        .sum::<Option<f64>>()
+        .filter(|_| !rows.is_empty() || unrecorded == 0);
     let reads = uses
         .iter()
         .filter(|m| m.access == MemoryAccess::Read)
@@ -181,7 +182,17 @@ fn check(
                 .get(&cohort(r))
                 .copied()
                 .or((r.harness == Harness::Codex).then_some(CODEX_TOKENS_PER_CHARACTER))?;
-            Some(m.characters? as f64 * ratio * output_rate(input.catalog, r, r.parts.first()?)?)
+            // The message iteration that wrote the call, not a compaction or advisor
+            // one; unpriced when several message iterations bill at different rates.
+            let rates = r
+                .parts
+                .iter()
+                .filter(|p| p.kind == PartKind::Message)
+                .map(|p| output_rate(input.catalog, r, p))
+                .collect::<Option<Vec<f64>>>()?;
+            let rate = *rates.first()?;
+            rates.iter().all(|&x| x == rate).then_some(())?;
+            Some(m.characters? as f64 * ratio * rate)
         })
         .sum::<Option<f64>>();
     let writes = uses.len() as u64 - reads;
@@ -230,9 +241,10 @@ fn check(
         uncertainty.push(format!(
             "{disagree} of {} sessions{} {} memory at their latest request, though {} turns it {}: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
             sessions.len(),
-            match profile.harness {
-                Harness::Claude => " in the directory the setting was read at",
-                Harness::Codex => "",
+            if control.directory.is_some() {
+                " in the directory the setting was read at"
+            } else {
+                ""
             },
             if on { "did not carry" } else { "still carried" },
             control.owner,

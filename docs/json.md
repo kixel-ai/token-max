@@ -51,7 +51,8 @@ and `keep` once it is off, whatever it cost; it never makes a change. Its
 files read back, priced like the `memory` context row) plus `writesUsd` (writes
 estimated at the output price), either null when unpriced. `reads` and `writes`
 count its uses, and `off`/`offFile` name the setting that turns it off.
-`offFile` is null for an environment variable. Today's setting decides
+`offFile` is null for a variable from the shell environment; a settings `env`
+entry names its settings file. Today's setting decides
 `current`; sessions whose requests disagree with it are noted in `uncertainty`.
 When some requests recorded no context, `coverage` counts those that did
 (`priced`) out of all (`total`), and `savingsUsd` is a lower bound. The

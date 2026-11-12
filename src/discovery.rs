@@ -13,8 +13,8 @@ use crate::controls::{
     idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
-    Agent, BackgroundControl, Harness, IdleControl, Location, PerBucket, Profile, Request,
-    RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Harness, IdleControl, Location, MemoryControl, PerBucket, Profile,
+    Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -755,7 +755,10 @@ pub fn discover_claude_controls(
             let mut idle = idle_controls(&scopes, local_env)?;
             let background = claude_background(&scopes, local_env)?;
             if latest.as_deref() == Some(cwd) {
-                profile.memory = Some(claude_memory(&scopes, local_env)?);
+                profile.memory = Some(MemoryControl {
+                    directory: Some(cwd.into()),
+                    ..claude_memory(&scopes, local_env)?
+                });
             }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
@@ -994,7 +997,13 @@ pub fn discover_codex_controls(
                 ));
             }
         };
-        let cwds = directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)));
+        let mine: Vec<&Request> = requests
+            .iter()
+            .filter(|r| r.profiles.contains(&profile.id))
+            .collect();
+        // Memories' setting is read at the latest session's directory, as for Claude.
+        let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.clone());
+        let cwds = directories(mine.iter().copied());
         for cwd in cwds {
             if !existing_directory(cwd)? {
                 let mut controls = base.clone();
@@ -1049,6 +1058,12 @@ pub fn discover_codex_controls(
                         .rev()
                         .map(|(file, config)| SettingsScope { config, file }),
                 );
+            }
+            if latest.as_deref() == Some(cwd) {
+                profile.memory = Some(MemoryControl {
+                    directory: Some(cwd.into()),
+                    ..codex_memory(&scopes, &profile.settings_file)?
+                });
             }
             let has_override = trust != Some("untrusted")
                 && layers
@@ -1550,7 +1565,7 @@ pub(crate) fn profile(
     let memory = if claude {
         claude_memory(&speed_scopes, local_env)?
     } else {
-        codex_memory(&speed_scopes)?
+        codex_memory(&speed_scopes, &settings_file)?
     };
     Ok(Profile {
         id: identity(key),

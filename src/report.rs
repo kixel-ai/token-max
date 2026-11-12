@@ -1026,10 +1026,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         ),
     );
     out.field(
-        if r.check == "fast-mode" {
-            "Estimated rate-only saving vs current speed"
-        } else {
-            "Estimated net saving vs baseline"
+        match r.check {
+            "fast-mode" => "Estimated rate-only saving vs current speed",
+            // What it cost, which turning it off saves only while it is still on.
+            "auto-memory" => "Total cost",
+            _ => "Estimated net saving vs baseline",
         },
         &format!(
             "{} over window; {} / 30 days",
@@ -2638,6 +2639,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 None => "Cost unknown".into(),
             };
             let cost = match r.coverage {
+                Some(c) if r.savings_usd.is_some() && c.priced == 0 => {
+                    format!("{cost}, from memory read back alone; no request recorded its context")
+                }
                 Some(c) if r.savings_usd.is_some() => format!(
                     "{cost}, from the {}% of requests that recorded their context",
                     percent(c.priced, c.total)
@@ -3240,8 +3244,24 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             6,
             PLAIN,
         );
+        // Auto memory's row names the setting its check resolved, whatever owns it.
+        let memory = report
+            .scan
+            .profiles
+            .iter()
+            .rev()
+            .find(|p| p.id == first)
+            .and_then(|p| p.memory.as_ref())
+            .filter(|_| c.kind == ContextKind::Memory);
         let text = match &c.control {
             _ if covered => "Covered by the server-off recommendation".into(),
+            Some(_) if memory.is_some() => {
+                let m = memory.expect("checked above");
+                match &m.off_file {
+                    Some(file) => format!("Turn off: {} in {}", m.off, out.home(file)),
+                    None => format!("Turn off: {}", m.off),
+                }
+            }
             Some(control) => {
                 let file = report
                     .scan

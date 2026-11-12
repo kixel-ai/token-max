@@ -895,6 +895,10 @@ pub struct MemoryControl {
     pub off: String,
     /// The file to set it in; null for an environment variable.
     pub off_file: Option<String>,
+    /// The working directory it was resolved at, the latest session's; null when
+    /// only profile-wide settings were read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 
 /// One background feature's current state and the control that owns it.

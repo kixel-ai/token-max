@@ -2407,9 +2407,11 @@ fn claude_auto_memory_turned_off_is_kept_off() {
     let check = memory_check(&turned_off, Harness::Claude);
     assert_eq!(check.base.current, Some(false));
     assert!(check.writes_usd.unwrap() > 0.0);
-    assert!(memory_note(check).unwrap().starts_with(
-        "1 of 2 sessions in the directory the setting was read at still carried memory"
-    ));
+    assert!(
+        memory_note(check)
+            .unwrap()
+            .starts_with("1 of 2 sessions still carried memory")
+    );
     let text = text(&turned_off);
     let keep = &text[text.find("Keep\n").unwrap()..];
     assert!(labelled(
@@ -2479,7 +2481,7 @@ fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
     assert_eq!(
         memory_note(check).unwrap(),
         format!(
-            "1 of 1 sessions in the directory the setting was read at still carried memory at their latest request, though {}:autoMemoryEnabled turns it off: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
+            "1 of 1 sessions still carried memory at their latest request, though {}:autoMemoryEnabled turns it off: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
             check.off_file.as_deref().unwrap()
         )
     );
@@ -2511,10 +2513,25 @@ fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
     let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
     let check = memory_check(&report, Harness::Claude);
     assert_eq!(check.base.current, Some(true));
-    assert_eq!(
-        check.off_file.as_deref(),
-        Some(&*std::fs::canonicalize(&local).unwrap().to_string_lossy())
+    let local = std::fs::canonicalize(&local).unwrap();
+    let local = local.to_string_lossy();
+    assert_eq!(check.off_file.as_deref(), Some(&*local));
+    // The context row's details name the same setting, not the user settings file.
+    let details = format_report(
+        &report,
+        ReportOptions {
+            width: Some(1000),
+            color: false,
+            unicode: false,
+            details: true,
+            host: None,
+        },
     );
+    assert!(details.lines().any(|l| {
+        l.trim_start()
+            .strip_prefix("Turn off: \"autoMemoryEnabled\": false in ")
+            .is_some_and(|file| file.ends_with("project/.claude/settings.local.json"))
+    }));
 }
 
 #[test]
@@ -2720,4 +2737,24 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         "Codex memories",
         |s| s == ": off. Costs nothing."
     ));
+
+    // A trusted project's config at the latest session's directory turns them on.
+    let project = w.home.join("repo");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir_all(project.join(".codex")).unwrap();
+    let project = crate::discovery::realpath(&project.to_string_lossy()).unwrap();
+    let project_config = format!("{project}/.codex/config.toml");
+    std::fs::write(&project_config, "[features]\nmemories = true\n").unwrap();
+    std::fs::write(
+        w.codex.join("config.toml"),
+        format!("[projects.{project:?}]\ntrust_level = \"trusted\"\n"),
+    )
+    .unwrap();
+    let mut meta = codex_meta();
+    meta["payload"]["cwd"] = json!(project);
+    std::fs::write(&file, jsonl(&[meta, turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let check = memory_check(&report(&data, 1.0), Harness::Codex).clone();
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.off_file.as_deref(), Some(&*project_config));
 }

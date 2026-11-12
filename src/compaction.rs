@@ -2251,8 +2251,28 @@ mod tests {
         env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
         capped.profiles[0].compaction = unset(&env);
         crate::controls::tune_windows(&mut capped);
-        assert_eq!(window(&capped, "gateway-opus").value, None);
+        assert_eq!(window(&capped, "gateway-opus").value, Some(400_000));
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
+        // Without the cap, a declared window sizes a gateway ID whose requests fit it.
+        let mut declared = scan.clone();
+        let mut env = Env::default();
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
+        declared.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut declared);
+        let control = window(&declared, "gateway-opus");
+        assert_eq!(control.value, Some(400_000));
+        assert!(control.applicable);
+        assert!(control.reason.contains("assumed"));
+        assert!(
+            control
+                .owner
+                .ends_with("(under CLAUDE_CODE_MAX_CONTEXT_TOKENS=400000)")
+        );
+        // A request above the declared window shows a [1m] spelling ran, which ignores it.
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "500".into());
+        declared.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut declared);
+        assert_eq!(window(&declared, "gateway-opus").value, None);
 
         // Each recorded directory's controls, which idle and keepalive read, tune under what
         // sizes their context, and directories sized apart never share an owner.
@@ -2365,8 +2385,16 @@ mod tests {
             auto_capped.owner,
             format!("{auto_row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
         );
-        // Another declared value, or none, sizes the ID differently, so the trigger is not theirs.
-        assert_eq!(scoped("/redeclared", "gateway-opus").value, None);
+        // Another declared value, or none, sizes the ID differently, so the trigger is not theirs:
+        // a directory declaring another value assumes its own declared window instead.
+        let redeclared = scoped("/redeclared", "gateway-opus");
+        assert_eq!(redeclared.value, Some(400000));
+        assert!(
+            redeclared
+                .owner
+                .ends_with("(under CLAUDE_CODE_MAX_CONTEXT_TOKENS=400000)")
+        );
+        assert!(redeclared.reason.contains("assumed"));
         assert_eq!(window(&directories, "gateway-opus").value, None);
 
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());

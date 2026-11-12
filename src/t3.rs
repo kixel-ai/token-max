@@ -61,6 +61,11 @@ const ENVIRONMENT: &[&str] = &[
     "BASH_DEFAULT_TIMEOUT_MS",
 ];
 
+/// The profile id of a T3 instance, which a removed instance keeps for its retained history.
+pub(crate) fn profile_key(state: &str, instance: &str) -> String {
+    format!("t3:{state}:{instance}")
+}
+
 /// Retained history is still priced when a current instance cannot receive guidance.
 pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
     if let Some(instance) = profiles
@@ -560,6 +565,8 @@ pub(crate) fn discover(
                     joined_requests: 0,
                     ambiguous_requests: 0,
                     unresolved: IndexMap::default(),
+                    removed: IndexMap::default(),
+                    instances: HashSet::default(),
                     text_generation: None,
                 });
                 continue;
@@ -611,6 +618,8 @@ pub(crate) fn discover(
             joined_requests: 0,
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
+            removed: IndexMap::default(),
+            instances: instances.keys().cloned().collect(),
             text_generation: Some(text_generation(&settings, &instances, &file)),
         };
         for (id, instance) in instances {
@@ -694,7 +703,7 @@ pub(crate) fn discover(
                 env,
                 ..options.clone()
             };
-            let key = format!("t3:{}:{id}", path.display());
+            let key = profile_key(&state.path, &id);
             let mut profile = crate::discovery::profile(&local, harness, root.clone(), root, &key)?;
             let owner = format!("{}:providerInstances.{id}", file.display());
             let (idle_mode, idle_owner) = match config.idle_compaction.as_deref() {
@@ -1604,6 +1613,8 @@ pub(crate) fn enrich(
     let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::default();
     let mut unlinked = HashSet::default();
     let mut read = HashSet::default();
+    // Owners no longer in their state's settings, by profile key: (state, instance).
+    let mut removed: HashMap<String, (String, String)> = HashMap::default();
     for state in states.iter_mut().filter(|s| s.status == "selected") {
         let path = Path::new(&state.path).join("statev2.sqlite");
         if !path.is_file() {
@@ -1659,14 +1670,25 @@ pub(crate) fn enrich(
                 })
                 .map(|p| p.id.clone())
         };
+        // A selected profile, a removed instance's key, or empty for an owner neither names.
+        let mut owner_id = |instance: &str, harness: Harness| {
+            profile_id(instance, harness)
+                .or_else(|| {
+                    (!instance.is_empty() && !state.instances.contains(instance)).then(|| {
+                        let key = profile_key(&state.path, instance);
+                        removed.insert(key.clone(), (state.path.clone(), instance.into()));
+                        key
+                    })
+                })
+                .unwrap_or_default()
+        };
         for ((harness, session), instances) in data.owners {
             if instances.is_empty() {
                 continue;
             }
             let target = owners.entry((harness, session)).or_default();
             for instance in instances {
-                // Preserve ambiguity even if a referenced instance was removed from settings.
-                target.push(profile_id(&instance, harness).unwrap_or_default());
+                target.push(owner_id(&instance, harness));
             }
         }
         for (request, matched) in data.turns {
@@ -1678,7 +1700,7 @@ pub(crate) fn enrich(
                 joins
                     .entry(request)
                     .or_default()
-                    .push((profile_id(&row.instance, harness).unwrap_or_default(), row));
+                    .push((owner_id(&row.instance, harness), row));
             } else if matched.count > 0 {
                 // Preserve invalid/duplicate matches as blockers, without inventing metadata.
                 invalid_joins.insert(request);
@@ -1689,6 +1711,7 @@ pub(crate) fn enrich(
         .iter()
         .filter(|p| p.t3.is_some())
         .map(|p| p.id.clone())
+        .chain(removed.keys().cloned())
         .collect();
     let state_of = |id: &String| {
         profiles
@@ -1716,6 +1739,22 @@ pub(crate) fn enrich(
     // Shared profile sets, so requests resolved alike keep sharing one copy.
     let mut owned: HashMap<String, Profiles> = HashMap::default();
     let mut native_only: HashMap<Profiles, Profiles> = HashMap::default();
+    // Sessions every owner of which was removed from settings ran under controls that no
+    // longer exist: they stay billed under those owners, outside every current profile.
+    let mut removed_roots: HashMap<(Harness, String), Profiles> = HashMap::default();
+    for (root, o) in &owners {
+        if !o.is_empty() && o.iter().all(|p| removed.contains_key(p)) {
+            let mut keys = o.clone();
+            keys.sort_unstable();
+            keys.dedup();
+            let profiles = match &keys[..] {
+                [one] => shared(&mut owned, one),
+                _ => keys.into(),
+            };
+            removed_roots.insert(root.clone(), profiles);
+        }
+    }
+    let mut removed_requests: HashMap<&(String, String), u64> = HashMap::default();
     let order: Vec<usize> = (0..requests.len())
         .filter(|&i| requests[i].agent != Agent::Subagent)
         .chain((0..requests.len()).filter(|&i| requests[i].agent == Agent::Subagent))
@@ -1726,11 +1765,14 @@ pub(crate) fn enrich(
         let root = (r.harness, ids.root(&r.session).to_string());
         let rows = joins.get(&*r.id);
         let session_owners = owners.get(&root);
+        let removed_owners = removed_roots.get(&root);
         let unique = rows
             .filter(|v| v.len() == 1)
             .and_then(|v| v.first())
             .filter(|(p, _)| {
-                !invalid_joins.contains(&*r.id) && !p.is_empty() && r.profiles.contains(p)
+                !invalid_joins.contains(&*r.id)
+                    && !p.is_empty()
+                    && (r.profiles.contains(p) || removed_owners.is_some_and(|o| o.contains(p)))
             });
         let selected = since.is_none_or(|s| r.time >= s);
         let root_resolution = if subagent {
@@ -1782,11 +1824,14 @@ pub(crate) fn enrich(
                         native.speed = native.speed.take().or_else(|| requested.speed.clone());
                     }
                 }
-                if let Some(state) = profiles
+                let state = profiles
                     .iter()
                     .find(|p| &p.id == owner)
                     .and_then(|p| p.t3.as_ref())
-                    .and_then(|t| states.iter_mut().find(|s| s.path == t.state))
+                    .map(|t| &t.state)
+                    .or_else(|| removed.get(owner).map(|(state, _)| state));
+                if let Some(state) =
+                    state.and_then(|path| states.iter_mut().find(|s| s.path == *path))
                 {
                     state.joined_requests += 1;
                 }
@@ -1795,6 +1840,8 @@ pub(crate) fn enrich(
             } else {
                 r.issues.push("T3 native session owner is unique; per-request run/speed/idle metadata is unavailable".into());
             }
+        } else if let Some(o) = removed_owners {
+            r.profiles = o.clone();
         } else if r.profiles.iter().any(|p| t3_ids.contains(p)) {
             // Native REPL or CLI provenance excludes T3 even when its state was not read.
             let native_source = (r.harness == Harness::Claude
@@ -1880,6 +1927,13 @@ pub(crate) fn enrich(
                 }
             }
         }
+        if selected && !removed.is_empty() {
+            for p in r.profiles.iter() {
+                if let Some(owner) = removed.get(p) {
+                    *removed_requests.entry(owner).or_default() += 1;
+                }
+            }
+        }
         if !subagent {
             const MIXED: &str = "the subagent's root session resolves to more than one owner";
             let native_only = cause.is_none() && r.profiles.iter().all(|p| !t3_ids.contains(p));
@@ -1906,6 +1960,13 @@ pub(crate) fn enrich(
             .collect();
         causes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         state.unresolved = causes.into_iter().map(|(c, n)| (c.into(), n)).collect();
+        let mut owners: Vec<(&str, u64)> = removed_requests
+            .iter()
+            .filter(|((path, _), _)| *path == state.path)
+            .map(|((_, instance), n)| (instance.as_str(), *n))
+            .collect();
+        owners.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        state.removed = owners.into_iter().map(|(i, n)| (i.into(), n)).collect();
     }
     // A uniquely owned session also owns its structural evidence, without assuming a run.
     let mut sessions: HashMap<(Harness, &str), HashSet<&str>> = HashMap::default();
@@ -2070,6 +2131,63 @@ mod tests {
             assert!(!exported.contains(secret), "{secret}");
         }
         assert_eq!(fs::read(root.join("statev2.sqlite")).unwrap(), before);
+    }
+    #[test]
+    fn removed_owners_stay_billed_outside_current_checks() {
+        // `gone` is no longer in settings; `elsewhere` is, but under another home.
+        for (owner, removed) in [("gone", true), ("elsewhere", false)] {
+            let w = Workspace::new();
+            native(&w);
+            let other = w.home.join("other-codex");
+            fs::create_dir_all(&other).unwrap();
+            let root = state(
+                &w,
+                json!({"providerInstances":{"codex":{"driver":"codex","config":{"homePath":w.codex}},"elsewhere":{"driver":"codex","config":{"homePath":other}}}}),
+            );
+            seed(&db(&root), "codex", owner);
+            let session = w.codex.join("sessions/test.jsonl");
+            let mut transcript = fs::read_to_string(&session).unwrap();
+            transcript.push_str("{\"type\":\"response_item\",\"timestamp\":\"2026-01-01T00:00:06Z\",\"payload\":{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"call_id\":\"k1\"}}\n");
+            write(&session, transcript);
+            let scan = scan(&w.scan_options()).unwrap();
+            let r = &scan.requests[0];
+            // Recorded uses follow the request's resolved owners.
+            let mut owners = r.profiles.to_vec();
+            owners.sort();
+            let mut credited = scan.exposure.tool_calls[0].profiles.clone();
+            credited.sort();
+            assert_eq!(credited, owners);
+            let t3 = &scan.t3[0];
+            let current = scan
+                .profiles
+                .iter()
+                .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
+                .unwrap();
+            // `ownership_resolved` also reflects platform policy (always unresolved on
+            // Windows), so check the marker shared-history ambiguity leaves on the TTL.
+            assert_eq!(
+                current.ttl.main.reason.contains("shared native history"),
+                !removed,
+                "{owner}"
+            );
+            if removed {
+                assert_eq!(*r.profiles, [profile_key(&t3.path, "gone")]);
+                assert!(r.t3.is_some(), "joined evidence still applies");
+                assert_eq!(t3.joined_requests, 1);
+                assert_eq!(t3.removed, IndexMap::from_iter([("gone".into(), 1)]));
+                assert!(t3.unresolved.is_empty(), "{:?}", t3.unresolved);
+            } else {
+                assert!(r.profiles.contains(&current.id));
+                assert!(t3.removed.is_empty());
+                assert!(
+                    t3.unresolved
+                        .keys()
+                        .any(|c| c.contains("not a selected instance")),
+                    "{:?}",
+                    t3.unresolved
+                );
+            }
+        }
     }
     #[test]
     fn codex_requested_tiers_share_aliases_and_preserve_partial_evidence() {

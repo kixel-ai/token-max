@@ -1,6 +1,6 @@
 //! Shared data types. Serialized names match the JSON report.
 
-use crate::collections::IndexMap;
+use crate::collections::{HashSet, IndexMap};
 use serde::{Deserialize, Serialize};
 
 /// Milliseconds since the Unix epoch.
@@ -664,9 +664,9 @@ pub struct CompactionControls {
     /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at a 200k window.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
-    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size a model ID Claude Code does not recognize.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub declared: bool,
+    /// The positive `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which may size a model ID Claude Code does not recognize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared: Option<u64>,
     /// Tuned windows by undated model ID, for every model the profile used.
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub tuned: IndexMap<String, TunedWindow>,
@@ -805,6 +805,12 @@ pub struct T3State {
     /// Requests whose T3 or native control owner stays unresolved, counted by cause.
     #[serde(default)]
     pub unresolved: IndexMap<String, u64>,
+    /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
+    #[serde(default)]
+    pub removed: IndexMap<String, u64>,
+    /// Every instance the settings name, which tells a removed owner from one not selected.
+    #[serde(skip)]
+    pub(crate) instances: HashSet<String>,
     /// The model T3 resolves for generated text; absent for a state that was not read.
     pub text_generation: Option<T3TextGeneration>,
 }

@@ -258,10 +258,15 @@ client version is the applicability assumption.
 
 When no setting names a window, each model the profile used gets Claude Code's
 tuned window, owned by that model's `modelSettings` row because the defaults
-differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
+differ by model. The profile's controls and each recorded directory's, which
+idle and keepalive read, are tuned under what sizes the model's context there.
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
 except an ID outside the table when `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size it.
+A window sized by either variable is owned by the row under that variable and
+value, so directories sized apart never share a replayed window.
 Otherwise the trigger of the profile's latest automatic, non-idle compaction on
-the model comes first, including one before `--since`, since the server can
+the model under the same sizing and no explicit window comes first, including
+one before `--since`, since the server can
 retune the default without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
 checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
 Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
@@ -583,7 +588,11 @@ credit both their server and their own schema row. Details and server totals
 must not be added together. A discovery listing and a subsequently surfaced
 schema remain distinct even when their names match.
 One-off attachments and skill bodies are excluded because no setting removes
-them up front.
+them up front. Rows group by the profiles that own each request, and recorded uses
+(tool calls, results and skill invocations) follow the owners of each session
+that recorded them, or the profiles of its transcripts when that session has no
+request. A request no selected profile owns, such as one of a T3 instance removed from
+settings, has no setting to change and prices no row; it stays in the bill.
 
 Tool results are `tool-output` rows, one per tool and one per MCP server. A
 result stays in the conversation until it compacts: output the previous request

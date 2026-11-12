@@ -91,8 +91,11 @@ same build, including its scan-schema fingerprint. Costs are independent per hos
 A compaction check has `unset: true` when no setting names its window, so its
 `current` is Claude Code's tuned window for the model: the latest observed
 automatic-compaction trigger or the documented default. Its owner is then the
-model's `modelSettings` row, and Claude `profiles[].compaction.tuned` lists
-the tuned window and reason for every model it used.
+model's `modelSettings` row, followed by `(under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)`
+or `(under CLAUDE_CODE_MAX_CONTEXT_TOKENS=<n>)` when that variable sizes the
+model. Claude `profiles[].compaction.tuned` lists the tuned window and reason
+for every model it used, and `profiles[].compaction.declared` holds the
+positive `CLAUDE_CODE_MAX_CONTEXT_TOKENS` value.
 
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
 instance ownership. The `t3-idle-compaction` check keeps all three policy costs;
@@ -102,4 +105,7 @@ periods. Unsupported providers remain explicit exclusions. `scan.t3[].textGenera
 names the resolved text-generation `selection`, its `owner` setting, its
 `resolution`, narrower `overrides` and the count of `projectOverrides`; its
 cost is unmeasured. `scan.t3[].unresolved` counts the window's requests whose
-control owner stays unresolved, keyed by cause.
+control owner stays unresolved, keyed by cause. `scan.t3[].removed` counts the window's
+requests whose every T3 owner was removed from settings, keyed by instance;
+their cost groups name the profile id `t3:<state>:<instance>`, which no
+current profile has.

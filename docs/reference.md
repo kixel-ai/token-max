@@ -138,6 +138,8 @@ the raw tool name in every owning profile;
 surfaces. These exposure controls do not establish net savings: search turns,
 returned definitions, cache changes and repeated loading are not completely
 attributable. A small frequently used server can be cheaper to load upfront.
+An MCP tool with no switch of its own, or whose server's off already covers
+it, keeps an info line with its cost, which its server's line already includes.
 App controls require the actual app id, which these transcripts do not map to
 the exposed app namespaces; the report names the supported controls without
 inventing per-app costs or a settings patch.
@@ -145,11 +147,14 @@ inventing per-app costs or a settings patch.
 Instruction files are Official lines. A CLAUDE.md is worth considering
 shorter at 200 recorded lines or more, Claude Code's documented guidance, and
 kept below that. A Codex AGENTS.md is compared with the selected profiles'
-`project_doc_max_bytes` (32 KiB by default): the recorded rendered bytes include
-headers and wrappers, so under the budget it is kept, and at or above it Codex
-may have truncated it, which is worth considering. Profiles with different or
-unreadable budgets, and records with no rendered text, give no verdict.
-Effective project/CLI overrides and original file sizes may be unavailable.
+`project_doc_max_bytes` in the user configuration (32 KiB by default): the
+recorded rendered bytes include headers and wrappers, so under the budget it is
+kept, and at or above it Codex may have truncated it, which is worth
+considering. The evidence names whether the budget is the default or the
+user's own, and says that a system, trusted-project or command-line override,
+which can replace it, is not visible. Profiles with different or unreadable
+budgets, and records with no rendered text, give no verdict. Original file
+sizes are unavailable.
 Length alone is not a quality score. Other instruction files Claude loads have
 no size guidance and get a Measured line with their cost. Output-cap lines
 still recommend no value because truncation-related read-back cannot be priced

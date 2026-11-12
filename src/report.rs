@@ -510,11 +510,22 @@ impl<'a> Out<'a> {
             (Mark::Keep, "Green: keep."),
             (Mark::Unknown, "Dim: no verdict."),
         ];
-        let line: Vec<String> = parts
-            .iter()
-            .map(|(mark, text)| format!("\x1b[{}m{text}\x1b[0m", mark.style()))
-            .collect();
-        self.text.push_str(&line.join(" "));
+        // Wrap between parts, so each keeps its own color on a narrow terminal.
+        let mut used = 0;
+        for (mark, text) in parts {
+            let cells = cells(text);
+            if used > 0 {
+                if self.options.width.is_some_and(|w| used + 1 + cells > w) {
+                    self.text.push('\n');
+                    used = 0;
+                } else {
+                    self.text.push(' ');
+                    used += 1;
+                }
+            }
+            let _ = write!(self.text, "\x1b[{}m{text}\x1b[0m", mark.style());
+            used += cells;
+        }
         self.text.push('\n');
     }
     /// A line kept whole at any width, such as a JSON snippet.
@@ -2890,6 +2901,23 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
             row
         }
         Harness::Codex => {
+            // Only the user configuration is read; a system, trusted-project or
+            // command-line project_doc_max_bytes can replace it unseen.
+            let set = profiles.iter().any(|p| {
+                c.profiles.contains(&p.id) && p.settings.contains_key("project_doc_max_bytes")
+            });
+            let limit = |budget: usize| {
+                format!(
+                    "the {} bytes {} (project_doc_max_bytes), counting headers and wrappers",
+                    count(budget as u64),
+                    if set {
+                        "your Codex config sets"
+                    } else {
+                        "Codex loads by default"
+                    }
+                )
+            };
+            let unseen = "A system, project or command-line override is not visible here.";
             let mut row = match agents_budget(c, profiles) {
                 None => {
                     let mut row = Row::new(Claim::Official, Mark::Unknown, name);
@@ -2903,17 +2931,14 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
                 Some(budget) if size.bytes >= budget => {
                     let mut row = Row::new(Claim::Official, Mark::Consider, name);
                     row.evidence = format!(
-                        "At or above the {} bytes Codex loads by default (project_doc_max_bytes), counting headers and wrappers, so Codex may have cut it short. Trim or scope it to keep the important instructions.",
-                        count(budget as u64)
+                        "At or above {}, so Codex may have cut it short. Trim or scope it to keep the important instructions. {unseen}",
+                        limit(budget)
                     );
                     row
                 }
                 Some(budget) => {
                     let mut row = Row::new(Claim::Official, Mark::Keep, name);
-                    row.evidence = format!(
-                        "Under the {} bytes Codex loads (project_doc_max_bytes), counting headers and wrappers.",
-                        count(budget as u64)
-                    );
+                    row.evidence = format!("Under {}. {unseen}", limit(budget));
                     row
                 }
             };
@@ -3174,10 +3199,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         let mark = mark(c);
         let mut row = Row::new(Claim::of(result), mark, setting_name(result));
         row.profile = tag(r.profile, out);
-        row.value = match r.current {
+        let current = match r.current {
             Some(Setting::Window(n)) => tokens(n),
             other => setting_value(other),
         };
+        row.value = current.clone();
         if let CheckResult::Compaction(c) = result
             && c.unset
         {
@@ -3243,9 +3269,8 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             CheckResult::Compaction(c) => {
                 let mut text = match c.setting {
                     Some(setting) => format!(
-                        "Set to {} tokens, which the model's context window caps at {}. ",
+                        "Set to {} tokens, which the model's context window caps at {current}. ",
                         count(setting),
-                        row.value
                     ),
                     None => String::new(),
                 };
@@ -3307,8 +3332,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             }
             CheckResult::T3Idle(_) => match mark {
                 Mark::Change => format!(
-                    "Replayed under each mode, assuming the same sessions{}. A summary drops detail, which is not measured. {set_in}",
-                    coverage_note(r)
+                    "Replayed under each mode, assuming the same sessions{}.{} {set_in}",
+                    coverage_note(r),
+                    if r.recommended == Some(Setting::T3Idle(crate::model::T3IdleMode::Off)) {
+                        ""
+                    } else {
+                        " A summary drops detail, which is not measured."
+                    }
                 ),
                 Mark::Keep => {
                     format!("Replayed under each mode, the current one costs least. {set_in}")
@@ -3532,6 +3562,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             ),
             Some(_) => "Its recorded uses are unknown, so keep or off is unresolved.".into(),
         });
+        if c.kind == ContextKind::McpTool {
+            text += " Included in its server's cost.";
+        }
         if c.skill.is_some() {
             let _ = write!(
                 text,
@@ -3548,6 +3581,42 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         text += &server_notes(c);
         row.evidence = text;
+        rows.push(row);
+    }
+    // Tools inside a server that the lines above leave out: those its server's off
+    // covers, and those without a switch of their own.
+    for (server, c) in report
+        .context
+        .iter()
+        .filter(|c| c.current)
+        .flat_map(|server| {
+            server
+                .details
+                .iter()
+                .filter(|d| d.current)
+                .map(move |d| (server, d))
+        })
+    {
+        let covered = server.verdict == Some(Verdict::Off);
+        if !covered && (c.verdict.is_some() || c.control.is_some()) {
+            continue;
+        }
+        let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
+        row.profile = tag(first_profile(c), out);
+        row.amount = cost_amount(c.estimated_usd);
+        let reason = if covered {
+            " Turning off its server covers it."
+        } else if server.harness == Harness::Codex && server.name == "codex_apps" {
+            " The app id mapping is unavailable, so no per-app tool switch is generated."
+        } else if c.harness == Harness::Codex && c.kind == ContextKind::McpTool {
+            " Its raw tool identity or owning server is unresolved, so no per-tool switch is generated."
+        } else {
+            ""
+        };
+        row.evidence = format!(
+            "{}. Included in its server's cost.{reason}",
+            capitalize(&uses(c))
+        );
         rows.push(row);
     }
     for g in report
@@ -4642,6 +4711,24 @@ mod tests {
         assert!(details.contains(&compact(
             "400000 tokens, capped at the model's context window"
         )));
+        // A change names the effective window, not the arrow to the new one.
+        let mut base = check_base(Action::Change, Some(200_000), Some(100_000));
+        base.owner =
+            format!("{ROOT}/settings.json:modelSettings.claude-opus-5-5.autoCompactWindow");
+        base.savings_usd = Some(1.0);
+        let mut check = compaction_check(base);
+        if let CheckResult::Compaction(c) = &mut check {
+            c.setting = Some(400_000);
+        }
+        report.checks = vec![check];
+        let line = report_line(&text(&report, None, false), "Auto-compact window");
+        assert!(line.head.contains("200k -> 100k"), "{line:?}");
+        assert!(
+            line.evidence.starts_with(
+                "Set to 400,000 tokens, which the model's context window caps at 200k. "
+            ),
+            "{line:?}"
+        );
     }
 
     #[test]
@@ -4901,7 +4988,17 @@ mod tests {
         let patch = rendered.split("To turn these off").nth(1).unwrap();
         assert!(patch.contains("enabled = false"));
         assert!(!patch.contains("disabled_tools"));
-        assert!(!rendered.contains("MCP tool mcp__docs__write"));
+        // The server's off covers its tools, which stay listed without a verdict.
+        let covered = report_line(&rendered, "MCP tool mcp__docs__write");
+        assert_eq!(
+            (covered.mark.as_str(), covered.head.as_str()),
+            ("info", "MCP tool mcp__docs__write costs $5")
+        );
+        assert!(
+            covered
+                .evidence
+                .contains("Turning off its server covers it.")
+        );
         assert!(!rendered.contains("Not enough evidence"));
         assert!(rendered.contains("Some feature costs are scaled from their priced requests"));
         let detailed = text(&report, None, true);
@@ -4916,6 +5013,60 @@ mod tests {
         // The server keeps the tool's cost inside it, without a second top-level row.
         assert_eq!(report.context.len(), 1);
         assert_eq!(report.context[0].details[0].estimated_usd, Some(5.0));
+    }
+
+    #[test]
+    fn tools_without_their_own_switch_keep_a_line() {
+        let mut report = synthetic();
+        report.checks.clear();
+        let mut server = context_piece(
+            ContextKind::McpServer,
+            "docs",
+            switch(
+                &["mcp_servers", "docs", "enabled"],
+                ControlValue::Bool(false),
+            ),
+            Some(20.0),
+            Some(3),
+        );
+        server.harness = Harness::Codex;
+        server.verdict = Some(Verdict::Keep);
+        let mut tool = context_piece(
+            ContextKind::McpTool,
+            "mcp__docs__read",
+            None,
+            Some(5.0),
+            Some(2),
+        );
+        tool.harness = Harness::Codex;
+        server.details.push(tool);
+        let mut conditional = context_piece(
+            ContextKind::McpTool,
+            "mcp__docs__write",
+            switch(
+                &["mcp_servers", "docs", "disabled_tools"],
+                ControlValue::Text("write".into()),
+            ),
+            Some(4.0),
+            None,
+        );
+        conditional.harness = Harness::Codex;
+        server.details.push(conditional);
+        report.context = vec![server];
+        let rendered = text(&report, None, false);
+        let read = report_line(&rendered, "MCP tool mcp__docs__read");
+        assert_eq!(
+            (read.mark.as_str(), read.head.as_str()),
+            ("info", "MCP tool mcp__docs__read costs $5")
+        );
+        assert!(read.evidence.contains("Included in its server's cost."));
+        assert!(
+            read.evidence
+                .contains("raw tool identity or owning server is unresolved")
+        );
+        let write = report_line(&rendered, "MCP tool mcp__docs__write");
+        assert_eq!(write.mark, "unknown");
+        assert!(write.evidence.contains("Included in its server's cost."));
     }
 
     #[test]
@@ -5043,10 +5194,23 @@ mod tests {
         let mut both = agents(100);
         both.profiles.push("other".into());
         assert_eq!(verdict(&both, &[profile.clone(), other]).1, Mark::Unknown);
+        let evidence =
+            |c: &ContextCost, profiles: &[Profile]| instruction_row(c, profiles, &out).evidence;
+        let default = evidence(&agents(32_768), std::slice::from_ref(&profile));
+        assert!(
+            default.contains("32,768 bytes Codex loads by default"),
+            "{default}"
+        );
+        assert!(default.contains("override is not visible"), "{default}");
         profile
             .settings
             .insert("project_doc_max_bytes".into(), Scalar::Number(65536.0));
-        assert_eq!(verdict(&agents(40_000), &[profile]).1, Mark::Keep);
+        let profiles = std::slice::from_ref(&profile);
+        assert_eq!(verdict(&agents(40_000), profiles).1, Mark::Keep);
+        // A configured budget is named as the user's own, not as the default.
+        let set = evidence(&agents(70_000), profiles);
+        assert!(set.contains("65,536 bytes your Codex config sets"), "{set}");
+        assert!(!set.contains("default"), "{set}");
     }
 
     #[test]
@@ -5265,6 +5429,22 @@ mod tests {
             );
         }
         assert!(styled.contains("\x1b[31mRed: change.\x1b[0m"));
+        // The legend wraps between its parts on a narrow terminal.
+        let narrow = format_report(
+            &report,
+            ReportOptions {
+                width: Some(40),
+                color: true,
+                ..Default::default()
+            },
+        );
+        let legend = &narrow[narrow.find("\x1b[31mRed: change.").unwrap()..];
+        let legend: Vec<&str> = legend.lines().take(2).collect();
+        assert!(
+            legend.iter().all(|l| cells(&strip_ansi(l)) <= 40),
+            "{legend:?}"
+        );
+        assert!(legend[1].contains("Dim: no verdict."), "{legend:?}");
         let words = |text: &str| {
             text.lines()
                 .filter(|l| !l.starts_with("Red: change."))

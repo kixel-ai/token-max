@@ -4327,6 +4327,16 @@ mod tests {
                 .all(|s| s.summaries == 0)
         );
         assert_eq!(short.base.recommended, Some(BeforeCacheExpires));
+        // Turning it off writes no summary, so no summary's lost detail is mentioned.
+        let mut report = report(scan, 10.0);
+        report
+            .checks
+            .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
+        report.checks.push(CheckResult::T3Idle(check));
+        let text = format_report(&report, ReportOptions::default());
+        let line = crate::test_support::report_line(&text, "T3 idle compaction");
+        assert_eq!(line.mark, "change", "{text}");
+        assert!(!line.evidence.contains("A summary drops detail"), "{text}");
     }
 
     #[test]

@@ -343,10 +343,7 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
             row.cost_usd += cost.known_usd;
             row.complete &= priced && cost.total_usd.is_some();
             // A request counts once in each row its parts reach.
-            if !r.parts[..index]
-                .iter()
-                .any(|q| q.model.as_deref() == key.0)
-            {
+            if !r.parts[..index].iter().any(|q| q.model.as_deref() == key.0) {
                 row.requests += 1;
             }
             // Server fees belong to the request, which its first part stands for.

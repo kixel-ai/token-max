@@ -148,7 +148,7 @@ pub struct ContextInput<'a> {
     pub profiles: &'a [Profile],
     /// Public prices.
     pub catalog: &'a Catalog,
-    /// Recommend turning a piece off when it cost more than this per use.
+    /// Suggest turning a used piece off when it cost more than this per use.
     pub max_cost_per_use_usd: f64,
 }
 
@@ -645,6 +645,9 @@ struct Row {
     owner: usize,
     key: usize,
     time: Millis,
+    /// Whether its owner's first shaped request carried it, so the whole window
+    /// could have recorded a use. One first sent later stays advisory when unused.
+    from_start: bool,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -680,6 +683,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::default();
     let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::default();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
+    let mut first_shaped: HashMap<usize, &str> = HashMap::default();
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -711,6 +715,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             (Harness::Codex, Linkage::Chronological) => (view.candidates.iter().collect(), true),
             _ => (vec![], false),
         };
+        if shaped {
+            first_shaped.entry(owner).or_insert(&*r.id);
+        }
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
             .profiles
@@ -872,6 +879,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     key,
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
+                    from_start: first_shaped.get(&owner) == Some(&&*r.id),
                 }
             });
             row.cost.requests += 1;
@@ -1276,16 +1284,22 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     c.control = None;
                 }
             }
-            if let Some(calls) = c.calls {
-                c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
-            }
-            if let (Some(_), true, Some(per_use)) = (&c.control, c.current, c.cost_per_use_usd)
+            c.cost_per_use_usd = c
+                .estimated_usd
+                .zip(c.calls.filter(|&calls| calls > 0))
+                .map(|(usd, calls)| usd / calls as f64);
+            if let (Some(_), true, Some(usd), Some(calls)) =
+                (&c.control, c.current, c.estimated_usd, c.calls)
                 && c.tier_unknown_requests == 0
             {
-                c.verdict = Some(if per_use > input.max_cost_per_use_usd {
-                    Verdict::Off
-                } else {
-                    Verdict::Keep
+                // Codex catalog skill uses are only partly recorded, so their nonuse is unproven.
+                let visible = row.from_start && c.skill.is_none();
+                c.verdict = Some(match calls {
+                    _ if usd <= 0.0 => Verdict::Keep,
+                    0 if visible => Verdict::Off,
+                    0 => Verdict::Consider,
+                    _ if usd / calls as f64 > input.max_cost_per_use_usd => Verdict::Consider,
+                    _ => Verdict::Keep,
                 });
             }
             if let Some(parent) = interned.kinds[row.key].parent {
@@ -1529,7 +1543,7 @@ mod tests {
         assert!(close(artifact.cost_usd, 1200.0 * READ));
         assert_eq!(artifact.tokens, Some(1200));
         assert_eq!(artifact.calls, Some(0));
-        assert_eq!(artifact.verdict, Some(Verdict::Keep));
+        assert_eq!(artifact.verdict, Some(Verdict::Off));
         let system = row(&rows, "Claude Code system prompt");
         assert!(close(
             system.cost_usd,
@@ -1566,23 +1580,34 @@ mod tests {
     }
 
     #[test]
-    fn verdicts_compare_cost_per_use_with_the_limit() {
-        let (scan, requests) = shaped();
-        let artifact = 1200.0 * READ;
-        let rows = costs(&scan, &requests, artifact / 2.0);
-        // No use counts as one use.
-        assert_eq!(row(&rows, "Artifact").verdict, Some(Verdict::Off));
-        assert!(close(
-            row(&rows, "Artifact").cost_per_use_usd.unwrap(),
-            artifact
-        ));
+    fn verdicts_turn_off_unused_pieces_and_weigh_used_ones_per_use() {
+        let (mut scan, mut requests) = shaped();
+        // Never used across the window: off, however little it cost.
+        let rows = costs(&scan, &requests, 1.0);
+        let artifact = row(&rows, "Artifact");
+        assert_eq!(
+            (artifact.verdict, artifact.cost_per_use_usd),
+            (Some(Verdict::Off), None)
+        );
         // Two calls halve the docs server's 150-token read cost.
-        assert!(close(
-            row(&rows, "docs").cost_per_use_usd.unwrap(),
-            150.0 * READ / 2.0
-        ));
+        let docs = 150.0 * READ / 2.0;
+        assert!(close(row(&rows, "docs").cost_per_use_usd.unwrap(), docs));
         assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Keep));
         assert_eq!(row(&rows, "Bash").verdict, None);
+        // Used, but above the limit per use: advisory.
+        let rows = costs(&scan, &requests, docs / 2.0);
+        assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Consider));
+        // First sent after the window's first request, so the window cannot rule out a use.
+        scan.requests.insert(
+            0,
+            exposure("r0", &["bash", "docs", "system", "listing"], 3, 6000),
+        );
+        requests.insert(0, request("r0", 0, 1200, 120, 480));
+        let rows = costs(&scan, &requests, 1.0);
+        let artifact = row(&rows, "Artifact");
+        assert!(artifact.estimated_usd.is_some());
+        assert_eq!(artifact.verdict, Some(Verdict::Consider));
+        assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Keep));
     }
 
     /// One token per character: each request's complete text equals its input.
@@ -1788,7 +1813,11 @@ mod tests {
             control_text(read.control.as_ref().unwrap(), Harness::Claude),
             r#""permissions": {"deny": ["mcp__docs__read"]}"#
         );
-        let off = costs(&scan, &requests, 0.0);
+        let unused = ExposureScan {
+            tool_calls: vec![],
+            ..scan.clone()
+        };
+        let off = costs(&unused, &requests, 1.0);
         let off = row(&off, "docs");
         assert_eq!(off.verdict, Some(Verdict::Off));
         assert!(off.details.iter().all(|d| d.verdict.is_none()));
@@ -1883,6 +1912,13 @@ mod tests {
                         ..(*exposure("r1", &[], 0, 0).view).clone()
                     }),
                     results: None,
+                }],
+                // A used tool keeps its own verdict, rather than one an unused server's off covers.
+                tool_calls: vec![ToolCalls {
+                    name: format!("mcp__docs_server__{exposed}"),
+                    profiles: vec!["profile".into()],
+                    calls: 1,
+                    last_used: 2,
                 }],
                 ..ExposureScan::default()
             };
@@ -2187,7 +2223,7 @@ mod tests {
             control_text(docs.control.as_ref().unwrap(), Harness::Codex),
             "mcp_servers.docs-server.enabled = false"
         );
-        assert_eq!(docs.verdict, Some(Verdict::Keep));
+        assert_eq!(docs.verdict, Some(Verdict::Off));
         let agents = row(&rows, "AGENTS.md");
         assert_eq!(
             (agents.kind, agents.control.as_ref()),

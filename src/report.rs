@@ -388,6 +388,7 @@ fn feature_tier(c: &ContextCost, covered: bool) -> &'static str {
     match c.verdict {
         Some(Verdict::Off) => tier(Action::Change),
         _ if covered => tier(Action::Change),
+        Some(Verdict::Consider) => tier(Action::Advisory),
         Some(Verdict::Keep) => tier(Action::Keep),
         None if c.current && c.control.is_some() => tier(Action::Advisory),
         None => PLAIN,
@@ -1569,9 +1570,12 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::Speed(s) => return s.reason.clone(),
         CheckResult::Background(b) => {
             return match r.action {
+                Action::Advisory if r.savings_usd.is_some() => {
+                    "Its whole cost is above --max-cost-per-use, but its uses are not recorded, so it may still cost less per use.".into()
+                }
                 Action::Advisory => format!("{} {}", background_unknown(b), b.reason),
                 _ if r.current == Some(Setting::Toggle(false)) => "Off; it costs nothing.".into(),
-                _ => "Estimated cost against --max-cost-per-use, counting its unrecorded uses as one.".into(),
+                _ => "Its whole cost is within --max-cost-per-use, so it costs no more than that per use.".into(),
             };
         }
         CheckResult::BashCap(b) => {
@@ -2442,7 +2446,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     );
     out.line(
         &format!(
-            "Setting comparisons are per 30 days at this window's rate; what features and context cost, and how often they were used, are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than {} per use (--max-cost-per-use).",
+            "Setting comparisons are per 30 days at this window's rate; what features and context cost, and how often they were used, are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -2465,30 +2469,46 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             || "Cost unknown".into(),
             |usd| format!("Costs {}", about(usd)),
         );
-        let per_use = c
+        let each = c
             .cost_per_use_usd
-            .map_or_else(|| "cost unknown".into(), about);
+            .map_or_else(String::new, |usd| format!(" ({} each)", about(usd)));
         let uses = if c.skill.is_some() {
             format!(
-                "{} ({per_use} per use, counting zero as one); {}. {}",
+                "{}{each}; {}. {}",
                 uses(c),
                 catalog_evidence(c),
                 catalog_control(c)
             )
-        } else if c.calls.unwrap_or(0) == 0 {
-            uses(c)
         } else {
-            format!("{} ({per_use} each)", uses(c))
+            format!("{}{each}", uses(c))
         };
-        let change = if typed_only(c.control.as_ref()) {
-            format!("on {arrow} only when you type /{}", c.name)
-        } else {
-            format!("on {arrow} off")
-        };
-        if c.verdict == Some(Verdict::Off) {
-            format!("{label}: {change}. {cost}; {uses}.")
-        } else {
-            format!("{label}: on. {cost}; {uses}.")
+        let typed = typed_only(c.control.as_ref());
+        match c.verdict {
+            Some(Verdict::Off) if typed => format!(
+                "{label}: on {arrow} only when you type /{}. {cost}; {uses}.",
+                c.name
+            ),
+            Some(Verdict::Off) => format!("{label}: on {arrow} off. {cost}; {uses}."),
+            // A Codex catalog skill's line already names its control.
+            Some(Verdict::Consider) if c.skill.is_some() => format!("{label}: on. {cost}; {uses}."),
+            Some(Verdict::Consider) => format!(
+                "{label}: on. {cost}; {uses}{}. {}: {}.",
+                if c.calls == Some(0) {
+                    ", but it was first sent during the window"
+                } else {
+                    ""
+                },
+                if typed {
+                    "Hide it from the model"
+                } else {
+                    "Turn off"
+                },
+                control_text(
+                    c.control.as_ref().expect("verdicts need a control"),
+                    c.harness
+                )
+            ),
+            _ => format!("{label}: on. {cost}; {uses}."),
         }
     };
     // What long foreground Bash waits cost: a total over the window, like their count.
@@ -2560,6 +2580,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             }
             Action::Advisory => {
                 if let CheckResult::Background(b) = result {
+                    if r.savings_usd.is_some() {
+                        return format!(
+                            "{head}. {}. {} to turn it off.",
+                            background_cost(r),
+                            background_off(b, out)
+                        );
+                    }
                     if r.current.is_none() {
                         return format!(
                             "{head}. {} {} Candidate owner: {}. Verify ownership before using: {}.",
@@ -2641,6 +2668,30 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             out.line(&text, 2, tier(Action::Change));
         }
     }
+    // A measured background generation over the limit is advisory only because its
+    // uses are not recorded, so it sits with the features worth considering off.
+    let costly = |c: &&(&CheckResult, Common<'_>)| {
+        matches!(c.0, CheckResult::Background(_))
+            && action(c) == Action::Advisory
+            && c.1.savings_usd.is_some()
+    };
+    let considered: Vec<&(&CheckResult, Common<'_>)> = checks.iter().filter(costly).collect();
+    let consider: Vec<&ContextCost> = pieces
+        .iter()
+        .copied()
+        .filter(|c| c.verdict == Some(Verdict::Consider))
+        .collect();
+    if !considered.is_empty() || !consider.is_empty() {
+        out.section("Consider turning off");
+        for c in considered {
+            let text = check_line(c, out);
+            out.line(&text, 2, tier(Action::Advisory));
+        }
+        for c in consider {
+            let text = piece(c, out);
+            out.line(&text, 2, tier(Action::Advisory));
+        }
+    }
     let keeps: Vec<&(&CheckResult, Common<'_>)> = checks
         .iter()
         .filter(|c| action(c) == Action::Keep)
@@ -2663,7 +2714,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     }
     let unknown: Vec<&(&CheckResult, Common<'_>)> = checks
         .iter()
-        .filter(|c| action(c) == Action::Advisory)
+        .filter(|c| action(c) == Action::Advisory && !costly(c))
         .collect();
     // Switchable context still sent today without enough pricing or use evidence for a verdict.
     let unpriced: Vec<&ContextCost> = setting_rows(&report.context)
@@ -2977,7 +3028,7 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
     out.section("What each piece of context costs");
     out.line(
         &format!(
-            "Priced over the requests that carried it in the same window. Tool and discovery detail costs are included in their server total. Recommended off when it cost more than {} per use.",
+            "Priced over the requests that carried it in the same window. Tool and discovery detail costs are included in their server total. Recommended off when never used, and worth considering off when it cost more than {} per use.",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -3079,10 +3130,10 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
                     .map_or_else(|| "settings.json".into(), |p| out.home(&p.settings_file));
                 format!(
                     "{}: {} in {file}",
-                    if c.verdict == Some(Verdict::Off) {
-                        "Recommended off"
-                    } else {
-                        "Turn off"
+                    match c.verdict {
+                        Some(Verdict::Off) => "Recommended off",
+                        Some(Verdict::Consider) => "Consider turning off",
+                        _ => "Turn off",
                     },
                     control_text(control, c.harness)
                 )
@@ -3399,7 +3450,9 @@ mod tests {
         estimated: Option<f64>,
         calls: Option<u64>,
     ) -> ContextCost {
-        let cost_per_use = calls.and_then(|c| estimated.map(|e| e / c.max(1) as f64));
+        let cost_per_use = calls
+            .filter(|&c| c > 0)
+            .and_then(|c| estimated.map(|e| e / c as f64));
         ContextCost {
             harness: Harness::Claude,
             largest_characters: None,
@@ -3421,8 +3474,10 @@ mod tests {
             last_used: calls.filter(|&c| c > 0).map(|_| NOV1 + 5 * DAY_MS),
             current: true,
             cost_per_use_usd: cost_per_use,
-            verdict: match (&control, cost_per_use) {
-                (Some(_), Some(c)) => Some(if c > 1.0 { Verdict::Off } else { Verdict::Keep }),
+            verdict: match (&control, estimated, calls) {
+                (Some(_), Some(_), Some(0)) => Some(Verdict::Off),
+                (Some(_), Some(_), Some(_)) if cost_per_use > Some(1.0) => Some(Verdict::Consider),
+                (Some(_), Some(_), Some(_)) => Some(Verdict::Keep),
                 _ => None,
             },
             control,
@@ -3768,25 +3823,27 @@ mod tests {
         let text = text(&report, None, false);
         let lines: Vec<&str> = text.lines().collect();
         let section = |title: &str| lines.iter().position(|l| *l == title).expect(title);
-        let (change, keep, unknown, fixed) = (
+        let (change, consider, keep, unknown, fixed) = (
             section("Change"),
+            section("Consider turning off"),
             section("Keep"),
             section("Not enough evidence"),
             section("No setting turns these off"),
         );
-        assert!(change < keep && keep < unknown && unknown < fixed);
+        assert!(change < consider && consider < keep && keep < unknown && unknown < fixed);
         let has = |line: &str| lines.contains(&line);
-        assert!(has("5 setting changes recommended."));
+        assert!(has("2 setting changes recommended."));
         assert!(has(
             "  Main-agent prompt cache TTL: 5m -> 1h. Saves $25, using the 99.5% of requests with measured usage. Set in /synthetic/home/.claude/settings.json:promptCacheTtl."
         ));
         assert!(has("  Artifact tool: on -> off. Costs $90; never used."));
+        // Used, but above the limit per use: worth considering off, with the setting inline.
         assert!(has(
-            "  Skill example: on -> only when you type /example. Costs $12; the model used it 2 times ($6 each)."
+            "  Skill example: on. Costs $12; the model used it 2 times ($6 each). Hide it from the model: \"skillOverrides\": {\"example\": \"user-invocable-only\"}."
         ));
         // Turning syncing off removes typed uses too, so every use counts.
         assert!(has(
-            "  Skills synced from claude.ai: on -> off. Costs $30; used 2 times ($15 each)."
+            "  Skills synced from claude.ai: on. Costs $30; used 2 times ($15 each). Turn off: \"syncClaudeAiSkills\": false."
         ));
         assert!(has(
             "  Skill tools:deploy: costs $6; never used. Turn off its plugin with /plugin, or remove the skill from the added directory."
@@ -3818,12 +3875,7 @@ mod tests {
         let json = &snippet[snippet.find('{').unwrap()..snippet.find("\n  }\n").unwrap() + 4];
         assert_eq!(
             serde_json::from_str::<Value>(json).unwrap(),
-            serde_json::json!({
-                "enableArtifact": false,
-                "skillOverrides": {"example": "user-invocable-only"},
-                "syncClaudeAiSkills": false,
-                "permissions": {"deny": ["mcp__docs"]}
-            })
+            serde_json::json!({ "enableArtifact": false })
         );
     }
 
@@ -4682,7 +4734,7 @@ mod tests {
             calls: Some(0),
             last_used: None,
             current: true,
-            cost_per_use_usd: Some(5.0),
+            cost_per_use_usd: None,
             verdict: Some(Verdict::Off),
         };
         report.context = vec![skill.clone()];
@@ -4696,6 +4748,12 @@ mod tests {
         );
         // Feature and context costs are totals over the window, however short.
         assert!(text(&report, Some(200), false).contains("Costs $5; the model never used it."));
+        // First sent during the window, so the window cannot rule out a use.
+        let mut late = report.clone();
+        late.context[0].verdict = Some(Verdict::Consider);
+        assert!(text(&late, Some(400), false).contains(
+            "Costs $5; the model never used it, but it was first sent during the window. Hide it from the model:"
+        ));
         report.scan.since = Some(instant(&report.generated_at) - 3_600_000);
         report.context.push(ContextCost {
             kind: ContextKind::System,

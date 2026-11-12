@@ -1286,7 +1286,8 @@ pub fn price_request(catalog: &Catalog, r: &Request) -> Cost {
     request_evidence(r, add_costs(&parts))
 }
 
-fn request_evidence(r: &Request, mut result: Cost) -> Cost {
+/// A request's priced parts and fees, unknown when its own record says usage is missing.
+pub(crate) fn request_evidence(r: &Request, mut result: Cost) -> Cost {
     let mut assumptions: IndexSet<String> = result.assumptions.drain(..).collect();
     for issue in &r.issues {
         if !assumptions.contains(&**issue) {

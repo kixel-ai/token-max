@@ -88,6 +88,7 @@ pub fn make_request() -> Request {
         version: Some("2.1.314".into()),
         client: Some("sdk-ts".into()),
         cwd: None,
+        effort: None,
         parts: vec![message_part(claude_usage(ClaudeUsage::default()))],
         server_tools: Some(Default::default()),
         profiles: vec!["profile".into()].into(),

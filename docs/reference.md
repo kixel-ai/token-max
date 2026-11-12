@@ -190,6 +190,32 @@ in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.
 Independent check savings must not be summed.
 
+## Session export
+
+`token-max sessions` prints each session's usage at public API prices, one
+JSON object per line, for tools that tie sessions to their own records, such
+as moq-dev/quest's `quest usage`. It takes `--since` and the profile and price
+options; `token-max sessions --help` lists every field.
+
+```sh
+token-max sessions --since 2026-11-01
+```
+
+A Claude subagent, and a Codex review or spawned thread, is a session of its
+own that names the session it came from. Each session lists its native ID,
+working directory, every Git branch its records name with the first and last
+time, and its tokens and cost per model and reasoning effort. Branches come
+from records in the `--since` window; when none names one, as in a Codex
+session begun before it (Codex names its branch only when a session starts),
+the last branch named before the window is listed. A request whose parts ran on
+several models, such as an advisor call, counts once in each model's entry. A request copied
+into another transcript, as a fork does, counts once, with its original
+session. A cost is a lower bound, marked `"complete": false`, when a request
+could not be priced or a transcript had unreadable or unfinished lines.
+Compaction summaries the transcripts never recorded are not estimated here.
+Native session IDs appear only in this export: the report hashes them, and SSH
+never carries them.
+
 ## Cache TTL
 
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from

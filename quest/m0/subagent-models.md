@@ -84,4 +84,4 @@ Update the README's feature list and `docs/semantics.md` in the same PR.
 
 ## Related
 
-- [Session export](https://github.com/kixelated/token-max/pull/54) - prices each subagent transcript file as its own record; share the attribution
+- [Session export](https://github.com/kixelated/token-max/pull/69) - `token-max sessions` prices each subagent session on its own and names its parent in `src/sessions.rs`; reuse that rather than a second reader

@@ -24,6 +24,7 @@ use crate::terminal::{WrapOptions, wrap_text};
 const HELP: &str = "token-max: cheaper agent settings from local usage
 
 Usage: token-max [options]
+       token-max sessions [options]  Each session's priced usage as JSON lines; see its --help
 
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
@@ -62,6 +63,37 @@ SIGINT/SIGTERM cancel with exit 2 and no success report.
 
 Exit 0: no applicable change (advisory findings may remain).
 Exit 1: change recommended. Exit 2: scan, pricing, argument or cancellation failure.
+";
+
+const SESSIONS_HELP: &str =
+    "token-max sessions: each transcript session's usage at public API prices
+
+Usage: token-max sessions [options]
+
+  --since YYYY-MM-DD|ISO  Count requests from midnight UTC or an instant with timezone
+  --claude-dir DIR        Select a Claude profile (repeatable)
+  --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
+  --t3-dir DIR            Select a T3 state directory (repeatable)
+  --offline               Use cached public prices without network access
+  --prices-file FILE      Use a local models.dev catalog without network access
+  --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
+  -h, --help              Show this help
+
+Prints one JSON object per line for each Claude Code or Codex session with a request in the
+window, ordered by its first request. A Claude subagent and a Codex review or spawned thread
+are sessions of their own. Fields: harness; session, its native ID; parent, the session it
+was spawned from; review, whether Codex marked it a review; cwd; branches, each Git branch
+its records in the window name with the first and last time, or else the last named before
+it; start and end of its requests; models, one entry per model and reasoning effort with
+requests (each request once in every entry it reaches), inputTokens (uncached),
+cacheWriteTokens, cacheReadTokens, outputTokens, costUsd and complete; costUsd; complete;
+skippedLines, the unreadable lines in its files; files. A cost is a lower bound when
+complete is false: a request could not be priced, or a file had unreadable or unfinished
+lines.
+
+Public API-price estimates, not subscription bills. Reads transcripts only and prints no
+prompt or reply text. Errors go to stderr as JSON.
+Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 
 /// Whether this process has started its single final write. A cancelling signal holds this
@@ -317,9 +349,9 @@ fn width() -> Option<usize> {
     Some(if columns == 0 { 80 } else { columns.into() })
 }
 
-fn help() -> String {
+fn help(text: &str) -> String {
     let width = width();
-    HELP.split('\n')
+    text.split('\n')
         .map(|row| {
             // Option descriptions continue under their own column.
             let continuation = row.strip_prefix("  -").and_then(|rest| {
@@ -452,20 +484,92 @@ fn now() -> Millis {
     i64::try_from(elapsed.as_millis()).expect("clock within range")
 }
 
+/// The `--since` bound; an empty value is absent, as JavaScript treats a falsy option.
+fn window(values: &Values) -> Result<Option<Millis>, ScanError> {
+    match values.since.as_deref() {
+        None | Some("") => Ok(None),
+        Some(value) => since(value).map(Some),
+    }
+}
+
+/// Where public prices come from.
+fn price_options(
+    prices_file: Option<String>,
+    price_cache: Option<String>,
+    offline: bool,
+) -> Result<PriceOptions, ScanError> {
+    let cache = match price_cache {
+        Some(cache) => PathBuf::from(cache),
+        None => {
+            let base = match env("XDG_CACHE_HOME") {
+                Some(base) => PathBuf::from(base),
+                None => std::env::home_dir()
+                    .ok_or_else(|| ScanError::new("cannot discover home directory"))?
+                    .join(".cache"),
+            };
+            base.join("token-max").join("models.json")
+        }
+    };
+    Ok(PriceOptions {
+        file: prices_file
+            .filter(|file| !file.is_empty())
+            .map(PathBuf::from),
+        cache,
+        offline,
+    })
+}
+
+/// `token-max sessions`: scan this host's selected profiles and price each session.
+fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
+    let invalid = || ScanError::new("invalid arguments; use token-max sessions --help");
+    let values = parse(args).ok_or_else(invalid)?;
+    if values.help {
+        return Ok((Output::Text(help(SESSIONS_HELP)), 0));
+    }
+    let report_only = values.json
+        || values.plain
+        || values.details
+        || values.version
+        || values.include_local
+        || values.ssh_scan
+        || values.max_cost_per_use.is_some()
+        || !values.ssh.is_empty();
+    if report_only {
+        return Err(invalid());
+    }
+    let since = window(&values)?;
+    let mut discovery = DiscoveryOptions::host()?;
+    discovery.claude_dirs = values.claude_dirs;
+    discovery.codex_dirs = values.codex_dirs;
+    discovery.t3_dirs = values.t3_dirs;
+    let scan = scan(&ScanOptions { discovery, since })?;
+    let catalog = load_prices(&price_options(
+        values.prices_file,
+        values.price_cache,
+        values.offline,
+    )?)?;
+    let mut lines = vec![];
+    for session in crate::sessions::export(&scan, &catalog) {
+        write_json(&mut lines, &session)
+            .map_err(|_| ScanError::new("analysis failed; no report produced"))?;
+    }
+    let lines = String::from_utf8(lines).expect("JSON is UTF-8");
+    Ok((Output::Text(lines), 0))
+}
+
 /// Run one atomic scan, returning the output and exit code without writing either.
 fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
+    if args.first().is_some_and(|arg| arg == "sessions") {
+        return sessions(&args[1..]);
+    }
     let values = parse(args).ok_or_else(|| ScanError::new("invalid arguments; use --help"))?;
     if values.help {
-        return Ok((Output::Text(help()), 0));
+        return Ok((Output::Text(help(HELP)), 0));
     }
     if values.version {
         return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
     }
-    // An empty value is absent, as JavaScript treats a falsy option.
-    let since = match values.since.as_deref() {
-        None | Some("") => None,
-        Some(value) => Some(since(value)?),
-    };
+    let since = window(&values)?;
     let max_cost_per_use_usd = match values.max_cost_per_use.as_deref() {
         None => 1.0,
         Some(value) => max_cost_per_use(value)?,
@@ -575,26 +679,11 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             scans[index] = Some(result?);
         }
         phase("Loading public prices");
-        let cache = match values.price_cache {
-            Some(cache) => PathBuf::from(cache),
-            None => {
-                let base = match env("XDG_CACHE_HOME") {
-                    Some(base) => PathBuf::from(base),
-                    None => std::env::home_dir()
-                        .ok_or_else(|| ScanError::new("cannot discover home directory"))?
-                        .join(".cache"),
-                };
-                base.join("token-max").join("models.json")
-            }
-        };
-        load_prices(&PriceOptions {
-            file: values
-                .prices_file
-                .filter(|file| !file.is_empty())
-                .map(PathBuf::from),
-            cache,
-            offline: values.offline,
-        })
+        load_prices(&price_options(
+            values.prices_file,
+            values.price_cache,
+            values.offline,
+        )?)
     })();
     let catalog = scanned.inspect_err(|_| ssh::cancel())?;
     phase("Checking settings");
@@ -684,7 +773,8 @@ pub fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    let json = args.iter().any(|a| a == "--json");
+    // Machine output keeps its diagnostics machine-readable too.
+    let json = args.iter().any(|a| a == "--json") || args.first().is_some_and(|a| a == "sessions");
     let handler = ctrlc::set_handler(move || {
         let committed = COMMITTED.lock().unwrap_or_else(PoisonError::into_inner);
         if *committed {

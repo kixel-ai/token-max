@@ -15,9 +15,9 @@ chosen option marked ✅:
 - `--json` once people run `doctor`: ✅ remove it (rejected: keep it as
   `doctor --json`; move it to its own sub-command). It has no consumer: SSH
   audits use their own stream (`--ssh-scan`, `src/wire.rs`), and
-  moq-dev/quest reads only the
-  [session export](/quest/m0/session-export.md). The report is for people;
-  each machine output is its own sub-command with a named consumer.
+  moq-dev/quest reads only the session export, `token-max sessions`. The
+  report is for people; each machine output is its own sub-command with a
+  named consumer.
 
 This is its own quest, ranked before `doctor`, so `doctor` never has to
 define a JSON mode and the tests are rewritten once.

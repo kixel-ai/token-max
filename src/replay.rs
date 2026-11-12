@@ -93,6 +93,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         version: event.version.clone(),
         client: event.client.clone(),
         cwd: event.cwd.clone(),
+        effort: None,
         profiles: event.profiles.clone(),
         locations: vec![event.location.clone()],
         accounting: Accounting::Individual,
@@ -1064,6 +1065,7 @@ mod tests {
         let n = requests.len() as u64;
         Scan {
             t3: vec![],
+            sessions: Default::default(),
             snapshot_started_at: iso(0),
             snapshot_finished_at: iso(0),
             since: None,

@@ -22,6 +22,7 @@ pub mod replay;
 pub mod report;
 pub mod safe;
 pub mod scenarios;
+pub mod sessions;
 mod skills;
 pub mod ssh;
 pub mod t3;

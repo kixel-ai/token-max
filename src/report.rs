@@ -3670,6 +3670,7 @@ mod tests {
             generated_at: "2026-12-01T00:00:00.000Z".into(),
             scan: Scan {
                 t3: vec![],
+                sessions: Default::default(),
                 snapshot_started_at: "2026-12-01T00:00:00.000Z".into(),
                 snapshot_finished_at: "2026-12-01T00:00:01.000Z".into(),
                 since: Some(NOV1),

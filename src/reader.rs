@@ -26,6 +26,7 @@ use crate::model::{
     StructuralEvent, Text, Usage,
 };
 use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
+use crate::sessions::{Record, Sessions};
 
 /// Select a time window and local roots.
 #[derive(Clone, Debug)]
@@ -570,6 +571,7 @@ struct Context {
     tier: Option<Text>,
     source: Option<Text>,
     cwd: Option<Text>,
+    effort: Option<Text>,
     pricing: Option<Arc<Pricing>>,
     profiles: Profiles,
 }
@@ -610,6 +612,7 @@ impl FileState {
                 tier: None,
                 source: None,
                 cwd: None,
+                effort: None,
                 pricing: None,
                 profiles: strings.profiles(&snapshot.profiles),
             },
@@ -699,6 +702,7 @@ fn request(
         version: context.version.clone(),
         client: context.client.clone(),
         cwd: context.cwd.clone(),
+        effort: context.effort.clone(),
         parts: vec![],
         server_tools: None,
         profiles: context.profiles.clone(),
@@ -779,6 +783,7 @@ impl EventIndex {
 /// What an API request record adds to the requests that answer it.
 struct RefFacts {
     source: Option<Text>,
+    effort: Option<Text>,
     attempt: Option<Attempt>,
     requested_speed: Option<RequestedSpeed>,
     time: Millis,
@@ -789,6 +794,7 @@ impl RefFacts {
     fn of(r: &Request) -> Self {
         Self {
             source: r.source.clone(),
+            effort: r.effort.clone(),
             attempt: r.attempt.clone(),
             requested_speed: r.requested_speed.clone(),
             time: r.time,
@@ -869,6 +875,7 @@ struct Reader {
     issues: IndexSet<Text>,
     modern_totals: HashSet<String>,
     legacy: Vec<(Request, String)>,
+    sessions: Sessions,
 }
 
 impl Reader {
@@ -918,9 +925,20 @@ impl Reader {
             );
         }
         match snapshot.harness {
-            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected),
-            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected),
+            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected)?,
+            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected)?,
         }
+        self.sessions.observe(Record {
+            harness: snapshot.harness,
+            session: &file.context.session,
+            subagent: file.subagent,
+            file: &location.file,
+            cwd: file.context.cwd.as_ref(),
+            raw,
+            time,
+            selected,
+        });
+        Ok(())
     }
 
     fn claude(
@@ -1004,6 +1022,7 @@ impl Reader {
             pending.source = text(member(raw, "querySource"));
             let params = nested(raw, "params");
             pending.model = text(member(params, "model"));
+            pending.effort = text(member(nested(params, "output_config"), "effort"));
             pending.attempt = Some(Attempt {
                 max_output_tokens: match count(params.get("max_tokens")) {
                     Ok(budget) => budget,
@@ -1094,6 +1113,7 @@ impl Reader {
             };
             let mut r = request(snapshot, location, context, time, name);
             r.model = text(member(m, "model"));
+            r.effort = text(member(raw, "effort"));
             r.reference = opaque(raw, "requestRef")?.map(Text::from);
             r.source = text(member(raw, "querySource"));
             r.agent = if is_true(raw, "isSidechain") || subagent {
@@ -1318,6 +1338,12 @@ impl Reader {
                 set(&mut context.cwd, Some(cwd));
             }
             set(&mut context.model, label(member(p, "model")).as_deref());
+            let mode = nested(nested(p, "collaboration_mode"), "settings");
+            set(
+                &mut context.effort,
+                label(coalesce(p.get("effort"), mode.get("reasoning_effort")).unwrap_or(&NULL))
+                    .as_deref(),
+            );
             context.turn = opaque(p, "turn_id")?.map(Text::from);
             context.tier = text(member(p, "service_tier"));
             if let Some(time) = time
@@ -1501,6 +1527,9 @@ impl Reader {
                 if let Some(model) = label(member(applied, "model")) {
                     set(&mut context.model, Some(&model));
                 }
+                if let Some(effort) = label(member(applied, "reasoning_effort")) {
+                    set(&mut context.effort, Some(&effort));
+                }
                 if let Some(provider) = label(member(applied, "model_provider_id")) {
                     context.provider = Some(provider.into());
                 }
@@ -1649,6 +1678,9 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
     if previous.provider.is_none() {
         previous.provider = r.provider;
     }
+    if previous.effort.is_none() {
+        previous.effort = r.effort;
+    }
     union(&mut previous.issues, r.issues);
     answered
 }
@@ -1700,6 +1732,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         issues: IndexSet::default(),
         modern_totals: HashSet::default(),
         legacy: vec![],
+        sessions: Sessions::default(),
     };
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
@@ -1727,6 +1760,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut issues,
         modern_totals,
         legacy,
+        sessions,
         ..
     } = reader;
     for (r, total_key) in legacy {
@@ -1768,6 +1802,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                     r.source = found.source.clone();
                 }
                 r.attempt = found.attempt.clone();
+                if r.effort.is_none() {
+                    r.effort = found.effort.clone();
+                }
                 if found.requested_speed.is_some() {
                     r.requested_speed = found.requested_speed.clone();
                 }
@@ -1932,6 +1969,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         },
         coverage,
         t3,
+        sessions,
     })
 }
 

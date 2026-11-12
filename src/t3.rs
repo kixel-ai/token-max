@@ -870,27 +870,12 @@ impl NativeIds {
     pub(crate) fn observe(&mut self, raw: &Map<String, Value>, harness: Harness, session: &str) {
         let payload = raw.get("payload").and_then(Value::as_object);
         // A Claude subagent file records its parent's session id under its own session key.
-        // A Codex subagent thread names its root as `session_id`, or in older spawns its
-        // parent as `parent_thread_id`.
         let (native, parent) = if harness == Harness::Claude {
             (raw.get("sessionId").and_then(Value::as_str), None)
         } else if raw.get("type").and_then(Value::as_str) == Some("session_meta")
             && let Some(p) = payload
         {
-            fn text(v: Option<&Value>) -> Option<&str> {
-                v.and_then(Value::as_str).filter(|s| !s.is_empty())
-            }
-            let id = text(p.get("id")).or_else(|| text(p.get("session_id")));
-            let parent = text(p.get("session_id"))
-                .filter(|root| Some(*root) != id)
-                .or_else(|| text(p.get("parent_thread_id")))
-                .or_else(|| {
-                    text(
-                        p.get("source")
-                            .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id")),
-                    )
-                });
-            (id, parent)
+            crate::sessions::codex_thread(p)
         } else {
             (None, None)
         };

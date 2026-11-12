@@ -63,6 +63,8 @@ Agent's choices, for the implementer to revisit:
 - Re-read each file just before writing and stop if it changed since the
   report read it. Write atomically, without replacing a symlink.
 - `--plain` and `NO_COLOR` still apply to the prompts.
+- `token-max sessions` parses only a leading `sessions` word
+  (`src/cli.rs`); generalize it into sub-command parsing for `doctor`.
 
 The same PR updates `--help`, the README and `docs/reference.md`, whose
 "Nothing is hidden behind an interactive prompt" no longer holds.
@@ -70,7 +72,3 @@ The same PR updates `--help`, the README and `docs/reference.md`, whose
 ## Required
 
 - [Remove the JSON report](/quest/m0/remove-json.md) - `doctor` has no JSON mode to carry over
-
-## Related
-
-- [Export priced sessions as JSON](/quest/m0/session-export.md) - the other sub-command; whichever lands first adds sub-command parsing

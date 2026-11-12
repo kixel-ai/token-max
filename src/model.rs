@@ -1009,7 +1009,8 @@ impl Usd {
 
     /// Round `usd` to the nearest step.
     ///
-    /// Panics on a non-finite amount or one past ±2^63 dollars, which no price produces.
+    /// Panics on a non-finite amount or one of at least 2^63 dollars either way, which no
+    /// validated price produces.
     pub fn from_f64(usd: f64) -> Self {
         let steps = (usd * Self::STEPS).round();
         assert!(
@@ -1044,17 +1045,18 @@ impl Usd {
     }
 }
 
+// Overflow panics in release builds too, rather than wrapping into a wrong total.
 impl std::ops::Add for Usd {
     type Output = Self;
     fn add(self, other: Self) -> Self {
-        Self(self.0 + other.0)
+        Self(self.0.checked_add(other.0).expect("dollar total overflow"))
     }
 }
 
 impl std::ops::Sub for Usd {
     type Output = Self;
     fn sub(self, other: Self) -> Self {
-        Self(self.0 - other.0)
+        Self(self.0.checked_sub(other.0).expect("dollar total overflow"))
     }
 }
 
@@ -1067,13 +1069,13 @@ impl std::ops::Neg for Usd {
 
 impl std::ops::AddAssign for Usd {
     fn add_assign(&mut self, other: Self) {
-        self.0 += other.0;
+        *self = *self + other;
     }
 }
 
 impl std::ops::SubAssign for Usd {
     fn sub_assign(&mut self, other: Self) {
-        self.0 -= other.0;
+        *self = *self - other;
     }
 }
 

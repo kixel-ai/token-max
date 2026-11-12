@@ -211,13 +211,21 @@ fn rate(value: Option<&Value>) -> Result<Option<f64>, ScanError> {
     }
 }
 
+/// Dollars per million tokens no real model charges, so a larger rate is a malformed catalog
+/// rather than a price; it keeps every charge far inside [`Usd`]'s range.
+const MAX_RATE: f64 = 1e6;
+
 fn rates(value: &Value) -> Result<Rates, ScanError> {
     let c = object(value);
+    let price = |key| match rate(c.get(key))? {
+        Some(r) if r > MAX_RATE => Err(ScanError::new("price catalog rate out of range")),
+        r => Ok(r),
+    };
     Ok(Rates {
-        input: rate(c.get("input"))?,
-        output: rate(c.get("output"))?,
-        read: rate(c.get("cache_read"))?,
-        write: rate(c.get("cache_write"))?,
+        input: price("input")?,
+        output: price("output")?,
+        read: price("cache_read")?,
+        write: price("cache_write")?,
     })
 }
 
@@ -1868,6 +1876,10 @@ mod tests {
         assert_eq!(
             parse(r#"{"p":{"models":{"m":{"cost":{"input":-1}}}}}"#).unwrap_err(),
             "invalid price catalog rate"
+        );
+        assert_eq!(
+            parse(r#"{"p":{"models":{"m":{"cost":{"output":1e30}}}}}"#).unwrap_err(),
+            "price catalog rate out of range"
         );
         assert_eq!(
             parse(r#"{"p":{"models":{"m":{"cost":{"tiers":null}}}}}"#).unwrap_err(),

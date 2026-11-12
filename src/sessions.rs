@@ -220,6 +220,8 @@ pub struct Session {
     pub start: String,
     pub end: String,
     pub models: Vec<ModelUsage>,
+    /// The exact total of the models' costs, which can differ in the last digit from adding
+    /// their rounded values.
     pub cost_usd: Usd,
     /// False when any request could not be priced or a file had unreadable lines.
     pub complete: bool,

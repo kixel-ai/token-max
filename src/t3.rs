@@ -875,7 +875,8 @@ impl NativeIds {
         } else if raw.get("type").and_then(Value::as_str) == Some("session_meta")
             && let Some(p) = payload
         {
-            crate::sessions::codex_thread(p)
+            let thread = crate::reader::CodexThread::parse(p);
+            (thread.id, thread.parent)
         } else {
             (None, None)
         };

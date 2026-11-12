@@ -8,7 +8,7 @@ Every recommendation is one of three kinds, and its line says which:
 
 - **Measured**: replayed from the user's own transcripts at public API prices.
   Name what the replay holds constant and what it could not measure.
-- **Documented**: the provider's own guidance, cited, beside whatever the
+- **Official**: the provider's own guidance, cited, beside whatever the
   transcripts show.
 - **Opinion**: the maintainer's preference, such as avoiding auto memory in
   repositories that have an AGENTS.md. Label it as one, and show the

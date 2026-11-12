@@ -923,7 +923,10 @@ impl Reader {
         subagent.session = self.strings.text(&subagent.session);
         self.strings.share(&mut subagent.parent);
         match self.subagents.get_mut(&subagent.session) {
-            Some(known) if known.kind == UNRECORDED => known.kind = subagent.kind,
+            Some(known) if known.kind == UNRECORDED => {
+                known.kind = subagent.kind;
+                known.native = subagent.native;
+            }
             Some(_) => {}
             None => {
                 self.subagents.insert(subagent.session.clone(), subagent);
@@ -1022,6 +1025,7 @@ impl Reader {
                         kind: spawn.kind.unwrap_or_else(|| UNRECORDED.into()),
                         built_in: spawn.built_in,
                         fork: spawn.fork,
+                        native: false,
                         model: spawn.model,
                         effort: spawn.effort,
                     });
@@ -1390,7 +1394,8 @@ impl Reader {
                 let spawn = nested(object(subagent), "thread_spawn");
                 // A spawned thread names its role, null meaning the default; other subagents
                 // are named by their source, such as `review`.
-                let kind = if object(subagent).contains_key("thread_spawn") {
+                let native = !object(subagent).contains_key("thread_spawn");
+                let kind = if !native {
                     match coalesce(spawn.get("agent_role"), spawn.get("agent_type")) {
                         None | Some(Value::Null) => Some("default".into()),
                         Some(role) => label(role),
@@ -1410,6 +1415,7 @@ impl Reader {
                     kind: kind.unwrap_or_else(|| UNRECORDED.into()),
                     built_in: None,
                     fork: false,
+                    native,
                     model: None,
                     effort: None,
                 });
@@ -2405,15 +2411,19 @@ mod tests {
             );
         }
         let data = scan(&options(&w)).unwrap();
-        let mut kinds: Vec<(&str, bool)> = data
+        let mut kinds: Vec<(&str, bool, bool)> = data
             .subagents
             .iter()
-            .map(|s| (s.kind.as_str(), s.parent.is_some()))
+            .map(|s| (s.kind.as_str(), s.parent.is_some(), s.native))
             .collect();
         kinds.sort();
         assert_eq!(
             kinds,
-            [("default", true), ("explorer", true), ("review", false)]
+            [
+                ("default", true, false),
+                ("explorer", true, false),
+                ("review", false, true)
+            ]
         );
         assert!(
             data.requests

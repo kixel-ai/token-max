@@ -29,6 +29,9 @@ const EXPLORE_INHERITS: (u64, u64, u64) = (2, 1, 198);
 /// Model families that rank above Opus, whose Explore runs are capped at Opus.
 const ABOVE_OPUS: [&str; 2] = ["fable", "mythos"];
 
+/// Codex 0.167's built-in agent roles, none of which sets a model.
+const CODEX_ROLES: [&str; 3] = ["default", "explorer", "worker"];
+
 /// Claude model family aliases a definition or call can name.
 const FAMILIES: [&str; 5] = ["haiku", "sonnet", "opus", "fable", "mythos"];
 
@@ -759,16 +762,27 @@ fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSo
     let Some(recorded) = run.model else {
         return (ModelSource::Unknown, "no model was recorded".into());
     };
-    let role = definition(controls, kind).filter(|_| kind != "review");
+    let native = run.subagent.is_some_and(|s| s.native);
+    let unknown = |reason: String| (ModelSource::Unknown, reason);
+    if native && kind != "review" {
+        return unknown(format!(
+            "Codex chooses the {kind} subagent's model itself; token-max does not model it"
+        ));
+    }
+    let role = definition(controls, kind).filter(|_| !native);
     if let Some(file) = role
         && file.modified.is_none_or(|m| m > run.start)
     {
-        return (
-            ModelSource::Unknown,
-            format!("{} changed after this run started", file.file),
-        );
+        return unknown(format!("{} changed after this run started", file.file));
     }
-    let (source, detail, expect) = if kind == "review" {
+    // A custom role with no current file may have set a model that is gone now.
+    if !native && role.is_none() && !CODEX_ROLES.contains(&kind) {
+        return unknown(match kind {
+            UNRECORDED => "no record names its agent role".into(),
+            _ => format!("no current role file defines {kind}"),
+        });
+    }
+    let (source, detail, expect) = if native {
         // A review records no parent thread, so its session model is the configured one.
         match (&controls.review, &controls.session) {
             (Some(review), _) => (
@@ -839,6 +853,7 @@ fn settings_text(
     controls: &AgentControls,
     kind: &str,
     fork: bool,
+    native: bool,
 ) -> (String, String) {
     match profile.harness {
         Harness::Claude if fork => (
@@ -878,7 +893,11 @@ fn settings_text(
             }
             (model, effort)
         }
-        Harness::Codex if kind == "review" => (
+        Harness::Codex if native && kind != "review" => (
+            format!("none that token-max models for Codex {kind} subagents"),
+            format!("none that token-max models for Codex {kind} subagents"),
+        ),
+        Harness::Codex if native => (
             format!(
                 "review_model in {}",
                 owner_file(controls.review.as_ref(), &profile.settings_file)
@@ -971,20 +990,22 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         let at = models.partition_point(|(t, _)| *t <= time);
         models[..at].last().or(models.first()).map(|(_, m)| *m)
     };
-    let mut groups: IndexMap<(Harness, Vec<String>, &str), Vec<&Request>> = IndexMap::default();
+    // A Codex source such as `review` never shares a line with a role of the same name.
+    let mut groups: IndexMap<(Harness, Vec<String>, &str, bool), Vec<&Request>> =
+        IndexMap::default();
     for r in scan.requests.iter().filter(|r| r.agent == Agent::Subagent) {
-        let kind = spawns
-            .get(&*r.session)
-            .map_or(UNRECORDED, |s| s.kind.as_str());
+        let spawn = spawns.get(&*r.session);
+        let kind = spawn.map_or(UNRECORDED, |s| s.kind.as_str());
+        let native = spawn.is_some_and(|s| s.native);
         let mut profiles = r.profiles.to_vec();
         profiles.sort();
         groups
-            .entry((r.harness, profiles, kind))
+            .entry((r.harness, profiles, kind, native))
             .or_default()
             .push(r);
     }
     let mut lines = vec![];
-    for ((harness, profiles, kind), requests) in groups {
+    for ((harness, profiles, kind, native), requests) in groups {
         let owners: Vec<&Profile> = scan
             .profiles
             .iter()
@@ -1031,8 +1052,13 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             };
             *sources.entry(source).or_default() += 1;
             if let Some(profile) = owners.first() {
-                let (model, effort) =
-                    settings_text(profile, scoped(&profile.agents, run.cwd), kind, fork);
+                let (model, effort) = settings_text(
+                    profile,
+                    scoped(&profile.agents, run.cwd),
+                    kind,
+                    fork,
+                    native,
+                );
                 model_settings.insert(model);
                 effort_settings.insert(effort);
             }
@@ -1087,6 +1113,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             harness,
             profiles,
             kind: kind.to_string(),
+            native,
             runs: runs.len() as u64,
             requests: requests.len() as u64,
             priced,
@@ -1131,6 +1158,7 @@ mod tests {
             kind: kind.into(),
             built_in: None,
             fork: false,
+            native: false,
             model: None,
             effort: None,
         }
@@ -1325,8 +1353,17 @@ mod tests {
             codex_source(&parent, &controls, "explorer").0,
             ModelSource::Inherited
         );
+        // A custom role no current file defines may have had a model; it stays unknown.
+        assert_eq!(
+            codex_source(&parent, &controls, "checker").0,
+            ModelSource::Unknown
+        );
         // A review records no parent, so the configured session model stands in.
-        let mut review = run(&role, "gpt-6.1-sol", "unused");
+        let review_mode = Subagent {
+            native: true,
+            ..role.clone()
+        };
+        let mut review = run(&review_mode, "gpt-6.1-sol", "unused");
         review.parent = None;
         assert_eq!(
             codex_source(&review, &controls, "review").0,
@@ -1339,6 +1376,22 @@ mod tests {
         assert_eq!(
             codex_source(&review, &controls, "review").0,
             ModelSource::Inherited
+        );
+        // A role named review is a role, not Codex's review mode.
+        let named = run(&role, "gpt-6-luna", "gpt-6.1-sol");
+        let reviewer = AgentControls {
+            definitions: vec![defined("review", Some("gpt-6-luna"), None)],
+            ..controls.clone()
+        };
+        assert_eq!(
+            codex_source(&named, &reviewer, "review").0,
+            ModelSource::Definition
+        );
+        let mut compact = run(&review_mode, "gpt-6.1-sol", "gpt-6.1-sol");
+        compact.parent = None;
+        assert_eq!(
+            codex_source(&compact, &controls, "compact").0,
+            ModelSource::Unknown
         );
     }
 
@@ -1572,7 +1625,7 @@ mod tests {
             Some("opus")
         );
         // The guidance names the file that applies where the run happened.
-        let (model, _) = settings_text(&profile, inside, "reviewer", false);
+        let (model, _) = settings_text(&profile, inside, "reviewer", false, false);
         let file = path(&project.join(".claude/agents/reviewer.md"));
         assert!(model.contains(&file), "{model}");
     }

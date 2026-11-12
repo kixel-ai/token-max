@@ -932,6 +932,9 @@ pub struct Subagent {
     pub built_in: Option<bool>,
     /// A Claude fork, which always runs on its parent's model.
     pub fork: bool,
+    /// A Codex subagent source such as `review` or `compact`, which no agent role defines,
+    /// even when a role has the same name.
+    pub native: bool,
     /// The model the spawning call requested, when recorded.
     pub model: Option<String>,
     /// The effort the spawning call requested, when recorded.
@@ -2176,6 +2179,8 @@ pub struct SubagentCost {
     pub profiles: Vec<String>,
     /// Claude's agent type, or Codex's agent role or subagent source; `unrecorded` when no record names it.
     pub kind: String,
+    /// Whether `kind` is a Codex subagent source, such as `review`, rather than an agent role.
+    pub native: bool,
     /// Subagent transcripts of this type in the window.
     pub runs: u64,
     pub requests: u64,

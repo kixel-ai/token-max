@@ -96,7 +96,8 @@ the tuned window and reason for every model it used.
 
 `subagents[]` has one row per Claude subagent type or Codex agent role and
 profile set, most expensive first: `kind` (`unrecorded` when no record names
-it), `runs`, `requests`, `priced`, `cost`, `models` and `efforts` (request
+it), `native` (true for a Codex subagent source such as `review` or `compact`,
+which never shares a row with a role of the same name), `runs`, `requests`, `priced`, `cost`, `models` and `efforts` (request
 counts by recorded value, `unrecorded` when absent), `sources` (run counts by
 `source` of `call`, `definition`, `setting`, `inherited` or `unknown`, with a
 `detail`), `cheapest` (the provider's cheapest current catalog model, or null),

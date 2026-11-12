@@ -986,7 +986,7 @@ fn subagent_name(c: &SubagentCost) -> String {
             format!("{} subagents of unrecorded type", label(&c.harness))
         }
         (Harness::Claude, kind) => format!("{kind} subagent"),
-        (Harness::Codex, "review") => "Codex review subagent".into(),
+        (Harness::Codex, kind) if c.native => format!("Codex {kind} subagent"),
         (Harness::Codex, kind) => format!("{kind} agent role"),
     }
 }
@@ -4350,6 +4350,7 @@ mod tests {
             harness: Harness::Claude,
             profiles: vec!["profile".into()],
             kind: "Explore".into(),
+            native: false,
             runs: 3,
             requests: 10,
             priced: 9,

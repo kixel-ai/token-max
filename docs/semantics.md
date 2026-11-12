@@ -1016,7 +1016,10 @@ The reader names a Claude subagent from the `agentType`, `isBuiltIn`, `isFork`,
 never its `description`. Without that file, the records' `attributionAgent` or
 `querySource` `agent:builtin:<type>` names it. A Codex thread is named by its
 `source.subagent.thread_spawn.agent_role`, null meaning `default`; other
-subagent sources, such as `review`, keep their source name. Each request keeps
+subagent sources, such as `review`, keep their source name and are marked
+native, so a role named `review` stays its own line. token-max does not model
+how Codex picks the model of a native source other than `review`, so those
+runs are unknown. Each request keeps
 its recorded effort: Claude's per-record `effort`, Codex's `turn_context`
 `effort` or applied `reasoning_effort`.
 

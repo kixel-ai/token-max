@@ -1616,12 +1616,12 @@ fn metadata(
                 .into_iter()
                 .find_map(|selected| items.get(&(root.clone(), selected)));
             if let Some(found) = found.filter(|_| list.is_empty()) {
-                for (instance, linked) in found.threads.values() {
-                    if *linked {
-                        owners.push(instance.clone());
-                    } else {
-                        result.unlinked.insert(root.clone());
-                    }
+                // An item proves its thread ran the request, so a thread whose owner the
+                // bound cannot confirm blocks the others rather than dropping out.
+                if found.threads.values().all(|(_, linked)| *linked) {
+                    owners.extend(found.threads.values().map(|(i, _)| i.clone()));
+                } else {
+                    result.unlinked.insert(root.clone());
                 }
                 if owners.is_empty() && found.orphaned {
                     result.orphaned.insert(root.clone());
@@ -3104,6 +3104,7 @@ mod tests {
             ("window-early-uuid", "turn2"),
             ("window-uuid", "turn"),
             ("late-uuid", "turn3"),
+            ("late-tool", "turn"),
         ] {
             let id = format!("{ITEM_PREFIX}{}", native.replace(':', "%3A"));
             let thread = match turn {
@@ -3137,7 +3138,13 @@ mod tests {
                 json!([{"type":"tool_use","id":"split-tool","name":"Bash","input":{}}]),
             ),
             ("old", "2025-12-31T00:00:00Z", "cli", json!([])),
-            ("late", "2026-01-01T00:00:12Z", "sdk-ts", json!([])),
+            // Its other item's thread is linked, but cannot make the session's owner unique.
+            (
+                "late",
+                "2026-01-01T00:00:12Z",
+                "sdk-ts",
+                json!([{"type":"tool_use","id":"late-tool","name":"Bash","input":{}}]),
+            ),
         ] {
             write(
                 w.claude.join(format!("projects/p/{session}.jsonl")),

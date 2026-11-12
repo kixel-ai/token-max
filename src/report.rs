@@ -307,10 +307,25 @@ fn common(result: &CheckResult) -> Common<'_> {
 
 /// How to turn auto memory off: an environment variable as is, a setting in its file.
 fn memory_off(c: &MemoryCheck, out: &Out<'_>) -> String {
-    match &c.off_file {
+    let set = match &c.off_file {
         Some(file) => format!("Set {} in {}", c.off, out.home(file)),
         None => format!("Set {}", c.off),
+    };
+    if c.overrides.is_empty() {
+        return set;
     }
+    // Settings that may override it have to be turned off where they set memories too.
+    let files: Vec<String> = c.overrides.iter().map(|f| out.home(f)).collect();
+    format!("{set}, and in {} where it sets memories", files.join(", "))
+}
+
+/// Whether Codex memories may have run in the window, generating notes in requests
+/// that are recorded only in telemetry.
+fn codex_unmeasured(c: &MemoryCheck) -> bool {
+    c.harness == Harness::Codex
+        && (c.base.current != Some(false)
+            || c.reads + c.writes > 0
+            || c.context_usd.is_some_and(|usd| usd > 0.0))
 }
 
 /// Why auto memory is not recommended, whatever it cost.
@@ -2809,7 +2824,23 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 ),
                 None => "Cost unknown".into(),
             };
+            // Codex extraction and consolidation are never measured, so a total from
+            // a window where memories may have run is a lower bound.
+            let cost = match (r.savings_usd, codex_unmeasured(m)) {
+                (Some(usd), true) if r.coverage.is_none() => format!(
+                    "Costs at least {}, without extraction and consolidation, which are not measured",
+                    about(usd)
+                ),
+                (None, true) => {
+                    "Cost unknown, and extraction and consolidation are not measured".into()
+                }
+                _ => cost,
+            };
             let cost = match r.coverage {
+                Some(c) if r.savings_usd.is_some() && codex_unmeasured(m) => format!(
+                    "{cost}, from the {}% of requests that recorded their context, without extraction and consolidation, which are not measured",
+                    percent(c.priced, c.total)
+                ),
                 Some(c) if r.savings_usd.is_some() && c.priced == 0 => {
                     format!(
                         "{cost}, from memory's reads and writes alone; no request recorded its context"
@@ -2822,7 +2853,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 _ => cost,
             };
             return match action(c) {
-                Action::Keep if memory_free(m) => format!("{head}. Costs nothing."),
+                Action::Keep if memory_free(m) && !codex_unmeasured(m) => {
+                    format!("{head}. Costs nothing.")
+                }
                 Action::Keep => format!("{head}. {cost}; {}.", memory_uses(m)),
                 _ if m.unresolved.is_some() => format!(
                     "{}: may be on {arrow} off. {}. {MEMORY_ADVICE}. {cost}; {}. {}.",
@@ -3989,6 +4022,7 @@ mod tests {
                     reads: 1,
                     writes: 2,
                     unresolved: None,
+                    overrides: vec![],
                 })
             },
         ];

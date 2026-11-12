@@ -368,6 +368,7 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
             off_file: scope.map(|s| s.file.to_string()),
             directory: None,
             unresolved: None,
+            overrides: vec![],
         });
     }
     let first = scopes.first().map_or("settings.json", |s| s.file);
@@ -382,21 +383,29 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
         off_file: Some(file.into()),
         directory: None,
         unresolved: None,
+        overrides: vec![],
     })
 }
 
-/// Codex memories, off by default: `features.memories` turns them on, and
-/// `memories.use_memories = false` keeps them out of the prompt. Scopes run from
-/// lowest to highest precedence; `user` is the file a default is set in.
-/// <https://developers.openai.com/codex/memories>
+/// Codex memories, off by default: `features.memories` turns them on.
+/// `memories.use_memories = false` only keeps them out of the prompt and
+/// `memories.generate_memories = false` only stops new ones, so both together are
+/// off too. Scopes run from lowest to highest precedence; `user` is the file a
+/// default is set in.
+/// <https://learn.chatgpt.com/docs/customization/memories>
 pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryControl, ScanError> {
     let key = "features.memories";
     let (enabled, file, owner) = match scoped_bool(scopes, key)? {
         Some((value, file)) => (value, file, format!("{file}:{key}")),
         None => (false, user, format!("{user}:{key} (default)")),
     };
-    let (value, owner) = match scoped_bool(scopes, "memories.use_memories")? {
-        Some((false, file)) if enabled => (false, format!("{file}:memories.use_memories")),
+    let used = scoped_bool(scopes, "memories.use_memories")?;
+    let generated = scoped_bool(scopes, "memories.generate_memories")?;
+    let (value, owner) = match (used, generated) {
+        (Some((false, used)), Some((false, generated))) if enabled => (
+            false,
+            format!("{used}:memories.use_memories and {generated}:memories.generate_memories"),
+        ),
         _ => (enabled, owner),
     };
     Ok(MemoryControl {
@@ -406,6 +415,7 @@ pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryContro
         off_file: Some(file.into()),
         directory: None,
         unresolved: None,
+        overrides: vec![],
     })
 }
 
@@ -1497,13 +1507,22 @@ mod tests {
             (on.value, on.off.as_str()),
             (true, "features.memories = false")
         );
+        // Keeping them out of the prompt alone still generates new ones.
         let unused = codex(json!({
             "features": { "memories": true },
             "memories": { "use_memories": false },
         }));
+        assert!(unused.value);
+        let inert = codex(json!({
+            "features": { "memories": true },
+            "memories": { "use_memories": false, "generate_memories": false },
+        }));
         assert_eq!(
-            (unused.value, unused.owner.as_str()),
-            (false, "config.toml:memories.use_memories")
+            (inert.value, inert.owner.as_str()),
+            (
+                false,
+                "config.toml:memories.use_memories and config.toml:memories.generate_memories"
+            )
         );
     }
 

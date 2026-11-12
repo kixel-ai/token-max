@@ -955,6 +955,9 @@ pub struct MemoryControl {
     /// project trust or profile selection; null when it resolved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unresolved: Option<String>,
+    /// Files whose memory settings may override `offFile` but could not be resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
 }
 
 /// One background feature's current state and the control that owns it.
@@ -1369,6 +1372,9 @@ pub struct MemoryCheck {
     /// Why whether it is on could not be resolved, making `current` null.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unresolved: Option<String>,
+    /// Files whose memory settings may override `offFile`, to turn it off in too.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
 }
 
 /// Foreground Bash calls that held the cache idle, and what their misses cost.

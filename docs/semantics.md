@@ -835,8 +835,8 @@ after it; `MEMORY.md` is placed like any other attachment. Both form the
 as subagents do, leaves any memory instructions elsewhere in its prompt
 unmeasured, and the check says how many did. Today's setting decides whether
 memory is on, as every other check reads today's settings. It is resolved at the
-working directory of the latest request in the main-agent session that started
-last, including the project's `.claude/settings.json` and
+working directory of the latest main-agent request, where the user worked most
+recently, including the project's `.claude/settings.json` and
 `.claude/settings.local.json`, so `offFile` names the file that owns it. Claude
 Code reads the setting when a session starts, so a session begun before a change
 keeps the old value until it restarts. When main-agent sessions in that
@@ -855,22 +855,26 @@ request whose reply made the call, using that model's calibrated token ratio;
 writes without one stay unpriced rather than zero.
 
 [Codex](https://developers.openai.com/codex/memories) memories are off unless
-`features.memories = true`; `memories.use_memories = false` keeps them out of
-the prompt. With each full context Codex 0.167.0 adds a developer message part
+`features.memories = true`, or both `memories.use_memories = false` (which
+keeps them out of the prompt) and `memories.generate_memories = false` (which
+stops new ones) are set. With each full context Codex 0.167.0 adds a developer message part
 tagged `memories.instructions` holding `memory_summary.md`, split into several
 parts when long; earlier versions start it with `## Memory`. A full world
 state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
 is gone. The settings decide whether memory is on, resolved like Claude Code's
-at the latest session's directory, including the `.codex/config.toml` layers of
+at the latest main-agent request's directory, including the `.codex/config.toml` layers of
 a trusted project. When something the scan cannot record could change that, the
 state is unknown and the line is a yellow advisory that memories may be on,
 naming why: a project layer that sets memories in a project whose trust is not
 recorded, a named config profile (or legacy `profiles` entry) that sets
-memories, or a named profile's `project_root_markers` or `projects` that could
+memories, a named profile's `project_root_markers` or `projects` that could
 add or drop a `.codex/config.toml` above the session's directory that sets
-them. Fully resolved settings keep a definite on or off. A session there that carried a summary at its latest request while the settings
-turn memory off is noted, and requests that recorded no context leave the cost
+them, or a T3 instance whose launch arguments or environment could override
+them. Its turn-off advice then also names each file that sets memories, since
+the user setting alone would not override them. Fully resolved settings keep a
+definite on or off. A session there that carried a summary at its latest
+request while the settings turn memory off is noted, and requests that recorded no context leave the cost
 a lower bound or unknown even with memories off now, since they may have run
 while memories were on. A missing summary shows nothing, since it appears only once one has
 been written. Uses are
@@ -879,7 +883,8 @@ the dedicated `memories` tools (`list`, `read` and `search` as reads,
 rule of thumb) and shell reads under `<codex home>/memories/` or
 `memories_v2/`. Dedicated tool output moves to the memory row; shell output
 stays on the shell's row. Extraction and consolidation run as requests Codex
-records only in telemetry, so their cost is not measured. No local session has
+records only in telemetry, so their cost is not measured: wherever memories may
+have run in the window, the line says so and its total is a lower bound. No local session has
 enabled Codex memories, so its tests use synthetic records derived from the
 0.167.0 source.
 

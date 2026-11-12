@@ -687,7 +687,7 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
-        // Auto memory's setting is read at the latest session's directory.
+        // Auto memory's setting is read at the latest main-agent request's directory.
         let latest = crate::memory::deciding_request(&relevant).and_then(|r| r.cwd.clone());
         if relevant
             .iter()
@@ -988,13 +988,19 @@ pub fn discover_codex_controls(
             );
         }
         let mut marker_selection = legacy_selection;
-        let mut memory_profiles = members(user.get("profiles"))
+        // Profiles that set memories, which a --profile selection could apply.
+        let mut memory_profiles: Vec<String> = members(user.get("profiles"))
             .values()
-            .any(|p| sets_codex_memory(members(Some(p))));
+            .any(|p| sets_codex_memory(members(Some(p))))
+            .then(|| profile.settings_file.clone())
+            .into_iter()
+            .collect();
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
-            memory_profiles |= sets_codex_memory(&config);
+            if sets_codex_memory(&config) {
+                memory_profiles.push(file.clone());
+            }
             marker_selection |=
                 config.contains_key("project_root_markers") || config.contains_key("projects");
             if members(config.get("tui")).contains_key("auto_recap") {
@@ -1014,11 +1020,12 @@ pub fn discover_codex_controls(
             }
         }
         // Named profiles can set memories too, and which one launched is not recorded.
-        let profile_memory = memory_profiles.then_some(
+        let profile_memory = (!memory_profiles.is_empty()).then_some(
             "a named config profile sets memories, and --profile selection is not recorded",
         );
         if let Some(memory) = &mut profile.memory {
             memory.unresolved = profile_memory.map(String::from);
+            memory.overrides = memory_profiles.clone();
         }
         profile.background = base.clone();
         let mut unknown = base.clone();
@@ -1034,7 +1041,8 @@ pub fn discover_codex_controls(
             .iter()
             .filter(|r| r.profiles.contains(&profile.id))
             .collect();
-        // Memories' setting is read at the latest session's directory, as for Claude.
+        // Memories' setting is read at the latest main-agent request's directory, as
+        // for Claude.
         let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.clone());
         let cwds = directories(mine.iter().copied());
         for cwd in cwds {
@@ -1091,12 +1099,26 @@ pub fn discover_codex_controls(
                 } else {
                     &base_scopes[..]
                 };
-                let untrusted_layer =
-                    trust.is_none() && layers.iter().any(|(_, config)| sets_codex_memory(config));
+                let untrusted: Vec<String> = layers
+                    .iter()
+                    .filter(|(_, config)| trust.is_none() && sets_codex_memory(config))
+                    .map(|(file, _)| file.clone())
+                    .collect();
+                let untrusted_layer = !untrusted.is_empty();
                 // A named profile's project_root_markers or projects can change which
                 // project layers apply, which matters only where one sets memories.
-                let moved_layer =
-                    marker_selection && ancestor_sets_codex_memory(cwd, &profile.settings_file)?;
+                let moved = if marker_selection {
+                    ancestors_setting_codex_memory(cwd, &profile.settings_file)?
+                } else {
+                    vec![]
+                };
+                let moved_layer = !moved.is_empty();
+                let mut overrides = memory_profiles.clone();
+                for file in untrusted.into_iter().chain(moved) {
+                    if !overrides.contains(&file) {
+                        overrides.push(file);
+                    }
+                }
                 let reasons: Vec<&str> = [
                     untrusted_layer.then_some(
                         "a project .codex/config.toml sets memories, but the project's trust is not recorded",
@@ -1112,6 +1134,7 @@ pub fn discover_codex_controls(
                 profile.memory = Some(MemoryControl {
                     directory: Some(cwd.into()),
                     unresolved: (!reasons.is_empty()).then(|| reasons.join("; ")),
+                    overrides,
                     ..codex_memory(trusted, &profile.settings_file)?
                 });
             }
@@ -1152,23 +1175,26 @@ pub fn discover_codex_controls(
     Ok(())
 }
 
-/// Whether a Codex config sets whether memories are on or used.
+/// Whether a Codex config sets whether memories are on, used or generated.
 fn sets_codex_memory(config: &Map<String, Value>) -> bool {
+    let memories = members(config.get("memories"));
     members(config.get("features")).contains_key("memories")
-        || members(config.get("memories")).contains_key("use_memories")
+        || memories.contains_key("use_memories")
+        || memories.contains_key("generate_memories")
 }
 
-/// Whether any `.codex/config.toml` from `cwd` up to the filesystem root, other than
-/// the user's own, sets memories, whichever of them a project root would include.
-fn ancestor_sets_codex_memory(cwd: &str, user: &str) -> Result<bool, ScanError> {
+/// Every `.codex/config.toml` from `cwd` up to the filesystem root, other than the
+/// user's own, that sets memories, whichever of them a project root would include.
+fn ancestors_setting_codex_memory(cwd: &str, user: &str) -> Result<Vec<String>, ScanError> {
+    let mut files = vec![];
     let mut path = cwd;
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
         if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
-            return Ok(true);
+            files.push(file);
         }
         if dirname(path) == path {
-            return Ok(false);
+            return Ok(files);
         }
         path = dirname(path);
     }

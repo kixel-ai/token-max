@@ -55,8 +55,9 @@ count its uses, and `off`/`offFile` name the setting that turns it off.
 entry names its settings file. Today's setting decides
 `current`; sessions whose requests disagree with it are noted in `uncertainty`.
 When a Codex setting the scan cannot resolve, such as a `--profile` selection,
-could change it, `current` is null, the check is `advisory`, and `unresolved`
-says why.
+could change it, `current` is null, the check is `advisory`, `unresolved`
+says why, and `overrides` lists the files that set memories there, which need
+turning off too.
 When some requests recorded no context, `coverage` counts those that did
 (`priced`) out of all (`total`), and `savingsUsd` is a lower bound. The
 `memory` context row has a control but never a verdict.

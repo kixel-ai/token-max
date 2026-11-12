@@ -63,15 +63,13 @@ pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
 }
 
 /// The main-agent request whose working directory auto memory's setting is read at:
-/// the latest request of the session that started last.
+/// the latest one, where the user worked most recently.
 pub(crate) fn deciding_request<'a>(requests: &[&'a Request]) -> Option<&'a Request> {
-    let main = || requests.iter().copied().filter(|r| r.agent == Agent::Main);
-    let mut starts: HashMap<&str, Millis> = HashMap::default();
-    for r in main() {
-        let start = starts.entry(&*r.session).or_insert(r.time);
-        *start = (*start).min(r.time);
-    }
-    main().max_by_key(|r| (starts[&*r.session], r.time))
+    requests
+        .iter()
+        .copied()
+        .filter(|r| r.agent == Agent::Main)
+        .max_by_key(|r| r.time)
 }
 
 fn check(
@@ -132,7 +130,15 @@ fn check(
     let on = control.value;
     // Unknown when a setting the scan cannot resolve, such as a Codex --profile
     // selection, could change it.
-    let current = control.unresolved.is_none().then_some(on);
+    // A T3 instance's launch arguments and environment can override native settings.
+    let unresolved = control.unresolved.clone().or_else(|| {
+        profile
+            .t3
+            .as_ref()
+            .filter(|t| !t.ownership_resolved)
+            .map(|_| "the T3 instance's launch arguments or environment can override the setting, and which apply is unresolved".to_string())
+    });
+    let current = unresolved.is_none().then_some(on);
     // Claude Code adds its prompt section whenever memory is on. Codex adds a summary
     // only once one has been written, so its absence shows nothing.
     let disagree = sessions
@@ -234,7 +240,7 @@ fn check(
         uncertainty.push("Codex extracts and consolidates memories in requests it records only in telemetry, so their cost is not measurable here".into());
         uncertainty.push("Codex shell reads of the memories folder count as uses, but their output stays on the shell tool's line".into());
     }
-    if let Some(reason) = &control.unresolved {
+    if let Some(reason) = &unresolved {
         uncertainty.push(format!(
             "{reason}, so whether memory is on is unknown; without it, {} leaves it {}",
             control.owner,
@@ -310,6 +316,7 @@ fn check(
         writes_usd,
         reads,
         writes,
-        unresolved: control.unresolved.clone(),
+        unresolved,
+        overrides: control.overrides.clone(),
     }
 }

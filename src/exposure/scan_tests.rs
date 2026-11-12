@@ -2419,6 +2419,33 @@ fn claude_auto_memory_turned_off_is_kept_off() {
         "Auto memory",
         then(": off. Cost", "; used 2 times (1 read, 1 write).")
     ));
+
+    // A T3 instance whose launch arguments or environment could override the
+    // setting leaves it unknown, advised off as it may be on.
+    let mut data = scan(&options(&w, None)).unwrap();
+    for profile in &mut data.profiles {
+        profile.t3 = Some(crate::model::T3Instance {
+            state: "/synthetic/t3".into(),
+            instance: "claudeAgent".into(),
+            enabled: true,
+            idle_mode: crate::model::T3IdleMode::Off,
+            idle_owner: "synthetic".into(),
+            ownership_resolved: false,
+            limitations: vec![],
+            inherited_window: None,
+        });
+    }
+    let t3 = report(&data, 1.0);
+    let check = memory_check(&t3, Harness::Claude);
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert!(
+        check
+            .unresolved
+            .as_deref()
+            .unwrap()
+            .starts_with("the T3 instance's launch arguments")
+    );
 }
 
 /// The same records as a later session, with their own ids.
@@ -2685,7 +2712,10 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     assert!(labelled(
         &text(&r),
         "Codex memories",
-        then(": off. Cost", "")
+        then(
+            ": off. Cost unknown, and extraction and consolidation are not measured",
+            ""
+        )
     ));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
 
@@ -2815,7 +2845,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     std::fs::write(w.codex.join("config.toml"), &trusted).unwrap();
     let named = w.codex.join("loud.config.toml");
     std::fs::write(&named, "[features]\nmemories = false\n").unwrap();
-    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    let (check, rendered) = unresolved(&scan(&options(&w, None)).unwrap());
     assert_eq!(check.base.current, None);
     assert!(
         check
@@ -2823,6 +2853,8 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
             .unwrap()
             .starts_with("a named config profile sets memories")
     );
+    // Turning it off in the user config alone would leave the profile's setting.
+    assert!(rendered.contains("loud.config.toml where it sets memories."));
     std::fs::remove_file(&named).unwrap();
 
     // A named profile that changes project roots matters only where a layer it could

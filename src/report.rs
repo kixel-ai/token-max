@@ -1788,7 +1788,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
                     .iter()
                     .any(|u| u.contains("default is not established"))
                 {
-                    "No window is set for this model and its default is not documented."
+                    "No window is set for this model and neither a recorded compaction nor Claude Code's documented defaults establish its default."
                 } else {
                     "The current window setting could not be resolved."
                 }
@@ -2109,6 +2109,27 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         ),
         Harness::Claude => return None,
     })
+}
+
+/// Anthropic's quality guidance when a Claude window is larger than a priced candidate.
+fn context_rot(report: &Report, result: &CheckResult) -> &'static str {
+    match result {
+        CheckResult::Compaction(c)
+            if report
+                .scan
+                .profiles
+                .iter()
+                .any(|p| p.id == c.base.profile && p.harness == Harness::Claude)
+                && c.base.current.is_some_and(|current| {
+                    c.scenarios
+                        .iter()
+                        .any(|s| s.window < current && s.savings_usd.is_some())
+                }) =>
+        {
+            " Anthropic notes that accuracy and recall degrade as context grows (context rot); that quality effect is not priced."
+        }
+        _ => "",
+    }
 }
 
 /// How large requests on a compaction check's models got, to judge a window by.
@@ -2446,7 +2467,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     };
     let check_line = |c: &(&CheckResult, Common<'_>), out: &Out<'_>| {
         let (result, r) = c;
-        let head = format!("{}: {}", name(r, result, out), setting_value(r.current));
+        let mut head = format!("{}: {}", name(r, result, out), setting_value(r.current));
+        if let CheckResult::Compaction(c) = result
+            && c.unset
+        {
+            head += " (default)";
+        }
         match action(c) {
             Action::Change => {
                 let saves = match (r.savings_usd, result) {
@@ -2479,9 +2505,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     );
                 }
                 return format!(
-                    "{head} {arrow} {}.{saves} Set in {}.",
+                    "{head} {arrow} {}.{saves} Set in {}.{}",
                     setting_value(r.recommended),
-                    out.home(r.owner)
+                    out.home(r.owner),
+                    context_rot(report, result)
                 );
             }
             Action::Advisory => {
@@ -2502,9 +2529,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     );
                 }
                 return format!(
-                    "{head}. {}{}",
+                    "{head}. {}{}{}",
                     unresolved(result, r),
-                    context_sizes(report, result, r.profile)
+                    context_sizes(report, result, r.profile),
+                    context_rot(report, result)
                 );
             }
             Action::Keep => {}
@@ -2538,9 +2566,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     coverage_note(r)
                 )
             }
-            CheckResult::Compaction(_) => {
-                format!("{head}. No other window was cheaper on recorded sessions.")
-            }
+            CheckResult::Compaction(_) => format!(
+                "{head}. No other window was cheaper on recorded sessions.{}",
+                context_rot(report, result)
+            ),
             CheckResult::BashCap(b) => format!(
                 "{head}. Under the {} cache TTL. {}",
                 b.ttl.map_or("unknown", Ttl::as_str),
@@ -3154,6 +3183,7 @@ mod tests {
             bucket: "all",
             model: Some("claude-opus-5-5".into()),
             models: vec![Some("claude-opus-5-5".into())],
+            unset: false,
             baseline_cost: cost(Some(1234567.891), 1234567.891),
             observed_summary_cost: cost(None, 0.125),
             ttls: PerBucket {

@@ -875,12 +875,21 @@ fn prices_and_destinations_stop_the_run_whichever_fails_first() {
         "token-max",
         &format!("echo '{header}'; printf '{{' > \"$TEST_ROOT/invalid.json\"; exec sleep 600"),
     );
+    // The real binary, which starts its audit and then fails to read this transcript.
+    let broken = hosts.host("broken");
+    std::fs::write(
+        broken.join(".claude/projects/my project/main.jsonl"),
+        r#"{"timestamp":"2026-11-02T00:00:00Z","type":"assistant","message":{"usage":{"input_tokens":"bad"}}}
+"#,
+    )
+    .unwrap();
     for (destination, prices, expected) in [
         (
             "unreachable",
             &stalled,
             "token-max: unreachable: SSH connection failed",
         ),
+        ("broken", &stalled, "token-max: broken: "),
         ("slow", &invalid, "token-max: invalid public price catalog"),
     ] {
         let mut child = hosts

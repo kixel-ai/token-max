@@ -89,7 +89,17 @@ pub fn cancel() {
     children.running.clear();
 }
 
-/// A running audit; dropping it before [`Session::finish`] stops it.
+/// What an audit waits for after the header, in whichever order it comes.
+enum Step {
+    /// This host's request, once it has prices.
+    Request(Request),
+    /// This host failed before sending a request.
+    Cancelled,
+    /// The destination's outcome, which may come before the request when it fails.
+    Outcome(Result<Outcome, serde_json::Error>),
+}
+
+/// A running audit; dropping it kills the child unless [`Session::stop`] already reaped it.
 struct Session {
     destination: String,
     id: u64,
@@ -129,7 +139,8 @@ impl Drop for Session {
 /// Audit one destination with its installed `token-max`, failing on any error there.
 ///
 /// The destination scans while this host loads prices; once `request` delivers the catalog and
-/// format, it analyzes and sends back its printed report.
+/// format, it analyzes and sends back its printed report. A destination that fails first is
+/// reported at once, without waiting for the request.
 pub fn audit(
     destination: &str,
     since: Option<Millis>,
@@ -210,17 +221,33 @@ pub fn audit(
             )
         }));
     }
-    // Dropped without a request when this host fails first, and then stops every destination.
-    let Ok(request) = request.recv() else {
-        return Err(ScanError::new("cancelled; no report produced"));
+    // The destination may fail before this host has prices to send, so its outcome is read
+    // while the request is still pending.
+    let (steps, arrived) = mpsc::channel();
+    let forward = steps.clone();
+    std::thread::spawn(move || {
+        // Dropped without a request when this host fails first, and then stops every destination.
+        let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
+    });
+    std::thread::spawn(move || {
+        let _ = steps.send(Step::Outcome(stream.outcome()));
+    });
+    let mut json = None;
+    let outcome = loop {
+        match arrived.recv() {
+            Ok(Step::Request(request)) => {
+                json = Some(matches!(request.format, Format::Json));
+                if let Some(stdin) = session.stdin.as_mut() {
+                    // A destination that already failed has stopped reading; its outcome says why.
+                    let _ = wire::write(&mut BufWriter::new(stdin), &request);
+                }
+            }
+            Ok(Step::Outcome(outcome)) => break outcome,
+            Ok(Step::Cancelled) | Err(_) => {
+                return Err(ScanError::new("cancelled; no report produced"));
+            }
+        }
     };
-    let json = matches!(request.format, Format::Json);
-    if let Some(stdin) = session.stdin.as_mut() {
-        // A destination that already failed has stopped reading; its outcome says why.
-        let _ = wire::write(&mut BufWriter::new(stdin), &request);
-    }
-    drop(request);
-    let outcome = stream.outcome();
     match outcome {
         Ok(Outcome::Report {
             since: scanned,
@@ -239,6 +266,11 @@ pub fn audit(
                     "{destination}: token-max scanned a different window than requested"
                 )));
             }
+            let Some(json) = json else {
+                return Err(ScanError::new(format!(
+                    "{destination}: token-max sent a report before its request"
+                )));
+            };
             if json != matches!(printed, Printed::Json(_)) {
                 return Err(ScanError::new(format!(
                     "{destination}: token-max printed a different format than requested"

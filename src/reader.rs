@@ -783,6 +783,7 @@ impl EventIndex {
 /// What an API request record adds to the requests that answer it.
 struct RefFacts {
     source: Option<Text>,
+    effort: Option<Text>,
     attempt: Option<Attempt>,
     requested_speed: Option<RequestedSpeed>,
     time: Millis,
@@ -793,6 +794,7 @@ impl RefFacts {
     fn of(r: &Request) -> Self {
         Self {
             source: r.source.clone(),
+            effort: r.effort.clone(),
             attempt: r.attempt.clone(),
             requested_speed: r.requested_speed.clone(),
             time: r.time,
@@ -933,7 +935,8 @@ impl Reader {
             file: &location.file,
             cwd: file.context.cwd.as_ref(),
             raw,
-            time: time.filter(|_| selected),
+            time,
+            selected,
         });
         Ok(())
     }
@@ -1799,6 +1802,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                     r.source = found.source.clone();
                 }
                 r.attempt = found.attempt.clone();
+                if r.effort.is_none() {
+                    r.effort = found.effort.clone();
+                }
                 if found.requested_speed.is_some() {
                     r.requested_speed = found.requested_speed.clone();
                 }

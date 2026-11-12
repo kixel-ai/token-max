@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::collections::{HashMap, IndexMap};
-use crate::model::{Harness, Millis, Scan, Text};
+use crate::model::{Harness, Millis, Request, Scan, Text};
 use crate::prices::{Catalog, add_costs, price_part, request_evidence, server_cost};
 use crate::safe::{iso, label};
 
@@ -23,8 +23,9 @@ pub(crate) struct Record<'a> {
     pub file: &'a Text,
     pub cwd: Option<&'a Text>,
     pub raw: &'a Map<String, Value>,
-    /// The record's time, when it falls in the selected window.
     pub time: Option<Millis>,
+    /// Whether the record falls in the selected window.
+    pub selected: bool,
 }
 
 /// A Git branch a session's records name, from the first to the last selected one.
@@ -38,6 +39,9 @@ struct Branch {
 /// What a session's records name, without content.
 #[derive(Clone, Debug, PartialEq)]
 struct Facts {
+    /// When the session began: its first record, or for Codex its `session_meta`, since a
+    /// fork's copied records keep their original times.
+    created: Option<Millis>,
     id: Option<String>,
     parent: Option<String>,
     cwd: Option<Text>,
@@ -100,6 +104,7 @@ impl Sessions {
                 let entry = self.facts.entry(record.session.clone());
                 let index = entry.index();
                 entry.or_insert_with(|| Facts {
+                    created: None,
                     id: None,
                     parent: None,
                     cwd: None,
@@ -119,9 +124,14 @@ impl Sessions {
             facts.cwd = record.cwd.cloned();
         }
         let raw = record.raw;
+        let earliest = |created: Option<Millis>| match (created, record.time) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let name = match record.harness {
             // A subagent's records carry its parent's session ID and its own agent ID.
             Harness::Claude => {
+                facts.created = earliest(facts.created);
                 if facts.id.is_none() || (record.subagent && facts.parent.is_none()) {
                     let session = native(raw.get("sessionId"));
                     if record.subagent {
@@ -146,6 +156,7 @@ impl Sessions {
                 let Some(meta) = raw.get("payload").and_then(Value::as_object) else {
                     return;
                 };
+                facts.created = earliest(facts.created);
                 let (id, parent) = codex_thread(meta);
                 facts.id = facts
                     .id
@@ -160,7 +171,7 @@ impl Sessions {
                 branch(meta.get("git").and_then(|git| git.get("branch")))
             }
         };
-        if let (Some(time), Some(name)) = (record.time, name) {
+        if let (Some(time), Some(name), true) = (record.time, name, record.selected) {
             match facts.branches.iter_mut().find(|b| b.name == name) {
                 Some(b) => {
                     b.first = b.first.min(time);
@@ -223,16 +234,43 @@ pub struct Session {
 }
 
 /// Price each session with a selected request, ordered by its first request.
-pub fn export(scan: &Scan, catalog: &Catalog) -> Vec<Session> {
+pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
     struct Totals<'a> {
         harness: Harness,
         start: Millis,
         end: Millis,
         rows: IndexMap<(Option<&'a str>, Option<&'a str>), ModelUsage>,
     }
+    let facts = &scan.sessions.facts;
+    let mut held: HashMap<&str, Vec<&Text>> = HashMap::default();
+    for (key, f) in facts {
+        for file in &f.files {
+            held.entry(file).or_default().push(key);
+        }
+    }
+    let created = |key: &Text| facts.get(key).and_then(|f| f.created);
+    // A Codex fork copies its source's records under its own `session_meta`, so a request in
+    // several rollouts belongs to the thread that began first, whichever the reader read
+    // first. Claude records name their own session, which the reader already keeps.
+    let owner = |r: &'s Request| -> &'s Text {
+        let own = created(&r.session);
+        r.locations
+            .iter()
+            .filter_map(|l| held.get(&*l.file))
+            .flatten()
+            .filter_map(|key| Some((created(key)?, *key)))
+            .min_by_key(|(time, _)| *time)
+            .filter(|(time, _)| own.is_none_or(|own| *time < own))
+            .map_or(&r.session, |(_, key)| key)
+    };
     let mut sessions: IndexMap<&Text, Totals> = IndexMap::default();
     for r in &scan.requests {
-        let totals = sessions.entry(&r.session).or_insert_with(|| Totals {
+        let key = if r.harness == Harness::Codex && r.locations.len() > 1 {
+            owner(r)
+        } else {
+            &r.session
+        };
+        let totals = sessions.entry(key).or_insert_with(|| Totals {
             harness: r.harness,
             start: r.time,
             end: r.end_time,
@@ -283,7 +321,7 @@ pub fn export(scan: &Scan, catalog: &Catalog) -> Vec<Session> {
     let mut result: Vec<(Millis, Session)> = sessions
         .into_iter()
         .map(|(key, totals)| {
-            let facts = scan.sessions.facts.get(key);
+            let facts = facts.get(key);
             let files = facts.map_or(&[][..], |f| &f.files[..]);
             let (skipped_lines, deferred) = files
                 .iter()
@@ -507,5 +545,72 @@ mod tests {
             assert_eq!(found, (Some("gpt-6.1-sol"), Some("medium"), 800, 200, 100));
             assert!(s.complete && s.cost_usd > 0.0);
         }
+    }
+
+    #[test]
+    fn a_codex_forks_copied_requests_stay_with_its_source_whichever_is_read_first() {
+        let w = Workspace::new();
+        let meta = |id: &str, time: &str| {
+            json!({"type": "session_meta", "timestamp": time,
+                "payload": {"id": id, "source": "exec", "model_provider": "openai"}})
+        };
+        let usage = |id: &str, time: &str| {
+            json!({"type": "token_usage_record", "timestamp": time,
+                "payload": {"response_id": id, "turn_id": "turn", "usage": {
+                    "input_tokens": 1000, "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0, "output_tokens": 100}}})
+        };
+        let context = json!({"type": "turn_context", "timestamp": "2026-11-01T00:00:00Z",
+            "payload": {"turn_id": "turn", "model": "gpt-6.1-sol"}});
+        let copied = usage("response-a", "2026-11-01T00:00:01Z");
+        // The fork's rollout sorts first, so the reader meets the copy before the original.
+        write(
+            &w.codex.join("sessions/a-fork.jsonl"),
+            &[
+                meta("fork", "2026-11-01T01:00:00Z"),
+                context.clone(),
+                copied.clone(),
+                usage("response-b", "2026-11-01T01:00:01Z"),
+            ],
+            "",
+        );
+        write(
+            &w.codex.join("sessions/b-source.jsonl"),
+            &[meta("source", "2026-11-01T00:00:00Z"), context, copied],
+            "",
+        );
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+        let found: Vec<_> = sessions
+            .iter()
+            .map(|s| (s.session.as_deref(), s.models[0].requests, &*s.start))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (Some("source"), 1, "2026-11-01T00:00:01.000Z"),
+                (Some("fork"), 1, "2026-11-01T01:00:01.000Z"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_claude_reply_takes_its_api_requests_effort_when_it_records_none() {
+        let w = Workspace::new();
+        let mut reply = reply("session", "r", "2026-11-01T00:00:01Z", "main", "unused");
+        reply.as_object_mut().unwrap().remove("effort");
+        reply["requestRef"] = json!("api-r");
+        write(
+            &w.claude.join("projects/project/session.jsonl"),
+            &[
+                json!({"type": "api-request", "id": "api-r", "sessionId": "session",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "params": {"model": "claude-opus-5-5",
+                        "output_config": {"effort": "max"}}}),
+                reply,
+            ],
+            "",
+        );
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+        assert_eq!(sessions[0].models[0].effort.as_deref(), Some("max"));
     }
 }

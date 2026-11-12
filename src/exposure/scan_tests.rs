@@ -168,7 +168,7 @@ fn text(report: &Report) -> String {
     format_report(
         report,
         ReportOptions {
-            width: Some(200),
+            width: None,
             color: false,
             unicode: false,
             details: false,
@@ -2543,7 +2543,7 @@ fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
     let details = format_report(
         &report,
         ReportOptions {
-            width: Some(1000),
+            width: None,
             color: false,
             unicode: false,
             details: true,
@@ -2833,7 +2833,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         let r = report(data, 1.0);
         let check = memory_check(&r, Harness::Codex).clone();
         let wide = ReportOptions {
-            width: Some(1000),
+            width: None,
             color: false,
             unicode: false,
             details: false,

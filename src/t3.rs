@@ -1117,7 +1117,7 @@ const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$
 // The provider thread holding a Claude turn item, by primary-key range from `item_range`.
 // After `/clear` the native session gets a new id while T3's provider thread keeps the old
 // one, yet T3 still records the new transcript's items under that thread.
-const ITEM_THREAD: &str = "SELECT t.provider_thread_id, pt.driver, pt.provider_instance_id
+const ITEM_THREAD: &str = "SELECT t.provider_thread_id, pt.driver, pt.provider_instance_id, pt.updated_at<=?3
  FROM orchestration_v2_projection_turn_items i
  LEFT JOIN orchestration_v2_projection_provider_turns t ON t.provider_turn_id=i.provider_turn_id AND t.thread_id=i.thread_id
  LEFT JOIN orchestration_v2_projection_provider_threads pt ON pt.provider_thread_id=t.provider_thread_id
@@ -1434,6 +1434,7 @@ fn metadata(
     tx: &Transaction<'_>,
     requests: &[&NativeRequest<'_>],
     bound: &str,
+    since: Option<Millis>,
 ) -> Result<Projection, Unavailable> {
     // Reject views and unknown/missing schemas before issuing any projection queries.
     for table in [
@@ -1509,9 +1510,16 @@ fn metadata(
         });
     }
     // Claude root sessions no provider thread names, owned by the threads their turn items
-    // name instead: one per provider thread, as for provider threads above.
-    let mut item_owners: HashMap<(Harness, String), HashMap<String, String>> = HashMap::default();
-    let mut orphaned = HashSet::default();
+    // name instead: one per provider thread, as for provider threads above. Evidence from
+    // requests inside the window decides; earlier requests' only fills in.
+    #[derive(Default)]
+    struct Items {
+        /// Each provider thread's instance, and whether it was linked within the native bound.
+        threads: HashMap<String, (String, bool)>,
+        /// An item whose provider turn names no Claude provider thread.
+        orphaned: bool,
+    }
+    let mut items: HashMap<((Harness, String), bool), Items> = HashMap::default();
     let mut item_thread = tx.prepare(ITEM_THREAD)?;
     for r in requests {
         if r.harness != Harness::Claude
@@ -1519,23 +1527,27 @@ fn metadata(
         {
             continue;
         }
-        let root = (r.harness, r.root.to_string());
+        let key = (
+            (r.harness, r.root.to_string()),
+            since.is_none_or(|s| r.time >= s),
+        );
         for native in &r.native_turns {
             let (start, end) = item_range(native);
-            let mut rows = item_thread.query(rusqlite::params![start, end])?;
+            let mut rows = item_thread.query(rusqlite::params![start, end, bound])?;
             while let Some(row) = rows.next()? {
+                let found = items.entry(key.clone()).or_default();
                 match (text_column(row, 0), text_column(row, 1).as_deref()) {
                     (Some(thread), Some("claudeAgent")) => {
-                        // Legacy nullable owners block uniqueness, not other rows.
-                        let instance = text_column(row, 2).unwrap_or_default();
-                        item_owners
-                            .entry(root.clone())
-                            .or_default()
-                            .insert(thread, instance);
+                        if !found.threads.contains_key(&thread) {
+                            let linked = bool_column(row, 3) == Some(true)
+                                || owner_event
+                                    .query_row(rusqlite::params![thread, bound], |r| r.get(0))?;
+                            // Legacy nullable owners block uniqueness, not other rows.
+                            let instance = text_column(row, 2).unwrap_or_default();
+                            found.threads.insert(thread, (instance, linked));
+                        }
                     }
-                    _ => {
-                        orphaned.insert(root.clone());
-                    }
+                    _ => found.orphaned = true,
                 }
             }
         }
@@ -1599,14 +1611,18 @@ fn metadata(
                 // Legacy nullable owners block uniqueness, not other rows.
                 .map(|t| t.instance.clone().unwrap_or_default())
                 .collect();
-            if list.is_empty() {
-                owners.extend(
-                    item_owners
-                        .remove(&root)
-                        .into_iter()
-                        .flat_map(|o| o.into_values()),
-                );
-                if owners.is_empty() && orphaned.contains(&root) {
+            let found = [true, false]
+                .into_iter()
+                .find_map(|selected| items.get(&(root.clone(), selected)));
+            if let Some(found) = found.filter(|_| list.is_empty()) {
+                for (instance, linked) in found.threads.values() {
+                    if *linked {
+                        owners.push(instance.clone());
+                    } else {
+                        result.unlinked.insert(root.clone());
+                    }
+                }
+                if owners.is_empty() && found.orphaned {
                     result.orphaned.insert(root.clone());
                 }
             }
@@ -1738,7 +1754,7 @@ pub(crate) fn enrich(
                     })
                 })
                 .collect();
-            let result = metadata(&tx, &relevant, bound)?;
+            let result = metadata(&tx, &relevant, bound, since)?;
             tx.rollback()?;
             Ok::<_, Unavailable>(result)
         })();
@@ -1995,6 +2011,11 @@ pub(crate) fn enrich(
                     // T3's state was read with no provider thread or turn item for this
                     // session. A Claude request T3 ran would have a turn item unless it
                     // predates them; Codex has no such record, so its label decides.
+                    // A subagent records no turn items of its own, so only its root can
+                    // exclude T3.
+                    _ if r.harness == Harness::Claude && subagent => Some(
+                        "the subagent's root session has no transcript and no T3 provider thread",
+                    ),
                     _ if r.harness == Harness::Claude && !recorded => {
                         Some("the request predates T3's oldest retained turn item")
                     }
@@ -2752,7 +2773,7 @@ mod tests {
             ..valid
         };
         let tx = database.transaction().unwrap();
-        let data = metadata(&tx, &[&valid, &orphan], "2026-01-01T00:00:20Z").unwrap();
+        let data = metadata(&tx, &[&valid, &orphan], "2026-01-01T00:00:20Z", None).unwrap();
         assert_eq!(
             data.owners[&(Harness::Codex, "opaque-session".into())].len(),
             2
@@ -3079,10 +3100,21 @@ mod tests {
             ("orphan-uuid", "missing-turn"),
             ("split-uuid", "turn"),
             ("split-tool", "turn2"),
+            ("window-early-uuid", "turn2"),
+            ("window-uuid", "turn"),
+            ("late-uuid", "turn3"),
         ] {
             let id = format!("{ITEM_PREFIX}{}", native.replace(':', "%3A"));
-            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z')",params![id,if turn == "turn2" {"thread2"} else {"thread"},turn]).unwrap();
+            let thread = match turn {
+                "turn2" => "thread2",
+                "turn3" => "thread3",
+                _ => "thread",
+            };
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z')",params![id,thread,turn]).unwrap();
         }
+        // Linked after the native snapshot, with no earlier event to prove the link.
+        database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt3','thread3','claudeAgent','claudeAgent','2999-01-01T00:00:00Z',?1)",[json!({"nativeThreadRef":{"nativeId":"third-session"}}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn3','thread3','pt3',NULL,'completed',NULL,NULL,'{}')",[]).unwrap();
         // Each session gets its own second so its request can be found again.
         let row = |session: &str, time: &str, entrypoint: &str, content: Value| json!({"type":"assistant","uuid":format!("{session}-uuid"),"sessionId":session,"timestamp":time,"entrypoint":entrypoint,"message":{"id":format!("{session}-message"),"model":"claude-opus-5-5","content":content,"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
         for (session, time, entrypoint, content) in [
@@ -3104,12 +3136,32 @@ mod tests {
                 json!([{"type":"tool_use","id":"split-tool","name":"Bash","input":{}}]),
             ),
             ("old", "2025-12-31T00:00:00Z", "cli", json!([])),
+            ("late", "2026-01-01T00:00:12Z", "sdk-ts", json!([])),
         ] {
             write(
                 w.claude.join(format!("projects/p/{session}.jsonl")),
                 format!("{}\n", row(session, time, entrypoint, content)),
             );
         }
+        // Inside a later window only the second request decides the owner.
+        let mut early = row("window", "2026-01-01T00:00:03Z", "sdk-ts", json!([]));
+        early["uuid"] = json!("window-early-uuid");
+        early["message"]["id"] = json!("window-early-message");
+        write(
+            w.claude.join("projects/p/window.jsonl"),
+            format!(
+                "{early}\n{}\n",
+                row("window", "2026-01-01T00:00:11Z", "sdk-ts", json!([]))
+            ),
+        );
+        // A subagent records no items, so a missing root cannot exclude T3.
+        let mut sub = row("rootless", "2026-01-01T00:00:13Z", "sdk-ts", json!([]));
+        sub["isSidechain"] = json!(true);
+        write(
+            w.claude
+                .join("projects/p/rootless/subagents/agent-a1.jsonl"),
+            format!("{sub}\n"),
+        );
         // A missing originator proves nothing.
         for (name, originator) in [
             ("vscode", json!("codex_vscode")),
@@ -3127,7 +3179,7 @@ mod tests {
             );
         }
         let data = scan(&w.scan_options()).unwrap();
-        assert_eq!(data.requests.len(), 9);
+        assert_eq!(data.requests.len(), 13);
         let t3 = |p: &String| data.profiles.iter().any(|q| &q.id == p && q.t3.is_some());
         let at = |time: &str| {
             let time = timestamp(&json!(time)).unwrap();
@@ -3149,6 +3201,9 @@ mod tests {
             "2026-01-01T00:00:08Z",
             "2026-01-01T00:00:09Z",
             "2025-12-31T00:00:00Z",
+            "2026-01-01T00:00:11Z",
+            "2026-01-01T00:00:12Z",
+            "2026-01-01T00:00:13Z",
         ] {
             let r = at(time);
             assert!(r.profiles.len() > 1, "{r:?}");
@@ -3175,10 +3230,28 @@ mod tests {
                     "no T3 provider thread owns the native session, but its client label is one T3 writes",
                     2
                 ),
-                ("several T3 provider threads own the native session", 1),
+                ("several T3 provider threads own the native session", 3),
+                (
+                    "the native session's T3 provider thread was linked after the native snapshot",
+                    1
+                ),
                 ("the request predates T3's oldest retained turn item", 1),
+                (
+                    "the subagent's root session has no transcript and no T3 provider thread",
+                    1
+                ),
             ]
         );
+        let mut options = w.scan_options();
+        options.since = timestamp(&json!("2026-01-01T00:00:10Z"));
+        let window = scan(&options).unwrap();
+        let r = window
+            .requests
+            .iter()
+            .find(|r| r.time == timestamp(&json!("2026-01-01T00:00:11Z")).unwrap())
+            .unwrap();
+        let t3 = |p: &String| window.profiles.iter().any(|q| &q.id == p && q.t3.is_some());
+        assert!(r.profiles.len() == 1 && t3(&r.profiles[0]), "{r:?}");
         // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
         // so check the marker shared-history ambiguity leaves on the TTL instead.
         let ambiguous = |s: &Scan| {
@@ -3342,12 +3415,12 @@ mod tests {
             profiles: &[],
         };
         let tx = database.transaction().unwrap();
-        let data = metadata(&tx, &[&request], "2026-01-01T00:00:20Z").unwrap();
+        let data = metadata(&tx, &[&request], "2026-01-01T00:00:20Z", None).unwrap();
         assert!(data.owners[&(Harness::Codex, "opaque-session".into())].is_empty());
         tx.rollback().unwrap();
         database.execute("INSERT INTO orchestration_events VALUES(2,'thread',2,'thread','provider-thread.updated','2026-01-01T00:00:01Z',?1)",[json!({"id":"pt","providerInstanceId":"codex","nativeThreadRef":{"driver":"codex","nativeId":"native-session"},"private":"PRIVATE_HISTORY"}).to_string()]).unwrap();
         let tx = database.transaction().unwrap();
-        let data = metadata(&tx, &[&request], "2026-01-01T00:00:20Z").unwrap();
+        let data = metadata(&tx, &[&request], "2026-01-01T00:00:20Z", None).unwrap();
         assert_eq!(
             data.owners[&(Harness::Codex, "opaque-session".into())],
             vec!["codex"]
@@ -3406,6 +3479,7 @@ mod tests {
             &tx,
             &[&request, &tool, &thinking, &other],
             "2026-01-01T00:00:20Z",
+            None,
         )
         .unwrap();
         for id in ["assistant", "tool", "thinking"] {
@@ -3422,7 +3496,7 @@ mod tests {
             )
             .unwrap();
         let tx = database.transaction().unwrap();
-        let error = metadata(&tx, &[&request], "2026-01-01T00:00:20Z")
+        let error = metadata(&tx, &[&request], "2026-01-01T00:00:20Z", None)
             .err()
             .unwrap();
         assert!(error.to_string().contains("1 MiB resource bound"));
@@ -3549,6 +3623,7 @@ mod tests {
             &tx,
             &[&native_request(&request, &ids).unwrap()],
             "2026-01-01T00:00:06Z",
+            None,
         )
         .unwrap();
         assert!(data.turns[&*request.id].joined.is_none());

@@ -752,43 +752,48 @@ pub fn tune_windows(scan: &mut Scan) {
                 }
             }
         }
-        let CompactionControls {
-            capped, declared, ..
-        } = profile.compaction;
-        for (model, size) in largest {
-            let documented = native_million(&model);
-            let (value, reason) = match (observed.get(&model), documented) {
-                // The cap holds even an explicit window, so a trigger from before it cannot lift
-                // it; only a declared window can size an ID Claude Code does not recognize.
-                _ if capped && (documented.is_some() || !declared) => (
-                    Some(TUNED_STANDARD),
-                    "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
-                ),
-                (Some(&(_, tokens)), _) => (
-                    Some(tokens),
-                    format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
-                ),
-                (None, Some(true)) => (
-                    Some(TUNED_MILLION),
-                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
-                ),
-                (None, Some(false)) if size <= TUNED_STANDARD => (
-                    Some(TUNED_STANDARD),
-                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
-                ),
-                (None, Some(false)) => (
-                    None,
-                    "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
-                ),
-                (None, None) => (
-                    None,
-                    "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
-                ),
-            };
-            profile
-                .compaction
-                .tuned
-                .insert(model, TunedWindow { value, reason });
+        // Recorded directories carry their own controls, which idle and keepalive read.
+        let directories = profile.idle_directories.iter_mut().flatten();
+        for compaction in std::iter::once(&mut profile.compaction)
+            .chain(directories.filter_map(|(_, idle)| idle.compaction.as_mut()))
+        {
+            let CompactionControls {
+                capped, declared, ..
+            } = *compaction;
+            for (model, &size) in &largest {
+                let documented = native_million(model);
+                let (value, reason) = match (observed.get(model), documented) {
+                    // The cap holds even an explicit window, so a trigger from before it cannot
+                    // lift it; only a declared window can size an ID Claude Code does not recognize.
+                    _ if capped && (documented.is_some() || !declared) => (
+                        Some(TUNED_STANDARD),
+                        "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
+                    ),
+                    (Some(&(_, tokens)), _) => (
+                        Some(tokens),
+                        format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
+                    ),
+                    (None, Some(true)) => (
+                        Some(TUNED_MILLION),
+                        "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
+                    ),
+                    (None, Some(false)) if size <= TUNED_STANDARD => (
+                        Some(TUNED_STANDARD),
+                        "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
+                    ),
+                    (None, Some(false)) => (
+                        None,
+                        "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
+                    ),
+                    (None, None) => (
+                        None,
+                        "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
+                    ),
+                };
+                compaction
+                    .tuned
+                    .insert(model.clone(), TunedWindow { value, reason });
+            }
         }
     }
 }

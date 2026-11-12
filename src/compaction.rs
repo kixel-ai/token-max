@@ -2231,6 +2231,7 @@ mod tests {
         let mut capped = scan.clone();
         let mut env = Env::default();
         env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let capped_env = env.clone();
         capped.profiles[0].compaction = unset(&env);
         crate::controls::tune_windows(&mut capped);
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
@@ -2248,6 +2249,32 @@ mod tests {
         crate::controls::tune_windows(&mut capped);
         assert_eq!(window(&capped, "gateway-opus").value, None);
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
+
+        // Each recorded directory's controls, which idle and keepalive read, tune under their
+        // own cap.
+        let directory = |compaction| crate::model::IdleControl {
+            value: None,
+            owner: String::new(),
+            threshold: None,
+            threshold_owner: String::new(),
+            auto_compact: None,
+            reason: String::new(),
+            resolved: true,
+            ttl: None,
+            compaction: Some(compaction),
+        };
+        let mut directories = scan.clone();
+        directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
+            ("/open".to_string(), directory(unset(&Env::default()))),
+            ("/capped".to_string(), directory(unset(&capped_env))),
+        ]));
+        crate::controls::tune_windows(&mut directories);
+        let scoped = |cwd: &str| {
+            let idle = &directories.profiles[0].idle_directories.as_ref().unwrap()[cwd];
+            window_control(idle.compaction.as_ref().unwrap(), Some("claude-fable-5-2")).value
+        };
+        assert_eq!(scoped("/open"), Some(967_000));
+        assert_eq!(scoped("/capped"), Some(200_000));
 
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
         capped.profiles[0].compaction = unset(&env);

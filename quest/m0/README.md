@@ -182,6 +182,8 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 - [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
 - [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
+- [Tune unset windows per recorded directory](/quest/m0/directory-windows.md) - idle and keepalive price sessions run in recorded directories
+- [Cap explicit windows at the model's context window](/quest/m0/window-cap.md) - explicit windows replay at the window that actually ran
 - [Export priced sessions as JSON](/quest/m0/session-export.md) - moq-dev/quest's `quest usage` ties each session, sub-agents included, to a PR
 - [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each
 - [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - every line is colored by verdict and shows total cost and uses

@@ -643,7 +643,10 @@ pub(crate) fn existing_directory(cwd: &str) -> Result<bool, ScanError> {
 }
 
 /// The project, legacy local and local settings files Claude reads at an existing `cwd`.
-fn claude_project_files(cwd: &str, options: &DiscoveryOptions) -> Result<[String; 3], ScanError> {
+pub(crate) fn claude_project_files(
+    cwd: &str,
+    options: &DiscoveryOptions,
+) -> Result<[String; 3], ScanError> {
     let paths = project_directories(cwd, &[".git".into()])?;
     let root = paths.last().expect("cwd is included");
     let local_root = claude_local_root(root, options)?;
@@ -909,6 +912,42 @@ pub fn discover_claude_controls(
 /// Codex keys that let a profile or project file change speed, model or gates.
 const CODEX_SPEED_KEYS: [&str; 4] = ["model", "model_provider", "service_tier", "features"];
 
+/// Codex's project root markers from its system and user settings, `.git` by default.
+pub(crate) fn codex_markers(
+    scopes: &[SettingsScope],
+    file: &str,
+) -> Result<Vec<String>, ScanError> {
+    match scopes
+        .iter()
+        .rev()
+        .find_map(|s| s.config.get("project_root_markers"))
+    {
+        None => Ok(vec![".git".into()]),
+        Some(Value::Array(values)) if values.iter().all(Value::is_string) => Ok(values
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()),
+        Some(_) => Err(error("invalid project_root_markers", file, 1)),
+    }
+}
+
+/// A directory's current Codex trust level: the exact directory's, then its project root's.
+/// Trust is never inferred from the fact that requests exist.
+pub(crate) fn codex_trust<'a>(
+    scopes: &[SettingsScope<'a>],
+    cwd: &str,
+    root: &str,
+) -> Option<&'a str> {
+    [cwd, root].into_iter().find_map(|path| {
+        scopes.iter().rev().find_map(|scope| {
+            members(scope.config.get("projects"))
+                .get(path)
+                .and_then(|p| p.get("trust_level"))
+                .and_then(Value::as_str)
+        })
+    })
+}
+
 /// Resolve Codex project controls without inferring trust or a selected launch profile.
 pub fn discover_codex_controls(
     options: &DiscoveryOptions,
@@ -971,24 +1010,7 @@ pub fn discover_codex_controls(
         profile
             .background_directories
             .insert(String::new(), unknown);
-        let markers = base_scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.config.get("project_root_markers"));
-        let markers: Vec<String> = match markers {
-            None => vec![".git".into()],
-            Some(Value::Array(values)) if values.iter().all(Value::is_string) => values
-                .iter()
-                .map(|v| v.as_str().unwrap().to_string())
-                .collect(),
-            Some(_) => {
-                return Err(error(
-                    "invalid project_root_markers",
-                    &profile.settings_file,
-                    1,
-                ));
-            }
-        };
+        let markers = codex_markers(&base_scopes, &profile.settings_file)?;
         let cwds = directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)));
         for cwd in cwds {
             if !existing_directory(cwd)? {
@@ -1002,15 +1024,7 @@ pub fn discover_codex_controls(
             }
             let paths = project_directories(cwd, &markers)?;
             let root = paths.last().expect("cwd is included");
-            // Exact cwd, then project root; never infer trust from the fact requests exist.
-            let trust = [cwd, root.as_str()].into_iter().find_map(|path| {
-                base_scopes.iter().rev().find_map(|scope| {
-                    members(scope.config.get("projects"))
-                        .get(path)
-                        .and_then(|p| p.get("trust_level"))
-                        .and_then(Value::as_str)
-                })
-            });
+            let trust = codex_trust(&base_scopes, cwd, root);
             let mut layers = Vec::new();
             for path in &paths {
                 if trust == Some("untrusted") {

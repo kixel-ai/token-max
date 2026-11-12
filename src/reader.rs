@@ -822,6 +822,7 @@ impl EventIndex {
 /// What an API request record adds to the requests that answer it.
 struct RefFacts {
     source: Option<Text>,
+    effort: Option<Text>,
     attempt: Option<Attempt>,
     requested_speed: Option<RequestedSpeed>,
     time: Millis,
@@ -832,6 +833,7 @@ impl RefFacts {
     fn of(r: &Request) -> Self {
         Self {
             source: r.source.clone(),
+            effort: r.effort.clone(),
             attempt: r.attempt.clone(),
             requested_speed: r.requested_speed.clone(),
             time: r.time,
@@ -1886,6 +1888,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 if r.source.is_none() {
                     r.source = found.source.clone();
                 }
+                if r.effort.is_none() {
+                    r.effort = found.effort.clone();
+                }
                 r.attempt = found.attempt.clone();
                 if found.requested_speed.is_some() {
                     r.requested_speed = found.requested_speed.clone();
@@ -2603,6 +2608,32 @@ mod tests {
         assert_eq!(data.requests.len(), 2);
         assert_ne!(data.requests[0].session, data.requests[1].session);
         assert_eq!(data.requests[0].cwd.as_deref(), Some("/synthetic/project"));
+    }
+
+    #[test]
+    fn a_linked_api_request_supplies_the_effort_its_response_omits() {
+        let w = Workspace::new();
+        let mut answer = assistant("session", "message");
+        answer["requestRef"] = json!("ref");
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[
+                json!({
+                    "type": "api-request",
+                    "id": "ref",
+                    "sessionId": "session",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "params": {
+                        "model": "claude-opus-5-5",
+                        "output_config": { "effort": "low" },
+                    },
+                }),
+                answer,
+            ]),
+        );
+        let data = scan(&options(&w)).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        assert_eq!(data.requests[0].effort.as_deref(), Some("low"));
     }
 
     #[test]

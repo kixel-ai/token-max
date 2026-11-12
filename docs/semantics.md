@@ -1007,7 +1007,9 @@ recorded tokens on the provider's cheapest current model. The lines are
 evidence only. They never recommend a model, add nothing to the settings
 snippet and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
-its own requests, where transcripts cannot attribute it.
+its own requests, where transcripts cannot attribute it. When runs in
+different projects are set by different files, the model and effort settings
+name each.
 
 The reader names a Claude subagent from the `agentType`, `isBuiltIn`, `isFork`,
 `model` and `effort` keys of the `agent-*.meta.json` beside its transcript, and
@@ -1034,13 +1036,24 @@ Claude's `effort:` and `CLAUDE_CODE_SUBAGENT_EFFORT`, and Codex's
 `model_reasoning_effort` and `default_subagent_reasoning_effort`.
 
 History records the requested call model but not the settings, so the source
-reads today's agent files (the profile's `agents/` and each subagent working
-directory's `.claude/agents/` up to its Git root, or Codex role files) and
-settings, then checks the rule against the recorded model and the parent's
-model at spawn. A run is unknown when its agent file changed after it started,
+reads today's agent files and settings at each run's recorded working
+directory, then checks the rule against the recorded model and the parent's
+model at spawn. For Claude these are the profile's `agents/` and settings, and
+each directory's `.claude/agents/` up to its Git root and project and local
+settings. Codex loads its system, user and project config layers as 0.167
+does: each layer's `[agents.<role>] config_file` and `agents/*.toml` role files
+(a file's own `name` wins over its declaration; a later layer's role replaces
+an earlier one; a role without a description is ignored), and project layers
+only for a project its config trusts. A project whose layers change the
+subagent settings but whose trust is not recorded makes its runs unknown. A
+directory that no longer exists uses the profile's controls. A run's start and
+its parent's model come from all scanned history, including requests before
+`--since`. A run is unknown when its agent file changed after it started,
 no current file defines a custom type, the version or parent model is not
 recorded, or the recorded model is not what the rule gives, for example after
 a setting changed or a Codex `spawn_agent` call asked for another model.
+Agent files are read for their frontmatter `name`, `model` and `effort` only,
+as YAML scalars without trailing comments.
 
 The cheapest current model is, among the provider's catalog models that are not
 deprecated, call tools and reply in text, the newest of each family with the

@@ -104,8 +104,12 @@ counts by recorded value, `unrecorded` when absent), `sources` (run counts by
 on it or `cheapest` is null), `modelSetting` and `effortSetting`. Rows are
 evidence: they carry no verdict and never change the exit code. `scan.subagents`
 is the count of subagent transcripts, and `profiles[].agents` holds the current
-subagent model and effort settings and agent definition files (name, file,
-model, effort and modification time, never the prompt).
+subagent model and effort settings, Codex's `review` and `session` models, and
+agent definition files (name, file, model, effort and modification time, never
+the prompt). Its `directories` maps each recorded subagent working directory
+whose project settings or agent files change them to that directory's controls,
+with `unresolved` giving the reason they cannot be established, such as a Codex
+project whose trust is not recorded.
 
 T3 adds optional `scan.t3` state coverage/snapshot bounds and `profiles[].t3`
 instance ownership. The `t3-idle-compaction` check keeps all three policy costs;

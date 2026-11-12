@@ -12,8 +12,8 @@ use serde_json::Value;
 use crate::collections::{HashMap, IndexMap, IndexSet};
 use crate::controls::{Env, SettingsScope, js_string, members, scoped_environment};
 use crate::discovery::{
-    DiscoveryOptions, directories, error, existing_directory, join, project_directories, realpath,
-    resolve, settings,
+    DiscoveryOptions, codex_markers, codex_trust, directories, error, existing_directory, join,
+    project_directories, realpath, resolve, settings,
 };
 use crate::model::{
     Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile, Request,
@@ -130,8 +130,7 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let value = value.trim().trim_matches(['"', '\'']);
-        let value = label(&Value::from(value));
+        let value = label(&Value::from(scalar(value)));
         match key.trim() {
             "name" => name = value,
             "model" => model = value,
@@ -140,6 +139,22 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
         }
     }
     None
+}
+
+/// A YAML plain or quoted scalar without its trailing comment.
+fn scalar(value: &str) -> &str {
+    let value = value.trim();
+    for quote in ['"', '\''] {
+        if let Some(rest) = value.strip_prefix(quote) {
+            return rest.split(quote).next().unwrap_or_default();
+        }
+    }
+    // A comment starts at a `#` that begins the value or follows whitespace.
+    let end = value
+        .char_indices()
+        .find(|&(i, c)| c == '#' && (i == 0 || value[..i].ends_with(char::is_whitespace)))
+        .map_or(value.len(), |(i, _)| i);
+    value[..end].trim_end()
 }
 
 /// Claude agent files under `dir`; files without frontmatter define no agent.
@@ -162,28 +177,159 @@ fn claude_definitions(dir: &str, project: Option<&str>) -> Result<Vec<AgentDefin
     Ok(definitions)
 }
 
-/// A Codex role file's model and effort; `name` defaults to the file's stem.
-fn codex_definition(file: &str, name: Option<&str>) -> Result<Option<AgentDefinition>, ScanError> {
-    let role = settings(file, Harness::Codex)?;
-    let stem = file
-        .rsplit(['/', '\\'])
-        .next()
-        .and_then(|f| f.strip_suffix(".toml"));
-    let Some(name) = name
-        .map(str::to_string)
-        .or_else(|| role.get("name").and_then(label))
-        .or_else(|| stem.map(str::to_string))
-    else {
-        return Ok(None);
+/// Whether an optional role text field is set; None where Codex rejects it as blank or not a
+/// string. The text itself is never kept.
+fn present(value: Option<&Value>) -> Option<bool> {
+    match value {
+        None => Some(false),
+        Some(Value::String(text)) => (!text.trim().is_empty()).then_some(true),
+        Some(_) => None,
+    }
+}
+
+/// One Codex agent role while its config layers merge.
+#[derive(Clone)]
+struct Role {
+    /// Its role file's model and effort; None for a declaration without a file.
+    definition: Option<AgentDefinition>,
+    /// Whether it has the description Codex requires of every role.
+    described: bool,
+}
+
+/// A Codex role file's name, whether it describes the role, and its model and effort. None
+/// where Codex ignores it: it is missing, unreadable or malformed, has a blank field, or was
+/// discovered without its own `name` and `developer_instructions`. The file's own `name`
+/// overrides the name it was declared under.
+fn codex_role_file(file: &str, declared: Option<&str>) -> Option<(String, bool, AgentDefinition)> {
+    if !fs::metadata(file).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let role = settings(file, Harness::Codex).ok()?;
+    let described = present(role.get("description"))?;
+    if !present(role.get("developer_instructions"))? && declared.is_none() {
+        return None;
+    }
+    let name = match role.get("name") {
+        Some(Value::String(name)) if !name.trim().is_empty() => label(&Value::from(name.trim()))?,
+        None | Some(Value::String(_)) => declared?.to_string(),
+        Some(_) => return None,
     };
-    Ok(Some(AgentDefinition {
-        name,
+    let definition = AgentDefinition {
+        name: name.clone(),
         file: file.to_string(),
         project: None,
         model: role.get("model").and_then(label),
         effort: role.get("model_reasoning_effort").and_then(label),
         modified: modified(file),
-    }))
+    };
+    Some((name, described, definition))
+}
+
+/// Apply one Codex config layer over the lower ones, as Codex 0.167 loads them: its settings
+/// replace earlier values key by key, and each role it defines replaces an earlier role of
+/// that name, keeping the earlier role file when it names none. Within a layer, a role
+/// declared in `[agents]` wins over a file discovered under `agents/`.
+fn codex_layer(
+    controls: &mut AgentControls,
+    roles: &mut IndexMap<String, Role>,
+    config: &serde_json::Map<String, Value>,
+    file: &str,
+    folder: &str,
+) -> Result<(), ScanError> {
+    let owned = |value: Option<&Value>, key: &str| {
+        value.and_then(label).map(|value| Owned {
+            value,
+            owner: format!("{file}:{key}"),
+        })
+    };
+    let agents = members(config.get("agents"));
+    for (slot, value, key) in [
+        (&mut controls.session, config.get("model"), "model"),
+        (
+            &mut controls.review,
+            config.get("review_model"),
+            "review_model",
+        ),
+        (
+            &mut controls.model,
+            agents.get("default_subagent_model"),
+            "agents.default_subagent_model",
+        ),
+        (
+            &mut controls.effort,
+            agents.get("default_subagent_reasoning_effort"),
+            "agents.default_subagent_reasoning_effort",
+        ),
+    ] {
+        if let Some(owned) = owned(value, key) {
+            *slot = Some(owned);
+        }
+    }
+    let mut layer: IndexMap<String, Role> = IndexMap::default();
+    let mut declared = IndexSet::default();
+    for (name, role) in agents {
+        let Value::Object(role) = role else { continue };
+        let Some(described) = present(role.get("description")) else {
+            continue;
+        };
+        let (name, role) = match role.get("config_file") {
+            None => (
+                name.clone(),
+                Role {
+                    definition: None,
+                    described,
+                },
+            ),
+            Some(Value::String(path)) => {
+                let path = if crate::safe::is_absolute(path) {
+                    path.clone()
+                } else {
+                    join(&[folder, path])
+                };
+                declared.insert(path.clone());
+                let Some((name, own, definition)) = codex_role_file(&path, Some(name)) else {
+                    continue;
+                };
+                (
+                    name,
+                    Role {
+                        definition: Some(definition),
+                        described: described || own,
+                    },
+                )
+            }
+            Some(_) => continue,
+        };
+        layer.entry(name).or_insert(role);
+    }
+    for path in files(&join(&[folder, "agents"]), ".toml")? {
+        if declared.contains(&path) {
+            continue;
+        }
+        if let Some((name, described, definition)) = codex_role_file(&path, None) {
+            layer.entry(name).or_insert(Role {
+                definition: Some(definition),
+                described,
+            });
+        }
+    }
+    for (name, mut role) in layer {
+        if let Some(earlier) = roles.get(&name) {
+            role.described |= earlier.described;
+            if role.definition.is_none() {
+                role.definition = earlier.definition.clone();
+            }
+        }
+        // Codex ignores a role without a description, keeping any earlier one.
+        if role.described {
+            roles.insert(name, role);
+        }
+    }
+    controls.definitions = roles
+        .values()
+        .filter_map(|r| r.definition.clone())
+        .collect();
+    Ok(())
 }
 
 /// Whether an environment value turns a Claude Code flag on.
@@ -194,8 +340,41 @@ fn enabled(value: Option<&Value>) -> bool {
     )
 }
 
-/// Resolve every profile's current subagent model and effort controls, including agent
-/// files in the projects its subagents ran in.
+/// Claude's subagent controls from settings scopes, lowest precedence first, and the
+/// launching environment.
+fn claude_controls(
+    scopes: &[SettingsScope],
+    env: &Env,
+    definitions: Vec<AgentDefinition>,
+) -> AgentControls {
+    let environment = scoped_environment(scopes, env);
+    let owned = |key: &str| {
+        let value = js_string(environment.values.get(key));
+        (environment.values.contains_key(key) && !value.is_empty() && value != "inherit").then(
+            || Owned {
+                value,
+                owner: environment.owners[key].clone(),
+            },
+        )
+    };
+    AgentControls {
+        model: owned("CLAUDE_CODE_SUBAGENT_MODEL"),
+        effort: owned("CLAUDE_CODE_SUBAGENT_EFFORT"),
+        force: enabled(environment.values.get("CLAUDE_CODE_SUBAGENT_MODEL_FORCE")),
+        explore_uncapped: enabled(
+            environment
+                .values
+                .get("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"),
+        ),
+        definitions,
+        ..AgentControls::default()
+    }
+}
+
+/// Resolve every profile's current subagent model and effort controls, and how the project
+/// settings and agent files at each recorded subagent directory change them. A directory
+/// that no longer exists keeps the profile's controls; the recorded model still has to
+/// match them for a source to be named.
 pub fn discover(
     options: &DiscoveryOptions,
     profiles: &mut [Profile],
@@ -206,131 +385,139 @@ pub fn discover(
     let default_root = join(&[&options.home, ".claude"]);
     let configured = env.get("CLAUDE_CONFIG_DIR").unwrap_or(&default_root);
     let active = realpath(&resolve(configured)).unwrap_or_default();
+    let mut project_agents: HashMap<String, Vec<AgentDefinition>> = HashMap::default();
     for profile in profiles.iter_mut() {
-        profile.agents = match profile.harness {
+        let cwds: Vec<String> = directories(
+            requests
+                .iter()
+                .filter(|r| r.agent == Agent::Subagent && r.profiles.contains(&profile.id)),
+        )
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let mut existing = vec![];
+        let mut scoped_dirs: IndexMap<String, AgentControls> = IndexMap::default();
+        for cwd in cwds {
+            if existing_directory(&cwd)? {
+                existing.push(cwd);
+            }
+        }
+        let mut agents = match profile.harness {
             Harness::Claude => {
                 let user = settings(&profile.settings_file, Harness::Claude)?;
-                let managed = settings(&options.managed_settings_file, Harness::Claude)?;
+                let managed_file = options.managed_settings_file.as_str();
+                let managed = settings(managed_file, Harness::Claude)?;
                 let local_env = if profile.t3.is_none() && active == profile.root {
                     env
                 } else {
                     &empty
                 };
+                let user_scope = SettingsScope {
+                    config: &user,
+                    file: &profile.settings_file,
+                };
+                let managed_scope = SettingsScope {
+                    config: &managed,
+                    file: managed_file,
+                };
+                let own = claude_definitions(&join(&[&profile.root, "agents"]), None)?;
+                let agents = claude_controls(&[user_scope, managed_scope], local_env, own.clone());
+                for cwd in existing {
+                    let [project_file, legacy_file, local_file] =
+                        crate::discovery::claude_project_files(&cwd, options)?;
+                    let project = settings(&project_file, Harness::Claude)?;
+                    let legacy = settings(&legacy_file, Harness::Claude)?;
+                    let local = settings(&local_file, Harness::Claude)?;
+                    let scopes = [
+                        user_scope,
+                        SettingsScope {
+                            config: &project,
+                            file: &project_file,
+                        },
+                        SettingsScope {
+                            config: &legacy,
+                            file: &legacy_file,
+                        },
+                        SettingsScope {
+                            config: &local,
+                            file: &local_file,
+                        },
+                        managed_scope,
+                    ];
+                    let mut definitions = own.clone();
+                    for dir in project_directories(&cwd, &[".git".into()])? {
+                        if !project_agents.contains_key(&dir) {
+                            let found = claude_definitions(
+                                &join(&[&dir, ".claude", "agents"]),
+                                Some(&dir),
+                            )?;
+                            project_agents.insert(dir.clone(), found);
+                        }
+                        definitions.extend(project_agents[&dir].iter().cloned());
+                    }
+                    let scoped = claude_controls(&scopes, local_env, definitions);
+                    if scoped != agents {
+                        scoped_dirs.insert(cwd, scoped);
+                    }
+                }
+                agents
+            }
+            Harness::Codex => {
+                let system_file = options.codex_system_config_file.as_str();
+                let system = settings(system_file, Harness::Codex)?;
+                let user = settings(&profile.settings_file, Harness::Codex)?;
+                let mut agents = AgentControls::default();
+                let mut roles = IndexMap::default();
+                for (config, file) in [(&system, system_file), (&user, &*profile.settings_file)] {
+                    let folder = crate::discovery::dirname(file);
+                    codex_layer(&mut agents, &mut roles, config, file, folder)?;
+                }
                 let scopes = [
+                    SettingsScope {
+                        config: &system,
+                        file: system_file,
+                    },
                     SettingsScope {
                         config: &user,
                         file: &profile.settings_file,
                     },
-                    SettingsScope {
-                        config: &managed,
-                        file: &options.managed_settings_file,
-                    },
                 ];
-                let environment = scoped_environment(&scopes, local_env);
-                let owned = |key: &str| {
-                    let value = js_string(environment.values.get(key));
-                    (environment.values.contains_key(key)
-                        && !value.is_empty()
-                        && value != "inherit")
-                        .then(|| Owned {
-                            value,
-                            owner: environment.owners[key].clone(),
-                        })
-                };
-                let mut definitions = claude_definitions(&join(&[&profile.root, "agents"]), None)?;
-                let mut seen: IndexSet<String> =
-                    definitions.iter().map(|d| d.file.clone()).collect();
-                let cwds =
-                    directories(requests.iter().filter(|r| {
-                        r.agent == Agent::Subagent && r.profiles.contains(&profile.id)
-                    }));
-                for cwd in cwds {
-                    if !existing_directory(cwd)? {
+                let markers = codex_markers(&scopes, &profile.settings_file)?;
+                for cwd in existing {
+                    let paths = project_directories(&cwd, &markers)?;
+                    let root = paths.last().expect("cwd is included");
+                    let trust = codex_trust(&scopes, &cwd, root);
+                    if trust == Some("untrusted") {
                         continue;
                     }
-                    for dir in project_directories(cwd, &[".git".into()])? {
-                        for definition in
-                            claude_definitions(&join(&[&dir, ".claude", "agents"]), Some(&dir))?
-                        {
-                            if seen.insert(definition.file.clone()) {
-                                definitions.push(definition);
-                            }
-                        }
+                    let mut scoped = agents.clone();
+                    let mut scoped_roles = roles.clone();
+                    // The project root's layer first, the working directory's last.
+                    for path in paths.iter().rev() {
+                        let folder = join(&[path, ".codex"]);
+                        let file = join(&[&folder, "config.toml"]);
+                        let config = settings(&file, Harness::Codex)?;
+                        codex_layer(&mut scoped, &mut scoped_roles, &config, &file, &folder)?;
                     }
-                }
-                AgentControls {
-                    model: owned("CLAUDE_CODE_SUBAGENT_MODEL"),
-                    effort: owned("CLAUDE_CODE_SUBAGENT_EFFORT"),
-                    force: enabled(environment.values.get("CLAUDE_CODE_SUBAGENT_MODEL_FORCE")),
-                    explore_uncapped: enabled(
-                        environment
-                            .values
-                            .get("CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP"),
-                    ),
-                    review: None,
-                    definitions,
-                }
-            }
-            Harness::Codex => {
-                let system = settings(&options.codex_system_config_file, Harness::Codex)?;
-                let user = settings(&profile.settings_file, Harness::Codex)?;
-                let mut controls = AgentControls::default();
-                let mut roles: IndexMap<String, AgentDefinition> = IndexMap::default();
-                // The user file overrides the system file, key by key.
-                for (config, file) in [
-                    (&system, options.codex_system_config_file.as_str()),
-                    (&user, profile.settings_file.as_str()),
-                ] {
-                    let agents = members(config.get("agents"));
-                    let owned = |key: &str, owner: &str| {
-                        config.get(key).and_then(label).map(|value| Owned {
-                            value,
-                            owner: format!("{file}:{owner}"),
-                        })
-                    };
-                    if let Some(review) = owned("review_model", "review_model") {
-                        controls.review = Some(review);
+                    if scoped == agents {
+                        continue;
                     }
-                    let setting = |key: &str| {
-                        agents.get(key).and_then(label).map(|value| Owned {
-                            value,
-                            owner: format!("{file}:agents.{key}"),
-                        })
-                    };
-                    if let Some(model) = setting("default_subagent_model") {
-                        controls.model = Some(model);
-                    }
-                    if let Some(effort) = setting("default_subagent_reasoning_effort") {
-                        controls.effort = Some(effort);
-                    }
-                    let base = crate::discovery::dirname(file);
-                    for (name, role) in agents {
-                        let Value::Object(role) = role else { continue };
-                        let Some(path) = role.get("config_file").and_then(Value::as_str) else {
-                            continue;
+                    if trust != Some("trusted") {
+                        scoped = AgentControls {
+                            unresolved: Some(format!(
+                                "project config under {root} changes subagent settings, but whether Codex trusts that project is not established"
+                            )),
+                            ..agents.clone()
                         };
-                        let path = if crate::safe::is_absolute(path) {
-                            path.to_string()
-                        } else {
-                            join(&[base, path])
-                        };
-                        if let Some(definition) = codex_definition(&path, Some(name))? {
-                            roles.insert(name.clone(), definition);
-                        }
                     }
-                    for path in files(&join(&[base, "agents"]), ".toml")? {
-                        if roles.values().any(|r| r.file == path) {
-                            continue;
-                        }
-                        if let Some(definition) = codex_definition(&path, None)? {
-                            roles.entry(definition.name.clone()).or_insert(definition);
-                        }
-                    }
+                    scoped_dirs.insert(cwd, scoped);
                 }
-                controls.definitions = roles.into_values().collect();
-                controls
+                agents
             }
         };
+        scoped_dirs.sort_keys();
+        agents.directories = scoped_dirs;
+        profile.agents = agents;
     }
     Ok(())
 }
@@ -404,25 +591,19 @@ impl Run<'_> {
 }
 
 /// The agent definition a run of `kind` used: the closest project file, else the profile's.
-fn definition<'a>(
-    controls: &'a AgentControls,
-    kind: &str,
-    cwd: Option<&str>,
-) -> Option<&'a AgentDefinition> {
-    let within = |dir: &str| {
-        cwd.is_some_and(|cwd| {
-            cwd == dir
-                || cwd
-                    .strip_prefix(dir)
-                    .is_some_and(|rest| rest.starts_with(['/', '\\']))
-        })
-    };
+/// Directory controls hold only the project files that apply there.
+fn definition<'a>(controls: &'a AgentControls, kind: &str) -> Option<&'a AgentDefinition> {
     controls
         .definitions
         .iter()
         .filter(|d| d.name == kind)
-        .filter(|d| d.project.as_deref().is_none_or(within))
         .max_by_key(|d| d.project.as_ref().map_or(0, String::len))
+}
+
+/// The controls a run in `cwd` used: its directory's, else the profile's.
+fn scoped<'a>(controls: &'a AgentControls, cwd: Option<&str>) -> &'a AgentControls {
+    cwd.and_then(|cwd| controls.directories.get(cwd))
+        .unwrap_or(controls)
 }
 
 /// Where a Claude run's model came from, or why that is unknown.
@@ -487,8 +668,8 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
             )
         });
     }
-    let definition = definition(controls, kind, run.cwd)
-        .filter(|_| subagent.is_none_or(|s| s.built_in != Some(true)));
+    let definition =
+        definition(controls, kind).filter(|_| subagent.is_none_or(|s| s.built_in != Some(true)));
     if let Some(file) = definition {
         if file.modified.is_none_or(|m| m > run.start) {
             return unknown(format!("{} changed after this run started", file.file));
@@ -574,47 +755,42 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
 }
 
 /// Where a Codex run's model came from, or why that is unknown.
-fn codex_source(run: &Run<'_>, profile: &Profile, kind: &str) -> (ModelSource, String) {
-    let controls = &profile.agents;
-    // A review records no parent thread, so its session model is the configured one.
-    let configured = match profile.settings.get("model") {
-        Some(crate::model::Scalar::Text(model)) if run.parent.is_none() => Some(model.as_str()),
-        _ => None,
-    };
+fn codex_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelSource, String) {
     let Some(recorded) = run.model else {
         return (ModelSource::Unknown, "no model was recorded".into());
     };
+    let role = definition(controls, kind).filter(|_| kind != "review");
+    if let Some(file) = role
+        && file.modified.is_none_or(|m| m > run.start)
+    {
+        return (
+            ModelSource::Unknown,
+            format!("{} changed after this run started", file.file),
+        );
+    }
     let (source, detail, expect) = if kind == "review" {
-        match &controls.review {
-            Some(review) => (
+        // A review records no parent thread, so its session model is the configured one.
+        match (&controls.review, &controls.session) {
+            (Some(review), _) => (
                 ModelSource::Setting,
                 format!("{}={}", review.owner, review.value),
                 Expect::Model(&review.value),
             ),
-            None => match configured {
-                Some(model) => (
-                    ModelSource::Inherited,
-                    format!(
-                        "without review_model a review runs on the session model, {}:model={model}",
-                        profile.settings_file
-                    ),
-                    Expect::Model(model),
+            (None, Some(session)) if run.parent.is_none() => (
+                ModelSource::Inherited,
+                format!(
+                    "without review_model a review runs on the session model, {}={}",
+                    session.owner, session.value
                 ),
-                None => (
-                    ModelSource::Inherited,
-                    "without review_model a review runs on the session model".into(),
-                    Expect::Parent,
-                ),
-            },
+                Expect::Model(&session.value),
+            ),
+            (None, _) => (
+                ModelSource::Inherited,
+                "without review_model a review runs on the session model".into(),
+                Expect::Parent,
+            ),
         }
-    } else if let Some(file) = definition(controls, kind, None).filter(|d| d.model.is_some()) {
-        if file.modified.is_none_or(|m| m > run.start) {
-            return (
-                ModelSource::Unknown,
-                format!("{} changed after this run started", file.file),
-            );
-        }
-        let model = file.model.as_deref().expect("filtered");
+    } else if let Some((file, model)) = role.and_then(|d| Some((d, d.model.as_deref()?))) {
         (
             ModelSource::Definition,
             format!("model = {model} in {}", file.file),
@@ -650,9 +826,20 @@ fn codex_source(run: &Run<'_>, profile: &Profile, kind: &str) -> (ModelSource, S
     }
 }
 
-/// The settings that change a type's model and effort.
-fn settings_text(profile: &Profile, kind: &str, fork: bool) -> (String, String) {
-    let controls = &profile.agents;
+/// The file a Codex setting's owner names, else `fallback`.
+fn owner_file<'a>(owned: Option<&'a Owned>, fallback: &'a str) -> &'a str {
+    owned
+        .and_then(|o| o.owner.rsplit_once(':'))
+        .map_or(fallback, |(file, _)| file)
+}
+
+/// The settings that change a type's model and effort under one directory's controls.
+fn settings_text(
+    profile: &Profile,
+    controls: &AgentControls,
+    kind: &str,
+    fork: bool,
+) -> (String, String) {
     match profile.harness {
         Harness::Claude if fork => (
             "none; a fork always runs on the main model".into(),
@@ -664,8 +851,7 @@ fn settings_text(profile: &Profile, kind: &str, fork: bool) -> (String, String) 
                 .into(),
         ),
         Harness::Claude => {
-            let defined = definition(controls, kind, None)
-                .or_else(|| controls.definitions.iter().find(|d| d.name == kind));
+            let defined = definition(controls, kind);
             let file = defined.map_or_else(
                 || join(&[&profile.root, "agents", &format!("{kind}.md")]),
                 |d| d.file.clone(),
@@ -693,29 +879,36 @@ fn settings_text(profile: &Profile, kind: &str, fork: bool) -> (String, String) 
             (model, effort)
         }
         Harness::Codex if kind == "review" => (
-            format!("review_model in {}", profile.settings_file),
+            format!(
+                "review_model in {}",
+                owner_file(controls.review.as_ref(), &profile.settings_file)
+            ),
             format!(
                 "model_reasoning_effort in {}, shared with its session",
                 profile.settings_file
             ),
         ),
         Harness::Codex => {
-            let file = definition(controls, kind, None).map(|d| d.file.as_str());
-            let config = &profile.settings_file;
-            match file {
-                Some(file) => (
-                    format!("model in {file}, else [agents] default_subagent_model in {config}"),
+            let model_file = owner_file(controls.model.as_ref(), &profile.settings_file);
+            let effort_file = owner_file(controls.effort.as_ref(), &profile.settings_file);
+            match definition(controls, kind) {
+                Some(role) => (
                     format!(
-                        "model_reasoning_effort in {file}, else [agents] default_subagent_reasoning_effort in {config}"
+                        "model in {}, else [agents] default_subagent_model in {model_file}",
+                        role.file
+                    ),
+                    format!(
+                        "model_reasoning_effort in {}, else [agents] default_subagent_reasoning_effort in {effort_file}",
+                        role.file
                     ),
                 ),
                 None => (
                     format!(
-                        "model in a role file named {kind} under {}, else [agents] default_subagent_model in {config}",
+                        "model in a role file named {kind} under {}, else [agents] default_subagent_model in {model_file}",
                         join(&[&profile.root, "agents"])
                     ),
                     format!(
-                        "model_reasoning_effort in that role file, else [agents] default_subagent_reasoning_effort in {config}"
+                        "model_reasoning_effort in that role file, else [agents] default_subagent_reasoning_effort in {effort_file}"
                     ),
                 ),
             }
@@ -760,17 +953,21 @@ fn reprice(catalog: &Catalog, r: &Request, model: &str) -> crate::model::Cost {
 pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
     let spawns: HashMap<&str, &Subagent> =
         scan.subagents.iter().map(|s| (&*s.session, s)).collect();
-    // Each conversation's model over time, to find the model a subagent inherited.
-    let mut main: HashMap<&str, Vec<(Millis, &str)>> = HashMap::default();
+    // Each conversation's requests over time, including those before the report window: a
+    // subagent's spawn and a parent's model at that time can precede the window.
+    let mut history: HashMap<&str, Vec<&Request>> = HashMap::default();
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
-        if r.agent != Agent::Subagent
-            && let Some(model) = r.model.as_deref()
-        {
-            main.entry(&*r.session).or_default().push((r.time, model));
-        }
+        history.entry(&*r.session).or_default().push(r);
+    }
+    for requests in history.values_mut() {
+        requests.sort_by_key(|r| r.time);
     }
     let parent_model = |session: &str, time: Millis| {
-        let models = main.get(session)?;
+        let models: Vec<(Millis, &str)> = history
+            .get(session)?
+            .iter()
+            .filter_map(|r| Some((r.time, r.model.as_deref()?)))
+            .collect();
         let at = models.partition_point(|(t, _)| *t <= time);
         models[..at].last().or(models.first()).map(|(_, m)| *m)
     };
@@ -800,31 +997,45 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         for r in &requests {
             runs.entry(&*r.session).or_default().push(r);
         }
+        let fork = runs.keys().all(|s| spawns.get(s).is_some_and(|s| s.fork)) && !runs.is_empty();
         let mut sources: IndexMap<(ModelSource, String), u64> = IndexMap::default();
-        for (session, rs) in &runs {
+        let mut model_settings: IndexSet<String> = IndexSet::default();
+        let mut effort_settings: IndexSet<String> = IndexSet::default();
+        for session in runs.keys() {
             let subagent = spawns.get(session).copied();
-            let first = rs[0];
+            let all = &history[session];
+            let start = all[0].time;
             let run = Run {
                 subagent,
-                model: rs.iter().find_map(|r| r.model.as_deref()),
+                model: all.iter().find_map(|r| r.model.as_deref()),
                 parent: subagent
                     .and_then(|s| s.parent.as_deref())
-                    .and_then(|p| parent_model(p, first.time)),
-                version: rs.iter().find_map(|r| r.version.as_deref()),
-                cwd: rs.iter().find_map(|r| r.cwd.as_deref()),
-                start: first.time,
+                    .and_then(|p| parent_model(p, start)),
+                version: all.iter().find_map(|r| r.version.as_deref()),
+                cwd: all.iter().find_map(|r| r.cwd.as_deref()),
+                start,
             };
             let source = match shared {
                 None => (
                     ModelSource::Unknown,
                     "profiles sharing this history have different agent settings".into(),
                 ),
-                Some(profile) => match harness {
-                    Harness::Claude => claude_source(&run, &profile.agents, kind),
-                    Harness::Codex => codex_source(&run, profile, kind),
-                },
+                Some(profile) => {
+                    let controls = scoped(&profile.agents, run.cwd);
+                    match (&controls.unresolved, harness) {
+                        (Some(reason), _) => (ModelSource::Unknown, reason.clone()),
+                        (None, Harness::Claude) => claude_source(&run, controls, kind),
+                        (None, Harness::Codex) => codex_source(&run, controls, kind),
+                    }
+                }
             };
             *sources.entry(source).or_default() += 1;
+            if let Some(profile) = owners.first() {
+                let (model, effort) =
+                    settings_text(profile, scoped(&profile.agents, run.cwd), kind, fork);
+                model_settings.insert(model);
+                effort_settings.insert(effort);
+            }
         }
         let mut sources: Vec<SourceShare> = sources
             .into_iter()
@@ -835,6 +1046,16 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             })
             .collect();
         sources.sort_by_key(|s| std::cmp::Reverse(s.runs));
+        // Runs in different projects can be set by different files; name each.
+        let joined = |settings: IndexSet<String>| {
+            let settings: Vec<String> = settings.into_iter().collect();
+            if settings.is_empty() {
+                "unknown".to_string()
+            } else {
+                settings.join("; for other runs, ")
+            }
+        };
+        let (model_setting, effort_setting) = (joined(model_settings), joined(effort_settings));
         let mut cost = Sum::new();
         let mut priced = 0;
         for r in &requests {
@@ -862,11 +1083,6 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 }
                 sum.cost()
             });
-        let fork = runs.keys().all(|s| spawns.get(s).is_some_and(|s| s.fork)) && !runs.is_empty();
-        let (model_setting, effort_setting) = match owners.first() {
-            Some(profile) => settings_text(profile, kind, fork),
-            None => ("unknown".into(), "unknown".into()),
-        };
         lines.push(SubagentCost {
             harness,
             profiles,
@@ -953,6 +1169,16 @@ mod tests {
             frontmatter(text),
             Some(("reviewer".into(), Some("haiku".into()), Some("low".into())))
         );
+        assert_eq!(
+            frontmatter(
+                "---\nname: scout # quick\nmodel: haiku # cheaper\neffort: 'low' # x\n---\n"
+            ),
+            Some(("scout".into(), Some("haiku".into()), Some("low".into())))
+        );
+        assert_eq!(
+            frontmatter("---\nname: \"a\" # quoted\nmodel: # none\n---\n"),
+            Some(("a".into(), None, None))
+        );
         assert_eq!(frontmatter("name: reviewer\n"), None);
         assert_eq!(frontmatter("---\nmodel: haiku\n---\n"), None);
         assert_eq!(frontmatter("---\nname: unterminated\n"), None);
@@ -1035,15 +1261,15 @@ mod tests {
         let mut controls = AgentControls {
             definitions: vec![
                 defined("reviewer", Some("opus"), None),
+                defined("reviewer", Some("sonnet"), Some("/work")),
                 defined("reviewer", Some("haiku"), Some("/work/project")),
-                defined("reviewer", Some("sonnet"), Some("/elsewhere")),
             ],
             ..AgentControls::default()
         };
         let (found, detail) = claude_source(&r, &controls, "reviewer");
         assert_eq!(found, ModelSource::Definition);
         assert!(detail.contains("/work/project/reviewer.md"), "{detail}");
-        controls.definitions[1].modified = Some(r.start + 1);
+        controls.definitions[2].modified = Some(r.start + 1);
         let (changed, detail) = claude_source(&r, &controls, "reviewer");
         assert_eq!(changed, ModelSource::Unknown);
         assert!(
@@ -1063,49 +1289,55 @@ mod tests {
 
     #[test]
     fn codex_roles_use_their_file_then_the_default_setting_then_the_parent() {
-        let mut profile = make_profile("codex", "/home/.codex");
-        profile.harness = Harness::Codex;
         let role = Subagent {
             harness: Harness::Codex,
             ..spawn("explorer")
         };
         let r = run(&role, "gpt-6-luna", "gpt-6.1-sol");
+        let mut controls = AgentControls::default();
         assert_eq!(
-            codex_source(&r, &profile, "explorer").0,
+            codex_source(&r, &controls, "explorer").0,
             ModelSource::Unknown
         );
-        profile.agents.model = Some(Owned {
+        controls.model = Some(Owned {
             value: "gpt-6-luna".into(),
             owner: "config.toml:agents.default_subagent_model".into(),
         });
         assert_eq!(
-            codex_source(&r, &profile, "explorer").0,
+            codex_source(&r, &controls, "explorer").0,
             ModelSource::Setting
         );
-        profile.agents.definitions = vec![defined("explorer", Some("gpt-6-luna"), None)];
+        controls.definitions = vec![defined("explorer", Some("gpt-6-luna"), None)];
         assert_eq!(
-            codex_source(&r, &profile, "explorer").0,
+            codex_source(&r, &controls, "explorer").0,
             ModelSource::Definition
         );
-        let parent = run(&role, "gpt-6.1-sol", "gpt-6.1-sol");
-        profile.agents = AgentControls::default();
+        // A role file changed since the run, even to drop its model, explains nothing.
+        controls.definitions = vec![defined("explorer", None, None)];
+        controls.definitions[0].modified = Some(r.start + 1);
         assert_eq!(
-            codex_source(&parent, &profile, "explorer").0,
+            codex_source(&r, &controls, "explorer").0,
+            ModelSource::Unknown
+        );
+        let parent = run(&role, "gpt-6.1-sol", "gpt-6.1-sol");
+        let mut controls = AgentControls::default();
+        assert_eq!(
+            codex_source(&parent, &controls, "explorer").0,
             ModelSource::Inherited
         );
         // A review records no parent, so the configured session model stands in.
         let mut review = run(&role, "gpt-6.1-sol", "unused");
         review.parent = None;
         assert_eq!(
-            codex_source(&review, &profile, "review").0,
+            codex_source(&review, &controls, "review").0,
             ModelSource::Unknown
         );
-        profile.settings.insert(
-            "model".into(),
-            crate::model::Scalar::Text("gpt-6.1-sol".into()),
-        );
+        controls.session = Some(Owned {
+            value: "gpt-6.1-sol".into(),
+            owner: "config.toml:model".into(),
+        });
         assert_eq!(
-            codex_source(&review, &profile, "review").0,
+            codex_source(&review, &controls, "review").0,
             ModelSource::Inherited
         );
     }
@@ -1214,7 +1446,12 @@ mod tests {
         );
         write(
             w.codex.join("agents/worker.toml"),
-            "name = \"builder\"\nmodel_reasoning_effort = \"high\"\n",
+            "name = \"builder\"\ndescription = \"SYNTHETIC_PRIVATE\"\ndeveloper_instructions = \"SYNTHETIC_PRIVATE\"\nmodel_reasoning_effort = \"high\"\n",
+        );
+        // Codex ignores a discovered role file without its own name and instructions.
+        write(
+            w.codex.join("agents/unnamed.toml"),
+            "model = \"gpt-6-luna\"\n",
         );
         write(w.claude.join("projects/project/main.jsonl"), "");
         let data = crate::reader::scan(&w.scan_options()).unwrap();
@@ -1256,6 +1493,200 @@ mod tests {
             !serde_json::to_string(&data)
                 .unwrap()
                 .contains("SYNTHETIC_PRIVATE")
+        );
+    }
+
+    fn put(path: std::path::PathBuf, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+
+    fn path(p: &std::path::Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    /// Re-discover one harness's profile with subagent requests in `cwds`.
+    fn discover_in(w: &Workspace, harness: Harness, cwds: &[&std::path::Path]) -> Profile {
+        let options = w.scan_options();
+        let mut data = crate::reader::scan(&options).unwrap();
+        let id = data
+            .profiles
+            .iter()
+            .find(|p| p.harness == harness)
+            .unwrap()
+            .id
+            .clone();
+        let requests: Vec<Request> = cwds
+            .iter()
+            .map(|cwd| Request {
+                harness,
+                agent: Agent::Subagent,
+                cwd: Some(path(cwd).into()),
+                profiles: vec![id.clone()].into(),
+                ..make_request()
+            })
+            .collect();
+        discover(&options.discovery, &mut data.profiles, &requests).unwrap();
+        data.profiles.into_iter().find(|p| p.id == id).unwrap()
+    }
+
+    #[test]
+    fn project_settings_and_agent_files_apply_in_their_own_directories() {
+        let w = Workspace::new();
+        let project = w.home.join("project");
+        let other = w.home.join("other");
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::create_dir_all(other.join(".git")).unwrap();
+        put(
+            project.join(".claude/settings.json"),
+            r#"{"env":{"CLAUDE_CODE_SUBAGENT_MODEL":"haiku"}}"#,
+        );
+        put(
+            project.join(".claude/agents/reviewer.md"),
+            "---\nname: reviewer\nmodel: sonnet\n---\n",
+        );
+        put(
+            w.claude.join("agents/reviewer.md"),
+            "---\nname: reviewer\nmodel: opus\n---\n",
+        );
+        put(w.claude.join("projects/project/main.jsonl"), "");
+        let profile = discover_in(&w, Harness::Claude, &[&project, &other]);
+        let agents = &profile.agents;
+        assert_eq!(agents.model, None);
+        // A directory without project settings or agents keeps the profile's controls.
+        assert_eq!(agents.directories.len(), 1);
+        let inside = scoped(agents, Some(&path(&project)));
+        let setting = inside.model.as_ref().unwrap();
+        assert_eq!(setting.value, "haiku");
+        assert!(
+            setting.owner.contains(".claude/settings.json"),
+            "{setting:?}"
+        );
+        assert_eq!(
+            definition(inside, "reviewer").unwrap().model.as_deref(),
+            Some("sonnet")
+        );
+        let outside = scoped(agents, Some(&path(&other)));
+        assert_eq!(
+            definition(outside, "reviewer").unwrap().model.as_deref(),
+            Some("opus")
+        );
+        // The guidance names the file that applies where the run happened.
+        let (model, _) = settings_text(&profile, inside, "reviewer", false);
+        let file = path(&project.join(".claude/agents/reviewer.md"));
+        assert!(model.contains(&file), "{model}");
+    }
+
+    #[test]
+    fn codex_role_layers_follow_codex_precedence_and_project_trust() {
+        let w = Workspace::new();
+        let trusted = w.home.join("trusted");
+        let unknown = w.home.join("unknown");
+        std::fs::create_dir_all(trusted.join(".git")).unwrap();
+        std::fs::create_dir_all(unknown.join(".git")).unwrap();
+        let role = |name: &str, model: &str| {
+            format!(
+                "name = \"{name}\"\ndescription = \"SYNTHETIC_PRIVATE\"\ndeveloper_instructions = \"SYNTHETIC_PRIVATE\"\nmodel = \"{model}\"\n"
+            )
+        };
+        // The system and user layers both discover `dup`; the user's layer wins.
+        put(w.home.join("agents/dup.toml"), &role("dup", "gpt-system"));
+        put(w.codex.join("agents/dup.toml"), &role("dup", "gpt-user"));
+        // A role file's own name overrides the name it is declared under.
+        put(
+            w.codex.join("config.toml"),
+            &format!(
+                "[agents.legacy]\ndescription = \"x\"\nconfig_file = \"roles/legacy.toml\"\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+                path(&trusted)
+            ),
+        );
+        put(
+            w.codex.join("roles/legacy.toml"),
+            "name = \"reviewer\"\nmodel = \"gpt-legacy\"\n",
+        );
+        put(
+            trusted.join(".codex/config.toml"),
+            "review_model = \"gpt-6-luna\"\n",
+        );
+        put(
+            unknown.join(".codex/config.toml"),
+            "review_model = \"gpt-6-luna\"\n",
+        );
+        let profile = discover_in(&w, Harness::Codex, &[&trusted, &unknown]);
+        let agents = &profile.agents;
+        let model = |name: &str| definition(agents, name).and_then(|d| d.model.as_deref());
+        assert_eq!(model("dup"), Some("gpt-user"));
+        assert_eq!(model("reviewer"), Some("gpt-legacy"));
+        assert_eq!(model("legacy"), None);
+        assert_eq!(agents.review, None);
+        let inside = scoped(agents, Some(&path(&trusted)));
+        assert_eq!(inside.review.as_ref().unwrap().value, "gpt-6-luna");
+        assert_eq!(inside.unresolved, None);
+        let untrusted = scoped(agents, Some(&path(&unknown)));
+        assert!(
+            untrusted
+                .unresolved
+                .as_deref()
+                .is_some_and(|r| r.contains("trust")),
+            "{untrusted:?}"
+        );
+        assert!(
+            !serde_json::to_string(&profile)
+                .unwrap()
+                .contains("SYNTHETIC_PRIVATE")
+        );
+    }
+
+    #[test]
+    fn a_run_keeps_its_start_and_its_parent_from_before_the_window() {
+        let request = |id: &str, session: &str, time: Millis, model: &str| {
+            let mut r = Request {
+                id: id.into(),
+                session: session.into(),
+                agent: Agent::Subagent,
+                time,
+                ..make_request()
+            };
+            r.model = Some(model.into());
+            r.parts[0].model = Some(model.into());
+            r
+        };
+        // A reviewer run started before its agent file changed and the window began.
+        let mut data = scan(
+            vec![
+                request("late", "child", 100, "claude-haiku-5-5"),
+                request("nested", "grandchild", 100, "claude-opus-5-5"),
+            ],
+            vec![
+                spawn("reviewer"),
+                Subagent {
+                    session: "grandchild".into(),
+                    parent: Some("middle".into()),
+                    ..spawn("general-purpose")
+                },
+            ],
+        );
+        data.cache_context.requests = vec![
+            request("early", "child", 10, "claude-haiku-5-5"),
+            // The grandchild's parent is itself a subagent.
+            request("middle", "middle", 20, "claude-opus-5-5"),
+        ];
+        let mut file = defined("reviewer", Some("haiku"), None);
+        file.modified = Some(50);
+        data.profiles[0].agents.definitions = vec![file];
+        let lines = subagent_costs(&data, &prices());
+        let line = |kind: &str| lines.iter().find(|l| l.kind == kind).unwrap();
+        let reviewer = line("reviewer");
+        assert_eq!(reviewer.requests, 1);
+        assert_eq!(reviewer.sources[0].source, ModelSource::Unknown);
+        assert!(
+            reviewer.sources[0].detail.contains("changed after"),
+            "{:?}",
+            reviewer.sources
+        );
+        assert_eq!(
+            line("general-purpose").sources[0].source,
+            ModelSource::Inherited
         );
     }
 }

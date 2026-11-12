@@ -710,8 +710,15 @@ pub struct AgentControls {
     pub explore_uncapped: bool,
     /// Codex's `review_model`.
     pub review: Option<Owned>,
+    /// Codex's configured session `model`, which a review without `review_model` runs on.
+    pub session: Option<Owned>,
     /// Agent definition files: Claude `agents/*.md`, Codex agent role files.
     pub definitions: Vec<AgentDefinition>,
+    /// Why these controls may not be the ones a run used, such as a project of unknown trust.
+    pub unresolved: Option<String>,
+    /// The controls at each recorded subagent working directory whose project settings or
+    /// agent files change them; other directories use these.
+    pub directories: IndexMap<String, AgentControls>,
 }
 
 /// One agent definition file's model and effort, never its prompt.

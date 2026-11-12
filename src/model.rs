@@ -2301,10 +2301,15 @@ pub struct SubagentCost {
 // ---------------------------------------------------------------------------
 // Scan and report.
 
-/// Pre-window Claude metadata supplies cache evidence, never selected billing or coverage.
+/// Pre-window metadata supplies cache and spawn evidence, never selected billing or coverage.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CacheContext {
     pub requests: Vec<Request>,
+    /// Pre-window Codex requests, without usage, that start a transcript or change its model,
+    /// so a subagent's start and its parent's model at spawn are known. Claude's earlier
+    /// requests are in `requests`.
+    #[serde(default)]
+    pub codex: Vec<Request>,
     pub boundaries: Vec<StructuralEvent>,
     /// Earlier user turns, which count toward per-session thresholds.
     pub prompts: Vec<StructuralEvent>,

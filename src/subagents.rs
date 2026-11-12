@@ -133,11 +133,18 @@ fn frontmatter(text: &str) -> Option<(String, Option<String>, Option<String>)> {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
-        let value = label(&Value::from(scalar(value)));
+        let value = scalar(value);
+        let labelled = label(&Value::from(value));
         match key.trim() {
-            "name" => name = value,
-            "model" => model = value,
-            "effort" => effort = value,
+            "name" => name = labelled,
+            // Claude Code accepts a long-context model such as `opus[1m]`.
+            "model" => {
+                model = match value.strip_suffix("[1m]") {
+                    Some(id) => label(&Value::from(id)).map(|id| format!("{id}[1m]")),
+                    None => labelled,
+                }
+            }
+            "effort" => effort = labelled,
             _ => {}
         }
     }
@@ -392,6 +399,7 @@ pub fn discover(
     options: &DiscoveryOptions,
     profiles: &mut [Profile],
     requests: &[Request],
+    earlier: &[Request],
 ) -> Result<(), ScanError> {
     let env = &options.env;
     let empty = Env::default();
@@ -403,6 +411,7 @@ pub fn discover(
         let cwds: Vec<String> = directories(
             requests
                 .iter()
+                .chain(earlier)
                 .filter(|r| r.agent == Agent::Subagent && r.profiles.contains(&profile.id)),
         )
         .into_iter()
@@ -582,10 +591,27 @@ impl Run<'_> {
         let named = |name: &str| {
             let name = name.trim_end_matches("[1m]");
             if FAMILIES.contains(&name) {
-                model.contains(name)
-            } else {
-                model == name || model.starts_with(&format!("{name}-"))
+                return model.contains(name);
             }
+            // An ID also names its dated snapshots, never another model it prefixes.
+            model.strip_prefix(name).is_some_and(|rest| {
+                rest.is_empty() || {
+                    let date = rest.strip_prefix('-').unwrap_or_default().as_bytes();
+                    let digits =
+                        |range: std::ops::Range<usize>| date[range].iter().all(u8::is_ascii_digit);
+                    match date.len() {
+                        8 => digits(0..8),
+                        10 => {
+                            digits(0..4)
+                                && date[4] == b'-'
+                                && digits(5..7)
+                                && date[7] == b'-'
+                                && digits(8..10)
+                        }
+                        _ => false,
+                    }
+                }
+            })
         };
         match expect {
             Expect::Model(name) => named(name),
@@ -999,7 +1025,13 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
     // Each conversation's requests over time, including those before the report window: a
     // subagent's spawn and a parent's model at that time can precede the window.
     let mut history: HashMap<&str, Vec<&Request>> = HashMap::default();
-    for r in scan.cache_context.requests.iter().chain(&scan.requests) {
+    let context = &scan.cache_context;
+    for r in context
+        .requests
+        .iter()
+        .chain(&context.codex)
+        .chain(&scan.requests)
+    {
         history.entry(&*r.session).or_default().push(r);
     }
     for requests in history.values_mut() {
@@ -1231,6 +1263,11 @@ mod tests {
             frontmatter("---\nname: \"a\" # quoted\nmodel: # none\n---\n"),
             Some(("a".into(), None, None))
         );
+        // A long-context model keeps its suffix.
+        assert_eq!(
+            frontmatter("---\nname: deep\nmodel: opus[1m]\n---\n"),
+            Some(("deep".into(), Some("opus[1m]".into()), None))
+        );
         assert_eq!(frontmatter("name: reviewer\n"), None);
         assert_eq!(frontmatter("---\nmodel: haiku\n---\n"), None);
         assert_eq!(frontmatter("---\nname: unterminated\n"), None);
@@ -1358,6 +1395,17 @@ mod tests {
         assert_eq!(
             codex_source(&r, &controls, "explorer").0,
             ModelSource::Setting
+        );
+        // A setting names its dated snapshots, but not another model its ID prefixes.
+        let dated = run(&role, "gpt-6-luna-2026-10-01", "gpt-6.1-sol");
+        assert_eq!(
+            codex_source(&dated, &controls, "explorer").0,
+            ModelSource::Setting
+        );
+        let mini = run(&role, "gpt-6-luna-mini", "gpt-6.1-sol");
+        assert_eq!(
+            codex_source(&mini, &controls, "explorer").0,
+            ModelSource::Unknown
         );
         controls.definitions = vec![defined("explorer", Some("gpt-6-luna"), None)];
         assert_eq!(
@@ -1612,7 +1660,7 @@ mod tests {
                 ..make_request()
             })
             .collect();
-        discover(&options.discovery, &mut data.profiles, &requests).unwrap();
+        discover(&options.discovery, &mut data.profiles, &requests, &[]).unwrap();
         data.profiles.into_iter().find(|p| p.id == id).unwrap()
     }
 
@@ -1757,11 +1805,10 @@ mod tests {
                 },
             ],
         );
-        data.cache_context.requests = vec![
-            request("early", "child", 10, "claude-haiku-5-5"),
-            // The grandchild's parent is itself a subagent.
-            request("middle", "middle", 20, "claude-opus-5-5"),
-        ];
+        data.cache_context.requests = vec![request("early", "child", 10, "claude-haiku-5-5")];
+        // The grandchild's parent is itself a subagent, known only from its earlier Codex-style
+        // start record.
+        data.cache_context.codex = vec![request("middle", "middle", 20, "claude-opus-5-5")];
         let mut file = defined("reviewer", Some("haiku"), None);
         file.modified = Some(50);
         data.profiles[0].agents.definitions = vec![file];

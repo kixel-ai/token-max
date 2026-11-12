@@ -592,6 +592,8 @@ struct FileState {
     /// The raw Claude session ID that `context.session` was derived from.
     session_raw: Option<String>,
     previous_total: Option<Usage>,
+    /// The model of the last pre-window Codex request kept; None before the first.
+    earlier_model: Option<Option<Text>>,
     /// A Claude subagent transcript's spawn metadata, read from the file beside it.
     spawn: Option<Spawn>,
 }
@@ -656,6 +658,7 @@ impl FileState {
             spawn: (subagent && snapshot.harness == Harness::Claude)
                 .then(|| Spawn::read(&snapshot.file)),
             subagent,
+            earlier_model: None,
             session_raw: None,
             previous_total: None,
         }
@@ -915,9 +918,30 @@ struct Reader {
     modern_totals: HashSet<String>,
     legacy: Vec<(Request, String)>,
     subagents: IndexMap<Text, Subagent>,
+    earlier: Vec<Request>,
 }
 
 impl Reader {
+    /// Keep a pre-window Codex request, without usage, when it starts its transcript or changes
+    /// its model: subagent attribution needs a run's start and its parent's model at spawn.
+    fn earlier(
+        &mut self,
+        snapshot: &Snapshot,
+        file: &mut FileState,
+        location: &Location,
+        time: Option<Millis>,
+    ) {
+        let Some(time) = time else { return };
+        if file.earlier_model.as_ref() == Some(&file.context.model) {
+            return;
+        }
+        file.earlier_model = Some(file.context.model.clone());
+        let mut r = request(snapshot, location, &file.context, time, String::new());
+        r.requested_speed = None;
+        self.strings.request(&mut r);
+        self.earlier.push(r);
+    }
+
     /// Record a subagent session once; a later copy can only name a type the first left unrecorded.
     fn spawned(&mut self, mut subagent: Subagent) {
         subagent.session = self.strings.text(&subagent.session);
@@ -1458,6 +1482,7 @@ impl Reader {
             }
         } else if kind == Some("token_usage_record") {
             if !selected {
+                self.earlier(snapshot, file, location, time);
                 return Ok(());
             }
             let time = time.ok_or_else(|| ScanError::new("missing request timestamp"))?;
@@ -1500,6 +1525,7 @@ impl Reader {
                 Ok(total) => total,
                 Err(_) if !selected => {
                     file.previous_total = None;
+                    self.earlier(snapshot, file, location, time);
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -1509,6 +1535,7 @@ impl Reader {
             let repeated = file.previous_total == Some(total);
             if !selected {
                 file.previous_total = Some(total);
+                self.earlier(snapshot, file, location, time);
                 return Ok(());
             }
             let mut u = if !nested(info, "last_token_usage").is_empty() {
@@ -1771,6 +1798,9 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
     if previous.source.is_none() {
         previous.source = r.source;
     }
+    if previous.effort.is_none() {
+        previous.effort = r.effort;
+    }
     if previous.provider.is_none() {
         previous.provider = r.provider;
     }
@@ -1826,6 +1856,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         modern_totals: HashSet::default(),
         legacy: vec![],
         subagents: IndexMap::default(),
+        earlier: vec![],
     };
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
@@ -1854,6 +1885,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         modern_totals,
         legacy,
         subagents,
+        earlier,
         ..
     } = reader;
     for (r, total_key) in legacy {
@@ -1979,7 +2011,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     events.sort_by_cached_key(|e| e.time);
     discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
     discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
-    crate::subagents::discover(&options.discovery, &mut profiles, &requests)?;
+    crate::subagents::discover(&options.discovery, &mut profiles, &requests, &earlier)?;
     crate::t3::enrich(
         &mut t3,
         &mut profiles,
@@ -2051,6 +2083,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         events,
         cache_context: CacheContext {
             requests: context_requests,
+            codex: earlier,
             prompts: context_events
                 .iter()
                 .filter(|e| e.kind == EventKind::TurnStart)
@@ -2267,6 +2300,20 @@ mod tests {
     }
 
     #[test]
+    fn a_later_copy_of_a_request_fills_its_unrecorded_effort() {
+        let w = Workspace::new();
+        let mut later = assistant("session", "message");
+        later["effort"] = json!("high");
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[assistant("session", "message"), later]),
+        );
+        let data = scan(&options(&w)).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
     fn codex_response_usage_replaces_overlapping_totals_and_duplicate_response_ids() {
         let w = Workspace::new();
         w.fixture(w.codex.join("sessions/main.jsonl"), "codex.jsonl");
@@ -2430,6 +2477,61 @@ mod tests {
                 .iter()
                 .all(|r| r.agent == Agent::Subagent && r.effort.as_deref() == Some("low"))
         );
+    }
+
+    #[test]
+    fn codex_keeps_pre_window_starts_and_model_changes_without_usage() {
+        let w = Workspace::new();
+        let line = |kind: &str, time: &str, payload: Value| json!({ "type": kind, "timestamp": time, "payload": payload });
+        let usage = |id: &str, time: &str| {
+            line(
+                "token_usage_record",
+                time,
+                json!({ "response_id": id, "usage": { "input_tokens": 10, "output_tokens": 1 } }),
+            )
+        };
+        write(
+            w.codex.join("sessions/parent.jsonl"),
+            jsonl(&[
+                line(
+                    "session_meta",
+                    "2026-10-01T00:00:00Z",
+                    json!({ "id": "thread-a", "source": "cli" }),
+                ),
+                line(
+                    "turn_context",
+                    "2026-10-01T00:00:00Z",
+                    json!({ "model": "gpt-6-luna" }),
+                ),
+                usage("a1", "2026-10-01T00:00:01Z"),
+                usage("a2", "2026-10-01T00:00:02Z"),
+                line(
+                    "turn_context",
+                    "2026-10-02T00:00:00Z",
+                    json!({ "model": "gpt-6.1-sol" }),
+                ),
+                usage("a3", "2026-10-02T00:00:01Z"),
+                usage("a4", "2026-11-02T00:00:01Z"),
+            ]),
+        );
+        let data = scan(&since(options(&w), "2026-11-01T00:00:00Z")).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        // The transcript's first request and its model change, but not their cost.
+        let earlier: Vec<(Millis, Option<&str>, usize)> = data
+            .cache_context
+            .codex
+            .iter()
+            .map(|r| (r.time, r.model.as_deref(), r.parts.len()))
+            .collect();
+        let at = |t: &str| crate::safe::parse_instant(t).unwrap();
+        assert_eq!(
+            earlier,
+            [
+                (at("2026-10-01T00:00:01Z"), Some("gpt-6-luna"), 0),
+                (at("2026-10-02T00:00:01Z"), Some("gpt-6.1-sol"), 0),
+            ]
+        );
+        assert!(data.cache_context.requests.is_empty());
     }
 
     #[test]

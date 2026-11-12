@@ -3863,6 +3863,7 @@ mod tests {
                 requests: vec![summary],
                 boundaries: vec![event],
                 prompts: vec![],
+                ..CacheContext::default()
             };
             s.since = Some(1000);
             let report = report(&s);

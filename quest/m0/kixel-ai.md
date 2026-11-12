@@ -34,8 +34,8 @@ Agent's notes, for the implementer to revisit:
   `src/ssh.rs`, `release.yml` and `docs/releasing.md`. Links to merged PRs
   redirect and can stay.
 - `CONTRIBUTING.md` says GitHub's merge queue is unavailable for personal
-  repositories. That stops being true; reword it, and leave enabling the
-  queue as a suggested follow-up.
+  repositories. That stops being true; reword it. Enabling the queue is
+  [its own quest](/quest/m0/merge-queue.md).
 - Confirm after the transfer that the `Check` requirement, auto-merge and
   the `crates-io` environment's branch restriction survived.
 

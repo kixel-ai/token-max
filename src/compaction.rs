@@ -2264,17 +2264,43 @@ mod tests {
             compaction: Some(compaction),
         };
         let mut directories = scan.clone();
+        directories.profiles[0].compaction = unset(&Env::default());
+        let explicit = controls(
+            Harness::Claude,
+            json!({"autoCompactWindow": 250000}),
+            &Env::default(),
+            "project.json",
+        );
         directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
             ("/open".to_string(), directory(unset(&Env::default()))),
             ("/capped".to_string(), directory(unset(&capped_env))),
+            ("/explicit".to_string(), directory(explicit)),
         ]));
+        // Only the trigger under the profile's own cap and no explicit window shows the default.
+        for (time, cwd, tokens) in [
+            (35, "/open", 400000),
+            (40, "/capped", 200000),
+            (50, "/explicit", 250000),
+        ] {
+            let mut e = boundary();
+            e.time = time;
+            e.cwd = Some(cwd.into());
+            e.model = Some("claude-fable-5-2".into());
+            e.pre_tokens = Some(tokens);
+            directories.events.push(e);
+        }
         crate::controls::tune_windows(&mut directories);
         let scoped = |cwd: &str| {
             let idle = &directories.profiles[0].idle_directories.as_ref().unwrap()[cwd];
-            window_control(idle.compaction.as_ref().unwrap(), Some("claude-fable-5-2")).value
+            window_control(idle.compaction.as_ref().unwrap(), Some("claude-fable-5-2"))
         };
-        assert_eq!(scoped("/open"), Some(967_000));
-        assert_eq!(scoped("/capped"), Some(200_000));
+        assert_eq!(window(&directories, "claude-fable-5-2").value, Some(400000));
+        assert_eq!(scoped("/open").value, Some(400000));
+        assert_eq!(scoped("/explicit").value, Some(250000));
+        // A different cap would tune another value under the same owner, so it stays unresolved.
+        let capped_directory = scoped("/capped");
+        assert_eq!(capped_directory.value, None);
+        assert!(capped_directory.reason.contains("unlike the profile's"));
 
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
         capped.profiles[0].compaction = unset(&env);

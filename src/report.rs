@@ -2442,7 +2442,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     );
     out.line(
         &format!(
-            "Savings are per 30 days at this window's rate; costs and use counts are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than {} per use (--max-cost-per-use).",
+            "Setting comparisons are per 30 days at this window's rate; what features and context cost, and how often they were used, are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than {} per use (--max-cost-per-use).",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -2504,7 +2504,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             None => "an unknown amount".into(),
         };
         format!(
-            "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost}.",
+            "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost} over the window.",
             count(w.long),
             if w.long == 1 { "" } else { "s" },
             count(w.timed_out),

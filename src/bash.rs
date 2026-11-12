@@ -481,7 +481,7 @@ mod tests {
         // The miss cost is the window's total, like the wait count, not a 30-day rate.
         assert!(
             text.contains(&format!(
-                "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop); the cache misses cost {}.",
+                "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop); the cache misses cost {} over the window.",
                 crate::report::about(expected)
             )),
             "{text}"

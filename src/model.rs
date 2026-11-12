@@ -1036,7 +1036,7 @@ impl Usd {
 
     /// The magnitude.
     pub fn abs(self) -> Self {
-        Self(self.0.abs())
+        Self(self.0.checked_abs().expect("dollar total overflow"))
     }
 
     /// `self` times `n`, saturating instead of overflowing.
@@ -1063,7 +1063,7 @@ impl std::ops::Sub for Usd {
 impl std::ops::Neg for Usd {
     type Output = Self;
     fn neg(self) -> Self {
-        Self(-self.0)
+        Self(self.0.checked_neg().expect("dollar total overflow"))
     }
 }
 
@@ -2539,5 +2539,26 @@ mod ids_tests {
         assert_eq!(json[0], "0");
         assert_eq!(json[19_999], "19999");
         drop(ids);
+    }
+}
+
+#[cfg(test)]
+mod usd_tests {
+    use super::Usd;
+
+    fn most_negative() -> Usd {
+        Usd::from_f64(-(2f64.powi(62))) - Usd::from_f64(2f64.powi(62))
+    }
+
+    #[test]
+    #[should_panic(expected = "dollar total overflow")]
+    fn magnitude_of_the_most_negative_total_panics() {
+        most_negative().abs();
+    }
+
+    #[test]
+    #[should_panic(expected = "dollar total overflow")]
+    fn negating_the_most_negative_total_panics() {
+        let _ = -most_negative();
     }
 }

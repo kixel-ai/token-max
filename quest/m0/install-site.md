@@ -1,0 +1,47 @@
+# [M] Serve install.sh and run.sh from max.kixel.ai
+
+## Goal
+
+`curl -LsSf https://max.kixel.ai/install.sh | sh` installs the latest
+`token-max` onto PATH, and `curl -LsSf https://max.kixel.ai/run.sh | sh`
+runs `token-max doctor` once without installing anything. A stand-alone
+Cloudflare Worker in this repository serves both. The README leads with
+these lines, and the SSH hint for a missing or mismatched destination
+names the install line.
+
+## Plan
+
+Decided 2026-11-11 (maintainer, /quest-plan for the follow-ups of
+[kixelated/token-max#62](https://github.com/kixelated/token-max/pull/62)).
+Decision prompts, chosen options marked ✅:
+
+- URL: ✅ `https://max.kixel.ai/install.sh` and `run.sh` (the maintainer:
+  "A subdomain means we can easily make a stand-alone worker"; rejected:
+  the long GitHub Releases URL in the README; a path on kixel.ai).
+- `run.sh`: ✅ run once with no install: download the latest binary to the
+  cache directory, verify its checksum, and run `token-max doctor` attached
+  to the terminal, like `npx` (rejected: install, then run).
+- Where the worker lives: ✅ a small worker directory in this repository,
+  deployed by hand with wrangler as kixel.ai is (rejected: its own
+  repository under kixel-ai).
+
+Agent's choices, for the implementer to revisit:
+
+- `install.sh` is cargo-dist's shell installer from the latest release,
+  redirected or proxied, not a second script to maintain. Serve
+  `install.ps1` the same way for Windows.
+- `run.sh` is ours. A script piped into `sh` has the pipe as stdin, so it
+  must give `doctor` the terminal, such as from `/dev/tty`, or `doctor`
+  sees no terminal and never prompts. It reuses a cached binary that is
+  still the latest.
+- Keep the worker free of dependencies and build steps, so the Rust
+  repository gains no JavaScript toolchain beyond wrangler.
+- Test `run.sh` against a local server and a fixture release, since no
+  release exists before 0.1.0.
+- Deploying needs a wrangler login for the kixel.ai zone on the host. If
+  `wrangler whoami` fails, hand back with a `Maintainer:` wait naming the
+  login, rather than asking for a token in chat.
+
+## Required
+
+- [Ship prebuilt binaries with cargo-dist](/quest/m0/binaries.md) - the scripts download its release assets

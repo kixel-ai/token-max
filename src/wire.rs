@@ -511,7 +511,7 @@ mod tests {
             complete_characters: Some(10),
             prefix: 1,
             wire_model: None,
-            reasons: vec![],
+            reasons: [].into(),
         })
     }
 

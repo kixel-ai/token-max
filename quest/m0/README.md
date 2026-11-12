@@ -10,8 +10,10 @@ For each setting it prints the current value, the recommended one, the file
 or tool that owns it, and the evidence. Where costs can be quantified, it
 shows estimated net savings over the window and per month; otherwise it
 gives an applicable provider-guidance warning and says the dollars are
-unknown. It exits nonzero when anything should change and never edits
-settings. moq-dev/quest's `SETUP.md` points to it.
+unknown. On a terminal, `token-max doctor` offers each change it can make to
+a user settings file and writes it only after a yes; without one it prints
+the report and exits nonzero when anything should change. moq-dev/quest's
+`SETUP.md` points to it.
 
 ## Plan
 
@@ -176,13 +178,21 @@ the public Anthropic API equivalent (rejected: unpriced). ✅ a default report
 of one plain verdict per setting, with the evidence cards under `--details`.
 ✅ scale work in its own quest.
 
-## Required
+Decided 2026-11-11 (maintainer, /quest-plan after an audit of the premise):
+✅ people run `token-max doctor`, which is interactive and offers to apply
+its recommendations, superseding recommend only; ✅ each machine output is
+its own sub-command with a named consumer, such as `token-max sessions`,
+and `--json` is removed; ✅ the repository moves to kixel-ai and keeps the
+name token-max. The reasons and rejected options are in the
+[doctor](/quest/m0/doctor.md), [JSON removal](/quest/m0/remove-json.md) and
+[kixel-ai](/quest/m0/kixel-ai.md) quests. Where this entry and an older one
+disagree, such as "never edits settings", "both text and JSON" or
+"Repository: ✅ kixelated", this one holds.
 
-- [Report each subagent type's model and cost](/quest/m0/subagent-models.md) - every Claude subagent type and Codex role shows its cost, model, effort and source, and a cheapest-model reprice
-- [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
-- [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history
-- [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
-- [Tune unset windows per recorded directory](/quest/m0/directory-windows.md) - idle and keepalive price sessions run in recorded directories
-- [Cap explicit windows at the model's context window](/quest/m0/window-cap.md) - explicit windows replay at the window that actually ran
-- [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each
-- [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - every line is colored by verdict and shows total cost and uses
+Decided 2026-11-11 (maintainer, /quest-plan for that audit's follow-ups):
+✅ 0.1.0 ships [prebuilt binaries](/quest/m0/binaries.md) built by
+cargo-dist, with `install.sh` and `run.sh` at
+[max.kixel.ai](/quest/m0/install-site.md); ✅ the report is
+[sectioned by kind of claim](/quest/m0/claim-tiers.md): Measured, Official
+and Opinion. The epic's end-to-end validation also runs both curl lines
+against the published release.

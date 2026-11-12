@@ -11,7 +11,7 @@ use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
-    Harness, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
+    Harness, Id, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
     StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowBasisKind, WindowControl,
     WindowScenario, WindowSensitivity,
 };
@@ -74,7 +74,7 @@ impl AsRef<Request> for Modeled<'_> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactionSample<'a> {
     /// The observed compaction boundary.
-    pub event: &'a str,
+    pub event: &'a Id,
     /// The first request resumed after it, and its only message part.
     pub request: &'a Request,
     pub p: &'a BillingPart,
@@ -179,7 +179,7 @@ impl<'a> CompactionSamples<'a> {
                     basis: matches
                         .iter()
                         .map(|s| CompactionBasis {
-                            event: s.event.to_string(),
+                            event: s.event.clone(),
                             request: s.request.id.clone(),
                         })
                         .collect(),
@@ -242,7 +242,7 @@ impl SessionBoundaries {
 /// One profile's structural events, indexed once for every window simulation and replay.
 pub struct WindowEvents<'a> {
     /// The first event with each identity.
-    by_id: HashMap<&'a str, &'a StructuralEvent>,
+    by_id: HashMap<&'a Id, &'a StructuralEvent>,
     boundaries: SessionBoundaries,
     /// Claude cache-reset boundaries for `replay_parts` over these events.
     pub cache: CacheBoundaries,
@@ -254,7 +254,7 @@ impl<'a> WindowEvents<'a> {
         let events: Vec<&'a StructuralEvent> = events.into_iter().collect();
         let mut by_id = HashMap::default();
         for &event in &events {
-            by_id.entry(event.id.as_str()).or_insert(event);
+            by_id.entry(&event.id).or_insert(event);
         }
         Self {
             by_id,
@@ -337,9 +337,9 @@ pub fn compaction_samples<'a>(
     let mut result = Vec::new();
     // Later duplicates win, like a JavaScript Map built from the array.
     let by_id: HashMap<&str, &'a Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
-    let mut charges: HashMap<&str, &CompactionCharge> = HashMap::default();
+    let mut charges: HashMap<&Id, &CompactionCharge> = HashMap::default();
     for charge in summaries {
-        charges.entry(charge.event.as_str()).or_insert(charge);
+        charges.entry(&charge.event).or_insert(charge);
     }
     let boundaries = SessionBoundaries::new(events.iter().copied());
     // Requests with a message part, per session in array order, and whether each list is
@@ -391,7 +391,7 @@ pub fn compaction_samples<'a>(
         if size <= 0 || next.evidence != RequestEvidence::Measured {
             continue;
         }
-        let charge = charges.get(event.id.as_str());
+        let charge = charges.get(&event.id);
         let key = charge
             .and_then(|c| c.request.as_deref())
             .or(event.request.as_deref())
@@ -720,7 +720,7 @@ fn simulate<'r>(
                                 .get(template.event)
                                 .expect("calibration samples come from the simulated events");
                             result.events.push(StructuralEvent {
-                                id: format!("modeled:{}:{index}", req.id),
+                                id: format!("modeled:{}:{index}", req.id).into(),
                                 time: req.time,
                                 session: req.session.clone(),
                                 origins: req
@@ -1167,16 +1167,16 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
         };
         let baseline = replayer.selected(requests.iter().copied(), options.estimates, None, None);
         let baseline_totals: Vec<Cost> = baseline.iter().map(|i| i.components.total()).collect();
-        let summary_ids: HashSet<&str> = events
+        let summary_ids: HashSet<&Id> = events
             .iter()
             .filter(|e| e.time >= since)
-            .map(|e| e.id.as_str())
+            .map(|e| &e.id)
             .collect();
         let unmatched = add_costs(
             options
                 .summaries
                 .iter()
-                .filter(|s| summary_ids.contains(s.event.as_str()) && s.request.is_none())
+                .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
                 .map(|s| &s.cost),
         );
         let servers: Vec<Cost> = selected
@@ -1501,7 +1501,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 e.kind == EventKind::Settings
                     && e.time >= since
                     && matches!(e.settings.get(window_key), Some(Scalar::Number(n))
-                        if control.value.is_none_or(|v| *n != v as f64))
+                        if control.setting.or(control.value).is_none_or(|v| *n != v as f64))
                     && (e.model.is_none()
                         || models.iter().any(|m| m.as_deref() == e.model.as_deref()))
             });
@@ -1620,6 +1620,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 model,
                 models: models.clone(),
                 unset: control.unset && control.value.is_some(),
+                setting: control.setting,
                 baseline_cost: baseline_cost.clone(),
                 observed_summary_cost: observed_summary_cost.clone(),
                 ttls: ttls.clone(),
@@ -1858,7 +1859,7 @@ mod tests {
             let pricing = Pricing::clone(e.pricing.as_ref().unwrap());
             let proxy = Request {
                 evidence: RequestEvidence::Estimated,
-                id: identity(&e.id).into(),
+                id: identity(&e.id.to_string()).into(),
                 harness: e.harness,
                 session: e.session.clone(),
                 time: e.time,
@@ -2251,12 +2252,291 @@ mod tests {
         assert_eq!(window(&capped, "gateway-opus").value, None);
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
 
+        // Each recorded directory's controls, which idle and keepalive read, tune under what
+        // sizes their context, and directories sized apart never share an owner.
+        let directory = |compaction| crate::model::IdleControl {
+            value: None,
+            owner: String::new(),
+            threshold: None,
+            threshold_owner: String::new(),
+            auto_compact: None,
+            reason: String::new(),
+            resolved: true,
+            ttl: None,
+            compaction: Some(compaction),
+        };
+        let sized = |key: &str, value: &str| {
+            let mut env = Env::default();
+            env.insert(key.into(), value.into());
+            directory(unset(&env))
+        };
+        let mut directories = scan.clone();
+        let explicit = controls(
+            Harness::Claude,
+            json!({"autoCompactWindow": 250000}),
+            &Env::default(),
+            "project.json",
+        );
+        let aliased = controls(
+            Harness::Claude,
+            json!({"modelSettings": {"fable": {"autoCompactWindow": 500000}}}),
+            &Env::default(),
+            "project.json",
+        );
+        let auto = |env: &Env| {
+            controls(
+                Harness::Claude,
+                json!({"modelSettings": {"claude-fable-5-2": {"autoCompactWindow": "auto"}}}),
+                env,
+                "project.json",
+            )
+        };
+        let mut cap = Env::default();
+        cap.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
+            ("/open".to_string(), directory(unset(&Env::default()))),
+            (
+                "/capped".to_string(),
+                sized("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1"),
+            ),
+            (
+                "/declared".to_string(),
+                sized("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "300000"),
+            ),
+            (
+                "/redeclared".to_string(),
+                sized("CLAUDE_CODE_MAX_CONTEXT_TOKENS", "400000"),
+            ),
+            ("/explicit".to_string(), directory(explicit)),
+            ("/aliased".to_string(), directory(aliased)),
+            ("/auto".to_string(), directory(auto(&Env::default()))),
+            ("/auto-capped".to_string(), directory(auto(&cap))),
+        ]));
+        // A trigger counts only under the sizing it ran with and without an explicit window.
+        for (time, cwd, model, tokens) in [
+            (35, "/open", "claude-fable-5-2", 400000),
+            (40, "/capped", "claude-fable-5-2", 300000),
+            (45, "/declared", "gateway-opus", 280000),
+            (50, "/explicit", "claude-fable-5-2", 250000),
+            (55, "/aliased", "claude-fable-5-2", 500000),
+        ] {
+            let mut e = boundary();
+            e.time = time;
+            e.cwd = Some(cwd.into());
+            e.model = Some(model.into());
+            e.pre_tokens = Some(tokens);
+            directories.events.push(e);
+        }
+        crate::controls::tune_windows(&mut directories);
+        let scoped = |cwd: &str, model| {
+            let idle = &directories.profiles[0].idle_directories.as_ref().unwrap()[cwd];
+            window_control(idle.compaction.as_ref().unwrap(), Some(model))
+        };
+        let row = "settings.json:modelSettings.claude-fable-5-2.autoCompactWindow";
+        let profile = window(&directories, "claude-fable-5-2");
+        assert_eq!((profile.value, profile.owner.as_str()), (Some(400000), row));
+        assert_eq!(scoped("/open", "claude-fable-5-2"), profile);
+        // A declared window never sizes a documented model.
+        assert_eq!(scoped("/declared", "claude-fable-5-2"), profile);
+        let held = scoped("/capped", "claude-fable-5-2");
+        assert_eq!(held.value, Some(200_000));
+        assert_eq!(
+            held.owner,
+            format!("{row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
+        );
+        let explicit = scoped("/explicit", "claude-fable-5-2");
+        assert_eq!(explicit.value, Some(250000));
+        assert_eq!(explicit.owner, "project.json:autoCompactWindow");
+        let declared = scoped("/declared", "gateway-opus");
+        assert_eq!(declared.value, Some(280000));
+        assert_eq!(
+            declared.owner,
+            "settings.json:modelSettings.gateway-opus.autoCompactWindow (under CLAUDE_CODE_MAX_CONTEXT_TOKENS=300000)"
+        );
+        // A row that already names the model takes the sizing too.
+        let auto_row = "project.json:modelSettings.claude-fable-5-2.autoCompactWindow";
+        let auto = scoped("/auto", "claude-fable-5-2");
+        assert_eq!((auto.value, auto.owner.as_str()), (Some(400000), auto_row));
+        let auto_capped = scoped("/auto-capped", "claude-fable-5-2");
+        assert_eq!(auto_capped.value, Some(200_000));
+        assert_eq!(
+            auto_capped.owner,
+            format!("{auto_row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
+        );
+        // Another declared value, or none, sizes the ID differently, so the trigger is not theirs.
+        assert_eq!(scoped("/redeclared", "gateway-opus").value, None);
+        assert_eq!(window(&directories, "gateway-opus").value, None);
+
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
         capped.profiles[0].compaction = unset(&env);
         crate::controls::tune_windows(&mut capped);
         let disabled = window(&capped, "claude-fable-5-2");
         assert_eq!(disabled.value, None);
         assert_eq!(disabled.owner, "settings.json:autoCompactWindow");
+    }
+
+    #[test]
+    fn explicit_windows_are_capped_at_the_model_context_window() {
+        let mut scan = data(4);
+        for (model, write) in [
+            ("claude-opus-4-6", 150000),
+            ("claude-sonnet-4-6", 250000),
+            ("gateway-opus", 1000),
+        ] {
+            let mut r = at(model, model, HOUR);
+            r.model = Some(model.into());
+            r.parts[0].model = Some(model.into());
+            r.parts[0].usage = writes(write);
+            scan.requests.push(r);
+        }
+        let tuned = |user: Value, env: &Env| {
+            let mut scan = scan.clone();
+            scan.profiles[0].compaction = controls(Harness::Claude, user, env, "settings.json");
+            crate::controls::tune_windows(&mut scan);
+            scan
+        };
+        let window = |scan: &Scan, model| window_control(&scan.profiles[0].compaction, Some(model));
+
+        // Opus 4.6 runs at 200k without its [1m] variant; a request above 200k shows Sonnet 4.6's ran.
+        let top = tuned(json!({"autoCompactWindow": 400000}), &Env::default());
+        let opus = window(&top, "claude-opus-4-6");
+        assert_eq!((opus.value, opus.setting), (Some(200_000), Some(400_000)));
+        assert!(opus.applicable);
+        let opus_row = "settings.json:modelSettings.claude-opus-4-6.autoCompactWindow";
+        assert_eq!(opus.owner, format!("{opus_row} (capped at 200000)"));
+        // Without a declared window, an ID outside the table may be one Claude Code recognizes.
+        for model in ["claude-sonnet-4-6", "claude-opus-5-5", "gateway-opus"] {
+            let control = window(&top, model);
+            assert_eq!((control.value, control.setting), (Some(400_000), None));
+            assert_eq!(control.owner, "settings.json:autoCompactWindow");
+        }
+        let below = tuned(json!({"autoCompactWindow": 150000}), &Env::default());
+        assert_eq!(window(&below, "claude-opus-4-6").value, Some(150_000));
+
+        // A per-model row already changes its model alone.
+        let row = tuned(
+            json!({"modelSettings": {"claude-opus-4-6": {"autoCompactWindow": 400000}}}),
+            &Env::default(),
+        );
+        let opus = window(&row, "claude-opus-4-6");
+        assert_eq!((opus.value, opus.setting), (Some(200_000), Some(400_000)));
+        assert_eq!(opus.owner, format!("{opus_row} (capped at 200000)"));
+
+        let held = " (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)";
+        let mut env = Env::default();
+        env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let capped = tuned(json!({"autoCompactWindow": 400000}), &env);
+        for model in ["claude-opus-5-5", "claude-sonnet-4-6", "gateway-opus"] {
+            let control = window(&capped, model);
+            assert_eq!(control.value, Some(200_000));
+            assert_eq!(
+                control.owner,
+                format!("settings.json:modelSettings.{model}.autoCompactWindow{held}")
+            );
+        }
+        // A declared window sizes an unrecognized ID instead of the cap, and caps it in turn.
+        let gateway_row = "settings.json:modelSettings.gateway-opus.autoCompactWindow";
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
+        let declared = tuned(json!({"autoCompactWindow": 400000}), &env);
+        assert_eq!(window(&declared, "gateway-opus").value, Some(400_000));
+        assert_eq!(window(&declared, "claude-opus-5-5").value, Some(200_000));
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "300000".into());
+        let declared = tuned(json!({"autoCompactWindow": 400000}), &env);
+        let gateway = window(&declared, "gateway-opus");
+        assert_eq!(
+            (gateway.value, gateway.setting),
+            (Some(300_000), Some(400_000))
+        );
+        assert_eq!(
+            gateway.owner,
+            format!("{gateway_row} (under CLAUDE_CODE_MAX_CONTEXT_TOKENS=300000)")
+        );
+        // Without the opt-out, a request above the declared window shows a [1m] spelling ran.
+        let mut small = Env::default();
+        small.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "500".into());
+        let escaped = tuned(json!({"autoCompactWindow": 400000}), &small);
+        assert_eq!(window(&escaped, "gateway-opus").value, Some(400_000));
+        small.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let held_small = tuned(json!({"autoCompactWindow": 400000}), &small);
+        assert_eq!(window(&held_small, "gateway-opus").value, Some(500));
+
+        // The variable outranks every per-model row, so no setting changes one model alone.
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
+        env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "400k".into());
+        let shared = tuned(json!({}), &env);
+        let opus = window(&shared, "claude-opus-5-5");
+        assert_eq!((opus.value, opus.setting), (Some(200_000), Some(400_000)));
+        assert!(!opus.applicable);
+        assert_eq!(opus.owner, format!("CLAUDE_CODE_AUTO_COMPACT_WINDOW{held}"));
+        assert!(opus.reason.contains(crate::controls::CAPPED_SHARED));
+        let gateway = window(&shared, "gateway-opus");
+        assert_eq!(gateway.owner, "CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+        let shared = tuned(json!({}), &{
+            let mut env = Env::default();
+            env.insert("CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(), "400k".into());
+            env
+        });
+        assert_eq!(
+            window(&shared, "claude-opus-4-6").owner,
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW (capped at 200000)"
+        );
+        assert_eq!(
+            window(&shared, "claude-opus-5-5").owner,
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+        );
+
+        // Directories sized apart cap one row differently, so they never share its owner.
+        let mut directories = scan.clone();
+        let row = json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}});
+        let directory = |env: &Env| {
+            let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
+            idle.compaction = Some(controls(Harness::Claude, row.clone(), env, "project.json"));
+            idle
+        };
+        let mut opt_out = Env::default();
+        opt_out.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        directories.profiles[0].idle_directories = Some(IndexMap::from_iter([
+            ("/open".into(), directory(&Env::default())),
+            ("/capped".into(), directory(&opt_out)),
+        ]));
+        crate::controls::tune_windows(&mut directories);
+        let scoped = |cwd: &str| {
+            let idle = &directories.profiles[0].idle_directories.as_ref().unwrap()[cwd];
+            window_control(idle.compaction.as_ref().unwrap(), Some("claude-opus-5-5"))
+        };
+        let project_row = "project.json:modelSettings.claude-opus-5-5.autoCompactWindow";
+        let open = scoped("/open");
+        assert_eq!(
+            (open.value, open.owner.as_str()),
+            (Some(400_000), project_row)
+        );
+        let held_row = scoped("/capped");
+        assert_eq!(
+            (held_row.value, held_row.setting),
+            (Some(200_000), Some(400_000))
+        );
+        assert_eq!(held_row.owner, format!("{project_row}{held}"));
+
+        // The check replays the capped window and names the setting's own value.
+        let mut scan = data(4);
+        env.remove("CLAUDE_CODE_AUTO_COMPACT_WINDOW");
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            json!({"autoCompactWindow": 400000}),
+            &env,
+            "settings.json",
+        );
+        crate::controls::tune_windows(&mut scan);
+        let check = &checks(&scan)[0];
+        assert_eq!(
+            (check.base.current, check.setting),
+            (Some(200_000), Some(400_000))
+        );
+        assert_eq!(
+            check.base.owner,
+            format!("settings.json:modelSettings.claude-opus-5-5.autoCompactWindow{held}")
+        );
+        assert!(check.base.assumptions[0].contains("context window"));
     }
 
     #[test]
@@ -2625,8 +2905,8 @@ mod tests {
         assert_eq!(samples.samples.len(), 1);
         let s = &samples.samples[0];
         assert_eq!(
-            (s.event, &*s.request.id, s.output, s.prefix),
-            ("sample-boundary", "sample-resume", 2000, 20000)
+            (s.event.to_string(), &*s.request.id, s.output, s.prefix),
+            ("sample-boundary".to_string(), "sample-resume", 2000, 20000)
         );
         assert_eq!(s.summary.kind, PartKind::Compaction);
         // A charge without a request falls back to the event's own link.
@@ -2697,7 +2977,7 @@ mod tests {
         requests: &[&Request],
         events: &[&StructuralEvent],
         summaries: &[CompactionCharge],
-    ) -> Vec<(String, Text)> {
+    ) -> Vec<(Id, Text)> {
         let mut result = vec![];
         let boundaries: Vec<&&StructuralEvent> = events
             .iter()
@@ -2788,7 +3068,7 @@ mod tests {
             let mut events = vec![];
             for i in 0..4 {
                 let mut e = boundary();
-                e.id = format!("e{i}");
+                e.id = format!("e{i}").into();
                 e.time = next(10) as Millis * 100 + 50;
                 e.origins[0].session = sessions[next(3) as usize].into();
                 if next(2) == 0 {
@@ -2805,10 +3085,10 @@ mod tests {
                 }
                 let refs: Vec<&Request> = requests.iter().collect();
                 let events: Vec<&StructuralEvent> = events.iter().collect();
-                let indexed: Vec<(String, Text)> = compaction_samples(&refs, &events, &[])
+                let indexed: Vec<(Id, Text)> = compaction_samples(&refs, &events, &[])
                     .samples
                     .iter()
-                    .map(|s| (s.event.to_string(), s.request.id.clone()))
+                    .map(|s| (s.event.clone(), s.request.id.clone()))
                     .collect();
                 assert_eq!(indexed, naive_samples(&refs, &events, &[]));
             }
@@ -2877,7 +3157,7 @@ mod tests {
         assert_eq!(owned, ["large-0", "large-1"]);
         assert_eq!(applied.added.len(), 1);
         assert_eq!(applied.events.len(), 1);
-        assert_eq!(applied.events[0].id, "modeled:large-0:0");
+        assert_eq!(applied.events[0].id.to_string(), "modeled:large-0:0");
         assert_eq!(applied.requests[1].parts[0].usage.input, Some(20000));
         // The second request keeps the removed context; its expired prefix is rewritten cold.
         assert_eq!(applied.requests[2].parts[0].usage.write, Some(20000));
@@ -3017,9 +3297,9 @@ mod tests {
         let modeled: Vec<_> = result
             .events
             .iter()
-            .map(|e| (e.id.as_str(), e.time))
+            .map(|e| (e.id.to_string(), e.time))
             .collect();
-        assert_eq!(modeled, [("modeled:large-0:0", HOUR)]);
+        assert_eq!(modeled, [("modeled:large-0:0".to_string(), HOUR)]);
         assert_eq!(result.estimated_parts.len(), 3);
     }
 

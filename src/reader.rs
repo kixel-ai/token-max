@@ -20,12 +20,12 @@ use crate::discovery::{
 };
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness,
+    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness, Id,
     IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
     Request, RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall, Snapshot,
     StructuralEvent, Text, Usage,
 };
-use crate::safe::{ScanError, count, id, identity, iso, label, object, timestamp};
+use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
 use crate::sessions::{Record, Sessions};
 
 /// Select a time window and local roots.
@@ -635,8 +635,8 @@ fn event(
     let harness = harness_name(snapshot.harness);
     let kind_text = kind_name(kind);
     let id = match key {
-        Some(key) => identity(&format!("{harness}:{kind_text}:{key}")),
-        None => identity(&format!(
+        Some(key) => digest(&format!("{harness}:{kind_text}:{key}")),
+        None => digest(&format!(
             "{harness}:{kind_text}:{}:{}",
             snapshot.file, location.line
         )),
@@ -738,7 +738,7 @@ fn line_key(snapshot: &Snapshot, location: &Location) -> String {
 #[derive(PartialEq)]
 struct Link {
     parent: Option<Key>,
-    boundary: Option<String>,
+    boundary: Option<Id>,
 }
 
 /// Requests in first-seen order, and each one's position by id, so the scan can take the
@@ -755,26 +755,26 @@ struct Requests {
 struct EventIndex {
     hasher: foldhash::fast::RandomState,
     by_hash: HashMap<u64, usize>,
-    collisions: HashMap<String, usize>,
+    collisions: HashMap<Id, usize>,
 }
 
 impl EventIndex {
-    fn get(&self, events: &[StructuralEvent], id: &str) -> Option<usize> {
+    fn get(&self, events: &[StructuralEvent], id: &Id) -> Option<usize> {
         match self.by_hash.get(&self.hasher.hash_one(id)) {
-            Some(&index) if events[index].id == id => Some(index),
+            Some(&index) if events[index].id == *id => Some(index),
             Some(_) => self.collisions.get(id).copied(),
             None => None,
         }
     }
 
     /// Record a new event's position; its id must not be indexed yet.
-    fn insert(&mut self, id: &str, index: usize) {
+    fn insert(&mut self, id: &Id, index: usize) {
         match self.by_hash.entry(self.hasher.hash_one(id)) {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(index);
             }
             std::collections::hash_map::Entry::Occupied(_) => {
-                self.collisions.insert(id.to_string(), index);
+                self.collisions.insert(id.clone(), index);
             }
         }
     }
@@ -870,7 +870,7 @@ struct Reader {
     // Only explicit compaction lineage can connect a notice to its boundary.
     // Ordinary messages stop the walk; a missing parent is not a historical match.
     compact_parents: HashMap<Key, Option<Link>>,
-    notice_parents: HashMap<String, HashSet<Option<Key>>>,
+    notice_parents: HashMap<Id, HashSet<Option<Key>>>,
     refs: Refs,
     issues: IndexSet<Text>,
     modern_totals: HashSet<String>,
@@ -995,7 +995,7 @@ impl Reader {
             let link = Link {
                 parent: parent.map(|parent| lineage(&context.session, parent)),
                 boundary: (kind == Some("system"))
-                    .then(|| identity(&format!("claude:compaction:{uuid}"))),
+                    .then(|| digest(&format!("claude:compaction:{uuid}"))),
             };
             match self.compact_parents.get_mut(&record) {
                 Some(existing) if existing.as_ref() != Some(&link) => *existing = None,
@@ -1158,7 +1158,7 @@ impl Reader {
                             string(b, "id"),
                         );
                         e.tool = text(member(b, "name"));
-                        e.tool_id = opaque(b, "id")?;
+                        e.tool_id = opaque(b, "id")?.map(Id::from);
                         e.request = Some(request_id.clone());
                         if is(b, "name", "Bash") {
                             let input = nested(b, "input");
@@ -1248,7 +1248,7 @@ impl Reader {
                             EventKind::ToolEnd,
                             string(b, "tool_use_id"),
                         );
-                        e.tool_id = opaque(b, "tool_use_id")?;
+                        e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -1577,7 +1577,7 @@ impl Reader {
                     string(p, "call_id"),
                 );
                 e.tool = text(member(p, "name"));
-                e.tool_id = opaque(p, "call_id")?;
+                e.tool_id = opaque(p, "call_id")?.map(Id::from);
                 self.add_event(e);
             }
         }
@@ -1980,7 +1980,7 @@ fn attribute_idle(
     events: &mut [StructuralEvent],
     ids: &EventIndex,
     compact_parents: &HashMap<Key, Option<Link>>,
-    notice_parents: &HashMap<String, HashSet<Option<Key>>>,
+    notice_parents: &HashMap<Id, HashSet<Option<Key>>>,
 ) {
     let notices: Vec<(Millis, Vec<String>, Option<Key>)> = events
         .iter()

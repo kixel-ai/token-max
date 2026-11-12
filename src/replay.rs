@@ -15,7 +15,7 @@ use crate::keepalive::{KeepaliveOptions, keepalive_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
-    HistoricalCost, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
+    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
     RequestEvidence, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
     UnlinkedSensitivity, Usage, UsageEstimate, WindowBasisKind,
 };
@@ -73,7 +73,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
     };
     Some(Request {
         evidence: RequestEvidence::Estimated,
-        id: identity(&event.id).into(),
+        id: identity(&event.id.to_string()).into(),
         harness: event.harness,
         session: event.session.clone(),
         time: event.time,
@@ -175,7 +175,7 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
         selected: requests,
     };
     let events: &[StructuralEvent] = events;
-    let selected: HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
+    let selected: HashSet<&Id> = events.iter().map(|e| &e.id).collect();
     let mut boundaries: Vec<&StructuralEvent> = cache_context
         .boundaries
         .iter()
@@ -346,7 +346,7 @@ pub fn compaction_charges(scan: &mut Scan, catalog: &Catalog) -> Vec<CompactionC
                 .collect(),
         });
     }
-    result.retain(|charge| selected.contains(charge.event.as_str()));
+    result.retain(|charge| selected.contains(&charge.event));
     result
 }
 
@@ -542,14 +542,14 @@ fn ttl_check(
     if selected.is_empty() && !boundaries.iter().any(|e| e.time >= since) {
         return None;
     }
-    let summary_ids: HashSet<&str> = boundaries
+    let summary_ids: HashSet<&Id> = boundaries
         .iter()
         .filter(|e| e.time >= since)
-        .map(|e| e.id.as_str())
+        .map(|e| &e.id)
         .collect();
     let unmatched: Vec<&CompactionCharge> = summaries
         .iter()
-        .filter(|s| summary_ids.contains(s.event.as_str()) && s.request.is_none())
+        .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
         .collect();
     let summary_cost = PerTtl {
         five_minutes: add_costs(unmatched.iter().map(|s| &s.ttl_cost.five_minutes)),
@@ -986,11 +986,13 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(String::from)
         .collect(),
     };
+    let incomplete = crate::context::incomplete_profiles(&scan.snapshots);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
         profiles: &scan.profiles,
         catalog,
+        incomplete: &incomplete,
         max_cost_per_use_usd,
     });
     Ok(Report {
@@ -2437,11 +2439,11 @@ mod tests {
             let complete = report_at(&scan(&options(&w, None)).unwrap(), Some(since), NOW);
             let selected = scan(&options(&w, Some(since))).unwrap();
             let report = report_at(&selected, Some(since), NOW);
-            let ids: HashSet<&str> = selected.events.iter().map(|e| e.id.as_str()).collect();
+            let ids: HashSet<&Id> = selected.events.iter().map(|e| &e.id).collect();
             let expected: Vec<CompactionCharge> = complete
                 .compactions
                 .iter()
-                .filter(|c| ids.contains(c.event.as_str()))
+                .filter(|c| ids.contains(&c.event))
                 .cloned()
                 .collect();
             assert_eq!(report.compactions, expected);

@@ -674,7 +674,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     let feature = |name: &str| checks.iter().find(|c| c["feature"] == name).unwrap();
     let suggestions = feature("prompt-suggestions");
     assert_eq!(suggestions["generations"], 2);
-    assert_eq!(suggestions["action"], "change");
+    assert_eq!(suggestions["action"], "advisory");
     assert!(suggestions["cost"]["totalUsd"].as_f64().unwrap() > 0.0);
     assert_eq!(suggestions["off"], "\"promptSuggestionEnabled\": false");
     assert_eq!(

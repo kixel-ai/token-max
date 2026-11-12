@@ -1013,7 +1013,7 @@ pub fn discover_codex_controls(
         }
         // Named profiles can set memories too, and which one launched is not recorded.
         let profile_memory = memory_profiles
-            .then(|| "named config profiles set memories; --profile selection is not recorded");
+            .then_some("named config profiles set memories; --profile selection is not recorded");
         if let Some(memory) = &mut profile.memory {
             memory.unresolved = profile_memory.map(String::from);
         }

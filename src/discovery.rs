@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 
 use crate::controls::{
     CLAUDE_BACKGROUND_ENV, CompactionSources, Env, SettingsScope, bash_cap_control,
-    claude_background, codex_background, compaction_controls, idle_controls, js_string, members,
-    scoped_environment, speed_controls,
+    claude_background, claude_memory, codex_background, codex_memory, compaction_controls,
+    idle_controls, js_string, members, scoped_environment, speed_controls,
 };
 use crate::model::{
     Agent, BackgroundControl, Harness, IdleControl, Location, PerBucket, Profile, Request,
@@ -1542,6 +1542,11 @@ pub(crate) fn profile(
     } else {
         codex_background(&speed_scopes)?
     };
+    let memory = if claude {
+        claude_memory(&speed_scopes, local_env)?
+    } else {
+        codex_memory(&speed_scopes)?
+    };
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1562,6 +1567,7 @@ pub(crate) fn profile(
         background,
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
+        memory: Some(memory),
         t3: None,
     })
 }

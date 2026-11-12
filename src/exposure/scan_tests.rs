@@ -6,7 +6,7 @@ use super::*;
 use crate::context::control_text;
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
-use crate::model::{ContextCost, ContextKind, Report, Scan, Verdict};
+use crate::model::{ContextCost, ContextKind, MemoryAccess, Report, Scan, Verdict};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{ReportOptions, format_report};
@@ -2170,4 +2170,283 @@ fn a_one_letter_plugin_name_is_not_a_windows_drive() {
         data.exposure.invocations[0].group,
         Some(identity("plugin:a"))
     );
+}
+
+/// One Claude session, with auto memory's system prompt section and MEMORY.md when
+/// `memory` is on, that reads one memory file and writes another.
+fn claude_memory_session(root: &str, memory: bool) -> Vec<Value> {
+    let mut prompt = "SYNTHETIC_PRIVATE_INTRO\n".to_string();
+    if memory {
+        prompt += "# Memory\n\nSYNTHETIC_PRIVATE_MEMORY_GUIDE \"quoted\"\n\n";
+    }
+    prompt += "# Environment\nSYNTHETIC_PRIVATE_ENV\n";
+    let system = json!([{ "type": "text", "text": prompt }]);
+    let tools =
+        [json!({ "name": "Read", "description": "r", "input_schema": { "type": "object" } })];
+    let dir = format!("{root}/projects/project/memory");
+    let mut files = vec![
+        json!({ "path": "/repo/CLAUDE.md", "type": "Project", "content": "SYNTHETIC_PRIVATE_RULES" }),
+    ];
+    if memory {
+        files.push(json!({ "path": format!("{dir}/MEMORY.md"), "type": "AutoMem", "content": "SYNTHETIC_PRIVATE_INDEX" }));
+    }
+    let request = |n: u32| {
+        json!({
+            "type": "api-request",
+            "id": format!("api-{n}"),
+            "timestamp": at(n),
+            "sessionId": "session",
+            "shapeHash": "shape",
+            "keep": 0,
+            "tail": ["m1"],
+            "requestDigest": format!("d{n}"),
+            "params": { "model": "claude-opus-5-5" },
+        })
+    };
+    vec![
+        attachment(0, json!({ "type": "instructions", "files": files })),
+        json!({
+            "type": "api-request-shape",
+            "sessionId": "session",
+            "timestamp": at(0),
+            "shapeHash": "shape",
+            "shape": { "system": system, "tools": tools },
+        }),
+        json!({ "type": "api-request-blob", "sessionId": "session", "hash": "m1", "message": { "role": "user", "content": "SYNTHETIC_PRIVATE_PROMPT" } }),
+        request(1),
+        assistant(
+            1,
+            json!([
+                { "type": "tool_use", "id": "read", "name": "Read", "input": { "file_path": format!("{dir}/note.md") } },
+                { "type": "tool_use", "id": "write", "name": "Write",
+                  "input": { "file_path": format!("{dir}/new.md"), "content": "SYNTHETIC_PRIVATE_NOTE" } },
+                { "type": "tool_use", "id": "other", "name": "Read", "input": { "file_path": "/repo/src/main.rs" } },
+            ]),
+        ),
+        json!({
+            "type": "user",
+            "timestamp": at(2),
+            "sessionId": "session",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "read", "content": "SYNTHETIC_PRIVATE_RECALLED" },
+                { "type": "tool_result", "tool_use_id": "write", "content": "ok" },
+                { "type": "tool_result", "tool_use_id": "other", "content": "SYNTHETIC_PRIVATE_SOURCE" },
+            ] },
+        }),
+        request(3),
+        assistant(3, json!([])),
+    ]
+}
+
+fn memory_check(report: &Report, harness: Harness) -> &crate::model::MemoryCheck {
+    report
+        .checks
+        .iter()
+        .find_map(|c| match c {
+            crate::model::CheckResult::Memory(m) if m.harness == harness => Some(m),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let root = root.to_string_lossy();
+    let records = claude_memory_session(&root, true);
+    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&records)).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let e = &data.exposure;
+    let component = |name: &str| e.components.iter().find(|c| c.name == name).unwrap();
+    // The section is measured as JSON text, so its quotes count escaped.
+    let section = r#"# Memory\n\nSYNTHETIC_PRIVATE_MEMORY_GUIDE \"quoted\"\n\n"#;
+    let system = &records[1]["shape"]["system"];
+    let memory_section = component(MEMORY_SECTION);
+    assert_eq!(memory_section.category, Category::Memory);
+    assert_eq!(memory_section.size.characters, Some(section.len() as i64));
+    assert_eq!(
+        component("wire-system").size.characters,
+        Some((length(system) - section.len()) as i64)
+    );
+    assert_eq!(e.requests[0].view.prefix, 3);
+    let index = component(&format!("{root}/projects/project/memory/MEMORY.md"));
+    assert_eq!(index.category, Category::Memory);
+    assert_eq!(e.memory.len(), 2);
+    let write = e
+        .memory
+        .iter()
+        .find(|m| m.access == MemoryAccess::Write)
+        .unwrap();
+    assert_eq!(write.request.as_deref(), Some(&*data.requests[0].id));
+    assert!(write.characters.unwrap() > "SYNTHETIC_PRIVATE_NOTE".len() as i64);
+    // The memory file read back is memory's output, not the Read tool's.
+    let read: Vec<&str> = e.tool_results.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(read, [MEMORY_OUTPUT, "Write", "Read"]);
+
+    let report = report(&data, 1.0);
+    let memory = row(&report, crate::context::CLAUDE_MEMORY);
+    assert_eq!(memory.kind, ContextKind::Memory);
+    assert_eq!(memory.calls, Some(2));
+    assert_eq!(memory.verdict, None);
+    assert_eq!(
+        control_text(memory.control.as_ref().unwrap(), Harness::Claude),
+        r#""autoMemoryEnabled": false"#
+    );
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!((check.reads, check.writes), (1, 1));
+    assert!(check.writes_usd.unwrap() > 0.0);
+    assert_eq!(
+        check.base.savings_usd,
+        Some(memory.estimated_usd.unwrap() + check.writes_usd.unwrap())
+    );
+    let text = format_report(
+        &report,
+        ReportOptions {
+            width: None,
+            color: false,
+            unicode: false,
+            details: false,
+            host: None,
+        },
+    );
+    let advised = &text[text.find("Not recommended\n").unwrap()..];
+    assert!(labelled(
+        advised,
+        "Auto memory",
+        then(
+            ": on -> off. Not recommended: ",
+            "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+        )
+    ));
+    assert!(!text.contains("MEMORY.md"));
+    // Advice is not a change, so it leaves the exit code alone.
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+    );
+    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+}
+
+#[test]
+fn claude_auto_memory_off_in_the_latest_request_is_kept_off() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let records = claude_memory_session(&root.to_string_lossy(), false);
+    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&records)).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert_eq!(categories(&data.exposure, Category::Memory), 0);
+    let report = report(&data, 1.0);
+    assert_eq!(memory_check(&report, Harness::Claude).base.current, Some(false));
+    let text = text(&report);
+    assert!(!text.contains("Not recommended\n"));
+    let keep = &text[text.find("Keep\n").unwrap()..];
+    assert!(labelled(keep, "Auto memory", |s| s == ": off. Costs nothing."));
+}
+
+#[test]
+fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_default() {
+    let w = Workspace::new();
+    let home = std::fs::canonicalize(&w.codex).unwrap();
+    let home = home.to_string_lossy();
+    let records = [
+        codex_meta(),
+        turn(),
+        json!({
+            "type": "response_item",
+            "timestamp": at(1),
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    { "type": "input_text", "text": "SYNTHETIC_PRIVATE_PERMISSIONS" },
+                    { "type": "input_text", "text": "## Memory\nSYNTHETIC_PRIVATE_SUMMARY" },
+                    { "type": "input_text", "text": "SYNTHETIC_PRIVATE_CONTINUED" },
+                ],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["permissions", "memories.instructions", "memories.instructions"],
+                },
+            },
+        }),
+        // A full world state does not drop the summary.
+        world(
+            1,
+            json!({ "agents_md": { "text": "SYNTHETIC_PRIVATE_AGENTS" } }),
+            true,
+        ),
+        json!({
+            "type": "response_item",
+            "timestamp": at(2),
+            "payload": { "type": "function_call", "namespace": "memories", "name": "read",
+                         "call_id": "recall", "arguments": "{\"path\":\"SYNTHETIC_PRIVATE_PATH\"}" },
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": at(3),
+            "payload": { "type": "function_call_output", "call_id": "recall", "output": "SYNTHETIC_PRIVATE_RECALLED" },
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": at(3),
+            "payload": { "type": "function_call", "namespace": "memories", "name": "add_ad_hoc_note",
+                         "call_id": "note", "arguments": "{\"note\":\"SYNTHETIC_PRIVATE_NOTE\"}" },
+        }),
+        json!({
+            "type": "event_msg",
+            "timestamp": at(4),
+            "payload": { "type": "item_completed", "item": {
+                "type": "CommandExecution", "id": "shell", "exit_code": 0, "status": "completed",
+                "parsed_cmd": [{ "type": "read", "name": "notes.md", "path": format!("{home}/memories/notes.md"), "cmd": "cat" }],
+                "aggregated_output": "SYNTHETIC_PRIVATE_SHELL",
+            } },
+        }),
+        billed(5),
+    ];
+    let file = w.codex.join("sessions/main.jsonl");
+    std::fs::write(&file, jsonl(&records)).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let e = &data.exposure;
+    let summary = e
+        .components
+        .iter()
+        .find(|c| c.category == Category::Memory)
+        .unwrap();
+    assert_eq!(
+        summary.size.characters,
+        Some("## Memory\nSYNTHETIC_PRIVATE_SUMMARY\nSYNTHETIC_PRIVATE_CONTINUED".len() as i64)
+    );
+    assert!(has(&e.requests[0].view.candidates, &summary.id));
+    let accesses: Vec<MemoryAccess> = e.memory.iter().map(|m| m.access).collect();
+    assert_eq!(
+        accesses,
+        [MemoryAccess::Read, MemoryAccess::Write, MemoryAccess::Read]
+    );
+    let r = report(&data, 1.0);
+    let memory = row(&r, crate::context::CODEX_MEMORY);
+    assert_eq!(memory.calls, Some(3));
+    assert_eq!(memory.requests, 1);
+    // Off by default, but a summary in the latest request shows it is on.
+    let check = memory_check(&r, Harness::Codex);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.off, "features.memories = false");
+    assert_eq!(check.context_usd, memory.estimated_usd);
+    assert!(labelled(
+        &text(&r),
+        "Codex memories",
+        then(": on -> off. Not recommended: ", "")
+    ));
+    assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
+
+    // With no summary and no setting, Codex memories are off.
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(labelled(
+        &text(&report(&data, 1.0)),
+        "Codex memories",
+        |s| s == ": off. Costs nothing."
+    ));
 }

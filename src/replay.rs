@@ -12,6 +12,7 @@ use crate::exposure::calibrate;
 use crate::fast::{SpeedInput, speed_checks};
 use crate::idle::{IdleOptions, idle_checks};
 use crate::keepalive::{KeepaliveOptions, keepalive_checks};
+use crate::memory::{MemoryInput, memory_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
@@ -960,6 +961,20 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let context = context_costs(&ContextInput {
+        scan: &scan.exposure,
+        requests: &scan.requests,
+        profiles: &scan.profiles,
+        catalog,
+        max_cost_per_use_usd,
+    });
+    let memory = memory_checks(&MemoryInput {
+        scan: &scan,
+        context: &context,
+        catalog,
+        since,
+        now,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
@@ -970,6 +985,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .chain(speed.into_iter().map(CheckResult::Speed))
         .chain(background.into_iter().map(CheckResult::Background))
         .chain(bash.into_iter().map(CheckResult::BashCap))
+        .chain(memory.into_iter().map(CheckResult::Memory))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
@@ -985,13 +1001,6 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(String::from)
         .collect(),
     };
-    let context = context_costs(&ContextInput {
-        scan: &scan.exposure,
-        requests: &scan.requests,
-        profiles: &scan.profiles,
-        catalog,
-        max_cost_per_use_usd,
-    });
     Ok(Report {
         schema_version: 2,
         generated_at: iso(now),

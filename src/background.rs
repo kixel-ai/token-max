@@ -53,7 +53,7 @@ pub struct BackgroundInput<'a> {
     pub since: Option<Millis>,
     /// The window end, which monthly values scale to.
     pub now: Millis,
-    /// Recommend turning a feature off when it cost more than this per recorded use.
+    /// Suggest turning a feature off when its whole cost exceeds this, since uses are not recorded.
     pub max_cost_per_use_usd: f64,
 }
 
@@ -464,12 +464,13 @@ fn check(
         }
         _ => v,
     };
-    // A suggestion or recap use is not recorded, so its whole cost counts as one use.
+    // A suggestion or recap use is not recorded, so nonuse is never proven: a whole
+    // cost above the per-use limit may still be under it per use, and stays advisory.
     let action = match (control.value, measurable, estimate) {
         (None, _, _) => Action::Advisory,
         (Some(false), _, _) => Action::Keep,
         (Some(true), false, _) | (Some(true), true, None) => Action::Advisory,
-        (Some(true), true, Some(usd)) if usd > input.max_cost_per_use_usd => Action::Change,
+        (Some(true), true, Some(usd)) if usd > input.max_cost_per_use_usd => Action::Advisory,
         (Some(true), true, Some(_)) => Action::Keep,
     };
     let other = ends.iter().filter(|e| !e.interactive).count();
@@ -543,11 +544,7 @@ fn check(
             },
             action,
             current: control.value,
-            recommended: match action {
-                Action::Change => Some(false),
-                Action::Keep => control.value,
-                Action::Advisory => None,
-            },
+            recommended: (action == Action::Keep).then_some(control.value).flatten(),
             owner: control.owner.clone(),
             since: start,
             until: Some(input.now),
@@ -579,7 +576,7 @@ fn check(
                 "a fork sends the conversation's prefix as a cache read before expiry or ordinary input after expiry, plus the last response and its instruction as new input, without writing cache",
                 "recaps require two new user turns after the previous modeled recap, including recaps before the analysis window",
                 "live-prefix reads by enabled suggestions and recaps refresh the cache; turning one feature off keeps the other's modeled requests and refreshes, including any extra recap input or later cache rewrite",
-                "uses are not recorded, so the whole cost counts as one use against --max-cost-per-use",
+                "uses are not recorded, so a whole cost above --max-cost-per-use is advisory and one below it is kept",
             ]
             .map(String::from)
             .into(),
@@ -617,7 +614,7 @@ mod tests {
 
     fn prompt(time: Millis) -> StructuralEvent {
         StructuralEvent {
-            id: format!("prompt-{time}"),
+            id: format!("prompt-{time}").into(),
             origins: vec![],
             harness: Harness::Claude,
             session: "session".into(),
@@ -733,7 +730,7 @@ mod tests {
             (checks[0].base.requests, checks[0].generations),
             (2, Some(1))
         );
-        assert_eq!(checks[0].base.action, Action::Change);
+        assert_eq!(checks[0].base.action, Action::Advisory);
         assert_eq!(checks[0].directories, [Some("/synthetic/a".into())]);
         assert_eq!(
             (checks[1].base.requests, checks[1].generations),
@@ -818,11 +815,11 @@ mod tests {
         assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
         assert!((c.base.savings_usd.unwrap() - expected).abs() < 1e-12);
         assert_eq!(c.base.action, Action::Keep);
-        // Any cost above the per-use limit turns it off, since uses are not recorded.
+        // Uses are not recorded, so a cost above the per-use limit is only advisory.
         let c = &run(&s, expected / 2.0)[0];
         assert_eq!(
             (c.base.action, c.base.recommended),
-            (Action::Change, Some(false))
+            (Action::Advisory, None)
         );
     }
 

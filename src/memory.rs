@@ -44,7 +44,7 @@ pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
         .exposure
         .components
         .iter()
-        .map(|c| (c.id.as_str(), c))
+        .map(|c| (&*c.id, c))
         .collect();
     scan.profiles
         .iter()

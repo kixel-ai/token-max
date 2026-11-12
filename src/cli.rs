@@ -520,10 +520,11 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             eprintln!("token-max: {message}...");
         }
     };
-    // Every host scans at once and the first failure stops the rest, but only one scan is held
-    // here at a time: a destination announces that its scan is ready and sends it only when its
-    // turn to be analyzed comes. A lone local scan runs on this thread, so the analysis reuses
-    // the memory the scan frees rather than leaving it to another thread's allocator arena.
+    // Every host scans at once and the first failure stops the rest. A destination announces
+    // that its scan is ready and sends it only when its turn to be analyzed comes, so every host
+    // reports ready or failed before analysis starts, yet only one remote scan is held here at a
+    // time. A lone local scan runs on this thread, so the analysis reuses the memory the scan
+    // frees rather than leaving it to another thread's allocator arena.
     enum Ready {
         Local(Box<Remote>),
         Remote(Box<ssh::Connection>),
@@ -582,6 +583,9 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         if let Some(job) = inline {
             slots[0] = Some(job()?);
         }
+        for (host, result) in ready {
+            slots[host] = Some(result?);
+        }
         phase("Loading public prices");
         let cache = match values.price_cache {
             Some(cache) => PathBuf::from(cache),
@@ -621,13 +625,8 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         let mut code = 0;
         let mut text = String::new();
         let mut reports = vec![];
-        let mut ready = ready.iter();
-        for (index, ssh) in hosts.iter().enumerate() {
-            while slots[index].is_none() {
-                let (host, result) = ready.next().expect("every host reports once");
-                slots[host] = Some(result?);
-            }
-            let Remote { scan, home } = match slots[index].take().expect("this host is ready") {
+        for (ssh, slot) in hosts.iter().zip(slots) {
+            let Remote { scan, home } = match slot.expect("every host reported ready") {
                 Ready::Local(scan) => *scan,
                 Ready::Remote(connection) => {
                     panic::catch_unwind(AssertUnwindSafe(|| connection.receive()))

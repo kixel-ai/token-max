@@ -182,5 +182,6 @@ of one plain verdict per setting, with the evidence cards under `--details`.
 - [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history, and hosts are analyzed one at a time
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
 - [Resolve Claude sessions by T3 turn items](/quest/m0/t3-turn-items.md) - `/clear` sessions and shelled-out `claude -p` runs stop keeping native profiles advisory
+- [Price unset gateway windows at the declared context size](/quest/m0/gateway-windows.md) - gateway model IDs with a declared window get priced compaction comparisons
 - [Export priced sessions as JSON](/quest/m0/session-export.md) - moq-dev/quest's `quest usage` ties each session, sub-agents included, to a PR
 - [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each

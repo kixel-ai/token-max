@@ -75,9 +75,9 @@ as an unpriced request in that profile's comparisons. Unterminated final
 lines are deferred, with frozen file lengths and deferred byte counts in JSON.
 
 The default report says what was read, then puts every setting and feature on
-one line under **Change**, **Keep**, or **Not enough evidence**. Setting
-savings are per 30 days at the window's rate; feature and context costs and
-use counts are totals over the whole window. Settings that don't change the
+one line under **Change**, **Keep**, or **Not enough evidence**. Savings are
+per 30 days at the window's rate, so checks with different windows compare;
+costs and use counts are totals over the whole window. Settings that don't change the
 experience, such as the cache TTL, name the current and suggested values, the
 savings, and the file that owns the setting. Not enough evidence says why in one
 sentence, such as two options being too close to call. Unresolved current
@@ -176,7 +176,7 @@ Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
 
 3 setting changes recommended.
-Setting savings are per 30 days at this window's rate; feature and context costs and uses are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than $1 per use (--max-cost-per-use).
+Savings are per 30 days at this window's rate; costs and use counts are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than $1 per use (--max-cost-per-use).
 
 Change
   Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.

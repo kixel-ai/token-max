@@ -478,10 +478,12 @@ mod tests {
             text.contains("]: 10m -> 4m. A wait that long outlasts the 5m cache."),
             "{text}"
         );
+        // The miss cost is the window's total, like the wait count, not a 30-day rate.
         assert!(
-            text.contains(
-                "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop)"
-            ),
+            text.contains(&format!(
+                "1 foreground Bash wait outlasted the cache (1 hit the timeout, 1 polled in a loop); the cache misses cost {}.",
+                crate::report::about(expected)
+            )),
             "{text}"
         );
         let json = serde_json::to_string(&report).unwrap();

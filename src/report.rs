@@ -125,7 +125,7 @@ fn count(value: impl Into<i128>) -> String {
     out
 }
 
-fn about(value: f64) -> String {
+pub(crate) fn about(value: f64) -> String {
     let rounded = if value.abs() >= 10.0 {
         js_round(value)
     } else {
@@ -2394,7 +2394,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         name
     };
     // Setting savings are shown per 30 days so checks with different windows compare
-    // directly. Feature costs stay totals over the read window, beside the uses they bought.
+    // directly. Costs stay totals over the read window, beside the uses they bought.
     let cost_text = |c: &ContextCost| {
         c.estimated_usd.map_or_else(
             || "cost unknown".into(),
@@ -2442,7 +2442,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     );
     out.line(
         &format!(
-            "Setting savings are per 30 days at this window's rate; feature and context costs and uses are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than {} per use (--max-cost-per-use).",
+            "Savings are per 30 days at this window's rate; costs and use counts are totals over the whole window. A tool, skill, MCP server or background generation is worth turning off when it cost more than {} per use (--max-cost-per-use).",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -2491,18 +2491,16 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             format!("{label}: on. {cost}; {uses}.")
         }
     };
-    // What long foreground Bash waits cost, scaled like every other line.
-    let waits = |b: &BashCapCheck, r: &Common<'_>| {
+    // What long foreground Bash waits cost: a total over the window, like their count.
+    let waits = |b: &BashCapCheck| {
         let w = &b.waits;
         if w.long == 0 {
             return "No foreground Bash wait outlasted the cache.".to_string();
         }
         let cost = &w.miss_cost;
         let cost = match cost.total_usd {
-            Some(usd) => per_month(usd, r.since, r.until),
-            None if cost.known_usd > 0.0 => {
-                format!("at least {}", per_month(cost.known_usd, r.since, r.until))
-            }
+            Some(usd) => about(usd),
+            None if cost.known_usd > 0.0 => format!("at least {}", about(cost.known_usd)),
             None => "an unknown amount".into(),
         };
         format!(
@@ -2537,7 +2535,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         let mut text = format!(
                             " A wait that long outlasts the {} cache. {}",
                             b.ttl.map_or("unknown", Ttl::as_str),
-                            waits(b, r)
+                            waits(b)
                         );
                         if b.replacement.contains("BASH_DEFAULT_TIMEOUT_MS") {
                             text += " Lower BASH_DEFAULT_TIMEOUT_MS to match.";
@@ -2618,7 +2616,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             CheckResult::BashCap(b) => format!(
                 "{head}. Under the {} cache TTL. {}",
                 b.ttl.map_or("unknown", Ttl::as_str),
-                waits(b, r)
+                waits(b)
             ),
             CheckResult::Keepalive(k) => format!("{head}. {}", keepalive_keep(k, r)),
             CheckResult::Idle(_) => format!(

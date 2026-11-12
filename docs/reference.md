@@ -82,7 +82,8 @@ prices, with one copy retained. Repeated discovery of the same path needs the
 redundant source removed. Zero observations do not prove nonuse, and listing
 cost is not promised savings: Codex can backfill the freed catalog space.
 Auto memory, Claude Code's `MEMORY.md` and system prompt section or Codex's
-memory summary, is worth considering off while it is on, on the maintainer's
+memory summary, is worth considering off while it is on, or may be on because
+a Codex setting such as a `--profile` selection is not recorded, on the maintainer's
 opinion rather than a measurement: notes the agent writes for itself skip
 review and encourage slop, so durable guidance belongs in a reviewed,
 checked-in CLAUDE.md or AGENTS.md. Its line shows the total cost of the loaded

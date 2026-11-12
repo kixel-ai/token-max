@@ -2772,13 +2772,80 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     assert_eq!(check.base.current, Some(true));
     assert_eq!(check.off_file.as_deref(), Some(&*project_config));
 
-    // Without a recorded trust decision, the project layer is not taken to apply,
-    // and the check says it could not tell.
+    // Without a recorded trust decision, whether the project layer applies is
+    // unknown, so the state is too: a yellow advisory that it may be on.
     std::fs::write(w.codex.join("config.toml"), "").unwrap();
-    let data = scan(&options(&w, None)).unwrap();
-    let check = memory_check(&report(&data, 1.0), Harness::Codex).clone();
-    assert_eq!(check.base.current, Some(false));
-    assert!(check.base.uncertainty.iter().any(|u| u.starts_with(
-        "a project .codex/config.toml sets memories, but the project's trust is not recorded, so whether those settings apply is unresolved"
-    )));
+    let unresolved = |data: &crate::model::Scan| {
+        let r = report(data, 1.0);
+        let check = memory_check(&r, Harness::Codex).clone();
+        let wide = ReportOptions {
+            width: Some(1000),
+            color: false,
+            unicode: false,
+            details: false,
+            host: None,
+        };
+        (check, format_report(&r, wide))
+    };
+    let (check, rendered) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(
+        check.unresolved.as_deref(),
+        Some("a project .codex/config.toml sets memories, but the project's trust is not recorded")
+    );
+    let advised = &rendered[rendered.find("Consider turning off\n").unwrap()..];
+    assert!(labelled(
+        advised,
+        "Codex memories",
+        then(
+            ": may be on -> off. Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
+            "Set features.memories = false in "
+        )
+    ));
+    assert!(
+        !report(&scan(&options(&w, None)).unwrap(), 1.0)
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+    );
+
+    // Trusted, but a named profile that sets memories may have been selected.
+    let trusted = format!("[projects.{project:?}]\ntrust_level = \"trusted\"\n");
+    std::fs::write(w.codex.join("config.toml"), &trusted).unwrap();
+    let named = w.codex.join("loud.config.toml");
+    std::fs::write(&named, "[features]\nmemories = false\n").unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert!(
+        check
+            .unresolved
+            .unwrap()
+            .starts_with("a named config profile sets memories")
+    );
+    std::fs::remove_file(&named).unwrap();
+
+    // A named profile that changes project roots matters only where a layer it could
+    // add or drop sets memories: here the root's layer, seen from a nested directory.
+    let nested = format!("{project}/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let mut meta = codex_meta();
+    meta["payload"]["cwd"] = json!(nested);
+    std::fs::write(&file, jsonl(&[meta, turn(), billed(5)])).unwrap();
+    std::fs::write(
+        w.codex.join("quiet.config.toml"),
+        "project_root_markers = []\n",
+    )
+    .unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert!(
+        check
+            .unresolved
+            .unwrap()
+            .starts_with("a .codex/config.toml above the latest session's directory sets memories")
+    );
+    std::fs::remove_file(&project_config).unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!((check.base.current, check.unresolved), (Some(false), None));
 }

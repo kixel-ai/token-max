@@ -316,6 +316,14 @@ fn memory_off(c: &MemoryCheck, out: &Out<'_>) -> String {
 /// Why auto memory is not recommended, whatever it cost.
 const MEMORY_ADVICE: &str = "Opinion: notes the agent writes for itself skip review, which encourages slop. Keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md instead";
 
+/// Why auto memory's state is unknown, as a sentence without its period.
+fn memory_unresolved(c: &MemoryCheck) -> String {
+    format!(
+        "Unknown whether it is on: {}",
+        c.unresolved.as_deref().unwrap_or_default()
+    )
+}
+
 /// Whether auto memory cost nothing and was never used in the window.
 fn memory_free(c: &MemoryCheck) -> bool {
     c.base.savings_usd == Some(0.0) && c.reads + c.writes == 0
@@ -1790,6 +1798,12 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::Memory(_) if r.action == Action::Keep => {
             return "Off now; its cost and uses earlier in the window are shown for reference.".into();
         }
+        CheckResult::Memory(m) if m.unresolved.is_some() => {
+            return format!(
+                "{}. {MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use.",
+                memory_unresolved(m)
+            );
+        }
         CheckResult::Memory(_) => return format!("{MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use."),
         CheckResult::Background(b) => {
             return match r.action {
@@ -2810,6 +2824,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             return match action(c) {
                 Action::Keep if memory_free(m) => format!("{head}. Costs nothing."),
                 Action::Keep => format!("{head}. {cost}; {}.", memory_uses(m)),
+                _ if m.unresolved.is_some() => format!(
+                    "{}: may be on {arrow} off. {}. {MEMORY_ADVICE}. {cost}; {}. {}.",
+                    name(r, result, out),
+                    memory_unresolved(m),
+                    memory_uses(m),
+                    memory_off(m, out)
+                ),
                 _ => format!(
                     "{head} {arrow} off. {MEMORY_ADVICE}. {cost}; {}. {}.",
                     memory_uses(m),
@@ -3967,6 +3988,7 @@ mod tests {
                     writes_usd: Some(10.0),
                     reads: 1,
                     writes: 2,
+                    unresolved: None,
                 })
             },
         ];

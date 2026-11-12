@@ -1366,6 +1366,9 @@ pub struct MemoryCheck {
     pub writes_usd: Option<f64>,
     pub reads: u64,
     pub writes: u64,
+    /// Why whether it is on could not be resolved, making `current` null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
 }
 
 /// Foreground Bash calls that held the cache idle, and what their misses cost.

@@ -130,11 +130,15 @@ fn check(
         }
     }
     let on = control.value;
+    // Unknown when a setting the scan cannot resolve, such as a Codex --profile
+    // selection, could change it.
+    let current = control.unresolved.is_none().then_some(on);
     // Claude Code adds its prompt section whenever memory is on. Codex adds a summary
     // only once one has been written, so its absence shows nothing.
     let disagree = sessions
         .values()
         .filter(|&&(_, carried)| match profile.harness {
+            _ if current.is_none() => false,
             Harness::Claude => carried != on,
             Harness::Codex => carried && !on,
         })
@@ -232,8 +236,9 @@ fn check(
     }
     if let Some(reason) = &control.unresolved {
         uncertainty.push(format!(
-            "{reason}, so whether those settings apply is unresolved; {} decides here",
-            control.owner
+            "{reason}, so whether memory is on is unknown; without it, {} leaves it {}",
+            control.owner,
+            if on { "on" } else { "off" },
         ));
     }
     if disagree > 0 {
@@ -250,10 +255,9 @@ fn check(
             if on { "on" } else { "off" },
         ));
     }
-    let (action, recommended) = if on {
-        (Action::Advisory, Some(false))
-    } else {
-        (Action::Keep, Some(false))
+    let (action, recommended) = match current {
+        Some(false) => (Action::Keep, Some(false)),
+        _ => (Action::Advisory, Some(false)),
     };
     MemoryCheck {
         base: CheckBase {
@@ -267,7 +271,7 @@ fn check(
                 .collect(),
             evidence: Evidence::Estimated,
             action,
-            current: Some(on),
+            current,
             recommended,
             owner: control.owner.clone(),
             since: start,
@@ -306,5 +310,6 @@ fn check(
         writes_usd,
         reads,
         writes,
+        unresolved: control.unresolved.clone(),
     }
 }

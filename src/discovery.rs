@@ -988,7 +988,9 @@ pub fn discover_codex_controls(
             );
         }
         let mut marker_selection = legacy_selection;
-        let mut memory_profiles = false;
+        let mut memory_profiles = members(user.get("profiles"))
+            .values()
+            .any(|p| sets_codex_memory(members(Some(p))));
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
@@ -1012,8 +1014,9 @@ pub fn discover_codex_controls(
             }
         }
         // Named profiles can set memories too, and which one launched is not recorded.
-        let profile_memory = memory_profiles
-            .then_some("named config profiles set memories; --profile selection is not recorded");
+        let profile_memory = memory_profiles.then_some(
+            "a named config profile sets memories, and --profile selection is not recorded",
+        );
         if let Some(memory) = &mut profile.memory {
             memory.unresolved = profile_memory.map(String::from);
         }
@@ -1090,9 +1093,16 @@ pub fn discover_codex_controls(
                 };
                 let untrusted_layer =
                     trust.is_none() && layers.iter().any(|(_, config)| sets_codex_memory(config));
+                // A named profile's project_root_markers or projects can change which
+                // project layers apply, which matters only where one sets memories.
+                let moved_layer =
+                    marker_selection && ancestor_sets_codex_memory(cwd, &profile.settings_file)?;
                 let reasons: Vec<&str> = [
                     untrusted_layer.then_some(
                         "a project .codex/config.toml sets memories, but the project's trust is not recorded",
+                    ),
+                    moved_layer.then_some(
+                        "a .codex/config.toml above the latest session's directory sets memories, and a named config profile that can change which project config applies may have been selected",
                     ),
                     profile_memory,
                 ]
@@ -1146,6 +1156,22 @@ pub fn discover_codex_controls(
 fn sets_codex_memory(config: &Map<String, Value>) -> bool {
     members(config.get("features")).contains_key("memories")
         || members(config.get("memories")).contains_key("use_memories")
+}
+
+/// Whether any `.codex/config.toml` from `cwd` up to the filesystem root, other than
+/// the user's own, sets memories, whichever of them a project root would include.
+fn ancestor_sets_codex_memory(cwd: &str, user: &str) -> Result<bool, ScanError> {
+    let mut path = cwd;
+    loop {
+        let file = join(&[path, ".codex", "config.toml"]);
+        if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
+            return Ok(true);
+        }
+        if dirname(path) == path {
+            return Ok(false);
+        }
+        path = dirname(path);
+    }
 }
 
 /// Whether a file name selects a named Codex profile, as in `--profile NAME`.

@@ -863,9 +863,13 @@ state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
 is gone. The settings decide whether memory is on, resolved like Claude Code's
 at the latest session's directory, including the `.codex/config.toml` layers of
-a trusted project. When the project's trust is not recorded, or named config
-profiles set memories, the check says those settings could not be resolved. A
-session there that carried a summary at its latest request while the settings
+a trusted project. When something the scan cannot record could change that, the
+state is unknown and the line is a yellow advisory that memories may be on,
+naming why: a project layer that sets memories in a project whose trust is not
+recorded, a named config profile (or legacy `profiles` entry) that sets
+memories, or a named profile's `project_root_markers` or `projects` that could
+add or drop a `.codex/config.toml` above the session's directory that sets
+them. Fully resolved settings keep a definite on or off. A session there that carried a summary at its latest request while the settings
 turn memory off is noted, and requests that recorded no context leave the cost
 a lower bound or unknown even with memories off now, since they may have run
 while memories were on. A missing summary shows nothing, since it appears only once one has

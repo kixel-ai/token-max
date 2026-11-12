@@ -979,11 +979,13 @@ impl NativeIds {
     }
 }
 
+const ITEM_PREFIX: &str = "turn-item:provider:claudeAgent:native-item:";
+
 /// The native item id inside a T3 Claude turn item id, with a thinking block's index dropped.
 /// T3 derives the id as `turn-item:provider:claudeAgent:native-item:` plus the
 /// URI-component-encoded native id, so no item payload (tool output) needs reading.
 fn item_key(turn_item: &str) -> Option<String> {
-    let encoded = turn_item.strip_prefix("turn-item:provider:claudeAgent:native-item:")?;
+    let encoded = turn_item.strip_prefix(ITEM_PREFIX)?;
     let bytes = encoded.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -1007,6 +1009,37 @@ fn item_key(turn_item: &str) -> Option<String> {
         }
         _ => native,
     })
+}
+
+/// The primary-key range of the T3 Claude turn items for one native key that `item_key`
+/// returns: that id exactly, or each `:thinking:<n>` block of a message.
+fn item_range(native: &str) -> (String, String) {
+    let encode = |s: &str| {
+        // JavaScript's encodeURIComponent, which T3 applies to the native id.
+        let mut out = String::from(ITEM_PREFIX);
+        for b in s.bytes() {
+            if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+        out
+    };
+    match native.strip_suffix(":thinking") {
+        Some(message) => {
+            let key = encode(&format!("{message}:thinking:"));
+            // `%3A` is the encoded colon; `%3B` sorts just after every `%3A` suffix.
+            let end = format!("{}B", &key[..key.len() - 1]);
+            (key, end)
+        }
+        // Only the id itself sorts at or above it and below it followed by NUL.
+        None => {
+            let key = encode(native);
+            let end = format!("{key}\0");
+            (key, end)
+        }
+    }
 }
 
 /// Borrow only join keys; native billing parts and locations never need copying.
@@ -1081,6 +1114,22 @@ const NATIVE_REFS: &str = "SELECT provider_turn_id, json_extract(payload_json,'$
  FROM orchestration_v2_projection_provider_turns t
  JOIN orchestration_v2_projection_turn_items i ON i.provider_turn_id=t.provider_turn_id AND i.thread_id=t.thread_id
  WHERE ?2='claudeAgent' AND t.provider_thread_id=?1";
+// The provider thread holding a Claude turn item, by primary-key range from `item_range`.
+// After `/clear` the native session gets a new id while T3's provider thread keeps the old
+// one, yet T3 still records the new transcript's items under that thread.
+const ITEM_THREAD: &str = "SELECT t.provider_thread_id, pt.driver, pt.provider_instance_id
+ FROM orchestration_v2_projection_turn_items i
+ LEFT JOIN orchestration_v2_projection_provider_turns t ON t.provider_turn_id=i.provider_turn_id AND t.thread_id=i.thread_id
+ LEFT JOIN orchestration_v2_projection_provider_threads pt ON pt.provider_thread_id=t.provider_thread_id
+ WHERE i.turn_item_id>=?1 AND i.turn_item_id<?2";
+// When T3 began recording provider turn items: the first one inserted, of any driver, so a
+// T3 that ran only Codex still dates it. T3 never deletes turn items, and V1 imports carry
+// no native ids, so every later Claude turn has its items. The update time can only be
+// later than the insertion, which errs toward unresolved. The subquery reads only the
+// primary-key index's provider range.
+const FIRST_ITEM: &str = "SELECT updated_at FROM orchestration_v2_projection_turn_items
+ WHERE rowid=(SELECT min(rowid) FROM orchestration_v2_projection_turn_items
+  WHERE turn_item_id>=?1 AND turn_item_id<?2)";
 // Native identities and the earliest running selection are the join.
 const TURN: &str = "WITH matched AS (
  SELECT t.*, a.attempt_id, a.run_id, a.provider_instance_id,
@@ -1196,6 +1245,10 @@ struct Projection {
     owners: HashMap<(Harness, String), Vec<String>>,
     /// Root sessions with a provider thread linked only after the native bound.
     unlinked: HashSet<(Harness, String)>,
+    /// Root sessions a turn item records without a provider thread to own it.
+    orphaned: HashSet<(Harness, String)>,
+    /// When T3 began recording provider turn items, or None if it has none.
+    items_since: Option<Millis>,
     turns: HashMap<String, TurnMatch>,
 }
 
@@ -1455,6 +1508,47 @@ fn metadata(
             linked,
         });
     }
+    // Claude root sessions no provider thread names, owned by the threads their turn items
+    // name instead: one per provider thread, as for provider threads above.
+    let mut item_owners: HashMap<(Harness, String), HashMap<String, String>> = HashMap::default();
+    let mut orphaned = HashSet::default();
+    let mut item_thread = tx.prepare(ITEM_THREAD)?;
+    for r in requests {
+        if r.harness != Harness::Claude
+            || threads.contains_key(&("claudeAgent", r.native_session.to_string()))
+        {
+            continue;
+        }
+        let root = (r.harness, r.root.to_string());
+        for native in &r.native_turns {
+            let (start, end) = item_range(native);
+            let mut rows = item_thread.query(rusqlite::params![start, end])?;
+            while let Some(row) = rows.next()? {
+                match (text_column(row, 0), text_column(row, 1).as_deref()) {
+                    (Some(thread), Some("claudeAgent")) => {
+                        // Legacy nullable owners block uniqueness, not other rows.
+                        let instance = text_column(row, 2).unwrap_or_default();
+                        item_owners
+                            .entry(root.clone())
+                            .or_default()
+                            .insert(thread, instance);
+                    }
+                    _ => {
+                        orphaned.insert(root.clone());
+                    }
+                }
+            }
+        }
+    }
+    let (start, end) = ("turn-item:provider:", "turn-item:provider;");
+    let items_since = tx
+        .query_row(FIRST_ITEM, rusqlite::params![start, end], |r| {
+            Ok(instant(text_column(r, 0)))
+        })
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
     // Provider turns per native turn/item id, within each selected session's threads.
     let mut refs: HashMap<&(&str, String), HashMap<String, Vec<String>>> = HashMap::default();
     let mut native_refs = tx.prepare(NATIVE_REFS)?;
@@ -1487,7 +1581,10 @@ fn metadata(
     }
     let mut turn_query = tx.prepare(TURN)?;
     let mut turn_rows: HashMap<String, Option<TurnRow>> = HashMap::default();
-    let mut result = Projection::default();
+    let mut result = Projection {
+        items_since,
+        ..Projection::default()
+    };
     for r in requests {
         let key = (driver(r.harness), r.native_session.to_string());
         let root = (r.harness, r.root.to_string());
@@ -1496,14 +1593,24 @@ fn metadata(
             if list.iter().any(|t| !t.linked) {
                 result.unlinked.insert(root.clone());
             }
-            result.owners.insert(
-                root,
-                list.iter()
-                    .filter(|t| t.linked)
-                    // Legacy nullable owners block uniqueness, not other rows.
-                    .map(|t| t.instance.clone().unwrap_or_default())
-                    .collect(),
-            );
+            let mut owners: Vec<String> = list
+                .iter()
+                .filter(|t| t.linked)
+                // Legacy nullable owners block uniqueness, not other rows.
+                .map(|t| t.instance.clone().unwrap_or_default())
+                .collect();
+            if list.is_empty() {
+                owners.extend(
+                    item_owners
+                        .remove(&root)
+                        .into_iter()
+                        .flat_map(|o| o.into_values()),
+                );
+                if owners.is_empty() && orphaned.contains(&root) {
+                    result.orphaned.insert(root.clone());
+                }
+            }
+            result.owners.insert(root, owners);
         }
         if r.native_turns.is_empty() || result.turns.contains_key(r.id) {
             continue;
@@ -1598,6 +1705,9 @@ pub(crate) fn enrich(
     let mut joins: HashMap<String, Vec<(String, Joined)>> = HashMap::default();
     let mut owners: HashMap<(Harness, String), Vec<String>> = HashMap::default();
     let mut unlinked = HashSet::default();
+    let mut orphaned = HashSet::default();
+    // When each read state began recording provider turn items.
+    let mut items_since: HashMap<String, Option<Millis>> = HashMap::default();
     let mut read = HashSet::default();
     // Owners no longer in their state's settings, by profile key: (state, instance).
     let mut removed: HashMap<String, (String, String)> = HashMap::default();
@@ -1638,6 +1748,8 @@ pub(crate) fn enrich(
                 state.metadata = "read-only consistent SQLite snapshot; allowlisted native links and controls only".into();
                 read.insert(state.path.clone());
                 unlinked.extend(data.unlinked.iter().cloned());
+                orphaned.extend(data.orphaned.iter().cloned());
+                items_since.insert(state.path.clone(), data.items_since);
                 data
             }
             Err(e) => {
@@ -1836,19 +1948,32 @@ pub(crate) fn enrich(
                 || (r.harness == Harness::Codex
                     && matches!(r.source.as_deref(), Some("cli" | "exec"))
                     && r.client.as_deref() != Some("T3 Code"));
-            // Labels T3's provider adapters write: the Claude Agent SDK's default, T3's own
-            // entrypoint, and T3's Codex originator. A missing label proves nothing.
-            let t3_label = match r.harness {
-                Harness::Claude => matches!(r.client.as_deref(), None | Some("sdk-ts" | "t3-code")),
-                Harness::Codex => matches!(r.client.as_deref(), None | Some("T3 Code")),
-            };
+            // T3's Codex originator, or none: a missing label proves nothing. Claude labels
+            // decide nothing, since `claude -p` from a T3 agent's shell inherits T3's.
+            let t3_label = r.harness == Harness::Codex
+                && matches!(r.client.as_deref(), None | Some("T3 Code"));
+            // T3 records a turn item for each Claude request after it began recording them.
+            let recorded = r
+                .profiles
+                .iter()
+                .filter(|p| t3_ids.contains(*p))
+                .filter_map(state_of)
+                .all(|s| {
+                    items_since
+                        .get(&s)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|t| t <= r.time)
+                });
             let native_root = subagent
                 && native_roots
                     .get(&(root.clone(), true))
                     .or_else(|| native_roots.get(&(root.clone(), false)))
                     == Some(&true);
             let native = r.profiles.iter().any(|p| !t3_ids.contains(p));
-            let stray = rows.is_some_and(|r| !r.is_empty()) || invalid_joins.contains(&*r.id);
+            let stray = rows.is_some_and(|r| !r.is_empty())
+                || invalid_joins.contains(&*r.id)
+                || orphaned.contains(&root);
             let found = match session_owners.map_or(0, Vec::len) {
                 0 if (native_source || native_root) && native && !stray => None,
                 0 => match root_resolution {
@@ -1867,8 +1992,12 @@ pub(crate) fn enrich(
                     _ if stray => Some(
                         "a T3 turn matches the request, but no T3 thread owns its native session",
                     ),
-                    // T3's state was read without a provider thread for this session. A T3
-                    // provider session lacks one only if T3 dropped it, so its label decides.
+                    // T3's state was read with no provider thread or turn item for this
+                    // session. A Claude request T3 ran would have a turn item unless it
+                    // predates them; Codex has no such record, so its label decides.
+                    _ if r.harness == Harness::Claude && !recorded => {
+                        Some("the request predates T3's oldest retained turn item")
+                    }
                     _ if native && !t3_label => None,
                     _ if t3_label => Some(
                         "no T3 provider thread owns the native session, but its client label is one T3 writes",
@@ -2602,7 +2731,7 @@ mod tests {
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads SELECT 'legacy',thread_id,driver,NULL,updated_at,payload_json FROM orchestration_v2_projection_provider_threads",[]).unwrap();
         database.execute("UPDATE orchestration_v2_projection_provider_turns SET payload_json=json_set(payload_json,'$.tokenUsage.usedTokens',300000.0)",[]).unwrap();
         // Codex joins never read item payloads, so an oversized one cannot sink the snapshot.
-        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('item','thread','turn','assistant_message','completed',?1)",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('item','thread','turn','assistant_message','completed',?1,'2026-01-01T00:00:00Z')",[json!({"nativeItemRef":{"driver":"codex","nativeId":"item"},"text":"x".repeat(2_000_000)}).to_string()]).unwrap();
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
@@ -2858,7 +2987,8 @@ mod tests {
     fn subagents_of_a_native_only_root_exclude_t3() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
-        db(&root);
+        // Any driver's item dates T3's records, so the session without one is native.
+        db(&root).execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('turn-item:provider:codex:native-item:x','thread','turn','assistant_message','completed','{}','2025-01-01T00:00:00Z')",[]).unwrap();
         let usage = json!({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
         write(
             w.claude.join("projects/p/native.jsonl"),
@@ -2902,7 +3032,8 @@ mod tests {
     fn subagents_inherit_their_roots_resolution_inside_the_window() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
-        db(&root);
+        // Any driver's item dates T3's records, so the session without one is native.
+        db(&root).execute("INSERT INTO orchestration_v2_projection_turn_items VALUES('turn-item:provider:codex:native-item:x','thread','turn','assistant_message','completed','{}','2025-01-01T00:00:00Z')",[]).unwrap();
         let usage = json!({"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0});
         write(
             w.claude.join("projects/p/native.jsonl"),
@@ -2934,19 +3065,51 @@ mod tests {
     }
 
     #[test]
-    fn sessions_without_a_t3_thread_resolve_by_client_label() {
+    fn sessions_without_a_t3_thread_resolve_by_turn_items_or_codex_label() {
         let w = Workspace::new();
         let root = state(&w, json!({}));
-        db(&root);
-        let row = |session: &str, entrypoint: &str| json!({"type":"assistant","uuid":format!("{session}-uuid"),"sessionId":session,"timestamp":"2026-01-01T00:00:01Z","entrypoint":entrypoint,"message":{"id":format!("{session}-message"),"model":"claude-opus-5-5","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
-        write(
-            w.claude.join("projects/p/print.jsonl"),
-            format!("{}\n", row("print-session", "sdk-cli")),
-        );
-        write(
-            w.claude.join("projects/p/t3.jsonl"),
-            format!("{}\n", row("t3-session", "t3-code")),
-        );
+        let database = db(&root);
+        seed(&database, "claudeAgent", "claudeAgent");
+        database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt2','thread2','claudeAgent','claudeAgent','2026-01-01T00:00:10Z',?1)",[json!({"nativeThreadRef":{"nativeId":"other-session"}}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn2','thread2','pt2',NULL,'completed',NULL,NULL,'{}')",[]).unwrap();
+        // Inserted first, so it dates when T3 began recording provider turn items.
+        for (native, turn) in [
+            ("cleared-uuid", "turn"),
+            ("think-message:thinking:3", "turn"),
+            ("orphan-uuid", "missing-turn"),
+            ("split-uuid", "turn"),
+            ("split-tool", "turn2"),
+        ] {
+            let id = format!("{ITEM_PREFIX}{}", native.replace(':', "%3A"));
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,?2,?3,'assistant_message','completed','{}','2026-01-01T00:00:00Z')",params![id,if turn == "turn2" {"thread2"} else {"thread"},turn]).unwrap();
+        }
+        // Each session gets its own second so its request can be found again.
+        let row = |session: &str, time: &str, entrypoint: &str, content: Value| json!({"type":"assistant","uuid":format!("{session}-uuid"),"sessionId":session,"timestamp":time,"entrypoint":entrypoint,"message":{"id":format!("{session}-message"),"model":"claude-opus-5-5","content":content,"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
+        for (session, time, entrypoint, content) in [
+            // `/clear` in a T3 thread: a new native id, items under the old provider thread.
+            ("cleared", "2026-01-01T00:00:05Z", "sdk-ts", json!([])),
+            (
+                "think",
+                "2026-01-01T00:00:06Z",
+                "sdk-ts",
+                json!([{"type":"thinking","thinking":""}]),
+            ),
+            // `claude -p` from a T3 agent's shell inherits T3's label but has no item.
+            ("print", "2026-01-01T00:00:07Z", "t3-code", json!([])),
+            ("orphan", "2026-01-01T00:00:08Z", "sdk-ts", json!([])),
+            (
+                "split",
+                "2026-01-01T00:00:09Z",
+                "sdk-ts",
+                json!([{"type":"tool_use","id":"split-tool","name":"Bash","input":{}}]),
+            ),
+            ("old", "2025-12-31T00:00:00Z", "cli", json!([])),
+        ] {
+            write(
+                w.claude.join(format!("projects/p/{session}.jsonl")),
+                format!("{}\n", row(session, time, entrypoint, content)),
+            );
+        }
         // A missing originator proves nothing.
         for (name, originator) in [
             ("vscode", json!("codex_vscode")),
@@ -2964,21 +3127,58 @@ mod tests {
             );
         }
         let data = scan(&w.scan_options()).unwrap();
-        assert_eq!(data.requests.len(), 5);
-        for r in &data.requests {
-            let t3 = r
-                .profiles
+        assert_eq!(data.requests.len(), 9);
+        let t3 = |p: &String| data.profiles.iter().any(|q| &q.id == p && q.t3.is_some());
+        let at = |time: &str| {
+            let time = timestamp(&json!(time)).unwrap();
+            data.requests
                 .iter()
-                .any(|p| data.profiles.iter().any(|q| &q.id == p && q.t3.is_some()));
-            let labelled =
-                r.client.is_none() || matches!(r.client.as_deref(), Some("t3-code" | "T3 Code"));
-            assert_eq!(t3, labelled, "{r:?}");
+                .find(|r| r.harness == Harness::Claude && r.time == time)
+                .unwrap()
+        };
+        for time in ["2026-01-01T00:00:05Z", "2026-01-01T00:00:06Z"] {
+            let r = at(time);
+            assert!(r.profiles.len() == 1 && t3(&r.profiles[0]), "{r:?}");
+        }
+        let print = at("2026-01-01T00:00:07Z");
+        assert!(
+            !print.profiles.is_empty() && !print.profiles.iter().any(t3),
+            "{print:?}"
+        );
+        for time in [
+            "2026-01-01T00:00:08Z",
+            "2026-01-01T00:00:09Z",
+            "2025-12-31T00:00:00Z",
+        ] {
+            let r = at(time);
+            assert!(r.profiles.len() > 1, "{r:?}");
+        }
+        for r in data.requests.iter().filter(|r| r.harness == Harness::Codex) {
+            let labelled = r.client.is_none() || r.client.as_deref() == Some("T3 Code");
+            assert_eq!(r.profiles.iter().any(t3), labelled, "{r:?}");
             assert_eq!(r.profiles.len() > 1, labelled, "{r:?}");
         }
-        let causes: Vec<_> = data.t3[0].unresolved.iter().collect();
-        assert_eq!(causes.len(), 1, "{causes:?}");
-        assert!(causes[0].0.contains("label is one T3 writes"), "{causes:?}");
-        assert_eq!(*causes[0].1, 3);
+        let mut causes: Vec<(&str, u64)> = data.t3[0]
+            .unresolved
+            .iter()
+            .map(|(c, n)| (c.as_ref(), *n))
+            .collect();
+        causes.sort();
+        assert_eq!(
+            causes,
+            [
+                (
+                    "a T3 turn matches the request, but no T3 thread owns its native session",
+                    1
+                ),
+                (
+                    "no T3 provider thread owns the native session, but its client label is one T3 writes",
+                    2
+                ),
+                ("several T3 provider threads own the native session", 1),
+                ("the request predates T3's oldest retained turn item", 1),
+            ]
+        );
         // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
         // so check the marker shared-history ambiguity leaves on the TTL instead.
         let ambiguous = |s: &Scan| {
@@ -3161,7 +3361,7 @@ mod tests {
         let mut database = db(&root);
         seed(&database, "claudeAgent", "claude");
         let item = |database: &Connection, kind: &str, native: &str, extra: &str| {
-            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn',?2,'completed',?3)",params![format!("turn-item:provider:claudeAgent:native-item:{native}"),kind,json!({"output":extra}).to_string()]).unwrap();
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn',?2,'completed',?3,'2026-01-01T00:00:00Z')",params![format!("turn-item:provider:claudeAgent:native-item:{native}"),kind,json!({"output":extra}).to_string()]).unwrap();
         };
         item(&database, "assistant_message", "assistant-uuid", "");
         // Tool outputs can exceed the length bound; the join never reads them.
@@ -3238,6 +3438,8 @@ mod tests {
             (OWNER_EVENT, 0),
             (NATIVE_REFS, 0),
             (TURN, 0),
+            (ITEM_THREAD, 0),
+            (FIRST_ITEM, 0),
         ] {
             let mut plan = database
                 .prepare(&format!("EXPLAIN QUERY PLAN {query}"))
@@ -3301,6 +3503,22 @@ mod tests {
             ("turn-item:provider:claudeAgent:native-item:cut%3", None),
         ] {
             assert_eq!(item_key(id).as_deref(), key, "{id}");
+        }
+        // Each range holds exactly the ids `item_key` maps back to its key.
+        for (native, inside, outside) in [
+            ("a b/é", "a%20b%2F%C3%A9", "a%20b%2F%C3%A9x"),
+            (
+                "msg_1:thinking",
+                "msg_1%3Athinking%3A12",
+                "msg_1%3Athinking",
+            ),
+        ] {
+            let (start, end) = item_range(native);
+            let inside = format!("{ITEM_PREFIX}{inside}");
+            let outside = format!("{ITEM_PREFIX}{outside}");
+            assert!(start <= inside && inside < end, "{inside}");
+            assert!(!(start <= outside && outside < end), "{outside}");
+            assert_eq!(item_key(&inside).as_deref(), Some(native));
         }
     }
 

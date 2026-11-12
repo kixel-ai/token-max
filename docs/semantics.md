@@ -833,9 +833,11 @@ measured apart from the rest of the recorded system prompt and placed right
 after it; `MEMORY.md` is placed like any other attachment. Both form the
 `memory` context row. A request that loads `MEMORY.md` without such a section,
 as subagents do, leaves any memory instructions elsewhere in its prompt
-unmeasured, and the check says how many did. The latest main-agent request with
-a recorded shape decides whether memory is on, since the section is present
-whenever it is; settings decide only without one. The setting that owns it is
+unmeasured, and the check says how many did. Claude Code reads the setting when
+a session starts, so a session begun before a change keeps the old value: the
+main-agent session that started last, at its latest request with a recorded
+shape, decides whether memory is on, since the section is present whenever it
+is; settings decide only without one. The setting that owns it is
 resolved at that request's working directory, including the project's
 `.claude/settings.json` and `.claude/settings.local.json`. When the request
 carries memory against an off setting anyway, because its directory is gone or

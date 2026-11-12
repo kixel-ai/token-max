@@ -2355,7 +2355,7 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
 }
 
 #[test]
-fn claude_auto_memory_off_in_the_latest_request_is_kept_off() {
+fn claude_auto_memory_off_in_the_latest_session_is_kept_off() {
     let w = Workspace::new();
     let root = std::fs::canonicalize(&w.claude).unwrap();
     let records = claude_memory_session(&root.to_string_lossy(), false);
@@ -2400,6 +2400,22 @@ fn claude_auto_memory_off_in_the_latest_request_is_kept_off() {
         "Auto memory",
         then(": off. Cost", "; used 2 times (1 read, 1 write).")
     ));
+
+    // A session begun before the change keeps memory and makes the newest request,
+    // but the session that started since shows what loads now.
+    let mut early = claude_memory_session(&root, true);
+    early.push(json!({
+        "type": "api-request", "id": "api-50", "timestamp": at(50), "sessionId": "session",
+        "shapeHash": "shape", "keep": 0, "tail": ["m1"], "requestDigest": "d50",
+        "params": { "model": "claude-opus-5-5" },
+    }));
+    early.push(assistant(50, json!([])));
+    std::fs::write(w.claude.join("projects/project/early.jsonl"), jsonl(&early)).unwrap();
+    let resumed = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    assert_eq!(
+        memory_check(&resumed, Harness::Claude).base.current,
+        Some(false)
+    );
 }
 
 /// The same records as a later session, with their own ids.

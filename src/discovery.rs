@@ -684,11 +684,12 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
-        // Auto memory's owner is the one at the latest request's directory, which
-        // decides whether memory is on now.
+        // Auto memory's owner is the one at the directory of the request that decides
+        // whether memory is on now.
+        let starts = crate::memory::session_starts(relevant.iter().copied());
         let latest = relevant
             .iter()
-            .max_by_key(|r| r.time)
+            .max_by_key(|r| (starts[&*r.session], r.time))
             .and_then(|r| r.cwd.clone());
         if relevant
             .iter()

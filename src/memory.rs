@@ -62,6 +62,20 @@ pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
         .collect()
 }
 
+/// When each main-agent session began. Both harnesses read the memory setting when a
+/// session starts, so one begun before a change keeps the old value: the session that
+/// started last, at its latest request, shows the current one.
+pub(crate) fn session_starts<'a>(
+    requests: impl Iterator<Item = &'a Request>,
+) -> HashMap<&'a str, Millis> {
+    let mut starts: HashMap<&str, Millis> = HashMap::default();
+    for r in requests.filter(|r| r.agent == Agent::Main) {
+        let start = starts.entry(&*r.session).or_insert(r.time);
+        *start = (*start).min(r.time);
+    }
+    starts
+}
+
 fn check(
     input: &MemoryInput<'_>,
     profile: &Profile,
@@ -76,8 +90,8 @@ fn check(
         .iter()
         .filter(|r| r.harness == profile.harness && r.profiles.contains(&profile.id))
         .collect();
-    // What each main-agent request whose context was recorded carried, latest last.
-    let mut seen: Vec<(Millis, bool)> = vec![];
+    // What each main-agent request whose context was recorded carried, by session.
+    let mut seen: Vec<(&str, Millis, bool)> = vec![];
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
     for e in &scan.exposure.requests {
@@ -108,12 +122,16 @@ fn check(
             unmeasured += 1;
         }
         if r.agent == Agent::Main {
-            seen.push((r.time, !memory.is_empty()));
+            seen.push((&r.session, r.time, !memory.is_empty()));
         }
     }
-    let observed = seen.iter().max_by_key(|(time, _)| *time).map(|&(_, on)| on);
-    // Claude Code always adds its prompt section while memory is on, so the latest
-    // request settles it. Codex adds a summary only once one has been written.
+    let starts = session_starts(mine.iter().copied());
+    let observed = seen
+        .iter()
+        .max_by_key(|&&(session, time, _)| (starts[session], time))
+        .map(|&(_, _, on)| on);
+    // Claude Code always adds its prompt section while memory is on, so that request
+    // settles it. Codex adds a summary only once one has been written.
     let on = match profile.harness {
         Harness::Claude => observed.unwrap_or(control.value),
         Harness::Codex => control.value || observed == Some(true),
@@ -206,7 +224,7 @@ fn check(
     }
     if observed.is_some_and(|o| o != control.value) {
         uncertainty.push(format!(
-            "the latest recorded request {} memory, unlike {}",
+            "the latest session to start {} memory, unlike {}",
             if on { "carried" } else { "did not carry" },
             control.owner
         ));

@@ -274,12 +274,72 @@ struct Config {
     setup_mode: Option<String>,
     auto_compact_window: String,
     idle_compaction: Option<String>,
-    #[serde(deserialize_with = "nonempty")]
-    launch_args: bool,
+    launch_args: String,
 }
 
-fn nonempty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
-    String::deserialize(d).map(|s| !s.trim().is_empty())
+/// The flags in T3's launch arguments, tokenized and parsed as T3's `parseCliArgs` does:
+/// arguments after `--` and single-dash options are operands, not flags.
+fn launch_flags(args: &str) -> HashSet<String> {
+    // JavaScript's `\s` matches the byte order mark but not NEL.
+    let space = |c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}';
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut quoted = false;
+    let mut chars = args.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            } else if c == '\\'
+                && q == '"'
+                && let Some(&next) = chars.peek().filter(|n| "\"\\$`".contains(**n))
+            {
+                current.push(next);
+                chars.next();
+            } else {
+                current.push(c);
+            }
+        } else if c == '\'' || c == '"' {
+            quote = Some(c);
+            quoted = true;
+        } else if space(c) {
+            if !current.is_empty() || quoted {
+                tokens.push(std::mem::take(&mut current));
+                quoted = false;
+            }
+        } else if c == '\\'
+            && let Some(&next) = chars.peek().filter(|n| space(**n) || "'\"".contains(**n))
+        {
+            current.push(next);
+            chars.next();
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() || quoted {
+        tokens.push(current);
+    }
+    let mut flags = HashSet::default();
+    let mut tokens = tokens.into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        if token == "--" {
+            break;
+        }
+        let Some(rest) = token.strip_prefix("--") else {
+            continue;
+        };
+        match rest.split_once('=') {
+            Some((name, _)) => {
+                flags.insert(name.to_string());
+            }
+            None => {
+                tokens.next_if(|next| !next.starts_with("--"));
+                flags.insert(rest.to_string());
+            }
+        }
+    }
+    flags
 }
 
 /// Unknown environment values and secret references are skipped, not deserialized as strings.
@@ -662,8 +722,20 @@ pub(crate) fn discover(
                 ),
             };
             let mut limitations = vec!["T3's current thread selection and new-thread browser default are unavailable with the server closed; historical requested speed does not establish current selection or billed speed".into()];
-            if config.launch_args {
-                limitations.push("T3 launchArgs are present; arbitrary CLI overrides are not inspected, so affected native fallback controls remain advisory".into());
+            // Only these Claude flags change the settings Claude Code reads; Codex launch
+            // arguments can override any config key and are not inspected.
+            let launch_unresolved = if harness == Harness::Claude {
+                let flags = launch_flags(&config.launch_args);
+                flags.contains("settings") || flags.contains("setting-sources")
+            } else {
+                !config.launch_args.trim().is_empty()
+            };
+            if launch_unresolved {
+                limitations.push(if harness == Harness::Claude {
+                    "T3 launchArgs pass --settings or --setting-sources, which can replace native settings; affected native fallback controls remain advisory"
+                } else {
+                    "T3 launchArgs are present; arbitrary CLI overrides are not inspected, so affected native fallback controls remain advisory"
+                }.into());
             }
             if unresolved_env {
                 limitations.push("a relevant T3 environment override uses a secret or redacted value; it was not read and effective ownership is unresolved".into());
@@ -696,10 +768,9 @@ pub(crate) fn discover(
                     minimum_claude_patch: None,
                     comparison_unknown: None,
                 };
-            } else if harness == Harness::Claude {
-                profile.compaction.default.comparison_unknown = Some("T3 inherits native per-model/project/launch window controls; effective launch scope is unresolved".into());
             }
-            if !enabled || unresolved_env || config.launch_args || policy_unresolved {
+            let resolved = enabled && !unresolved_env && !launch_unresolved && !policy_unresolved;
+            if !resolved {
                 profile.compaction.default.comparison_unknown = Some("T3 instance is disabled or effective environment/launch overrides are unresolved".into());
             }
             if let Some(reason) = &profile.compaction.default.comparison_unknown {
@@ -735,11 +806,14 @@ pub(crate) fn discover(
                 enabled,
                 idle_mode,
                 idle_owner,
-                ownership_resolved: enabled
-                    && !unresolved_env
-                    && !config.launch_args
-                    && !policy_unresolved,
+                ownership_resolved: resolved,
                 limitations,
+                // Without its own window, T3 passes no window, so Claude Code reads the
+                // same user, project and local settings as a native session.
+                inherited_window: (resolved
+                    && harness == Harness::Claude
+                    && config.auto_compact_window.is_empty())
+                .then(|| local.env.clone()),
             });
             profiles.push(profile);
         }
@@ -1925,6 +1999,8 @@ pub(crate) fn enrich(
         if ambiguous_profiles.contains(&p.id) {
             if let Some(t3) = &mut p.t3 {
                 t3.ownership_resolved = false;
+                // Its directory windows would otherwise bypass the unresolved profile window.
+                p.idle_directories = None;
             }
             p.compaction.default.comparison_unknown =
                 Some("shared native history has unresolved T3 control ownership".into());
@@ -2323,12 +2399,128 @@ mod tests {
             .iter()
             .find(|p| p.t3.is_some() && p.harness == Harness::Claude)
             .unwrap();
-        assert!(inherited.compaction.default.comparison_unknown.is_some());
-        assert!(
-            inherited.compaction.models["claude-opus-5-5"]
-                .comparison_unknown
-                .is_some()
+        // Without its own window, T3 inherits the native files' windows unchanged.
+        assert_eq!(inherited.compaction.default.value, Some(400000));
+        assert_eq!(
+            inherited.compaction.models["claude-opus-5-5"].value,
+            Some(350000)
         );
+        assert_eq!(
+            inherited.compaction.default.comparison_unknown.is_some(),
+            managed_policy_unresolved()
+        );
+    }
+
+    #[test]
+    fn launch_flags_parse_like_t3() {
+        for (args, flags) in [
+            ("", &[][..]),
+            ("--chrome", &["chrome"][..]),
+            (
+                r#"--settings '{"autoCompactWindow":350000}'"#,
+                &["settings"],
+            ),
+            ("--settings=path.json --verbose", &["settings", "verbose"]),
+            ("--setting-sources user,project", &["setting-sources"]),
+            // An option missing its value leaves the next flag a flag.
+            ("--model --settings x", &["model", "settings"]),
+            ("--model '--settings'", &["model", "settings"]),
+            // Operands after `--`, escaped and quoted values are not flags.
+            ("--chrome -- --settings x", &["chrome"]),
+            (
+                r#"--append-system-prompt "a \"--settings\" b""#,
+                &["append-system-prompt"],
+            ),
+            (r"--add-dir a\ --settings", &["add-dir"]),
+            (r"--add-dir a \--settings", &["add-dir"]),
+            ("-p --settings", &["settings"]),
+            // An unterminated quote runs to the end, as in T3.
+            ("--add-dir 'a --settings", &["add-dir"]),
+            ("--chrome\u{85}--settings", &["chrome\u{85}--settings"]),
+            ("--chrome\u{feff}--settings", &["chrome", "settings"]),
+        ] {
+            let mut parsed: Vec<String> = launch_flags(args).into_iter().collect();
+            parsed.sort();
+            let mut flags: Vec<&str> = flags.to_vec();
+            flags.sort();
+            assert_eq!(parsed, flags, "{args}");
+        }
+    }
+
+    #[test]
+    fn inherited_window_resolves_per_project_unless_launch_settings_can_replace_it() {
+        if managed_policy_unresolved() {
+            return;
+        }
+        let w = Workspace::new();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"autoCompactWindow":400000}"#,
+        );
+        let project = w.home.join("project");
+        fs::create_dir_all(project.join(".git")).unwrap();
+        write(
+            project.join(".claude/settings.json"),
+            r#"{"autoCompactWindow":250000}"#,
+        );
+        state(
+            &w,
+            json!({"providerInstances":{
+                "claudeAgent":{"driver":"claudeAgent","config":{"launchArgs":"--chrome"}},
+                "pinned":{"driver":"claudeAgent","config":{"launchArgs":"--chrome","autoCompactWindow":"300000"}},
+                "flagged":{"driver":"claudeAgent","config":{"launchArgs":"--setting-sources=user"}},
+                "codex":{"driver":"codex","config":{"launchArgs":"-c model=x"}}
+            }}),
+        );
+        let options = w.scan_options();
+        let mut data = crate::discovery::discover(&options.discovery).unwrap();
+        let instance = |data: &crate::discovery::Discovery, id: &str| {
+            data.profiles
+                .iter()
+                .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == id))
+                .unwrap()
+                .clone()
+        };
+        let chrome = instance(&data, "claudeAgent");
+        assert!(chrome.t3.as_ref().unwrap().ownership_resolved);
+        assert_eq!(chrome.compaction.default.value, Some(400000));
+        assert_eq!(chrome.compaction.default.comparison_unknown, None);
+        let flagged = instance(&data, "flagged");
+        assert!(!flagged.t3.as_ref().unwrap().ownership_resolved);
+        assert!(flagged.compaction.default.comparison_unknown.is_some());
+        assert!(!instance(&data, "codex").t3.unwrap().ownership_resolved);
+
+        let missing = w.home.join("removed");
+        let requests: Vec<Request> = [Some(&project), Some(&missing), None]
+            .into_iter()
+            .flat_map(|cwd| {
+                ["claudeAgent", "pinned", "flagged"].map(|id| {
+                    let mut r = make_request();
+                    r.cwd = cwd.map(|cwd| cwd.to_string_lossy().as_ref().into());
+                    r.profiles = vec![instance(&data, id).id].into();
+                    r
+                })
+            })
+            .collect();
+        crate::discovery::discover_claude_controls(
+            &options.discovery,
+            &mut data.profiles,
+            &requests,
+        )
+        .unwrap();
+        let directories = instance(&data, "claudeAgent").idle_directories.unwrap();
+        let window = &directories[project.to_string_lossy().as_ref()]
+            .compaction
+            .as_ref()
+            .unwrap()
+            .default;
+        assert_eq!(window.value, Some(250000));
+        assert_eq!(window.comparison_unknown, None);
+        // A missing or unrecorded directory keeps the home's window, as a native profile does.
+        assert_eq!(directories.len(), 1);
+        // T3's own window and an unresolved launch keep the profile's window everywhere.
+        assert!(instance(&data, "pinned").idle_directories.is_none());
+        assert!(instance(&data, "flagged").idle_directories.is_none());
     }
     #[cfg(unix)]
     #[test]

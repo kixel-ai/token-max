@@ -406,6 +406,8 @@ struct Out<'a> {
     arrow: &'static str,
     home: Option<String>,
     profiles: IndexMap<&'a str, &'a Profile>,
+    /// Instances removed from T3's settings, by the profile key their history keeps.
+    removed: crate::collections::HashMap<String, &'a str>,
 }
 
 impl<'a> Out<'a> {
@@ -541,7 +543,7 @@ impl<'a> Out<'a> {
                 ),
                 None => format!("{} {}", label(&p.harness), display(&p.root)),
             },
-            None => display(id),
+            None => self.removed_name(id).unwrap_or_else(|| display(id)),
         }
     }
     /// A profile by harness and home-relative root, for the summary.
@@ -556,8 +558,13 @@ impl<'a> Out<'a> {
                 ),
                 None => format!("{} {}", label(&p.harness), self.home(&p.root)),
             },
-            None => self.home(id),
+            None => self.removed_name(id).unwrap_or_else(|| self.home(id)),
         }
+    }
+    fn removed_name(&self, id: &str) -> Option<String> {
+        self.removed
+            .get(id)
+            .map(|instance| format!("T3 {instance} (removed from T3 settings)"))
     }
 }
 
@@ -576,6 +583,16 @@ pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> Stri
             None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
         },
         profiles,
+        removed: report
+            .scan
+            .t3
+            .iter()
+            .flat_map(|s| {
+                s.removed
+                    .keys()
+                    .map(|i| (crate::t3::profile_key(&s.path, i), i.as_str()))
+            })
+            .collect(),
     };
     if options.details {
         details(report, &mut out);
@@ -635,6 +652,16 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
                 "T3 unresolved",
                 &format!(
                     "{} request{}: {cause}",
+                    count(*n),
+                    if *n == 1 { "" } else { "s" }
+                ),
+            );
+        }
+        for (instance, n) in &state.removed {
+            out.field(
+                "T3 removed",
+                &format!(
+                    "{} request{} of instance {instance}, no longer in T3's settings: billed, left out of every current profile's checks",
                     count(*n),
                     if *n == 1 { "" } else { "s" }
                 ),
@@ -3746,6 +3773,33 @@ mod tests {
             rest = &rest[start + end + 1..];
         }
         out + rest
+    }
+
+    #[test]
+    fn removed_t3_owners_are_named_in_the_bill() {
+        let mut report = synthetic();
+        report.scan.t3.push(T3State {
+            path: "/state".into(),
+            status: "selected".into(),
+            exclusions: vec![],
+            metadata: String::new(),
+            snapshot_started_at: None,
+            snapshot_finished_at: None,
+            joined_requests: 0,
+            ambiguous_requests: 0,
+            unresolved: IndexMap::default(),
+            removed: IndexMap::from_iter([("gone".into(), 3)]),
+            instances: Default::default(),
+            text_generation: None,
+        });
+        let mut group = report.historical[0].clone();
+        group.profiles = vec![crate::t3::profile_key("/state", "gone")];
+        report.historical.push(group);
+        let rendered = compact(&text(&report, Some(400), true));
+        assert!(rendered.contains(&compact(
+            "T3 gone (removed from T3 settings); 2000 requests"
+        )));
+        assert!(rendered.contains(&compact("T3 removed: 3 requests of instance gone")));
     }
 
     #[test]

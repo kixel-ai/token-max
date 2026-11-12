@@ -110,4 +110,7 @@ periods. Unsupported providers remain explicit exclusions. `scan.t3[].textGenera
 names the resolved text-generation `selection`, its `owner` setting, its
 `resolution`, narrower `overrides` and the count of `projectOverrides`; its
 cost is unmeasured. `scan.t3[].unresolved` counts the window's requests whose
-control owner stays unresolved, keyed by cause.
+control owner stays unresolved, keyed by cause. `scan.t3[].removed` counts the window's
+requests whose every T3 owner was removed from settings, keyed by instance;
+their cost groups name the profile id `t3:<state>:<instance>`, which no
+current profile has.

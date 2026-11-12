@@ -1916,7 +1916,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         roots,
         profiles,
         snapshots,
-        exposure: exposure.finish(&requests, since),
+        exposure: exposure.finish(&requests, &context_requests, since),
         requests,
         events,
         cache_context: CacheContext {

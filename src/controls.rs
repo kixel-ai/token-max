@@ -490,7 +490,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             },
             models,
             capped: false,
-            declared: false,
+            declared: None,
             tuned: IndexMap::default(),
         });
     }
@@ -591,11 +591,9 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             .values
             .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
             .map(|value| js_string(Some(value)))
-            .is_some_and(|text| {
-                !text.is_empty()
-                    && text.bytes().all(|b| b.is_ascii_digit())
-                    && text.parse::<u64>().is_ok_and(|n| n > 0)
-            }),
+            .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|&n| n > 0),
         tuned: IndexMap::default(),
     })
 }
@@ -654,6 +652,8 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
             value: None,
             applicable: false,
             reason: "model alias or [1m] setting may own the current window; effective alias selection is unresolved".into(),
+            // The alias's row may name the window, so its triggers do not show the default.
+            unset: false,
             ..current.clone()
         };
     }
@@ -665,9 +665,18 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
         if let Some(value) = tuned.value {
             control.value = Some(value);
             control.applicable = true;
-            // Tuned windows differ by model, so only the model's own row changes one alone.
+            // Tuned windows differ by model, so only the model's own row changes one alone; they
+            // also differ by what sizes the context, so scopes sized apart never share an owner,
+            // even where the model's own row is already the owner, as with an explicit "auto".
             if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
                 control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
+            }
+            match Sizing::of(compaction, canonical) {
+                Sizing::Native => {}
+                Sizing::Capped => control.owner += " (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)",
+                Sizing::Declared(tokens) => {
+                    control.owner += &format!(" (under CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens})");
+                }
             }
         }
     }
@@ -705,8 +714,32 @@ fn native_million(model: &str) -> Option<bool> {
     }
 }
 
-/// Fill each Claude profile's tuned window for every model it used: the trigger of its latest
-/// automatic compaction on that model, else Claude Code's documented default.
+/// What sets a model's context window, and so its tuned window, under one scope's environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Sizing {
+    /// The model's own context window.
+    Native,
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds the model at 200k.
+    Capped,
+    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size an ID outside the documented table.
+    Declared(u64),
+}
+
+impl Sizing {
+    fn of(compaction: &CompactionControls, model: &str) -> Self {
+        // The cap holds even an explicit window; only a declared window can size an ID Claude
+        // Code does not recognize, and it never sizes a documented model.
+        match compaction.declared {
+            Some(tokens) if native_million(model).is_none() => Self::Declared(tokens),
+            _ if compaction.capped => Self::Capped,
+            _ => Self::Native,
+        }
+    }
+}
+
+/// Fill the tuned window of every model a Claude profile used, in the profile's controls and in
+/// each recorded directory's, which idle and keepalive read: the trigger of the latest automatic
+/// compaction on that model under the same sizing, else Claude Code's documented default.
 pub fn tune_windows(scan: &mut Scan) {
     let Scan {
         profiles,
@@ -729,7 +762,20 @@ pub fn tune_windows(scan: &mut Scan) {
                 }
             }
         }
-        let mut observed: IndexMap<String, (Millis, i64)> = IndexMap::default();
+        // Idle and keepalive read a recorded directory's own controls, else the profile's.
+        let scope = |cwd: Option<&str>| {
+            cwd.filter(|c| !c.is_empty())
+                .and_then(|c| {
+                    profile
+                        .idle_directories
+                        .as_ref()?
+                        .get(c)?
+                        .compaction
+                        .as_ref()
+                })
+                .unwrap_or(&profile.compaction)
+        };
+        let mut observed: IndexMap<(String, Sizing), (Millis, i64)> = IndexMap::default();
         for e in cache_context.boundaries.iter().chain(events.iter()) {
             if let (
                 EventKind::Compaction,
@@ -746,49 +792,57 @@ pub fn tune_windows(scan: &mut Scan) {
             ) && e.profiles.contains(&profile.id)
                 && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
             {
-                let latest = observed.entry(undated(model)).or_insert((e.time, tokens));
+                // A trigger under an explicit window does not show the default.
+                let at = scope(e.cwd.as_deref());
+                if !window_control(at, Some(model)).unset {
+                    continue;
+                }
+                let model = undated(model);
+                let sizing = Sizing::of(at, &model);
+                let latest = observed.entry((model, sizing)).or_insert((e.time, tokens));
                 if e.time >= latest.0 {
                     *latest = (e.time, tokens);
                 }
             }
         }
-        let CompactionControls {
-            capped, declared, ..
-        } = profile.compaction;
-        for (model, size) in largest {
-            let documented = native_million(&model);
-            let (value, reason) = match (observed.get(&model), documented) {
-                // The cap holds even an explicit window, so a trigger from before it cannot lift
-                // it; only a declared window can size an ID Claude Code does not recognize.
-                _ if capped && (documented.is_some() || !declared) => (
-                    Some(TUNED_STANDARD),
-                    "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
-                ),
-                (Some(&(_, tokens)), _) => (
-                    Some(tokens),
-                    format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
-                ),
-                (None, Some(true)) => (
-                    Some(TUNED_MILLION),
-                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
-                ),
-                (None, Some(false)) if size <= TUNED_STANDARD => (
-                    Some(TUNED_STANDARD),
-                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
-                ),
-                (None, Some(false)) => (
-                    None,
-                    "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
-                ),
-                (None, None) => (
-                    None,
-                    "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
-                ),
-            };
-            profile
-                .compaction
-                .tuned
-                .insert(model, TunedWindow { value, reason });
+        let directories = profile.idle_directories.iter_mut().flatten();
+        for compaction in std::iter::once(&mut profile.compaction)
+            .chain(directories.filter_map(|(_, idle)| idle.compaction.as_mut()))
+        {
+            for (model, &size) in &largest {
+                let sizing = Sizing::of(compaction, model);
+                let trigger = observed.get(&(model.clone(), sizing));
+                let (value, reason) = match (sizing, trigger, native_million(model)) {
+                    // A trigger from before the cap cannot lift it.
+                    (Sizing::Capped, ..) => (
+                        Some(TUNED_STANDARD),
+                        "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
+                    ),
+                    (_, Some(&(_, tokens)), _) => (
+                        Some(tokens),
+                        format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
+                    ),
+                    (_, None, Some(true)) => (
+                        Some(TUNED_MILLION),
+                        "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
+                    ),
+                    (_, None, Some(false)) if size <= TUNED_STANDARD => (
+                        Some(TUNED_STANDARD),
+                        "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
+                    ),
+                    (_, None, Some(false)) => (
+                        None,
+                        "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
+                    ),
+                    (_, None, None) => (
+                        None,
+                        "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
+                    ),
+                };
+                compaction
+                    .tuned
+                    .insert(model.clone(), TunedWindow { value, reason });
+            }
         }
     }
 }

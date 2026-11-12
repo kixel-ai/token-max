@@ -561,7 +561,10 @@ fn codex_context_and_output_keep_their_remote_controls() {
         assert!(!text.contains("SYNTHETIC_PRIVATE"));
         assert!(text.contains("Conditional Codex pricing"), "{text}");
         if priceable {
-            assert!(text.contains("keep/off unresolved"), "{text}");
+            assert!(
+                text.contains("tier sensitivity could reverse keep or off"),
+                "{text}"
+            );
         }
         assert!(
             text.contains("tool_output_token_limit is 7,000 tokens"),
@@ -757,7 +760,7 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     ] {
         assert!(text.contains(label), "{text}");
     }
-    assert!(text.contains("Cost unknown"), "{text}");
+    assert!(text.contains("Not enough evidence: cost unknown"), "{text}");
     assert!(
         text.contains("tui.auto_recap = false in ~/workspace/.codex/config.toml"),
         "{text}"

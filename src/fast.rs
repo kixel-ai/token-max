@@ -716,7 +716,12 @@ mod tests {
             assert_eq!(result.observed.premium_parts, 1);
             assert_eq!(result.observed.standard_parts, 1);
             assert_eq!(result.current_estimate.priced_parts, 2);
-            assert!(format_report(&report, ReportOptions::default()).contains("Fast mode ["));
+            let text = format_report(&report, ReportOptions::default());
+            assert!(
+                crate::test_support::report_lines(&text)
+                    .iter()
+                    .any(|l| l.claim == "OPINION" && l.head.starts_with("Fast mode "))
+            );
             let details = format_report(
                 &report,
                 ReportOptions {

@@ -86,6 +86,23 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
     command
 }
 
+/// A plain report's line whose heading starts with `head`: its verdict word,
+/// heading with padding collapsed, and evidence.
+fn report_line(text: &str, head: &str) -> (String, String, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    lines
+        .windows(2)
+        .find_map(|pair| {
+            let (word, rest) = pair[0].split_once(' ')?;
+            let heading = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+            let evidence = pair[1].strip_prefix("         ")?;
+            heading
+                .starts_with(head)
+                .then(|| (word.to_string(), heading, evidence.to_string()))
+        })
+        .unwrap_or_else(|| panic!("no line starts with {head:?} in {text}"))
+}
+
 fn run(command: &mut Command) -> (i32, String, String) {
     let Output {
         status,
@@ -434,7 +451,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     let (status, stdout, stderr) = invoke(&["--plain"]);
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.contains("No setting changes recommended"));
-    assert!(stdout.lines().any(|l| l == "Keep"));
+    assert!(stdout.lines().any(|l| l.starts_with("keep     ")));
     assert!(!stdout.contains('\x1b') && !stdout.contains('→'));
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(stderr, "");
@@ -825,19 +842,14 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     std::fs::write(&settings, r#"{"promptCacheTtl":"5m"}"#).unwrap();
     let (status, text, text_err) = invoke(&with("--plain"));
     assert_eq!(status, 1, "{text_err}");
+    let (mark, head, _) = report_line(&text, "Main-agent prompt cache TTL 5m -> 1h");
+    assert_eq!(mark, "change");
     assert!(
-        text.contains("Main-agent prompt cache TTL: 5m -> 1h"),
-        "{text}"
-    );
-    assert!(
-        text.contains("Saves $") || text.contains("Saves <$"),
+        head.contains("saves $") || head.contains("saves <$"),
         "{text}"
     );
     assert!(text.contains("Read 2 requests"), "{text}");
-    let unknown = text
-        .find("Not enough evidence")
-        .unwrap_or_else(|| panic!("{text}"));
-    assert!(text[unknown..].contains("Idle compaction"), "{text}");
+    assert_eq!(report_line(&text, "Idle compaction").0, "unknown", "{text}");
     let all = format!("{text}{text_err}");
     assert!(!all.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(std::fs::read(&transcript).unwrap(), original);
@@ -1223,10 +1235,9 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
     assert!(stdout.contains("scope or launch selection is unresolved"));
     assert!(stdout.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"));
     assert!(stdout.contains("Background estimates apply current files to history"));
-    let consider = &stdout[stdout.find("\nConsider turning off\n").unwrap() + 1..];
-    let consider = &consider[..consider.find("\n\n").unwrap()];
-    assert!(consider.contains("Prompt suggestions"));
-    assert!(consider.contains("its uses are not recorded"));
+    let (mark, _, evidence) = report_line(&stdout, "Prompt suggestions");
+    assert_eq!(mark, "consider");
+    assert!(evidence.contains("its uses are not recorded"));
 }
 
 #[test]
@@ -1275,9 +1286,13 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
         &["--t3-dir", &state, "--prices-file", &prices],
     ));
     assert!(stderr.is_empty());
-    let unmeasured = summary.split("Not enough evidence").nth(1).unwrap();
+    let (mark, head, unmeasured) = report_line(&summary, "T3 text generation");
+    assert_eq!(
+        (mark.as_str(), head.as_str()),
+        ("unknown", "T3 text generation codex gpt-6-luna")
+    );
     assert!(
-        unmeasured.contains("T3 text generation: codex gpt-6-luna (T3 default). Cost unmeasured")
+        unmeasured.contains("ephemeral sessions that keep no native records (T3 default).")
             && unmeasured.contains(&format!(
                 "Set in ~{0}selected-t3{0}settings.json:textGenerationModelSelection.",
                 std::path::MAIN_SEPARATOR

@@ -4051,10 +4051,11 @@ mod tests {
             let check = compaction(&report);
             assert_eq!(check.base.action, Action::Keep);
             assert!(check.scenarios.iter().all(|c| c.coverage.total == 0));
-            let text = text(&report, Some(200), false);
-            let keep = text.find("Keep").expect("a Keep section");
-            assert!(
-                text[keep..].contains("Auto-compact window (claude-opus-5-5): 400,000 tokens"),
+            let text = text(&report, None, false);
+            let line = crate::test_support::report_line(&text, "Auto-compact window");
+            assert_eq!(
+                (line.mark.as_str(), line.head.as_str()),
+                ("keep", "Auto-compact window (claude-opus-5-5) 400k"),
                 "{text}"
             );
             assert!(!text.contains("could not confirm"), "{text}");

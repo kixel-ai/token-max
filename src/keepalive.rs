@@ -1243,11 +1243,8 @@ mod tests {
                 host: None,
             },
         );
-        text.lines()
-            .find(|l| l.trim_start().starts_with("Keepalive pings"))
-            .unwrap()
-            .trim()
-            .to_string()
+        let line = crate::test_support::report_line(&text, "Keepalive pings");
+        format!("{}: {}", line.head, line.evidence)
     }
 
     #[test]
@@ -1262,7 +1259,7 @@ mod tests {
         };
         let win = line(scan(one_hour(), session()), 30 * DAY);
         assert!(
-            win.starts_with("Keepalive pings: unknown. Pinging idle sessions every 50m for up to 1h 40m would save $"),
+            win.starts_with("Keepalive pings unknown: Pinging idle sessions every 50m for up to 1h 40m would save $"),
             "{win}"
         );
         assert!(win.ends_with("but a /loop task pings on a fixed schedule with no idle cap, and stops only when cancelled or after seven days."), "{win}");
@@ -1271,7 +1268,7 @@ mod tests {
         let lose = line(scan(one_hour(), requests), 30 * DAY);
         assert!(
             lose.starts_with(
-                "Keepalive pings: unknown. Pinging idle sessions every 50m would cost $"
+                "Keepalive pings unknown: Pinging idle sessions every 50m would cost $"
             ),
             "{lose}"
         );

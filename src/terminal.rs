@@ -107,6 +107,11 @@ fn cluster_cells(cluster: &str) -> usize {
     cells
 }
 
+/// The terminal cells `text` takes on one row.
+pub fn cells(text: &str) -> usize {
+    text.graphemes(true).map(cluster_cells).sum()
+}
+
 /// Wrap plain text by terminal cells without normalizing Unicode or shortening words.
 ///
 /// Input must already be free of terminal escapes, such as text passed through `safe::terminal_text`.

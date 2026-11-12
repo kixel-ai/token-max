@@ -3772,7 +3772,7 @@ mod tests {
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
             report.checks[0] = CheckResult::Idle(c);
             let text = format_report(&report, ReportOptions::default());
-            assert!(text.contains("On and off cost the same"), "{text}");
+            assert!(text.contains("on and off cost the same"), "{text}");
         }
     }
 
@@ -4448,9 +4448,9 @@ mod tests {
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
         report.checks.push(CheckResult::T3Idle(check));
         let text = format_report(&report, ReportOptions::default());
-        let line = text.lines().find(|l| l.contains("T3 idle")).unwrap();
+        let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
-            line.contains("Changed cost per month: off $0, onReturn ")
+            line.contains("changed cost per month: off $0, onReturn ")
                 && line.contains(&format!("beforeCacheExpires is unpriced: {guards}")),
             "{text}"
         );

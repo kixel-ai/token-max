@@ -11,6 +11,7 @@ use serde_json::{Map, Value};
 use crate::collections::{HashMap, IndexMap};
 use crate::model::{Harness, Millis, Request, Scan, Text};
 use crate::prices::{Catalog, add_costs, price_part, request_evidence, server_cost};
+use crate::reader::CodexThread;
 use crate::safe::{iso, label};
 
 /// What one transcript record says about its session.
@@ -67,25 +68,6 @@ pub struct Sessions {
 /// A recorded native ID, such as a UUID; anything else is not kept.
 fn native(value: Option<&Value>) -> Option<String> {
     label(value?)
-}
-
-/// The thread a Codex `session_meta` names and the thread it was spawned from: its root as
-/// `session_id`, or in older spawns its parent as `parent_thread_id`.
-pub(crate) fn codex_thread(meta: &Map<String, Value>) -> (Option<&str>, Option<&str>) {
-    fn text(v: Option<&Value>) -> Option<&str> {
-        v.and_then(Value::as_str).filter(|s| !s.is_empty())
-    }
-    let id = text(meta.get("id")).or_else(|| text(meta.get("session_id")));
-    let parent = text(meta.get("session_id"))
-        .filter(|root| Some(*root) != id)
-        .or_else(|| text(meta.get("parent_thread_id")))
-        .or_else(|| {
-            text(
-                meta.get("source")
-                    .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id")),
-            )
-        });
-    (id, parent)
 }
 
 /// A name Git could have given a branch.
@@ -159,21 +141,22 @@ impl Sessions {
                     return;
                 };
                 facts.created = earliest(facts.created);
-                let (id, parent) = codex_thread(meta);
+                let thread = CodexThread::parse(meta);
                 facts.id = facts
                     .id
                     .take()
-                    .or_else(|| native(id.map(Value::from).as_ref()));
+                    .or_else(|| native(thread.id.map(Value::from).as_ref()));
                 facts.parent = facts
                     .parent
                     .take()
-                    .or_else(|| native(parent.map(Value::from).as_ref()));
+                    .or_else(|| native(thread.parent.map(Value::from).as_ref()));
                 facts.forked_from = facts
                     .forked_from
                     .take()
                     .or_else(|| native(meta.get("forked_from_id")));
-                facts.review |= meta.get("source").and_then(|s| s.get("subagent"))
-                    == Some(&Value::from("review"));
+                facts.review |= thread
+                    .spawn
+                    .is_some_and(|s| s.native && s.kind.as_deref() == Some("review"));
                 branch(meta.get("git").and_then(|git| git.get("branch")))
             }
         };
@@ -591,6 +574,52 @@ mod tests {
             assert_eq!(found, (Some("gpt-6.1-sol"), Some("medium"), 800, 200, 100));
             assert!(s.complete && s.cost_usd > 0.0);
         }
+    }
+
+    #[test]
+    fn a_nested_codex_spawn_names_its_immediate_parent_not_the_root() {
+        let w = Workspace::new();
+        let thread = |id: &str, source: Value| {
+            let meta = json!({"type": "session_meta", "timestamp": "2026-11-01T00:00:00Z",
+                "payload": {"id": id, "session_id": "root", "source": source,
+                    "model_provider": "openai"}});
+            let usage = json!({"type": "token_usage_record",
+                "timestamp": "2026-11-01T00:00:02Z",
+                "payload": {"response_id": format!("response-{id}"), "turn_id": "turn",
+                    "usage": {"input_tokens": 1000, "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0, "output_tokens": 100}}});
+            write(
+                &w.codex.join(format!("sessions/rollout-{id}.jsonl")),
+                &[meta, usage],
+                "",
+            );
+        };
+        let spawn = |parent: &str| json!({"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}});
+        thread("root", json!("exec"));
+        thread("mid", spawn("root"));
+        thread("leaf", spawn("mid"));
+        let scan = scan(&w.scan_options()).unwrap();
+        let mut found: Vec<_> = export(&scan, &prices())
+            .into_iter()
+            .map(|s| (s.session, s.parent))
+            .collect();
+        found.sort();
+        let pair = |a: &str, b: Option<&str>| (Some(a.to_string()), b.map(String::from));
+        assert_eq!(
+            found,
+            [
+                pair("leaf", Some("mid")),
+                pair("mid", Some("root")),
+                pair("root", None)
+            ]
+        );
+        // The report's Subagents attribution reads the same parent.
+        let leaf = crate::safe::identity("leaf");
+        let parent = scan.subagents.iter().find(|s| *s.session == *leaf).unwrap();
+        assert_eq!(
+            parent.parent.as_deref(),
+            Some(crate::safe::identity("mid").as_str())
+        );
     }
 
     #[test]

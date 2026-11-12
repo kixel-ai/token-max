@@ -258,10 +258,15 @@ client version is the applicability assumption.
 
 When no setting names a window, each model the profile used gets Claude Code's
 tuned window, owned by that model's `modelSettings` row because the defaults
-differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
+differ by model. The profile's controls and each recorded directory's, which
+idle and keepalive read, are tuned under what sizes the model's context there.
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
 except an ID outside the table when `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size it.
+A window sized by either variable is owned by the row under that variable and
+value, so directories sized apart never share a replayed window.
 Otherwise the trigger of the profile's latest automatic, non-idle compaction on
-the model comes first, including one before `--since`, since the server can
+the model under the same sizing and no explicit window comes first, including
+one before `--since`, since the server can
 retune the default without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
 checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
 Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
@@ -634,10 +639,17 @@ transcript files. A copy cannot say which profile made a call, so it counts for
 every row of its tool that shares a profile with it; skill uses count only the
 model's Skill calls, since a hidden skill can still be typed, except where the
 switch removes the skill entirely, where typed requests count too. A piece still sent
-today is recommended off when `estimatedUsd` divided by its uses, counting no
-use as one, exceeds `maxCostPerUseUsd` (default $1, `--max-cost-per-use`);
-otherwise it is kept. The ratio does not depend on the window's length. A piece
-with no priced request or unresolved service-tier evidence gets no cost-per-use verdict. Duplicate Codex copies can
+today with a positive cost and no recorded use is recommended off (`verdict:
+"off"`, exit 1), whatever the amount, when its profile's first shaped request in
+the window already carried it and none of that profile's transcripts has an
+unreadable or deferred line, which could hold a call. One first sent later, one
+whose profile's transcripts are incomplete, or a Codex catalog skill, whose
+uses are only partly recorded, gets `"consider"`, an advisory that exits
+0, since the window cannot rule out a use. A used piece whose `estimatedUsd`
+divided by its uses (`costPerUseUsd`) exceeds `maxCostPerUseUsd` (default $1,
+`--max-cost-per-use`) also gets `"consider"`; otherwise it is kept. The ratio
+does not depend on the window's length. A piece with no priced request or
+unresolved service-tier evidence gets no verdict. Duplicate Codex copies can
 still receive a path-based recommendation without dollars. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
@@ -690,8 +702,8 @@ Duplicate detection is by exact name within the latest catalog for each owning
 profile set, independent of pricing. Retain the identifiable path with the
 most recorded observations, breaking ties in listing order, and recommend
 disabling other paths even without prices. The preferred copy keeps its
-cost-per-use verdict when prices and service-tier evidence permit one, so all
-copies may be off when even that copy exceeds the threshold. Conditional prices
+cost-per-use verdict when prices and service-tier evidence permit one, so it
+may be worth considering off when even that copy exceeds the threshold. Conditional prices
 retain the skill's observed-use evidence and disable control while leaving its
 cost-per-use verdict unresolved. Repeated discovery of the same path
 cannot be removed with a path control while keeping that path enabled; remove
@@ -765,9 +777,12 @@ Calibration
 estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
-currently guarantees complete typed-skill or nested-call visibility, so automatic
-unused findings remain blocked. Context verdicts rest on cost per recorded use,
-not on a claim that a piece is unused, and change no local agent settings.
+currently guarantees complete typed-skill or nested-call visibility, so the
+exposure scan's `automaticUnused` stays false. Context verdicts instead rest on
+the calls each transcript records: Claude records every tool, MCP and Skill
+call, subagents' included, so a piece carried from the window's start with none
+is unused. Codex catalog skills and pieces first sent mid-window stay advisory
+when unused. Verdicts change no local agent settings.
 
 Record shapes were checked on 2026-11-07 using local structural metadata only;
 no real transcript text was printed or copied into fixtures. Claude's existing
@@ -856,9 +871,11 @@ on the same model, speed and provider count, up to the prefix the recap read. Tu
 recorded usage are scaled from the priced ones, and with none priced the check
 is unknown.
 
-Uses (an accepted suggestion, a read recap) are not recorded, so the whole
-estimate counts as one use: a feature is recommended off when it cost more than
-`--max-cost-per-use` over the window. Goal check-ins start ordinary-looking task
+Uses (an accepted suggestion, a read recap) are not recorded, so nonuse is never
+proven and the check never recommends a change: a feature that cost more than
+`--max-cost-per-use` over the window is worth considering off (`action:
+"advisory"`, exit 0), and one that cost less is kept, since it cannot have cost
+more than that per use. Goal check-ins start ordinary-looking task
 notification turns and Codex does not record automatic recaps, so both report an
 unknown cost and stay advisory. Each line names where to turn the feature off:
 the settings file that owns the effective value, managed settings included, or

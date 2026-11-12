@@ -21,8 +21,9 @@ rather than hiding the setting or guessing a number.
   cheaper value recommended outright.
 - One that trades cost for capability, such as a tool, skill or MCP server,
   shows what it cost and how often it was used. Recommend turning it off when
-  it cost more than `--max-cost-per-use` (default $1) per recorded use,
-  counting no use as one; otherwise recommend keeping it.
+  it was never used (red, exit 1). When it cost more than
+  `--max-cost-per-use` (default $1) per recorded use, suggest turning it off
+  as an advisory (yellow, exit 0); otherwise recommend keeping it (green).
 - Show every setting and feature on its own line, and name the setting that
   changes it.
 

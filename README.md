@@ -12,13 +12,15 @@ Estimated with public API prices, not your subscription bill. Nothing was change
 Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
 
-3 setting changes recommended.
-Dollar amounts are per 30 days at this window's rate. A tool, skill or MCP server is worth turning off when it cost more than $1 per use (--max-cost-per-use).
+2 setting changes recommended.
+Setting comparisons are per 30 days at this window's rate; what features and context cost, and how often they were used, are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
 
 Change
   Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.
   Artifact tool: on -> off. Costs $90; never used.
-  Skill example: on -> only when you type /example. Costs $12; the model used it 2 times ($6 each).
+
+Consider turning off
+  Skill example: on. Costs $12; the model used it 2 times ($6 each). Hide it from the model: "skillOverrides": {"example": "user-invocable-only"}.
 
 Keep
   Fast mode: off.
@@ -29,14 +31,11 @@ Not enough evidence
 
 No setting turns these off
   ~/.claude/CLAUDE.md: costs $5. Shorten it, or move parts into path-scoped rules or skills.
-  System prompt, core tools such as Bash and Read, and the skill and subagent lists: cost $210.
+  System prompt, core tools such as Bash and Read, and the skill and subagent lists: $210.
 
 To turn these off, merge this into ~/.claude/settings.json, adding to any lists already there:
   {
-    "enableArtifact": false,
-    "skillOverrides": {
-      "example": "user-invocable-only"
-    }
+    "enableArtifact": false
   }
 ```
 
@@ -84,18 +83,21 @@ tool output text is kept or printed.
 
 ## Reading the report
 
-Every setting and feature gets one line under **Change**, **Keep** or
-**Not enough evidence**.
+Every setting and feature gets one line under **Change**, **Consider turning
+off**, **Keep** or **Not enough evidence**. On a terminal, color repeats the
+verdict: red for a recommended change (exit 1), yellow for an advisory or
+missing evidence (exit 0), green for a setting already at its recommended value.
 
-- Dollars are per 30 days at public API prices. They compare one setting with
-  another; they are not your subscription bill.
+- Dollars are at public API prices, not your subscription bill. Comparisons
+  between setting values are per 30 days; what a feature cost, and how often
+  it was used, are totals over the whole window.
 - A **Saves** figure comes from replaying your own sessions under the other
   value, assuming the sessions would otherwise have gone the same way. A
   smaller compaction window, for example, can also lose detail the replay
   cannot see.
-- A tool, skill or MCP server is recommended off when it cost more than $1 per
-  use (`--max-cost-per-use`). You know what a use was worth; the report only
-  knows what it cost.
+- A tool, skill or MCP server that was never used is recommended off. One that
+  cost more than $1 per use (`--max-cost-per-use`) is worth considering off.
+  You know what a use was worth; the report only knows what it cost.
 - Fast mode off is the maintainer's preference, not a measurement.
 - **Not enough evidence** says why in one sentence. A cost that cannot be
   measured is shown as unknown, never as zero.

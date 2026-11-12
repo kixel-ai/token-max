@@ -74,4 +74,3 @@ The same PR updates `--help`, the README and `docs/reference.md`, whose
 ## Related
 
 - [Export priced sessions as JSON](/quest/m0/session-export.md) - the other sub-command; whichever lands first adds sub-command parsing
-- [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - the red lines are the changes `doctor` offers

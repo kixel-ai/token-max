@@ -21,8 +21,9 @@ unproven advice, so a preference must not look like a measurement.
 Decision prompts, chosen options marked ✅:
 
 - Goal and milestone: ✅ its own quest in m0, absorbing the follow-up about
-  checks that change behavior (rejected: m1; folding it into
-  [verdict colors](/quest/m0/verdict-tiers.md)).
+  checks that change behavior (rejected: m1; folding it into the verdict
+  colors, which landed in
+  [kixelated/token-max#64](https://github.com/kixelated/token-max/pull/64)).
 - Layout: ✅ the tiers are the top-level sections and color carries the
   verdict (the maintainer, after seeing three mockups with Change, Keep
   and Not enough evidence on top: "flip the sections"; rejected: a tier
@@ -74,10 +75,7 @@ The maintainer asked that the output look good; show a real run's report
 in the PR. The same PR updates the README's sample and
 `docs/reference.md`.
 
-## Required
-
-- [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - color must carry the verdict before the sections stop naming it
-
 ## Related
 
+- [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - its yellow line is the first Opinion advisory
 - [Run the report as an interactive doctor](/quest/m0/doctor.md) - offers the red lines first, in this order

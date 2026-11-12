@@ -27,6 +27,7 @@ toml = "1.2.1"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 ureq = "3.5.1"
+mimalloc = "0.1.52"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

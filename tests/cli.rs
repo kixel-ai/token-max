@@ -1184,8 +1184,10 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
         disabled["offFile"],
         text(&off.join(".claude/settings.local.json"))
     );
+    // Uses are not recorded, so a cost above the per-use limit is only advisory.
     let enabled = feature(Some(&on), "prompt-suggestions");
-    assert_eq!(enabled["action"], "change");
+    assert_eq!(enabled["action"], "advisory");
+    assert_eq!(enabled["recommended"], Value::Null);
     assert_eq!(enabled["requests"], 2);
     assert_eq!(enabled["generations"], 1);
     let patch: Value =
@@ -1212,6 +1214,10 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
     assert!(stdout.contains("scope or launch selection is unresolved"));
     assert!(stdout.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"));
     assert!(stdout.contains("Background estimates apply current files to history"));
+    let consider = &stdout[stdout.find("\nConsider turning off\n").unwrap() + 1..];
+    let consider = &consider[..consider.find("\n\n").unwrap()];
+    assert!(consider.contains("Prompt suggestions"));
+    assert!(consider.contains("its uses are not recorded"));
 }
 
 #[test]

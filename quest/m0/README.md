@@ -205,12 +205,10 @@ against the published release.
 - [Ship prebuilt binaries with cargo-dist](/quest/m0/binaries.md) - release binaries, shell and PowerShell installers, cargo-binstall and a Nix package
 - [Serve install.sh and run.sh from max.kixel.ai](/quest/m0/install-site.md) - one curl line installs, another runs `doctor` once without installing
 - [Report each subagent type's model and cost](/quest/m0/subagent-models.md) - every Claude subagent type and Codex role shows its cost, model, effort and source, and a cheapest-model reprice
-- [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
-- [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history
+- [Fold the scan per session](/quest/m0/memory-fold.md) - peak memory grows with the largest session, not the whole history, and hosts are analyzed one at a time
 - [Rebuild historical T3 idle guards](/quest/m0/t3-idle-guards.md) - `beforeCacheExpires` is priced for past idle gaps
-- [Tune unset windows per recorded directory](/quest/m0/directory-windows.md) - idle and keepalive price sessions run in recorded directories
+- [Resolve Claude sessions by T3 turn items](/quest/m0/t3-turn-items.md) - `/clear` sessions and shelled-out `claude -p` runs stop keeping native profiles advisory
 - [Cap explicit windows at the model's context window](/quest/m0/window-cap.md) - explicit windows replay at the window that actually ran
 - [Export priced sessions as JSON](/quest/m0/session-export.md) - moq-dev/quest's `quest usage` ties each session, sub-agents included, to a PR
 - [Report auto memory's total cost and advise against it](/quest/m0/auto-memory.md) - Claude and Codex memory get one priced, yellow line each
-- [Grade verdicts green, yellow and red](/quest/m0/verdict-tiers.md) - every line is colored by verdict and shows total cost and uses
 - [Section the report by kind of claim](/quest/m0/claim-tiers.md) - Measured, Official and Opinion sections, with color carrying the verdict

@@ -139,8 +139,9 @@ impl Workspace {
         ));
         // create_dir fails on an existing path, so a planted symlink is never followed.
         std::fs::create_dir(&home).unwrap();
-        // Tests compare discovered paths, which resolve symlinks such as macOS's /var.
-        let home = std::fs::canonicalize(&home).unwrap();
+        // Tests compare discovered paths, normalized as discovery does: symlinks such as
+        // macOS's /var resolve, and Windows' verbatim prefix is stripped.
+        let home = PathBuf::from(crate::discovery::realpath(home.to_str().unwrap()).unwrap());
         let claude = home.join(".claude");
         let codex = home.join(".codex");
         std::fs::create_dir_all(claude.join("projects/project")).unwrap();

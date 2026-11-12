@@ -1201,6 +1201,9 @@ fn ancestors_setting_codex_memory(
     user: &str,
     home: &str,
 ) -> Result<Vec<String>, ScanError> {
+    // cwd comes from realpath, so normalize the home alike, such as Windows' `\\?\` prefix.
+    // A home that does not exist cannot be an ancestor of a real cwd.
+    let home = realpath(home).unwrap_or_default();
     let mut files = vec![];
     let mut path = cwd;
     loop {

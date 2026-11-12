@@ -2558,7 +2558,13 @@ fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
     assert!(details.lines().any(|l| {
         l.trim_start()
             .strip_prefix("Turn off: \"autoMemoryEnabled\": false in ")
-            .is_some_and(|file| file.ends_with("project/.claude/settings.local.json"))
+            .is_some_and(|file| {
+                std::path::Path::new(file).ends_with(
+                    std::path::Path::new("project")
+                        .join(".claude")
+                        .join("settings.local.json"),
+                )
+            })
     }));
 }
 
@@ -2607,13 +2613,20 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     let coverage = check.base.coverage.unwrap();
     assert_eq!((coverage.priced, coverage.total), (2, 3));
     assert!(check.base.savings_usd.unwrap() > 0.0);
-    // The long temporary path wraps the line.
+    // The long temporary path wraps the line, and its length moves the cents,
+    // since the loaded paths are part of the priced context.
+    let both = text(&both).replace("\n  ", " ");
     assert!(labelled(
-        &text(&both).replace("\n  ", " "),
+        &both,
+        "Auto memory",
+        then(": on -> off. ", "Costs at least $0.")
+    ));
+    assert!(labelled(
+        &both,
         "Auto memory",
         then(
             ": on -> off. ",
-            "Costs at least $0.01, from the 66.6% of requests that recorded their context;"
+            ", from the 66.6% of requests that recorded their context;"
         )
     ));
 }
@@ -2799,7 +2812,11 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     std::fs::create_dir_all(project.join(".git")).unwrap();
     std::fs::create_dir_all(project.join(".codex")).unwrap();
     let project = crate::discovery::realpath(&project.to_string_lossy()).unwrap();
-    let project_config = format!("{project}/.codex/config.toml");
+    let project_config = std::path::Path::new(&project)
+        .join(".codex")
+        .join("config.toml")
+        .to_string_lossy()
+        .into_owned();
     std::fs::write(&project_config, "[features]\nmemories = true\n").unwrap();
     std::fs::write(
         w.codex.join("config.toml"),

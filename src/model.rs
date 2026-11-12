@@ -962,6 +962,9 @@ pub struct MemoryControl {
     /// Files whose memory settings may override `offFile` but could not be resolved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<String>,
+    /// Whether Codex's memory store exists, so memories were generated at some point.
+    #[serde(default)]
+    pub stored: bool,
 }
 
 /// One background feature's current state and the control that owns it.
@@ -1379,6 +1382,9 @@ pub struct MemoryCheck {
     /// Files whose memory settings may override `offFile`, to turn it off in too.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<String>,
+    /// Whether Codex may have extracted or consolidated memories in the window, which
+    /// is never measured, so the total is a lower bound.
+    pub unmeasured_generation: bool,
 }
 
 /// Foreground Bash calls that held the cache idle, and what their misses cost.

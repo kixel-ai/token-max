@@ -884,7 +884,9 @@ rule of thumb) and shell reads under `<codex home>/memories/` or
 `memories_v2/`. Dedicated tool output moves to the memory row; shell output
 stays on the shell's row. Extraction and consolidation run as requests Codex
 records only in telemetry, so their cost is not measured: wherever memories may
-have run in the window, the line says so and its total is a lower bound. No local session has
+have run in the window (not definitely off, used or loaded, or with a
+`memories` or `memories_v2` store under the Codex home, which Codex creates only
+once it generates memories), the line says so and its total is a lower bound. No local session has
 enabled Codex memories, so its tests use synthetic records derived from the
 0.167.0 source.
 

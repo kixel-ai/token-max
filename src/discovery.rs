@@ -1135,6 +1135,7 @@ pub fn discover_codex_controls(
                     directory: Some(cwd.into()),
                     unresolved: (!reasons.is_empty()).then(|| reasons.join("; ")),
                     overrides,
+                    stored: codex_memory_stored(&profile.root),
                     ..codex_memory(trusted, &profile.settings_file)?
                 });
             }
@@ -1181,6 +1182,14 @@ fn sets_codex_memory(config: &Map<String, Value>) -> bool {
     members(config.get("features")).contains_key("memories")
         || memories.contains_key("use_memories")
         || memories.contains_key("generate_memories")
+}
+
+/// Whether a Codex home holds a memory store, which Codex writes only once it has
+/// generated memories.
+fn codex_memory_stored(root: &str) -> bool {
+    ["memories", "memories_v2"]
+        .iter()
+        .any(|name| std::path::Path::new(&join(&[root, name])).is_dir())
 }
 
 /// Every `.codex/config.toml` from `cwd` up to the filesystem root, other than the
@@ -1663,7 +1672,10 @@ pub(crate) fn profile(
     let memory = if claude {
         claude_memory(&speed_scopes, local_env)?
     } else {
-        codex_memory(&speed_scopes, &settings_file)?
+        MemoryControl {
+            stored: codex_memory_stored(&canonical),
+            ..codex_memory(&speed_scopes, &settings_file)?
+        }
     };
     Ok(Profile {
         id: identity(key),

@@ -322,10 +322,7 @@ fn memory_off(c: &MemoryCheck, out: &Out<'_>) -> String {
 /// Whether Codex memories may have run in the window, generating notes in requests
 /// that are recorded only in telemetry.
 fn codex_unmeasured(c: &MemoryCheck) -> bool {
-    c.harness == Harness::Codex
-        && (c.base.current != Some(false)
-            || c.reads + c.writes > 0
-            || c.context_usd.is_some_and(|usd| usd > 0.0))
+    c.unmeasured_generation
 }
 
 /// Why auto memory is not recommended, whatever it cost.
@@ -1807,7 +1804,9 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
-        CheckResult::Memory(m) if r.action == Action::Keep && memory_free(m) => {
+        CheckResult::Memory(m)
+            if r.action == Action::Keep && memory_free(m) && !codex_unmeasured(m) =>
+        {
             return "Off; it costs nothing.".into();
         }
         CheckResult::Memory(_) if r.action == Action::Keep => {
@@ -2827,6 +2826,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             // Codex extraction and consolidation are never measured, so a total from
             // a window where memories may have run is a lower bound.
             let cost = match (r.savings_usd, codex_unmeasured(m)) {
+                (Some(usd), true) if r.coverage.is_none() && usd == 0.0 => {
+                    "No measured cost, but extraction and consolidation are not measured".into()
+                }
                 (Some(usd), true) if r.coverage.is_none() => format!(
                     "Costs at least {}, without extraction and consolidation, which are not measured",
                     about(usd)
@@ -4023,6 +4025,7 @@ mod tests {
                     writes: 2,
                     unresolved: None,
                     overrides: vec![],
+                    unmeasured_generation: false,
                 })
             },
         ];

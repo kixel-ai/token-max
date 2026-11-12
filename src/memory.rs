@@ -319,5 +319,10 @@ fn check(
         writes,
         unresolved,
         overrides: control.overrides.clone(),
+        unmeasured_generation: profile.harness == Harness::Codex
+            && (current != Some(false)
+                || control.stored
+                || !uses.is_empty()
+                || !rows.is_empty()),
     }
 }

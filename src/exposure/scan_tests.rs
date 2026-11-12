@@ -2773,6 +2773,17 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         "Codex memories",
         |s| s == ": off. Costs nothing."
     ));
+    // A memory store shows Codex generated memories at some point, in requests it
+    // records only in telemetry, so the line cannot say they cost nothing.
+    std::fs::create_dir_all(w.codex.join("memories")).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(labelled(
+        &text(&report(&data, 1.0)),
+        "Codex memories",
+        |s| s
+            == ": off. No measured cost, but extraction and consolidation are not measured; never read back or written."
+    ));
+    std::fs::remove_dir(w.codex.join("memories")).unwrap();
     // A request that recorded no context may have loaded memories while they were
     // on, so turning them off does not make its cost zero.
     std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();

@@ -369,6 +369,7 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
             directory: None,
             unresolved: None,
             overrides: vec![],
+            stored: false,
         });
     }
     let first = scopes.first().map_or("settings.json", |s| s.file);
@@ -384,6 +385,7 @@ pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryContro
         directory: None,
         unresolved: None,
         overrides: vec![],
+        stored: false,
     })
 }
 
@@ -416,6 +418,7 @@ pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryContro
         directory: None,
         unresolved: None,
         overrides: vec![],
+        stored: false,
     })
 }
 

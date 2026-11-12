@@ -7,7 +7,3 @@ agent settings would have cost less on their own sessions, with API-price
 estimates where observable and provider-backed guidance otherwise. The tool
 shows its evidence, never prints a prompt, and edits a setting only after the
 user says yes.
-
-## Required
-
-- [m0: first release](/quest/m0/README.md) - `token-max` 0.1.0 on crates.io with a polished CLI, one-command install, priced setting recommendations and guidance warnings for fast mode, background generation, skills, MCPs, and loaded context

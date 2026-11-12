@@ -40,4 +40,4 @@ never shapes `doctor`.
   real sessions.
 - `just check` runs everything CI runs on Linux.
 
-Quests: before any work, run `quest context` and follow it.
+Quests: before any work, run `quest context` and follow it, unless this session already holds its rules.

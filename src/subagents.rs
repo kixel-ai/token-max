@@ -1692,10 +1692,8 @@ mod tests {
         let inside = scoped(agents, Some(&path(&project)));
         let setting = inside.model.as_ref().unwrap();
         assert_eq!(setting.value, "haiku");
-        assert!(
-            setting.owner.contains(".claude/settings.json"),
-            "{setting:?}"
-        );
+        let file = path(&project.join(".claude").join("settings.json"));
+        assert!(setting.owner.starts_with(&file), "{setting:?}");
         assert_eq!(
             definition(inside, "reviewer").unwrap().model.as_deref(),
             Some("sonnet")
@@ -1707,7 +1705,7 @@ mod tests {
         );
         // The guidance names the file that applies where the run happened.
         let (model, _) = settings_text(&profile, inside, "reviewer", false, false);
-        let file = path(&project.join(".claude/agents/reviewer.md"));
+        let file = path(&project.join(".claude").join("agents").join("reviewer.md"));
         assert!(model.contains(&file), "{model}");
     }
 
@@ -1730,8 +1728,8 @@ mod tests {
         put(
             w.codex.join("config.toml"),
             &format!(
-                "[agents.legacy]\ndescription = \"x\"\nconfig_file = \"roles/legacy.toml\"\n[agents.checker]\ndescription = \"x\"\n[agents.ghost]\nnickname_candidates = []\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
-                path(&trusted)
+                "[agents.legacy]\ndescription = \"x\"\nconfig_file = \"roles/legacy.toml\"\n[agents.checker]\ndescription = \"x\"\n[agents.ghost]\nnickname_candidates = []\n[projects.{}]\ntrust_level = \"trusted\"\n",
+                serde_json::to_string(&path(&trusted)).unwrap()
             ),
         );
         put(

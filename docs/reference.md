@@ -1,7 +1,7 @@
 # Reference
 
 Every flag, report section and check. [Replay semantics](semantics.md) covers
-the accounting underneath, and [JSON reports](json.md) the `--json` schema.
+the accounting underneath.
 
 ## Running it
 
@@ -43,13 +43,13 @@ setting or environment override and never apply it.
 
 Exit codes are `0` for no applicable change, `1` for a recommended setting or
 feature change, and `2`
-for a failed scan, price fetch, invalid argument, or cancellation. JSON errors go to stderr; a failed run emits no
+for a failed scan, price fetch, invalid argument, or cancellation. A failed run emits no
 success report or partial recommendations. Invalid selected usage fails with only
 a file and line. Complete lines that are not JSON objects, which harnesses leave
-after crashes and concurrent writes, are skipped and counted in the report and in
-JSON `coverage.skippedLines`; their usage counts as missing, and each one counts
-as an unpriced request in that profile's comparisons. Unterminated final
-lines are deferred, with frozen file lengths and deferred byte counts in JSON.
+after crashes and concurrent writes, are skipped and counted in the report;
+their usage counts as missing, and each one counts as an unpriced request in
+that profile's comparisons. Unterminated final lines are deferred, and
+`--details` counts the files that had one.
 
 ## Reading the report
 
@@ -158,26 +158,13 @@ is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM end
 with exit 2 and no success report.
 Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
 
-## JSON
+## Machine-readable output
 
-Text and `--json` share the same analysis. `--json` emits schema version 2. It retains every check's costs, coverage, current and recommended
-values, owning controls, assumptions, uncertainty and sensitivity, plus every
-per-piece cost and use count in `context`. Large evidence arrays become counts
-and groups of distinct conditions; unknown totals remain null with their known
-subtotal and every unknown-cost reason. `--json-full` and its per-request schema
-version 1 are removed; see [JSON migration](json.md).
+The report is for people and has no machine-readable form; `--json` was
+removed. Each machine output is its own sub-command with a named consumer, such
+as the session export below.
 
-Each check has a `check` discriminator: `claude-cache-ttl`
-retains its TTL-specific fields, while `compaction-window` includes candidate
-windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
-current-settings and post-recommendation on/off costs, grouped periods,
-activation cohorts, context-size costs and lifetime/summary/timing sensitivities.
-`background-generation` adds the feature, the setting that turns it off, its
-estimated request count and cost, and the cache rewrites it avoided.
-`keepalive` adds the cache lifetime, ping interval and size, and one scenario
-per cap. Consumers
-should branch on `check` before reading setting-specific fields.
-IDs are opaque hashes. Shared histories are read once and historical costs stay
+IDs in the report are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.
 Independent check savings must not be summed.
@@ -219,7 +206,7 @@ winner, and unknown fixed charges can cancel without pretending they cost zero.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans
-compatible histories; JSON and text group
+compatible histories; `--details` groups
 their states and reasons. A comparison
 stays unpriced when those histories imply different cache charges, while invariant
 charges can still be compared.
@@ -346,9 +333,7 @@ catalog. `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only
 `--ssh` they need `--include-local`.
 
 Each host is analyzed on its own and gets its own section, labeled with the
-destination, or `this host`. With `--ssh`, JSON is
-`{"schemaVersion": 2, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
-report per host and `ssh` null for this host. A history copied between hosts
+destination, or `this host`. A history copied between hosts
 counts in each host's report, so don't add amounts across hosts. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination.
@@ -410,8 +395,8 @@ a different tier. Today's config never establishes a historical tier. Unsupporte
 requested tiers, conflicting evidence, missing usage and unavailable prices stay
 unknown. Recorded effective tiers always take precedence.
 
-Reports count conditional requests separately from recorded tier coverage. Details
-and JSON show standard, fast and ultrafast served-tier scenarios for
+Reports count conditional requests separately from recorded tier coverage.
+`--details` shows standard, fast and ultrafast served-tier scenarios for
 conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual

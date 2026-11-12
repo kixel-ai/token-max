@@ -35,7 +35,6 @@ Usage: token-max [options]
   --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
   --plain                 Plain text without color or decorative Unicode
-  --json                  Aggregate JSON report, schema version 2
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
@@ -52,13 +51,12 @@ Examples:
   token-max --since 2026-11-01
   token-max --claude-dir ~/.claude-work --codex-dir ~/.codex --details
   token-max --offline --plain
-  token-max --json > report.json
   token-max --ssh devbox --ssh user@laptop --include-local
 
 Public API-price estimates, not subscription bills. Reads transcripts/settings
 only; never edits settings or retains/prints prompt, reply or component text.
 Color is automatic on terminals; NO_COLOR disables it. Progress goes to stderr
-only on interactive terminals, never with --json or redirected output.
+only on interactive terminals, never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report.
 
 Exit 0: no applicable change (advisory findings may remain).
@@ -110,7 +108,6 @@ fn commit() {
 struct Values {
     since: Option<String>,
     max_cost_per_use: Option<String>,
-    json: bool,
     offline: bool,
     plain: bool,
     details: bool,
@@ -146,7 +143,6 @@ impl Values {
 
     fn flag(&mut self, name: &str) -> Option<&mut bool> {
         Some(match name {
-            "json" => &mut self.json,
             "offline" => &mut self.offline,
             "plain" => &mut self.plain,
             "details" => &mut self.details,
@@ -456,25 +452,8 @@ fn diagnose(json: bool, error: &ScanError) {
 /// What a successful run prints, decided before anything is written.
 enum Output {
     Text(String),
-    Json(Box<serde_json::Value>),
-    Hosts(Hosts),
     /// Already streamed, as an SSH audit destination does.
     Written,
-}
-
-/// The JSON report of a run with `--ssh`.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct Hosts {
-    schema_version: u32,
-    hosts: Vec<HostReport>,
-}
-
-#[derive(Serialize)]
-struct HostReport {
-    /// The SSH destination, or null for this host.
-    ssh: Option<String>,
-    report: serde_json::Value,
 }
 
 fn now() -> Millis {
@@ -526,8 +505,7 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     if values.help {
         return Ok((Output::Text(help(SESSIONS_HELP)), 0));
     }
-    let report_only = values.json
-        || values.plain
+    let report_only = values.plain
         || values.details
         || values.version
         || values.include_local
@@ -576,8 +554,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     };
     if values.ssh_scan {
         // A destination scans with its own discovery; only the window crosses SSH.
-        let other = values.json
-            || values.offline
+        let other = values.offline
             || values.plain
             || values.details
             || values.include_local
@@ -618,7 +595,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     let stdout = io::stdout().is_terminal();
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let interactive = stdout && io::stderr().is_terminal() && !term_dumb;
-    let progress = interactive && !values.json;
+    let progress = interactive;
     let phase = |message: &str| {
         if progress {
             eprintln!("token-max: {message}...");
@@ -705,7 +682,6 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     let sections = hosts.len();
     let mut code = 0;
     let mut text = String::new();
-    let mut reports = vec![];
     for (ssh, scan) in hosts.into_iter().zip(scans) {
         let Remote { scan, home } = scan.expect("every host sent a result");
         let report = analyze(AnalyzeOptions {
@@ -722,13 +698,6 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             || crate::context::setting_rows(&report.context)
                 .any(|c| c.verdict == Some(Verdict::Off));
         code = code.max(u8::from(change));
-        if values.json {
-            reports.push(HostReport {
-                ssh,
-                report: crate::compact::report(report),
-            });
-            continue;
-        }
         let host = Host {
             name: ssh.as_deref().unwrap_or("this host"),
             home: home.as_deref(),
@@ -744,25 +713,12 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             },
         ));
     }
-    if sections > 1 && !values.json {
+    if sections > 1 {
         text.push_str(
             "\nEach host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",
         );
     }
-    let output = match (values.json, remote) {
-        (false, _) => Output::Text(text),
-        (true, false) => Output::Json(Box::new(reports.pop().expect("one host").report)),
-        (true, true) => Output::Hosts(Hosts {
-            schema_version: 2,
-            hosts: reports,
-        }),
-    };
-    Ok((output, code))
-}
-
-fn json_output(value: &impl Serialize) -> io::Result<()> {
-    panic::catch_unwind(AssertUnwindSafe(|| write_json(io::stdout().lock(), value)))
-        .unwrap_or_else(|_| Err(io::Error::other("serialization failed")))
+    Ok((Output::Text(text), code))
 }
 
 /// Run the command line and return its exit code: 0 no change, 1 change recommended, 2 failure.
@@ -773,8 +729,8 @@ pub fn main() -> ExitCode {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
-    // Machine output keeps its diagnostics machine-readable too.
-    let json = args.iter().any(|a| a == "--json") || args.first().is_some_and(|a| a == "sessions");
+    // The session export keeps its diagnostics machine-readable too.
+    let json = args.first().is_some_and(|a| a == "sessions");
     let handler = ctrlc::set_handler(move || {
         let committed = COMMITTED.lock().unwrap_or_else(PoisonError::into_inner);
         if *committed {
@@ -801,8 +757,6 @@ pub fn main() -> ExitCode {
             .write_all(text.as_bytes())
             .and_then(|()| io::stdout().lock().flush())
             .map(|()| code),
-        Ok((Output::Json(report), code)) => json_output(&*report).map(|()| code),
-        Ok((Output::Hosts(hosts), code)) => json_output(&hosts).map(|()| code),
         Ok((Output::Written, code)) => Ok(code),
         Err(error) => {
             diagnose(json, &error);

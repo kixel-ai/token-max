@@ -68,7 +68,3 @@ Agent's choices, for the implementer to revisit:
 
 The same PR updates `--help`, the README and `docs/reference.md`, whose
 "Nothing is hidden behind an interactive prompt" no longer holds.
-
-## Required
-
-- [Remove the JSON report](/quest/m0/remove-json.md) - `doctor` has no JSON mode to carry over

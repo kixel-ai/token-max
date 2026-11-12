@@ -4054,11 +4054,7 @@ mod tests {
             Some(Ttl::FiveMinutes)
         );
         let full = report(parsed, 100.0);
-        assert!(
-            !serde_json::to_string(&full)
-                .unwrap()
-                .contains("Compacted while idle")
-        );
+        assert!(!format!("{full:?}").contains("Compacted while idle"));
         assert!(format_report(&full, ReportOptions::default()).contains("Idle compaction"));
         let details = ReportOptions {
             details: true,

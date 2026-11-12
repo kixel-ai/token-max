@@ -8,6 +8,14 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
+use token_max::controls::Env;
+use token_max::discovery::DiscoveryOptions;
+use token_max::model::{
+    Action, BackgroundCheck, BackgroundFeature, CheckResult, ContextKind, Harness, Report,
+};
+use token_max::prices::{PriceOptions, load_prices};
+use token_max::reader::{ScanOptions, scan};
+use token_max::replay::{AnalyzeOptions, analyze};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -144,12 +152,105 @@ fn run(command: &mut Command) -> (i32, String, String) {
     )
 }
 
-/// A report's scan without the instants that differ between runs.
-fn timeless(report: &Value) -> Value {
-    let mut scan = report["scan"].clone();
-    scan["snapshotStartedAt"] = Value::Null;
-    scan["snapshotFinishedAt"] = Value::Null;
-    scan
+/// The analysis a destination runs on its own home, through the library.
+fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Report {
+    let home = home.to_str().unwrap();
+    let catalog = load_prices(&PriceOptions {
+        file: Some(fixture("prices.json")),
+        cache: PathBuf::new(),
+        offline: false,
+    })
+    .unwrap();
+    let discovery = DiscoveryOptions {
+        home: home.into(),
+        env: Env::default(),
+        claude_dirs: vec![],
+        codex_dirs: vec![],
+        t3_dirs: vec![],
+        managed_settings_file: format!("{home}/managed-settings.json"),
+        codex_system_config_file: format!("{home}/system.toml"),
+        codex_requirements_file: format!("{home}/requirements.toml"),
+    };
+    analyze(AnalyzeOptions {
+        scan: scan(&ScanOptions { discovery, since }).unwrap(),
+        catalog: &catalog,
+        since,
+        now: NOW,
+        max_cost_per_use_usd,
+    })
+    .unwrap()
+}
+
+/// An instant after every fixture request, so analyses don't depend on the wall clock.
+const NOW: i64 = 1_796_083_200_000;
+/// 2026-11-01T00:00:00Z.
+const NOVEMBER: i64 = 1_793_491_200_000;
+const MINUTE: i64 = 60_000;
+
+/// One host's section of a report covering several, without its heading.
+fn section<'a>(text: &'a str, host: &str) -> &'a str {
+    let heading = format!("token-max: {host}\n");
+    let start = text.find(&heading).unwrap_or_else(|| panic!("{text}")) + heading.len();
+    let rest = &text[start..];
+    let end = ["\ntoken-max: ", "\nEach host is analyzed on its own."]
+        .iter()
+        .filter_map(|marker| rest.find(marker))
+        .min()
+        .unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// A report without what depends on each run's own clock: instants, dates, day counts, and
+/// dollar amounts, since a per-30-day rate divides by the window that ends at that clock.
+fn timeless(text: &str) -> String {
+    let text = text.strip_prefix("token-max\n").unwrap_or(text);
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    let digits = |at: usize| b[at..].iter().take_while(|c| c.is_ascii_digit()).count();
+    while i < b.len() {
+        let date = i + 10 <= b.len()
+            && digits(i) == 4
+            && b[i + 4] == b'-'
+            && digits(i + 5) == 2
+            && b[i + 7] == b'-'
+            && digits(i + 8) == 2;
+        if date {
+            i += 10;
+            if b.get(i) == Some(&b'T') {
+                i += 1 + b[i + 1..]
+                    .iter()
+                    .take_while(|c| c.is_ascii_digit() || matches!(c, b':' | b'.' | b'Z'))
+                    .count();
+            }
+            out.push_str("<date>");
+        } else if b[i] == b'$' {
+            i += 1 + b[i + 1..]
+                .iter()
+                .take_while(|c| c.is_ascii_digit() || matches!(c, b'.' | b','))
+                .count();
+            out.push_str("$<usd>");
+        } else if b[i].is_ascii_digit() && text[i + digits(i)..].starts_with(" day") {
+            i += digits(i);
+            out.push_str("<n>");
+        } else {
+            let c = text[i..].chars().next().unwrap();
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
+fn background(report: &Report) -> Vec<&BackgroundCheck> {
+    report
+        .checks
+        .iter()
+        .filter_map(|c| match c {
+            CheckResult::Background(b) => Some(b),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -161,7 +262,7 @@ fn a_remote_report_matches_running_there() {
         "--ssh",
         "devbox",
         "--include-local",
-        "--json",
+        "--details",
         since[0],
         since[1],
     ]);
@@ -169,17 +270,13 @@ fn a_remote_report_matches_running_there() {
     // Login noise and transcript text stay out of the output.
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let combined: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(combined["schemaVersion"], 2);
-    let reports = combined["hosts"].as_array().unwrap();
-    assert_eq!(reports.len(), 2);
-    assert_eq!(reports[0]["ssh"], Value::Null);
-    assert_eq!(reports[1]["ssh"], "devbox");
+    for host in ["this host", "devbox"] {
+        assert!(section(&stdout, host).contains("; 2 requests;"), "{host}");
+    }
     let (_, there, _) = run(hosts
-        .command(&["--json", since[0], since[1]])
+        .command(&["--details", since[0], since[1]])
         .env("HOME", &home));
-    let there: Value = serde_json::from_str(&there).unwrap();
-    assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
+    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
 
     let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
     for option in [
@@ -200,6 +297,10 @@ fn a_remote_report_matches_running_there() {
     let (_, alone, _) = hosts.run(&["--ssh", "devbox"]);
     assert!(alone.starts_with("token-max: devbox\n"), "{alone}");
     assert!(!alone.contains("this host") && !alone.contains("across hosts"));
+    assert_eq!(
+        timeless(section(&alone, "devbox")),
+        timeless(section(&text, "devbox"))
+    );
 }
 
 #[test]
@@ -245,90 +346,39 @@ fn keepalive_retains_costs_unknowns_and_caps_over_ssh() {
         records.iter().map(|r| format!("{r}\n")).collect::<String>(),
     )
     .unwrap();
-    let keepalive = |report: &Value| {
-        let mut check = report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["check"] == "keepalive")
-            .unwrap()
-            .clone();
-        // Each invocation has its own clock; the replay costs do not depend on it.
-        check.as_object_mut().unwrap().remove("until");
-        check.as_object_mut().unwrap().remove("monthlySavingsUsd");
-        check
-    };
-    let args = ["--json", "--since", "2026-11-01T00:10:00Z"];
+    let report = analysis(&home, Some(NOVEMBER + 10 * MINUTE), 1.0);
+    assert_eq!(report.scan.cache_context.requests.len(), 2);
+    let check = report
+        .checks
+        .iter()
+        .find_map(|c| match c {
+            CheckResult::Keepalive(k) => Some(k),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, Action::Advisory);
+    assert_eq!(check.base.savings_usd, None);
+    assert_eq!(check.margin_usd, None);
+    assert_eq!(check.ping_input_tokens, Some(1000));
+    assert!(check.base.coverage.unwrap().priced > 0);
+    assert!(check.unpriced > 0);
+    assert!(check.scenarios.len() >= 2);
+    for cap in &check.scenarios {
+        assert!(cap.ping_cost_usd > 0.0);
+        assert!(cap.closed_savings_usd > cap.savings_usd);
+    }
+
+    let args = ["--details", "--since", "2026-11-01T00:10:00Z"];
     let (status, stdout, stderr) = hosts.run(&[&["--ssh", "devbox"][..], &args].concat());
     assert_ne!(status, 2, "{stderr}");
     assert!(stderr.is_empty(), "{stderr}");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let combined: Value = serde_json::from_str(&stdout).unwrap();
-    let remote = &combined["hosts"][0]["report"];
-    assert_eq!(remote["scan"]["cacheContext"]["requests"], 2);
-    let check = keepalive(remote);
-    assert_eq!(check["current"], Value::Null);
-    assert_eq!(check["action"], "advisory");
-    assert_eq!(check["savingsUsd"], Value::Null);
-    assert_eq!(check["marginUsd"], Value::Null);
-    assert_eq!(check["pingInputTokens"], 1000);
-    assert!(check["coverage"]["priced"].as_u64().unwrap() > 0);
-    assert!(check["unpriced"].as_u64().unwrap() > 0);
-    let caps = check["scenarios"].as_array().unwrap();
-    assert!(caps.len() >= 2);
-    for cap in caps {
-        assert!(cap["pingCostUsd"].as_f64().unwrap() > 0.0);
-        assert!(cap["closedSavingsUsd"].as_f64().unwrap() > cap["savingsUsd"].as_f64().unwrap());
-    }
-    let (_, stdout, stderr) = run(hosts.command(&args).env("HOME", &home));
+    let remote = section(&stdout, "devbox");
+    assert!(remote.contains("keepalive"), "{remote}");
+    let (_, there, stderr) = run(hosts.command(&args).env("HOME", &home));
     assert!(stderr.is_empty(), "{stderr}");
-    let local: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(check, keepalive(&local));
-}
-
-#[test]
-fn compact_ssh_reports_use_the_same_contract_as_local_reports() {
-    let hosts = Hosts::new();
-    let home = hosts.host("devbox");
-    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
-    assert_eq!(status, 0, "{stderr}");
-    assert!(stderr.is_empty());
-    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let combined: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(combined["schemaVersion"], 2);
-    let reports = combined["hosts"].as_array().unwrap();
-    assert_eq!(reports.len(), 2);
-    assert_eq!(reports[0]["ssh"], Value::Null);
-    assert_eq!(reports[1]["ssh"], "devbox");
-    for host in reports {
-        assert_eq!(host["report"]["schemaVersion"], 2);
-        assert_eq!(host["report"]["scan"]["requests"], 2);
-    }
-    let (_, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
-    assert!(stderr.is_empty());
-    let there: Value = serde_json::from_str(&there).unwrap();
-    assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
-    for key in ["context", "historical"] {
-        assert_eq!(reports[1]["report"][key], there[key], "{key}");
-    }
-    let remote = reports[1]["report"]["checks"].as_array().unwrap();
-    let local = there["checks"].as_array().unwrap();
-    assert_eq!(remote.len(), local.len());
-    for (remote, local) in remote.iter().zip(local) {
-        // Each run has its own observation end; compare costs and decisions without
-        // the monthly extrapolation that uses that end.
-        for key in [
-            "check",
-            "action",
-            "owner",
-            "recommended",
-            "cost",
-            "coverage",
-            "comparisonCost",
-        ] {
-            assert_eq!(remote[key], local[key], "{key}");
-        }
-    }
+    assert_eq!(timeless(remote), timeless(&there));
 }
 
 #[test]
@@ -361,40 +411,39 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
     std::fs::write(&transcript, lines).unwrap();
 
-    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
+    let cap = |home: &Path| {
+        analysis(home, None, 1.0)
+            .checks
+            .into_iter()
+            .find_map(|c| match c {
+                CheckResult::BashCap(b) => Some(b),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let local = cap(&hosts.root.join("homes/local"));
+    let remote = cap(&home);
+    assert_eq!(local.base.current, Some(600_000));
+    assert_eq!(local.base.action, Action::Keep);
+    assert_eq!(local.waits.calls, 0);
+    assert_eq!(remote.base.current, Some(7_200_000));
+    assert_eq!(remote.base.recommended, Some(3_300_000));
+    assert_eq!(remote.base.action, Action::Change);
+    let w = &remote.waits;
+    assert_eq!((w.calls, w.long, w.timed_out, w.polling), (1, 1, 1, 1));
+    assert!(w.miss_cost.total_usd.unwrap() > 0.0);
+
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let combined: Value = serde_json::from_str(&stdout).unwrap();
-    let reports = combined["hosts"].as_array().unwrap();
-    let cap = |report: &Value| -> Value {
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|check| check["check"] == "bash-timeout-cap")
-            .unwrap()
-            .clone()
-    };
-    let local = cap(&reports[0]["report"]);
-    let remote = cap(&reports[1]["report"]);
-    assert_eq!(local["current"], 600000);
-    assert_eq!(local["action"], "keep");
-    assert_eq!(local["waits"]["calls"], 0);
-    assert_eq!(remote["current"], 7200000);
-    assert_eq!(remote["recommended"], 3300000);
-    assert_eq!(remote["action"], "change");
-    for field in ["calls", "long", "timedOut", "polling"] {
-        assert_eq!(remote["waits"][field], 1, "{field}");
-    }
-    assert!(remote["waits"]["missCost"]["totalUsd"].as_f64().unwrap() > 0.0);
-    let (status, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+    assert!(
+        section(&stdout, "devbox").contains("BASH_MAX_TIMEOUT_MS"),
+        "{stdout}"
+    );
+    let (status, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
-    let there: Value = serde_json::from_str(&there).unwrap();
-    assert_eq!(timeless(&reports[1]["report"]), timeless(&there));
-    let there = cap(&there);
-    assert_eq!(remote["waits"], there["waits"]);
-    assert_eq!(remote["recommended"], there["recommended"]);
+    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
 }
 
 #[test]
@@ -440,6 +489,8 @@ fn codex_context_and_output_keep_their_remote_controls() {
     next["timestamp"] = "2026-11-01T00:00:04Z".into();
     next["payload"]["response_id"] = "response-c".into();
     records.push(next);
+    let local = analysis(&hosts.root.join("homes/local"), None, 1.0);
+    assert!(local.context.is_empty());
     for priceable in [false, true] {
         // Unknown offsets across cache categories remain unknown even with a tier estimate.
         // A cache-free request prices every possible offset at the same ordinary rate.
@@ -454,61 +505,55 @@ fn codex_context_and_output_keep_their_remote_controls() {
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         std::fs::write(codex.join("sessions/rollout.jsonl"), lines).unwrap();
 
-        let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox", "--include-local", "--json"]);
-        assert_eq!(status, 0, "{stderr}");
-        assert_eq!(stderr, "");
-        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-        let combined: Value = serde_json::from_str(&stdout).unwrap();
-        let local = &combined["hosts"][0]["report"];
-        let remote = &combined["hosts"][1]["report"];
-        assert!(local["context"].as_array().unwrap().is_empty());
-        let rows = remote["context"].as_array().unwrap();
-        let server = rows.iter().find(|r| r["kind"] == "mcp-server").unwrap();
-        assert_eq!(server["harness"], "codex");
-        assert_eq!(server["name"], "docs");
+        let remote = analysis(&home, None, 1.0);
+        let server = remote
+            .context
+            .iter()
+            .find(|r| r.kind == ContextKind::McpServer)
+            .unwrap();
+        assert_eq!(server.harness, Harness::Codex);
+        assert_eq!(server.name, "docs");
         assert_eq!(
-            server["control"]["path"],
-            serde_json::json!(["mcp_servers", "docs", "enabled"])
+            server.control.as_ref().unwrap().path,
+            ["mcp_servers", "docs", "enabled"]
         );
-        assert_eq!(
-            server["estimatedUsd"].as_f64().is_some(),
-            priceable,
-            "{server}"
-        );
-        assert_eq!(server["conditionalRequests"], server["priced"]);
-        assert!(server["assumptions"].to_string().contains("conditional"));
-        assert_eq!(server["verdict"], Value::Null);
+        assert_eq!(server.estimated_usd.is_some(), priceable, "{server:?}");
+        assert_eq!(server.conditional_requests, server.priced);
+        assert!(server.assumptions.iter().any(|a| a.contains("conditional")));
+        assert_eq!(server.verdict, None);
         // The remote keeps the same two recorded Claude tiers as this host.
         // Adding Codex estimates must not increase that billing-evidence coverage.
         assert_eq!(
-            remote["scan"]["coverage"]["tierKnown"],
-            local["scan"]["coverage"]["tierKnown"]
+            remote.scan.coverage.tier_known,
+            local.scan.coverage.tier_known
         );
-        let output = rows.iter().find(|r| r["kind"] == "tool-output").unwrap();
-        assert_eq!(output["name"], "mcp__docs");
+        let output = remote
+            .context
+            .iter()
+            .find(|r| r.kind == ContextKind::ToolOutput)
+            .unwrap();
+        assert_eq!(output.name, "mcp__docs");
         // Both requests retain the result; compaction removes it before the third.
-        assert_eq!(output["requests"], 2);
-        assert_eq!(output["calls"], 1);
+        assert_eq!(output.requests, 2);
+        assert_eq!(output.calls, Some(1));
         assert_eq!(
-            output["largestCharacters"],
-            "SYNTHETIC_PRIVATE_OUTPUT".len()
+            output.largest_characters,
+            Some("SYNTHETIC_PRIVATE_OUTPUT".len() as i64)
         );
-        assert_eq!(output["priced"], if priceable { 2 } else { 0 });
-        assert_eq!(output["estimatedUsd"].as_f64().is_some(), priceable);
-        let (_, there, stderr) = run(hosts.command(&["--json"]).env("HOME", &home));
+        assert_eq!(output.priced, if priceable { 2 } else { 0 });
+        assert_eq!(output.estimated_usd.is_some(), priceable);
+
+        let (status, stdout, stderr) =
+            hosts.run(&["--ssh", "devbox", "--include-local", "--details"]);
+        assert_eq!(status, 0, "{stderr}");
         assert_eq!(stderr, "");
-        let there: Value = serde_json::from_str(&there).unwrap();
-        assert_eq!(timeless(remote), timeless(&there));
-        assert_eq!(remote["context"], there["context"]);
-        assert_eq!(remote["historical"], there["historical"]);
-        let (_, compact, stderr) = hosts.run(&["--ssh", "devbox", "--json"]);
+        assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        let (_, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));
         assert_eq!(stderr, "");
-        let compact: Value = serde_json::from_str(&compact).unwrap();
-        assert_eq!(
-            compact["hosts"][0]["report"]["historical"],
-            remote["historical"]
-        );
-        assert_eq!(compact["hosts"][0]["report"]["context"], remote["context"]);
+        assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
+        let (_, alone, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
+        assert_eq!(stderr, "");
+        assert_eq!(timeless(section(&alone, "devbox")), timeless(&there));
 
         let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
         assert_eq!(stderr, "");
@@ -631,8 +676,61 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     std::fs::write(home.join(".claude/projects/my project/main.jsonl"), lines).unwrap();
 
     // Two earlier turns establish eligibility for the first selected turn's recap.
+    let since = Some(NOVEMBER + 2 * MINUTE);
+    let local = analysis(&local, since, 0.000001);
+    let remote = analysis(&home, since, 0.000001);
+    assert_eq!(background(&local).len(), 4);
+    assert!(
+        background(&local)
+            .iter()
+            .all(|c| c.base.current == Some(false) && c.base.action == Action::Keep),
+        "{:?}",
+        background(&local)
+    );
+    let checks = background(&remote);
+    assert_eq!(checks.len(), 4);
+    assert!(checks.iter().all(|c| c.base.current == Some(true)));
+    let feature = |name| *checks.iter().find(|c| c.feature == name).unwrap();
+    let settings = home.join("workspace/.claude/settings.json");
+    let suggestions = feature(BackgroundFeature::PromptSuggestions);
+    assert_eq!(suggestions.generations, Some(2));
+    assert_eq!(suggestions.base.action, Action::Advisory);
+    assert!(suggestions.cost.total_usd.unwrap() > 0.0);
+    assert_eq!(suggestions.off, "\"promptSuggestionEnabled\": false");
+    assert_eq!(suggestions.off_file.as_deref(), settings.to_str());
+    let recaps = feature(BackgroundFeature::SessionRecaps);
+    assert_eq!(recaps.generations, Some(1));
+    assert!(recaps.cost.total_usd.unwrap() > 0.0);
+    assert!(recaps.lost_warming.total_usd.unwrap() > 0.0);
+    assert_eq!(
+        recaps.off,
+        "\"env\": {\"CLAUDE_CODE_ENABLE_AWAY_SUMMARY\": \"0\"}"
+    );
+    assert_eq!(recaps.off_file.as_deref(), settings.to_str());
+    for name in [
+        BackgroundFeature::GoalCheckIns,
+        BackgroundFeature::AutoRecaps,
+    ] {
+        let c = feature(name);
+        assert_eq!(c.base.action, Action::Advisory);
+        assert_eq!(c.generations, None);
+        assert_eq!(c.cost.total_usd, None);
+    }
+    let claude = remote
+        .scan
+        .profiles
+        .iter()
+        .find(|p| p.harness == Harness::Claude)
+        .unwrap();
+    assert_eq!(
+        claude.background_directories[home.join("workspace").to_str().unwrap()][2].minutes,
+        Some(7)
+    );
+    assert_eq!(remote.scan.cache_context.prompts.len(), 2);
+    assert_eq!(remote.scan.cache_context.requests.len(), 2);
+
     let args = [
-        "--json",
+        "--details",
         "--since",
         "2026-11-01T00:02:00Z",
         "--max-cost-per-use",
@@ -643,81 +741,10 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let combined: Value = serde_json::from_str(&stdout).unwrap();
-    let local = &combined["hosts"][0]["report"];
-    let remote = &combined["hosts"][1]["report"];
-    let background = |report: &Value| -> Vec<Value> {
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|c| c["check"] == "background-generation")
-            .cloned()
-            .map(|mut c| {
-                c.as_object_mut().unwrap().remove("until");
-                c.as_object_mut().unwrap().remove("monthlySavingsUsd");
-                c
-            })
-            .collect()
-    };
-    assert_eq!(background(local).len(), 4);
-    assert!(
-        background(local)
-            .iter()
-            .all(|c| c["current"] == false && c["action"] == "keep"),
-        "{:?}",
-        background(local)
-    );
-    let checks = background(remote);
-    assert_eq!(checks.len(), 4);
-    assert!(checks.iter().all(|c| c["current"] == true));
-    let feature = |name: &str| checks.iter().find(|c| c["feature"] == name).unwrap();
-    let suggestions = feature("prompt-suggestions");
-    assert_eq!(suggestions["generations"], 2);
-    assert_eq!(suggestions["action"], "advisory");
-    assert!(suggestions["cost"]["totalUsd"].as_f64().unwrap() > 0.0);
-    assert_eq!(suggestions["off"], "\"promptSuggestionEnabled\": false");
-    assert_eq!(
-        suggestions["offFile"],
-        home.join("workspace/.claude/settings.json")
-            .to_str()
-            .unwrap()
-    );
-    let recaps = feature("session-recaps");
-    assert_eq!(recaps["generations"], 1);
-    assert!(recaps["cost"]["totalUsd"].as_f64().unwrap() > 0.0);
-    assert!(recaps["lostWarming"]["totalUsd"].as_f64().unwrap() > 0.0);
-    assert_eq!(
-        recaps["off"],
-        "\"env\": {\"CLAUDE_CODE_ENABLE_AWAY_SUMMARY\": \"0\"}"
-    );
-    assert_eq!(
-        recaps["offFile"],
-        home.join("workspace/.claude/settings.json")
-            .to_str()
-            .unwrap()
-    );
-    for name in ["goal-check-ins", "auto-recaps"] {
-        let c = feature(name);
-        assert_eq!(c["action"], "advisory");
-        assert_eq!(c["generations"], Value::Null);
-        assert_eq!(c["cost"]["totalUsd"], Value::Null);
-    }
-    let profiles = remote["scan"]["profiles"].as_array().unwrap();
-    let claude = profiles.iter().find(|p| p["harness"] == "claude").unwrap();
-    assert_eq!(
-        claude["backgroundDirectories"][home.join("workspace").to_str().unwrap()][2]["minutes"],
-        7
-    );
-    assert_eq!(remote["scan"]["cacheContext"]["prompts"], 2);
-    assert_eq!(remote["scan"]["cacheContext"]["requests"], 2);
-
     let (status, there, stderr) = run(hosts.command(&args).env("HOME", &home));
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
-    let there: Value = serde_json::from_str(&there).unwrap();
-    assert_eq!(timeless(remote), timeless(&there));
-    assert_eq!(checks, background(&there));
+    assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
     let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
     assert_eq!(stderr, "");
     assert!(!text.contains("SYNTHETIC_PRIVATE"));
@@ -794,10 +821,9 @@ fn any_failed_destination_fails_the_whole_report() {
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
     }
-    let (status, _, stderr) = hosts.run(&["--ssh", "broken", "--json"]);
+    let (status, _, stderr) = hosts.run(&["--ssh", "broken"]);
     assert_eq!(status, 2);
-    let diagnostic: Value = serde_json::from_str(&stderr).unwrap();
-    assert_eq!(diagnostic["location"]["line"], 1);
+    assert!(stderr.ends_with(":1\n"), "{stderr}");
     // A mismatched destination is stopped, not left scanning.
     let pid: i32 = std::fs::read_to_string(hosts.root.join("other.pid"))
         .unwrap()
@@ -866,7 +892,7 @@ fn destinations_and_directory_flags_are_unambiguous() {
         (&["--ssh", "a", "--ssh", "a"], "--ssh a is selected twice"),
         (&["--include-local"], "--include-local requires --ssh"),
         (&["--ssh", "a", "--claude-dir", "x"], "add --include-local"),
-        (&["--ssh-scan", "--json"], "invalid arguments"),
+        (&["--ssh-scan", "--plain"], "invalid arguments"),
         (&["--ssh", "-x"], "invalid arguments"),
     ] {
         let (status, stdout, stderr) = hosts.run(args);

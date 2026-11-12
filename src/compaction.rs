@@ -11,7 +11,7 @@ use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
-    Harness, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
+    Harness, Id, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
     StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowBasisKind, WindowControl,
     WindowScenario, WindowSensitivity,
 };
@@ -74,7 +74,7 @@ impl AsRef<Request> for Modeled<'_> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactionSample<'a> {
     /// The observed compaction boundary.
-    pub event: &'a str,
+    pub event: &'a Id,
     /// The first request resumed after it, and its only message part.
     pub request: &'a Request,
     pub p: &'a BillingPart,
@@ -179,7 +179,7 @@ impl<'a> CompactionSamples<'a> {
                     basis: matches
                         .iter()
                         .map(|s| CompactionBasis {
-                            event: s.event.to_string(),
+                            event: s.event.clone(),
                             request: s.request.id.clone(),
                         })
                         .collect(),
@@ -242,7 +242,7 @@ impl SessionBoundaries {
 /// One profile's structural events, indexed once for every window simulation and replay.
 pub struct WindowEvents<'a> {
     /// The first event with each identity.
-    by_id: HashMap<&'a str, &'a StructuralEvent>,
+    by_id: HashMap<&'a Id, &'a StructuralEvent>,
     boundaries: SessionBoundaries,
     /// Claude cache-reset boundaries for `replay_parts` over these events.
     pub cache: CacheBoundaries,
@@ -254,7 +254,7 @@ impl<'a> WindowEvents<'a> {
         let events: Vec<&'a StructuralEvent> = events.into_iter().collect();
         let mut by_id = HashMap::default();
         for &event in &events {
-            by_id.entry(event.id.as_str()).or_insert(event);
+            by_id.entry(&event.id).or_insert(event);
         }
         Self {
             by_id,
@@ -337,9 +337,9 @@ pub fn compaction_samples<'a>(
     let mut result = Vec::new();
     // Later duplicates win, like a JavaScript Map built from the array.
     let by_id: HashMap<&str, &'a Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
-    let mut charges: HashMap<&str, &CompactionCharge> = HashMap::default();
+    let mut charges: HashMap<&Id, &CompactionCharge> = HashMap::default();
     for charge in summaries {
-        charges.entry(charge.event.as_str()).or_insert(charge);
+        charges.entry(&charge.event).or_insert(charge);
     }
     let boundaries = SessionBoundaries::new(events.iter().copied());
     // Requests with a message part, per session in array order, and whether each list is
@@ -391,7 +391,7 @@ pub fn compaction_samples<'a>(
         if size <= 0 || next.evidence != RequestEvidence::Measured {
             continue;
         }
-        let charge = charges.get(event.id.as_str());
+        let charge = charges.get(&event.id);
         let key = charge
             .and_then(|c| c.request.as_deref())
             .or(event.request.as_deref())
@@ -720,7 +720,7 @@ fn simulate<'r>(
                                 .get(template.event)
                                 .expect("calibration samples come from the simulated events");
                             result.events.push(StructuralEvent {
-                                id: format!("modeled:{}:{index}", req.id),
+                                id: format!("modeled:{}:{index}", req.id).into(),
                                 time: req.time,
                                 session: req.session.clone(),
                                 origins: req
@@ -1167,16 +1167,16 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
         };
         let baseline = replayer.selected(requests.iter().copied(), options.estimates, None, None);
         let baseline_totals: Vec<Cost> = baseline.iter().map(|i| i.components.total()).collect();
-        let summary_ids: HashSet<&str> = events
+        let summary_ids: HashSet<&Id> = events
             .iter()
             .filter(|e| e.time >= since)
-            .map(|e| e.id.as_str())
+            .map(|e| &e.id)
             .collect();
         let unmatched = add_costs(
             options
                 .summaries
                 .iter()
-                .filter(|s| summary_ids.contains(s.event.as_str()) && s.request.is_none())
+                .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
                 .map(|s| &s.cost),
         );
         let servers: Vec<Cost> = selected
@@ -1857,7 +1857,7 @@ mod tests {
             let pricing = Pricing::clone(e.pricing.as_ref().unwrap());
             let proxy = Request {
                 evidence: RequestEvidence::Estimated,
-                id: identity(&e.id).into(),
+                id: identity(&e.id.to_string()).into(),
                 harness: e.harness,
                 session: e.session.clone(),
                 time: e.time,
@@ -2738,8 +2738,8 @@ mod tests {
         assert_eq!(samples.samples.len(), 1);
         let s = &samples.samples[0];
         assert_eq!(
-            (s.event, &*s.request.id, s.output, s.prefix),
-            ("sample-boundary", "sample-resume", 2000, 20000)
+            (s.event.to_string(), &*s.request.id, s.output, s.prefix),
+            ("sample-boundary".to_string(), "sample-resume", 2000, 20000)
         );
         assert_eq!(s.summary.kind, PartKind::Compaction);
         // A charge without a request falls back to the event's own link.
@@ -2810,7 +2810,7 @@ mod tests {
         requests: &[&Request],
         events: &[&StructuralEvent],
         summaries: &[CompactionCharge],
-    ) -> Vec<(String, Text)> {
+    ) -> Vec<(Id, Text)> {
         let mut result = vec![];
         let boundaries: Vec<&&StructuralEvent> = events
             .iter()
@@ -2901,7 +2901,7 @@ mod tests {
             let mut events = vec![];
             for i in 0..4 {
                 let mut e = boundary();
-                e.id = format!("e{i}");
+                e.id = format!("e{i}").into();
                 e.time = next(10) as Millis * 100 + 50;
                 e.origins[0].session = sessions[next(3) as usize].into();
                 if next(2) == 0 {
@@ -2918,10 +2918,10 @@ mod tests {
                 }
                 let refs: Vec<&Request> = requests.iter().collect();
                 let events: Vec<&StructuralEvent> = events.iter().collect();
-                let indexed: Vec<(String, Text)> = compaction_samples(&refs, &events, &[])
+                let indexed: Vec<(Id, Text)> = compaction_samples(&refs, &events, &[])
                     .samples
                     .iter()
-                    .map(|s| (s.event.to_string(), s.request.id.clone()))
+                    .map(|s| (s.event.clone(), s.request.id.clone()))
                     .collect();
                 assert_eq!(indexed, naive_samples(&refs, &events, &[]));
             }
@@ -2990,7 +2990,7 @@ mod tests {
         assert_eq!(owned, ["large-0", "large-1"]);
         assert_eq!(applied.added.len(), 1);
         assert_eq!(applied.events.len(), 1);
-        assert_eq!(applied.events[0].id, "modeled:large-0:0");
+        assert_eq!(applied.events[0].id.to_string(), "modeled:large-0:0");
         assert_eq!(applied.requests[1].parts[0].usage.input, Some(20000));
         // The second request keeps the removed context; its expired prefix is rewritten cold.
         assert_eq!(applied.requests[2].parts[0].usage.write, Some(20000));
@@ -3130,9 +3130,9 @@ mod tests {
         let modeled: Vec<_> = result
             .events
             .iter()
-            .map(|e| (e.id.as_str(), e.time))
+            .map(|e| (e.id.to_string(), e.time))
             .collect();
-        assert_eq!(modeled, [("modeled:large-0:0", HOUR)]);
+        assert_eq!(modeled, [("modeled:large-0:0".to_string(), HOUR)]);
         assert_eq!(result.estimated_parts.len(), 3);
     }
 

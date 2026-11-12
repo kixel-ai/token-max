@@ -4111,6 +4111,7 @@ mod tests {
             idle_owner: "t3/settings.json:idleCompaction".into(),
             ownership_resolved: true,
             limitations: vec![],
+            inherited_window: None,
         });
         for r in &mut scan.requests {
             r.client = Some("t3-code".into());

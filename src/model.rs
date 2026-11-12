@@ -764,6 +764,10 @@ pub struct T3Instance {
     pub idle_owner: String,
     pub ownership_resolved: bool,
     pub limitations: Vec<String>,
+    /// The instance's environment when it inherits the native settings window, which
+    /// discovery resolves at each recorded project like a native profile's.
+    #[serde(skip)]
+    pub inherited_window: Option<crate::controls::Env>,
 }
 
 /// Coverage of one selected T3 state, without aggregate usage or connection credentials.

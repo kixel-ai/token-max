@@ -7,16 +7,16 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::context::{
-    SYNCED_SKILLS, config_patch, control_text, incomplete_profiles, setting_rows, settings_patch,
-    typed_only,
+    CLAUDE_MEMORY, CODEX_MEMORY, SYNCED_SKILLS, config_patch, control_text, incomplete_profiles,
+    setting_rows, settings_patch, typed_only,
 };
 use crate::controls::CAPPED_SHARED;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, Control, ControlValue, Cost, Coverage, EstimateEvidence,
-    Evidence, Harness, KeepaliveCheck, Millis, ModelSource, PeriodStatus, Profile, Report,
-    RequestEvidence, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
+    Evidence, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile,
+    Report, RequestEvidence, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
     UsageEstimate, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
@@ -299,7 +299,63 @@ fn common(result: &CheckResult) -> Common<'_> {
         CheckResult::Keepalive(c) => base("keepalive", c.bucket, &c.base, &[], |s: &String| {
             Setting::Keepalive(s)
         }),
+        CheckResult::Memory(c) => base("auto-memory", "memory", &c.base, &[], |b| {
+            Setting::Toggle(*b)
+        }),
     }
+}
+
+/// How to turn auto memory off: an environment variable as is, a setting in its file.
+fn memory_off(c: &MemoryCheck, out: &Out<'_>) -> String {
+    let set = match &c.off_file {
+        Some(file) => format!("Set {} in {}", c.off, out.home(file)),
+        None => format!("Set {}", c.off),
+    };
+    if c.overrides.is_empty() {
+        return set;
+    }
+    // Settings that may override it have to be turned off where they set memories too.
+    let files: Vec<String> = c.overrides.iter().map(|f| out.home(f)).collect();
+    format!("{set}, and in {} where it sets memories", files.join(", "))
+}
+
+/// Whether Codex memories may have run in the window, generating notes in requests
+/// that are recorded only in telemetry.
+fn codex_unmeasured(c: &MemoryCheck) -> bool {
+    c.unmeasured_generation
+}
+
+/// Why auto memory is not recommended, whatever it cost.
+const MEMORY_ADVICE: &str = "Opinion: notes the agent writes for itself skip review, which encourages slop. Keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md instead";
+
+/// Why auto memory's state is unknown, as a sentence without its period.
+fn memory_unresolved(c: &MemoryCheck) -> String {
+    format!(
+        "Unknown whether it is on: {}",
+        c.unresolved.as_deref().unwrap_or_default()
+    )
+}
+
+/// Whether auto memory cost nothing and was never used in the window.
+fn memory_free(c: &MemoryCheck) -> bool {
+    c.base.savings_usd == Some(0.0) && c.reads + c.writes == 0
+}
+
+/// Auto memory's reads and writes, and what writes cost when they could not be priced.
+fn memory_uses(c: &MemoryCheck) -> String {
+    let uses = c.reads + c.writes;
+    if uses == 0 {
+        return "never read back or written".into();
+    }
+    format!(
+        "used {} time{} ({} read{}, {} write{})",
+        count(uses),
+        if uses == 1 { "" } else { "s" },
+        count(c.reads),
+        if c.reads == 1 { "" } else { "s" },
+        count(c.writes),
+        if c.writes == 1 { "" } else { "s" },
+    )
 }
 
 fn feature_label(feature: BackgroundFeature) -> &'static str {
@@ -1147,10 +1203,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         ),
     );
     out.field(
-        if r.check == "fast-mode" {
-            "Estimated rate-only saving vs current speed"
-        } else {
-            "Estimated net saving vs baseline"
+        match r.check {
+            "fast-mode" => "Estimated rate-only saving vs current speed",
+            // What it cost, which turning it off saves only while it is still on.
+            "auto-memory" => "Total cost",
+            _ => "Estimated net saving vs baseline",
         },
         &format!(
             "{} over window; {} / 30 days",
@@ -1159,6 +1216,15 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         ),
     );
     match result {
+        CheckResult::Memory(m) => {
+            out.field("Turn off", &memory_off(m, out));
+            out.field("Loaded memory and reads", &estimate(m.context_usd));
+            out.field(
+                "Writes, estimated at the output price",
+                &estimate(m.writes_usd),
+            );
+            out.field("Uses", &memory_uses(m));
+        }
         CheckResult::Background(b) => {
             out.field("Ownership", &b.reason);
             for cwd in &b.directories {
@@ -1448,14 +1514,18 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
     if action == Action::Advisory {
         out.field(
             "Next",
-            "Review evidence and resolve current ownership/coverage before changing a setting; advisory findings do not affect the exit code.",
+            if matches!(result, CheckResult::Memory(_)) {
+                "Move what is worth keeping into a reviewed CLAUDE.md or AGENTS.md, then turn it off; advisory findings do not affect the exit code."
+            } else {
+                "Review evidence and resolve current ownership/coverage before changing a setting; advisory findings do not affect the exit code."
+            },
         );
     }
     for id in r.history_profiles {
         out.field("History profile", &out.profile_name(id));
     }
     match result {
-        CheckResult::Background(_) => {}
+        CheckResult::Background(_) | CheckResult::Memory(_) => {}
         CheckResult::Ttl(t) => {
             for ttl in Ttl::ALL {
                 let name = ttl.as_str();
@@ -1723,7 +1793,8 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         | CheckResult::Speed(_)
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
-        | CheckResult::Keepalive(_) => {}
+        | CheckResult::Keepalive(_)
+        | CheckResult::Memory(_) => {}
     }
     out.notes("Assumption", r.assumptions);
     out.notes("Uncertainty", r.uncertainty);
@@ -1733,6 +1804,21 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
+        CheckResult::Memory(m)
+            if r.action == Action::Keep && memory_free(m) && !codex_unmeasured(m) =>
+        {
+            return "Off; it costs nothing.".into();
+        }
+        CheckResult::Memory(_) if r.action == Action::Keep => {
+            return "Off now; its cost and uses earlier in the window are shown for reference.".into();
+        }
+        CheckResult::Memory(m) if m.unresolved.is_some() => {
+            return format!(
+                "{}. {MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use.",
+                memory_unresolved(m)
+            );
+        }
+        CheckResult::Memory(_) => return format!("{MEMORY_ADVICE}. Its cost and uses are shown for reference, not weighed against --max-cost-per-use."),
         CheckResult::Background(b) => {
             return match r.action {
                 Action::Advisory if r.savings_usd.is_some() => {
@@ -1820,6 +1906,10 @@ fn setting_name(result: &CheckResult) -> String {
         CheckResult::Speed(_) => "Fast mode".into(),
         CheckResult::Keepalive(_) => "Keepalive pings".into(),
         CheckResult::BashCap(_) => "Bash timeout cap".into(),
+        CheckResult::Memory(m) => match m.harness {
+            Harness::Codex => CODEX_MEMORY.into(),
+            Harness::Claude => CLAUDE_MEMORY.into(),
+        },
         CheckResult::Background(b) => match b.feature {
             BackgroundFeature::PromptSuggestions => "Prompt suggestions".into(),
             BackgroundFeature::SessionRecaps => "Session recaps".into(),
@@ -2040,7 +2130,8 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::Speed(_)
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
-        | CheckResult::Keepalive(_) => {
+        | CheckResult::Keepalive(_)
+        | CheckResult::Memory(_) => {
             unreachable!("handled above")
         }
     }
@@ -2121,7 +2212,7 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
         ),
         ContextKind::Skill => format!("Skill {}", c.name),
         ContextKind::Instructions => out.home(&c.name),
-        ContextKind::System | ContextKind::Other => c.name.clone(),
+        ContextKind::System | ContextKind::Memory | ContextKind::Other => c.name.clone(),
     }
 }
 
@@ -2720,6 +2811,68 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 );
             }
         }
+        if let CheckResult::Memory(m) = result {
+            let cost = match r.savings_usd {
+                Some(usd) => format!(
+                    "Costs {}{}",
+                    match r.coverage {
+                        Some(_) => "at least ",
+                        None => "",
+                    },
+                    about(usd)
+                ),
+                None => "Cost unknown".into(),
+            };
+            // Codex extraction and consolidation are never measured, so a total from
+            // a window where memories may have run is a lower bound.
+            let cost = match (r.savings_usd, codex_unmeasured(m)) {
+                (Some(usd), true) if r.coverage.is_none() && usd == 0.0 => {
+                    "No measured cost, but extraction and consolidation are not measured".into()
+                }
+                (Some(usd), true) if r.coverage.is_none() => format!(
+                    "Costs at least {}, without extraction and consolidation, which are not measured",
+                    about(usd)
+                ),
+                (None, true) => {
+                    "Cost unknown, and extraction and consolidation are not measured".into()
+                }
+                _ => cost,
+            };
+            let cost = match r.coverage {
+                Some(c) if r.savings_usd.is_some() && codex_unmeasured(m) => format!(
+                    "{cost}, from the {}% of requests that recorded their context, without extraction and consolidation, which are not measured",
+                    percent(c.priced, c.total)
+                ),
+                Some(c) if r.savings_usd.is_some() && c.priced == 0 => {
+                    format!(
+                        "{cost}, from memory's reads and writes alone; no request recorded its context"
+                    )
+                }
+                Some(c) if r.savings_usd.is_some() => format!(
+                    "{cost}, from the {}% of requests that recorded their context",
+                    percent(c.priced, c.total)
+                ),
+                _ => cost,
+            };
+            return match action(c) {
+                Action::Keep if memory_free(m) && !codex_unmeasured(m) => {
+                    format!("{head}. Costs nothing.")
+                }
+                Action::Keep => format!("{head}. {cost}; {}.", memory_uses(m)),
+                _ if m.unresolved.is_some() => format!(
+                    "{}: may be on {arrow} off. {}. {MEMORY_ADVICE}. {cost}; {}. {}.",
+                    name(r, result, out),
+                    memory_unresolved(m),
+                    memory_uses(m),
+                    memory_off(m, out)
+                ),
+                _ => format!(
+                    "{head} {arrow} off. {MEMORY_ADVICE}. {cost}; {}. {}.",
+                    memory_uses(m),
+                    memory_off(m, out)
+                ),
+            };
+        }
         match action(c) {
             Action::Change => {
                 let saves = match (r.savings_usd, result) {
@@ -2850,11 +3003,15 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
     }
     // A measured background generation over the limit is advisory only because its
-    // uses are not recorded, so it sits with the features worth considering off.
+    // uses are not recorded, and auto memory is advised off on the maintainer's opinion
+    // whatever it cost, so both sit with the features worth considering off.
     let costly = |c: &&(&CheckResult, Common<'_>)| {
-        matches!(c.0, CheckResult::Background(_))
-            && action(c) == Action::Advisory
-            && c.1.savings_usd.is_some()
+        action(c) == Action::Advisory
+            && match c.0 {
+                CheckResult::Background(_) => c.1.savings_usd.is_some(),
+                CheckResult::Memory(_) => true,
+                _ => false,
+            }
     };
     let considered: Vec<&(&CheckResult, Common<'_>)> = checks.iter().filter(costly).collect();
     let consider: Vec<&ContextCost> = pieces
@@ -2897,9 +3054,12 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .iter()
         .filter(|c| action(c) == Action::Advisory && !costly(c))
         .collect();
-    // Switchable context still sent today without enough pricing or use evidence for a verdict.
+    // Switchable context still sent today without enough pricing or use evidence for a
+    // verdict. Auto memory has its own line.
     let unpriced: Vec<&ContextCost> = setting_rows(&report.context)
-        .filter(|c| c.current && c.control.is_some() && c.verdict.is_none())
+        .filter(|c| {
+            c.current && c.control.is_some() && c.verdict.is_none() && c.kind != ContextKind::Memory
+        })
         .collect();
     let generation = t3_text_generation(report, out);
     if !unknown.is_empty() || !unpriced.is_empty() || !generation.is_empty() {
@@ -3311,8 +3471,24 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             6,
             PLAIN,
         );
+        // Auto memory's row names the setting its check resolved, whatever owns it.
+        let memory = report
+            .scan
+            .profiles
+            .iter()
+            .rev()
+            .find(|p| p.id == first)
+            .and_then(|p| p.memory.as_ref())
+            .filter(|_| c.kind == ContextKind::Memory);
         let text = match &c.control {
             _ if covered => "Covered by the server-off recommendation".into(),
+            Some(_) if memory.is_some() => {
+                let m = memory.expect("checked above");
+                match &m.off_file {
+                    Some(file) => format!("Turn off: {} in {}", m.off, out.home(file)),
+                    None => format!("Turn off: {}", m.off),
+                }
+            }
             Some(control) => {
                 let file = report
                     .scan
@@ -3833,6 +4009,25 @@ mod tests {
                 Some(0.0),
             ),
             speed_check(fast, "explicit fastMode false"),
+            {
+                let mut base = check_base(Action::Advisory, Some(true), Some(false));
+                base.owner = format!("{ROOT}/settings.json:autoMemoryEnabled (default)");
+                base.evidence = Evidence::Estimated;
+                base.coverage = None;
+                CheckResult::Memory(MemoryCheck {
+                    base,
+                    harness: Harness::Claude,
+                    off: "\"autoMemoryEnabled\": false".into(),
+                    off_file: Some(format!("{ROOT}/settings.json")),
+                    context_usd: Some(140.0),
+                    writes_usd: Some(10.0),
+                    reads: 1,
+                    writes: 2,
+                    unresolved: None,
+                    overrides: vec![],
+                    unmeasured_generation: false,
+                })
+            },
         ];
         Report {
             subagents: vec![],
@@ -4049,6 +4244,12 @@ mod tests {
             section("No setting turns these off"),
         );
         assert!(change < consider && consider < keep && keep < unknown && unknown < fixed);
+        // Auto memory is advised off whatever it cost, without changing the exit code.
+        let memory = lines
+            .iter()
+            .position(|l| *l == "  Auto memory: on -> off. Opinion: notes the agent writes for itself skip review, which encourages slop. Keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md instead. Costs $150; used 3 times (1 read, 2 writes). Set \"autoMemoryEnabled\": false in /synthetic/home/.claude/settings.json.")
+            .expect("auto memory line");
+        assert!(consider < memory && memory < keep);
         let has = |line: &str| lines.contains(&line);
         assert!(has("2 setting changes recommended."));
         assert!(has(

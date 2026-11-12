@@ -1916,6 +1916,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         earlier: vec![],
         sessions: Sessions::default(),
     };
+    reader.exposure.roots(&profiles);
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();

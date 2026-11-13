@@ -1,4 +1,4 @@
-//! Synthetic requests and checkout-local scratch profiles for unit tests.
+//! Synthetic requests and isolated scratch profiles for unit tests.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -121,7 +121,8 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// An isolated home with empty Claude and Codex profiles under the checkout's `.tmp/`.
+/// An isolated home with empty Claude and Codex profiles in the system temp directory,
+/// outside any checkout or real home whose settings discovery would read as a project's.
 pub struct Workspace {
     pub home: PathBuf,
     pub claude: PathBuf,
@@ -131,13 +132,23 @@ pub struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!(
-                "test-{}-{}",
+        // create_dir fails on an existing path, so a planted symlink is never followed; a
+        // name a killed run left behind is skipped.
+        let home = loop {
+            let home = std::env::temp_dir().join(format!(
+                "token-max-test-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
+            match std::fs::create_dir(&home) {
+                Ok(()) => break home,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("{}: {e}", home.display()),
+            }
+        };
+        // Tests compare discovered paths, normalized as discovery does: symlinks such as
+        // macOS's /var resolve, and Windows' verbatim prefix is stripped.
+        let home = PathBuf::from(crate::discovery::realpath(home.to_str().unwrap()).unwrap());
         let claude = home.join(".claude");
         let codex = home.join(".codex");
         std::fs::create_dir_all(claude.join("projects/project")).unwrap();

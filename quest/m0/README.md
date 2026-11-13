@@ -184,7 +184,7 @@ its recommendations, superseding recommend only; ✅ each machine output is
 its own sub-command with a named consumer, such as `token-max sessions`,
 and `--json` is removed; ✅ the repository moves to kixel-ai and keeps the
 name token-max. The reasons and rejected options are in the
-[doctor](/quest/m0/doctor.md) quest, for the move in
+finished doctor quest (`quest/m0/doctor.md` in git history), for the move in
 [kixel-ai/token-max#83](https://github.com/kixel-ai/token-max/pull/83),
 and for the JSON removal in
 [kixelated/token-max#74](https://github.com/kixelated/token-max/pull/74). Where this entry and an older one

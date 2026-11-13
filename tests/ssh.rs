@@ -86,7 +86,11 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         let mut command = Command::new(BIN);
         let path = std::env::var("PATH").unwrap();
         command
-            .args(["--prices-file", fixture("prices.json").to_str().unwrap()])
+            .args([
+                "doctor",
+                "--prices-file",
+                fixture("prices.json").to_str().unwrap(),
+            ])
             .args(args)
             .env_clear()
             .env("HOME", self.root.join("homes/local"))
@@ -104,11 +108,11 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         run(&mut self.command(args))
     }
 
-    /// The first line `--ssh-scan` prints: the header naming this build.
+    /// The first line `doctor --ssh-scan` prints: the header naming this build.
     fn header(&self) -> String {
         // Held open: a destination stops when its stdin closes.
         let mut child = Command::new(BIN)
-            .arg("--ssh-scan")
+            .args(["doctor", "--ssh-scan"])
             .env_clear()
             .env("HOME", self.root.join("homes/empty"))
             .stdin(Stdio::piped())
@@ -438,6 +442,13 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert!(
         section(&stdout, "devbox").contains("BASH_MAX_TIMEOUT_MS"),
+        "{stdout}"
+    );
+    // The destination's change is listed as an edit to make there, in its own home.
+    assert!(
+        section(&stdout, "devbox").contains(
+            "  Bash timeout cap: 2h -> 55m (Measured)\n    In ~/.claude/settings.json:\n      \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"}\n"
+        ),
         "{stdout}"
     );
     let (status, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));

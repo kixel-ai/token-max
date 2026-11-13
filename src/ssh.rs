@@ -1,6 +1,6 @@
 //! Audits of selected SSH destinations, each run by the `token-max` installed there.
 //!
-//! The coordinator runs `token-max --ssh-scan` on each destination through the local OpenSSH
+//! The coordinator runs `token-max doctor --ssh-scan` on each destination through the local OpenSSH
 //! client, with its configuration, authentication and host keys. The destination reads its own
 //! histories and settings, prices and checks them with the coordinator's catalog, and sends
 //! back only its printed report (see [`crate::wire`]); its scan never leaves it.
@@ -54,7 +54,7 @@ const NOT_INSTALLED: i32 = 127;
 const SSH_FAILED: i32 = 255;
 
 fn remote_command(since: Option<Millis>) -> String {
-    let mut command = format!("sh -c '{SCRIPT}' sh --ssh-scan");
+    let mut command = format!("sh -c '{SCRIPT}' sh doctor --ssh-scan");
     if let Some(since) = since {
         command.push_str(&format!(" --since '{}'", iso(since)));
     }
@@ -271,7 +271,11 @@ pub fn audit(
                     "{destination}: token-max sent a report before its request"
                 )));
             }
-            Ok(Rendered { text, change })
+            Ok(Rendered {
+                text,
+                change,
+                fixes: vec![],
+            })
         }
         Ok(Outcome::Error { message, location }) => {
             session.stop(true);
@@ -342,12 +346,14 @@ pub fn serve(since: Option<Millis>) -> u8 {
                 max_cost_per_use_usd: request.max_cost_per_use_usd,
                 format: &request.format,
                 home: home.as_deref(),
+                // Its changes are made there, so its report lists them.
+                changes: true,
             },
         )
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
     let (outcome, code) = match result {
-        Ok(Rendered { text, change }) => (
+        Ok(Rendered { text, change, .. }) => (
             Outcome::Report {
                 since,
                 text,

@@ -1764,6 +1764,7 @@ mod tests {
             agents: Default::default(),
             instruction_budget_file: None,
             instruction_budget_unresolved: None,
+            outranking_files: vec![],
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),

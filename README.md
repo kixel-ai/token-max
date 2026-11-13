@@ -3,9 +3,11 @@
 Most advice about configuring coding agents is asserted, not measured.
 token-max reads this machine's Claude Code and Codex transcripts, replays them
 at public API prices, and shows which of your settings cost more than they
-return, with the evidence for each one.
+return, with the evidence for each one. Then it offers to change them, one at a
+time.
 
 ```text
+$ token-max doctor
 token-max
 Estimated with public API prices, not your subscription bill. Nothing was changed.
 
@@ -40,10 +42,13 @@ consider Auto memory  on   costs $12
 keep     Fast mode    off
          Opinion: standard speed is enough, and fast mode bills a premium for the same work. Set in ~/.claude/settings.json:fastMode.
 
-To turn these off, merge this into ~/.claude/settings.json, adding to any lists already there:
-  {
-    "enableArtifact": false
-  }
+token-max doctor: 4 changes to review. Each is written only after a yes.
+
+[1/4] Main-agent prompt cache TTL: 5m -> 1h (Measured)
+  In ~/.claude/settings.json:
+    "promptCacheTtl": "1h"
+Apply? [y]es, [n]o, [q]uit: y
+...
 ```
 
 That excerpt is from synthetic usage with synthetic prices, not a real host.
@@ -60,19 +65,22 @@ cargo install --locked --git https://github.com/kixel-ai/token-max
 ## Run
 
 ```sh
-token-max                     # every Claude Code and Codex profile on this host
-token-max --since 2026-11-01  # only sessions from that date on
-token-max --details           # the evidence behind every line
-token-max --help
+token-max doctor                     # every Claude Code and Codex profile on this host
+token-max doctor --since 2026-11-01  # only sessions from that date on
+token-max doctor --details           # the evidence behind every line
+token-max doctor --help
 ```
 
 The first run downloads public prices from `https://models.dev/api.json` and
 caches them; `--offline` reuses the cache. That is the only network request,
 unless you name other machines with `--ssh`.
 
-Transcripts and settings are only read. Nothing is edited: the report ends
-with a settings snippet to merge by hand. No prompt, reply, tool argument or
-tool output text is kept or printed.
+Transcripts are only read. On a terminal, `doctor` shows each change it can
+make as the exact edit to your own `settings.json` or `config.toml`, and writes
+the file only after you answer yes. A change something else would override,
+such as a shell variable or a project's settings, is listed to make by hand.
+Piped or redirected, it prints the report and the changes and edits nothing.
+No prompt, reply, tool argument or tool output text is kept or printed.
 
 ## What it checks
 
@@ -104,7 +112,7 @@ reads as a measurement:
 
 Every setting and feature gets two lines: its name, value and cost, then its
 evidence. On a terminal a colored dot gives the verdict: red for a recommended
-change (exit 1), yellow for one worth considering (exit 0), green for a setting
+change, yellow for one worth considering, green for a setting
 already at its recommended value, and a dim hollow dot where there is no
 verdict. Without color (`--plain`, `NO_COLOR` or redirected output), as above,
 a word replaces the dot. Red lines come first in each section.

@@ -17,7 +17,7 @@ use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
     HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
-    RequestEvidence, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
+    RequestEvidence, RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
     UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
@@ -75,32 +75,11 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
     Some(Request {
         evidence: RequestEvidence::Estimated,
         id: identity(&event.id.to_string()).into(),
-        harness: event.harness,
-        session: event.session.clone(),
         time: event.time,
         end_time: event.time,
-        agent: Agent::Subagent,
-        model: model.clone(),
-        provider: event
-            .pricing
-            .as_ref()
-            .and_then(|p| p.provider.clone())
-            .or_else(|| previous.and_then(|r| r.provider.clone())),
-        api: Api::Messages,
-        source: Some("compaction".into()),
-        trigger: event.trigger.as_deref().map(Text::from),
         reference: None,
         turn: None,
-        version: event.version.clone(),
-        client: event.client.clone(),
-        cwd: event.cwd.clone(),
-        effort: None,
-        profiles: event.profiles.clone(),
         locations: vec![event.location.clone()],
-        accounting: Accounting::Individual,
-        attempt: None,
-        server_tools: Some(crate::model::ServerTools::default()),
-        requested_speed: None,
         t3: event.t3.clone(),
         parts: vec![BillingPart {
             model: model.clone(),
@@ -120,9 +99,33 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
                 reasoning: None,
             },
         }],
-        issues: vec![
+        meta: RequestMeta {
+            harness: event.harness,
+            session: event.session.clone(),
+            agent: Agent::Subagent,
+            model: model.clone(),
+            provider: event
+            .pricing
+            .as_ref()
+            .and_then(|p| p.provider.clone())
+            .or_else(|| previous.and_then(|r| r.provider.clone())),
+            api: Api::Messages,
+            source: Some("compaction".into()),
+            trigger: event.trigger.as_deref().map(Text::from),
+            version: event.version.clone(),
+            client: event.client.clone(),
+            cwd: event.cwd.clone(),
+            effort: None,
+            profiles: event.profiles.clone(),
+            accounting: Accounting::Individual,
+            attempt: None,
+            server_tools: Some(crate::model::ServerTools::default()),
+            requested_speed: None,
+            issues: vec![
             "summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into(),
         ],
+        }
+        .into(),
     })
 }
 
@@ -1315,9 +1318,12 @@ mod tests {
         let result = check(&data(vec![first, read], vec![]), None, 1_200_000);
         assert_eq!(result.base.recommended, Some(H1));
         assert!(total(&result.cost.five_minutes).unwrap() > total(&result.cost.one_hour).unwrap());
-        let unshared = Request {
-            session: "different".into(),
-            ..at("separate", 600_000)
+        let unshared = {
+            let mut built = Request {
+                ..at("separate", 600_000)
+            };
+            built.session = "different".into();
+            built
         };
         let c = check(
             &data(vec![make_request(), unshared], vec![]),
@@ -1331,10 +1337,13 @@ mod tests {
     fn a_large_returned_period_decides_the_aggregate() {
         let mut requests: Vec<Request> = (0..4)
             .map(|i| {
-                let r = Request {
-                    id: format!("small-{i}").into(),
-                    session: format!("small-{i}").into(),
-                    ..make_request()
+                let r = {
+                    let mut built = Request {
+                        id: format!("small-{i}").into(),
+                        ..make_request()
+                    };
+                    built.session = format!("small-{i}").into();
+                    built
                 };
                 with(r, u(10, 0, M5))
             })
@@ -1455,12 +1464,13 @@ mod tests {
 
     #[test]
     fn scenario_invariant_unknown_server_fees_do_not_veto() {
-        let first = Request {
-            server_tools: Some(crate::model::ServerTools::from_iter([(
+        let first = {
+            let mut built = Request { ..make_request() };
+            built.server_tools = Some(crate::model::ServerTools::from_iter([(
                 "code_execution_requests".into(),
                 1,
-            )])),
-            ..make_request()
+            )]));
+            built
         };
         let mut next = Request {
             id: "later".into(),
@@ -1490,16 +1500,20 @@ mod tests {
 
     #[test]
     fn mixed_outside_main_agent_ttls_keep_the_available_window() {
-        let first = Request {
-            agent: Agent::Subagent,
-            source: Some("agent:builtin:general-purpose".into()),
-            ..make_request()
+        let first = {
+            let mut built = Request { ..make_request() };
+            built.agent = Agent::Subagent;
+            built.source = Some("agent:builtin:general-purpose".into());
+            built
         };
-        let helper = Request {
-            session: "helper-session".into(),
-            agent: Agent::Subagent,
-            source: Some("session_title".into()),
-            ..at("helper", 600_000)
+        let helper = {
+            let mut built = Request {
+                ..at("helper", 600_000)
+            };
+            built.session = "helper-session".into();
+            built.agent = Agent::Subagent;
+            built.source = Some("session_title".into());
+            built
         };
         let helper = with(helper, u(1000, 0, H1));
         let again = Request {
@@ -1531,10 +1545,11 @@ mod tests {
 
     #[test]
     fn an_unknown_unmatched_proxy_cancels_without_hiding_its_cost() {
-        let first = Request {
-            agent: Agent::Subagent,
-            source: Some("agent:builtin:general-purpose".into()),
-            ..make_request()
+        let first = {
+            let mut built = Request { ..make_request() };
+            built.agent = Agent::Subagent;
+            built.source = Some("agent:builtin:general-purpose".into());
+            built
         };
         let next = Request {
             id: "next".into(),
@@ -1558,10 +1573,13 @@ mod tests {
 
     #[test]
     fn unknown_comparison_reports_missing_linked_usage_first() {
-        let mut r = Request {
-            evidence: RequestEvidence::Unknown,
-            issues: vec![UNLINKED.into()],
-            ..make_request()
+        let mut r = {
+            let mut built = Request {
+                evidence: RequestEvidence::Unknown,
+                ..make_request()
+            };
+            built.issues = vec![UNLINKED.into()];
+            built
         };
         r.parts[0].usage = empty_usage();
         r.parts[0].tier = None;
@@ -1590,15 +1608,18 @@ mod tests {
 
     fn bracketed_attempt() -> Bracket {
         let first = at("before", 0);
-        let mut attempt = Request {
-            evidence: RequestEvidence::Unknown,
-            reference: Some("attempt-ref".into()),
-            attempt: Some(Attempt {
+        let mut attempt = {
+            let mut built = Request {
+                evidence: RequestEvidence::Unknown,
+                reference: Some("attempt-ref".into()),
+                ..at("attempt", 600_000)
+            };
+            built.attempt = Some(Attempt {
                 max_output_tokens: Some(100),
-            }),
-            server_tools: None,
-            issues: vec![UNLINKED.into()],
-            ..at("attempt", 600_000)
+            });
+            built.server_tools = None;
+            built.issues = vec![UNLINKED.into()];
+            built
         };
         attempt.parts[0] = BillingPart {
             usage: empty_usage(),
@@ -1758,9 +1779,12 @@ mod tests {
             end_time: 480_000,
             ..first.clone()
         };
-        let other = Request {
-            session: "other".into(),
-            ..at("other", 60_000)
+        let other = {
+            let mut built = Request {
+                ..at("other", 60_000)
+            };
+            built.session = "other".into();
+            built
         };
         let other = with(other, u(10, 0, M5));
         let transition = Request {
@@ -1804,10 +1828,13 @@ mod tests {
         attempt.parts[0].speed = speed.map(Text::from);
         retime(&mut after, 20 * MIN);
         after.parts[0].usage = claude_usage(u(200, 1000, H1));
-        let mut other = Request {
-            session: "other".into(),
-            source: Some("other".into()),
-            ..at("other", 60_000)
+        let mut other = {
+            let mut built = Request {
+                ..at("other", 60_000)
+            };
+            built.session = "other".into();
+            built.source = Some("other".into());
+            built
         };
         other.parts[0] = BillingPart {
             usage: claude_usage(u(10, 0, M5)),
@@ -1954,11 +1981,12 @@ mod tests {
             after,
         } = bracketed_attempt();
         let after = with(after, u(1200, 0, M5));
-        let sub = Request {
-            agent: Agent::Subagent,
-            source: Some("agent:builtin:general-purpose".into()),
-            session: "child".into(),
-            ..at("sub", 0)
+        let sub = {
+            let mut built = Request { ..at("sub", 0) };
+            built.agent = Agent::Subagent;
+            built.source = Some("agent:builtin:general-purpose".into());
+            built.session = "child".into();
+            built
         };
         let s = data(vec![first, attempt, after, sub], vec![]);
         let report = report_at(&s, None, 1_800_000);
@@ -2020,16 +2048,19 @@ mod tests {
                 attempt,
                 after,
             } = bracketed_attempt();
-            let other = Request {
-                id: "other".into(),
-                session: if layout == "mixed" {
+            let other = {
+                let mut built = Request {
+                    id: "other".into(),
+                    time: 900_000,
+                    end_time: 900_000,
+                    ..attempt.clone()
+                };
+                built.session = if layout == "mixed" {
                     "unbracketed-session".into()
                 } else {
                     attempt.session.clone()
-                },
-                time: 900_000,
-                end_time: 900_000,
-                ..attempt.clone()
+                };
+                built
             };
             let requests = match layout {
                 "first" => vec![attempt, after],
@@ -2057,9 +2088,10 @@ mod tests {
     fn unknown_rates_for_a_cache_free_part_cancel_but_an_unknown_tier_does_not() {
         let mut first = at("before", 0);
         let after = at("after", 600_000);
-        let mut fixed = Request {
-            session: "separate".into(),
-            ..at("fixed", 0)
+        let mut fixed = {
+            let mut built = Request { ..at("fixed", 0) };
+            built.session = "separate".into();
+            built
         };
         fixed.parts[0].model = Some("private-internal".into());
         fixed.parts[0].usage = Usage {
@@ -2206,9 +2238,12 @@ mod tests {
     fn unknown_subagent_kinds_cannot_affect_the_main_bucket() {
         let first = with(at("main-first", 0), u(50_000, 0, M5));
         let after = with(at("main-after", 20 * MIN), u(1000, 50_000, M5));
-        let mut child = Request {
-            agent: Agent::Subagent,
-            ..at("child", 60_000)
+        let mut child = {
+            let mut built = Request {
+                ..at("child", 60_000)
+            };
+            built.agent = Agent::Subagent;
+            built
         };
         child.parts[0].kind = PartKind::Unknown;
         child.parts[0].usage = claude_usage(u(20_000, 0, M5));

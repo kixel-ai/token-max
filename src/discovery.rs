@@ -1924,10 +1924,11 @@ mod tests {
     }
 
     fn request(profile: &Profile, cwd: Option<&Path>) -> Request {
-        Request {
-            profiles: vec![profile.id.clone()].into(),
-            cwd: cwd.map(|c| text(c).into()),
-            ..make_request()
+        {
+            let mut built = Request { ..make_request() };
+            built.profiles = vec![profile.id.clone()].into();
+            built.cwd = cwd.map(|c| text(c).into());
+            built
         }
     }
 
@@ -2384,9 +2385,12 @@ mod tests {
         let mut data = discover(&options).unwrap();
         let profile = data.profiles[0].clone();
         let requests = [
-            Request {
-                harness: Harness::Codex,
-                ..request(&profile, Some(&nested))
+            {
+                let mut built = Request {
+                    ..request(&profile, Some(&nested))
+                };
+                built.harness = Harness::Codex;
+                built
             },
             request(&profile, None),
         ];
@@ -2458,20 +2462,21 @@ mod tests {
         o.env
             .insert("CLAUDE_CODE_GOAL_CHECKIN_MINUTES".into(), "9".into());
         let mut d = discover(&o).unwrap();
-        let r = Request {
-            client: Some("cli".into()),
-            ..request(claude(&d), Some(&nested))
+        let r = {
+            let mut built = Request {
+                ..request(claude(&d), Some(&nested))
+            };
+            built.client = Some("cli".into());
+            built
         };
         discover_claude_controls(
             &o,
             &mut d.profiles,
-            &[
-                r.clone(),
-                Request {
-                    cwd: None,
-                    ..r.clone()
-                },
-            ],
+            &[r.clone(), {
+                let mut built = Request { ..r.clone() };
+                built.cwd = None;
+                built
+            }],
         )
         .unwrap();
         let p = claude(&d);
@@ -2515,9 +2520,10 @@ mod tests {
             c[2].off_file.as_deref(),
             Some(text(&w.managed_settings_file()).as_str())
         );
-        let hosted = Request {
-            client: Some("desktop".into()),
-            ..r.clone()
+        let hosted = {
+            let mut built = Request { ..r.clone() };
+            built.client = Some("desktop".into());
+            built
         };
         discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&hosted)).unwrap();
         let c = &claude(&d).background_requests[&*hosted.id];
@@ -2552,12 +2558,15 @@ mod tests {
         ]
         .into_iter()
         .enumerate()
-        .map(|(i, (session, cwd, client))| Request {
-            id: format!("r{i}").into(),
-            session: session.into(),
-            time: i as i64,
-            client: client.map(crate::model::Text::from),
-            ..request(p, Some(cwd))
+        .map(|(i, (session, cwd, client))| {
+            let mut built = Request {
+                id: format!("r{i}").into(),
+                time: i as i64,
+                ..request(p, Some(cwd))
+            };
+            built.session = session.into();
+            built.client = client.map(crate::model::Text::from);
+            built
         })
         .collect();
         discover_claude_controls(&o, &mut d.profiles, &requests).unwrap();
@@ -2706,9 +2715,12 @@ mod tests {
             .iter()
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
-        let r = Request {
-            harness: Harness::Codex,
-            ..request(p, Some(&cwd))
+        let r = {
+            let mut built = Request {
+                ..request(p, Some(&cwd))
+            };
+            built.harness = Harness::Codex;
+            built
         };
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
@@ -2828,11 +2840,12 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let req = Request {
-            harness: Harness::Codex,
-            profiles: vec![id].into(),
-            cwd: Some(text(&root).into()),
-            ..make_request()
+        let req = {
+            let mut built = Request { ..make_request() };
+            built.harness = Harness::Codex;
+            built.profiles = vec![id].into();
+            built.cwd = Some(text(&root).into());
+            built
         };
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(budget(&d).1, None);
@@ -2883,11 +2896,12 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let req = Request {
-            harness: Harness::Codex,
-            profiles: vec![id.clone()].into(),
-            cwd: Some(text(&cwd).into()),
-            ..make_request()
+        let req = {
+            let mut built = Request { ..make_request() };
+            built.harness = Harness::Codex;
+            built.profiles = vec![id.clone()].into();
+            built.cwd = Some(text(&cwd).into());
+            built
         };
         let recap = |d: &Discovery| {
             d.profiles
@@ -2926,11 +2940,16 @@ mod tests {
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, None);
         assert!(recap(&d).reason.contains("--profile"));
-        let gone = Request {
-            cwd: Some(text(&w.home.join("gone")).into()),
-            ..req.clone()
+        let gone = {
+            let mut built = Request { ..req.clone() };
+            built.cwd = Some(text(&w.home.join("gone")).into());
+            built
         };
-        let absent = Request { cwd: None, ..req };
+        let absent = {
+            let mut built = Request { ..req };
+            built.cwd = None;
+            built
+        };
         discover_codex_controls(&options(&w), &mut d.profiles, &[gone.clone(), absent]).unwrap();
         let p = d.profiles.iter().find(|p| p.id == id).unwrap();
         assert!(
@@ -2939,7 +2958,7 @@ mod tests {
                 .all(|c| c.value.is_none())
         );
         assert!(
-            p.background_directories[&*gone.cwd.unwrap()][0]
+            p.background_directories[&*gone.cwd.clone().unwrap()][0]
                 .value
                 .is_none()
         );
@@ -2971,9 +2990,12 @@ mod tests {
         let requests = [
             request(&profile, Some(&project.join("nested"))),
             request(&profile, Some(&gone)),
-            Request {
-                agent: crate::model::Agent::Subagent,
-                ..request(&profile, None)
+            {
+                let mut built = Request {
+                    ..request(&profile, None)
+                };
+                built.agent = crate::model::Agent::Subagent;
+                built
             },
         ];
         discover_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();

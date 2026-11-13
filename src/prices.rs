@@ -1375,11 +1375,12 @@ mod tests {
     }
 
     fn codex_request() -> Request {
-        Request {
-            harness: Harness::Codex,
-            provider: Some("openai".into()),
-            api: Api::Responses,
-            ..make_request()
+        {
+            let mut built = Request { ..make_request() };
+            built.harness = Harness::Codex;
+            built.provider = Some("openai".into());
+            built.api = Api::Responses;
+            built
         }
     }
 
@@ -1587,9 +1588,10 @@ mod tests {
         );
         assert_eq!(missing.total_usd, None);
         assert!(missing.unknown.join(" ").contains("cache writes missing"));
-        let unknown_api = Request {
-            api: Api::Unknown,
-            ..r.clone()
+        let unknown_api = {
+            let mut built = Request { ..r.clone() };
+            built.api = Api::Unknown;
+            built
         };
         assert_eq!(price_part(&catalog, &unknown_api, &p).total_usd, None);
     }
@@ -1696,14 +1698,16 @@ mod tests {
             ..p.clone()
         };
         assert_eq!(price_part(&c, &r, &priority).total_usd, None);
-        let custom = Request {
-            provider: Some("custom".into()),
-            ..r.clone()
+        let custom = {
+            let mut built = Request { ..r.clone() };
+            built.provider = Some("custom".into());
+            built
         };
         assert_eq!(price_part(&c, &custom, &p).total_usd, None);
-        let tools = |entries: &[(&str, i64)]| Request {
-            server_tools: Some(entries.iter().map(|&(k, v)| (k.to_string(), v)).collect()),
-            ..r.clone()
+        let tools = |entries: &[(&str, i64)]| {
+            let mut built = Request { ..r.clone() };
+            built.server_tools = Some(entries.iter().map(|&(k, v)| (k.to_string(), v)).collect());
+            built
         };
         assert_eq!(
             server_cost(&tools(&[
@@ -1718,10 +1722,13 @@ mod tests {
             server_cost(&tools(&[("code_execution_requests", 1)])).total_usd,
             None
         );
-        let unrecorded = Request {
-            parts: vec![p],
-            server_tools: None,
-            ..r
+        let unrecorded = {
+            let mut built = Request {
+                parts: vec![p],
+                ..r
+            };
+            built.server_tools = None;
+            built
         };
         assert_eq!(price_request(&c, &unrecorded).total_usd, None);
     }

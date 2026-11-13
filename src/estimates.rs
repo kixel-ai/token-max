@@ -261,24 +261,27 @@ mod tests {
             id: "before".into(),
             ..make_request()
         };
-        let attempt = Request {
-            id: "attempt".into(),
-            evidence: RequestEvidence::Unknown,
-            time: attempt_time,
-            end_time: attempt_time,
-            reference: Some("attempt-ref".into()),
-            attempt: Some(Attempt {
+        let attempt = {
+            let mut built = Request {
+                id: "attempt".into(),
+                evidence: RequestEvidence::Unknown,
+                time: attempt_time,
+                end_time: attempt_time,
+                reference: Some("attempt-ref".into()),
+                parts: vec![BillingPart {
+                    usage: Usage::default(),
+                    tier: None,
+                    speed: None,
+                    geo: None,
+                    ..first.parts[0].clone()
+                }],
+                ..make_request()
+            };
+            built.attempt = Some(Attempt {
                 max_output_tokens: Some(100),
-            }),
-            server_tools: None,
-            parts: vec![BillingPart {
-                usage: Usage::default(),
-                tier: None,
-                speed: None,
-                geo: None,
-                ..first.parts[0].clone()
-            }],
-            ..make_request()
+            });
+            built.server_tools = None;
+            built
         };
         let mut next = Request {
             id: "after".into(),

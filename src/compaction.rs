@@ -1659,7 +1659,7 @@ mod tests {
     use crate::estimates::estimate_usage;
     use crate::model::{
         Accounting, Api, Attempt, CacheContext, CompactionControls, ExposureScan, IdleAttribution,
-        Location, PerTtl, Pricing, Profile, ScanCoverage, Snapshot, TtlControl,
+        Location, PerTtl, Pricing, Profile, RequestMeta, ScanCoverage, Snapshot, TtlControl,
     };
     use crate::prices::price_request;
     use crate::safe::identity;
@@ -1706,12 +1706,15 @@ mod tests {
     }
 
     fn at(id: &str, session: &str, time: Millis) -> Request {
-        Request {
-            id: id.into(),
-            session: session.into(),
-            time,
-            end_time: time,
-            ..make_request()
+        {
+            let mut built = Request {
+                id: id.into(),
+                time,
+                end_time: time,
+                ..make_request()
+            };
+            built.session = session.into();
+            built
         }
     }
 
@@ -1868,32 +1871,15 @@ mod tests {
             let proxy = Request {
                 evidence: RequestEvidence::Estimated,
                 id: identity(&e.id.to_string()).into(),
-                harness: e.harness,
-                session: e.session.clone(),
                 time: e.time,
                 end_time: e.time,
-                agent: Agent::Subagent,
-                model: pricing.model.clone(),
-                provider: pricing.provider.clone(),
-                api: Api::Messages,
-                source: Some("compaction".into()),
-                trigger: e.trigger.as_deref().map(Text::from),
                 reference: None,
                 turn: None,
-                version: e.version.clone(),
-                client: e.client.clone(),
-                cwd: e.cwd.clone(),
-                effort: None,
-                profiles: e.profiles.clone(),
                 locations: vec![e.location.clone()],
-                accounting: Accounting::Individual,
-                attempt: None,
-                server_tools: Some(crate::model::ServerTools::default()),
-                requested_speed: None,
                 t3: None,
                 parts: vec![BillingPart {
                     kind: PartKind::Compaction,
-                    model: pricing.model,
+                    model: pricing.model.clone(),
                     tier: pricing.tier,
                     speed: pricing.speed,
                     geo: pricing.geo,
@@ -1909,7 +1895,27 @@ mod tests {
                         reasoning: None,
                     },
                 }],
-                issues: vec!["summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into()],
+                meta: RequestMeta {
+                    harness: e.harness,
+                    session: e.session.clone(),
+                    agent: Agent::Subagent,
+                    model: pricing.model.clone(),
+                    provider: pricing.provider.clone(),
+                    api: Api::Messages,
+                    source: Some("compaction".into()),
+                    trigger: e.trigger.as_deref().map(Text::from),
+                    version: e.version.clone(),
+                    client: e.client.clone(),
+                    cwd: e.cwd.clone(),
+                    effort: None,
+                    profiles: e.profiles.clone(),
+                    accounting: Accounting::Individual,
+                    attempt: None,
+                    server_tools: Some(crate::model::ServerTools::default()),
+                    requested_speed: None,
+                    issues: vec!["summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into()],
+                }
+                .into(),
             };
             let cost = price_request(catalog, &proxy);
             result.push(CompactionCharge {
@@ -2046,13 +2052,16 @@ mod tests {
                 s.requests[2].time = before + 2000;
                 s.requests[2].end_time = before + 2000;
                 s.requests[2].parts[0].usage = usage(0, 150000, 10, Ttl::FiveMinutes, 0);
-                let mut attempt = Request {
-                    evidence: RequestEvidence::Unknown,
-                    reference: Some("attempt-ref".into()),
-                    attempt: Some(Attempt {
+                let mut attempt = {
+                    let mut built = Request {
+                        evidence: RequestEvidence::Unknown,
+                        reference: Some("attempt-ref".into()),
+                        ..at("attempt", "session", before + 1000)
+                    };
+                    built.attempt = Some(Attempt {
                         max_output_tokens: Some(100),
-                    }),
-                    ..at("attempt", "session", before + 1000)
+                    });
+                    built
                 };
                 attempt.parts[0].usage = Usage::default();
                 s.requests.insert(2, attempt);
@@ -2074,10 +2083,13 @@ mod tests {
                 let large: Vec<Request> = s.requests[1..].to_vec();
                 for k in 1..10 {
                     for r in &large {
-                        s.requests.push(Request {
-                            id: format!("{}-{k}", r.id).into(),
-                            session: format!("copy-{k}").into(),
-                            ..r.clone()
+                        s.requests.push({
+                            let mut built = Request {
+                                id: format!("{}-{k}", r.id).into(),
+                                ..r.clone()
+                            };
+                            built.session = format!("copy-{k}").into();
+                            built
                         });
                     }
                 }
@@ -2145,9 +2157,12 @@ mod tests {
                 s.requests.push(other);
                 s.events.push(event);
                 for i in 0..3 {
-                    let mut r = Request {
-                        model: Some(model.into()),
-                        ..at(&format!("haiku-{i}"), "haiku", (i + 1) * HOUR)
+                    let mut r = {
+                        let mut built = Request {
+                            ..at(&format!("haiku-{i}"), "haiku", (i + 1) * HOUR)
+                        };
+                        built.model = Some(model.into());
+                        built
                     };
                     r.parts[0].model = Some(model.into());
                     r.parts[0].usage = writes(150000);
@@ -3881,16 +3896,19 @@ mod tests {
             after.end_time = after.time;
             after.parts[0].usage = usage(0, 150000, 10, Ttl::FiveMinutes, 0);
             let after = after.id.clone();
-            let mut attempt = Request {
-                id: "attempt".into(),
-                time: before.time + 1000,
-                end_time: before.time + 1000,
-                evidence: RequestEvidence::Unknown,
-                reference: Some("attempt-ref".into()),
-                attempt: Some(Attempt {
+            let mut attempt = {
+                let mut built = Request {
+                    id: "attempt".into(),
+                    time: before.time + 1000,
+                    end_time: before.time + 1000,
+                    evidence: RequestEvidence::Unknown,
+                    reference: Some("attempt-ref".into()),
+                    ..make_request()
+                };
+                built.attempt = Some(Attempt {
                     max_output_tokens: Some(100),
-                }),
-                ..make_request()
+                });
+                built
             };
             attempt.parts[0].usage = crate::reader::usage(&json!({}), Harness::Claude).unwrap();
             s.requests.insert(2, attempt);
@@ -3980,9 +3998,12 @@ mod tests {
                 s.requests.push(other);
                 s.events.push(event);
                 for i in 0..3 {
-                    let mut request = Request {
-                        model: Some(model.into()),
-                        ..at(&format!("haiku-{i}"), "haiku", (i + 1) * HOUR)
+                    let mut request = {
+                        let mut built = Request {
+                            ..at(&format!("haiku-{i}"), "haiku", (i + 1) * HOUR)
+                        };
+                        built.model = Some(model.into());
+                        built
                     };
                     request.parts[0].model = Some(model.into());
                     request.parts[0].usage = writes(150000);
@@ -4050,10 +4071,13 @@ mod tests {
                 .collect();
             for k in 1..10 {
                 for r in &large {
-                    s.requests.push(Request {
-                        id: format!("{}-{k}", r.id).into(),
-                        session: format!("copy-{k}").into(),
-                        ..r.clone()
+                    s.requests.push({
+                        let mut built = Request {
+                            id: format!("{}-{k}", r.id).into(),
+                            ..r.clone()
+                        };
+                        built.session = format!("copy-{k}").into();
+                        built
                     });
                 }
             }

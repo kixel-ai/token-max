@@ -22,8 +22,8 @@ use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
     Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness, Id,
     IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
-    Request, RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall, Snapshot,
-    StructuralEvent, Subagent, Text, Usage,
+    Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall,
+    Snapshot, StructuralEvent, Subagent, Text, Usage,
 };
 use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
 use crate::sessions::{Record, Sessions};
@@ -778,37 +778,40 @@ fn request(
     Request {
         evidence: RequestEvidence::Measured,
         id: format!("{}:{identity}", harness_name(snapshot.harness)).into(),
-        harness: snapshot.harness,
-        session: context.session.clone(),
-        agent: context.agent,
         time,
         end_time: time,
-        model: context.model.clone(),
-        provider: context.provider.clone(),
-        api: match snapshot.harness {
-            Harness::Claude => Api::Messages,
-            Harness::Codex => Api::Responses,
-        },
-        source: context.source.clone(),
-        trigger: context.trigger.clone(),
         reference: None,
         turn: context.turn.clone(),
-        version: context.version.clone(),
-        client: context.client.clone(),
-        cwd: context.cwd.clone(),
-        effort: context.effort.clone(),
         parts: vec![],
-        server_tools: None,
-        profiles: context.profiles.clone(),
         locations: vec![location.clone()],
-        accounting: Accounting::Individual,
-        attempt: None,
-        requested_speed: Some(RequestedSpeed {
-            tier: context.tier.clone(),
-            speed: None,
-        }),
-        issues: vec![],
         t3: None,
+        meta: RequestMeta {
+            harness: snapshot.harness,
+            session: context.session.clone(),
+            agent: context.agent,
+            model: context.model.clone(),
+            provider: context.provider.clone(),
+            api: match snapshot.harness {
+                Harness::Claude => Api::Messages,
+                Harness::Codex => Api::Responses,
+            },
+            source: context.source.clone(),
+            trigger: context.trigger.clone(),
+            version: context.version.clone(),
+            client: context.client.clone(),
+            cwd: context.cwd.clone(),
+            effort: context.effort.clone(),
+            server_tools: None,
+            profiles: context.profiles.clone(),
+            accounting: Accounting::Individual,
+            attempt: None,
+            requested_speed: Some(RequestedSpeed {
+                tier: context.tier.clone(),
+                speed: None,
+            }),
+            issues: vec![],
+        }
+        .into(),
     }
 }
 
@@ -1767,19 +1770,31 @@ impl Reader {
 
 /// Merge a request into its earlier copy; `r` shares the interner's strings. Returns the
 /// reference the stored request newly answers.
-fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Option<Text> {
+fn add(requests: &mut Requests, strings: &mut Interner, r: Request) -> Option<Text> {
     let Some(&index) = requests.ids.get(&r.id) else {
         let answered = r.reference.clone();
         requests.ids.insert(r.id.clone(), requests.list.len());
         requests.list.push(r);
         return answered;
     };
+    let Request {
+        evidence,
+        time,
+        end_time,
+        reference,
+        mut parts,
+        mut locations,
+        meta: incoming,
+        ..
+    } = r;
     let previous = &mut requests.list[index];
-    previous.profiles = strings.union(&previous.profiles, &r.profiles);
-    previous.locations.append(&mut r.locations);
-    previous.time = previous.time.min(r.time);
-    previous.end_time = previous.end_time.max(r.end_time);
-    if previous.harness == Harness::Codex {
+    // The shared fields are copied once here and shared again below.
+    let meta = Arc::make_mut(&mut previous.meta);
+    meta.profiles = strings.union(&meta.profiles, &incoming.profiles);
+    previous.locations.append(&mut locations);
+    previous.time = previous.time.min(time);
+    previous.end_time = previous.end_time.max(end_time);
+    if meta.harness == Harness::Codex {
         let conflict = |a: &Option<Text>, b: &Option<Text>| {
             a.as_ref()
                 .zip(b.as_ref())
@@ -1788,25 +1803,27 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
         if previous
             .parts
             .iter()
-            .zip(&r.parts)
+            .zip(&parts)
             .any(|(a, b)| a.kind == b.kind && a.model == b.model && conflict(&a.tier, &b.tier))
         {
             union(
-                &mut previous.issues,
+                &mut meta.issues,
                 vec![strings.text("conflicting effective service tiers")],
             );
         }
-        if let (Some(a), Some(b)) = (&previous.requested_speed, &r.requested_speed)
+        if let (Some(a), Some(b)) = (&meta.requested_speed, &incoming.requested_speed)
             && (conflict(&a.tier, &b.tier) || conflict(&a.speed, &b.speed))
         {
             union(
-                &mut previous.issues,
+                &mut meta.issues,
                 vec![strings.text("conflicting requested service tiers")],
             );
         }
-        if previous.requested_speed.is_none() {
-            previous.requested_speed = r.requested_speed.clone();
-        } else if let (Some(old), Some(new)) = (&mut previous.requested_speed, &r.requested_speed) {
+        if meta.requested_speed.is_none() {
+            meta.requested_speed = incoming.requested_speed.clone();
+        } else if let (Some(old), Some(new)) =
+            (&mut meta.requested_speed, &incoming.requested_speed)
+        {
             if old.tier.is_none() {
                 old.tier = new.tier.clone();
             }
@@ -1814,7 +1831,7 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
                 old.speed = new.speed.clone();
             }
         }
-        for (old, new) in previous.parts.iter_mut().zip(&r.parts) {
+        for (old, new) in previous.parts.iter_mut().zip(&parts) {
             if old.kind == new.kind && old.model == new.model && old.tier.is_none() {
                 old.tier = new.tier.clone();
             }
@@ -1824,13 +1841,13 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
     let output =
         |parts: &[BillingPart]| -> i64 { parts.iter().map(|p| p.usage.output.unwrap_or(0)).sum() };
     let old_output = output(&previous.parts);
-    let new_output = output(&r.parts);
-    if r.parts.len() > previous.parts.len()
-        || (r.parts.len() == previous.parts.len()
+    let new_output = output(&parts);
+    if parts.len() > previous.parts.len()
+        || (parts.len() == previous.parts.len()
             && new_output >= old_output
-            && r.end_time >= previous.end_time)
+            && end_time >= previous.end_time)
     {
-        for (index, p) in r.parts.iter_mut().enumerate() {
+        for (index, p) in parts.iter_mut().enumerate() {
             if let Some(old) = previous.parts.get(index)
                 && old.kind == p.kind
                 && old.model == p.model
@@ -1841,27 +1858,28 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
                 }
             }
         }
-        previous.parts = r.parts;
-        previous.evidence = r.evidence;
-        if r.server_tools.is_some() {
-            previous.server_tools = r.server_tools;
+        previous.parts = parts;
+        previous.evidence = evidence;
+        if incoming.server_tools.is_some() {
+            meta.server_tools = incoming.server_tools.clone();
         }
     }
     let mut answered = None;
     if previous.reference.is_none() {
-        previous.reference = r.reference;
+        previous.reference = reference;
         answered = previous.reference.clone();
     }
-    if previous.source.is_none() {
-        previous.source = r.source;
+    if meta.source.is_none() {
+        meta.source = incoming.source.clone();
     }
-    if previous.effort.is_none() {
-        previous.effort = r.effort;
+    if meta.effort.is_none() {
+        meta.effort = incoming.effort.clone();
     }
-    if previous.provider.is_none() {
-        previous.provider = r.provider;
+    if meta.provider.is_none() {
+        meta.provider = incoming.provider.clone();
     }
-    union(&mut previous.issues, r.issues);
+    union(&mut meta.issues, incoming.issues.clone());
+    strings.meta(&mut previous.meta);
     answered
 }
 
@@ -2030,7 +2048,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
             }
         }
         r.locations.shrink_to_fit();
-        r.issues.shrink_to_fit();
+        strings.meta(&mut r.meta);
     }
     // Events share their pricing context, so fill each shared copy once per provider. Each
     // entry keeps its source alive, so no other copy can reuse the address it is keyed by.
@@ -2080,6 +2098,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &native_ids,
         &snapshot_finished_at,
         since,
+        &mut strings,
     );
     let before = |time: Millis| since.is_some_and(|since| time < since);
     let split = requests.partition_point(|r| before(r.time));
@@ -2243,7 +2262,8 @@ mod tests {
         let mut requests = Requests::default();
         add(&mut requests, s, r.clone());
         add(&mut requests, s, missing.clone());
-        let get = |requests: &Requests| requests.get(&r.id).unwrap().clone();
+        let id = r.id.clone();
+        let get = |requests: &Requests| requests.get(&id).unwrap().clone();
         assert_eq!(get(&requests).parts[0].tier.as_deref(), Some("priority"));
         requests = Requests::default();
         add(&mut requests, s, missing);

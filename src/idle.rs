@@ -3014,14 +3014,17 @@ mod tests {
     /// An interactive CLI request in the target session with `tokens` of cold 1h prefix.
     fn request(id: &str, minute: f64, tokens: i64) -> Request {
         let time = (minute * MINUTE as f64) as Millis;
-        let mut r = Request {
-            id: id.into(),
-            session: "target".into(),
-            time,
-            end_time: time,
-            client: Some("cli".into()),
-            source: Some("repl_main_thread".into()),
-            ..make_request()
+        let mut r = {
+            let mut built = Request {
+                id: id.into(),
+                time,
+                end_time: time,
+                ..make_request()
+            };
+            built.session = "target".into();
+            built.client = Some("cli".into());
+            built.source = Some("repl_main_thread".into());
+            built
         };
         r.parts[0].usage = usage(tokens, 0, 0, Ttl::OneHour);
         r
@@ -3717,11 +3720,14 @@ mod tests {
                 },
             );
         }
-        let copy = |id: &str, as_id: &str| Request {
-            id: as_id.into(),
-            session: "different-sample".into(),
-            version: Some("2.1.315".into()),
-            ..s.requests.iter().find(|r| &*r.id == id).unwrap().clone()
+        let copy = |id: &str, as_id: &str| {
+            let mut built = Request {
+                id: as_id.into(),
+                ..s.requests.iter().find(|r| &*r.id == id).unwrap().clone()
+            };
+            built.session = "different-sample".into();
+            built.version = Some("2.1.315".into());
+            built
         };
         let copies = [
             copy("summary", "different-summary"),

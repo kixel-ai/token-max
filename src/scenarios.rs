@@ -191,12 +191,15 @@ mod tests {
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
 
     fn at(id: &str, session: &str, time: Millis, read: i64, write: i64) -> Request {
-        let mut r = Request {
-            id: id.into(),
-            session: session.into(),
-            time,
-            end_time: time,
-            ..make_request()
+        let mut r = {
+            let mut built = Request {
+                id: id.into(),
+                time,
+                end_time: time,
+                ..make_request()
+            };
+            built.session = session.into();
+            built
         };
         r.parts[0].usage = claude_usage(ClaudeUsage {
             read,

@@ -839,15 +839,17 @@ mod tests {
             let boundaries = CacheBoundaries::new([&boundary]);
             let mut chain = CacheChain::new([&boundaries]);
             for r in [&first, &missing] {
-                let r = Request {
-                    session: session.into(),
-                    ..r.clone()
+                let r = {
+                    let mut built = Request { ..r.clone() };
+                    built.session = session.into();
+                    built
                 };
                 feed(&mut chain, &r, Ttl::FiveMinutes, false, false);
             }
-            let r = Request {
-                session: session.into(),
-                ..last.clone()
+            let r = {
+                let mut built = Request { ..last.clone() };
+                built.session = session.into();
+                built
             };
             let result = feed(&mut chain, &r, Ttl::FiveMinutes, true, false).unwrap();
             assert!(!result.unknown);

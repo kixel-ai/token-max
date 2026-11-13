@@ -1700,6 +1700,7 @@ pub(crate) fn enrich(
     ids: &NativeIds,
     bound: &str,
     since: Option<Millis>,
+    strings: &mut Interner,
 ) {
     let mut projections: Vec<NativeRequest<'_>> = requests
         .iter()
@@ -2097,6 +2098,7 @@ pub(crate) fn enrich(
             };
             roots.insert(key, merged);
         }
+        strings.meta(&mut r.meta);
     }
     for state in states.iter_mut() {
         let mut causes: Vec<(&str, u64)> = unresolved

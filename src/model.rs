@@ -76,6 +76,7 @@ pub struct Interner {
     texts: crate::collections::HashSet<Text>,
     profiles: crate::collections::HashSet<Profiles>,
     tools: crate::collections::HashSet<ServerTools>,
+    metas: crate::collections::HashSet<std::sync::Arc<RequestMeta>>,
 }
 
 impl Interner {
@@ -120,36 +121,33 @@ impl Interner {
         self.profiles(&ids)
     }
 
-    /// Share every repeated string of a request, keeping its unique identifiers as they are.
+    /// Share every repeated string of a request, keeping its unique identifiers as they are,
+    /// and the fields it records alike with other requests.
     pub fn request(&mut self, r: &mut Request) {
-        r.session = self.text(&r.session);
+        let meta = std::sync::Arc::make_mut(&mut r.meta);
+        meta.session = self.text(&meta.session);
         for slot in [
-            &mut r.model,
-            &mut r.provider,
-            &mut r.source,
-            &mut r.trigger,
-            &mut r.turn,
-            &mut r.version,
-            &mut r.client,
-            &mut r.cwd,
-            &mut r.effort,
+            &mut meta.model,
+            &mut meta.provider,
+            &mut meta.source,
+            &mut meta.trigger,
+            &mut meta.version,
+            &mut meta.client,
+            &mut meta.cwd,
+            &mut meta.effort,
         ] {
             self.share(slot);
         }
-        for p in &mut r.parts {
-            for slot in [&mut p.model, &mut p.tier, &mut p.speed, &mut p.geo] {
-                self.share(slot);
-            }
-        }
-        if let Some(speed) = &mut r.requested_speed {
+        if let Some(speed) = &mut meta.requested_speed {
             self.share(&mut speed.tier);
             self.share(&mut speed.speed);
         }
-        for issue in &mut r.issues {
+        for issue in &mut meta.issues {
             *issue = self.text(issue);
         }
-        r.profiles = self.profiles(&r.profiles);
-        if let Some(tools) = &mut r.server_tools {
+        meta.issues.shrink_to_fit();
+        meta.profiles = self.profiles(&meta.profiles);
+        if let Some(tools) = &mut meta.server_tools {
             match self.tools.get(tools) {
                 Some(shared) => *tools = shared.clone(),
                 None => {
@@ -157,9 +155,30 @@ impl Interner {
                 }
             }
         }
+        self.share(&mut r.turn);
+        for p in &mut r.parts {
+            for slot in [&mut p.model, &mut p.tier, &mut p.speed, &mut p.geo] {
+                self.share(slot);
+            }
+        }
+        self.meta(&mut r.meta);
         r.parts.shrink_to_fit();
         r.locations.shrink_to_fit();
-        r.issues.shrink_to_fit();
+    }
+
+    /// Replace `meta` with the shared copy of its value; its strings must already be shared.
+    pub fn meta(&mut self, meta: &mut std::sync::Arc<RequestMeta>) {
+        match self.metas.get(&**meta) {
+            Some(shared) => {
+                if !std::sync::Arc::ptr_eq(shared, meta) {
+                    *meta = shared.clone();
+                }
+            }
+            None => {
+                std::sync::Arc::make_mut(meta).issues.shrink_to_fit();
+                self.metas.insert(meta.clone());
+            }
+        }
     }
 
     /// Share every repeated string of a structural event.
@@ -358,14 +377,14 @@ pub enum Accounting {
 }
 
 /// Recorded API-attempt budget; this does not establish execution or billing.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     pub max_output_tokens: Option<i64>,
 }
 
 /// Requested controls never establish the billed response tier.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct RequestedSpeed {
     pub tier: Option<Text>,
     pub speed: Option<Text>,
@@ -373,41 +392,64 @@ pub struct RequestedSpeed {
 
 /// One deduplicated model request, with no message content.
 ///
-/// Strings are shared: a request holds references to values that thousands of requests
-/// repeat, such as its model, session and profiles, so a full history fits in memory.
+/// A history holds a million requests, so each keeps only what differs per request and
+/// shares the rest, such as its session, model and profiles, with every request recorded
+/// alike. Shared fields read and write through `Deref`; a write copies them first.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub evidence: RequestEvidence,
     pub id: Text,
+    pub time: Millis,
+    pub end_time: Millis,
+    pub reference: Option<Text>,
+    pub turn: Option<Text>,
+    pub parts: Vec<BillingPart>,
+    pub locations: Vec<Location>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t3: Option<Box<T3Request>>,
+    #[serde(flatten)]
+    pub meta: std::sync::Arc<RequestMeta>,
+}
+
+/// What requests recorded alike share: everything but their identity, time, usage and location.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMeta {
     pub harness: Harness,
     pub session: Text,
     pub agent: Agent,
-    pub time: Millis,
-    pub end_time: Millis,
     pub model: Option<Text>,
     pub provider: Option<Text>,
     pub api: Api,
     pub source: Option<Text>,
     pub trigger: Option<Text>,
-    pub reference: Option<Text>,
-    pub turn: Option<Text>,
     pub version: Option<Text>,
     pub client: Option<Text>,
     pub cwd: Option<Text>,
     /// The recorded reasoning effort, such as `high`.
     pub effort: Option<Text>,
-    pub parts: Vec<BillingPart>,
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
-    pub locations: Vec<Location>,
     pub accounting: Accounting,
     pub attempt: Option<Attempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
     pub issues: Vec<Text>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub t3: Option<Box<T3Request>>,
+}
+
+impl std::ops::Deref for Request {
+    type Target = RequestMeta;
+    fn deref(&self) -> &RequestMeta {
+        &self.meta
+    }
+}
+
+impl std::ops::DerefMut for Request {
+    /// The shared fields, copied first unless this request holds the only reference.
+    fn deref_mut(&mut self) -> &mut RequestMeta {
+        std::sync::Arc::make_mut(&mut self.meta)
+    }
 }
 
 /// A safe location under one conversation alias.

@@ -643,9 +643,10 @@ mod tests {
         }
 
         fn request(profile: &Profile) -> Request {
-            Request {
-                profiles: vec![profile.id.clone()].into(),
-                ..make_request()
+            {
+                let mut built = Request { ..make_request() };
+                built.profiles = vec![profile.id.clone()].into();
+                built
             }
         }
 
@@ -666,29 +667,32 @@ mod tests {
                 ..ClaudeUsage::default()
             };
             let base = make_request().parts[0].clone();
-            let r = Request {
-                parts: vec![
-                    BillingPart {
-                        speed: Some("fast".into()),
-                        geo: Some("us".into()),
-                        usage: claude_usage(usage),
-                        ..base.clone()
-                    },
-                    BillingPart {
-                        speed: Some("standard".into()),
-                        usage: claude_usage(ClaudeUsage {
-                            ttl: Ttl::OneHour,
-                            ..usage
-                        }),
-                        ..base
-                    },
-                ],
-                server_tools: Some(
+            let r = {
+                let mut built = Request {
+                    parts: vec![
+                        BillingPart {
+                            speed: Some("fast".into()),
+                            geo: Some("us".into()),
+                            usage: claude_usage(usage),
+                            ..base.clone()
+                        },
+                        BillingPart {
+                            speed: Some("standard".into()),
+                            usage: claude_usage(ClaudeUsage {
+                                ttl: Ttl::OneHour,
+                                ..usage
+                            }),
+                            ..base
+                        },
+                    ],
+                    ..request(claude(&s))
+                };
+                built.server_tools = Some(
                     [("web_search_requests".to_string(), 999)]
                         .into_iter()
                         .collect(),
-                ),
-                ..request(claude(&s))
+                );
+                built
             };
             s.requests = vec![r.clone()];
             let report = analyze(AnalyzeOptions {
@@ -1048,15 +1052,21 @@ mod tests {
             );
             let p = p.clone();
             s.requests = vec![
-                Request {
-                    id: "a".into(),
-                    cwd: Some("a".into()),
-                    ..request(&p)
+                {
+                    let mut built = Request {
+                        id: "a".into(),
+                        ..request(&p)
+                    };
+                    built.cwd = Some("a".into());
+                    built
                 },
-                Request {
-                    id: "b".into(),
-                    cwd: Some("b".into()),
-                    ..request(&p)
+                {
+                    let mut built = Request {
+                        id: "b".into(),
+                        ..request(&p)
+                    };
+                    built.cwd = Some("b".into());
+                    built
                 },
             ];
             let cards: Vec<_> = checks(&s, &c, None, 100)

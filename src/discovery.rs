@@ -1201,18 +1201,19 @@ fn ancestors_setting_codex_memory(
     user: &str,
     home: &str,
 ) -> Result<Vec<String>, ScanError> {
-    // Normalize both alike, such as symlinks and Windows' `\\?\` prefix, so the stop
-    // matches. A path that no longer exists is compared as recorded.
-    let cwd = realpath(cwd).unwrap_or_else(|_| cwd.to_string());
-    let home = realpath(home).unwrap_or_else(|_| home.to_string());
+    // Compare normalized forms, such as resolved symlinks and Windows' `\\?\` prefix,
+    // while naming files under the recorded cwd as the other layers do. A path that no
+    // longer exists is compared as recorded.
+    let normal = |path: &str| realpath(path).unwrap_or_else(|_| path.to_string());
+    let home = normal(home);
     let mut files = vec![];
-    let mut path = cwd.as_str();
+    let mut path = cwd;
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
         if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
             files.push(file);
         }
-        if path == home || dirname(path) == path {
+        if dirname(path) == path || normal(path) == home {
             return Ok(files);
         }
         path = dirname(path);

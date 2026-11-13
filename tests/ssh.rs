@@ -23,7 +23,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 /// Destinations under one checkout-local directory whose path has a space, removed on drop.
 ///
 /// `ssh` runs the destination's command with `sh`, its home under `homes/` and its `PATH`
-/// starting with `remote/<host>`, which links the real binary unless a test replaces it.
+/// of `remote/<host>`, which links the real binary unless a test replaces it, then `tools/`.
 struct Hosts {
     root: PathBuf,
 }
@@ -39,6 +39,18 @@ impl Hosts {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
         std::fs::create_dir_all(root.join("bin")).unwrap();
+        // Destinations get only the commands their scripts run, so a token-max the developer
+        // installed can't stand in for the one under test.
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let path = std::env::var_os("PATH").unwrap();
+        for tool in ["sh", "uname", "sleep"] {
+            let found = std::env::split_paths(&path)
+                .map(|dir| dir.join(tool))
+                .find(|file| file.is_file())
+                .unwrap_or_else(|| panic!("{tool} is not on PATH"));
+            symlink(found, tools.join(tool)).unwrap();
+        }
         script(
             &root.join("bin/ssh"),
             r#"echo "$*" >> "$TEST_ROOT/ssh.args"
@@ -86,14 +98,7 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
     /// The coordinator, with this host's home as `local` and only the test's environment.
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
-        // Destinations must not find a token-max the developer installed.
         let path = std::env::var("PATH").unwrap();
-        let path = std::env::join_paths(
-            std::env::split_paths(&path).filter(|dir| !dir.join("token-max").exists()),
-        )
-        .unwrap()
-        .into_string()
-        .unwrap();
         command
             .args(["--prices-file", fixture("prices.json").to_str().unwrap()])
             .args(args)
@@ -104,7 +109,7 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
                 format!("{}:{path}", self.root.join("bin").display()),
             )
             .env("TEST_ROOT", &self.root)
-            .env("TEST_PATH", path)
+            .env("TEST_PATH", self.root.join("tools"))
             .stdin(Stdio::null());
         command
     }

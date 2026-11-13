@@ -93,7 +93,7 @@ pub struct ReplayedPart<'a> {
 }
 
 /// Price one replayed part, whose cache charge is unknown for `cache_unknown`.
-pub fn replayed_components(
+pub(crate) fn replayed_components(
     catalog: &Catalog,
     r: &Request,
     p: &BillingPart,

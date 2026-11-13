@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::collections::{HashMap, IndexMap};
-use crate::model::{Harness, Millis, Request, Scan, Text};
+use crate::model::{Harness, Millis, Request, Scan, Text, Usd};
 use crate::prices::{Catalog, add_costs, price_part, request_evidence, server_cost};
 use crate::reader::CodexThread;
 use crate::safe::{iso, label};
@@ -202,7 +202,7 @@ pub struct ModelUsage {
     pub cache_read_tokens: i64,
     pub output_tokens: i64,
     /// The priced cost; a lower bound unless `complete`.
-    pub cost_usd: f64,
+    pub cost_usd: Usd,
     pub complete: bool,
 }
 
@@ -220,7 +220,9 @@ pub struct Session {
     pub start: String,
     pub end: String,
     pub models: Vec<ModelUsage>,
-    pub cost_usd: f64,
+    /// The exact total of the models' costs, which can differ in the last digit from adding
+    /// their rounded values.
+    pub cost_usd: Usd,
     /// False when any request could not be priced or a file had unreadable lines.
     pub complete: bool,
     pub skipped_lines: u64,
@@ -307,7 +309,7 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
                 cache_write_tokens: 0,
                 cache_read_tokens: 0,
                 output_tokens: 0,
-                cost_usd: 0.0,
+                cost_usd: Usd::ZERO,
                 complete: true,
             });
             let u = &p.usage;
@@ -489,8 +491,8 @@ mod tests {
             )
         };
         assert_eq!(tokens(high), (1, 100, 1000, 500, 50));
-        assert!(high.complete && close(high.cost_usd, 0.0041));
-        assert!(close(main.cost_usd, 0.0082));
+        assert!(high.complete && close(high.cost_usd.to_f64(), 0.0041));
+        assert!(close(main.cost_usd.to_f64(), 0.0082));
         // The truncated line may have held usage, so the total is only a lower bound.
         assert_eq!(main.skipped_lines, 1);
         assert!(!main.complete);
@@ -503,14 +505,14 @@ mod tests {
         let sub = &sessions[1];
         assert_eq!(sub.parent.as_deref(), Some("session-a"));
         assert_eq!(sub.branches[0].name, "quest/a");
-        assert!(sub.complete && close(sub.cost_usd, 0.0041));
+        assert!(sub.complete && close(sub.cost_usd.to_f64(), 0.0041));
 
         let fork = &sessions[2];
         assert_eq!(
             fork.models[0].requests, 1,
             "the copied reply stays with session-a"
         );
-        assert!(fork.complete && close(fork.cost_usd, 0.0041));
+        assert!(fork.complete && close(fork.cost_usd.to_f64(), 0.0041));
     }
 
     #[test]
@@ -572,7 +574,7 @@ mod tests {
                 m.output_tokens,
             );
             assert_eq!(found, (Some("gpt-6.1-sol"), Some("medium"), 800, 200, 100));
-            assert!(s.complete && s.cost_usd > 0.0);
+            assert!(s.complete && s.cost_usd.to_f64() > 0.0);
         }
     }
 

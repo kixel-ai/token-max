@@ -17,7 +17,7 @@ use crate::model::{
     Action, Agent, BillingPart, Bucket, CheckBase, CompactionCharge, CompactionCheck, Coverage,
     EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck, KeepaliveScenario,
     Millis, PartKind, PerBucket, Profile, Request, Scan, ScenarioWindow, StructuralEvent, Text,
-    Ttl, TtlCheck, Usage, UsageEstimate,
+    Ttl, TtlCheck, Usage, UsageEstimate, Usd,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
@@ -181,9 +181,9 @@ pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
 #[derive(Default)]
 struct Run {
     conditional: bool,
-    recorded: f64,
-    pings: Vec<f64>,
-    finals: Vec<f64>,
+    recorded: Usd,
+    pings: Vec<Usd>,
+    finals: Vec<Usd>,
     reads: HashMap<Text, i64>,
 }
 
@@ -473,7 +473,7 @@ impl Replayer<'_> {
                     boundaries.next();
                 }
             }
-            let mut cost = 0.0;
+            let mut cost = Usd::ZERO;
             let mut recorded = original
                 .get(&*r.id)
                 .into_iter()
@@ -796,7 +796,9 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     let mut unpriced = 0;
     let mut priced = 0;
     let mut conditional = false;
-    let mut final_costs: Vec<Vec<f64>> = vec![vec![]; caps.len()];
+    // Avoided, ping and closed-savings totals per cap, summed exactly and shown as f64.
+    let mut totals = vec![[Usd::ZERO; 3]; caps.len()];
+    let mut final_costs: Vec<Vec<Usd>> = vec![vec![]; caps.len()];
     let mut uncertainty = vec![
         "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
         "transcripts do not record when clients close or sleep; returning sessions stay awake and final periods ping for the full cap, including beyond the observation window".into(),
@@ -887,12 +889,13 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
                             .is_some_and(|b| *b == 0 && **read > 0)
                     })
                     .count() as u64;
-                s.avoided_usd += baseline.recorded - run.recorded;
-                s.ping_cost_usd += run.pings.iter().chain(&run.finals).sum::<f64>();
-                s.closed_savings_usd +=
-                    baseline.recorded - run.recorded - run.pings.iter().sum::<f64>();
+                let [avoided, ping, closed] = &mut totals[i];
+                *avoided += baseline.recorded - run.recorded;
+                *ping += run.pings.iter().chain(&run.finals).copied().sum::<Usd>();
+                *closed +=
+                    baseline.recorded - run.recorded - run.pings.iter().copied().sum::<Usd>();
                 let size = run.finals.len().max(final_costs[i].len());
-                final_costs[i].resize(size, 0.0);
+                final_costs[i].resize(size, Usd::ZERO);
                 for (n, cost) in run.finals.into_iter().enumerate() {
                     final_costs[i][n] += cost;
                 }
@@ -901,8 +904,11 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     } else {
         unpriced = returns + finals;
     }
-    for s in &mut scenarios {
-        s.savings_usd = s.avoided_usd - s.ping_cost_usd;
+    for (s, [avoided, ping, closed]) in scenarios.iter_mut().zip(totals) {
+        s.avoided_usd = avoided.to_f64();
+        s.ping_cost_usd = ping.to_f64();
+        s.closed_savings_usd = closed.to_f64();
+        s.savings_usd = (avoided - ping).to_f64();
     }
     if priced == 0 {
         scenarios.clear();
@@ -955,8 +961,8 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .and_then(|(i, s)| {
         let spare = s.closed_savings_usd - alternative;
         if spare <= 0.0 || s.savings_usd > alternative {return None;}
-        let mut total = 0.0;
-        let count = final_costs[i].iter().take_while(|&&cost| {total += cost; total <= spare}).count();
+        let mut total = Usd::ZERO;
+        let count = final_costs[i].iter().take_while(|&&cost| {total += cost; total.to_f64() <= spare}).count();
         Some(format!("pinging {} wins only if sessions that never came back close within {} of their last request",
             policy(interval.unwrap(), s.cap_ms), duration((count + 1) as Millis * interval.unwrap())))
     });
@@ -1454,7 +1460,8 @@ mod tests {
         )
     }
 
-    fn near(actual: f64, expected: f64) {
+    fn near(actual: Usd, expected: f64) {
+        let actual = actual.to_f64();
         assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
     }
 
@@ -1468,7 +1475,7 @@ mod tests {
             .flat_map(|r| {
                 r.parts
                     .iter()
-                    .map(|p| price_part(&prices(), r, p).total_usd.unwrap())
+                    .map(|p| price_part(&prices(), r, p).total_usd.unwrap().to_f64())
             })
             .sum();
         near(baseline.recorded, expected);
@@ -1511,7 +1518,10 @@ mod tests {
         assert!(base.reads.contains_key(&mixed.id));
         assert!(pinged.reads.contains_key(&mixed.id));
         mixed.parts.pop();
-        let advisor_cost = price_part(&prices(), &mixed, &advisor).total_usd.unwrap();
+        let advisor_cost = price_part(&prices(), &mixed, &advisor)
+            .total_usd
+            .unwrap()
+            .to_f64();
         let (without_base, without_pinged) =
             replay(vec![turn("a", 0), mixed, returned], vec![idle], 2);
         near(base.recorded - without_base.recorded, advisor_cost);
@@ -1550,7 +1560,12 @@ mod tests {
             expected.usage = Cache::Claude(Ttl::OneHour).usage(0, 104_000, 0, 500);
             let mut before = original.parts[0].clone();
             before.usage = Cache::Claude(Ttl::OneHour).usage(0, 101_000, 0, 500);
-            let cost = |p: &BillingPart| price_part(&prices(), &original, p).total_usd.unwrap();
+            let cost = |p: &BillingPart| {
+                price_part(&prices(), &original, p)
+                    .total_usd
+                    .unwrap()
+                    .to_f64()
+            };
             near(
                 (pinged.recorded - base.recorded) - (short_pinged.recorded - short_base.recorded),
                 cost(&expected) - cost(&before),
@@ -1579,7 +1594,10 @@ mod tests {
         r.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(0, 21_000, 0, 500);
         near(
             pinged.pings[1],
-            price_part(&prices(), &r, &r.parts[0]).total_usd.unwrap(),
+            price_part(&prices(), &r, &r.parts[0])
+                .total_usd
+                .unwrap()
+                .to_f64(),
         );
         let mut compacted = scan(one_hour(), vec![turn("a", 0), turn("a", 2 * HOUR)]);
         compacted.events = vec![boundary("a", HOUR, None)];
@@ -1609,8 +1627,14 @@ mod tests {
         before.usage = Cache::Claude(Ttl::OneHour).usage(0, 99_000, 0, 500);
         near(
             pinged.recorded - base.recorded,
-            price_part(&prices(), &b, &expected).total_usd.unwrap()
-                - price_part(&prices(), &b, &before).total_usd.unwrap(),
+            price_part(&prices(), &b, &expected)
+                .total_usd
+                .unwrap()
+                .to_f64()
+                - price_part(&prices(), &b, &before)
+                    .total_usd
+                    .unwrap()
+                    .to_f64(),
         );
     }
 
@@ -1871,7 +1895,12 @@ mod tests {
         returned.parts[0].usage = Cache::Claude(Ttl::OneHour).usage(21_000, 1500, 0, 500);
         let expected: f64 = [&first, &summary, &returned]
             .into_iter()
-            .map(|r| price_part(&prices(), r, &r.parts[0]).total_usd.unwrap())
+            .map(|r| {
+                price_part(&prices(), r, &r.parts[0])
+                    .total_usd
+                    .unwrap()
+                    .to_f64()
+            })
             .sum();
         near(pinged.recorded, expected);
     }

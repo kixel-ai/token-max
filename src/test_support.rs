@@ -196,6 +196,8 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
     };
     Profile {
         agents: Default::default(),
+        instruction_budget_file: None,
+        instruction_budget_unresolved: None,
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),
@@ -237,4 +239,56 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         memory: None,
         t3: None,
     }
+}
+
+/// One setting's two lines in a plain-text default report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportLine {
+    /// The section's kind of claim: "MEASURED", "OFFICIAL" or "OPINION".
+    pub claim: String,
+    /// The verdict word, such as "change".
+    pub mark: String,
+    /// The heading line, with its column padding collapsed to single spaces.
+    pub head: String,
+    pub evidence: String,
+}
+
+/// The setting lines of a plain, unwrapped default report.
+pub fn report_lines(text: &str) -> Vec<ReportLine> {
+    let mut claim = String::new();
+    let mut rows = vec![];
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((title, _)) = line.split_once("  ")
+            && ["MEASURED", "OFFICIAL", "OPINION"].contains(&title)
+        {
+            claim = title.into();
+            continue;
+        }
+        let word = line.split(' ').next().unwrap_or_default();
+        let evidence = lines.get(i + 1).and_then(|l| l.strip_prefix("         "));
+        if claim.is_empty()
+            || !["change", "consider", "keep", "unknown", "info"].contains(&word)
+            || line.len() < 9
+        {
+            continue;
+        }
+        let Some(evidence) = evidence else { continue };
+        rows.push(ReportLine {
+            claim: claim.clone(),
+            mark: word.into(),
+            head: line[9..].split_whitespace().collect::<Vec<_>>().join(" "),
+            evidence: evidence.into(),
+        });
+    }
+    rows
+}
+
+/// The report line whose heading starts with `head`.
+pub fn report_line(text: &str, head: &str) -> ReportLine {
+    let rows = report_lines(text);
+    rows.iter()
+        .find(|r| r.head.starts_with(head))
+        .cloned()
+        .unwrap_or_else(|| panic!("no line starts with {head:?} in {rows:#?}"))
 }

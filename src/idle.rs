@@ -3125,6 +3125,8 @@ mod tests {
         };
         Profile {
             agents: Default::default(),
+            instruction_budget_file: None,
+            instruction_budget_unresolved: None,
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -3779,7 +3781,7 @@ mod tests {
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
             report.checks[0] = CheckResult::Idle(c);
             let text = format_report(&report, ReportOptions::default());
-            assert!(text.contains("On and off cost the same"), "{text}");
+            assert!(text.contains("on and off cost the same"), "{text}");
         }
     }
 
@@ -4336,6 +4338,16 @@ mod tests {
                 .all(|s| s.summaries == 0)
         );
         assert_eq!(short.base.recommended, Some(BeforeCacheExpires));
+        // Turning it off writes no summary, so no summary's lost detail is mentioned.
+        let mut report = report(scan, 10.0);
+        report
+            .checks
+            .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
+        report.checks.push(CheckResult::T3Idle(check));
+        let text = format_report(&report, ReportOptions::default());
+        let line = crate::test_support::report_line(&text, "T3 idle compaction");
+        assert_eq!(line.mark, "change", "{text}");
+        assert!(!line.evidence.contains("A summary drops detail"), "{text}");
     }
 
     #[test]
@@ -4457,9 +4469,9 @@ mod tests {
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
         report.checks.push(CheckResult::T3Idle(check));
         let text = format_report(&report, ReportOptions::default());
-        let line = text.lines().find(|l| l.contains("T3 idle")).unwrap();
+        let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
-            line.contains("Changed cost per month: off $0, onReturn ")
+            line.contains("changed cost per month: off $0, onReturn ")
                 && line.contains(&format!("beforeCacheExpires is unpriced: {guards}")),
             "{text}"
         );

@@ -714,6 +714,13 @@ pub struct Profile {
     pub t3: Option<T3Instance>,
     /// Current controls that choose subagent models and efforts.
     pub agents: AgentControls,
+    /// The file that sets Codex's `project_doc_max_bytes` in `settings`, when one does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_budget_file: Option<String>,
+    /// Why Codex's `project_doc_max_bytes` may differ from the system and user value
+    /// in `settings`, such as a project or named profile that sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_budget_unresolved: Option<String>,
 }
 
 /// A setting's current value and the file or variable that sets it.

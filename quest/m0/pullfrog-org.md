@@ -17,6 +17,11 @@ transfer `gh api orgs/kixel-ai/installations` lists no apps. An app
 installed on a personal account does not follow a repository to an
 organization. The `pullfrog` environment survived, limited to `main`.
 
+Decided 2026-11-12 (maintainer, the /quest-merge pick of
+[kixel-ai/token-max#83](https://github.com/kixel-ai/token-max/pull/83)):
+✅ keep this quest and leave the install to the maintainer (rejected: have
+the coordinator install the app through Chrome now; drop).
+
 Once the app is installed, confirm the Pullfrog console still grants model
 access to the repository under its new owner, then check that the next PR
 push produces a successful Pullfrog run on `main`.

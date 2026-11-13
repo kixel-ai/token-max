@@ -5,14 +5,14 @@ use std::fmt::Write as _;
 use crate::collections::{IndexMap, IndexSet};
 
 use crate::context::{
-    CLAUDE_MEMORY, CODEX_MEMORY, SYNCED_SKILLS, config_patch, control_text, incomplete_profiles,
-    setting_rows, settings_patch, typed_only,
+    CLAUDE_MEMORY, CODEX_MEMORY, SYNCED_SKILLS, control_text, incomplete_profiles, setting_rows,
+    typed_only,
 };
 use crate::controls::CAPPED_SHARED;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, Control, ControlValue, Cost, Coverage, EstimateEvidence,
+    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EstimateEvidence,
     Evidence, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile,
     Report, RequestEvidence, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
     UsageEstimate, Usd, Verdict,
@@ -460,6 +460,22 @@ fn feature_tier(c: &ContextCost, covered: bool) -> &'static str {
     }
 }
 
+/// `path` shown from `~` when it is under `home`.
+pub(crate) fn home_path(home: Option<&str>, path: &str) -> String {
+    match home {
+        Some(dir)
+            // A Windows home, local or remote, also separates with backslashes.
+            if path == dir
+                || path.strip_prefix(dir).is_some_and(|rest| {
+                    rest.starts_with('/') || (dir.contains('\\') && rest.starts_with('\\'))
+                }) =>
+        {
+            format!("~{}", &path[dir.len()..])
+        }
+        _ => path.to_string(),
+    }
+}
+
 /// The text being built, one wrapped line at a time.
 struct Out<'a> {
     text: String,
@@ -472,6 +488,32 @@ struct Out<'a> {
 }
 
 impl<'a> Out<'a> {
+    fn new(report: &'a Report, options: ReportOptions<'a>) -> Self {
+        let mut profiles = IndexMap::default();
+        for p in &report.scan.profiles {
+            profiles.insert(p.id.as_str(), p);
+        }
+        Out {
+            text: String::new(),
+            options,
+            arrow: if options.unicode { "→" } else { "->" },
+            home: match options.host {
+                Some(host) => host.home.map(str::to_string),
+                None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
+            },
+            profiles,
+            removed: report
+                .scan
+                .t3
+                .iter()
+                .flat_map(|s| {
+                    s.removed
+                        .keys()
+                        .map(|i| (crate::t3::profile_key(&s.path, i), i.as_str()))
+                })
+                .collect(),
+        }
+    }
     fn line(&mut self, text: &str, indent: usize, style: &str) {
         self.wrap(text, indent, None, style);
     }
@@ -612,18 +654,7 @@ impl<'a> Out<'a> {
         self.line(&title, 0, BOLD);
     }
     fn home(&self, path: &str) -> String {
-        match &self.home {
-            Some(dir)
-                // A Windows home, local or remote, also separates with backslashes.
-                if path == dir
-                    || path.strip_prefix(dir.as_str()).is_some_and(|rest| {
-                        rest.starts_with('/') || (dir.contains('\\') && rest.starts_with('\\'))
-                    }) =>
-            {
-                format!("~{}", &path[dir.len()..])
-            }
-            _ => path.to_string(),
-        }
+        home_path(self.home.as_deref(), path)
     }
     /// `text` with every path under the home directory shown from `~`.
     fn home_in(&self, text: &str) -> String {
@@ -671,34 +702,39 @@ impl<'a> Out<'a> {
 
 /// Render all findings in a wrapping flow, with grouped evidence in details.
 pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
-    let mut profiles = IndexMap::default();
-    for p in &report.scan.profiles {
-        profiles.insert(p.id.as_str(), p);
-    }
-    let mut out = Out {
-        text: String::new(),
-        options,
-        arrow: if options.unicode { "→" } else { "->" },
-        home: match options.host {
-            Some(host) => host.home.map(str::to_string),
-            None => std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned()),
-        },
-        profiles,
-        removed: report
-            .scan
-            .t3
-            .iter()
-            .flat_map(|s| {
-                s.removed
-                    .keys()
-                    .map(|i| (crate::t3::profile_key(&s.path, i), i.as_str()))
-            })
-            .collect(),
-    };
+    let mut out = Out::new(report, options);
     if options.details {
         details(report, &mut out);
     } else {
         summary(report, &mut out);
+    }
+    out.text
+}
+
+/// The changes the report recommends or suggests, each with its settings edit or the
+/// step to take by hand, for output that `token-max doctor` does not walk through.
+pub fn format_changes<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
+    let mut out = Out::new(report, options);
+    let fixes = crate::doctor::fixes(report, options.unicode);
+    if fixes.is_empty() {
+        return out.text;
+    }
+    out.blank();
+    out.line(
+        "Changes to make; on a terminal, token-max doctor offers to make each one:",
+        0,
+        BOLD,
+    );
+    for fix in &fixes {
+        let lines = crate::doctor::describe(fix, out.home.as_deref());
+        out.hang(&format!("  {}", lines.head), 4, PLAIN);
+        for (text, raw) in lines.body {
+            if raw {
+                out.raw(&format!("    {text}"));
+            } else {
+                out.line(&text, 4, PLAIN);
+            }
+        }
     }
     out.text
 }
@@ -2961,6 +2997,118 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
 }
 
 /// The default report: every setting and feature under the kind of claim it rests on.
+/// A check's verdict before its line is drawn.
+///
+/// A comparison with no requests is not a verdict, whatever the tie-break said. Window
+/// coverage counts only changed parts, so zero there can still be a keep. Fast mode warns
+/// from current settings alone, so it never needs requests.
+fn check_action(result: &CheckResult, r: &Common<'_>) -> Action {
+    let empty =
+        matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
+    if empty { Action::Advisory } else { r.action }
+}
+
+/// A check line's mark. A measured background generation over the limit is advisory only
+/// because its uses are not recorded, and auto memory is advised off on the maintainer's
+/// opinion whatever it cost, so both are worth considering off. Other advisories lack evidence.
+fn check_mark(result: &CheckResult, r: &Common<'_>) -> Mark {
+    match check_action(result, r) {
+        Action::Change => Mark::Change,
+        Action::Keep => Mark::Keep,
+        Action::Advisory => match result {
+            CheckResult::Background(_) if r.savings_usd.is_some() => Mark::Consider,
+            CheckResult::Memory(_) => Mark::Consider,
+            _ => Mark::Unknown,
+        },
+    }
+}
+
+/// A line the report asks the person to act on.
+pub(crate) struct Recommendation<'a> {
+    /// The kind of claim it rests on: Measured, Official or Opinion.
+    pub claim: &'static str,
+    /// Worth considering, rather than a recommended change.
+    pub suggested: bool,
+    /// The line's name, such as "Main-agent prompt cache TTL".
+    pub name: String,
+    /// The current value and the one to change to, such as "5m -> 1h".
+    pub value: String,
+    pub source: Source<'a>,
+}
+
+/// What a recommendation's line reports on.
+pub(crate) enum Source<'a> {
+    Check(&'a CheckResult),
+    Piece(&'a ContextCost),
+}
+
+/// Every change the summary recommends or suggests, in its order: by kind of claim,
+/// recommended changes before suggestions.
+pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendation<'_>> {
+    let out = Out::new(
+        report,
+        ReportOptions {
+            unicode,
+            ..ReportOptions::default()
+        },
+    );
+    let arrow = out.arrow;
+    let mut lines = vec![];
+    for result in &report.checks {
+        let r = common(result);
+        let mark = check_mark(result, &r);
+        if !matches!(mark, Mark::Change | Mark::Consider) {
+            continue;
+        }
+        let value = |s: Option<Setting<'_>>| match s {
+            Some(Setting::Window(n)) => tokens(n),
+            other => setting_value(other),
+        };
+        // A suggestion is always to turn a feature off.
+        let target = match mark {
+            Mark::Change => value(r.recommended),
+            _ => "off".into(),
+        };
+        lines.push((
+            Claim::of(result),
+            mark,
+            Recommendation {
+                claim: Claim::of(result).name(),
+                suggested: mark == Mark::Consider,
+                name: setting_name(result),
+                value: format!("{} {arrow} {target}", value(r.current)),
+                source: Source::Check(result),
+            },
+        ));
+    }
+    for c in setting_rows(&report.context) {
+        let mark = match c.verdict {
+            Some(Verdict::Off) => Mark::Change,
+            Some(Verdict::Consider) => Mark::Consider,
+            _ => continue,
+        };
+        let target = if typed_only(c.control.as_ref()) {
+            "typed only"
+        } else {
+            "off"
+        };
+        lines.push((
+            Claim::Measured,
+            mark,
+            Recommendation {
+                claim: Claim::Measured.name(),
+                suggested: mark == Mark::Consider,
+                name: short_label(c, &out),
+                value: format!("on {arrow} {target}"),
+                source: Source::Piece(c),
+            },
+        ));
+    }
+    // A stable sort keeps the report's order within each claim and mark.
+    lines.sort_by_key(|(claim, mark, _)| (Claim::ALL.iter().position(|c| c == claim), *mark));
+    lines.into_iter().map(|(_, _, line)| line).collect()
+}
+
 fn summary(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
@@ -3055,14 +3203,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         };
         format!("{}:{}:{}:{models}", r.check, r.bucket, r.profile)
     };
-    // A comparison with no requests is not a verdict, whatever the tie-break said.
-    // Window coverage counts only changed parts, so zero there can still be a keep.
-    // Fast mode warns from current settings alone, so it never needs requests.
-    let action = |(result, r): &(&CheckResult, Common<'_>)| {
-        let empty =
-            matches!(result, CheckResult::Ttl(_) | CheckResult::Compaction(_)) && r.requests == 0;
-        if empty { Action::Advisory } else { r.action }
-    };
+    let action = |(result, r): &(&CheckResult, Common<'_>)| check_action(result, r);
     let decided: crate::collections::HashSet<String> = checks
         .iter()
         .filter(|c| action(c) != Action::Advisory)
@@ -3078,18 +3219,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 && decided.contains(&key(c)))
         })
         .collect();
-    // A measured background generation over the limit is advisory only because its
-    // uses are not recorded, and auto memory is advised off on the maintainer's opinion
-    // whatever it cost, so both are worth considering off. Other advisories lack evidence.
-    let mark = |c: &(&CheckResult, Common<'_>)| match action(c) {
-        Action::Change => Mark::Change,
-        Action::Keep => Mark::Keep,
-        Action::Advisory => match c.0 {
-            CheckResult::Background(_) if c.1.savings_usd.is_some() => Mark::Consider,
-            CheckResult::Memory(_) => Mark::Consider,
-            _ => Mark::Unknown,
-        },
-    };
+    let mark = |(result, r): &(&CheckResult, Common<'_>)| check_mark(result, r);
     // Lines name a profile briefly, by T3 instance or root, unless two would read the same.
     let mut tags: IndexMap<&str, String> = report
         .scan
@@ -3122,12 +3252,6 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             .unwrap_or_else(|| out.short_profile(profile));
         format!("[{tag}]")
     };
-    let settings_file: IndexMap<&str, String> = report
-        .scan
-        .profiles
-        .iter()
-        .map(|p| (p.id.as_str(), out.home(&p.settings_file)))
-        .collect();
     let pieces: Vec<&ContextCost> = setting_rows(&report.context)
         .filter(|c| c.verdict.is_some())
         .collect();
@@ -3810,32 +3934,6 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         out.line(SUBAGENT_EVIDENCE, 0, PLAIN);
     }
     catalog_guidance(report, out);
-    let mut files: IndexMap<&str, Vec<&Control>> = IndexMap::default();
-    for c in &off {
-        let file = settings_file
-            .get(first_profile(c))
-            .map_or("settings.json", String::as_str);
-        files.entry(file).or_default().extend(c.control.as_ref());
-    }
-    for (file, controls) in files {
-        out.blank();
-        out.line(
-            &format!(
-                "To turn these off, merge this into {file}, adding to any lists already there:"
-            ),
-            0,
-            PLAIN,
-        );
-        // Never wrapped, so the snippet stays valid at any terminal width.
-        let patch = if file.ends_with(".toml") {
-            config_patch(controls).trim_end().to_string()
-        } else {
-            serde_json::to_string_pretty(&settings_patch(controls)).expect("JSON values serialize")
-        };
-        for row in patch.split('\n') {
-            out.raw(&format!("  {row}"));
-        }
-    }
     if since.is_some_and(|s| until > s) && !pieces.is_empty() {
         out.line(
             "Context costs assume nothing else changes when a piece is removed; cache writes and compaction can shift.",
@@ -4645,6 +4743,16 @@ mod tests {
         report
     }
 
+    fn changes(report: &Report, width: Option<usize>) -> String {
+        format_changes(
+            report,
+            ReportOptions {
+                width,
+                ..Default::default()
+            },
+        )
+    }
+
     fn text(report: &Report, width: Option<usize>, details: bool) -> String {
         format_report(
             report,
@@ -4892,11 +5000,111 @@ mod tests {
         );
         // Pieces no longer sent and those without a verdict get no line of their own.
         assert!(!text.contains("Retired") && !text.contains("Skill list framing"));
-        let snippet = &text[text.find("To turn these off").unwrap()..];
-        let json = &snippet[snippet.find('{').unwrap()..snippet.find("\n  }\n").unwrap() + 4];
+        // The changes list each edit after the report, in report order.
+        let listed = changes(&report, None);
+        assert!(!text.contains("Changes to make"));
+        let edits: Vec<&str> = listed
+            .lines()
+            .filter(|l| l.starts_with("      "))
+            .map(str::trim)
+            .collect();
         assert_eq!(
-            serde_json::from_str::<serde_json::Value>(json).unwrap(),
-            serde_json::json!({ "enableArtifact": false })
+            edits,
+            [
+                r#""promptCacheTtl": "1h""#,
+                r#""enableArtifact": false"#,
+                r#""skillOverrides": {"example": "user-invocable-only"}"#,
+                r#""syncClaudeAiSkills": false"#,
+                r#""permissions": {"deny": ["mcp__docs"]} (added to the list)"#,
+                r#""autoMemoryEnabled": false"#,
+            ],
+            "{listed}"
+        );
+    }
+
+    #[test]
+    fn doctor_edits_the_owning_setting_and_leaves_other_owners_by_hand() {
+        use crate::doctor::{Edit, How, Patch, fixes};
+        use serde_json::json;
+        let file = format!("{ROOT}/settings.json");
+        let set = |path: &[&str], value: serde_json::Value| {
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: vec![Edit {
+                    path: path.iter().map(|p| p.to_string()).collect(),
+                    value,
+                    append: false,
+                }],
+            })
+        };
+        let how = |report: &Report, name: &str| {
+            fixes(report, false)
+                .into_iter()
+                .find(|f| f.name.starts_with(name))
+                .unwrap_or_else(|| panic!("no {name} fix"))
+                .how
+        };
+        let by_hand = |how: How| match how {
+            How::Manual { reason, .. } => reason,
+            How::Edit(patch) => panic!("expected a step by hand, got {patch:?}"),
+        };
+        let ttl = "Main-agent prompt cache TTL";
+        let mut report = synthetic();
+        assert_eq!(how(&report, ttl), set(&["promptCacheTtl"], json!("1h")));
+        // The variable in the settings env is edited there; the setting outranks the 1h flag.
+        for (owner, path) in [
+            (
+                "env.CLAUDE_CODE_PROMPT_CACHE_TTL",
+                &["env", "CLAUDE_CODE_PROMPT_CACHE_TTL"][..],
+            ),
+            ("env.ENABLE_PROMPT_CACHING_1H", &["promptCacheTtl"][..]),
+        ] {
+            ttl_mut(&mut report).base.owner = format!("{file}:{owner}");
+            assert_eq!(how(&report, ttl), set(path, json!("1h")), "{owner}");
+        }
+        ttl_mut(&mut report).base.owner = "CLAUDE_CODE_PROMPT_CACHE_TTL".into();
+        assert_eq!(
+            by_hand(how(&report, ttl)),
+            format!(
+                "the CLAUDE_CODE_PROMPT_CACHE_TTL environment variable sets it and outranks {file}; change it where it is exported"
+            )
+        );
+        let project = "/synthetic/project/.claude/settings.json:promptCacheTtl";
+        ttl_mut(&mut report).base.owner = project.into();
+        assert_eq!(
+            by_hand(how(&report, ttl)),
+            format!("{project} sets it; token-max edits only {file}")
+        );
+
+        // A model's own row, whose ID may hold dots, under a sizing note.
+        let mut window = check_base(Action::Change, Some(967_000), Some(400_000));
+        window.owner =
+            format!("{file}:modelSettings.claude-opus-4.5.autoCompactWindow (capped at 200000)");
+        report.checks.push(compaction_check(window));
+        assert_eq!(
+            how(&report, "Auto-compact window"),
+            set(
+                &["modelSettings", "claude-opus-4.5", "autoCompactWindow"],
+                json!(400_000)
+            )
+        );
+
+        // Two lines that want one setting at different values leave it to the person.
+        let mut on = check_base(Action::Change, Some(false), Some(true));
+        on.owner = format!("{file}:idleCompaction");
+        let off = CheckBase {
+            current: Some(true),
+            recommended: Some(false),
+            ..on.clone()
+        };
+        report.checks = vec![idle_check(on, vec![], None), idle_check(off, vec![], None)];
+        report.context.clear();
+        let idle = fixes(&report, false);
+        assert_eq!(idle[0].how, set(&["idleCompaction"], json!(true)));
+        assert_eq!(
+            by_hand(idle[1].how.clone()),
+            "Idle compaction wants a different value for the same setting"
         );
     }
 
@@ -4948,7 +5156,7 @@ mod tests {
             ("change", "MCP tool mcp__docs__write on -> off costs $5")
         );
         assert!(line.evidence.contains("Included in its server's cost."));
-        let patch = rendered.split("To turn these off").nth(1).unwrap();
+        let patch = changes(&report, None);
         assert!(patch.contains("disabled_tools = [\"write\"]"));
         assert!(!patch.contains("enabled = false"));
         for details in [false, true] {
@@ -4987,7 +5195,7 @@ mod tests {
             r.evidence
                 .contains("tier sensitivity could reverse keep or off")
         }));
-        assert!(!rendered.contains("To turn these off"));
+        assert!(changes(&conditional, None).is_empty());
         let detailed = text(&conditional, None, true);
         assert_eq!(
             detailed.matches("conditional tool-tier estimate").count(),
@@ -4996,7 +5204,7 @@ mod tests {
 
         report.context[0].verdict = Some(Verdict::Off);
         let rendered = text(&report, None, false);
-        let patch = rendered.split("To turn these off").nth(1).unwrap();
+        let patch = changes(&report, None);
         assert!(patch.contains("enabled = false"));
         assert!(!patch.contains("disabled_tools"));
         // The server's off covers its tools, which stay listed without a verdict.
@@ -5374,10 +5582,11 @@ mod tests {
             ]
         );
         // Codex switches go to config.toml as TOML.
-        let snippet = &text[text
-            .find("merge this into /synthetic/.codex/config.toml")
-            .unwrap()..];
-        assert!(snippet.contains("\n  [features]\n  apps = false\n"));
+        let snippet = changes(&report, None);
+        assert!(
+            snippet.contains("In /synthetic/.codex/config.toml:\n      features.apps = false\n"),
+            "{snippet}"
+        );
     }
 
     #[test]
@@ -5982,13 +6191,14 @@ mod tests {
             verdict: Some(Verdict::Off),
         };
         report.context = vec![skill.clone()];
-        let narrow = text(&report, Some(40), false);
-        let lines: Vec<&str> = narrow.lines().collect();
-        let start = lines.iter().position(|l| l.trim() == "{").unwrap();
-        let end = start + lines[start..].iter().position(|l| *l == "  }").unwrap();
-        assert_eq!(
-            serde_json::from_str::<serde_json::Value>(&lines[start..=end].join("\n")).unwrap(),
-            serde_json::json!({"skillOverrides": {name: "user-invocable-only"}})
+        // An edit is never wrapped, so it can be copied at any width.
+        let narrow = changes(&report, Some(40));
+        assert!(
+            narrow
+                .lines()
+                .any(|l| l.trim()
+                    == format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}}"#)),
+            "{narrow}"
         );
         // Feature and context costs are totals over the window, however short.
         let line = report_line(&text(&report, None, false), "Skill google-drive-comments");

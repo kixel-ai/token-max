@@ -177,9 +177,11 @@ fn check(report: &token_max::model::Report, find: impl Fn(&CheckResult) -> bool)
     report.checks.iter().find(|c| find(c)).expect("the check")
 }
 
+/// `token-max doctor` with `base` and `extra` options.
 fn args<'a>(base: &'a [String], extra: &[&'a str]) -> Vec<&'a str> {
-    base.iter()
-        .map(String::as_str)
+    ["doctor"]
+        .into_iter()
+        .chain(base.iter().map(String::as_str))
         .chain(extra.iter().copied())
         .collect()
 }
@@ -464,6 +466,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     let (status, stdout, stderr) = run(&mut command(
         &w,
         &[
+            "doctor",
             "--claude-dir",
             &claude,
             "--offline",
@@ -477,6 +480,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     let (status, stdout, stderr) = run(&mut command(
         &w,
         &[
+            "doctor",
             "--claude-dir",
             &claude,
             "--offline",
@@ -490,14 +494,20 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     let (status, help, stderr) = invoke(&["--help"]);
     assert_eq!(status, 0, "{stderr}");
     assert!(help.lines().any(|l| l.starts_with("  --since ")));
-    assert!(help.lines().any(|l| l.starts_with("  token-max --since ")));
+    assert!(
+        help.lines()
+            .any(|l| l.starts_with("  token-max doctor --since "))
+    );
     for row in help.lines().filter(|l| l.starts_with("  -")) {
         assert_eq!(description_column(row), Some(26), "{row}");
     }
     let (status, stdout, stderr) = invoke(&["--bogus"]);
     assert_eq!(status, 2);
     assert_eq!(stdout, "");
-    assert_eq!(stderr.to_lowercase().matches("use --help").count(), 1);
+    assert_eq!(
+        stderr,
+        "token-max: invalid arguments; use token-max doctor --help\n"
+    );
     let (status, _, stderr) = invoke(&["--max-cost-per-use", "lots"]);
     assert_eq!(status, 2);
     assert!(stderr.contains("--max-cost-per-use requires a dollar amount"));
@@ -509,9 +519,8 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
         "--details",
         "--plain",
         "NO_COLOR",
-        "Exit 0",
-        "Exit 1",
-        "Exit 2",
+        "On a terminal: exit 0",
+        "Without one: exit 0",
     ] {
         assert!(help.contains(flag), "{flag}");
     }
@@ -538,20 +547,40 @@ fn arguments_follow_strict_parse_args() {
         assert_eq!(status, 2, "{extra:?}");
         assert_eq!(stdout, "");
         assert_eq!(
-            stderr, "token-max: invalid arguments; use --help\n",
+            stderr, "token-max: invalid arguments; use token-max doctor --help\n",
             "{extra:?}"
         );
     }
-    let (status, stdout, _) = invoke(&["-hv"]);
+    // The version and the command list belong to the bare command.
+    let top = |args: &[&str]| run(&mut command(&w, args));
+    let (status, stdout, _) = top(&["-hv"]);
     assert_eq!(
         (status, stdout.starts_with("token-max: cheaper")),
         (0, true)
     );
-    let (status, stdout, _) = invoke(&["-v", "--"]);
+    let (status, stdout, _) = top(&["-v", "--"]);
     assert_eq!(
         (status, stdout),
         (0, format!("{}\n", env!("CARGO_PKG_VERSION")))
     );
+    assert_eq!(invoke(&["-v"]).0, 2);
+    let (status, stdout, stderr) = top(&[]);
+    assert_eq!((status, &*stdout), (2, ""));
+    assert!(stderr.starts_with("token-max: cheaper") && stderr.contains("\n  doctor "));
+    let (status, _, stderr) = top(&["--since", "2026-11-01"]);
+    assert_eq!(status, 2);
+    assert_eq!(
+        stderr,
+        "token-max: options follow a command, such as token-max doctor --since 2026-11-01; use --help\n"
+    );
+    for args in [&["report"][..], &["--bogus"], &["-x"]] {
+        let (status, _, stderr) = top(args);
+        assert_eq!(status, 2, "{args:?}");
+        assert_eq!(
+            stderr, "token-max: invalid arguments; use --help\n",
+            "{args:?}"
+        );
+    }
     for (value, message) in [
         ("2026-11", "--since requires YYYY-MM-DD"),
         ("2026-11-01T00:00:00", "--since requires YYYY-MM-DD"),
@@ -580,7 +609,7 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     let base = prices_args(&w);
     let invoke = |extra: &[&str]| {
         let mut all = vec!["sessions"];
-        all.extend(args(&base, extra));
+        all.extend(base.iter().map(String::as_str).chain(extra.iter().copied()));
         run(&mut command(&w, &all))
     };
     let (status, stdout, stderr) = invoke(&[]);
@@ -617,7 +646,7 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     let (status, help, _) = invoke(&["--help"]);
     assert!(status == 0 && help.starts_with("token-max sessions:"));
     let (_, help, _) = run(&mut command(&w, &["--help"]));
-    assert!(help.contains("token-max sessions [options]"));
+    assert!(help.contains("\n  sessions "), "{help}");
 }
 
 /// Floats print as JavaScript prints them: integers without a fraction, no `1.0`.
@@ -631,7 +660,7 @@ fn session_numbers_print_like_javascript() {
     std::fs::write(w.transcript(), lines).unwrap();
     let base = prices_args(&w);
     let mut all = vec!["sessions"];
-    all.extend(args(&base, &[]));
+    all.extend(base.iter().map(String::as_str));
     let (status, stdout, stderr) = run(&mut command(&w, &all));
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.contains(r#""costUsd":0,"#), "{stdout}");
@@ -748,6 +777,7 @@ fn explicit_windows_match_the_library_replay() {
         let mut c = command(
             &w,
             &[
+                "doctor",
                 "--claude-dir",
                 &claude,
                 "--since",
@@ -830,7 +860,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
         run(&mut c)
     };
     let profile = ["--claude-dir", "profile", "--prices-file", "prices.json"];
-    let with = |extra: &'static str| [&profile[..], &[extra][..]].concat();
+    let with = |extra: &'static str| [&["doctor"][..], &profile[..], &[extra][..]].concat();
 
     let (status, help, stderr) = invoke(&["--help"]);
     assert_eq!(status, 0, "{stderr}");
@@ -927,7 +957,7 @@ fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_l
 
 #[cfg(unix)]
 mod unix {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::thread::JoinHandle;
@@ -1050,7 +1080,10 @@ mod unix {
         assert!(!stdout.contains('→'));
         let (_, help, _) = invoke(&["--help"], &[]);
         assert!(help.lines().any(|l| l.starts_with("  --since ")));
-        assert!(help.lines().any(|l| l.starts_with("  token-max --since ")));
+        assert!(
+            help.lines()
+                .any(|l| l.starts_with("  token-max doctor --since "))
+        );
         assert!(help.lines().all(|l| l.chars().count() <= 40), "{help}");
         assert!(help.lines().any(|l| l.len() > 26
             && l[..26].bytes().all(|b| b == b' ')
@@ -1085,6 +1118,50 @@ mod unix {
         assert!(!format!("{stdout}{stderr}").contains("SYNTHETIC_PRIVATE"));
     }
 
+    #[test]
+    fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
+        let w = Workspace::new();
+        w.fixture();
+        w.settings("{\n  \"promptCacheTtl\": \"5m\"\n}\n");
+        let base = prices_args(&w);
+        let mut c = command(&w, &args(&base, &["--plain"]));
+        let input = Pty::new(80);
+        let (stdout, out) = Pty::new(80).drain();
+        let (stderr, err) = Pty::new(80).drain();
+        let Pty { master, slave } = input;
+        c.stdin(Stdio::from(slave)).stdout(stdout).stderr(stderr);
+        let mut child = c.spawn().unwrap();
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Answers wait in the terminal until each prompt reads one; the terminal stays
+        // open until the child exits, as a person's would.
+        let mut keyboard = std::fs::File::from(master);
+        keyboard.write_all(b"y\nn\n").unwrap();
+        let status = child.wait().unwrap().code().unwrap();
+        let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
+        assert_eq!(status, 0, "{stderr}");
+        assert!(stdout.contains("1 setting change recommended."), "{stdout}");
+        assert!(!stdout.contains("Changes to make"), "{stdout}");
+        assert!(
+            stdout.contains(
+                "[1/2] Main-agent prompt cache TTL: 5m -> 1h (Measured)\n  In ~/.claude/settings.json:\n    \"promptCacheTtl\": \"1h\"\nApply? [y]es, [n]o, [q]uit: "
+            ),
+            "{stdout}"
+        );
+        assert!(stdout.contains("[2/2] Auto memory: on -> off (Opinion, worth considering)"));
+        assert!(
+            stdout.contains("Wrote 1 edit to ~/.claude/settings.json."),
+            "{stdout}"
+        );
+        assert!(stdout.contains("Not applied; to make these yourself:"));
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+            "{\n  \"promptCacheTtl\": \"1h\"\n}\n"
+        );
+        drop(keyboard);
+    }
+
     fn signal(pid: u32, signal: libc::c_int) {
         // SAFETY: kill only sends a signal to the child process this test spawned.
         assert_eq!(unsafe { libc::kill(pid as libc::pid_t, signal) }, 0);
@@ -1100,7 +1177,7 @@ mod unix {
         for sig in [libc::SIGINT, libc::SIGTERM] {
             {
                 let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
-                let args = ["--claude-dir", &claude, "--price-cache", &cache];
+                let args = ["doctor", "--claude-dir", &claude, "--price-cache", &cache];
                 let mut c = command(&w, &args);
                 c.env(
                     "ALL_PROXY",
@@ -1224,7 +1301,8 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
         assert_eq!(unknown.base.coverage, None);
     }
     assert!(!format!("{report:?}").contains("SYNTHETIC_PRIVATE"));
-    let mut args = prices_args(&w);
+    let mut args = vec!["doctor".to_string()];
+    args.extend(prices_args(&w));
     args.extend(["--max-cost-per-use".into(), "0".into()]);
     let (_, stdout, stderr) = run(&mut command(
         &w,
@@ -1256,7 +1334,14 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
     let invoke = |output| {
         run(&mut command(
             &w,
-            &["--t3-dir", &state, "--prices-file", &prices, output],
+            &[
+                "doctor",
+                "--t3-dir",
+                &state,
+                "--prices-file",
+                &prices,
+                output,
+            ],
         ))
     };
     let report = analysis(&w, |d| d.t3_dirs = vec![state.clone()], 1.0);
@@ -1283,7 +1368,7 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
     );
     let (_, summary, stderr) = run(&mut command(
         &w,
-        &["--t3-dir", &state, "--prices-file", &prices],
+        &["doctor", "--t3-dir", &state, "--prices-file", &prices],
     ));
     assert!(stderr.is_empty());
     let (mark, head, unmeasured) = report_line(&summary, "T3 text generation");

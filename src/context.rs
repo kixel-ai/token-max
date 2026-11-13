@@ -17,26 +17,27 @@ use crate::safe::identity;
 /// The settings fragment for one control: settings.json's `"enableArtifact": false`,
 /// or config.toml's `features.apps = false`.
 pub fn control_text(control: &Control, harness: Harness) -> String {
+    setting_text(
+        &control.path,
+        json_value(&control.value),
+        control.append,
+        harness,
+    )
+}
+
+/// The settings fragment that sets `path` to `value`, or adds it to the list there.
+pub fn setting_text(path: &[String], value: Value, append: bool, harness: Harness) -> String {
+    let mut value = if append {
+        Value::Array(vec![value])
+    } else {
+        value
+    };
     if harness == Harness::Codex {
-        let path: Vec<String> = control.path.iter().map(|key| toml_key(key)).collect();
-        let value = match &control.value {
-            ControlValue::Text(text) => toml::Value::String(text.clone()),
-            ControlValue::Bool(b) => toml::Value::Boolean(*b),
-            ControlValue::Skill { .. } => toml::Value::try_from(json_value(&control.value))
-                .expect("skill controls are tables"),
-        };
-        let value = if control.append {
-            toml::Value::Array(vec![value])
-        } else {
-            value
-        };
+        let path: Vec<String> = path.iter().map(|key| toml_key(key)).collect();
+        let value = toml::Value::try_from(value).expect("settings values are TOML values");
         return format!("{} = {value}", path.join("."));
     }
-    let mut value = json_value(&control.value);
-    if control.append {
-        value = Value::Array(vec![value]);
-    }
-    for key in control.path.iter().skip(1).rev() {
+    for key in path.iter().skip(1).rev() {
         let mut map = Map::new();
         map.insert(key.clone(), value);
         value = Value::Object(map);
@@ -69,45 +70,8 @@ pub fn control_text(control: &Control, harness: Harness) -> String {
         .replace(" }", "}");
     format!(
         "{}: {flat}",
-        serde_json::to_string(&control.path[0]).expect("strings serialize")
+        serde_json::to_string(&path[0]).expect("strings serialize")
     )
-}
-
-/// Merge controls into one settings.json object, adding to lists rather than replacing them.
-pub fn settings_patch<'a>(controls: impl IntoIterator<Item = &'a Control>) -> Map<String, Value> {
-    let mut root = Map::new();
-    for c in controls {
-        let Some((last, parents)) = c.path.split_last() else {
-            continue;
-        };
-        let mut node = &mut root;
-        for key in parents {
-            let child = node
-                .entry(key.clone())
-                .or_insert_with(|| Value::Object(Map::new()));
-            // Controls never nest under a scalar; replacing one keeps the patch an object.
-            if !child.is_object() {
-                *child = Value::Object(Map::new());
-            }
-            node = child.as_object_mut().expect("just made an object");
-        }
-        let value = json_value(&c.value);
-        if !c.append {
-            node.insert(last.clone(), value);
-            continue;
-        }
-        let list = node
-            .entry(last.clone())
-            .or_insert_with(|| Value::Array(vec![]));
-        if !list.is_array() {
-            *list = Value::Array(vec![]);
-        }
-        let list = list.as_array_mut().expect("just made an array");
-        if !list.contains(&value) {
-            list.push(value);
-        }
-    }
-    root
 }
 
 /// A TOML key, quoted unless it is bare.
@@ -123,12 +87,7 @@ fn toml_key(key: &str) -> String {
     }
 }
 
-/// Merge controls into one config.toml fragment, as `settings_patch` does for settings.json.
-pub fn config_patch<'a>(controls: impl IntoIterator<Item = &'a Control>) -> String {
-    toml::to_string(&Value::Object(settings_patch(controls))).expect("controls are TOML tables")
-}
-
-fn json_value(value: &ControlValue) -> Value {
+pub(crate) fn json_value(value: &ControlValue) -> Value {
     match value {
         ControlValue::Text(text) => Value::String(text.clone()),
         ControlValue::Bool(b) => Value::Bool(*b),
@@ -2639,52 +2598,6 @@ mod tests {
                 Harness::Codex
             ),
             r#"mcp_servers."my.server".enabled = false"#
-        );
-    }
-
-    #[test]
-    fn config_patch_renders_toml_tables() {
-        let off = |path: &[&str]| Control {
-            path: path.iter().map(|p| p.to_string()).collect(),
-            value: ControlValue::Bool(false),
-            append: false,
-        };
-        let patch = config_patch([
-            &off(&["features", "apps"]),
-            &off(&["mcp_servers", "t3-code", "enabled"]),
-        ]);
-        let parsed: toml::Table = toml::from_str(&patch).expect("valid TOML");
-        assert_eq!(parsed["features"]["apps"], toml::Value::Boolean(false));
-        assert_eq!(
-            parsed["mcp_servers"]["t3-code"]["enabled"],
-            toml::Value::Boolean(false)
-        );
-    }
-
-    #[test]
-    fn settings_patch_merges_and_appends_without_duplicates() {
-        let deny = |rule: &str| Control {
-            path: vec!["permissions".into(), "deny".into()],
-            value: ControlValue::Text(rule.into()),
-            append: true,
-        };
-        let artifact = Control {
-            path: vec!["enableArtifact".into()],
-            value: ControlValue::Bool(false),
-            append: false,
-        };
-        let patch = settings_patch([
-            &deny("Agent"),
-            &artifact,
-            &deny("mcp__docs"),
-            &deny("Agent"),
-        ]);
-        assert_eq!(
-            Value::Object(patch),
-            serde_json::json!({
-                "permissions": {"deny": ["Agent", "mcp__docs"]},
-                "enableArtifact": false
-            })
         );
     }
 }

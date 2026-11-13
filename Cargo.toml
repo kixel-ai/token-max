@@ -28,6 +28,7 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 ureq = "3.5.1"
 mimalloc = "0.1.52"
+toml_edit = { version = "0.25.19", default-features = false, features = ["parse", "display"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

@@ -5,10 +5,49 @@ the accounting underneath.
 
 ## Running it
 
-Relative paths resolve from the working directory. Reports go to stdout;
-diagnostics go to stderr; exit codes are 0/1/2 as described below. Ctrl-C
-cancels the running analysis: SIGINT or SIGTERM exits 2 with no success
-report.
+`token-max doctor` prints the report, then, when stdin and stdout are both a
+terminal, walks through its changes. Bare `token-max` prints the commands and
+exits 2; options follow a command. Relative paths resolve from the working
+directory. Reports go to stdout; diagnostics go to stderr; exit codes are as
+described below. Ctrl-C cancels the running analysis: SIGINT or SIGTERM exits 2
+with no success report.
+
+## Applying changes
+
+After the report, `doctor` offers each recommended change it can make, then
+each one the report suggests considering, in report order. Each prompt shows
+the line's name and values and the exact edit, such as `"promptCacheTtl":
+"1h"` in `~/.claude/settings.json`, and takes `y`, `n` or `q`; anything else
+asks again, and end of input is a `q`. A `q` leaves the rest unapplied.
+Nothing is written until the last answer: each file is then written once,
+with every edit accepted for it. A no or an unanswered change is listed after
+the walk with its edit, to make by hand, which also suits a file another tool
+rewrites, such as a dotfiles manager.
+
+Only a profile's own `settings.json` or Codex `config.toml` is edited,
+including Claude's `env` block. An edit sets the setting that decides the
+current value, as its line's `Set in` names it, so a change is applied only
+when that owner is the profile's file, or the default no file sets. A shell
+variable, a project, local or managed settings file, or T3 that owns it makes
+the change a step by hand naming that owner, and so does a Codex skill whose
+`SKILL.md` path the catalog does not resolve. Two lines that want one setting
+at different values leave it by hand too.
+
+The edit keeps the file's other settings and their order. `settings.json` is
+rewritten as indented JSON with the file's indentation, the form Claude Code
+writes it in; `config.toml` keeps its comments and formatting. A list gains the
+value once, and a Codex `[[skills.config]]` entry with the same `path` is
+updated in place. Each file is read when the walk starts and again before
+writing; if it changed in between, nothing is written and the run fails. A
+file is replaced atomically with its permissions kept. A symlink is written
+through to its target, which the summary names, and a read-only target, or one
+that cannot take the edit, such as a `permissions` that is not an object, makes
+the change a step by hand naming the resolved path. Ctrl-C at a prompt exits 2
+with no settings changed.
+
+Without a terminal, `doctor` changes nothing: the report ends with every
+change as its edit and file, or its step by hand. A destination of `--ssh`
+lists its changes the same way, to make on that host.
 
 ## Profiles
 
@@ -37,12 +76,13 @@ Without it, each Claude bucket starts at its latest observed write-TTL transitio
 or the available history when no transition is recorded. A transition can also be
 a billing or agent-policy change. Reports label today's settings applied to
 history and do not invent historical settings. Recommendations name the owning
-setting or environment override and never apply it.
+setting or environment override.
 
 ## Exit codes and unreadable lines
 
-Exit codes are `0` for no applicable change, `1` for a recommended setting or
-feature change, and `2`
+When `doctor` walks through its changes on a terminal, it exits `0`, or `2` for
+a failure or cancellation. Otherwise exit codes are `0` for no applicable
+change, `1` for a recommended setting or feature change, and `2`
 for a failed scan, price fetch, invalid argument, or cancellation. A failed run emits no
 success report or partial recommendations. Invalid selected usage fails with only
 a file and line. Complete lines that are not JSON objects, which harnesses leave
@@ -119,10 +159,10 @@ profile with memory off shows it as kept.
 Claude plugin skills, which `skillOverrides` does not reach, and the system
 prompt, core tools such as Bash and Read, and the skill and subagent lists have
 no switch, so their Measured lines give no verdict.
-The report ends with one `settings.json` or `config.toml` snippet per settings file holding every
-recommended change, such as `"enableArtifact": false` or a bare tool name in
-`permissions.deny`; merge it by hand. `--details` lists every piece, including
-those no longer sent.
+A switch is an edit such as `"enableArtifact": false` or a bare tool name added
+to `permissions.deny`, which `doctor` offers to make (see
+[Applying changes](#applying-changes)). `--details` lists every piece,
+including those no longer sent.
 
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
@@ -192,8 +232,8 @@ uncertainty, cost components, break-evens, sensitivity scenarios, cache witnesse
 and sources. Repeated idle periods, cache witnesses and attempt estimates are
 grouped by their recorded outcomes and reasons. Token ranges and combined costs
 summarize modeled compactions; geometry sources are listed once. Identifiers in
-grouped cache and attempt evidence are examples. Nothing is hidden behind an interactive prompt
-or a top-N limit. The layout wraps long paths and
+grouped cache and attempt evidence are examples. No evidence is hidden behind
+the walk's prompts or a top-N limit. The layout wraps long paths and
 names on narrow terminals, where the name column narrows first and a line too
 long for the width wraps under its name. Redirected output keeps each field on
 one line so paths remain copyable. On terminals, the default report's colored
@@ -368,10 +408,10 @@ installs nothing there itself. A missing or different version fails with the
 command to run. Linux and macOS destinations are supported.
 
 ```sh
-token-max --ssh devbox --ssh user@laptop --include-local
+token-max doctor --ssh devbox --ssh user@laptop --include-local
 ```
 
-The destination runs `token-max --ssh-scan`, which discovers that host's own
+The destination runs `token-max doctor --ssh-scan`, which discovers that host's own
 profiles from its home and environment, reads its transcripts and settings,
 and runs every check there, priced from the one catalog this host loads and
 sends it. Only its finished report comes back, so its transcripts and scan
@@ -384,7 +424,8 @@ Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A history copied between hosts
 counts in each host's report, so don't add amounts across hosts. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
-Ctrl-C stops every destination.
+Ctrl-C stops every destination. A destination's changes are listed in its
+section to make there; `doctor` offers only this host's.
 
 ## Keepalive pings
 
@@ -510,7 +551,7 @@ default_subagent_model`. A file that replaces a built-in such as Explore must
 restate its tool restriction and system prompt.
 
 The lines are evidence, never recommendations: their dot is dim, with no
-verdict, and they do not change the exit code or the settings snippet. A cheaper model trades
+verdict, and they do not change the exit code or offer a change. A cheaper model trades
 capability, and the main agent's extra work after a weaker subagent cannot be
 attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent

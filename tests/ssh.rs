@@ -23,7 +23,7 @@ const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 /// Destinations under one target scratch directory whose path has a space, removed on drop.
 ///
 /// `ssh` runs the destination's command with `sh`, its home under `homes/` and its `PATH`
-/// starting with `remote/<host>`, which links the real binary unless a test replaces it.
+/// of `remote/<host>`, which links the real binary unless a test replaces it, then `tools/`.
 struct Hosts {
     root: PathBuf,
 }
@@ -37,6 +37,19 @@ impl Hosts {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(root.join("bin")).unwrap();
+        // Destinations get only the commands their scripts run, so a token-max the developer
+        // installed can't stand in for the one under test.
+        let tools = root.join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        let path = std::env::var_os("PATH").unwrap();
+        for tool in ["sh", "uname", "sleep"] {
+            let found = std::env::split_paths(&path)
+                .map(|dir| dir.join(tool))
+                .find(|file| file.is_file())
+                .unwrap_or_else(|| panic!("{tool} is not on PATH"));
+            let found = std::env::current_dir().unwrap().join(found);
+            symlink(found, tools.join(tool)).unwrap();
+        }
         script(
             &root.join("bin/ssh"),
             r#"echo "$*" >> "$TEST_ROOT/ssh.args"
@@ -99,7 +112,7 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
                 format!("{}:{path}", self.root.join("bin").display()),
             )
             .env("TEST_ROOT", &self.root)
-            .env("TEST_PATH", path)
+            .env("TEST_PATH", self.root.join("tools"))
             .stdin(Stdio::null());
         command
     }
@@ -777,6 +790,22 @@ fn background_controls_and_estimates_keep_their_remote_history() {
 }
 
 #[test]
+fn the_release_installers_directory_is_searched() {
+    let hosts = Hosts::new();
+    let home = hosts.home("installed");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    symlink(BIN, bin.join("token-max")).unwrap();
+    // An older `cargo install` loses to the installers' copy.
+    let cargo = home.join(".cargo/bin");
+    std::fs::create_dir_all(&cargo).unwrap();
+    script(&cargo.join("token-max"), "exit 2");
+    let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert!(stdout.starts_with("token-max: installed\n"), "{stdout}");
+}
+
+#[test]
 fn any_failed_destination_fails_the_whole_report() {
     let hosts = Hosts::new();
     hosts.host("devbox");
@@ -805,20 +834,30 @@ fn any_failed_destination_fails_the_whole_report() {
 "#,
     )
     .unwrap();
+    // The hint names the command that installs this build there.
+    let install = match env!("CARGO_PKG_VERSION") {
+        "0.0.0" => {
+            "`cargo install --locked --git https://github.com/kixel-ai/token-max` on both hosts"
+                .to_string()
+        }
+        version => format!(
+            "`curl -LsSf https://github.com/kixel-ai/token-max/releases/download/v{version}/token-max-installer.sh | sh` or `cargo install --locked token-max --version {version}` there"
+        ),
+    };
+    let bare = format!(
+        "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with {install}\n"
+    );
+    let old = format!(
+        "old: token-max there did not start an SSH audit (exit 2); install the same version with {install}\n"
+    );
     for (host, expected) in [
         (
             "unreachable",
             "unreachable: SSH connection failed; check that `ssh unreachable true` works",
         ),
-        (
-            "bare",
-            "bare: token-max is not installed on PATH or in ~/.cargo/bin; install it with `cargo install --locked",
-        ),
+        ("bare", bare.as_str()),
         ("windows", "windows: unsupported platform"),
-        (
-            "old",
-            "old: token-max there did not start an SSH audit (exit 2); install the same version with `cargo install",
-        ),
+        ("old", old.as_str()),
         ("other", "other: runs token-max 9.9.9+"),
         ("corrupt", "corrupt: invalid SSH audit stream at line "),
         ("silent", "silent: invalid SSH audit stream at line 2"),

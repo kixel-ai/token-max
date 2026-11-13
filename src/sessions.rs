@@ -2,17 +2,18 @@
 //! as moq-dev/quest that tie sessions to branches.
 //!
 //! The reader notes what every record says about its session; the export then prices the
-//! session's deduplicated requests. Native session IDs stay out of the scan's serialized form,
-//! so they never cross SSH or reach the report.
+//! session's deduplicated requests on the host that ran it. Native session IDs never reach the
+//! report; over SSH they cross only in these session lines.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::collections::{HashMap, IndexMap};
 use crate::model::{Harness, Millis, Request, Scan, Text, Usd};
 use crate::prices::{Catalog, add_costs, price_part, request_evidence, server_cost};
 use crate::reader::CodexThread;
-use crate::safe::{iso, label};
+use crate::repository::{self, Source};
+use crate::safe::{ScanError, iso, label};
 
 /// What one transcript record says about its session.
 pub(crate) struct Record<'a> {
@@ -48,6 +49,8 @@ struct Facts {
     forked_from: Option<String>,
     parent: Option<String>,
     cwd: Option<Text>,
+    /// The remote URL Codex recorded when the session started.
+    repository: Option<String>,
     /// Branches the selected records name.
     branches: Vec<Branch>,
     /// The last branch named before the window, listed when no selected record names one,
@@ -91,6 +94,7 @@ impl Sessions {
                     forked_from: None,
                     parent: None,
                     cwd: None,
+                    repository: None,
                     branches: vec![],
                     before_window: None,
                     review: false,
@@ -157,7 +161,12 @@ impl Sessions {
                 facts.review |= thread
                     .spawn
                     .is_some_and(|s| s.native && s.kind.as_deref() == Some("review"));
-                branch(meta.get("git").and_then(|git| git.get("branch")))
+                let git = meta.get("git");
+                facts.repository = facts.repository.take().or_else(|| {
+                    let url = git?.get("repository_url")?.as_str()?;
+                    repository::url(url)
+                });
+                branch(git.and_then(|git| git.get("branch")))
             }
         };
         let (Some(time), Some(name)) = (record.time, name) else {
@@ -182,7 +191,7 @@ impl Sessions {
 }
 
 /// A branch as the export prints it.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct BranchSpan {
     pub name: String,
     pub first: String,
@@ -190,7 +199,7 @@ pub struct BranchSpan {
 }
 
 /// One model and effort's usage within a session.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
     pub model: Option<String>,
@@ -207,15 +216,21 @@ pub struct ModelUsage {
 }
 
 /// One session's priced usage: one line of `token-max sessions`.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    /// The SSH destination the session ran on, as given to `--ssh`, or None for this host.
+    pub host: Option<String>,
     pub harness: Harness,
     pub session: Option<String>,
     /// The session a subagent or Codex review thread was spawned from.
     pub parent: Option<String>,
     pub review: bool,
     pub cwd: Option<String>,
+    /// Remote URLs without userinfo, resolved on the session's host.
+    pub repositories: Option<Vec<String>>,
+    /// Where `repositories` came from; None exactly when it is.
+    pub repositories_source: Option<Source>,
     pub branches: Vec<BranchSpan>,
     pub start: String,
     pub end: String,
@@ -229,8 +244,9 @@ pub struct Session {
     pub files: Vec<String>,
 }
 
-/// Price each session with a selected request, ordered by its first request.
-pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
+/// Price each session with a selected request, ordered by its first request, and resolve
+/// its repositories on this host.
+pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Result<Vec<Session>, ScanError> {
     struct Totals<'a> {
         harness: Harness,
         start: Millis,
@@ -337,10 +353,28 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
         .iter()
         .map(|s| (s.file.as_str(), s))
         .collect();
+    // Sessions in one directory share its checkout.
+    let mut checkouts: HashMap<&str, Option<Vec<String>>> = HashMap::default();
     let mut result: Vec<(Millis, Session)> = sessions
         .into_iter()
         .map(|(key, totals)| {
             let facts = facts.get(key);
+            let cwd = facts.and_then(|f| f.cwd.as_deref());
+            let repositories = match (facts.and_then(|f| f.repository.clone()), cwd) {
+                (Some(recorded), _) => Some((vec![recorded], Source::Recorded)),
+                (None, Some(cwd)) => {
+                    let found = match checkouts.get(cwd) {
+                        Some(found) => found.clone(),
+                        None => {
+                            let found = repository::checkout(cwd)?;
+                            checkouts.insert(cwd, found.clone());
+                            found
+                        }
+                    };
+                    found.map(|urls| (urls, Source::Checkout))
+                }
+                (None, None) => None,
+            };
             let files = facts.map_or(&[][..], |f| &f.files[..]);
             let (skipped_lines, deferred) = files
                 .iter()
@@ -350,11 +384,14 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
                 });
             let models: Vec<ModelUsage> = totals.rows.into_values().collect();
             let session = Session {
+                host: None,
                 harness: totals.harness,
                 session: facts.and_then(|f| f.id.clone()),
                 parent: facts.and_then(|f| f.parent.clone()),
                 review: facts.is_some_and(|f| f.review),
-                cwd: facts.and_then(|f| f.cwd.as_deref().map(str::to_string)),
+                cwd: cwd.map(str::to_string),
+                repositories_source: repositories.as_ref().map(|(_, source)| *source),
+                repositories: repositories.map(|(urls, _)| urls),
                 branches: facts
                     .map(|f| match &f.before_window {
                         Some(before) if f.branches.is_empty() => std::slice::from_ref(before),
@@ -376,11 +413,11 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
                 skipped_lines,
                 files: files.iter().map(|f| f.to_string()).collect(),
             };
-            (totals.start, session)
+            Ok((totals.start, session))
         })
-        .collect();
+        .collect::<Result<_, ScanError>>()?;
     result.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.session.cmp(&b.1.session)));
-    result.into_iter().map(|(_, session)| session).collect()
+    Ok(result.into_iter().map(|(_, session)| session).collect())
 }
 
 #[cfg(test)]
@@ -456,7 +493,7 @@ mod tests {
         );
         let mut options = w.scan_options();
         options.since = Some(1_793_491_200_000);
-        let sessions = export(&scan(&options).unwrap(), &prices());
+        let sessions = export(&scan(&options).unwrap(), &prices()).unwrap();
         let ids: Vec<_> = sessions.iter().map(|s| s.session.as_deref()).collect();
         assert_eq!(ids, [Some("session-a"), Some("x1"), Some("session-b")]);
 
@@ -544,7 +581,7 @@ mod tests {
         // The window opens after `session_meta`, the only record naming the branch.
         let mut options = w.scan_options();
         options.since = Some(1_793_491_200_500);
-        let sessions = export(&scan(&options).unwrap(), &prices());
+        let sessions = export(&scan(&options).unwrap(), &prices()).unwrap();
         let found: Vec<_> = sessions
             .iter()
             .map(|s| (s.session.as_deref(), s.parent.as_deref(), s.review))
@@ -602,6 +639,7 @@ mod tests {
         thread("leaf", spawn("mid"));
         let scan = scan(&w.scan_options()).unwrap();
         let mut found: Vec<_> = export(&scan, &prices())
+            .unwrap()
             .into_iter()
             .map(|s| (s.session, s.parent))
             .collect();
@@ -674,7 +712,7 @@ mod tests {
                 &[meta("root", "00:00", None)],
                 "",
             );
-            let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+            let sessions = export(&scan(&w.scan_options()).unwrap(), &prices()).unwrap();
             let found: Vec<_> = sessions
                 .iter()
                 .map(|s| (s.session.as_deref(), s.models[0].requests, &*s.start))
@@ -707,7 +745,7 @@ mod tests {
             ],
             "",
         );
-        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices()).unwrap();
         assert_eq!(sessions[0].models[0].effort.as_deref(), Some("max"));
     }
 
@@ -734,7 +772,7 @@ mod tests {
             &[reply],
             "",
         );
-        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices());
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices()).unwrap();
         let rows: Vec<_> = sessions[0]
             .models
             .iter()
@@ -745,6 +783,67 @@ mod tests {
             [
                 (Some("claude-opus-5-5"), 1, 100),
                 (Some("claude-haiku-5-5"), 1, 50)
+            ]
+        );
+    }
+
+    #[test]
+    fn repositories_come_from_the_record_or_else_the_checkout_now_at_cwd() {
+        let w = Workspace::new();
+        let checkout = w.home.join("checkout");
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        std::fs::create_dir_all(checkout.join("sub")).unwrap();
+        std::fs::write(
+            checkout.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://user:token@host/o/r.git\n",
+        )
+        .unwrap();
+        let cwd = |path: &Path| json!(path.to_str().unwrap());
+        let mut a = reply("claude-a", "a", "2026-11-01T00:00:01Z", "main", "high");
+        a["cwd"] = cwd(&checkout.join("sub"));
+        let mut b = reply("claude-b", "b", "2026-11-01T00:00:02Z", "main", "high");
+        b["cwd"] = cwd(&w.home);
+        write(&w.claude.join("projects/project/a.jsonl"), &[a], "");
+        write(&w.claude.join("projects/project/b.jsonl"), &[b], "");
+        // Codex's record wins over the checkout at its directory.
+        let meta = json!({"type": "session_meta", "timestamp": "2026-11-01T00:00:00Z",
+            "payload": {"id": "codex", "cwd": checkout, "source": "exec",
+                "model_provider": "openai", "git": {"branch": "main",
+                    "repository_url": "git@recorded:o/r.git"}}});
+        let usage = json!({"type": "token_usage_record", "timestamp": "2026-11-01T00:00:03Z",
+            "payload": {"response_id": "response", "turn_id": "turn", "usage": {
+                "input_tokens": 1000, "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0, "output_tokens": 100}}});
+        write(&w.codex.join("sessions/rollout.jsonl"), &[meta, usage], "");
+        let sessions = export(&scan(&w.scan_options()).unwrap(), &prices()).unwrap();
+        let found: Vec<_> = sessions
+            .iter()
+            .map(|s| {
+                (
+                    s.session.as_deref(),
+                    s.host.as_deref(),
+                    s.repositories.clone(),
+                    s.repositories_source,
+                )
+            })
+            .collect();
+        let urls = |url: &str| Some(vec![url.to_string()]);
+        assert_eq!(
+            found,
+            [
+                (
+                    Some("claude-a"),
+                    None,
+                    urls("https://host/o/r.git"),
+                    Some(Source::Checkout)
+                ),
+                (Some("claude-b"), None, None, None),
+                (
+                    Some("codex"),
+                    None,
+                    urls("recorded:o/r.git"),
+                    Some(Source::Recorded)
+                ),
             ]
         );
     }

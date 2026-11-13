@@ -2,8 +2,8 @@
 //!
 //! The coordinator runs `token-max doctor --ssh-scan` on each destination through the local OpenSSH
 //! client, with its configuration, authentication and host keys. The destination reads its own
-//! histories and settings, prices and checks them with the coordinator's catalog, and sends
-//! back only its printed report (see [`crate::wire`]); its scan never leaves it.
+//! histories and settings, prices them with the coordinator's catalog, and sends back only its
+//! printed report or its session lines (see [`crate::wire`]); its scan never leaves it.
 
 use std::io::{self, BufReader, BufWriter};
 use std::panic::{self, AssertUnwindSafe};
@@ -15,7 +15,8 @@ use crate::discovery::DiscoveryOptions;
 use crate::model::Millis;
 use crate::reader::{ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
-use crate::wire::{self, Header, Outcome, Request, Stream};
+use crate::sessions::{self, export};
+use crate::wire::{self, Header, Job, Outcome, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -140,16 +141,23 @@ impl Drop for Session {
     }
 }
 
+/// What a destination sent back for its [`Job`].
+pub enum Reply {
+    Report(Rendered),
+    /// Its sessions, ordered by first request, each without a host.
+    Sessions(Vec<sessions::Session>),
+}
+
 /// Audit one destination with its installed `token-max`, failing on any error there.
 ///
 /// The destination scans while this host loads prices; once `request` delivers the catalog and
-/// format, it analyzes and sends back its printed report. A destination that fails first is
+/// job, it analyzes and sends back what the job asks for. A destination that fails first is
 /// reported at once, without waiting for the request.
 pub fn audit(
     destination: &str,
     since: Option<Millis>,
     request: mpsc::Receiver<Request>,
-) -> Result<Rendered, ScanError> {
+) -> Result<Reply, ScanError> {
     let mut command = Command::new("ssh");
     command
         .args(["-T", "-x", "-a"])
@@ -236,11 +244,12 @@ pub fn audit(
     std::thread::spawn(move || {
         let _ = steps.send(Step::Outcome(stream.outcome()));
     });
-    let mut requested = false;
+    // Whether the job asked for sessions, once it is sent.
+    let mut requested = None;
     let outcome = loop {
         match arrived.recv() {
             Ok(Step::Request(request)) => {
-                requested = true;
+                requested = Some(matches!(request.job, Job::Sessions));
                 if let Some(stdin) = session.stdin.as_mut() {
                     // A destination that already failed has stopped reading; its outcome says why.
                     let _ = wire::write(&mut BufWriter::new(stdin), &request);
@@ -252,52 +261,58 @@ pub fn audit(
             }
         }
     };
-    match outcome {
+    let (scanned, reply) = match outcome {
         Ok(Outcome::Report {
-            since: scanned,
+            since,
             text,
             change,
-        }) => {
-            let status = session.stop(false).and_then(|s| s.code());
-            if status != Some(0) {
-                return Err(ScanError::new(format!(
-                    "{destination}: token-max failed after sending its report ({})",
-                    exit(status)
-                )));
-            }
-            if scanned != since {
-                return Err(ScanError::new(format!(
-                    "{destination}: token-max scanned a different window than requested"
-                )));
-            }
-            if !requested {
-                return Err(ScanError::new(format!(
-                    "{destination}: token-max sent a report before its request"
-                )));
-            }
-            Ok(Rendered {
+        }) => (
+            since,
+            Reply::Report(Rendered {
                 text,
                 change,
                 fixes: vec![],
-            })
-        }
+            }),
+        ),
+        Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions)),
         Ok(Outcome::Error { message, location }) => {
             session.stop(true);
-            Err(ScanError {
+            return Err(ScanError {
                 message: format!("{destination}: {}", terminal_text(&message)),
                 location,
-            })
+            });
         }
         Err(error) => {
             let (line, column) = (error.line(), error.column());
-            Err(session.fail(true, |status| match status {
+            return Err(session.fail(true, |status| match status {
                 Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
                 _ => format!(
                     "invalid SSH audit stream at line {line}, column {column} ({})",
                     exit(status)
                 ),
-            }))
+            }));
         }
+    };
+    let status = session.stop(false).and_then(|s| s.code());
+    if status != Some(0) {
+        return Err(ScanError::new(format!(
+            "{destination}: token-max failed after sending its result ({})",
+            exit(status)
+        )));
+    }
+    if scanned != since {
+        return Err(ScanError::new(format!(
+            "{destination}: token-max scanned a different window than requested"
+        )));
+    }
+    match requested {
+        None => Err(ScanError::new(format!(
+            "{destination}: token-max sent its result before its request"
+        ))),
+        Some(sessions) if sessions != matches!(reply, Reply::Sessions(_)) => Err(ScanError::new(
+            format!("{destination}: token-max sent a different result than requested"),
+        )),
+        Some(_) => Ok(reply),
     }
 }
 
@@ -308,8 +323,8 @@ fn exit(status: Option<i32>) -> String {
     }
 }
 
-/// Run as an SSH audit destination: audit this host, stream its report to stdout and return
-/// the exit code.
+/// Run as an SSH audit destination: scan this host, stream what the coordinator's job asks for
+/// to stdout and return the exit code.
 ///
 /// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
 /// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
@@ -339,32 +354,40 @@ pub fn serve(since: Option<Millis>) -> u8 {
         let discovery = DiscoveryOptions::host()?;
         let scan = scan(&ScanOptions { discovery, since })?;
         // The stdin thread keeps the sender until it exits this process.
-        let request = requests.recv().expect("the request or an exit");
+        let request: Request = requests.recv().expect("the request or an exit");
+        let (max_cost_per_use_usd, format) = match &request.job {
+            Job::Report {
+                max_cost_per_use_usd,
+                format,
+            } => (*max_cost_per_use_usd, format),
+            Job::Sessions => {
+                let sessions = export(&scan, &request.catalog)?;
+                return Ok(Outcome::Sessions { since, sessions });
+            }
+        };
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-        render(
+        let Rendered { text, change, .. } = render(
             scan,
             Render {
                 catalog: &request.catalog,
                 since,
                 now: crate::reader::now(),
-                max_cost_per_use_usd: request.max_cost_per_use_usd,
-                format: &request.format,
+                max_cost_per_use_usd,
+                format,
                 home: home.as_deref(),
                 // Its changes are made there, so its report lists them.
                 changes: true,
             },
-        )
+        )?;
+        Ok(Outcome::Report {
+            since,
+            text,
+            change,
+        })
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
     let (outcome, code) = match result {
-        Ok(Rendered { text, change, .. }) => (
-            Outcome::Report {
-                since,
-                text,
-                change,
-            },
-            0,
-        ),
+        Ok(outcome) => (outcome, 0),
         Err(error) => (
             Outcome::Error {
                 message: error.message,

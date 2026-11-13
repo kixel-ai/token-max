@@ -183,7 +183,7 @@ impl Interner {
 }
 
 /// The two locally supported transcript formats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
@@ -1103,6 +1103,17 @@ impl std::iter::Sum for Usd {
 impl Serialize for Usd {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_f64(self.to_f64())
+    }
+}
+
+/// Reads the printed amount back, as an SSH destination's session export arrives.
+impl<'de> Deserialize<'de> for Usd {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let usd = f64::deserialize(deserializer)?;
+        if !usd.is_finite() || usd.abs() >= 2f64.powi(63) {
+            return Err(serde::de::Error::custom("dollar amount out of range"));
+        }
+        Ok(Self::from_f64(usd))
     }
 }
 

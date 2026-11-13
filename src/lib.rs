@@ -21,6 +21,7 @@ pub mod prices;
 pub mod reader;
 pub mod replay;
 pub mod report;
+pub mod repository;
 pub mod safe;
 pub mod scenarios;
 pub mod sessions;

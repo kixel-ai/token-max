@@ -19,9 +19,10 @@ use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{Host, ReportOptions, format_changes, format_report};
 use crate::safe::{ScanError, display};
-use crate::ssh;
+use crate::sessions::{Session, export};
+use crate::ssh::{self, Reply};
 use crate::terminal::{WrapOptions, wrap_text};
-use crate::wire::{Format, Request};
+use crate::wire::{Format, Job, Request};
 
 const HELP: &str = "token-max: cheaper agent settings from local usage
 
@@ -67,7 +68,7 @@ Without profile flags, discover local Claude/Codex profiles and T3 instances. Ex
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
 and needs this same version installed there; it prices its own history with this host's
-prices, and only its report crosses SSH. Its changes are listed to make there. Current
+prices, and only its report crosses SSH, never its scan. Its changes are listed to make there. Current
 settings are applied to the selected history; checks can use different windows and
 baselines. Independent savings do not add.
 
@@ -97,15 +98,21 @@ Usage: token-max sessions [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
+  --ssh HOST              Also export an SSH destination's sessions with the token-max installed there (repeatable)
+  --include-local         Also export this host's sessions when --ssh is given
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
   -h, --help              Show this help
 
 Prints one JSON object per line for each Claude Code or Codex session with a request in the
-window, ordered by its first request. A Claude subagent and a Codex review or spawned thread
-are sessions of their own. Fields: harness; session, its native ID; parent, the session it
-was spawned from; review, whether Codex marked it a review; cwd; branches, each Git branch
+window, ordered across hosts by its first request. A Claude subagent and a Codex review or
+spawned thread are sessions of their own. Fields: host, the --ssh destination as given, or
+null for this host; harness; session, its native ID; parent, the session it was spawned
+from; review, whether Codex marked it a review; cwd; repositories, remote URLs without
+userinfo, resolved on the session's host, or null; repositoriesSource, recorded when Codex
+recorded the repository, or checkout when read now from the Git checkout at cwd, which may
+have changed since the session; branches, each Git branch
 its records in the window name with the first and last time, or else the last named before
 it; start and end of its requests; models, one entry per model and reasoning effort with
 requests (each request once in every entry it reaches), inputTokens (uncached),
@@ -115,8 +122,13 @@ skippedLines, the unreadable lines in its files; files. A cost is a lower bound 
 complete is false: a request could not be priced, or a file had unreadable or unfinished
 lines.
 
-Public API-price estimates, not subscription bills. Reads transcripts only and prints no
-prompt or reply text. Errors go to stderr as JSON.
+Directory flags select local profiles only; with --ssh they need --include-local. Each SSH
+destination exports its own sessions with this host's prices, and only its session lines
+cross SSH. A session found on several hosts is printed once per host. Any failed host fails
+the whole run.
+
+Public API-price estimates, not subscription bills. Reads transcripts and Git config only
+and prints no prompt or reply text. Errors go to stderr as JSON.
 Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 
@@ -448,6 +460,23 @@ impl Formatter for JsFormatter {
         }
         write!(writer, "{value}")
     }
+    /// Terminal controls and direction overrides print as `\uXXXX`, which decodes to the same
+    /// string, so a path or URL from a transcript or a destination cannot drive the terminal.
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        fragment: &str,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        for (at, c) in fragment.char_indices() {
+            if crate::safe::unsafe_char(c) {
+                writer.write_all(&fragment.as_bytes()[start..at])?;
+                write!(writer, "\\u{:04x}", c as u32)?;
+                start = at + c.len_utf8();
+            }
+        }
+        writer.write_all(&fragment.as_bytes()[start..])
+    }
 }
 
 /// Stream a value as one compact JavaScript-compatible JSON line.
@@ -504,10 +533,10 @@ struct Walk {
     style: Style,
 }
 
-/// One host's audit before its report is printed: this host's scan, or a destination's report.
+/// One host before its job runs here: this host's scan, or a destination's reply.
 enum Scanned {
     Local(Box<Scan>),
-    Remote(Rendered),
+    Remote(Reply),
 }
 
 /// What reaches the coordinator while hosts scan, in whatever order it finishes.
@@ -618,36 +647,53 @@ fn price_options(
     })
 }
 
-/// `token-max sessions`: scan this host's selected profiles and price each session.
+/// `token-max sessions`: price each session on the selected hosts.
 fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     let invalid = || ScanError::new("invalid arguments; use token-max sessions --help");
-    let values = parse(args).ok_or_else(invalid)?;
+    let mut values = parse(args).ok_or_else(invalid)?;
     if values.help {
         return Ok((Output::Text(help(SESSIONS_HELP)), 0));
     }
     let report_only = values.plain
         || values.details
         || values.version
-        || values.include_local
         || values.ssh_scan
-        || values.max_cost_per_use.is_some()
-        || !values.ssh.is_empty();
+        || values.max_cost_per_use.is_some();
     if report_only {
         return Err(invalid());
     }
     let since = window(&values)?;
-    let mut discovery = DiscoveryOptions::host()?;
-    discovery.claude_dirs = values.claude_dirs;
-    discovery.codex_dirs = values.codex_dirs;
-    discovery.t3_dirs = values.t3_dirs;
-    let scan = scan(&ScanOptions { discovery, since })?;
-    let catalog = load_prices(&price_options(
-        values.prices_file,
-        values.price_cache,
-        values.offline,
-    )?)?;
+    let (discovery, destinations) = hosts(&mut values)?;
+    let replies = gather(Gather {
+        since,
+        discovery,
+        destinations,
+        prices: price_options(values.prices_file, values.price_cache, values.offline)?,
+        job: Job::Sessions,
+        changes: false,
+        home: None,
+        progress: false,
+    })?;
+    let mut sessions: Vec<(jiff::Timestamp, Session)> = vec![];
+    for (host, reply) in replies {
+        let Reply::Sessions(found) = reply else {
+            unreachable!("a sessions job gets sessions");
+        };
+        for mut session in found {
+            let start = session.start.parse().map_err(|_| {
+                ScanError::new(format!(
+                    "{}: invalid session start",
+                    host.as_deref().unwrap_or("this host")
+                ))
+            })?;
+            session.host = host.clone();
+            sessions.push((start, session));
+        }
+    }
+    // Stable, so a tie keeps each host's own order, then the order hosts were selected in.
+    sessions.sort_by_key(|(start, _)| *start);
     let mut lines = vec![];
-    for session in crate::sessions::export(&scan, &catalog) {
+    for (_, session) in sessions {
         write_json(&mut lines, &session)
             .map_err(|_| ScanError::new("analysis failed; no report produced"))?;
     }
@@ -684,11 +730,216 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     Err(invalid())
 }
 
+/// The selected hosts: this host's discovery when it is selected, and the SSH destinations.
+///
+/// Takes the directory flags, which select this host's profiles.
+fn hosts(values: &mut Values) -> Result<(Option<DiscoveryOptions>, Vec<String>), ScanError> {
+    for (index, destination) in values.ssh.iter().enumerate() {
+        ssh::destination(destination)?;
+        if values.ssh[..index].contains(destination) {
+            return Err(ScanError::new(format!(
+                "--ssh {destination} is selected twice"
+            )));
+        }
+    }
+    let remote = !values.ssh.is_empty();
+    if values.include_local && !remote {
+        return Err(ScanError::new("--include-local requires --ssh"));
+    }
+    let local = !remote || values.include_local;
+    if !local
+        && !(values.claude_dirs.is_empty()
+            && values.codex_dirs.is_empty()
+            && values.t3_dirs.is_empty())
+    {
+        return Err(ScanError::new(
+            "--claude-dir, --codex-dir and --t3-dir select local profiles; add --include-local to read them with --ssh",
+        ));
+    }
+    let discovery = if local {
+        let mut discovery = DiscoveryOptions::host()?;
+        discovery.claude_dirs = std::mem::take(&mut values.claude_dirs);
+        discovery.codex_dirs = std::mem::take(&mut values.codex_dirs);
+        discovery.t3_dirs = std::mem::take(&mut values.t3_dirs);
+        Some(discovery)
+    } else {
+        None
+    };
+    Ok((discovery, std::mem::take(&mut values.ssh)))
+}
+
+/// A run across the selected hosts.
+struct Gather {
+    since: Option<Millis>,
+    /// This host, when it is selected.
+    discovery: Option<DiscoveryOptions>,
+    destinations: Vec<String>,
+    prices: PriceOptions,
+    /// What every host makes of its scan; a report's host label is set per host.
+    job: Job,
+    /// List this host's changes after its report, for output no one walks through.
+    changes: bool,
+    /// This host's home directory, which its report shows as `~`.
+    home: Option<String>,
+    /// Print each phase to stderr.
+    progress: bool,
+}
+
+/// Scan every selected host and load prices at once, then run the job on each, failing on the
+/// first error. Returns each host's reply in selection order, this host first, as None.
+///
+/// Destinations run the job on their own scans, so this host only ever holds its own.
+fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
+    let Gather {
+        since,
+        discovery,
+        destinations,
+        prices,
+        job,
+        changes,
+        home,
+        progress,
+    } = run;
+    let phase = |message: &str| {
+        if progress {
+            eprintln!("token-max: {message}...");
+        }
+    };
+    let local = discovery.is_some();
+    let remote = !destinations.is_empty();
+    // Each host's report is named once the run covers several.
+    let labeled = |host: Option<&str>| match &job {
+        Job::Report {
+            max_cost_per_use_usd,
+            format,
+        } => Job::Report {
+            max_cost_per_use_usd: *max_cost_per_use_usd,
+            format: Format {
+                host: host.map(str::to_string),
+                ..format.clone()
+            },
+        },
+        Job::Sessions => Job::Sessions,
+    };
+    let (sender, results) = mpsc::channel();
+    let mut hosts: Vec<Option<String>> = vec![];
+    let mut requests = vec![];
+    // A lone local scan runs on this thread, so the analysis reuses the memory the scan
+    // frees rather than leaving it to another thread's allocator arena.
+    let mut inline = None;
+    if let Some(discovery) = discovery {
+        let index = hosts.len();
+        hosts.push(None);
+        let job = move || {
+            panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(|scan| Scanned::Local(Box::new(scan)))
+        };
+        if remote {
+            let sender = sender.clone();
+            thread::spawn(move || {
+                let _ = sender.send(Arrival::Host(index, job()));
+            });
+        } else {
+            inline = Some((index, job));
+        }
+    }
+    for destination in destinations {
+        let sender = sender.clone();
+        let index = hosts.len();
+        let (request, receiver) = mpsc::channel();
+        requests.push((request, labeled(Some(&destination))));
+        hosts.push(Some(destination.clone()));
+        thread::spawn(move || {
+            let result = panic::catch_unwind(|| ssh::audit(&destination, since, receiver))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                .map(Scanned::Remote);
+            let _ = sender.send(Arrival::Host(index, result));
+        });
+    }
+    phase(match (local, remote) {
+        (true, false) => "Scanning local histories",
+        (true, true) => "Scanning local histories and SSH hosts",
+        (false, _) => "Scanning SSH hosts",
+    });
+    let local_job = labeled(remote.then_some("this host"));
+    let mut replies: Vec<Option<Reply>> = hosts.iter().map(|_| None).collect();
+    let gathered = (|| {
+        let inline = inline
+            .map(|(index, job)| job().map(|scan| (index, scan)))
+            .transpose()?;
+        phase("Loading public prices");
+        // Prices load beside the scans, so whichever fails first stops the run at once.
+        thread::spawn(move || {
+            let catalog = panic::catch_unwind(|| load_prices(&prices))
+                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
+            let _ = sender.send(Arrival::Prices(catalog));
+        });
+        let mut catalog = None;
+        // Hosts that finished before the prices arrived.
+        let mut scanned: Vec<_> = inline.into_iter().collect();
+        for arrival in results {
+            match arrival {
+                Arrival::Host(index, result) => scanned.push((index, result?)),
+                Arrival::Prices(loaded) => {
+                    let loaded = loaded?;
+                    for (request, job) in std::mem::take(&mut requests) {
+                        // A destination that already failed reports itself through `results`.
+                        let _ = request.send(Request {
+                            catalog: loaded.clone(),
+                            job,
+                        });
+                    }
+                    phase(match job {
+                        Job::Report { .. } => "Checking settings",
+                        Job::Sessions => "Pricing sessions",
+                    });
+                    catalog = Some(loaded);
+                }
+            }
+            let Some(catalog) = &catalog else { continue };
+            for (index, scanned) in scanned.drain(..) {
+                replies[index] = Some(match scanned {
+                    Scanned::Local(scan) => match &local_job {
+                        Job::Report {
+                            max_cost_per_use_usd,
+                            format,
+                        } => Reply::Report(render(
+                            *scan,
+                            Render {
+                                catalog,
+                                since,
+                                now: now(),
+                                max_cost_per_use_usd: *max_cost_per_use_usd,
+                                format,
+                                home: home.as_deref(),
+                                changes,
+                            },
+                        )?),
+                        Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
+                    },
+                    Scanned::Remote(reply) => reply,
+                });
+            }
+        }
+        Ok(())
+    })();
+    gathered.inspect_err(|_| {
+        cancel_downloads();
+        ssh::cancel();
+    })?;
+    Ok(hosts
+        .into_iter()
+        .zip(replies)
+        .map(|(host, reply)| (host, reply.expect("every host sent a result")))
+        .collect())
+}
+
 /// `token-max doctor`: audit the selected hosts, then walk through this host's changes when
 /// stdin and stdout are a terminal.
 fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let invalid = || ScanError::new("invalid arguments; use token-max doctor --help");
-    let values = parse(args).ok_or_else(invalid)?;
+    let mut values = parse(args).ok_or_else(invalid)?;
     if values.help {
         return Ok((Output::Text(help(DOCTOR_HELP)), 0));
     }
@@ -718,39 +969,11 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         }
         return Ok((Output::Written, ssh::serve(since)));
     }
-    for (index, destination) in values.ssh.iter().enumerate() {
-        ssh::destination(destination)?;
-        if values.ssh[..index].contains(destination) {
-            return Err(ScanError::new(format!(
-                "--ssh {destination} is selected twice"
-            )));
-        }
-    }
-    let remote = !values.ssh.is_empty();
-    if values.include_local && !remote {
-        return Err(ScanError::new("--include-local requires --ssh"));
-    }
-    let local = !remote || values.include_local;
-    if !local
-        && !(values.claude_dirs.is_empty()
-            && values.codex_dirs.is_empty()
-            && values.t3_dirs.is_empty())
-    {
-        return Err(ScanError::new(
-            "--claude-dir, --codex-dir and --t3-dir select local profiles; add --include-local to audit them with --ssh",
-        ));
-    }
+    let (discovery, destinations) = hosts(&mut values)?;
     let stdout = io::stdout().is_terminal();
     // Only this host's changes can be made here, so a run of destinations alone lists them.
-    let walk = local && stdout && io::stdin().is_terminal();
+    let walk = discovery.is_some() && stdout && io::stdin().is_terminal();
     let term_dumb = env("TERM").as_deref() == Some("dumb");
-    let interactive = stdout && io::stderr().is_terminal() && !term_dumb;
-    let progress = interactive;
-    let phase = |message: &str| {
-        if progress {
-            eprintln!("token-max: {message}...");
-        }
-    };
     let unicode_locale = env_nonempty("LC_ALL")
         .or_else(|| env_nonempty("LC_CTYPE"))
         .or_else(|| env_nonempty("LANG"))
@@ -759,131 +982,40 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             locale.contains("utf8") || locale.contains("utf-8")
         });
     let color = stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb;
-    // Each host's section is named once the run covers several.
-    let format = |host: Option<&str>| Format {
+    let format = Format {
         width: width(),
         color,
         unicode: stdout && !values.plain && !term_dumb && unicode_locale,
         details: values.details,
-        host: host.map(str::to_string),
+        host: None,
     };
-    let prices = price_options(values.prices_file, values.price_cache, values.offline)?;
-    // Every host scans at once; the first failure stops the rest. Destinations analyze their
-    // own scans, so this host only ever holds its own.
-    let (sender, results) = mpsc::channel();
-    let mut hosts: Vec<Option<String>> = vec![];
-    let mut requests = vec![];
-    // A lone local scan runs on this thread, so the analysis reuses the memory the scan
-    // frees rather than leaving it to another thread's allocator arena.
-    let mut inline = None;
-    if local {
-        let mut discovery = DiscoveryOptions::host()?;
-        discovery.claude_dirs = values.claude_dirs;
-        discovery.codex_dirs = values.codex_dirs;
-        discovery.t3_dirs = values.t3_dirs;
-        let index = hosts.len();
-        hosts.push(None);
-        let job = move || {
-            panic::catch_unwind(|| scan(&ScanOptions { discovery, since }))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(|scan| Scanned::Local(Box::new(scan)))
-        };
-        if remote {
-            let sender = sender.clone();
-            thread::spawn(move || {
-                let _ = sender.send(Arrival::Host(index, job()));
-            });
-        } else {
-            inline = Some((index, job));
-        }
-    }
-    for destination in values.ssh {
-        let sender = sender.clone();
-        let index = hosts.len();
-        hosts.push(Some(destination.clone()));
-        let (request, receiver) = mpsc::channel();
-        requests.push((request, format(Some(&destination))));
-        thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::audit(&destination, since, receiver))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(Scanned::Remote);
-            let _ = sender.send(Arrival::Host(index, result));
-        });
-    }
-    phase(match (local, remote) {
-        (true, false) => "Scanning local histories",
-        (true, true) => "Scanning local histories and SSH hosts",
-        (false, _) => "Scanning SSH hosts",
-    });
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-    let local_format = format(remote.then_some("this host"));
-    let mut rendered: Vec<Option<Rendered>> = hosts.iter().map(|_| None).collect();
-    let audited = (|| {
-        let inline = inline
-            .map(|(index, job)| job().map(|scan| (index, scan)))
-            .transpose()?;
-        phase("Loading public prices");
-        // Prices load beside the scans, so whichever fails first stops the run at once.
-        thread::spawn(move || {
-            let catalog = panic::catch_unwind(|| load_prices(&prices))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-            let _ = sender.send(Arrival::Prices(catalog));
-        });
-        let mut catalog = None;
-        // Hosts that finished before the prices arrived.
-        let mut scanned: Vec<_> = inline.into_iter().collect();
-        for arrival in results {
-            match arrival {
-                Arrival::Host(index, result) => scanned.push((index, result?)),
-                Arrival::Prices(loaded) => {
-                    let loaded = loaded?;
-                    for (request, format) in std::mem::take(&mut requests) {
-                        // A destination that already failed reports itself through `results`.
-                        let _ = request.send(Request {
-                            catalog: loaded.clone(),
-                            max_cost_per_use_usd,
-                            format,
-                        });
-                    }
-                    phase("Checking settings");
-                    catalog = Some(loaded);
-                }
-            }
-            let Some(catalog) = &catalog else { continue };
-            for (index, scanned) in scanned.drain(..) {
-                rendered[index] = Some(match scanned {
-                    Scanned::Local(scan) => render(
-                        *scan,
-                        Render {
-                            catalog,
-                            since,
-                            now: now(),
-                            max_cost_per_use_usd,
-                            format: &local_format,
-                            home: home.as_deref(),
-                            changes: !walk,
-                        },
-                    )?,
-                    Scanned::Remote(report) => report,
-                });
-            }
-        }
-        Ok(())
-    })();
-    audited.inspect_err(|_| {
-        cancel_downloads();
-        ssh::cancel();
+    let replies = gather(Gather {
+        since,
+        discovery,
+        destinations,
+        prices: price_options(values.prices_file, values.price_cache, values.offline)?,
+        job: Job::Report {
+            max_cost_per_use_usd,
+            format,
+        },
+        changes: !walk,
+        home: home.clone(),
+        progress: stdout && io::stderr().is_terminal() && !term_dumb,
     })?;
-    let sections = hosts.len();
+    let sections = replies.len();
     let mut code = 0;
     let mut text = String::new();
     let mut fixes = vec![];
-    for (ssh, rendered) in hosts.into_iter().zip(rendered) {
-        let Rendered {
+    for (ssh, reply) in replies {
+        let Reply::Report(Rendered {
             text: report,
             change,
             fixes: local,
-        } = rendered.expect("every host sent a result");
+        }) = reply
+        else {
+            unreachable!("a report job gets reports");
+        };
         code = code.max(u8::from(change));
         fixes.extend(local);
         if !text.is_empty() {
@@ -1011,6 +1143,19 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_lines_escape_every_terminal_control() {
+        let text = "a\u{1b}b\u{7f}c\u{9b}d\u{202e}e\u{2069}f\u{e9}";
+        let mut line = vec![];
+        write_json(&mut line, &text).unwrap();
+        let line = String::from_utf8(line).unwrap();
+        assert_eq!(
+            line,
+            "\"a\\u001bb\\u007fc\\u009bd\\u202ee\\u2069f\u{e9}\"\n"
+        );
+        assert_eq!(serde_json::from_str::<String>(&line).unwrap(), text);
+    }
 
     /// Expected instants are what Node's `Date.parse` returns for the same text.
     #[test]

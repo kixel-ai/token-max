@@ -192,7 +192,7 @@ disagree, such as "never edits settings", "both text and JSON" or
 "Repository: ✅ kixelated", this one holds.
 
 Decided 2026-11-11 (maintainer, /quest-plan for that audit's follow-ups):
-✅ 0.1.0 ships [prebuilt binaries](/quest/m0/binaries.md) built by
+✅ 0.1.0 ships prebuilt binaries built by
 cargo-dist, with `install.sh` and `run.sh` at
 [max.kixel.ai](/quest/m0/install-site.md); ✅ the report is
 sectioned by kind of claim, Measured, Official and Opinion

@@ -13,36 +13,193 @@ on:
         type: choice
         default: trusted
         options: [trusted, bootstrap]
+      dry-run:
+        description: Build every artifact and publish nothing; runs from any branch
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: crates-io-release
+  group: ${{ inputs.dry-run && format('release-dry-run-{0}', github.ref) || 'release' }}
   cancel-in-progress: false
+
+env:
+  # Also cargo-dist-version in dist-workspace.toml. A new version needs the
+  # SHA-256s below from its release's sha256.sum.
+  DIST_VERSION: 0.34.0
 
 jobs:
   preflight:
-    if: github.ref == 'refs/heads/main' && github.repository == 'kixel-ai/token-max'
+    if: github.repository == 'kixel-ai/token-max' && (inputs.dry-run || github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Require the requested version in Cargo.toml
+        id: version
         env:
           RELEASE_VERSION: ${{ inputs.version }}
+          DRY_RUN: ${{ inputs.dry-run }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           test "$version" = "$RELEASE_VERSION"
-          test "$version" != 0.0.0
+          if [ "$DRY_RUN" != true ]; then test "$version" != 0.0.0; fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
 
   validate:
     needs: preflight
+    if: ${{ !inputs.dry-run }}
     uses: ./.github/workflows/check.yml
 
+  build:
+    name: Build (${{ matrix.target }})
+    needs: preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+            dist-host: x86_64-unknown-linux-gnu
+            dist-sha256: 7fee44ff3ff71ed0064b32d4ec62fee6b58bd37c5887b12a86aedddc5af0c7b5
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            dist-host: aarch64-unknown-linux-gnu
+            dist-sha256: 58efb33edf01342875bfd0c3ce2befa9d73075579ca1b3e5dd75b98c88f92e83
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            dist-host: aarch64-apple-darwin
+            dist-sha256: d1eec30e63eed23e5a5bd48fe96eae314799811bffca254ec1d2264638ba1890
+          - target: x86_64-apple-darwin
+            runner: macos-15
+            dist-host: aarch64-apple-darwin
+            dist-sha256: d1eec30e63eed23e5a5bd48fe96eae314799811bffca254ec1d2264638ba1890
+          - target: x86_64-pc-windows-msvc
+            runner: windows-2025
+            dist-host: x86_64-pc-windows-msvc
+            dist-sha256: 7bb53fbc998321f77a3bbb044084a52747c8ed041cf6d6a604802aa57b9c80c6
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the Rust target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add "$TARGET"
+      - name: Install the musl C toolchain for the bundled SQLite and mimalloc
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: ./.github/actions/install-dist
+        with:
+          version: ${{ env.DIST_VERSION }}
+          host: ${{ matrix.dist-host }}
+          sha256: ${{ matrix.dist-sha256 }}
+      - name: Build the archive
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          dist build --tag "$TAG" --artifacts=local --target "$TARGET" --print=linkage --output-format=json > dist-manifest.json
+          # The installers job reads every target's manifest to embed checksums.
+          cp dist-manifest.json "target/distrib/$TARGET-dist-manifest.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            target/distrib/token-max-${{ matrix.target }}.*
+            target/distrib/${{ matrix.target }}-dist-manifest.json
+
+  installers:
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/install-dist
+        with:
+          version: ${{ env.DIST_VERSION }}
+          host: x86_64-unknown-linux-gnu
+          sha256: 7fee44ff3ff71ed0064b32d4ec62fee6b58bd37c5887b12a86aedddc5af0c7b5
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Build the installers and checksums
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          dist build --tag "$TAG" --artifacts=global --output-format=json > /dev/null
+          cd target/distrib
+          sha256sum --check --strict sha256.sum
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: artifacts-global
+          if-no-files-found: error
+          path: |
+            target/distrib/token-max-installer.sh
+            target/distrib/token-max-installer.ps1
+            target/distrib/source.tar.gz
+            target/distrib/source.tar.gz.sha256
+            target/distrib/sha256.sum
+
+  # Stage everything as a draft before crates.io, which cannot be undone, so a
+  # failure leaves nothing public; the release is published only after the crate.
+  draft:
+    needs: [preflight, validate, installers]
+    if: ${{ !inputs.dry-run && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    environment: github-releases
+    permissions:
+      attestations: write
+      contents: write
+      id-token: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: artifacts-*
+          path: assets/
+          merge-multiple: true
+      - name: Check the assets
+        run: |
+          rm assets/*-dist-manifest.json
+          cd assets
+          sha256sum --check --strict sha256.sum
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: assets/*
+      - name: Upload to a draft release
+        run: |
+          # A rerun after a partial upload reuses its draft; a published
+          # release with this tag fails the job.
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
+            test "$draft" = true
+          else
+            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi
+          gh release upload "$TAG" --clobber assets/*
+
   publish:
-    needs: validate
+    needs: draft
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     environment: crates-io
@@ -61,3 +218,18 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ inputs.authentication == 'trusted' && steps.auth.outputs.token || secrets.CARGO_BOOTSTRAP_TOKEN }}
         run: cargo publish --locked
+
+  announce:
+    needs: [preflight, publish]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: github-releases
+    permissions:
+      contents: write
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.preflight.outputs.tag }}
+    steps:
+      - name: Publish the draft, which creates the tag
+        run: gh release edit "$TAG" --draft=false --latest

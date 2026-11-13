@@ -27,6 +27,24 @@
         pkgs = import nixpkgs { inherit system; };
       in
       {
+        # `nix run github:kixel-ai/token-max` builds this from source.
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "token-max";
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              ./Cargo.toml
+              ./Cargo.lock
+              ./src
+            ];
+          };
+          cargoLock.lockFile = ./Cargo.lock;
+          # CI runs the tests; running the tool should not.
+          doCheck = false;
+          meta.mainProgram = "token-max";
+        };
+
         packages.quest = quest.packages.${system}.default;
 
         devShells.default = pkgs.mkShell {

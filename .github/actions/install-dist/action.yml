@@ -1,0 +1,42 @@
+name: Install dist
+description: Download a pinned cargo-dist release archive, verify its SHA-256, and put dist on PATH
+
+inputs:
+  version:
+    description: The cargo-dist release, matching cargo-dist-version in dist-workspace.toml
+    required: true
+  host:
+    description: The runner's target triple, which names the cargo-dist archive
+    required: true
+  sha256:
+    description: The archive's SHA-256 from that cargo-dist release's sha256.sum
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        DIST_VERSION: ${{ inputs.version }}
+        DIST_HOST: ${{ inputs.host }}
+        DIST_SHA256: ${{ inputs.sha256 }}
+      run: |
+        set -euo pipefail
+        case "$DIST_HOST" in
+          *windows*) archive="cargo-dist-$DIST_HOST.zip" ;;
+          *) archive="cargo-dist-$DIST_HOST.tar.xz" ;;
+        esac
+        cd "$RUNNER_TEMP"
+        curl --proto '=https' --tlsv1.2 -fLsS -o "$archive" \
+          "https://github.com/axodotdev/cargo-dist/releases/download/v$DIST_VERSION/$archive"
+        if [ "$RUNNER_OS" = macOS ]; then
+          echo "$DIST_SHA256  $archive" | shasum -a 256 --check --strict
+        else
+          echo "$DIST_SHA256  $archive" | sha256sum --check --strict
+        fi
+        mkdir dist
+        case "$archive" in
+          *.zip) pwsh -NoProfile -Command "Expand-Archive -Path '$archive' -DestinationPath dist" ;;
+          *) tar -xJf "$archive" -C dist --strip-components=1 ;;
+        esac
+        echo "$RUNNER_TEMP/dist" >> "$GITHUB_PATH"

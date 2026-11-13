@@ -1,4 +1,4 @@
-//! The built `token-max` binary against synthetic homes under the checkout's `.tmp/`.
+//! The built `token-max` binary against synthetic homes under Cargo's target scratch directory.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -10,6 +10,10 @@ use token_max::model::{Action, BackgroundFeature, CheckResult, Usd, Verdict};
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
 /// An isolated home with empty Claude and Codex profiles, removed on drop.
+///
+/// It lives under the target directory, which `cargo package` skips: on Windows, walking a home
+/// another test is deleting fails the package listing. Unlike the system temp directory, it
+/// shares a volume with the binary a test hard-links.
 struct Workspace {
     home: PathBuf,
     claude: PathBuf,
@@ -19,13 +23,11 @@ struct Workspace {
 impl Workspace {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!(
-                "cli-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+        let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "cli-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let claude = home.join(".claude");
         let codex = home.join(".codex");
         std::fs::create_dir_all(claude.join("projects/project")).unwrap();

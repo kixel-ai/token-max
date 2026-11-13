@@ -108,7 +108,7 @@ pub fn make_request() -> Request {
 pub fn prices() -> Catalog {
     load_prices(&PriceOptions {
         file: Some(fixture_path("prices.json")),
-        cache: Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/unused-cache.json"),
+        cache: std::env::temp_dir().join("token-max-unused-cache.json"),
         offline: false,
     })
     .unwrap()

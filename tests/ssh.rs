@@ -20,7 +20,7 @@ use token_max::replay::{AnalyzeOptions, analyze};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
-/// Destinations under one checkout-local directory whose path has a space, removed on drop.
+/// Destinations under one target scratch directory whose path has a space, removed on drop.
 ///
 /// `ssh` runs the destination's command with `sh`, its home under `homes/` and its `PATH`
 /// starting with `remote/<host>`, which links the real binary unless a test replaces it.
@@ -31,13 +31,11 @@ struct Hosts {
 impl Hosts {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!(
-                "ssh test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "ssh test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(root.join("bin")).unwrap();
         script(
             &root.join("bin/ssh"),

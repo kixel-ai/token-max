@@ -1672,35 +1672,53 @@ pub enum PeriodOutcome {
     Unobserved,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PeriodCalibration {
-    /// The calibrating summaries' events, shared by every period one cohort calibrates.
-    pub events: std::sync::Arc<[Id]>,
-    pub summary_tokens: i64,
-    pub prefix_tokens: i64,
-}
-
-/// One request gap or final observation period, without an assumed session end.
-#[derive(Clone, Debug, PartialEq)]
-pub struct IdlePeriod {
-    pub request: Text,
-    pub resume: Option<Text>,
-    pub session: Text,
-    pub context_tokens: Option<i64>,
-    pub gap_ms: i64,
+/// What decided one idle period, which the report counts periods by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PeriodKind {
     pub status: PeriodStatus,
-    pub reason: &'static str,
-    pub confirmed: bool,
     pub return_timing: ReturnTiming,
     pub outcome: PeriodOutcome,
-    pub event: Option<Id>,
-    pub version: Option<Text>,
-    pub client: Option<Text>,
-    pub flag_state: Option<&'static str>,
-    pub activation: Option<f64>,
-    pub activation_basis: std::borrow::Cow<'static, str>,
-    pub summary_cost: Cost,
-    pub calibration: Option<PeriodCalibration>,
+    pub reason: &'static str,
+}
+
+/// How many periods of one kind a scenario had.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeriodGroup {
+    pub kind: PeriodKind,
+    pub periods: u64,
+}
+
+/// A scenario's request gaps and final observation periods, counted by kind.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PeriodCounts {
+    /// Each kind in the order its first period was seen.
+    pub groups: Vec<PeriodGroup>,
+    /// Eligible periods whose turn had ended before the estimated trigger.
+    pub confirmed: u64,
+}
+
+impl PeriodCounts {
+    pub(crate) fn add(&mut self, kind: PeriodKind, confirmed: bool) {
+        match self.groups.iter_mut().find(|g| g.kind == kind) {
+            Some(g) => g.periods += 1,
+            None => self.groups.push(PeriodGroup { kind, periods: 1 }),
+        }
+        self.confirmed += u64::from(confirmed);
+    }
+
+    /// Every counted period.
+    pub fn total(&self) -> u64 {
+        self.groups.iter().map(|g| g.periods).sum()
+    }
+
+    /// The periods with `status`.
+    pub fn with_status(&self, status: PeriodStatus) -> u64 {
+        self.groups
+            .iter()
+            .filter(|g| g.kind.status == status)
+            .map(|g| g.periods)
+            .sum()
+    }
 }
 
 /// A value for idle compaction on and off.
@@ -1751,7 +1769,7 @@ pub struct IdleScenario {
     pub applicable: bool,
     pub ttls: PerBucket<Option<Ttl>>,
     pub windows: Vec<ScenarioWindow>,
-    pub periods: Vec<IdlePeriod>,
+    pub periods: PeriodCounts,
     pub cost: OnOff<Cost>,
     /// Only changed charges, relative to the shared recorded-request baseline.
     pub adjustment: OnOff<Cost>,
@@ -1790,8 +1808,8 @@ pub struct T3IdleComparison {
     pub baseline: String,
     pub ttl: Option<Ttl>,
     pub scenarios: Vec<T3IdleScenario>,
-    /// Shared eligibility; summary cost and calibration describe beforeCacheExpires only.
-    pub periods: Vec<IdlePeriod>,
+    /// Shared eligibility, counted once for every mode.
+    pub periods: PeriodCounts,
 }
 
 /// T3 idle modes use observed expiry and lifecycle evidence, independently of native interactive eligibility.

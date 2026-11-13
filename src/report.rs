@@ -14,8 +14,8 @@ use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EstimateEvidence,
     Evidence, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile,
-    Report, RequestEvidence, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
-    UsageEstimate, Usd, Verdict,
+    Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck,
+    T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -1389,18 +1389,21 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                     ),
                 );
                 let periods = &scenario.periods;
-                let with = |f: &dyn Fn(&crate::model::IdlePeriod) -> bool| {
-                    periods.iter().filter(|p| f(p)).count()
-                };
+                let finals: u64 = periods
+                    .groups
+                    .iter()
+                    .filter(|g| g.kind.return_timing == ReturnTiming::Final)
+                    .map(|g| g.periods)
+                    .sum();
                 out.field(
                     "Idle periods",
                     &format!(
                         "{} request/final periods; {} eligible, {} confirmed; {} censored; {} final periods without observed return",
-                        periods.len(),
-                        with(&|p| p.status == PeriodStatus::Eligible),
-                        with(&|p| p.confirmed),
-                        with(&|p| p.status == PeriodStatus::Censored),
-                        with(&|p| p.resume.is_none())
+                        periods.total(),
+                        periods.with_status(PeriodStatus::Eligible),
+                        periods.confirmed,
+                        periods.with_status(PeriodStatus::Censored),
+                        finals
                     ),
                 );
             }
@@ -1643,20 +1646,16 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         CheckResult::T3Idle(i) => {
             for comparison in [&i.current_settings, &i.after_recommendations] {
                 out.field("T3 period baseline", &comparison.baseline);
-                let mut groups = IndexMap::default();
-                for p in &comparison.periods {
-                    *groups
-                        .entry((p.status, p.return_timing, p.outcome, p.reason))
-                        .or_insert(0usize) += 1;
-                }
-                for ((status, timing, outcome, reason), count) in groups {
+                for g in &comparison.periods.groups {
                     out.field(
                         "T3 idle period group",
                         &format!(
-                            "{count} periods; {}; {}; {}; {reason}",
-                            label(&status),
-                            label(&timing),
-                            label(&outcome)
+                            "{} periods; {}; {}; {}; {}",
+                            g.periods,
+                            label(&g.kind.status),
+                            label(&g.kind.return_timing),
+                            label(&g.kind.outcome),
+                            g.kind.reason
                         ),
                     );
                 }
@@ -1712,20 +1711,16 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                         token_range(scenario.by_context.iter().filter_map(|s| s.tokens))
                     ),
                 );
-                let mut groups = IndexMap::default();
-                for p in &scenario.periods {
-                    *groups
-                        .entry((p.status, p.return_timing, p.outcome, p.reason))
-                        .or_insert(0usize) += 1;
-                }
-                for ((status, timing, outcome, reason), count) in groups {
+                for g in &scenario.periods.groups {
                     out.field(
                         "Idle period group",
                         &format!(
-                            "{count} periods; {}; {}; {}; {reason}",
-                            label(&status),
-                            label(&timing),
-                            label(&outcome)
+                            "{} periods; {}; {}; {}; {}",
+                            g.periods,
+                            label(&g.kind.status),
+                            label(&g.kind.return_timing),
+                            label(&g.kind.outcome),
+                            g.kind.reason
                         ),
                     );
                 }
@@ -2176,14 +2171,14 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
             let periods = &i.after_recommendations.periods;
-            if !periods.is_empty()
-                && periods
-                    .iter()
-                    .all(|p| matches!(p.status, PeriodStatus::Censored | PeriodStatus::Ineligible))
+            if periods.total() > 0
+                && periods.with_status(PeriodStatus::Censored)
+                    + periods.with_status(PeriodStatus::Ineligible)
+                    == periods.total()
             {
                 return "Sessions were never idle long enough for it to trigger, so it made no difference.".into();
             }
-            if !periods.iter().any(|p| p.status == PeriodStatus::Eligible) {
+            if periods.with_status(PeriodStatus::Eligible) == 0 {
                 return "No idle gaps could be compared with it on and off.".into();
             }
             if i.after_recommendations.delta_usd == Some(0.0) {
@@ -2231,7 +2226,7 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
         .flat_map(|s| s.cost.unknown.iter().map(String::as_str))
         .collect();
     let Some(first) = reasons.first() else {
-        if c.after_recommendations.periods.is_empty() {
+        if c.after_recommendations.periods.total() == 0 {
             return "No main-thread idle gaps in this window to compare.".into();
         }
         // Every mode is priced, so only a disabled instance or ownership keeps it advisory.
@@ -4318,34 +4313,28 @@ mod tests {
         })
     }
 
-    fn period(status: PeriodStatus, resume: Option<&str>) -> IdlePeriod {
-        IdlePeriod {
-            request: "synthetic-idle-request".into(),
-            resume: resume.map(Text::from),
-            session: "session".into(),
-            context_tokens: Some(180_000),
-            gap_ms: 3_700_000,
+    fn period(status: PeriodStatus, returned: bool) -> PeriodKind {
+        PeriodKind {
             status,
             reason: "synthetic gap",
-            confirmed: status == PeriodStatus::Eligible,
-            return_timing: ReturnTiming::AfterExpiry,
+            return_timing: if returned {
+                ReturnTiming::AfterExpiry
+            } else {
+                ReturnTiming::Final
+            },
             outcome: PeriodOutcome::Unobserved,
-            event: None,
-            version: Some("2.1.314".into()),
-            client: None,
-            flag_state: Some("on"),
-            activation: Some(1.0 / 3.0),
-            activation_basis: "synthetic cohort".into(),
-            summary_cost: cost(Some(0.875), 0.875),
-            calibration: Some(PeriodCalibration {
-                events: ["synthetic-boundary".into(), "second".into()].into(),
-                summary_tokens: 1500,
-                prefix_tokens: 30000,
-            }),
         }
     }
 
-    fn idle_scenario(periods: Vec<IdlePeriod>, delta: Option<f64>) -> IdleScenario {
+    fn counts(kinds: impl IntoIterator<Item = PeriodKind>) -> PeriodCounts {
+        let mut counts = PeriodCounts::default();
+        for kind in kinds {
+            counts.add(kind, kind.status == PeriodStatus::Eligible);
+        }
+        counts
+    }
+
+    fn idle_scenario(periods: PeriodCounts, delta: Option<f64>) -> IdleScenario {
         IdleScenario {
             baseline: "current settings".into(),
             applicable: true,
@@ -4391,11 +4380,7 @@ mod tests {
         }
     }
 
-    fn idle_check(
-        base: CheckBase<bool>,
-        periods: Vec<IdlePeriod>,
-        delta: Option<f64>,
-    ) -> CheckResult {
+    fn idle_check(base: CheckBase<bool>, periods: PeriodCounts, delta: Option<f64>) -> CheckResult {
         CheckResult::Idle(IdleCheck {
             base,
             bucket: "main",
@@ -4622,10 +4607,10 @@ mod tests {
             compaction_check(window_keep),
             idle_check(
                 idle,
-                vec![
-                    period(PeriodStatus::Eligible, Some("synthetic-resume")),
-                    period(PeriodStatus::Censored, None),
-                ],
+                counts([
+                    period(PeriodStatus::Eligible, true),
+                    period(PeriodStatus::Censored, false),
+                ]),
                 Some(0.0),
             ),
             speed_check(fast, "explicit fastMode false"),
@@ -5105,7 +5090,10 @@ mod tests {
             recommended: Some(false),
             ..on.clone()
         };
-        report.checks = vec![idle_check(on, vec![], None), idle_check(off, vec![], None)];
+        report.checks = vec![
+            idle_check(on, PeriodCounts::default(), None),
+            idle_check(off, PeriodCounts::default(), None),
+        ];
         report.context.clear();
         let idle = fixes(&report, false);
         assert_eq!(idle[0].how, set(&["idleCompaction"], json!(true)));
@@ -6003,13 +5991,14 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        let eligible = period(PeriodStatus::Eligible, Some("return"));
-        let mut unknown = period(PeriodStatus::Unknown, None);
-        unknown.reason = "unresolved synthetic setting";
-        let mut periods = vec![eligible; 100];
-        periods.push(unknown);
-        idle.after_recommendations.periods = periods;
-        idle.current_settings.periods.clear();
+        let eligible = period(PeriodStatus::Eligible, true);
+        let unknown = PeriodKind {
+            reason: "unresolved synthetic setting",
+            ..period(PeriodStatus::Unknown, true)
+        };
+        idle.after_recommendations.periods =
+            counts(std::iter::repeat_n(eligible, 100).chain([unknown]));
+        idle.current_settings.periods = PeriodCounts::default();
         let rendered = text(&report, None, true);
         assert!(
             rendered.contains("100 periods; eligible; after-expiry; unobserved; synthetic gap")

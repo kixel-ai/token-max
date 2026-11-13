@@ -19,9 +19,9 @@ use crate::discovery::locale_compare;
 use crate::model::{
     Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
     CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
-    IdleCheck, IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind,
-    PerBucket, PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming,
-    Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
+    IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
+    PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar,
+    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
     WindowControl,
 };
 use crate::prices::{
@@ -494,8 +494,9 @@ impl<'r> ReplayIndex<'r> {
     }
 }
 
-/// An idle period with the context its replay needs.
-struct Prepared<'r> {
+/// One request gap or final observation period, without an assumed session end, with the
+/// context its replay needs.
+struct Period<'r> {
     previous: &'r Request,
     next: Option<&'r Request>,
     boundary: Option<&'r StructuralEvent>,
@@ -503,6 +504,97 @@ struct Prepared<'r> {
     window: Option<i64>,
     threshold: Option<i64>,
     ttls: Ttls,
+    context_tokens: Option<i64>,
+    gap_ms: i64,
+    kind: PeriodKind,
+    confirmed: bool,
+    flag_state: Option<&'static str>,
+    activation: Option<f64>,
+    /// The known-on cohort whose applied fraction set an unobserved activation.
+    cohort: Option<usize>,
+}
+
+/// The calibration one period's hypothetical summary used.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PeriodCalibration {
+    /// The calibrating summaries' events, shared by every period one cohort calibrates.
+    pub(crate) events: std::sync::Arc<[Id]>,
+    pub(crate) summary_tokens: i64,
+    pub(crate) prefix_tokens: i64,
+}
+
+/// One period with its evidence. Only tests read single periods; the report counts them.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IdlePeriod {
+    pub(crate) request: Text,
+    pub(crate) resume: Option<Text>,
+    pub(crate) session: Text,
+    pub(crate) context_tokens: Option<i64>,
+    pub(crate) gap_ms: i64,
+    pub(crate) status: PeriodStatus,
+    pub(crate) reason: &'static str,
+    pub(crate) confirmed: bool,
+    pub(crate) return_timing: ReturnTiming,
+    pub(crate) outcome: PeriodOutcome,
+    pub(crate) event: Option<Id>,
+    pub(crate) version: Option<Text>,
+    pub(crate) client: Option<Text>,
+    pub(crate) flag_state: Option<&'static str>,
+    pub(crate) activation: Option<f64>,
+    pub(crate) activation_basis: Cow<'static, str>,
+    pub(crate) summary_cost: Cost,
+    pub(crate) calibration: Option<PeriodCalibration>,
+}
+
+impl Period<'_> {
+    /// This period as tests read it, before any run charges it.
+    fn detail(&self, cohorts: &[ActivationCohort]) -> IdlePeriod {
+        let kind = self.kind;
+        let activation_basis: Cow<'static, str> = if kind.status != PeriodStatus::Eligible {
+            "not applicable".into()
+        } else if kind.outcome != PeriodOutcome::Unobserved {
+            "recorded applied/not-applied returned outcome; missing discarded generation is separately unobserved".into()
+        } else {
+            match self.cohort.map(|c| &cohorts[c]) {
+                Some(c) => format!(
+                    "same version/client/flag known-on returned applied fraction {}/{}; final periods use that same fraction with no second liveness factor",
+                    c.applied, c.eligible
+                )
+                .into(),
+                None => "documented-trigger fallback: left open and awake, one summary; final periods have the same assumed activation and no return benefit".into(),
+            }
+        };
+        IdlePeriod {
+            request: self.previous.id.clone(),
+            resume: self.next.map(|n| n.id.clone()),
+            session: self.previous.session.clone(),
+            context_tokens: self.context_tokens,
+            gap_ms: self.gap_ms,
+            status: kind.status,
+            reason: kind.reason,
+            confirmed: self.confirmed,
+            return_timing: kind.return_timing,
+            outcome: kind.outcome,
+            event: self.boundary.map(|b| b.id.clone()),
+            version: self.previous.version.clone(),
+            client: self.previous.client.clone(),
+            flag_state: self.flag_state,
+            activation: self.activation,
+            activation_basis,
+            summary_cost: zero_cost(),
+            calibration: None,
+        }
+    }
+}
+
+/// Which context-size groups each canonical period's charges count toward.
+struct SizeGroups {
+    /// Each period's group, by its first-seen context size.
+    of: Vec<usize>,
+    /// For a canonical period whose request other periods share, those periods' groups.
+    shared: HashMap<usize, Vec<usize>>,
+    len: usize,
 }
 
 /// How a run activates unobserved summaries and sizes them.
@@ -646,18 +738,23 @@ fn changed_cost(
 }
 
 /// A run's charges in total and, for a point run, per period.
-struct Ledger {
+struct Ledger<'x> {
     total: Sum,
-    by_period: Option<Vec<Option<Sum>>>,
+    sizes: &'x SizeGroups,
+    by_size: Option<Vec<Option<Sum>>>,
 }
 
-impl Ledger {
+impl Ledger<'_> {
+    /// Charge a canonical period, and each context size whose periods share its request.
     fn charge(&mut self, period: Option<usize>, cost: &Cost, weight: f64) {
         self.total.add_scaled(cost, weight);
-        if let (Some(period), Some(by_period)) = (period, &mut self.by_period) {
-            by_period[period]
-                .get_or_insert_with(Sum::new)
-                .add_scaled(cost, weight);
+        if let (Some(period), Some(by_size)) = (period, &mut self.by_size) {
+            let shared = self.sizes.shared.get(&period).into_iter().flatten();
+            for &size in std::iter::once(&self.sizes.of[period]).chain(shared) {
+                by_size[size]
+                    .get_or_insert_with(Sum::new)
+                    .add_scaled(cost, weight);
+            }
         }
     }
 }
@@ -665,14 +762,14 @@ impl Ledger {
 /// One run's changed charges relative to the shared baseline.
 struct Run {
     adjustment: Cost,
-    /// Charges per canonical period index; only point runs, which report them, keep any.
-    by_period: Vec<Option<Cost>>,
+    /// Charges per context size; only point runs, which report them, keep any.
+    by_size: Vec<Option<Cost>>,
     resumed: f64,
 }
 
 impl Run {
-    fn period(&self, canonical: usize) -> Cow<'_, Cost> {
-        self.by_period[canonical]
+    fn size(&self, size: usize) -> Cow<'_, Cost> {
+        self.by_size[size]
             .as_ref()
             .map_or_else(|| Cow::Owned(zero_cost()), Cow::Borrowed)
     }
@@ -727,9 +824,10 @@ struct Runner<'r, 'x> {
     since: Millis,
     summaries: &'x Summaries<'r>,
     index: &'x ReplayIndex<'r>,
-    prepared: &'x [Prepared<'r>],
+    periods: &'x [Period<'r>],
     /// The first period with each request identity, which owns its charges.
     canonical: Vec<usize>,
+    sizes: SizeGroups,
     sessions: Vec<Session<'r>>,
 }
 
@@ -737,39 +835,52 @@ impl<'r, 'x> Runner<'r, 'x> {
     fn new(
         context: &'x Profiled<'r>,
         index: &'x ReplayIndex<'r>,
-        prepared: &'x [Prepared<'r>],
-        periods: &[IdlePeriod],
+        periods: &'x [Period<'r>],
+        sizes: &IndexMap<Option<i64>, u64>,
         ttls: &Ttls,
     ) -> Self {
         let mut first: HashMap<&str, usize> = HashMap::default();
-        let canonical = periods
+        let canonical: Vec<usize> = periods
             .iter()
             .enumerate()
-            .map(|(i, p)| *first.entry(&*p.request).or_insert(i))
+            .map(|(i, p)| *first.entry(&*p.previous.id).or_insert(i))
             .collect();
+        let of: Vec<usize> = periods
+            .iter()
+            .map(|p| {
+                sizes
+                    .get_index_of(&p.context_tokens)
+                    .expect("every period's size is counted")
+            })
+            .collect();
+        let mut shared: HashMap<usize, Vec<usize>> = HashMap::default();
+        for (i, &c) in canonical.iter().enumerate() {
+            if c != i {
+                shared.entry(c).or_default().push(of[i]);
+            }
+        }
         let mut runner = Self {
             catalog: context.catalog,
             since: context.since,
             summaries: &context.summaries,
             index,
-            prepared,
+            periods,
             canonical,
+            sizes: SizeGroups {
+                of,
+                shared,
+                len: sizes.len(),
+            },
             sessions: vec![],
         };
-        runner.sessions = runner.ticks(context, periods, ttls, false);
+        runner.sessions = runner.ticks(context, ttls, false);
         runner
     }
 
     /// Each session's requests, boundaries and idle triggers in replay order.
-    fn ticks(
-        &self,
-        context: &Profiled<'r>,
-        periods: &[IdlePeriod],
-        scenario: &Ttls,
-        late: bool,
-    ) -> Vec<Session<'r>> {
+    fn ticks(&self, context: &Profiled<'r>, scenario: &Ttls, late: bool) -> Vec<Session<'r>> {
         let mut groups: IndexMap<&str, Vec<usize>> = IndexMap::default();
-        for (i, p) in self.prepared.iter().enumerate() {
+        for (i, p) in self.periods.iter().enumerate() {
             groups.entry(&*p.previous.session).or_default().push(i);
         }
         groups
@@ -777,7 +888,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             .map(|(session, ps)| {
                 let mut idle_by_event: HashMap<&Id, usize> = HashMap::default();
                 for &i in &ps {
-                    if let Some(b) = self.prepared[i].boundary {
+                    if let Some(b) = self.periods[i].boundary {
                         idle_by_event.insert(&b.id, i);
                     }
                 }
@@ -793,7 +904,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                     let key = tick_key(e.time, true, keyed.len());
                     let idle = idle_by_event.get(&e.id).copied();
                     let source = idle
-                        .map(|i| self.prepared[i].previous)
+                        .map(|i| self.periods[i].previous)
                         .or_else(|| {
                             let id = e.request.as_deref().unwrap_or("");
                             self.index.by_id.get(id).copied()
@@ -811,10 +922,9 @@ impl<'r, 'x> Runner<'r, 'x> {
                     keyed.push((key, tick));
                 }
                 for &i in &ps {
-                    if self.prepared[i].boundary.is_none()
-                        && periods[i].status == PeriodStatus::Eligible
-                    {
-                        let time = self.prepared[i].previous.time + if late { HOUR } else { EARLY };
+                    let p = &self.periods[i];
+                    if p.boundary.is_none() && p.kind.status == PeriodStatus::Eligible {
+                        let time = p.previous.time + if late { HOUR } else { EARLY };
                         keyed.push((tick_key(time, false, keyed.len()), Tick::Idle(i)));
                     }
                 }
@@ -828,18 +938,19 @@ impl<'r, 'x> Runner<'r, 'x> {
     }
 
     /// Replay every session with idle compaction on or off; point runs also record each
-    /// period's summary cost and calibration.
+    /// detailed period's summary cost and calibration, when `detail` holds them.
     fn run(
         &self,
         context: &Profiled<'r>,
         scenario: &Ttls,
         on: bool,
         mode: Mode,
-        periods: &mut [IdlePeriod],
+        detail: &mut [IdlePeriod],
     ) -> Run {
+        let periods = self.periods;
         let late;
         let sessions = if mode == Mode::Late {
-            late = self.ticks(context, periods, scenario, true);
+            late = self.ticks(context, scenario, true);
             &late
         } else {
             &self.sessions
@@ -849,7 +960,8 @@ impl<'r, 'x> Runner<'r, 'x> {
         let since = self.since;
         let mut ledger = Ledger {
             total: Sum::new(),
-            by_period: point.then(|| vec![None; self.prepared.len()]),
+            sizes: &self.sizes,
+            by_size: point.then(|| vec![None; self.sizes.len]),
         };
         let mut resumed = 0.0;
         let mut charged: HashSet<&Id> = HashSet::default();
@@ -873,17 +985,17 @@ impl<'r, 'x> Runner<'r, 'x> {
                         if !on {
                             continue;
                         }
-                        let item = &self.prepared[i];
+                        let item = &periods[i];
                         let time = *time;
-                        if time > item.previous.time + periods[i].gap_ms || time < since {
+                        if time > item.previous.time + item.gap_ms || time < since {
                             continue;
                         }
-                        let unobserved = periods[i].outcome == PeriodOutcome::Unobserved;
+                        let unobserved = item.kind.outcome == PeriodOutcome::Unobserved;
                         let activation = match mode {
                             Mode::Fraction(f) if unobserved => f,
                             Mode::Closed if unobserved => 0.0,
                             Mode::Open if unobserved => 1.0,
-                            _ => periods[i]
+                            _ => item
                                 .activation
                                 .expect("eligible periods have an activation"),
                         };
@@ -898,7 +1010,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             .expect("eligible periods follow a message");
                         let calibration = sample_key(item.previous, part)
                             .and_then(|key| self.index.calibration.get(&key));
-                        let context_tokens = periods[i].context_tokens;
+                        let context_tokens = item.context_tokens;
                         let active = self.canonical[i];
                         let mut branched = Vec::with_capacity(states.len() * 2);
                         for state in states {
@@ -915,8 +1027,8 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     && is_message(part)
                             });
                             let Some(c) = usable else {
-                                if point {
-                                    periods[i].summary_cost =
+                                if let Some(d) = detail.get_mut(i).filter(|_| point) {
+                                    d.summary_cost =
                                         unknown_cost("summary calibration is unresolved");
                                 }
                                 ledger.charge(
@@ -935,8 +1047,8 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 &c.median
                             };
                             let sample = c.samples[0];
-                            if point {
-                                periods[i].calibration = Some(PeriodCalibration {
+                            if let Some(d) = detail.get_mut(i).filter(|_| point) {
+                                d.calibration = Some(PeriodCalibration {
                                     events: c.events.clone(),
                                     summary_tokens: g.output,
                                     prefix_tokens: g.prefix,
@@ -992,9 +1104,9 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 Some(_) => price_part(catalog, sample.summary_request, &summary),
                             };
                             ledger.charge(Some(active), &cost, weight);
-                            if point {
-                                periods[i].summary_cost =
-                                    add_costs([&periods[i].summary_cost, &scale(&cost, weight)]);
+                            if let Some(d) = detail.get_mut(i).filter(|_| point) {
+                                d.summary_cost =
+                                    add_costs([&d.summary_cost, &scale(&cost, weight)]);
                             }
                             if item.next.is_some() {
                                 resumed += weight;
@@ -1063,7 +1175,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             Some(add_costs(&costs))
                         };
                         if let Some(i) = idle {
-                            let item = &self.prepared[i];
+                            let item = &periods[i];
                             let active = self.canonical[i];
                             let resumed_part = item
                                 .next
@@ -1102,9 +1214,9 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     if linked.map_or(e.time, |l| l.time) >= since {
                                         ledger.charge(Some(active), &cost, state.weight);
                                     }
-                                    if point {
-                                        periods[i].summary_cost = add_costs([
-                                            &periods[i].summary_cost,
+                                    if let Some(d) = detail.get_mut(i).filter(|_| point) {
+                                        d.summary_cost = add_costs([
+                                            &d.summary_cost,
                                             &scale(&cost, state.weight),
                                         ]);
                                     }
@@ -1225,10 +1337,10 @@ impl<'r, 'x> Runner<'r, 'x> {
             }
             if on {
                 for &i in &session.periods {
-                    if periods[i].status == PeriodStatus::Unknown {
-                        let cost = unknown_cost(periods[i].reason);
-                        if point {
-                            periods[i].summary_cost = cost.clone();
+                    if periods[i].kind.status == PeriodStatus::Unknown {
+                        let cost = unknown_cost(periods[i].kind.reason);
+                        if let Some(d) = detail.get_mut(i).filter(|_| point) {
+                            d.summary_cost = cost.clone();
                         }
                         ledger.charge(Some(self.canonical[i]), &cost, 1.0);
                     }
@@ -1237,8 +1349,8 @@ impl<'r, 'x> Runner<'r, 'x> {
         }
         Run {
             adjustment: ledger.total.cost(),
-            by_period: ledger
-                .by_period
+            by_size: ledger
+                .by_size
                 .unwrap_or_default()
                 .into_iter()
                 .map(|s| s.map(Sum::cost))
@@ -1262,6 +1374,8 @@ struct Profiled<'a> {
     /// Profile events indexed once for every window simulation and cache replay.
     window_events: WindowEvents<'a>,
     calibration: CompactionSamples<'a>,
+    /// Whether scenarios also keep single periods, which only tests read.
+    detail: bool,
 }
 
 impl<'a> Profiled<'a> {
@@ -1435,8 +1549,7 @@ impl<'a> Profiled<'a> {
         ttls: &Ttls,
         windows: &[ScenarioWindow],
         owner: &str,
-    ) -> (Vec<Prepared<'r>>, Vec<IdlePeriod>, Vec<ActivationCohort>) {
-        let mut prepared = vec![];
+    ) -> (Vec<Period<'r>>, Vec<ActivationCohort>) {
         let mut periods = vec![];
         // The first window owning each (owner, model), as `find` would return.
         let mut lookup: HashMap<(&str, Option<&str>), Option<i64>> = HashMap::default();
@@ -1612,41 +1725,7 @@ impl<'a> Profiled<'a> {
                     && old.get("autoCompactEnabled") == Some(&&Scalar::Bool(true))
                     && !flag_off;
                 let eligible = status == PeriodStatus::Eligible;
-                periods.push(IdlePeriod {
-                    request: r.id.clone(),
-                    resume: next.map(|n| n.id.clone()),
-                    session: r.session.clone(),
-                    context_tokens,
-                    gap_ms,
-                    status,
-                    reason,
-                    confirmed: eligible && turn_end >= r.end_time && turn_end < r.time + EARLY,
-                    return_timing: if next.is_none() {
-                        ReturnTiming::Final
-                    } else if (EARLY..=HOUR).contains(&gap_ms) {
-                        ReturnTiming::NearExpiry
-                    } else if gap_ms < HOUR {
-                        ReturnTiming::BeforeExpiry
-                    } else {
-                        ReturnTiming::AfterExpiry
-                    },
-                    outcome: if boundary.is_some() {
-                        PeriodOutcome::Applied
-                    } else if known_on && next.is_some() {
-                        PeriodOutcome::NotApplied
-                    } else {
-                        PeriodOutcome::Unobserved
-                    },
-                    event: boundary.map(|b| b.id.clone()),
-                    version: r.version.clone(),
-                    client: r.client.clone(),
-                    flag_state,
-                    activation: None,
-                    activation_basis: "not applicable".into(),
-                    summary_cost: zero_cost(),
-                    calibration: None,
-                });
-                prepared.push(Prepared {
+                periods.push(Period {
                     previous: r,
                     next,
                     boundary,
@@ -1654,69 +1733,94 @@ impl<'a> Profiled<'a> {
                     window,
                     threshold: c.threshold,
                     ttls: period_ttls,
+                    context_tokens,
+                    gap_ms,
+                    kind: PeriodKind {
+                        status,
+                        reason,
+                        return_timing: if next.is_none() {
+                            ReturnTiming::Final
+                        } else if (EARLY..=HOUR).contains(&gap_ms) {
+                            ReturnTiming::NearExpiry
+                        } else if gap_ms < HOUR {
+                            ReturnTiming::BeforeExpiry
+                        } else {
+                            ReturnTiming::AfterExpiry
+                        },
+                        outcome: if boundary.is_some() {
+                            PeriodOutcome::Applied
+                        } else if known_on && next.is_some() {
+                            PeriodOutcome::NotApplied
+                        } else {
+                            PeriodOutcome::Unobserved
+                        },
+                    },
+                    confirmed: eligible && turn_end >= r.end_time && turn_end < r.time + EARLY,
+                    flag_state,
+                    activation: None,
+                    cohort: None,
                 });
             }
         }
-        let truthy = |text: &Option<Text>| text.clone().filter(|t| !t.is_empty());
-        let mut cohorts: IndexMap<(Text, Text, &str), ActivationCohort> = IndexMap::default();
-        for (p, item) in periods.iter().zip(&prepared) {
-            if p.status != PeriodStatus::Eligible || truthy(&p.resume).is_none() || !item.known_on {
+        let truthy = |text: Option<&'r Text>| text.map(|t| &**t).filter(|t| !t.is_empty());
+        let mut cohorts: IndexMap<(&str, &str, &str), ActivationCohort> = IndexMap::default();
+        for p in &periods {
+            let r: &'r Request = p.previous;
+            if p.kind.status != PeriodStatus::Eligible
+                || p.next.is_none_or(|n| n.id.is_empty())
+                || !p.known_on
+            {
                 continue;
             }
-            let (Some(version), Some(client), Some(flag_state)) =
-                (truthy(&p.version), truthy(&p.client), p.flag_state)
-            else {
+            let (Some(version), Some(client), Some(flag_state)) = (
+                truthy(r.version.as_ref()),
+                truthy(r.client.as_ref()),
+                p.flag_state,
+            ) else {
                 continue;
             };
             let c = cohorts
-                .entry((version.clone(), client.clone(), flag_state))
+                .entry((version, client, flag_state))
                 .or_insert(ActivationCohort {
-                    version,
-                    client,
+                    version: version.into(),
+                    client: client.into(),
                     flag_state,
                     eligible: 0,
                     applied: 0,
                     fraction: 0.0,
                 });
             c.eligible += 1;
-            c.applied += u64::from(p.outcome == PeriodOutcome::Applied);
+            c.applied += u64::from(p.kind.outcome == PeriodOutcome::Applied);
             c.fraction = c.applied as f64 / c.eligible as f64;
         }
         for p in &mut periods {
-            if p.status != PeriodStatus::Eligible {
-                p.activation = (p.status != PeriodStatus::Unknown).then_some(0.0);
+            if p.kind.status != PeriodStatus::Eligible {
+                p.activation = (p.kind.status != PeriodStatus::Unknown).then_some(0.0);
                 continue;
             }
-            if p.outcome != PeriodOutcome::Unobserved {
-                p.activation = Some(if p.outcome == PeriodOutcome::Applied {
+            if p.kind.outcome != PeriodOutcome::Unobserved {
+                p.activation = Some(if p.kind.outcome == PeriodOutcome::Applied {
                     1.0
                 } else {
                     0.0
                 });
-                p.activation_basis = "recorded applied/not-applied returned outcome; missing discarded generation is separately unobserved".into();
                 continue;
             }
             // Cohorts never hold a missing or empty version or client, so a missing value matches none.
-            let c = match (&p.version, &p.client, p.flag_state) {
+            let r: &'r Request = p.previous;
+            p.cohort = match (r.version.as_deref(), r.client.as_deref(), p.flag_state) {
                 (Some(version), Some(client), Some(flag_state)) => {
-                    cohorts.get(&(version.clone(), client.clone(), flag_state))
+                    cohorts.get_index_of(&(version, client, flag_state))
                 }
                 _ => None,
             };
-            p.activation = Some(c.map_or(1.0, |c| c.fraction));
-            p.activation_basis = match c {
-                Some(c) => format!(
-                    "same version/client/flag known-on returned applied fraction {}/{}; final periods use that same fraction with no second liveness factor",
-                    c.applied, c.eligible
-                )
-                .into(),
-                None => "documented-trigger fallback: left open and awake, one summary; final periods have the same assumed activation and no return benefit".into(),
-            };
+            p.activation = Some(p.cohort.map_or(1.0, |c| cohorts[c].fraction));
         }
-        (prepared, periods, cohorts.into_values().collect())
+        (periods, cohorts.into_values().collect())
     }
 
-    /// Compare idle on and off for `owner` in one replayed TTL/window configuration.
+    /// Compare idle on and off for `owner` in one replayed TTL/window configuration, with its
+    /// single periods when `self.detail` asks for them.
     fn scenario(
         &self,
         replay: &Replay,
@@ -1725,9 +1829,9 @@ impl<'a> Profiled<'a> {
         ttls: &Ttls,
         windows: &[ScenarioWindow],
         baseline: &str,
-    ) -> IdleScenario {
-        let (prepared, mut periods, activation_cohorts) = self.periods(index, ttls, windows, owner);
-        let idle_events: HashSet<&Id> = prepared
+    ) -> (IdleScenario, Vec<IdlePeriod>) {
+        let (periods, activation_cohorts) = self.periods(index, ttls, windows, owner);
+        let idle_events: HashSet<&Id> = periods
             .iter()
             .filter_map(|p| p.boundary.map(|b| &b.id))
             .collect();
@@ -1766,8 +1870,23 @@ impl<'a> Profiled<'a> {
             common.add(cost);
         }
         let common = common.cost();
-        let runner = Runner::new(self, index, &prepared, &periods, ttls);
-        let mut run = |on: bool, mode: Mode| runner.run(self, ttls, on, mode, &mut periods);
+        let mut counts = PeriodCounts::default();
+        // Context sizes in first-seen order, with their period counts.
+        let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
+        for p in &periods {
+            counts.add(p.kind, p.confirmed);
+            *sizes.entry(p.context_tokens).or_default() += 1;
+        }
+        let mut detail: Vec<IdlePeriod> = if self.detail {
+            periods
+                .iter()
+                .map(|p| p.detail(&activation_cohorts))
+                .collect()
+        } else {
+            vec![]
+        };
+        let runner = Runner::new(self, index, &periods, &sizes, ttls);
+        let mut run = |on: bool, mode: Mode| runner.run(self, ttls, on, mode, &mut detail);
         let off = run(false, Mode::Point);
         let on = run(true, Mode::Point);
         let delta = |r: &Run| {
@@ -1816,7 +1935,7 @@ impl<'a> Profiled<'a> {
             .chain(&off.adjustment.unknown)
             .collect();
         let unknown: Vec<String> = unknown.into_iter().cloned().collect();
-        let applicable = prepared.iter().any(|p| {
+        let applicable = periods.iter().any(|p| {
             p.ttls.main != Some(Ttl::FiveMinutes)
                 && self
                     .scopes
@@ -1829,39 +1948,24 @@ impl<'a> Profiled<'a> {
                 }
         });
         let delta_usd = if unknown.is_empty() { delta(&on) } else { None };
-        // Group once by size, keeping first-seen size order and period order within each.
-        let mut sizes: IndexMap<Option<i64>, Vec<usize>> = IndexMap::default();
-        for (i, p) in periods.iter().enumerate() {
-            sizes.entry(p.context_tokens).or_default().push(i);
-        }
         let by_context = sizes
             .into_iter()
-            .map(|(tokens, selected)| {
-                let total = |run: &Run| {
-                    let costs: Vec<Cow<Cost>> = selected
-                        .iter()
-                        .map(|&i| run.period(runner.canonical[i]))
-                        .collect();
-                    add_costs(costs.iter().map(AsRef::as_ref))
-                };
-                ContextDelta {
-                    tokens,
-                    periods: selected.len() as u64,
-                    delta_usd: difference(&total(&on), &total(&off))
-                        .total_usd
-                        .map(Usd::to_f64),
-                }
+            .enumerate()
+            .map(|(size, (tokens, periods))| ContextDelta {
+                tokens,
+                periods,
+                delta_usd: difference(&on.size(size), &off.size(size))
+                    .total_usd
+                    .map(Usd::to_f64),
             })
             .collect();
         let elapsed = self.now - self.since;
-        // The report keeps one period per request gap, so it keeps no spare capacity.
-        periods.shrink_to_fit();
-        IdleScenario {
+        let scenario = IdleScenario {
             baseline: baseline.to_string(),
             applicable,
             ttls: ttls.clone(),
             windows: windows.to_vec(),
-            periods,
+            periods: counts,
             cost: OnOff {
                 off: add_costs([&common, &off.adjustment]),
                 on: add_costs([&common, &on.adjustment]),
@@ -1887,7 +1991,8 @@ impl<'a> Profiled<'a> {
                 off: off.adjustment,
             },
             unknown,
-        }
+        };
+        (scenario, detail)
     }
 }
 
@@ -1920,10 +2025,19 @@ fn historically_available(events: &[&StructuralEvent], r: &Request) -> bool {
 
 /// Compare idle compaction on and off for each Claude profile.
 pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
+    detailed_checks(options, false)
+        .into_iter()
+        .map(|(check, _)| check)
+        .collect()
+}
+
+/// Each check with its single periods at current settings and after recommendations, when
+/// `detail` asks for them.
+fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<IdlePeriod>; 2])> {
     let mut checks = Vec::new();
     for profile in &options.scan.profiles {
         if profile.harness == Harness::Claude && profile.t3.is_none() {
-            profile_checks(options, profile, &mut checks);
+            profile_checks(options, profile, detail, &mut checks);
         }
     }
     checks
@@ -1985,7 +2099,8 @@ pub(crate) fn recommended_windows(
 fn profile_checks<'a>(
     options: &IdleOptions<'a>,
     profile: &'a Profile,
-    checks: &mut Vec<IdleCheck>,
+    detail: bool,
+    checks: &mut Vec<(IdleCheck, [Vec<IdlePeriod>; 2])>,
 ) {
     let scan = options.scan;
     let in_profile = |profiles: &[String]| profiles.contains(&profile.id);
@@ -2046,6 +2161,7 @@ fn profile_checks<'a>(
         groups,
         window_events: WindowEvents::new(events.iter().copied()),
         calibration: compaction_samples(&requests, &events, options.summaries),
+        detail,
     };
     let scopes = &profiled.scopes;
     let current_windows = current_windows(scopes, &main);
@@ -2071,7 +2187,7 @@ fn profile_checks<'a>(
         controls.insert(c.owner.as_str(), c);
     }
     // Each replay covers the whole history, so the current one is released before the next.
-    let current_settings: Vec<IdleScenario> = {
+    let current_settings: Vec<(IdleScenario, Vec<IdlePeriod>)> = {
         let current = profiled.replay(&current_ttls, &current_windows, false);
         let current_events = all_events(&events, &current.modeled);
         let current_index = ReplayIndex::new(
@@ -2111,8 +2227,9 @@ fn profile_checks<'a>(
         .cloned()
         .collect();
     let elapsed = now - since;
-    for ((&owner, &c), current_settings) in controls.iter().zip(current_settings) {
-        let after = profiled.scenario(
+    for ((&owner, &c), (current_settings, current_periods)) in controls.iter().zip(current_settings)
+    {
+        let (after, after_periods) = profiled.scenario(
             &recommended,
             &recommended_index,
             owner,
@@ -2166,7 +2283,7 @@ fn profile_checks<'a>(
         let threshold = c
             .threshold
             .map_or_else(|| "unknown".to_string(), |t| t.to_string());
-        checks.push(IdleCheck {
+        let check = IdleCheck {
             base: CheckBase {
                 profile: profile.id.clone(),
                 history_profiles: history_profiles.iter().map(|p| p.to_string()).collect(),
@@ -2232,12 +2349,25 @@ fn profile_checks<'a>(
             current_settings,
             after_recommendations: after,
             usage_estimates: usage_estimates.clone(),
-        });
+        };
+        checks.push((check, [current_periods, after_periods]));
     }
 }
 
 /// Compare T3's policies with the shared summary calibration and provider pricing owners.
 pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleCheck> {
+    detailed_t3_checks(options, false)
+        .into_iter()
+        .map(|(check, _)| check)
+        .collect()
+}
+
+/// Each T3 check with its single periods at current settings and after recommendations,
+/// when `detail` asks for them.
+fn detailed_t3_checks(
+    options: &IdleOptions<'_>,
+    detail: bool,
+) -> Vec<(crate::model::T3IdleCheck, [Vec<IdlePeriod>; 2])> {
     use crate::model::T3IdleCheck;
     let mut checks = Vec::new();
     for profile in &options.scan.profiles {
@@ -2284,6 +2414,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             groups,
             window_events: WindowEvents::new(events.iter().copied()),
             calibration: samples,
+            detail,
         };
         let current_windows = current_windows(&profiled.scopes, &requests);
         let after_windows = recommended_windows(&profiled.scopes, &requests, options.windows);
@@ -2311,12 +2442,12 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         current_replay
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
-        let current = t3_comparison(
+        let (current, current_periods) = t3_comparison(
             options,
             profile,
             &current_replay,
             &events,
-            &profiled.calibration,
+            &profiled,
             &current_ttls,
             "T3 modes at current native TTL/window controls",
         );
@@ -2347,12 +2478,12 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         after_replay
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
-        let after = t3_comparison(
+        let (after, after_periods) = t3_comparison(
             options,
             profile,
             &after_replay,
             &events,
-            &profiled.calibration,
+            &profiled,
             &after_ttls,
             "T3 modes after applicable TTL/window recommendations using the shared window/cache replay; independent savings do not add",
         );
@@ -2385,7 +2516,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             .zip(best.and_then(|s| s.cost.total_usd))
             .map(|(a, b)| (a - b).to_f64());
         let applicable = instance.enabled && instance.ownership_resolved;
-        checks.push(T3IdleCheck {
+        let check = T3IdleCheck {
             base: CheckBase {
                 profile: profile.id.clone(), history_profiles: requests.iter().flat_map(|r|r.profiles.iter().cloned()).collect::<IndexSet<_>>().into_iter().collect(),
                 evidence: if all_priced { Evidence::Estimated } else { Evidence::Unknown },
@@ -2399,7 +2530,8 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session; 5m and 1h caches both apply".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
-        });
+        };
+        checks.push((check, [current_periods, after_periods]));
     }
     checks
 }
@@ -2437,10 +2569,11 @@ fn t3_comparison(
     profile: &Profile,
     replay: &Replay<'_>,
     events: &[&StructuralEvent],
-    samples: &CompactionSamples<'_>,
+    profiled: &Profiled<'_>,
     ttls: &Ttls,
     baseline: &str,
-) -> crate::model::T3IdleComparison {
+) -> (crate::model::T3IdleComparison, Vec<IdlePeriod>) {
+    let samples = &profiled.calibration;
     use crate::model::{T3IdleComparison, T3IdleMode};
     let ttl = ttls.main;
     let requests: Vec<&Request> = replay.requests.iter().map(AsRef::as_ref).collect();
@@ -2471,7 +2604,8 @@ fn t3_comparison(
         boundaries.entry(&e.session).or_default().push(e);
     }
     let mut gaps = Vec::new();
-    let mut periods = Vec::new();
+    let mut counts = PeriodCounts::default();
+    let mut detail = Vec::new();
     for group in groups.values_mut() {
         group.sort_by_key(|r| r.time);
         for (i, &r) in group.iter().enumerate() {
@@ -2629,13 +2763,45 @@ fn t3_comparison(
                     ),
                 },
             };
-            periods.push(IdlePeriod {
-                request:r.id.clone(), resume:next.map(|r|r.id.clone()),session:r.session.clone(),context_tokens:tokens,
-                gap_ms:end-r.end_time,status,reason,confirmed:observed.is_some(),
-                return_timing:if next.is_none(){ReturnTiming::Final}else if expires.is_some_and(|t|end>=t){ReturnTiming::AfterExpiry}else{ReturnTiming::BeforeExpiry},
-                outcome:if observed.is_some(){PeriodOutcome::Applied}else{PeriodOutcome::Unobserved},event:boundary.map(|e|e.id.clone()),version:r.version.clone(),client:r.client.clone(),flag_state:None,
-                activation:if status==PeriodStatus::Eligible{Some(1.0)}else{None},activation_basis:"conditional server liveness or on-return acceptance; absent generation is unobserved".into(),summary_cost:zero_cost(),calibration:None,
-            });
+            let kind = PeriodKind {
+                status,
+                reason,
+                return_timing: if next.is_none() {
+                    ReturnTiming::Final
+                } else if expires.is_some_and(|t| end >= t) {
+                    ReturnTiming::AfterExpiry
+                } else {
+                    ReturnTiming::BeforeExpiry
+                },
+                outcome: if observed.is_some() {
+                    PeriodOutcome::Applied
+                } else {
+                    PeriodOutcome::Unobserved
+                },
+            };
+            counts.add(kind, observed.is_some());
+            if profiled.detail {
+                detail.push(IdlePeriod {
+                    request: r.id.clone(),
+                    resume: next.map(|r| r.id.clone()),
+                    session: r.session.clone(),
+                    context_tokens: tokens,
+                    gap_ms: end - r.end_time,
+                    status,
+                    reason,
+                    confirmed: observed.is_some(),
+                    return_timing: kind.return_timing,
+                    outcome: kind.outcome,
+                    event: boundary.map(|e| e.id.clone()),
+                    version: r.version.clone(),
+                    client: r.client.clone(),
+                    flag_state: None,
+                    activation: (status == PeriodStatus::Eligible).then_some(1.0),
+                    activation_basis: "conditional server liveness or on-return acceptance; absent generation is unobserved".into(),
+                    summary_cost: zero_cost(),
+                    calibration: None,
+                });
+            }
             gaps.push(T3Gap {
                 previous: r,
                 next,
@@ -2665,19 +2831,19 @@ fn t3_comparison(
                 replay,
             },
             &gaps,
-            &mut periods,
+            &mut detail,
             mode,
         )
     })
     .collect();
     // All values are changed charges against the same native request baseline.
-    periods.shrink_to_fit();
-    T3IdleComparison {
+    let comparison = T3IdleComparison {
         baseline: baseline.into(),
         ttl,
         scenarios,
-        periods,
-    }
+        periods: counts,
+    };
+    (comparison, detail)
 }
 
 /// Replay T3 changes through later native requests, converging at unrelated compactions.
@@ -2694,7 +2860,7 @@ fn t3_replay(
     options: &IdleOptions<'_>,
     input: &T3Replay<'_>,
     gaps: &[T3Gap<'_>],
-    periods: &mut [IdlePeriod],
+    detail: &mut [IdlePeriod],
     mode: crate::model::T3IdleMode,
 ) -> crate::model::T3IdleScenario {
     let T3Replay {
@@ -3007,9 +3173,11 @@ fn t3_replay(
                     if options.since.is_none_or(|s| *time >= s) {
                         costs.push(cost.clone());
                     }
-                    if mode == T3IdleMode::BeforeCacheExpires {
-                        periods[*i].summary_cost = cost;
-                        periods[*i].calibration = Some(PeriodCalibration {
+                    if mode == T3IdleMode::BeforeCacheExpires
+                        && let Some(d) = detail.get_mut(*i)
+                    {
+                        d.summary_cost = cost;
+                        d.calibration = Some(PeriodCalibration {
                             events: matches.iter().map(|s| s.event.clone()).collect(),
                             summary_tokens: output,
                             prefix_tokens: full,
@@ -3279,14 +3447,38 @@ mod tests {
         since: Option<Millis>,
     }
 
-    fn check_with(scan: &Scan, now: f64, policies: &Policies) -> IdleCheck {
+    /// A check with its single periods, which the report only counts.
+    struct Checked<C> {
+        check: C,
+        current: Vec<IdlePeriod>,
+        after: Vec<IdlePeriod>,
+    }
+
+    impl<C> std::ops::Deref for Checked<C> {
+        type Target = C;
+        fn deref(&self) -> &C {
+            &self.check
+        }
+    }
+
+    impl<C> Checked<C> {
+        fn new((check, [current, after]): (C, [Vec<IdlePeriod>; 2])) -> Self {
+            Self {
+                check,
+                current,
+                after,
+            }
+        }
+    }
+
+    fn check_with(scan: &Scan, now: f64, policies: &Policies) -> Checked<IdleCheck> {
         let catalog = prices();
         // Charging converts linked summaries to compaction parts, which the idle replay reads.
         let mut scan = scan.clone();
         let summaries = compaction_charges(&mut scan, &catalog);
         let ttls: Vec<&TtlCheck> = policies.ttls.iter().collect();
         let windows: Vec<&CompactionCheck> = policies.windows.iter().collect();
-        idle_checks(&IdleOptions {
+        let options = IdleOptions {
             scan: &scan,
             catalog: &catalog,
             summaries: &summaries,
@@ -3295,8 +3487,8 @@ mod tests {
             windows: &windows,
             since: policies.since.or(scan.since),
             now: (now * MINUTE as f64) as Millis,
-        })
-        .remove(0)
+        };
+        Checked::new(detailed_checks(&options, true).remove(0))
     }
 
     /// The full report for `scan`, as the CLI builds it.
@@ -3311,7 +3503,7 @@ mod tests {
         .unwrap()
     }
 
-    fn check(scan: &Scan, now: f64) -> IdleCheck {
+    fn check(scan: &Scan, now: f64) -> Checked<IdleCheck> {
         check_with(scan, now, &Policies::default())
     }
 
@@ -3320,9 +3512,8 @@ mod tests {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
     }
 
-    fn period<'c>(scenario: &'c IdleScenario, request: &str) -> &'c IdlePeriod {
-        scenario
-            .periods
+    fn period<'c>(periods: &'c [IdlePeriod], request: &str) -> &'c IdlePeriod {
+        periods
             .iter()
             .find(|p| &*p.request == request)
             .expect("period")
@@ -3368,7 +3559,7 @@ mod tests {
         assert_eq!(c.base.action, Action::Change);
         assert_eq!(c.base.recommended, Some(true));
         let a = &c.after_recommendations;
-        let p = period(a, "before");
+        let p = period(&c.after, "before");
         near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         let calibration = p.calibration.as_ref().unwrap();
         assert_eq!(calibration.prefix_tokens, 20_000);
@@ -3399,14 +3590,17 @@ mod tests {
         assert_eq!(c.base.action, Action::Keep);
         let a = &c.after_recommendations;
         near(a.delta_usd, 0.1);
-        let last = period(a, "final");
+        let last = period(&c.after, "final");
         assert_eq!(last.resume, None);
         near(last.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         near(a.sensitivity.closed_delta_usd, 0.0);
         near(a.sensitivity.open_delta_usd, 0.1);
         let recent = check(&s, 150.0);
+        assert_eq!(
+            period(&recent.after, "final").status,
+            PeriodStatus::Censored
+        );
         let recent = &recent.after_recommendations;
-        assert_eq!(period(recent, "final").status, PeriodStatus::Censored);
         near(recent.delta_usd, 0.0);
         s.profiles[0].idle.as_mut().unwrap().value = Some(true);
         let off = check(&s, 200.0);
@@ -3425,8 +3619,7 @@ mod tests {
         let c = check(&s, 140.0);
         near(c.after_recommendations.delta_usd, 0.0);
         assert!(
-            c.after_recommendations
-                .periods
+            c.after
                 .iter()
                 .all(|p| matches!(p.status, PeriodStatus::Censored | PeriodStatus::Ineligible))
         );
@@ -3457,7 +3650,7 @@ mod tests {
             } else {
                 ReturnTiming::AfterExpiry
             };
-            assert_eq!(period(a, "before").return_timing, expected);
+            assert_eq!(period(&c.after, "before").return_timing, expected);
             if minute == 158.0 {
                 near(a.sensitivity.late_trigger_delta_usd, 0.0);
             }
@@ -3548,7 +3741,7 @@ mod tests {
         };
         let c = check_with(&s, 200.0, &policies);
         let current = &c.current_settings;
-        assert_eq!(current.periods[0].context_tokens, Some(300_000));
+        assert_eq!(c.current[0].context_tokens, Some(300_000));
         near(Some(current.cost.off.known_usd.to_f64()), 2.4);
         assert_eq!(current.delta_usd, None);
         assert_eq!(c.usage_estimates.len(), 1);
@@ -3597,6 +3790,7 @@ mod tests {
         crate::controls::tune_windows(&mut s);
         let row = "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow";
         let windows: Vec<(String, Option<i64>)> = check(&s, 200.0)
+            .check
             .current_settings
             .windows
             .into_iter()
@@ -3628,7 +3822,7 @@ mod tests {
                 s.events.sort_by_key(|e| e.time);
                 let c = check(&s, 200.0);
                 let a = &c.after_recommendations;
-                assert_eq!(period(a, "final").status, PeriodStatus::Eligible);
+                assert_eq!(period(&c.after, "final").status, PeriodStatus::Eligible);
                 near(a.delta_usd, 0.1);
             }
         }
@@ -3738,7 +3932,7 @@ mod tests {
         );
         let c = check(&s, 201.0);
         let a = &c.after_recommendations;
-        let p = period(a, "before");
+        let p = period(&c.after, "before");
         assert_eq!(p.outcome, PeriodOutcome::Applied);
         near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         near(a.delta_usd, 0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6);
@@ -3815,13 +4009,13 @@ mod tests {
         let c = check(&s, 201.0);
         let a = &c.after_recommendations;
         assert_eq!(a.activation_cohorts[0].fraction, 0.5);
-        let last = period(a, "final");
+        let last = period(&c.after, "final");
         near(last.activation, 0.5);
         near(last.summary_cost.total_usd.map(Usd::to_f64), 0.05);
-        let no = period(a, "no");
+        let no = period(&c.after, "no");
         assert_eq!(no.outcome, PeriodOutcome::NotApplied);
         near(no.summary_cost.total_usd.map(Usd::to_f64), 0.0);
-        let other = period(a, "different");
+        let other = period(&c.after, "different");
         near(other.activation, 1.0);
         near(other.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         assert!(
@@ -3853,7 +4047,7 @@ mod tests {
             assert_eq!(c.base.action, Action::Advisory);
             let mut report = report(s, 201.0);
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
-            report.checks[0] = CheckResult::Idle(c);
+            report.checks[0] = CheckResult::Idle(c.check);
             let text = format_report(&report, ReportOptions::default());
             assert!(text.contains("on and off cost the same"), "{text}");
         }
@@ -3906,10 +4100,7 @@ mod tests {
         let c = check(&s, 200.0);
         near(c.after_recommendations.delta_usd, 0.1);
         assert_eq!(c.base.recommended, Some(false));
-        assert_eq!(
-            period(&c.after_recommendations, "final").outcome,
-            PeriodOutcome::Applied
-        );
+        assert_eq!(period(&c.after, "final").outcome, PeriodOutcome::Applied);
     }
 
     #[test]
@@ -3929,7 +4120,7 @@ mod tests {
             let a = &c.after_recommendations;
             if mode == "active" {
                 near(a.delta_usd, 0.0);
-                assert_eq!(period(a, "before").status, PeriodStatus::Ineligible);
+                assert_eq!(period(&c.after, "before").status, PeriodStatus::Ineligible);
             } else {
                 assert_eq!(a.delta_usd, None, "{mode}");
                 assert_eq!(c.base.action, Action::Advisory, "{mode}");
@@ -3949,12 +4140,7 @@ mod tests {
         s.since = Some(160 * MINUTE);
         let c = check(&s, 201.0);
         near(c.after_recommendations.delta_usd, 0.0);
-        assert!(
-            !c.after_recommendations
-                .periods
-                .iter()
-                .any(|p| &*p.request == "before")
-        );
+        assert!(!c.after.iter().any(|p| &*p.request == "before"));
     }
 
     #[test]
@@ -3966,7 +4152,7 @@ mod tests {
         ];
         let c = check(&data(target, vec![]), 200.0);
         let a = &c.after_recommendations;
-        let order: Vec<&str> = a.periods.iter().map(|p| &*p.request).collect();
+        let order: Vec<&str> = c.after.iter().map(|p| &*p.request).collect();
         assert_eq!(order, ["sample-resume", "a", "b", "c"]);
         let groups: Vec<(Option<i64>, u64)> =
             a.by_context.iter().map(|g| (g.tokens, g.periods)).collect();
@@ -3975,7 +4161,13 @@ mod tests {
             [(Some(20_000), 1), (Some(300_000), 2), (Some(250_000), 1)]
         );
         // Each final period only adds its summary, so a size's delta sums its own periods'.
-        let summary = |id| period(a, id).summary_cost.total_usd.unwrap().to_f64();
+        let summary = |id| {
+            period(&c.after, id)
+                .summary_cost
+                .total_usd
+                .unwrap()
+                .to_f64()
+        };
         near(a.by_context[1].delta_usd, summary("a") + summary("c"));
         near(a.by_context[2].delta_usd, summary("b"));
         assert!(summary("b") < summary("a"));
@@ -4290,11 +4482,11 @@ mod tests {
         scan
     }
 
-    fn t3_check(scan: &Scan, now: f64) -> crate::model::T3IdleCheck {
+    fn t3_check(scan: &Scan, now: f64) -> Checked<crate::model::T3IdleCheck> {
         let catalog = prices();
         let mut scan = scan.clone();
         let summaries = compaction_charges(&mut scan, &catalog);
-        t3_idle_checks(&IdleOptions {
+        let options = IdleOptions {
             scan: &scan,
             catalog: &catalog,
             summaries: &summaries,
@@ -4303,8 +4495,8 @@ mod tests {
             windows: &[],
             since: None,
             now: (now * MINUTE as f64) as Millis,
-        })
-        .remove(0)
+        };
+        Checked::new(detailed_t3_checks(&options, true).remove(0))
     }
 
     #[test]
@@ -4340,12 +4532,7 @@ mod tests {
         );
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
         assert!(check.base.owner.contains("t3/settings.json"));
-        let p = check
-            .current_settings
-            .periods
-            .iter()
-            .find(|p| &*p.request == "a")
-            .unwrap();
+        let p = check.current.iter().find(|p| &*p.request == "a").unwrap();
         assert_eq!(p.status, PeriodStatus::Eligible);
         assert_eq!(p.return_timing, ReturnTiming::AfterExpiry);
         assert_eq!(p.calibration.as_ref().unwrap().prefix_tokens, 20_000);
@@ -4399,8 +4586,7 @@ mod tests {
         let short = t3_check(&scan, 2.0);
         assert_eq!(
             short
-                .current_settings
-                .periods
+                .current
                 .iter()
                 .find(|p| &*p.request == "final")
                 .unwrap()
@@ -4420,7 +4606,7 @@ mod tests {
         report
             .checks
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
-        report.checks.push(CheckResult::T3Idle(check));
+        report.checks.push(CheckResult::T3Idle(check.check));
         let text = format_report(&report, ReportOptions::default());
         let line = crate::test_support::report_line(&text, "T3 idle compaction");
         assert_eq!(line.mark, "change", "{text}");
@@ -4467,8 +4653,8 @@ mod tests {
         boundary.idle_attribution = IdleAttribution::T3;
         observed.events.push(boundary);
         observed.events.sort_by_key(|e| e.time);
-        let observed = t3_check(&observed, 10.0).current_settings.scenarios;
-        let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
+        let observed = t3_check(&observed, 10.0).check.current_settings.scenarios;
+        let baseline = t3_check(&baseline, 10.0).check.current_settings.scenarios;
         // Off grows the later request back from 20k to 300k uncached tokens, and charges
         // neither the recorded nor a new summary.
         near(observed[0].cost.total_usd.map(Usd::to_f64), 1.5 - 0.1);
@@ -4546,7 +4732,7 @@ mod tests {
         report
             .checks
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
-        report.checks.push(CheckResult::T3Idle(check));
+        report.checks.push(CheckResult::T3Idle(check.check));
         let text = format_report(&report, ReportOptions::default());
         let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
@@ -4572,8 +4758,8 @@ mod tests {
         // T3 or not. Without a linked start, the previous request's end bounds it.
         scan.requests.iter_mut().find(|r| &*r.id == "a").unwrap().t3 = None;
         let check = t3_check(&scan, 2.5);
-        let status = |check: &crate::model::T3IdleCheck, id: &str| {
-            let periods = &check.current_settings.periods;
+        let status = |check: &Checked<crate::model::T3IdleCheck>, id: &str| {
+            let periods = &check.current;
             periods.iter().find(|p| *p.request == *id).unwrap().status
         };
         assert_eq!(status(&check, "a"), PeriodStatus::Censored);
@@ -4602,17 +4788,14 @@ mod tests {
         a.completed_at = Some(4 * MINUTE);
         a.cache_expires_at = Some(5 * MINUTE);
         let check = t3_check(&scan, 10.0);
-        assert_eq!(
-            check.current_settings.periods[0].status,
-            PeriodStatus::Eligible
-        );
+        assert_eq!(check.current[0].status, PeriodStatus::Eligible);
         assert_eq!(check.current_settings.scenarios[2].summaries, 1);
 
         // A fully cached last request reports no TTL, so T3 arms no timer, while the
         // SDK still offers its summary when the cold session resumes.
         t3_meta(&mut scan, "a").cache_expires_at = None;
         let check = t3_check(&scan, 10.0);
-        let p = &check.current_settings.periods[0];
+        let p = &check.current[0];
         assert_eq!(p.status, PeriodStatus::Ineligible);
         assert!(p.reason.contains("arms no timer"));
         let s = &check.current_settings.scenarios;
@@ -4628,7 +4811,7 @@ mod tests {
             Ttl::FiveMinutes,
             OnReturn,
         );
-        let priced = t3_check(&scan, 10.0).current_settings.scenarios;
+        let priced = t3_check(&scan, 10.0).check.current_settings.scenarios;
         let mut unpriced = in_session(request("side", 1.0, 1000), "side");
         unpriced.agent = Agent::Subagent;
         unpriced.parts[0].model = Some("unpriced-model".into());

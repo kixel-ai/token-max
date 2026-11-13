@@ -2458,6 +2458,7 @@ fn claude_auto_memory_turned_off_is_kept_off() {
             settings_unresolved: true,
             limitations: vec![],
             inherited_window: None,
+            retained_since: None,
         });
     }
     let t3 = report(&data, 1.0);

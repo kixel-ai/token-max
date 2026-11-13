@@ -66,6 +66,9 @@ pub fn checkout(cwd: &str) -> Result<Option<Vec<String>>, ScanError> {
         return Ok(None);
     };
     let root = paths.last().expect("cwd is included");
+    if unreadable_pointer(root) {
+        return Ok(None);
+    }
     let Some(git) = git_dir(root)? else {
         return Ok(None);
     };
@@ -87,6 +90,25 @@ pub fn checkout(cwd: &str) -> Result<Option<Vec<String>>, ScanError> {
         }
     }
     Ok((!unique.is_empty()).then_some(unique))
+}
+
+/// Whether this host lacks permission to read the `.git` pointer file at `root` or the
+/// `commondir` it leads to, which leaves the checkout unknown rather than invalid.
+fn unreadable_pointer(root: &str) -> bool {
+    let denied = |e: std::io::Error| e.kind() == ErrorKind::PermissionDenied;
+    let dotgit = join(&[root, ".git"]);
+    if !fs::metadata(&dotgit).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
+    let text = match fs::read_to_string(&dotgit) {
+        Ok(text) => text,
+        Err(e) => return denied(e),
+    };
+    let Some(gitdir) = text.trim().strip_prefix("gitdir: ") else {
+        return false;
+    };
+    let common = std::path::Path::new(root).join(gitdir).join("commondir");
+    fs::read_to_string(common).is_err_and(denied)
 }
 
 /// Every `remote.<name>.url` in one Git config file, or the 1-based line Git would reject.
@@ -363,6 +385,17 @@ mod tests {
         // Root reads it anyway.
         if !entered {
             assert_eq!(found.unwrap(), None);
+        }
+        // A pointer file or commondir this user cannot read leaves the checkout unknown.
+        let commondir = main.join(".git/worktrees/branch/commondir");
+        for denied in [&work.join(".git"), &commondir] {
+            std::fs::set_permissions(denied, mode(0o000)).unwrap();
+            let readable = std::fs::read(denied).is_ok();
+            let found = checkout(&text(&work.join("sub")));
+            std::fs::set_permissions(denied, mode(0o644)).unwrap();
+            if !readable {
+                assert_eq!(found.unwrap(), None, "{denied:?}");
+            }
         }
         let file = main.join("src/file");
         std::fs::write(&file, "").unwrap();

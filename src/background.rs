@@ -16,7 +16,7 @@ use crate::model::{
     Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
-    Catalog, add_costs, paired_savings, price_components, unit_rates, unknown_cost, zero_cost,
+    Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
 };
 
 const SOURCES: [&str; 8] = [
@@ -403,35 +403,36 @@ fn lost_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeature
     add_costs(&[request_warming(catalog, end, feature), recap])
 }
 
-/// The estimated (on, off) cost of each turn where the feature would have run.
+/// The estimated on and off costs of the turns where a feature would have run, totaled as
+/// each turn is priced.
+#[derive(Default)]
+struct Generations {
+    pairs: Pairs,
+    on: Sum,
+    off: Sum,
+}
+
+/// Total the estimated (on, off) cost of each turn where the feature would have run.
 fn generations(
     catalog: &Catalog,
     feature: BackgroundFeature,
     ends: &[&TurnEnd<'_>],
-) -> Vec<(Cost, Cost)> {
-    let mut result = vec![];
+) -> Generations {
+    let mut result = Generations::default();
     for end in ends.iter().filter(|e| e.interactive) {
-        match feature {
-            BackgroundFeature::PromptSuggestions => {
-                if !end.suggestion {
-                    continue;
-                }
-                result.push((
-                    fork_cost(catalog, end, feature),
-                    lost_warming(catalog, end, feature),
-                ));
-            }
-            BackgroundFeature::SessionRecaps => {
-                if !end.recap {
-                    continue;
-                }
-                result.push((
-                    fork_cost(catalog, end, feature),
-                    lost_warming(catalog, end, feature),
-                ));
-            }
-            BackgroundFeature::GoalCheckIns | BackgroundFeature::AutoRecaps => {}
+        let runs = match feature {
+            BackgroundFeature::PromptSuggestions => end.suggestion,
+            BackgroundFeature::SessionRecaps => end.recap,
+            BackgroundFeature::GoalCheckIns | BackgroundFeature::AutoRecaps => false,
+        };
+        if !runs {
+            continue;
         }
+        let on = fork_cost(catalog, end, feature);
+        let off = lost_warming(catalog, end, feature);
+        result.pairs.add(&on, &off);
+        result.on.add(&on);
+        result.off.add(&off);
     }
     result
 }
@@ -450,12 +451,12 @@ fn check(
     );
     let enabled = control.value == Some(true);
     let resolved = control.value.is_some();
-    let pairs = if measurable && enabled {
+    let Generations { pairs, on, off } = if measurable && enabled {
         generations(input.catalog, feature, ends)
     } else {
-        vec![]
+        Generations::default()
     };
-    let paired = paired_savings(pairs.iter().map(|(on, off)| (on, off)), 0);
+    let paired = pairs.savings(0);
     // Scale the measured net cost up to every turn where it ran, as context costs do.
     let estimate = (paired.priced > 0)
         .then(|| paired.usd.to_f64() * paired.total as f64 / paired.priced as f64)
@@ -503,10 +504,7 @@ fn check(
         });
         (unknown.clone(), unknown)
     } else {
-        (
-            add_costs(pairs.iter().map(|(on, _)| on)),
-            add_costs(pairs.iter().map(|(_, off)| off)),
-        )
+        (on.cost(), off.cost())
     };
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
@@ -531,6 +529,9 @@ fn check(
         requests.iter().map(|r| r.cwd.clone()).collect()
     };
     let no_history = directories.is_empty();
+    // The set reserved a slot per request, which a list collected from it would keep.
+    let mut directories: Vec<Option<Text>> = directories.into_iter().collect();
+    directories.shrink_to_fit();
     let mut uncertainty: Vec<String> = uncertainty.into_iter().collect();
     if no_history {
         uncertainty
@@ -587,11 +588,11 @@ fn check(
             sources: SOURCES.map(String::from).into(),
         },
         feature,
-        directories: directories.into_iter().collect(),
+        directories,
         reason: control.reason.clone(),
         off: control.off.clone(),
         off_file: control.off_file.clone(),
-        generations: (measurable && resolved).then_some(pairs.len() as u64),
+        generations: (measurable && resolved).then_some(paired.total),
         cost,
         lost_warming: lost,
     }

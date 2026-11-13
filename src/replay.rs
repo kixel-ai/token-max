@@ -894,7 +894,17 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let historical = groups
         .into_iter()
         .map(|(key, requests)| {
-            let costs: Vec<Cost> = requests.iter().map(|r| price_request(catalog, r)).collect();
+            let mut cost = Sum::new();
+            let (mut priced_requests, mut conditional_requests) = (0, 0);
+            for &r in &requests {
+                let c = price_request(catalog, r);
+                if c.total_usd.is_some() {
+                    priced_requests += 1;
+                    conditional_requests +=
+                        u64::from(r.parts.iter().any(|p| conditional_tier(r, p)));
+                }
+                cost.add(&c);
+            }
             HistoricalCost {
                 bucket: if requests[0].profiles.len() > 1 {
                     format!("shared:{key}")
@@ -903,16 +913,10 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 },
                 profiles: requests[0].profiles.to_vec(),
                 requests: requests.len() as u64,
-                priced_requests: costs.iter().filter(|c| c.total_usd.is_some()).count() as u64,
-                conditional_requests: requests
-                    .iter()
-                    .zip(&costs)
-                    .filter(|(r, c)| {
-                        c.total_usd.is_some() && r.parts.iter().any(|p| conditional_tier(r, p))
-                    })
-                    .count() as u64,
+                priced_requests,
+                conditional_requests,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
-                cost: add_costs(&costs),
+                cost: cost.cost(),
             }
         })
         .collect();

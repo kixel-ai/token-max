@@ -3,7 +3,6 @@
 
 use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::collections::BTreeSet;
-use std::iter;
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, CacheBoundaries, ttl_milliseconds};
 use crate::controls::{CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, window_control};
@@ -1341,12 +1340,12 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .filter(|s| summary_ids.contains(&s.event) && s.request.is_none())
                 .map(|s| &s.cost),
         );
-        let servers: Vec<Cost> = selected
-            .iter()
-            .filter(|r| r.time >= since)
-            .map(|r| server_cost(r))
-            .collect();
-        let fixed = add_costs(iter::once(&unmatched).chain(&servers));
+        let mut fixed = Sum::new();
+        fixed.add(&unmatched);
+        for r in selected.iter().filter(|r| r.time >= since) {
+            fixed.add(&server_cost(r));
+        }
+        let fixed = fixed.cost();
         // Totals of totals: Usd sums are exact and first-seen reasons keep their order.
         let recorded_cost = add_costs([&fixed, &baseline_totals.cost()]);
         let observed_summary_cost = add_costs([&unmatched, &baseline_summaries.cost()]);

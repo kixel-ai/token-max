@@ -1,0 +1,10 @@
+// max.kixel.ai: the install and run scripts, as static assets with no Worker code.
+// Deploy by hand from this directory with `wrangler deploy`; see docs/releasing.md.
+{
+	"name": "max-kixel-ai",
+	"account_id": "dd618f5dbd5da77b8296f1613c301f5c",
+	"compatibility_date": "2026-11-01",
+	"workers_dev": false,
+	"routes": [{ "pattern": "max.kixel.ai", "custom_domain": true }],
+	"assets": { "directory": "./public" }
+}

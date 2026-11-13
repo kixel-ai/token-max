@@ -819,6 +819,12 @@ pub(crate) fn discover(
                     && config.auto_compact_window.is_empty())
                 .then(|| local.env.clone()),
             });
+            if harness == Harness::Codex {
+                // Project layers are resolved only for native Codex homes.
+                profile.instruction_budget_unresolved = Some(
+                    "T3 Codex instances can take project_doc_max_bytes from project or launch configuration, which is not resolved for them".into(),
+                );
+            }
             profiles.push(profile);
         }
         states.push(state);
@@ -2382,7 +2388,8 @@ mod tests {
             assert_eq!(scan.coverage.tier_known, 0);
             let cost = crate::prices::price_request(&catalog, r);
             assert_eq!(
-                cost.total_usd.map(|usd| (usd * 1_000_000.0).round()),
+                cost.total_usd
+                    .map(|usd| (usd.to_f64() * 1_000_000.0).round()),
                 expected.map(|usd: f64| (usd * 1_000_000.0).round()),
                 "native={native:?}, T3={selected:?}: {cost:?}"
             );
@@ -2997,12 +3004,13 @@ mod tests {
                 );
             }
             let data = scan(&w.scan_options()).unwrap();
-            let owner = data
-                .profiles
-                .iter()
-                .find(|p| p.t3.is_some())
-                .map(|p| p.id.clone())
-                .unwrap();
+            let t3 = data.profiles.iter().find(|p| p.t3.is_some()).unwrap();
+            // A T3 Codex instance's instruction budget is never assumed from its home alone.
+            assert_eq!(
+                t3.instruction_budget_unresolved.is_some(),
+                harness == Harness::Codex
+            );
+            let owner = t3.id.clone();
             assert_eq!(data.requests.len(), 1, "{harness:?}");
             let r = &data.requests[0];
             assert_eq!(r.agent, Agent::Subagent, "{harness:?}");

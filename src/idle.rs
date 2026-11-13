@@ -21,7 +21,7 @@ use crate::model::{
     CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
     IdleCheck, IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind,
     PerBucket, PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming,
-    Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate,
+    Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
     WindowControl,
 };
 use crate::prices::{
@@ -99,8 +99,8 @@ fn scale(cost: &Cost, fraction: f64) -> Cost {
         return zero_cost();
     }
     Cost {
-        known_usd: cost.known_usd * fraction,
-        total_usd: cost.total_usd.map(|t| t * fraction),
+        known_usd: cost.known_usd.scale(fraction),
+        total_usd: cost.total_usd.map(|t| t.scale(fraction)),
         ..cost.clone()
     }
 }
@@ -613,11 +613,12 @@ fn changed_cost(
         };
         price_components(catalog, r, &unit).output
     };
-    let output = if difference(&output_unit(after), &output_unit(before)).total_usd == Some(0.0) {
-        zero_cost()
-    } else {
-        difference(&a.output, &b.output)
-    };
+    let output =
+        if difference(&output_unit(after), &output_unit(before)).total_usd == Some(Usd::ZERO) {
+            zero_cost()
+        } else {
+            difference(&a.output, &b.output)
+        };
     add_costs([
         &difference(&a.cache, &b.cache),
         &difference(&a.ordinary, &b.ordinary),
@@ -1028,7 +1029,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             .filter(|r| !r.is_empty());
                         let allocated = !charged.contains(&e.id)
                             && (summary_request.is_none()
-                                || summary.is_some_and(|s| s.cost.total_usd != Some(0.0)));
+                                || summary.is_some_and(|s| s.cost.total_usd != Some(Usd::ZERO)));
                         charged.insert(&e.id);
                         // Changed input to the observed summary under each carried context.
                         let extra = |state: &State| -> Option<Cost> {
@@ -1689,7 +1690,7 @@ impl<'a> Profiled<'a> {
         let idle_requests: HashSet<&str> = self
             .all_summaries
             .iter()
-            .filter(|s| idle_events.contains(&s.event) && s.cost.total_usd != Some(0.0))
+            .filter(|s| idle_events.contains(&s.event) && s.cost.total_usd != Some(Usd::ZERO))
             .filter_map(|s| s.request.as_deref().filter(|r| !r.is_empty()))
             .collect();
         let mut common = Sum::new();
@@ -1719,7 +1720,11 @@ impl<'a> Profiled<'a> {
         let mut run = |on: bool, mode: Mode| runner.run(self, ttls, on, mode, &mut periods);
         let off = run(false, Mode::Point);
         let on = run(true, Mode::Point);
-        let delta = |r: &Run| difference(&r.adjustment, &off.adjustment).total_usd;
+        let delta = |r: &Run| {
+            difference(&r.adjustment, &off.adjustment)
+                .total_usd
+                .map(Usd::to_f64)
+        };
         let closed = delta(&run(true, Mode::Closed));
         let open = delta(&run(true, Mode::Open));
         let mut lifetime_break_even_fraction = None;
@@ -1792,7 +1797,9 @@ impl<'a> Profiled<'a> {
                 ContextDelta {
                     tokens,
                     periods: selected.len() as u64,
-                    delta_usd: difference(&total(&on), &total(&off)).total_usd,
+                    delta_usd: difference(&total(&on), &total(&off))
+                        .total_usd
+                        .map(Usd::to_f64),
                 }
             })
             .collect();
@@ -2309,7 +2316,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                     a.cost
                         .total_usd
                         .unwrap()
-                        .total_cmp(&b.cost.total_usd.unwrap())
+                        .cmp(&b.cost.total_usd.unwrap())
                         .then_with(|| {
                             (b.mode == instance.idle_mode).cmp(&(a.mode == instance.idle_mode))
                         })
@@ -2324,7 +2331,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             .and_then(|s| s.cost.total_usd);
         let savings = baseline_cost
             .zip(best.and_then(|s| s.cost.total_usd))
-            .map(|(a, b)| a - b);
+            .map(|(a, b)| (a - b).to_f64());
         let applicable = instance.enabled && instance.ownership_resolved;
         checks.push(T3IdleCheck {
             base: CheckBase {
@@ -3118,6 +3125,8 @@ mod tests {
         };
         Profile {
             agents: Default::default(),
+            instruction_budget_file: None,
+            instruction_budget_unresolved: None,
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -3292,7 +3301,7 @@ mod tests {
         assert_eq!(c.base.recommended, Some(true));
         let a = &c.after_recommendations;
         let p = period(a, "before");
-        near(p.summary_cost.total_usd, 0.1);
+        near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         let calibration = p.calibration.as_ref().unwrap();
         assert_eq!(calibration.prefix_tokens, 20_000);
         assert_eq!(calibration.summary_tokens, 2000);
@@ -3300,7 +3309,7 @@ mod tests {
         // Off: 301k cold writes; following 302k reads 301k and writes 1k.
         near(a.delta_usd, -2.196);
         near(
-            Some(a.cost.on.total_usd.unwrap() - a.cost.off.total_usd.unwrap()),
+            Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             a.delta_usd.unwrap(),
         );
         assert!(
@@ -3324,7 +3333,7 @@ mod tests {
         near(a.delta_usd, 0.1);
         let last = period(a, "final");
         assert_eq!(last.resume, None);
-        near(last.summary_cost.total_usd, 0.1);
+        near(last.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         near(a.sensitivity.closed_delta_usd, 0.0);
         near(a.sensitivity.open_delta_usd, 0.1);
         let recent = check(&s, 150.0);
@@ -3472,7 +3481,7 @@ mod tests {
         let c = check_with(&s, 200.0, &policies);
         let current = &c.current_settings;
         assert_eq!(current.periods[0].context_tokens, Some(300_000));
-        near(Some(current.cost.off.known_usd), 2.4);
+        near(Some(current.cost.off.known_usd.to_f64()), 2.4);
         assert_eq!(current.delta_usd, None);
         assert_eq!(c.usage_estimates.len(), 1);
     }
@@ -3663,10 +3672,10 @@ mod tests {
         let a = &c.after_recommendations;
         let p = period(a, "before");
         assert_eq!(p.outcome, PeriodOutcome::Applied);
-        near(p.summary_cost.total_usd, 0.1);
+        near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         near(a.delta_usd, 0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6);
         near(
-            Some(a.cost.on.total_usd.unwrap() - a.cost.off.total_usd.unwrap()),
+            Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             a.delta_usd.unwrap(),
         );
     }
@@ -3734,13 +3743,13 @@ mod tests {
         assert_eq!(a.activation_cohorts[0].fraction, 0.5);
         let last = period(a, "final");
         near(last.activation, 0.5);
-        near(last.summary_cost.total_usd, 0.05);
+        near(last.summary_cost.total_usd.map(Usd::to_f64), 0.05);
         let no = period(a, "no");
         assert_eq!(no.outcome, PeriodOutcome::NotApplied);
-        near(no.summary_cost.total_usd, 0.0);
+        near(no.summary_cost.total_usd.map(Usd::to_f64), 0.0);
         let other = period(a, "different");
         near(other.activation, 1.0);
-        near(other.summary_cost.total_usd, 0.1);
+        near(other.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         assert!(
             c.base
                 .uncertainty
@@ -3772,7 +3781,7 @@ mod tests {
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
             report.checks[0] = CheckResult::Idle(c);
             let text = format_report(&report, ReportOptions::default());
-            assert!(text.contains("On and off cost the same"), "{text}");
+            assert!(text.contains("on and off cost the same"), "{text}");
         }
     }
 
@@ -3802,7 +3811,7 @@ mod tests {
         let a = &c.after_recommendations;
         near(a.delta_usd, -2.252);
         near(
-            Some(a.cost.on.total_usd.unwrap() - a.cost.off.total_usd.unwrap()),
+            Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             -2.252,
         );
     }
@@ -3889,7 +3898,7 @@ mod tests {
             [(Some(20_000), 1), (Some(300_000), 2), (Some(250_000), 1)]
         );
         // Each final period only adds its summary, so a size's delta sums its own periods'.
-        let summary = |id| period(a, id).summary_cost.total_usd.unwrap();
+        let summary = |id| period(a, id).summary_cost.total_usd.unwrap().to_f64();
         near(a.by_context[1].delta_usd, summary("a") + summary("c"));
         near(a.by_context[2].delta_usd, summary("b"));
         assert!(summary("b") < summary("a"));
@@ -4243,11 +4252,13 @@ mod tests {
         assert_eq!(scenarios[1].summaries, 1);
         assert_eq!(scenarios[2].summaries, 1);
         assert!(
-            scenarios[2].cost.total_usd.unwrap() < scenarios[1].cost.total_usd.unwrap(),
+            scenarios[2].cost.total_usd.unwrap().to_f64()
+                < scenarios[1].cost.total_usd.unwrap().to_f64(),
             "warm proactive summary should beat cold on-return summary"
         );
         assert!(
-            scenarios[2].cost.total_usd.unwrap() < scenarios[0].cost.total_usd.unwrap(),
+            scenarios[2].cost.total_usd.unwrap().to_f64()
+                < scenarios[0].cost.total_usd.unwrap().to_f64(),
             "full resumed-prefix savings should cover the summary"
         );
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
@@ -4306,7 +4317,7 @@ mod tests {
         let s = &check.current_settings.scenarios;
         assert_eq!(s[1].summaries, 0);
         assert_eq!(s[2].final_summaries, 1);
-        assert!(s[2].cost.total_usd.unwrap() > s[0].cost.total_usd.unwrap());
+        assert!(s[2].cost.total_usd.unwrap().to_f64() > s[0].cost.total_usd.unwrap().to_f64());
         assert_eq!(check.base.recommended, Some(Off));
         let short = t3_check(&scan, 2.0);
         assert_eq!(
@@ -4327,6 +4338,16 @@ mod tests {
                 .all(|s| s.summaries == 0)
         );
         assert_eq!(short.base.recommended, Some(BeforeCacheExpires));
+        // Turning it off writes no summary, so no summary's lost detail is mentioned.
+        let mut report = report(scan, 10.0);
+        report
+            .checks
+            .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
+        report.checks.push(CheckResult::T3Idle(check));
+        let text = format_report(&report, ReportOptions::default());
+        let line = crate::test_support::report_line(&text, "T3 idle compaction");
+        assert_eq!(line.mark, "change", "{text}");
+        assert!(!line.evidence.contains("A summary drops detail"), "{text}");
     }
 
     #[test]
@@ -4372,13 +4393,13 @@ mod tests {
         let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
         // Off grows the later request back from 20k to 300k uncached tokens, and charges
         // neither the recorded nor a new summary.
-        near(observed[0].cost.total_usd, 1.5 - 0.1);
+        near(observed[0].cost.total_usd.map(Usd::to_f64), 1.5 - 0.1);
         assert_eq!(observed[0].summaries, 0);
-        near(baseline[0].cost.total_usd, 0.0);
+        near(baseline[0].cost.total_usd.map(Usd::to_f64), 0.0);
         // The proactive summary replaces the recorded one, so both histories compare alike.
         // onReturn is left out: the recorded summary also calibrates its cache reads.
         let relative = |s: &[crate::model::T3IdleScenario]| {
-            s[2].cost.total_usd.unwrap() - s[0].cost.total_usd.unwrap()
+            s[2].cost.total_usd.unwrap().to_f64() - s[0].cost.total_usd.unwrap().to_f64()
         };
         near(Some(relative(&observed)), relative(&baseline));
     }
@@ -4435,7 +4456,7 @@ mod tests {
         t3_meta(&mut scan, "a").lifecycle_eligible = Some(false);
         let check = t3_check(&scan, 10.0);
         let s = &check.current_settings.scenarios;
-        near(s[0].cost.total_usd, 0.0);
+        near(s[0].cost.total_usd.map(Usd::to_f64), 0.0);
         assert!(s[1].cost.total_usd.is_some(), "{:?}", s[1].cost);
         assert_eq!(s[1].summaries, 1);
         assert_eq!(s[2].cost.total_usd, None);
@@ -4448,9 +4469,9 @@ mod tests {
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
         report.checks.push(CheckResult::T3Idle(check));
         let text = format_report(&report, ReportOptions::default());
-        let line = text.lines().find(|l| l.contains("T3 idle")).unwrap();
+        let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
-            line.contains("Changed cost per month: off $0, onReturn ")
+            line.contains("changed cost per month: off $0, onReturn ")
                 && line.contains(&format!("beforeCacheExpires is unpriced: {guards}")),
             "{text}"
         );
@@ -4480,7 +4501,7 @@ mod tests {
         let proactive = &check.current_settings.scenarios[2];
         assert_eq!(
             (proactive.cost.total_usd, proactive.summaries),
-            (Some(0.0), 0)
+            (Some(Usd::ZERO), 0)
         );
         // With no earlier request, `a` may have started long before its first record.
         scan.requests.retain(|r| &*r.id != "p");
@@ -4535,7 +4556,10 @@ mod tests {
         scan.requests.push(unpriced);
         let check = t3_check(&scan, 10.0);
         for (with, without) in check.current_settings.scenarios.iter().zip(&priced) {
-            near(with.cost.total_usd, without.cost.total_usd.unwrap());
+            near(
+                with.cost.total_usd.map(Usd::to_f64),
+                without.cost.total_usd.unwrap().to_f64(),
+            );
         }
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
     }

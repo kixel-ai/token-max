@@ -13,7 +13,7 @@ use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BackgroundCheck, BackgroundControl, BackgroundFeature, BillingPart, CheckBase, Cost,
     Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
-    Scan, Text, Ttl, Usage,
+    Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
     Catalog, add_costs, paired_savings, price_components, unit_rates, unknown_cost, zero_cost,
@@ -355,9 +355,10 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
         Ttl::FiveMinutes => rates.write5m,
         Ttl::OneHour => rates.write1h,
     };
+    let usd = Usd::from_f64(read as f64 * (write - rates.read));
     Cost {
-        known_usd: read as f64 * (write - rates.read),
-        total_usd: Some(read as f64 * (write - rates.read)),
+        known_usd: usd,
+        total_usd: Some(usd),
         ..zero_cost()
     }
 }
@@ -382,7 +383,7 @@ fn recap_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
     ) else {
         return unknown_cost("the recap's cached prefix has no priced usage");
     };
-    let usd = (read + write) as f64 * (rates.ordinary - rates.read);
+    let usd = Usd::from_f64((read + write) as f64 * (rates.ordinary - rates.read));
     Cost {
         known_usd: usd,
         total_usd: Some(usd),
@@ -455,7 +456,7 @@ fn check(
     let paired = paired_savings(pairs.iter().map(|(on, off)| (on, off)), 0);
     // Scale the measured net cost up to every turn where it ran, as context costs do.
     let estimate = (paired.priced > 0)
-        .then(|| paired.usd * paired.total as f64 / paired.priced as f64)
+        .then(|| paired.usd.to_f64() * paired.total as f64 / paired.priced as f64)
         .or((paired.total == 0).then_some(0.0));
     let start = input.since.or(requests.iter().map(|r| r.time).min());
     let month = |v: Option<f64>| match (v, start) {
@@ -813,8 +814,8 @@ mod tests {
             &turn_ends(&s, &s.profiles[0])[0],
             BackgroundFeature::PromptSuggestions,
         );
-        let expected = one.total_usd.unwrap() * 3.0;
-        assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
+        let expected = one.total_usd.unwrap().to_f64() * 3.0;
+        assert!((c.cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-12);
         assert!((c.base.savings_usd.unwrap() - expected).abs() < 1e-12);
         assert_eq!(c.base.action, Action::Keep);
         // Uses are not recorded, so a cost above the per-use limit is only advisory.
@@ -863,18 +864,18 @@ mod tests {
         // The recap at 5 minutes kept the 5m cache warm for the prompt at 10.
         let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
         let lost = 100_000.0 * (rates.write5m - rates.read);
-        assert!((c.lost_warming.total_usd.unwrap() - lost).abs() < 1e-12);
+        assert!((c.lost_warming.total_usd.unwrap().to_f64() - lost).abs() < 1e-12);
         let recap = fork_cost(
             &prices(),
             &turn_ends(&s, &s.profiles[0])[2],
             BackgroundFeature::SessionRecaps,
         );
-        let net = recap.total_usd.unwrap() - lost;
+        let net = recap.total_usd.unwrap().to_f64() - lost;
         assert!((c.base.savings_usd.unwrap() - net).abs() < 1e-12);
         // A request on another model reads a cache the recap never touched.
         let mut other = s.clone();
         other.requests[3].parts[0].model = Some("claude-sonnet-5".into());
-        assert_eq!(run(&other, 1.0)[0].lost_warming.total_usd, Some(0.0));
+        assert_eq!(run(&other, 1.0)[0].lost_warming.total_usd, Some(Usd::ZERO));
     }
 
     #[test]
@@ -904,11 +905,12 @@ mod tests {
             )
             .total()
             .total_usd
-            .unwrap();
+            .unwrap()
+            .to_f64();
             let c = &run(&s, 1.0)[0];
             assert_eq!(c.generations, Some(1));
-            assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
-            assert_eq!(c.lost_warming.total_usd, Some(0.0));
+            assert!((c.cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-12);
+            assert_eq!(c.lost_warming.total_usd.map(Usd::to_f64), Some(0.0));
         }
     }
 
@@ -957,7 +959,7 @@ mod tests {
             let expected = expected_reads as f64 * (rates.write5m - rates.read);
             let c = &run(&s, 1.0)[0];
             assert_eq!(c.generations, Some(1));
-            assert!((c.lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
+            assert!((c.lost_warming.total_usd.unwrap().to_f64() - expected).abs() < 1e-12);
         }
     }
 
@@ -977,18 +979,18 @@ mod tests {
             ],
             &[0, 1, 2, 9],
         );
-        let warm_recap = run(&s, 1.0)[1].cost.total_usd.unwrap();
+        let warm_recap = run(&s, 1.0)[1].cost.total_usd.unwrap().to_f64();
         // The suggestion at minute five keeps the prefix warm for the recap at eight.
         s.requests[2].end_time = 5 * MINUTE;
         let checks = run(&s, 1.0);
-        assert!((checks[1].cost.total_usd.unwrap() - warm_recap).abs() < 1e-12);
+        assert!((checks[1].cost.total_usd.unwrap().to_f64() - warm_recap).abs() < 1e-12);
         // The prompt at nine is still inside the suggestion's lifetime without a recap.
-        assert_eq!(checks[1].lost_warming.total_usd, Some(0.0));
+        assert_eq!(checks[1].lost_warming.total_usd.map(Usd::to_f64), Some(0.0));
         // Without suggestions the recap loses its read, and the next request loses warming.
         let rates = unit_rates(&prices(), &s.requests[2], &s.requests[2].parts[0]).unwrap();
         let extra =
             100_100.0 * (rates.ordinary - rates.read) + 100_000.0 * (rates.write5m - rates.read);
-        assert!((checks[0].lost_warming.total_usd.unwrap() - extra).abs() < 1e-12);
+        assert!((checks[0].lost_warming.total_usd.unwrap().to_f64() - extra).abs() < 1e-12);
     }
 
     #[test]
@@ -1010,7 +1012,9 @@ mod tests {
             s.requests[2].end_time = 3 * MINUTE;
             let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
             let expected = reads as f64 * (rates.write5m - rates.read);
-            assert!((run(&s, 1.0)[1].lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
+            assert!(
+                (run(&s, 1.0)[1].lost_warming.total_usd.unwrap().to_f64() - expected).abs() < 1e-12
+            );
         }
     }
 
@@ -1054,7 +1058,7 @@ mod tests {
         let checks = run(&s, 1.0);
         assert_eq!(checks[0].base.action, Action::Keep);
         assert_eq!(checks[0].base.savings_usd, None);
-        assert_eq!(checks[0].cost.total_usd, Some(0.0));
+        assert_eq!(checks[0].cost.total_usd.map(Usd::to_f64), Some(0.0));
         assert_eq!(checks[1].base.action, Action::Advisory);
         assert_eq!(checks[1].base.evidence, Evidence::Guidance);
         assert_eq!(checks[1].generations, None);
@@ -1073,7 +1077,9 @@ mod tests {
             &turn_ends(&s, &s.profiles[0])[0],
             BackgroundFeature::PromptSuggestions,
         );
-        assert!((c.base.savings_usd.unwrap() - one.total_usd.unwrap() * 3.0).abs() < 1e-12);
+        assert!(
+            (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 3.0).abs() < 1e-12
+        );
         for r in &mut s.requests {
             r.evidence = RequestEvidence::Unknown;
         }

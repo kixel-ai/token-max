@@ -40,7 +40,7 @@ fn install() -> String {
                 .into()
         }
         version => format!(
-            "`curl -LsSf https://github.com/kixel-ai/token-max/releases/download/v{version}/token-max-installer.sh | sh` or `cargo install --locked token-max --version {version}` there"
+            "`curl -LsSf https://max.kixel.ai/install.sh | sh` on both hosts, or `cargo install --locked token-max --version {version}` there"
         ),
     }
 }

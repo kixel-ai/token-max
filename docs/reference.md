@@ -12,6 +12,21 @@ directory. Reports go to stdout; diagnostics go to stderr; exit codes are as
 described below. Ctrl-C cancels the running analysis: SIGINT or SIGTERM exits 2
 with no success report.
 
+`curl -LsSf https://max.kixel.ai/run.sh | sh` and, on Windows,
+`irm https://max.kixel.ai/run.ps1 | iex` run `token-max doctor` from the
+latest release without installing it. Each downloads the release archive for
+this platform, refuses it unless it matches the release's `.sha256` file, and
+keeps the binary in `token-max/run` under `$XDG_CACHE_HOME` or `~/.cache`,
+beside the price cache. Later runs reuse it while it is still the latest
+release; a newer one is downloaded beside it, and deleting the directory
+reclaims the space. `run.sh` hands `doctor` the
+terminal from `/dev/tty`, since its stdin is the piped script, so the changes
+are still offered. Options go after `sh -s --`, as in
+`curl -LsSf https://max.kixel.ai/run.sh | sh -s -- --since 2026-11-01`, or
+in PowerShell,
+`& ([scriptblock]::Create((irm https://max.kixel.ai/run.ps1))) --since 2026-11-01`.
+`install.sh` and `install.ps1` redirect to the release's own installers.
+
 ## Applying changes
 
 After the report, `doctor` offers each recommended change it can make, then

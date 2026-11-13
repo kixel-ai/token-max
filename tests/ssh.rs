@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use token_max::controls::Env;
 use token_max::discovery::DiscoveryOptions;
 use token_max::model::{
@@ -81,13 +81,18 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         script(&bin.join(name), body);
     }
 
-    /// The coordinator, with this host's home as `local` and only the test's environment.
+    /// The coordinator's `doctor`, with this host's home as `local` and only the test's environment.
     fn command(&self, args: &[&str]) -> Command {
+        self.invoke("doctor", args)
+    }
+
+    /// The coordinator running `name`, as [`Hosts::command`] runs `doctor`.
+    fn invoke(&self, name: &str, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
         let path = std::env::var("PATH").unwrap();
         command
             .args([
-                "doctor",
+                name,
                 "--prices-file",
                 fixture("prices.json").to_str().unwrap(),
             ])
@@ -989,4 +994,125 @@ fn destinations_and_directory_flags_are_unambiguous() {
         assert!(stderr.contains(message), "{args:?}: {stderr}");
     }
     assert!(!hosts.root.join("ssh.args").exists());
+}
+
+/// Each line of a session export, parsed.
+fn lines(stdout: &str) -> Vec<Value> {
+    stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn sessions_from_every_host_interleave_by_first_request() {
+    let hosts = Hosts::new();
+    let home = hosts.host("devbox");
+    // An earlier session on the destination, run in a checkout whose remote holds a credential.
+    let checkout = home.join("checkout");
+    std::fs::create_dir_all(checkout.join(".git")).unwrap();
+    std::fs::write(
+        checkout.join(".git/config"),
+        "[remote \"origin\"]\n\turl = https://user:SYNTHETIC_PRIVATE_TOKEN@host/o/r.git\n",
+    )
+    .unwrap();
+    let early: String = std::fs::read_to_string(fixture("claude.jsonl"))
+        .unwrap()
+        .replace("session-a", "session-early")
+        .replace("2026-11-01", "2026-10-31")
+        .replace("message-", "early-message-")
+        .lines()
+        .map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            record["cwd"] = checkout.to_str().unwrap().into();
+            format!("{record}\n")
+        })
+        .collect();
+    std::fs::write(home.join(".claude/projects/my project/early.jsonl"), early).unwrap();
+
+    let run_sessions = |args: &[&str]| run(&mut hosts.invoke("sessions", args));
+    let (status, stdout, stderr) = run_sessions(&["--ssh", "devbox", "--include-local"]);
+    assert_eq!(status, 0, "{stderr}");
+    assert_eq!(stderr, "");
+    assert!(!stdout.contains("SYNTHETIC_PRIVATE"), "{stdout}");
+    let found = lines(&stdout);
+    let order: Vec<_> = found
+        .iter()
+        .map(|l| (l["host"].as_str(), l["session"].as_str().unwrap()))
+        .collect();
+    // A tie keeps the order the hosts were selected in.
+    assert_eq!(
+        order,
+        [
+            (Some("devbox"), "session-early"),
+            (None, "session-a"),
+            (Some("devbox"), "session-a"),
+        ]
+    );
+    assert_eq!(found[0]["repositories"], json!(["https://host/o/r.git"]));
+    assert_eq!(found[0]["repositoriesSource"], "checkout");
+
+    // The destination's lines are what it prints itself, under its name.
+    let (status, there, stderr) = run(hosts.invoke("sessions", &[]).env("HOME", &home));
+    assert_eq!(status, 0, "{stderr}");
+    let remote: Vec<Value> = found
+        .into_iter()
+        .filter(|l| l["host"] == "devbox")
+        .map(|mut l| {
+            l["host"] = Value::Null;
+            l
+        })
+        .collect();
+    assert_eq!(remote, lines(&there));
+    let (_, alone, _) = run_sessions(&["--ssh", "devbox"]);
+    assert_eq!(
+        lines(&alone),
+        lines(&stdout)
+            .into_iter()
+            .filter(|l| l["host"] == "devbox")
+            .collect::<Vec<_>>()
+    );
+    let (_, windowed, stderr) = run_sessions(&["--ssh", "devbox", "--since", "2026-11-01"]);
+    assert_eq!(stderr, "");
+    let windowed = lines(&windowed);
+    assert_eq!(windowed.len(), 1);
+    assert_eq!(windowed[0]["session"], "session-a");
+
+    let args = std::fs::read_to_string(hosts.root.join("ssh.args")).unwrap();
+    assert!(args.contains("-- devbox sh -c"), "{args}");
+}
+
+#[test]
+fn a_failed_host_fails_the_whole_session_export() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    let broken = hosts.host("broken");
+    std::fs::write(
+        broken.join(".claude/projects/my project/main.jsonl"),
+        r#"{"timestamp":"2026-11-02T00:00:00Z","type":"assistant","private":"SYNTHETIC_PRIVATE_REPLY","message":{"usage":{"input_tokens":"bad"}}}
+"#,
+    )
+    .unwrap();
+    for (args, expected) in [
+        (
+            &["--ssh", "devbox", "--ssh", "unreachable", "--include-local"][..],
+            "unreachable: SSH connection failed",
+        ),
+        (&["--ssh", "devbox", "--ssh", "broken"], "broken: "),
+        (
+            &["--ssh", "devbox", "--claude-dir", "x"],
+            "--claude-dir, --codex-dir and --t3-dir select local profiles",
+        ),
+        (&["--include-local"], "--include-local requires --ssh"),
+        (&["--ssh", "devbox", "--ssh-scan"], "invalid arguments"),
+    ] {
+        let (status, stdout, stderr) = run(&mut hosts.invoke("sessions", args));
+        assert_eq!((status, &*stdout), (2, ""), "{args:?}: {stderr}");
+        let error: Value = serde_json::from_str(&stderr).unwrap();
+        assert!(
+            error["error"].as_str().unwrap().starts_with(expected),
+            "{args:?}: {stderr}"
+        );
+        assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
+    }
 }

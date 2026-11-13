@@ -939,6 +939,10 @@ impl<'a> Log<'a> {
                 self.unsupported = true;
                 if let Some(last) = last {
                     for &t in &live {
+                        let arms = trackers[t].guards.arms.iter_mut();
+                        for (_, guard) in arms.filter(|(a, _)| *a >= last) {
+                            *guard = Err(UNSUPPORTED);
+                        }
                         trackers[t].span(last, Err(UNSUPPORTED));
                     }
                 }
@@ -1658,12 +1662,16 @@ mod tests {
             f.complete()
                 .raw(&occurred, event_type, &thread(json!({})).to_string())
                 .event(30, "thread.visited", thread(json!({})));
-            let spans: &[_] = if from == 10 {
-                &[(10, Err(UNSUPPORTED))]
+            // An undated event may share the arm's instant, so the arm is unknown too.
+            let expected = if from == 10 {
+                expect(&[(10, Err(UNSUPPORTED))], &[(10, Err(UNSUPPORTED))])
             } else {
-                &[(10, Ok(true)), (from, Err(UNSUPPORTED))]
+                expect(
+                    &[(10, Ok(true))],
+                    &[(10, Ok(true)), (from, Err(UNSUPPORTED))],
+                )
             };
-            assert_eq!(f.run1(), expect(&[(10, Ok(true))], spans), "{event_type}");
+            assert_eq!(f.run1(), expected, "{event_type}");
         }
     }
 

@@ -1114,8 +1114,13 @@ pub fn discover_codex_controls(
                 };
                 let moved_layer = !moved.is_empty();
                 let mut overrides = memory_profiles.clone();
+                // The walk names files by resolved path, the project layers by the
+                // recorded one, so compare them resolved.
+                let same = |a: &str, b: &str| {
+                    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+                };
                 for file in untrusted.into_iter().chain(moved) {
-                    if !overrides.contains(&file) {
+                    if !overrides.iter().any(|o| same(o, &file)) {
                         overrides.push(file);
                     }
                 }
@@ -1201,19 +1206,20 @@ fn ancestors_setting_codex_memory(
     user: &str,
     home: &str,
 ) -> Result<Vec<String>, ScanError> {
-    // Compare normalized forms, such as resolved symlinks and Windows' `\\?\` prefix,
-    // while naming files under the recorded cwd as the other layers do. A path that no
-    // longer exists is compared as recorded.
+    // Walk and stop on normalized forms, such as resolved symlinks and Windows' `\\?\`
+    // prefix: a symlinked cwd's physical parents are its ancestors, not the link's. A path
+    // that no longer exists is walked as recorded.
     let normal = |path: &str| realpath(path).unwrap_or_else(|_| path.to_string());
     let home = normal(home);
+    let cwd = normal(cwd);
     let mut files = vec![];
-    let mut path = cwd;
+    let mut path = cwd.as_str();
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
         if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
             files.push(file);
         }
-        if dirname(path) == path || normal(path) == home {
+        if path == home || dirname(path) == path {
             return Ok(files);
         }
         path = dirname(path);
@@ -1928,6 +1934,22 @@ mod tests {
         // Outside the home, the walk reaches the filesystem root, still skipping the user's.
         let outside = found(&cwd.join("elsewhere"));
         assert!(outside.contains(&file(&w.home)) && !outside.contains(&file(&home)));
+        // A symlinked cwd outside the home walks its target's ancestors, not the link's.
+        #[cfg(unix)]
+        {
+            let outside = w.home.join("outside");
+            std::fs::create_dir_all(outside.join(".codex")).unwrap();
+            std::fs::write(
+                outside.join(".codex/config.toml"),
+                "[features]\nmemories = true\n",
+            )
+            .unwrap();
+            let link = outside.join("link");
+            std::os::unix::fs::symlink(&cwd, &link).unwrap();
+            let linked =
+                ancestors_setting_codex_memory(&text(&link), &file(&home), &text(&home)).unwrap();
+            assert_eq!(linked, [file(&cwd), file(&home.join("repo"))]);
+        }
     }
 
     #[cfg(windows)]

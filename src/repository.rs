@@ -81,7 +81,12 @@ fn remotes(text: &str) -> Result<Vec<String>, u64> {
     let mut urls = vec![];
     let mut remote = false;
     let mut line = 1;
-    let mut chars = text.chars().peekable();
+    // Git skips a leading UTF-8 byte order mark, as some Windows editors write.
+    let mut chars = text
+        .strip_prefix('\u{feff}')
+        .unwrap_or(text)
+        .chars()
+        .peekable();
     while let Some(&c) = chars.peek() {
         match c {
             '\n' => {
@@ -281,7 +286,13 @@ mod tests {
                 "a b".into(),
             ])
         );
+        assert_eq!(
+            remotes("\u{feff}[remote \"o\"]\nurl = x\n"),
+            Ok(vec!["x".into()])
+        );
         for (config, line) in [
+            // Only a leading byte order mark is skipped.
+            ("\n\u{feff}[core]\n", 2),
             ("[remote \"origin\"\n", 1),
             ("\n[remote \"o]\n", 2),
             ("[core]\n\n  = x\n", 3),

@@ -54,6 +54,20 @@ it:
 - Compaction, 294 MB: the current window's replay keeps one 240 B record per
   part, and each simulation copies every request it changes.
 
+### Streaming the checks
+
+Measured 2026-11-13 after idle counts its periods: peak RSS on the
+160,000-request history is set by compaction (265 to 365 MB) and then idle
+(383 MB). The cache replay (`CacheChain`) and the window simulation keep
+their state per session, so compaction can stream instead of keeping a
+whole-history replay: each source request steps the current window's
+simulation and replay and every candidate's in lockstep, and each part is
+compared as it comes. Lists whose first-seen order reaches the report, such
+as a cost's unknown reasons, keep it by totaling each kind of charge
+separately and merging the totals in today's order. A session's state is
+dropped after its last request, which is what makes memory follow the
+largest session.
+
 ### One pass, by measurement
 
 A sessions-only pass (`token-max sessions`) took 1.1 s of user CPU against

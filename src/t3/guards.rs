@@ -460,7 +460,7 @@ impl Snapshot {
 /// An entity's state at the sweep's time.
 #[derive(Clone, Debug)]
 enum State {
-    Known(Snapshot),
+    Known(Box<Snapshot>),
     Absent,
     Unknown(&'static str),
 }
@@ -606,7 +606,7 @@ impl<'a> Log<'a> {
                 .or_insert_with(|| match snapshot {
                     Some(s) => Entity {
                         first: s.clone(),
-                        state: State::Known(s),
+                        state: State::Known(Box::new(s)),
                     },
                     None => Entity {
                         first: Snapshot::default(),
@@ -677,7 +677,7 @@ impl<'a> Log<'a> {
                 // A provider thread re-points the active one and leaves the thread's flags.
                 (Kind::Active, State::Known(prior)) if kind == Kind::ProviderThread => Snapshot {
                     active_provider_thread: s.id.clone(),
-                    ..prior.clone()
+                    ..Snapshot::clone(prior)
                 },
                 (Kind::Active, _) if kind == Kind::ProviderThread => Snapshot {
                     active_provider_thread: s.id.clone(),
@@ -691,7 +691,7 @@ impl<'a> Log<'a> {
                 (Kind::Turn, State::Unknown(_)) if s.usage_at.is_none() => continue,
                 _ => s.clone(),
             };
-            entity.state = State::Known(next);
+            entity.state = State::Known(Box::new(next));
             if target == Kind::Item {
                 self.relive(&id);
             }

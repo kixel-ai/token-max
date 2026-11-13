@@ -405,10 +405,13 @@ and the user accepts it; the adapter does not infer an unrecorded acceptance.
 It needs no T3 lifecycle guard. `off` also suppresses that dialog. Summaries
 pay warm or cold input plus output; later requests pay their full changed
 prefixes, and final proactive summaries have no invented return benefit.
-Missing lifecycle or compatible full-prefix calibration stays unpriced, and
-the report names the first missing input. Current lifecycle guards do not
-reconstruct prior guard states. See [T3 evidence and sources](t3.md) for
-supported schema and limits.
+The lifecycle guards for each gap are rebuilt from T3's event log at every
+completed-run event and when the timer would fire. T3 keeps about one day of
+that log, so the check's window starts where the log is complete, and gaps
+that open earlier stay as recorded in every mode. Unknown lifecycle or missing
+compatible full-prefix calibration stays unpriced, and the report names the
+first missing input. See [T3 evidence and sources](t3.md) for supported schema
+and limits.
 
 ## Other hosts over SSH
 

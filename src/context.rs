@@ -9,7 +9,7 @@ use crate::exposure::{MEMORY_OUTPUT, calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
-    Text, Verdict, Via,
+    Text, Usd, Verdict, Via,
 };
 use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
@@ -897,7 +897,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         tier_unknown_requests: 0,
                         assumptions: vec![],
                         tokens: None,
-                        cost_usd: 0.0,
+                        cost_usd: Usd::ZERO,
                         estimated_usd: None,
                         calls: None,
                         last_used: None,
@@ -1071,7 +1071,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 let row = &mut rows[&(owner, key)];
                 row.cost.priced += 1;
-                row.cost.cost_usd += cost;
+                row.cost.cost_usd += Usd::from_f64(cost);
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));
                 }
@@ -1327,7 +1327,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
             c.estimated_usd =
-                (c.priced > 0).then(|| (c.cost_usd * c.requests as f64) / c.priced as f64);
+                (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
             c.largest_characters = largest.get(&index).copied();
             if c.harness == Harness::Codex
@@ -1606,13 +1606,13 @@ mod tests {
         // the system prompt's 600 span the last 350 cached reads, all 200 1h writes
         // and 50 ordinary input tokens.
         let artifact = row(&rows, "Artifact");
-        assert!(close(artifact.cost_usd, 1200.0 * READ));
+        assert!(close(artifact.cost_usd.to_f64(), 1200.0 * READ));
         assert_eq!(artifact.tokens, Some(1200));
         assert_eq!(artifact.calls, Some(0));
         assert_eq!(artifact.verdict, Some(Verdict::Off));
         let system = row(&rows, "Claude Code system prompt");
         assert!(close(
-            system.cost_usd,
+            system.cost_usd.to_f64(),
             350.0 * READ + 200.0 * WRITE1H + 50.0 * ORDINARY
         ));
         assert_eq!(
@@ -1623,9 +1623,9 @@ mod tests {
         // possible offset is ordinary input, so it is priced.
         let review = row(&rows, "review");
         assert_eq!(review.kind, ContextKind::Skill);
-        assert!(close(review.cost_usd, 90.0 * ORDINARY));
+        assert!(close(review.cost_usd.to_f64(), 90.0 * ORDINARY));
         assert!(close(
-            row(&rows, "Skill list framing").cost_usd,
+            row(&rows, "Skill list framing").cost_usd.to_f64(),
             15.0 * ORDINARY
         ));
         let docs = row(&rows, "docs");
@@ -1727,14 +1727,17 @@ mod tests {
         let rows = costs(&scan, &requests, 1.0);
         let file = row(&rows, "/repo/CLAUDE.md");
         assert_eq!((file.requests, file.priced), (3, 2));
-        assert!(close(file.cost_usd, 500.0 * WRITE1H + 500.0 * READ));
+        assert!(close(
+            file.cost_usd.to_f64(),
+            500.0 * WRITE1H + 500.0 * READ
+        ));
         assert!(close(
             file.estimated_usd.unwrap(),
-            file.cost_usd * 3.0 / 2.0
+            file.cost_usd.to_f64() * 3.0 / 2.0
         ));
         let new = row(&rows, "/repo/sub/CLAUDE.md");
         assert_eq!((new.requests, new.priced), (2, 1));
-        assert!(close(new.cost_usd, 300.0 * WRITE1H));
+        assert!(close(new.cost_usd.to_f64(), 300.0 * WRITE1H));
         assert!(file.current && new.current);
     }
 
@@ -1782,7 +1785,7 @@ mod tests {
         let system = row(&rows, "Claude Code system prompt");
         assert_eq!((system.requests, system.priced), (2, 1));
         // The unpriced request is scaled from the priced one, never counted as free.
-        assert_eq!(system.estimated_usd, Some(system.cost_usd * 2.0));
+        assert_eq!(system.estimated_usd, Some(system.cost_usd.to_f64() * 2.0));
         // The file is new in the high request, after a prior whose input fits.
         assert_eq!(row(&rows, "/repo/CLAUDE.md").priced, 1);
     }
@@ -1882,8 +1885,8 @@ mod tests {
         );
         assert_eq!(server.details.len(), 3);
         assert!(close(
-            server.cost_usd,
-            server.details.iter().map(|c| c.cost_usd).sum()
+            server.cost_usd.to_f64(),
+            server.details.iter().map(|c| c.cost_usd.to_f64()).sum()
         ));
         let read = row(&server.details, "mcp__docs__read");
         assert_eq!((read.tokens, read.calls), (Some(400), Some(3)));
@@ -2189,7 +2192,7 @@ mod tests {
         assert_eq!(bash.kind, ContextKind::ToolOutput);
         assert_eq!((bash.requests, bash.priced), (4, 4));
         assert!(close(
-            bash.cost_usd,
+            bash.cost_usd.to_f64(),
             1000.0 * WRITE1H + (1000.0 * READ + 300.0 * WRITE1H) + 200.0 * ORDINARY + 200.0 * READ
         ));
         assert_eq!(
@@ -2283,7 +2286,7 @@ mod tests {
             (apps.harness, apps.kind),
             (Harness::Codex, ContextKind::McpServer)
         );
-        assert!(close(apps.cost_usd, 100.0 * input + 100.0 * read));
+        assert!(close(apps.cost_usd.to_f64(), 100.0 * input + 100.0 * read));
         assert_eq!(
             control_text(apps.control.as_ref().unwrap(), Harness::Codex),
             "features.apps = false"
@@ -2301,7 +2304,10 @@ mod tests {
             (agents.kind, agents.control.as_ref()),
             (ContextKind::Instructions, None)
         );
-        assert!(close(agents.cost_usd, 500.0 * input + 500.0 * read));
+        assert!(close(
+            agents.cost_usd.to_f64(),
+            500.0 * input + 500.0 * read
+        ));
         // A catalog without parsed member spans remains one piece with no per-skill control.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));

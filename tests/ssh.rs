@@ -819,20 +819,30 @@ fn any_failed_destination_fails_the_whole_report() {
 "#,
     )
     .unwrap();
+    // The hint names the command that installs this build there.
+    let install = match env!("CARGO_PKG_VERSION") {
+        "0.0.0" => {
+            "`cargo install --locked --git https://github.com/kixel-ai/token-max` on both hosts"
+                .to_string()
+        }
+        version => format!(
+            "`curl -LsSf https://github.com/kixel-ai/token-max/releases/download/v{version}/token-max-installer.sh | sh` or `cargo install --locked token-max --version {version}` there"
+        ),
+    };
+    let bare = format!(
+        "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with {install}\n"
+    );
+    let old = format!(
+        "old: token-max there did not start an SSH audit (exit 2); install the same version with {install}\n"
+    );
     for (host, expected) in [
         (
             "unreachable",
             "unreachable: SSH connection failed; check that `ssh unreachable true` works",
         ),
-        (
-            "bare",
-            "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with `",
-        ),
+        ("bare", bare.as_str()),
         ("windows", "windows: unsupported platform"),
-        (
-            "old",
-            "old: token-max there did not start an SSH audit (exit 2); install the same version with `",
-        ),
+        ("old", old.as_str()),
         ("other", "other: runs token-max 9.9.9+"),
         ("corrupt", "corrupt: invalid SSH audit stream at line "),
         ("silent", "silent: invalid SSH audit stream at line 2"),

@@ -475,8 +475,11 @@ mod tests {
         let expected = 100_000.0 * (rates.write5m - rates.read);
         assert!((w.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
         let text = format_report(&report, ReportOptions::default());
+        let line = crate::test_support::report_line(&text, "Bash timeout cap 10m -> 4m");
+        assert_eq!(line.mark, "change");
         assert!(
-            text.contains("]: 10m -> 4m. A wait that long outlasts the 5m cache."),
+            line.evidence
+                .starts_with("A wait that long outlasts the 5m cache."),
             "{text}"
         );
         // The miss cost is the window's total, like the wait count, not a 30-day rate.

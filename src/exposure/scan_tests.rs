@@ -10,7 +10,7 @@ use crate::model::{ContextCost, ContextKind, MemoryAccess, Report, Scan, Verdict
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{ReportOptions, format_report};
-use crate::test_support::{Workspace, prices};
+use crate::test_support::{Workspace, prices, report_line};
 
 /// A fixed report time; none of these assertions depend on it.
 const NOW: Millis = 1_800_000_000_000;
@@ -168,7 +168,7 @@ fn text(report: &Report) -> String {
     format_report(
         report,
         ReportOptions {
-            width: Some(200),
+            width: None,
             color: false,
             unicode: false,
             details: false,
@@ -202,25 +202,14 @@ fn categories(e: &ExposureScan, category: Category) -> usize {
         .count()
 }
 
-/// Whether some line holds `name`, an optional ` [...]` tag, then a rest that
-/// satisfies `rest`, like the pattern `name( \[[^\]]*\])?rest`.
-fn labelled(text: &str, name: &str, rest: impl Fn(&str) -> bool) -> bool {
-    text.match_indices(name).any(|(i, _)| {
-        let after = &text[i + name.len()..];
-        let line = |s: &str| rest(s.split('\n').next().unwrap());
-        let tagged = after
-            .strip_prefix(" [")
-            .and_then(|t| t.find(']').map(|end| &t[end + 1..]));
-        line(after) || tagged.is_some_and(line)
-    })
-}
-
-/// A rest that starts with `prefix` and later holds `suffix` on the same line.
-fn then(prefix: &str, suffix: &str) -> impl Fn(&str) -> bool {
-    move |s: &str| {
-        s.strip_prefix(prefix)
-            .is_some_and(|tail| tail.contains(suffix))
+/// Whether a report line's heading starts with `head` and its evidence holds every one of `parts`.
+fn shows(text: &str, mark: &str, head: &str, parts: &[&str]) -> bool {
+    let line = report_line(text, head);
+    let ok = line.mark == mark && parts.iter().all(|p| line.evidence.contains(p));
+    if !ok {
+        eprintln!("{line:#?}");
     }
+    ok
 }
 
 #[test]
@@ -493,9 +482,20 @@ fn image_inputs_and_unlinked_requests_never_calibrate_from_partial_text() {
     let report = report(&data, 1.0);
     assert!(report.context.iter().all(|c| c.estimated_usd.is_none()));
     let text = text(&report);
-    assert!(labelled(&text, "Artifact tool", |s| s
-        .starts_with(": on. Cost unknown")));
-    assert!(text.contains("and the skill and subagent lists: cost unknown."));
+    let artifact = report_line(&text, "Artifact tool");
+    assert!(
+        artifact.head.starts_with("Artifact tool on ["),
+        "{artifact:?}"
+    );
+    assert!(
+        artifact
+            .evidence
+            .starts_with("Not enough evidence: none of its requests could be priced;")
+    );
+    assert_eq!(
+        report_line(&text, "System prompt").head,
+        "System prompt and core tools costs unknown"
+    );
 }
 
 #[test]
@@ -836,27 +836,29 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert_eq!(verdict("review"), Some(Verdict::Off));
     assert_eq!(verdict("Bash"), None);
     let text = text(&strict);
-    assert!(labelled(
-        &text,
-        "Artifact tool",
-        then(": on -> off. Costs ", "; never used.")
-    ));
-    assert!(labelled(
-        &text,
-        "Skill review",
-        then(
-            ": on -> only when you type /review. Costs ",
-            "; the model never used it."
-        )
-    ));
-    assert!(labelled(
-        &text,
-        "MCP server docs",
-        then(
-            ": on. Costs ",
-            r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#
-        )
-    ));
+    let line = |head: &str| report_line(&text, head);
+    assert!(
+        line("Artifact tool")
+            .head
+            .starts_with("Artifact tool on -> off costs ")
+    );
+    assert!(line("Artifact tool").evidence.starts_with("Never used."));
+    assert!(
+        line("Skill review")
+            .head
+            .starts_with("Skill review on -> typed only costs ")
+    );
+    assert!(
+        line("Skill review")
+            .evidence
+            .starts_with("The model never used it.")
+    );
+    assert_eq!(line("MCP server docs").mark, "consider");
+    assert!(
+        line("MCP server docs")
+            .evidence
+            .contains(r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#)
+    );
     let snippet = &text[text.find("To turn these off").unwrap()..];
     assert!(snippet.contains(r#""enableArtifact": false"#));
     assert!(snippet.contains(r#""review": "user-invocable-only""#));
@@ -1692,12 +1694,10 @@ fn codex_catalog_conditional_prices_preserve_evidence_and_duplicate_controls() {
             ..Default::default()
         },
     );
-    let unresolved = output
-        .lines()
-        .find(|line| line.contains("Skill same (/skills/a/SKILL.md)"))
-        .unwrap();
-    assert!(unresolved.contains("Estimated cost"), "{output}");
-    assert!(unresolved.contains("keep/off unresolved because tier sensitivity could reverse it"));
+    let line = report_line(&output, "Skill same (/skills/a/SKILL.md)");
+    assert!(line.head.contains(" costs <$0.01"), "{output}");
+    let unresolved = line.evidence;
+    assert!(unresolved.contains("tier sensitivity could reverse keep or off"));
     assert!(
         unresolved
             .contains("1 requested; 1 confirmed SKILL.md loads; successful invocation unknown")
@@ -1811,7 +1811,11 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
         );
         assert!(output.contains("1 requested; 1 confirmed SKILL.md loads"));
         assert!(output.contains("Codex MCP loading:"));
-        assert!(output.contains("Recorded rendered AGENTS.md:"));
+        assert!(
+            report_line(&output, "AGENTS.md")
+                .evidence
+                .starts_with("Under the 32,768 bytes Codex loads")
+        );
         assert!(output.contains("Duplicate skill same"));
         assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
     }
@@ -1941,8 +1945,9 @@ fn codex_duplicates_are_actionable_without_prices_and_same_path_repeats_keep_one
     );
     let output = text(&r);
     assert!(
-        labelled(&output, "Skill same (/skills/b/SKILL.md)", |rest| rest
-            .starts_with(": on -> off. Cost unknown")),
+        report_line(&output, "Skill same (/skills/b/SKILL.md)")
+            .head
+            .starts_with("Skill same (/skills/b/SKILL.md) on -> off costs unknown"),
         "{output}"
     );
     assert!(output.contains("does not resolve an absolute SKILL.md path"));
@@ -2341,14 +2346,14 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
             host: None,
         },
     );
-    let advised = &text[text.find("Consider turning off\n").unwrap()..];
-    assert!(labelled(
-        advised,
-        "Auto memory",
-        then(
-            ": on -> off. Opinion: ",
+    assert!(shows(
+        &text,
+        "consider",
+        "Auto memory on costs $",
+        &[
+            "Opinion: ",
             "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
-        )
+        ]
     ));
     assert!(!text.contains("MEMORY.md"));
     // Advice is not a change, so it leaves the exit code alone.
@@ -2393,9 +2398,12 @@ fn claude_auto_memory_turned_off_is_kept_off() {
     assert_eq!(check.base.current, Some(false));
     assert_eq!(memory_note(check), None);
     let rendered = text(&first);
-    assert!(!rendered.contains("Consider turning off\n"));
-    let keep = &rendered[rendered.find("Keep\n").unwrap()..];
-    assert!(labelled(keep, "Auto memory", |s| s == ": off. Costs nothing."));
+    assert!(shows(
+        &rendered,
+        "keep",
+        "Auto memory off [",
+        &["Measured: costs nothing."]
+    ));
 
     // Turned off after an earlier session used it: still kept off, but what it cost
     // in the window shows, and the earlier session is noted.
@@ -2420,11 +2428,11 @@ fn claude_auto_memory_turned_off_is_kept_off() {
             .starts_with("1 of 2 sessions still carried memory")
     );
     let text = text(&turned_off);
-    let keep = &text[text.find("Keep\n").unwrap()..];
-    assert!(labelled(
-        keep,
-        "Auto memory",
-        then(": off. Cost", "; used 2 times (1 read, 1 write).")
+    assert!(shows(
+        &text,
+        "keep",
+        "Auto memory off costs",
+        &["Measured: used 2 times (1 read, 1 write)"]
     ));
 
     // A T3 instance whose launch arguments or environment could override the
@@ -2522,8 +2530,7 @@ fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
     );
     let rendered = text(&first);
     assert!(!rendered.contains("settings.local.json"));
-    let keep = &rendered[rendered.find("Keep\n").unwrap()..];
-    assert!(labelled(keep, "Auto memory", then(": off. Cost", "")));
+    assert!(shows(&rendered, "keep", "Auto memory off costs", &[]));
 
     // A project setting at the latest session's directory owns it, even when the
     // user setting agrees.
@@ -2622,19 +2629,12 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     assert!(check.base.savings_usd.unwrap() > 0.0);
     // The long temporary path wraps the line, and its length moves the cents,
     // since the loaded paths are part of the priced context.
-    let both = text(&both).replace("\n  ", " ");
-    assert!(labelled(
+    let both = text(&both);
+    assert!(shows(
         &both,
-        "Auto memory",
-        then(": on -> off. ", "Costs at least $0.")
-    ));
-    assert!(labelled(
-        &both,
-        "Auto memory",
-        then(
-            ": on -> off. ",
-            ", from the 66.6% of requests that recorded their context;"
-        )
+        "consider",
+        "Auto memory on costs at least $0.",
+        &["; from the 66.6% of requests that recorded their context."]
     ));
 }
 
@@ -2730,13 +2730,11 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
             .unwrap()
             .starts_with("1 of 1 sessions still carried memory")
     );
-    assert!(labelled(
+    assert!(shows(
         &text(&r),
-        "Codex memories",
-        then(
-            ": off. Cost unknown, and extraction and consolidation are not measured",
-            ""
-        )
+        "keep",
+        "Codex memories off costs unknown",
+        &["; extraction and consolidation are not measured."]
     ));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
 
@@ -2746,10 +2744,11 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     let check = memory_check(&on, Harness::Codex);
     assert_eq!(check.base.current, Some(true));
     assert_eq!(memory_note(check), None);
-    assert!(labelled(
+    assert!(shows(
         &text(&on),
-        "Codex memories",
-        then(": on -> off. Opinion: ", "")
+        "consider",
+        "Codex memories on",
+        &["Opinion: ", "Set features.memories = false in "]
     ));
     std::fs::remove_file(w.codex.join("config.toml")).unwrap();
 
@@ -2788,30 +2787,34 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     );
     std::fs::write(&file, jsonl(&[codex_meta(), turn(), context, billed(5)])).unwrap();
     let data = scan(&options(&w, None)).unwrap();
-    assert!(labelled(
+    assert!(shows(
         &text(&report(&data, 1.0)),
-        "Codex memories",
-        |s| s == ": off. Costs nothing."
+        "keep",
+        "Codex memories off [",
+        &["Measured: costs nothing."]
     ));
     // A memory store shows Codex generated memories at some point, in requests it
     // records only in telemetry, so the line cannot say they cost nothing.
     std::fs::create_dir_all(w.codex.join("memories")).unwrap();
     let data = scan(&options(&w, None)).unwrap();
-    assert!(labelled(
+    assert!(shows(
         &text(&report(&data, 1.0)),
-        "Codex memories",
-        |s| s
-            == ": off. No measured cost, but extraction and consolidation are not measured; never read back or written."
+        "keep",
+        "Codex memories off [",
+        &[
+            "Measured: never read back or written; no measured cost, but extraction and consolidation are not measured."
+        ]
     ));
     std::fs::remove_dir(w.codex.join("memories")).unwrap();
     // A request that recorded no context may have loaded memories while they were
     // on, so turning them off does not make its cost zero.
     std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();
     let data = scan(&options(&w, None)).unwrap();
-    assert!(labelled(
+    assert!(shows(
         &text(&report(&data, 1.0)),
-        "Codex memories",
-        then(": off. Cost unknown", "")
+        "keep",
+        "Codex memories off costs unknown",
+        &[]
     ));
 
     // A trusted project's config at the latest session's directory turns them on.
@@ -2845,7 +2848,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         let r = report(data, 1.0);
         let check = memory_check(&r, Harness::Codex).clone();
         let wide = ReportOptions {
-            width: Some(1000),
+            width: None,
             color: false,
             unicode: false,
             details: false,
@@ -2860,14 +2863,14 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
         check.unresolved.as_deref(),
         Some("a project .codex/config.toml sets memories, but the project's trust is not recorded")
     );
-    let advised = &rendered[rendered.find("Consider turning off\n").unwrap()..];
-    assert!(labelled(
-        advised,
-        "Codex memories",
-        then(
-            ": may be on -> off. Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
+    assert!(shows(
+        &rendered,
+        "consider",
+        "Codex memories may be on",
+        &[
+            "Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
             "Set features.memories = false in "
-        )
+        ]
     ));
     assert!(
         !report(&scan(&options(&w, None)).unwrap(), 1.0)

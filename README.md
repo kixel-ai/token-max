@@ -54,7 +54,7 @@ It needs a Rust toolchain. Until the first crates.io release, install from
 GitHub:
 
 ```sh
-cargo install --locked --git https://github.com/kixelated/token-max
+cargo install --locked --git https://github.com/kixel-ai/token-max
 ```
 
 ## Run
@@ -125,12 +125,12 @@ a word replaces the dot. Red lines come first in each section.
 
 ## More
 
-- [Reference](https://github.com/kixelated/token-max/blob/main/docs/reference.md):
+- [Reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md):
   every flag, report section and check, including `--ssh`, T3 Code
   and the `token-max sessions` export.
-- [Replay semantics](https://github.com/kixelated/token-max/blob/main/docs/semantics.md):
+- [Replay semantics](https://github.com/kixel-ai/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.
-- [First-release plan](https://github.com/kixelated/token-max/blob/main/quest/m0/README.md):
+- [First-release plan](https://github.com/kixel-ai/token-max/blob/main/quest/m0/README.md):
   the checks still to come.
 - To work on it, run `nix develop`, then `just check`. See
-  [CONTRIBUTING.md](https://github.com/kixelated/token-max/blob/main/CONTRIBUTING.md).
+  [CONTRIBUTING.md](https://github.com/kixel-ai/token-max/blob/main/CONTRIBUTING.md).

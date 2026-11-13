@@ -61,7 +61,7 @@ T3 prunes its event log, so the plan cannot reach the Goal for most histories.
      older gaps stay unpriced with a pruning reason, so `beforeCacheExpires`
      stays unpriced for any history older than about a day, nearly always.
   3. Ask T3 upstream to keep the lifecycle events the predicate reads; this
-     posts outside the `kixelated` and `moq-dev` orgs, so it needs approval
+     posts outside the `kixelated`, `kixel-ai` and `moq-dev` orgs, so it needs approval
      and t3code's AI policy check, and old history stays pruned.
   4. Drop the quest: `beforeCacheExpires` stays advisory, and its unpriced
      reason names T3's event pruning.

@@ -5,6 +5,7 @@
 #
 # The binary is checked against its release checksum, cached under
 # $env:XDG_CACHE_HOME or ~\.cache, in token-max\run, and reused while it is the latest.
+# Each release's binary stays there until deleted, so no run removes one another is about to start.
 # TOKEN_MAX_RELEASES points at another copy of the releases, for tests.
 #
 # Run through iex, `exit` would close the user's window: errors throw, and doctor's exit code
@@ -48,18 +49,29 @@
 			Invoke-WebRequest -UseBasicParsing -Uri "$releases/download/$tag/$archive.sha256" -OutFile "$zip.sha256"
 			$expected = ([IO.File]::ReadAllText("$zip.sha256").Trim() -split '\s+')[0]
 			if ($expected -notmatch '^[0-9a-fA-F]{64}$') { throw "token-max: $archive.sha256 holds no SHA-256" }
-			if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zip).Hash -ne $expected) {
+			# .NET rather than Get-FileHash and Expand-Archive: Windows PowerShell started from
+			# PowerShell 7 inherits a PSModulePath whose script modules it cannot load.
+			$stream = [IO.File]::OpenRead($zip)
+			try {
+				$actual = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($stream)) -replace '-', ''
+			} finally {
+				$stream.Dispose()
+			}
+			if ($actual -ne $expected) {
 				throw "token-max: $archive does not match its checksum; nothing was run"
 			}
-			Expand-Archive -LiteralPath $zip -DestinationPath $tmp
-			Move-Item -Force -LiteralPath (Join-Path $tmp 'token-max.exe') -Destination $exe
+			Add-Type -AssemblyName System.IO.Compression.FileSystem
+			$unpacked = Join-Path $tmp 'unpacked'
+			[IO.Compression.ZipFile]::ExtractToDirectory($zip, $unpacked)
+			try {
+				[IO.File]::Move((Join-Path $unpacked 'token-max.exe'), $exe)
+			} catch {
+				# Another run placed the same verified release first, and may be running it.
+				if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw }
+			}
 		} finally {
 			Remove-Item -Recurse -Force -LiteralPath $tmp
 		}
-		# Older releases are never run again; one still running stays until next time.
-		Get-ChildItem -LiteralPath $cache -Filter "token-max-v*-$target.exe" |
-			Where-Object { $_.FullName -ne $exe } |
-			Remove-Item -Force -ErrorAction SilentlyContinue
 	}
 
 	# Under Stop, Windows PowerShell turns doctor's redirected stderr into a terminating error.

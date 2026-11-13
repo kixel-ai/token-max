@@ -1,6 +1,16 @@
 //! max.kixel.ai's run script (`run.sh`, or `run.ps1` on Windows) against fixture releases on a
 //! local server.
 
+// Only the platforms the scripts have a release for.
+#![cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    target_os = "macos",
+    windows
+))]
+
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -267,7 +277,7 @@ fn exe(tag: &str) -> String {
 }
 
 #[test]
-fn runs_the_latest_release_and_reuses_it_until_a_newer_one() {
+fn runs_the_latest_release_and_reuses_it_until_a_newer_one_lands_beside_it() {
     let releases = Releases::new();
     releases.publish("v1.0.0", false);
     runs_doctor(&releases);
@@ -281,7 +291,8 @@ fn runs_the_latest_release_and_reuses_it_until_a_newer_one() {
     releases.publish("v1.0.1", false);
     runs_doctor(&releases);
     assert_eq!(releases.downloads(), 4);
-    assert_eq!(releases.cached(), [exe("v1.0.1")]);
+    // Kept, since another run may be about to start it.
+    assert_eq!(releases.cached(), [exe("v1.0.0"), exe("v1.0.1")]);
 }
 
 #[test]

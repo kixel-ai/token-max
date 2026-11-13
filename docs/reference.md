@@ -18,7 +18,8 @@ latest release without installing it. Each downloads the release archive for
 this platform, refuses it unless it matches the release's `.sha256` file, and
 keeps the binary in `token-max/run` under `$XDG_CACHE_HOME` or `~/.cache`,
 beside the price cache. Later runs reuse it while it is still the latest
-release, and a newer release replaces it. `run.sh` hands `doctor` the
+release; a newer one is downloaded beside it, and deleting the directory
+reclaims the space. `run.sh` hands `doctor` the
 terminal from `/dev/tty`, since its stdin is the piped script, so the changes
 are still offered. Options go after `sh -s --`, as in
 `curl -LsSf https://max.kixel.ai/run.sh | sh -s -- --since 2026-11-01`, or

@@ -5,7 +5,8 @@
 #   curl -LsSf https://max.kixel.ai/run.sh | sh -s -- --since 2026-11-01
 #
 # The binary is checked against its release checksum, cached under
-# ${XDG_CACHE_HOME:-~/.cache}/token-max/run, and reused while it is the latest.
+# ${XDG_CACHE_HOME:-~/.cache}/token-max/run, and reused while it is the latest. Each
+# release's binary stays there until deleted, so no run removes one another is about to start.
 # TOKEN_MAX_RELEASES points at another copy of the releases, for tests.
 
 # Everything is in a function, so a truncated download runs nothing.
@@ -74,10 +75,6 @@ main() {
 		mv -f "$tmp/token-max-$target/token-max" "$bin"
 		rm -rf "$tmp"
 		trap - EXIT
-		# Older releases are never run again.
-		for old in "$cache"/token-max-v*-"$target"; do
-			[ "$old" = "$bin" ] || rm -f "$old"
-		done
 	fi
 
 	# Piped into sh, stdin is the script, so doctor would see no terminal and never prompt.

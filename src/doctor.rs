@@ -91,9 +91,18 @@ impl Edit {
 /// Every change the report recommends or suggests, in report order, each with its edit
 /// or the step to take by hand. An edit another line already makes is listed once.
 pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
+    fixes_from(
+        recommendations(report, unicode)
+            .into_iter()
+            .map(|line| fix(report, line))
+            .collect(),
+    )
+}
+
+/// Drop repeated edits, and leave the second of two values for one setting by hand.
+fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     let mut fixes: Vec<Fix> = vec![];
-    for line in recommendations(report, unicode) {
-        let mut fix = fix(report, line);
+    for mut fix in all {
         if fixes
             .iter()
             .any(|f| matches!(f.how, How::Edit(_)) && f.how == fix.how)
@@ -118,10 +127,12 @@ pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
     fixes
 }
 
-/// Whether `how` sets a setting `patch` also sets, to another value.
+/// Whether `how` sets a setting `patch` also sets, to another value, in the same file or
+/// one a symlink makes the same.
 fn conflicts(how: &How, patch: &Patch) -> bool {
     let How::Edit(other) = how else { return false };
-    other.file == patch.file
+    (other.file == patch.file
+        || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
         && other.edits.iter().any(|a| {
             patch
                 .edits
@@ -132,8 +143,27 @@ fn conflicts(how: &How, patch: &Patch) -> bool {
 
 /// The edits as steps to take by hand.
 fn steps(patch: &Patch) -> String {
+    steps_in(patch, &patch.file)
+}
+
+/// The edits as steps to take by hand in `file`, such as the end of a symlink.
+fn steps_in(patch: &Patch, file: &str) -> String {
     let edits: Vec<String> = patch.edits.iter().map(|e| e.text(patch.harness)).collect();
-    format!("in {}, set {}", patch.file, edits.join(" and "))
+    format!("in {file}, set {}", edits.join(" and "))
+}
+
+/// A path as the filesystem resolves it, so two names for one file compare equal; a file
+/// that does not exist yet resolves through its directory.
+fn identity(path: &Path) -> PathBuf {
+    if let Ok(path) = fs::canonicalize(path) {
+        return path;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+            fs::canonicalize(dir).map_or_else(|_| path.to_path_buf(), |dir| dir.join(name))
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
@@ -149,11 +179,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         },
         (Some(profile), Source::Check(result)) => check_how(result, profile),
         (Some(profile), Source::Piece(c)) => match &c.control {
-            Some(control) => How::Edit(Patch {
-                file: profile.settings_file.clone(),
-                harness: profile.harness,
-                edits: vec![control.into()],
-            }),
+            Some(control) => switch(profile, control.into()),
             None => How::Manual {
                 step: "disable it in config.toml with [[skills.config]]".into(),
                 reason: "the recorded catalog does not give its SKILL.md path".into(),
@@ -166,6 +192,90 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         claim: line.claim,
         suggested: line.suggested,
         how,
+    }
+}
+
+/// A tool, skill or MCP switch in the profile's file, unless a file that outranks it for
+/// some sessions sets the same switch, which would keep it on there.
+fn switch(profile: &Profile, edit: Edit) -> How {
+    let file = &profile.settings_file;
+    let patch = Patch {
+        file: file.clone(),
+        harness: profile.harness,
+        edits: vec![edit],
+    };
+    match outranking(profile, &patch.edits[0]) {
+        Ok(owners) if owners.is_empty() => How::Edit(patch),
+        Ok(owners) => {
+            let text = patch.edits[0].text(profile.harness);
+            let them = owners.join(", ");
+            let verb = if owners.len() == 1 { "sets" } else { "set" };
+            How::Manual {
+                step: format!("in {file}, and in {them} where it is set, set {text}"),
+                reason: format!("{them} {verb} it too, which outranks {file}"),
+            }
+        }
+        Err(e) => {
+            let at = e
+                .location
+                .map_or_else(String::new, |l| format!(" {}", l.file));
+            How::Manual {
+                step: steps(&patch),
+                reason: format!(
+                    "{}{at}, so whether it overrides {file} is unknown",
+                    e.message
+                ),
+            }
+        }
+    }
+}
+
+/// The files, or legacy Codex profile tables, that outrank the profile's settings file and
+/// set what `edit` sets. Claude's `permissions.deny` rules from every file apply together,
+/// so a rule added to the user file is never outranked.
+fn outranking(profile: &Profile, edit: &Edit) -> Result<Vec<String>, ScanError> {
+    if profile.harness == Harness::Claude && edit.append {
+        return Ok(vec![]);
+    }
+    let mut owners = vec![];
+    for file in &profile.outranking_files {
+        if sets(&crate::discovery::settings(file, profile.harness)?, edit) {
+            owners.push(file.clone());
+        }
+    }
+    if profile.harness == Harness::Codex {
+        let user = crate::discovery::settings(&profile.settings_file, Harness::Codex)?;
+        for (name, table) in crate::controls::members(user.get("profiles")) {
+            if sets(crate::controls::members(Some(table)), edit) {
+                owners.push(format!("{}:profiles.{name}", profile.settings_file));
+            }
+        }
+    }
+    Ok(owners)
+}
+
+/// Whether `config` sets what `edit` sets: the same key, or for a list a Codex
+/// `[[skills.config]]` entry with the same `path`.
+fn sets(config: &Map<String, Value>, edit: &Edit) -> bool {
+    let Some((last, parents)) = edit.path.split_last() else {
+        return false;
+    };
+    let mut table = config;
+    for key in parents {
+        match table.get(key) {
+            Some(Value::Object(next)) => table = next,
+            _ => return false,
+        }
+    }
+    let Some(value) = table.get(last) else {
+        return false;
+    };
+    // A Codex skill entry is matched by its `path`; any other list a file sets replaces the
+    // user's.
+    match (edit.append, edit.value.get("path"), value) {
+        (true, Some(key), Value::Array(items)) => items.iter().any(|i| i.get("path") == Some(key)),
+        (true, Some(_), _) => false,
+        _ => true,
     }
 }
 
@@ -404,6 +514,22 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
             )
         }
         CheckResult::Memory(m) => {
+            // Another file may set memories for some runs, such as a named profile or a
+            // project whose trust is unrecorded: the user file alone may not turn it off.
+            if m.unresolved.is_some() || !m.overrides.is_empty() {
+                let mut step = off_step(&m.off, m.off_file.as_deref());
+                if !m.overrides.is_empty() {
+                    step = format!(
+                        "{step}, and in {} where it sets memories",
+                        m.overrides.join(", ")
+                    );
+                }
+                let reason = match &m.unresolved {
+                    Some(why) => why.clone(),
+                    None => format!("{} may set memories too", m.overrides.join(", ")),
+                };
+                return How::Manual { step, reason };
+            }
             let candidates = match m.harness {
                 Harness::Claude => vec![
                     (
@@ -557,39 +683,58 @@ struct Target {
     file: String,
     /// Where an edit lands: the file, or the end of its symlinks.
     resolved: PathBuf,
+    /// The file as the filesystem resolves it, shared by every name for it.
+    identity: PathBuf,
     harness: Harness,
     /// Its text when the walk began; None when it did not exist.
     before: Option<String>,
 }
 
+/// Why the doctor cannot write a settings file, and the file to edit by hand instead.
+#[derive(Debug)]
+struct Refused {
+    reason: String,
+    /// The end of the file's symlinks when they resolve, else the file as named.
+    file: String,
+}
+
 impl Target {
     /// The file as it is now, or why the doctor cannot write it.
-    fn open(file: &str, harness: Harness) -> Result<Target, String> {
+    fn open(file: &str, harness: Harness) -> Result<Target, Refused> {
         let path = Path::new(file);
         let link = fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink());
         let resolved = if link {
-            fs::canonicalize(path).map_err(|e| match e.kind() {
-                ErrorKind::NotFound => format!("{file} is a symlink to a missing file"),
-                _ => format!("{file} cannot be resolved ({e})"),
+            fs::canonicalize(path).map_err(|e| Refused {
+                reason: match e.kind() {
+                    ErrorKind::NotFound => format!("{file} is a symlink to a missing file"),
+                    _ => format!("{file} cannot be resolved ({e})"),
+                },
+                file: file.into(),
             })?
         } else {
             path.to_path_buf()
         };
         let shown = resolved.display().to_string();
+        let refused = |reason: String| Refused {
+            reason,
+            file: shown.clone(),
+        };
         let before = match fs::read(&resolved) {
-            Ok(bytes) => {
-                Some(String::from_utf8(bytes).map_err(|_| format!("{shown} is not UTF-8 text"))?)
-            }
+            Ok(bytes) => Some(
+                String::from_utf8(bytes)
+                    .map_err(|_| refused(format!("{shown} is not UTF-8 text")))?,
+            ),
             Err(e) if e.kind() == ErrorKind::NotFound => None,
-            Err(e) => return Err(format!("{shown} cannot be read ({e})")),
+            Err(e) => return Err(refused(format!("{shown} cannot be read ({e})"))),
         };
         let directory = resolved.parent().filter(|d| !d.as_os_str().is_empty());
         let directory = directory.unwrap_or(Path::new("."));
         if !writable(directory) || (before.is_some() && !writable(&resolved)) {
-            return Err(format!("{shown} is read-only"));
+            return Err(refused(format!("{shown} is read-only")));
         }
         Ok(Target {
             file: file.into(),
+            identity: identity(&resolved),
             resolved,
             harness,
             before,
@@ -616,15 +761,23 @@ impl Target {
         let temp = self
             .resolved
             .with_file_name(format!(".{name}.token-max-{}", std::process::id()));
+        let existing = fs::metadata(&self.resolved).ok();
         let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(text.as_bytes())?;
-            if let Ok(metadata) = fs::metadata(&self.resolved) {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            // The copy is never readable by more people than the file it replaces, even
+            // before its permissions are copied over: settings can hold credentials.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                let mode = existing.as_ref().map_or(0o600, |m| m.permissions().mode());
+                options.mode(mode & 0o777);
+            }
+            let mut file = options.open(&temp)?;
+            if let Some(metadata) = &existing {
                 file.set_permissions(metadata.permissions())?;
             }
+            file.write_all(text.as_bytes())?;
             file.sync_all()?;
             drop(file);
             fs::rename(&temp, &self.resolved)
@@ -681,8 +834,11 @@ pub fn ask(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<Plan> {
-    let mut targets: Vec<Result<Target, String>> = vec![];
-    let mut files: Vec<String> = vec![];
+    let mut targets: Vec<Result<Target, Refused>> = vec![];
+    // Each file as a profile names it, and its target. Names that resolve to one file,
+    // such as two profiles' symlinks to one dotfile, share a target, so each accepted
+    // edit lands in the one text written.
+    let mut files: Vec<(String, usize)> = vec![];
     let mut offers = vec![];
     let mut manual = vec![];
     for mut fix in fixes {
@@ -690,22 +846,37 @@ pub fn ask(
             manual.push(fix);
             continue;
         };
-        let index = match files.iter().position(|f| *f == patch.file) {
-            Some(index) => index,
+        let index = match files.iter().find(|(f, _)| *f == patch.file) {
+            Some((_, index)) => *index,
             None => {
-                files.push(patch.file.clone());
-                targets.push(Target::open(&patch.file, patch.harness));
-                files.len() - 1
+                let target = Target::open(&patch.file, patch.harness);
+                let shared = target.as_ref().ok().and_then(|t| {
+                    targets.iter().position(|o| {
+                        o.as_ref()
+                            .is_ok_and(|o| o.identity == t.identity && o.harness == t.harness)
+                    })
+                });
+                let index = match shared {
+                    Some(index) => index,
+                    None => {
+                        targets.push(target);
+                        targets.len() - 1
+                    }
+                };
+                files.push((patch.file.clone(), index));
+                index
             }
         };
         // Check the edit applies before offering it.
         let refused = match &targets[index] {
-            Err(reason) => Some(reason.clone()),
-            Ok(target) => apply(target, &patch.edits).err(),
+            Err(refused) => Some((refused.reason.clone(), refused.file.clone())),
+            Ok(target) => apply(target, &patch.edits)
+                .err()
+                .map(|reason| (reason, target.resolved.display().to_string())),
         };
-        if let Some(reason) = refused {
+        if let Some((reason, file)) = refused {
             fix.how = How::Manual {
-                step: steps(patch),
+                step: steps_in(patch, &file),
                 reason,
             };
             manual.push(fix);
@@ -1374,8 +1545,51 @@ mod tests {
                 panic!("a read-only target is a step by hand")
             };
             assert_eq!(reason, &format!("{} is read-only", target.display()));
-            assert_eq!(step, &format!("in {}, set \"a\": 1", settings.display()));
+            assert_eq!(step, &format!("in {}, set \"a\": 1", target.display()));
+            std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
+        // Two profiles that link one dotfile write it once, with both accepted edits.
+        let work = w.home.join(".claude-work");
+        std::fs::create_dir_all(&work).unwrap();
+        let other = work.join("settings.json");
+        symlink(&target, &other).unwrap();
+        let (plan, _) = walk(
+            vec![
+                change("A", &settings, Harness::Claude, vec![edit("b", 2, false)]),
+                change("B", &other, Harness::Claude, vec![edit("c", 3, false)]),
+            ],
+            &w,
+            "y\ny\n",
+        );
+        assert_eq!(plan.files.len(), 1);
+        write(&plan).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\n  \"a\": 1,\n  \"b\": 2,\n  \"c\": 3\n}\n"
+        );
+        // So do two lines that set one setting through either name: the second is by hand.
+        let fixes = super::fixes_from(vec![
+            change("A", &settings, Harness::Claude, vec![edit("b", 4, false)]),
+            change("B", &other, Harness::Claude, vec![edit("b", 5, false)]),
+        ]);
+        assert!(matches!(fixes[1].how, How::Manual { .. }), "{fixes:?}");
+        // A new file is readable only by its owner.
+        let fresh = w.home.join("fresh");
+        std::fs::create_dir_all(&fresh).unwrap();
+        let created = fresh.join("settings.json");
+        let (plan, _) = walk(
+            vec![change(
+                "A",
+                &created,
+                Harness::Claude,
+                vec![edit("a", 1, false)],
+            )],
+            &w,
+            "y\n",
+        );
+        write(&plan).unwrap();
+        let mode = std::fs::metadata(&created).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
         let dangling = w.claude.join("dangling.json");
         symlink(w.home.join("missing.json"), &dangling).unwrap();
         let (plan, _) = walk(

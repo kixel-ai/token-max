@@ -519,8 +519,9 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
         "--details",
         "--plain",
         "NO_COLOR",
-        "On a terminal: exit 0",
-        "Without one: exit 0",
+        "on a terminal: exit 0",
+        "Otherwise: exit 0",
+        "--version",
     ] {
         assert!(help.contains(flag), "{flag}");
     }
@@ -563,7 +564,10 @@ fn arguments_follow_strict_parse_args() {
         (status, stdout),
         (0, format!("{}\n", env!("CARGO_PKG_VERSION")))
     );
-    assert_eq!(invoke(&["-v"]).0, 2);
+    assert_eq!(
+        invoke(&["-v"]),
+        (0, format!("{}\n", env!("CARGO_PKG_VERSION")), String::new())
+    );
     let (status, stdout, stderr) = top(&[]);
     assert_eq!((status, &*stdout), (2, ""));
     assert!(stderr.starts_with("token-max: cheaper") && stderr.contains("\n  doctor "));

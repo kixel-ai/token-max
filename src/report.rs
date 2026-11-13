@@ -720,11 +720,7 @@ pub fn format_changes<'a>(report: &'a Report, options: ReportOptions<'a>) -> Str
         return out.text;
     }
     out.blank();
-    out.line(
-        "Changes to make; on a terminal, token-max doctor offers to make each one:",
-        0,
-        BOLD,
-    );
+    out.line("Changes to make:", 0, BOLD);
     for fix in &fixes {
         let lines = crate::doctor::describe(fix, out.home.as_deref());
         out.hang(&format!("  {}", lines.head), 4, PLAIN);
@@ -2996,7 +2992,6 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
     row
 }
 
-/// The default report: every setting and feature under the kind of claim it rests on.
 /// A check's verdict before its line is drawn.
 ///
 /// A comparison with no requests is not a verdict, whatever the tie-break said. Window
@@ -3069,6 +3064,12 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             Mark::Change => value(r.recommended),
             _ => "off".into(),
         };
+        let mut current = value(r.current);
+        if let CheckResult::Compaction(c) = result
+            && c.unset
+        {
+            current += " (default)";
+        }
         lines.push((
             Claim::of(result),
             mark,
@@ -3076,7 +3077,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
                 claim: Claim::of(result).name(),
                 suggested: mark == Mark::Consider,
                 name: setting_name(result),
-                value: format!("{} {arrow} {target}", value(r.current)),
+                value: format!("{current} {arrow} {target}"),
                 source: Source::Check(result),
             },
         ));
@@ -3109,6 +3110,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
     lines.into_iter().map(|(_, _, line)| line).collect()
 }
 
+/// The default report: every setting and feature under the kind of claim it rests on.
 fn summary(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
@@ -5106,6 +5108,47 @@ mod tests {
             by_hand(idle[1].how.clone()),
             "Idle compaction wants a different value for the same setting"
         );
+
+        // Auto memory that another file may turn on for some runs is turned off by hand.
+        let mut report = synthetic();
+        assert_eq!(
+            how(&report, "Auto memory"),
+            set(&["autoMemoryEnabled"], json!(false))
+        );
+        for check in &mut report.checks {
+            if let CheckResult::Memory(m) = check {
+                m.overrides = vec!["/synthetic/work.config.toml".into()];
+            }
+        }
+        assert_eq!(
+            by_hand(how(&report, "Auto memory")),
+            "/synthetic/work.config.toml may set memories too"
+        );
+
+        // A switch that a file outranking the user's sets stays by hand; a deny rule
+        // adds to every file's rules, so nothing outranks it.
+        let w = Workspace::new();
+        let project = w.home.join("settings.json");
+        std::fs::write(
+            &project,
+            r#"{"enableArtifact": true, "permissions": {"deny": ["Read"]}}"#,
+        )
+        .unwrap();
+        let project = project.display().to_string();
+        let mut report = synthetic();
+        report.scan.profiles[0].outranking_files = vec![project.clone()];
+        let all = fixes(&report, false);
+        let edits = |fix: &crate::doctor::Fix| match &fix.how {
+            How::Edit(patch) => patch.edits[0].path.join("."),
+            How::Manual { step, .. } => step.clone(),
+        };
+        let artifact = all.iter().find(|f| edits(f).contains("enableArtifact"));
+        assert_eq!(
+            by_hand(artifact.expect("an Artifact fix").how.clone()),
+            format!("{project} sets it too, which outranks {file}")
+        );
+        let deny = all.iter().find(|f| edits(f) == "permissions.deny");
+        assert!(matches!(deny.expect("a deny fix").how, How::Edit(_)));
     }
 
     #[test]

@@ -209,6 +209,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         agents: Default::default(),
         instruction_budget_file: None,
         instruction_budget_unresolved: None,
+        outranking_files: vec![],
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),

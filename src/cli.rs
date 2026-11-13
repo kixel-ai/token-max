@@ -53,6 +53,7 @@ Usage: token-max doctor [options]
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
+  -v, --version           Show the package version
   -h, --help              Show this help
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
@@ -82,8 +83,8 @@ stderr only on interactive terminals, never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
 the last answer.
 
-On a terminal: exit 0, or 2 on failure or cancellation.
-Without one: exit 0 for no applicable change (advisory findings may remain), 1 for a
+When it offers this host's changes on a terminal: exit 0, or 2 on failure or cancellation.
+Otherwise: exit 0 for no applicable change (advisory findings may remain), 1 for a
 recommended change, 2 for a scan, pricing, argument or cancellation failure.
 ";
 
@@ -690,7 +691,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         return Ok((Output::Text(help(DOCTOR_HELP)), 0));
     }
     if values.version {
-        return Err(invalid());
+        return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
     }
     let since = window(&values)?;
     let max_cost_per_use_usd = match values.max_cost_per_use.as_deref() {
@@ -738,7 +739,8 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         ));
     }
     let stdout = io::stdout().is_terminal();
-    let walk = stdout && io::stdin().is_terminal();
+    // Only this host's changes can be made here, so a run of destinations alone lists them.
+    let walk = local && stdout && io::stdin().is_terminal();
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let interactive = stdout && io::stderr().is_terminal() && !term_dumb;
     let progress = interactive;
@@ -956,7 +958,12 @@ pub fn main() -> ExitCode {
     };
     let result =
         result.unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-    enter(Phase::Writing);
+    // The walk's report leads into its prompts, so Ctrl-C while it prints cancels the walk;
+    // anything else is written whole.
+    enter(match result {
+        Ok((Output::Walk(_), _)) => Phase::Asking,
+        _ => Phase::Writing,
+    });
     let written = match result {
         Ok((Output::Text(text), code)) => io::stdout()
             .lock()

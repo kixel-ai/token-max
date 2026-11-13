@@ -684,6 +684,10 @@ pub fn discover_claude_controls(
         let user = settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
+        let mut outranking: Vec<String> = vec![];
+        if !managed.is_empty() {
+            outranking.push(managed_file.into());
+        }
         let mut speed_directories = IndexMap::default();
         let mut idle_directories = IndexMap::default();
         let relevant: Vec<&Request> = requests
@@ -735,6 +739,15 @@ pub fn discover_claude_controls(
             let project = settings(&project_file, Harness::Claude)?;
             let legacy = settings(&legacy_file, Harness::Claude)?;
             let local = settings(&local_file, Harness::Claude)?;
+            for (file, config) in [
+                (&project_file, &project),
+                (&legacy_file, &legacy),
+                (&local_file, &local),
+            ] {
+                if !config.is_empty() && !outranking.contains(file) {
+                    outranking.push(file.clone());
+                }
+            }
             let scopes = [
                 SettingsScope {
                     config: &user,
@@ -816,6 +829,7 @@ pub fn discover_claude_controls(
         }
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
+        profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
         for request in requests
@@ -1004,9 +1018,13 @@ pub fn discover_codex_controls(
             .then(|| profile.settings_file.clone())
             .into_iter()
             .collect();
+        let mut outranking: Vec<String> = vec![];
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
+            if !config.is_empty() {
+                outranking.push(file.clone());
+            }
             if sets_codex_memory(&config) {
                 memory_profiles.push(file.clone());
             }
@@ -1098,6 +1116,13 @@ pub fn discover_codex_controls(
                     && !budget_overrides.contains(&file)
                 {
                     budget_overrides.push(file.clone());
+                }
+                // A layer Codex may read, unless it is the user's own file again.
+                let user_file = file == profile.settings_file
+                    || realpath(&file)
+                        .is_ok_and(|a| realpath(&profile.settings_file).is_ok_and(|b| a == b));
+                if !config.is_empty() && !user_file && !outranking.contains(&file) {
+                    outranking.push(file.clone());
                 }
                 layers.push((file, config));
             }
@@ -1195,6 +1220,7 @@ pub fn discover_codex_controls(
             }
             profile.background_directories.insert(cwd.into(), controls);
         }
+        profile.outranking_files = outranking;
         profile.instruction_budget_unresolved = (!budget_overrides.is_empty()).then(|| {
             format!(
                 "{} can set {AGENTS_BUDGET} for some runs, which the transcripts do not record",
@@ -1753,6 +1779,7 @@ pub(crate) fn profile(
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,
         instruction_budget_unresolved: None,
+        outranking_files: vec![],
     })
 }
 

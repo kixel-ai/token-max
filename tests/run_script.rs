@@ -74,14 +74,20 @@ impl Releases {
         if corrupt {
             hash.replace_range(..1, if hash.starts_with('0') { "1" } else { "0" });
         }
-        std::fs::write(dir.join(format!("{name}.sha256")), format!("{hash}  {name}\n")).unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.sha256")),
+            format!("{hash}  {name}\n"),
+        )
+        .unwrap();
         self.server.lock().unwrap().latest = Some(tag.into());
     }
 
     /// Requests for release assets so far.
     fn downloads(&self) -> usize {
         let log = &self.server.lock().unwrap().log;
-        log.iter().filter(|path| path.contains("/download/")).count()
+        log.iter()
+            .filter(|path| path.contains("/download/"))
+            .count()
     }
 
     fn cache(&self) -> PathBuf {
@@ -246,6 +252,16 @@ fn serve(stream: TcpStream, files: &Path, state: &Mutex<Server>, base: &str) {
     }
 }
 
+/// Runs the script and checks that it ran doctor with the arguments it was given.
+fn runs_doctor(releases: &Releases) {
+    let (code, stdout, stderr) = releases.run();
+    assert_eq!(
+        (code, stdout.as_str()),
+        (0, expected().as_str()),
+        "{stderr}"
+    );
+}
+
 fn exe(tag: &str) -> String {
     format!("token-max-{tag}{}", std::env::consts::EXE_SUFFIX)
 }
@@ -254,19 +270,16 @@ fn exe(tag: &str) -> String {
 fn runs_the_latest_release_and_reuses_it_until_a_newer_one() {
     let releases = Releases::new();
     releases.publish("v1.0.0", false);
-    let (code, stdout, stderr) = releases.run();
-    assert_eq!((code, stdout.as_str()), (0, expected().as_str()), "{stderr}");
+    runs_doctor(&releases);
     assert_eq!(releases.downloads(), 2);
     assert_eq!(releases.cached(), [exe("v1.0.0")]);
 
     // Still the latest: only the redirect is fetched.
-    let (code, stdout, stderr) = releases.run();
-    assert_eq!((code, stdout.as_str()), (0, expected().as_str()), "{stderr}");
+    runs_doctor(&releases);
     assert_eq!(releases.downloads(), 2);
 
     releases.publish("v1.0.1", false);
-    let (code, stdout, stderr) = releases.run();
-    assert_eq!((code, stdout.as_str()), (0, expected().as_str()), "{stderr}");
+    runs_doctor(&releases);
     assert_eq!(releases.downloads(), 4);
     assert_eq!(releases.cached(), [exe("v1.0.1")]);
 }

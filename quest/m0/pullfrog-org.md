@@ -3,8 +3,9 @@
 ## Goal
 
 Pullfrog reviews PRs in kixel-ai/token-max again: its GitHub App is
-installed on the kixel-ai organization with access to token-max, and a PR
-push dispatches `.github/workflows/pullfrog.yml`, which succeeds.
+installed on the kixel-ai organization with access to token-max, and on a
+PR push the app dispatches `.github/workflows/pullfrog.yml` on `main`, which
+succeeds and posts its review.
 
 ## Plan
 
@@ -18,7 +19,7 @@ organization. The `pullfrog` environment survived, limited to `main`.
 
 Once the app is installed, confirm the Pullfrog console still grants model
 access to the repository under its new owner, then check that the next PR
-push produces a successful Pullfrog run.
+push produces a successful Pullfrog run on `main`.
 
 ## Waiting
 

@@ -1126,14 +1126,19 @@ pub fn discover_codex_controls(
                 // A named profile's project_root_markers or projects can change which
                 // project layers apply, which matters only where one sets memories.
                 let moved = if marker_selection {
-                    ancestors_setting_codex_memory(cwd, &profile.settings_file)?
+                    ancestors_setting_codex_memory(cwd, &profile.settings_file, &options.home)?
                 } else {
                     vec![]
                 };
                 let moved_layer = !moved.is_empty();
                 let mut overrides = memory_profiles.clone();
+                // The walk names files by resolved path, the project layers by the
+                // recorded one, so compare them resolved.
+                let same = |a: &str, b: &str| {
+                    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+                };
                 for file in untrusted.into_iter().chain(moved) {
-                    if !overrides.contains(&file) {
+                    if !overrides.iter().any(|o| same(o, &file)) {
                         overrides.push(file);
                     }
                 }
@@ -1216,17 +1221,29 @@ fn codex_memory_stored(root: &str) -> bool {
         .any(|name| std::path::Path::new(&join(&[root, name])).is_dir())
 }
 
-/// Every `.codex/config.toml` from `cwd` up to the filesystem root, other than the
-/// user's own, that sets memories, whichever of them a project root would include.
-fn ancestors_setting_codex_memory(cwd: &str, user: &str) -> Result<Vec<String>, ScanError> {
+/// Every `.codex/config.toml` from `cwd` up to the user's home, or the filesystem root
+/// outside it, other than the user's own, that sets memories, whichever of them a
+/// project root would include. A home's `.codex` is the user layer, and directories
+/// above a home hold no one's project.
+fn ancestors_setting_codex_memory(
+    cwd: &str,
+    user: &str,
+    home: &str,
+) -> Result<Vec<String>, ScanError> {
+    // Walk and stop on normalized forms, such as resolved symlinks and Windows' `\\?\`
+    // prefix: a symlinked cwd's physical parents are its ancestors, not the link's. A path
+    // that no longer exists is walked as recorded.
+    let normal = |path: &str| realpath(path).unwrap_or_else(|_| path.to_string());
+    let home = normal(home);
+    let cwd = normal(cwd);
     let mut files = vec![];
-    let mut path = cwd;
+    let mut path = cwd.as_str();
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
         if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
             files.push(file);
         }
-        if dirname(path) == path {
+        if path == home || dirname(path) == path {
             return Ok(files);
         }
         path = dirname(path);
@@ -1928,6 +1945,46 @@ mod tests {
             profiles: vec![profile.id.clone()].into(),
             cwd: cwd.map(|c| text(c).into()),
             ..make_request()
+        }
+    }
+
+    #[test]
+    fn codex_memory_ancestors_stop_at_the_home() {
+        let w = Workspace::new();
+        let home = w.home.join("user");
+        let cwd = home.join("repo/nested");
+        for dir in [&w.home, &home, &home.join("repo"), &cwd] {
+            std::fs::create_dir_all(dir.join(".codex")).unwrap();
+            std::fs::write(
+                dir.join(".codex/config.toml"),
+                "[features]\nmemories = true\n",
+            )
+            .unwrap();
+        }
+        let file = |dir: &Path| text(&dir.join(".codex/config.toml"));
+        let found = |stop: &Path| {
+            ancestors_setting_codex_memory(&text(&cwd), &file(&home), &text(stop)).unwrap()
+        };
+        // The home's own is the user layer, and above the home is no one's project.
+        assert_eq!(found(&home), [file(&cwd), file(&home.join("repo"))]);
+        // Outside the home, the walk reaches the filesystem root, still skipping the user's.
+        let outside = found(&cwd.join("elsewhere"));
+        assert!(outside.contains(&file(&w.home)) && !outside.contains(&file(&home)));
+        // A symlinked cwd outside the home walks its target's ancestors, not the link's.
+        #[cfg(unix)]
+        {
+            let outside = w.home.join("outside");
+            std::fs::create_dir_all(outside.join(".codex")).unwrap();
+            std::fs::write(
+                outside.join(".codex/config.toml"),
+                "[features]\nmemories = true\n",
+            )
+            .unwrap();
+            let link = outside.join("link");
+            std::os::unix::fs::symlink(&cwd, &link).unwrap();
+            let linked =
+                ancestors_setting_codex_memory(&text(&link), &file(&home), &text(&home)).unwrap();
+            assert_eq!(linked, [file(&cwd), file(&home.join("repo"))]);
         }
     }
 

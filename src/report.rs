@@ -5402,11 +5402,17 @@ mod tests {
             "Suggested: 1h".into(),
             "[guidance]".into(),
         ];
-        for width in [28, 40, 80] {
-            let text = text(&report, Some(width), true);
+        let text_unwrapped = |details| text(&report, None, details);
+        for (width, details) in [28, 40, 80]
+            .into_iter()
+            .flat_map(|w| [(w, false), (w, true)])
+        {
+            let text = text(&report, Some(width), details);
             let at = |s: &str| text.find(s).expect(s);
-            assert!(at("Recommended changes") < at("Advisory findings"));
-            assert!(at("Advisory findings") < at("Keep current settings"));
+            if details {
+                assert!(at("Recommended changes") < at("Advisory findings"));
+                assert!(at("Advisory findings") < at("Keep current settings"));
+            }
             for line in text.lines() {
                 assert!(
                     unicode_width::UnicodeWidthStr::width(line) <= width,
@@ -5414,10 +5420,14 @@ mod tests {
                 );
             }
             let compact = compact(&text);
-            for value in &values {
-                assert!(compact.contains(&super::tests::compact(value)), "{value}");
+            // Wrapping only moves line breaks, so nothing is dropped or repeated.
+            assert_eq!(compact, super::tests::compact(&text_unwrapped(details)));
+            if details {
+                for value in &values {
+                    assert!(compact.contains(&super::tests::compact(value)), "{value}");
+                }
+                assert!(compact.contains("$12.34") && compact.contains("$24.68"));
             }
-            assert!(compact.contains("$12.34") && compact.contains("$24.68"));
             assert!(!text.contains('\x1b') && !text.contains('…'));
             assert!(
                 text.contains("e\u{301}"),

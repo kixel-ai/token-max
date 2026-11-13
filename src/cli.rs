@@ -460,6 +460,23 @@ impl Formatter for JsFormatter {
         }
         write!(writer, "{value}")
     }
+    /// Terminal controls and direction overrides print as `\uXXXX`, which decodes to the same
+    /// string, so a path or URL from a transcript or a destination cannot drive the terminal.
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        writer: &mut W,
+        fragment: &str,
+    ) -> io::Result<()> {
+        let mut start = 0;
+        for (at, c) in fragment.char_indices() {
+            if crate::safe::unsafe_char(c) {
+                writer.write_all(&fragment.as_bytes()[start..at])?;
+                write!(writer, "\\u{:04x}", c as u32)?;
+                start = at + c.len_utf8();
+            }
+        }
+        writer.write_all(&fragment.as_bytes()[start..])
+    }
 }
 
 /// Stream a value as one compact JavaScript-compatible JSON line.
@@ -1126,6 +1143,19 @@ pub fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn json_lines_escape_every_terminal_control() {
+        let text = "a\u{1b}b\u{7f}c\u{9b}d\u{202e}e\u{2069}f\u{e9}";
+        let mut line = vec![];
+        write_json(&mut line, &text).unwrap();
+        let line = String::from_utf8(line).unwrap();
+        assert_eq!(
+            line,
+            "\"a\\u001bb\\u007fc\\u009bd\\u202ee\\u2069f\u{e9}\"\n"
+        );
+        assert_eq!(serde_json::from_str::<String>(&line).unwrap(), text);
+    }
 
     /// Expected instants are what Node's `Date.parse` returns for the same text.
     #[test]

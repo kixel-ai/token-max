@@ -168,7 +168,7 @@ pub fn display(value: &str) -> String {
 }
 
 /// Terminal controls and direction overrides, which metadata must never print raw.
-fn unsafe_char(c: char) -> bool {
+pub(crate) fn unsafe_char(c: char) -> bool {
     let code = c as u32;
     code <= 0x1f
         || (0x7f..=0x9f).contains(&code)

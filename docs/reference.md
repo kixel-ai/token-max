@@ -303,14 +303,20 @@ Each line's `repositories` is resolved on the host that ran the session, so a
 consumer never reads another host's path on its own. It is the repository
 Codex recorded when the session started (`"repositoriesSource": "recorded"`),
 or else the remote URLs of the Git checkout now containing `cwd`, a
-subdirectory or linked worktree included (`"checkout"`). A checkout is read
-when the export runs and may have been replaced since the session, so treat
-`checkout` as unverified. It is null when the directory no longer exists, is in
-no checkout, or the checkout has no remote. URLs are read from the
+subdirectory, linked worktree or symlinked directory included (`"checkout"`). A
+checkout is read when the export runs and may have been replaced since the
+session, so treat `checkout` as unverified. It is null when the directory no
+longer exists or this user cannot read it (another user's, or a dropped network
+mount), is in no checkout, or the checkout has no remote or an unreadable
+config. URLs are read from the
 repository's own config file, in the order it lists them, without following
 includes or applying `insteadOf` rewrites, and are printed without userinfo, so
 a credential such as `https://user:token@host` never leaves the host. A config
 Git would reject fails the export, naming the file and line.
+
+Every string prints with terminal controls and direction overrides escaped as
+`\uXXXX`, which decodes to the same text, so a path, branch or URL, from this
+host or a destination, cannot drive the terminal that shows the output.
 
 Native session IDs never reach the report, which hashes them. Over SSH, they
 cross only in a destination's session lines.

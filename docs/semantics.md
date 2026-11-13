@@ -1068,9 +1068,10 @@ report and whether it recommends a change, or its session lines, either with
 its window, or its safe diagnostic, then ends the stream. Any other build, a
 truncated or trailing value, a result for another window or job than
 requested, or a nonzero exit fails the run. The coordinator sets each session
-line's `host` and orders every host's lines by first request. The coordinator prints a destination's text with every terminal
-control escaped except line breaks and, when color is on, the color sequences
-reports use.
+line's `host` and orders every host's lines by first request. The coordinator
+prints a destination's report text with every terminal control escaped except
+line breaks and, when color is on, the color sequences reports use, and writes
+every session line string with terminal controls escaped as JSON `\uXXXX`.
 
 The scan never leaves its host, so the coordinator holds at most its own scan
 however many hosts it audits, and each destination's memory is that of a local

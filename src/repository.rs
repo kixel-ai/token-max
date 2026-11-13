@@ -2,10 +2,11 @@
 //! export.
 
 use std::fs;
+use std::io::ErrorKind;
 
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::{absent, error, existing_directory, git_dir, join, project_directories};
+use crate::discovery::{absent, error, git_dir, join, project_directories, realpath};
 use crate::safe::ScanError;
 
 /// Where a session's repositories came from.
@@ -46,12 +47,24 @@ pub fn url(value: &str) -> Option<String> {
 
 /// The remote URLs of the Git checkout containing `cwd`, in the order its config lists them.
 ///
-/// None when `cwd` no longer exists, is in no checkout, or the checkout has no remote.
+/// None when `cwd` no longer exists or cannot be read, is in no checkout, or the checkout has
+/// no remote or an unreadable config. Fails only on Git metadata Git itself would reject.
 pub fn checkout(cwd: &str) -> Result<Option<Vec<String>>, ScanError> {
-    if !existing_directory(cwd)? {
+    // The repository is evidence beside the session's cost, so a directory this host cannot
+    // read, such as another user's or a dropped network mount, leaves it unknown rather than
+    // failing the export. Git finds the checkout from the resolved path, past any symlink.
+    if !std::path::Path::new(cwd).is_absolute() {
         return Ok(None);
     }
-    let paths = project_directories(cwd, &[".git".into()])?;
+    let Ok(cwd) = realpath(cwd) else {
+        return Ok(None);
+    };
+    if !fs::metadata(&cwd).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(None);
+    }
+    let Ok(paths) = project_directories(&cwd, &[".git".into()]) else {
+        return Ok(None);
+    };
     let root = paths.last().expect("cwd is included");
     let Some(git) = git_dir(root)? else {
         return Ok(None);
@@ -59,8 +72,10 @@ pub fn checkout(cwd: &str) -> Result<Option<Vec<String>>, ScanError> {
     let file = join(&[&git.common, "config"]);
     let text = match fs::read(&file) {
         Ok(bytes) => bytes,
-        // Git metadata that a removed main checkout left dangling names no remote.
-        Err(e) if absent(e.kind()) => return Ok(None),
+        // Metadata a removed main checkout left dangling, or another user's, names no remote.
+        Err(e) if absent(e.kind()) || e.kind() == ErrorKind::PermissionDenied => {
+            return Ok(None);
+        }
         Err(_) => return Err(error("cannot read git config", &file, 0)),
     };
     let text = String::from_utf8_lossy(&text);
@@ -331,9 +346,27 @@ mod tests {
             "https://host/o/r.git".to_string(),
             "host:me/r.git".to_string(),
         ]);
-        for cwd in [&main, &main.join("src/deep"), &work.join("sub")] {
+        // A symlink resolves as Git resolves it, through the real path's parents.
+        let alias = w.home.join("alias");
+        std::os::unix::fs::symlink(main.join("src/deep"), &alias).unwrap();
+        for cwd in [&main, &main.join("src/deep"), &work.join("sub"), &alias] {
             assert_eq!(checkout(&text(cwd)).unwrap(), expected, "{cwd:?}");
         }
+        // A directory this user cannot enter, as under another user's home.
+        let locked = w.home.join("locked");
+        std::fs::create_dir_all(locked.join("inside")).unwrap();
+        let mode = |m| std::os::unix::fs::PermissionsExt::from_mode(m);
+        std::fs::set_permissions(&locked, mode(0o000)).unwrap();
+        let entered = std::fs::read_dir(&locked).is_ok();
+        let found = checkout(&text(&locked.join("inside")));
+        std::fs::set_permissions(&locked, mode(0o755)).unwrap();
+        // Root reads it anyway.
+        if !entered {
+            assert_eq!(found.unwrap(), None);
+        }
+        let file = main.join("src/file");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(checkout(&text(&file)).unwrap(), None);
 
         // A submodule's own directory, a checkout without remotes, outside any checkout, gone.
         let module = w.home.join("super/.git/modules/sub");

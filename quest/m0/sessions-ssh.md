@@ -3,7 +3,8 @@
 ## Goal
 
 `token-max sessions --ssh HOST [--include-local]` prints the priced
-sessions of every selected host as JSON lines. Each line carries a new
+sessions of every selected host as JSON lines, ordered across hosts by
+first request as `SESSIONS_HELP` promises. Each line carries a new
 `host` field: the destination as given to `--ssh`, or null for this host.
 Every host is priced from this host's catalog, and the first failed host
 fails the whole run, as `--ssh` reports do today. Only the session lines
@@ -13,7 +14,7 @@ Every line, local or remote, also carries `repositories`, resolved on the
 host where the session ran: the repository a Codex session recorded when
 there is one, otherwise the remote URLs of the Git checkout now at the
 session's `cwd`. It is null when neither exists, so a consumer never
-resolves another host's path on its own. A `repositories_source` field
+resolves another host's path on its own. A `repositoriesSource` field
 says which (`recorded` or `checkout`), since a checkout read at export
 time may have been replaced since the session; a consumer treats
 `checkout` as unverified evidence. Each URL is printed without its
@@ -50,9 +51,15 @@ request history could replace reading transcripts over SSH):
 Guidance: reuse the `--ssh-scan` stream in `src/ssh.rs` and `src/wire.rs`,
 with the request naming the export instead of a report format, and
 `--ssh` with directory flags needing `--include-local` as the report does.
-Read remotes from the checkout's Git config rather than running `git`.
-Update `SESSIONS_HELP`, the README's `sessions` line, and the SSH section of
-`docs/semantics.md`.
+Find the checkout containing `cwd` with `project_directories` and
+`main_checkout` in `src/discovery.rs`, so a subdirectory or linked worktree
+resolves, and read its remotes from Git config rather than running `git`.
+Add `src/sessions.rs` to the stream fingerprint in `wire::build()`, since
+the session lines now cross SSH.
+Update `SESSIONS_HELP`, the top-level help's SSH line in `src/cli.rs`, the
+`src/sessions.rs` module comment that session IDs never cross SSH, the
+README's `sessions` line, the `sessions` and SSH sections of
+`docs/reference.md`, and the SSH section of `docs/semantics.md`.
 
 ## Related
 

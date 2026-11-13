@@ -68,7 +68,7 @@ Without profile flags, discover local Claude/Codex profiles and T3 instances. Ex
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
 and needs this same version installed there; it prices its own history with this host's
-prices, and only its report crosses SSH. Its changes are listed to make there. Current
+prices, and only its report crosses SSH, never its scan. Its changes are listed to make there. Current
 settings are applied to the selected history; checks can use different windows and
 baselines. Independent savings do not add.
 
@@ -98,15 +98,21 @@ Usage: token-max sessions [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
+  --ssh HOST              Also export an SSH destination's sessions with the token-max installed there (repeatable)
+  --include-local         Also export this host's sessions when --ssh is given
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
   --price-cache FILE      Cache path (default: ~/.cache/token-max/models.json)
   -h, --help              Show this help
 
 Prints one JSON object per line for each Claude Code or Codex session with a request in the
-window, ordered by its first request. A Claude subagent and a Codex review or spawned thread
-are sessions of their own. Fields: harness; session, its native ID; parent, the session it
-was spawned from; review, whether Codex marked it a review; cwd; branches, each Git branch
+window, ordered across hosts by its first request. A Claude subagent and a Codex review or
+spawned thread are sessions of their own. Fields: host, the --ssh destination as given, or
+null for this host; harness; session, its native ID; parent, the session it was spawned
+from; review, whether Codex marked it a review; cwd; repositories, remote URLs without
+userinfo, resolved on the session's host, or null; repositoriesSource, recorded when Codex
+recorded the repository, or checkout when read now from the Git checkout at cwd, which may
+have changed since the session; branches, each Git branch
 its records in the window name with the first and last time, or else the last named before
 it; start and end of its requests; models, one entry per model and reasoning effort with
 requests (each request once in every entry it reaches), inputTokens (uncached),
@@ -116,8 +122,13 @@ skippedLines, the unreadable lines in its files; files. A cost is a lower bound 
 complete is false: a request could not be priced, or a file had unreadable or unfinished
 lines.
 
-Public API-price estimates, not subscription bills. Reads transcripts only and prints no
-prompt or reply text. Errors go to stderr as JSON.
+Directory flags select local profiles only; with --ssh they need --include-local. Each SSH
+destination exports its own sessions with this host's prices, and only its session lines
+cross SSH. A session found on several hosts is printed once per host. Any failed host fails
+the whole run.
+
+Public API-price estimates, not subscription bills. Reads transcripts and Git config only
+and prints no prompt or reply text. Errors go to stderr as JSON.
 Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 

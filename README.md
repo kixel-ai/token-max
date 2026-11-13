@@ -135,7 +135,8 @@ a word replaces the dot. Red lines come first in each section.
 
 - [Reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md):
   every flag, report section and check, including `--ssh`, T3 Code
-  and the `token-max sessions` export.
+  and the `token-max sessions` export of each session's cost, branches and
+  repositories, from this host or over SSH.
 - [Replay semantics](https://github.com/kixel-ai/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.
 - [First-release plan](https://github.com/kixel-ai/token-max/blob/main/quest/m0/README.md):

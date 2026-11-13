@@ -272,11 +272,13 @@ Independent check savings must not be summed.
 
 `token-max sessions` prints each session's usage at public API prices, one
 JSON object per line, for tools that tie sessions to their own records, such
-as moq-dev/quest's `quest usage`. It takes `--since` and the profile and price
-options; `token-max sessions --help` lists every field.
+as moq-dev/quest's `quest usage`. It takes `--since`, the profile and price
+options, and `--ssh` with `--include-local` as `doctor` does;
+`token-max sessions --help` lists every field.
 
 ```sh
 token-max sessions --since 2026-11-01
+token-max sessions --ssh devbox --include-local
 ```
 
 A Claude subagent, and a Codex review or spawned thread, is a session of its
@@ -291,8 +293,27 @@ into another transcript, as a fork does, counts once, with its original
 session. A cost is a lower bound, marked `"complete": false`, when a request
 could not be priced or a transcript had unreadable or unfinished lines.
 Compaction summaries the transcripts never recorded are not estimated here.
-Native session IDs appear only in this export: the report hashes them, and an
-SSH destination sends only its report.
+
+Each line names its `host`: the `--ssh` destination as given, or null for this
+host. Lines from every host are ordered together by first request; a session
+whose history was copied between hosts is printed once per host, each with its
+own `host`, and the consumer decides which to count.
+
+Each line's `repositories` is resolved on the host that ran the session, so a
+consumer never reads another host's path on its own. It is the repository
+Codex recorded when the session started (`"repositoriesSource": "recorded"`),
+or else the remote URLs of the Git checkout now containing `cwd`, a
+subdirectory or linked worktree included (`"checkout"`). A checkout is read
+when the export runs and may have been replaced since the session, so treat
+`checkout` as unverified. It is null when the directory no longer exists, is in
+no checkout, or the checkout has no remote. URLs are read from the
+repository's own config file, in the order it lists them, without following
+includes or applying `insteadOf` rewrites, and are printed without userinfo, so
+a credential such as `https://user:token@host` never leaves the host. A config
+Git would reject fails the export, naming the file and line.
+
+Native session IDs never reach the report, which hashes them. Over SSH, they
+cross only in a destination's session lines.
 
 ## Cache TTL
 
@@ -417,7 +438,9 @@ SSH configuration, keys and known hosts without prompting. Add
 `--include-local` to audit this host in the same run. Each destination needs
 the same version of token-max installed with `cargo install`; token-max
 installs nothing there itself. A missing or different version fails with the
-command to run. Linux and macOS destinations are supported.
+command to run. Linux and macOS destinations are supported. `token-max
+sessions` takes the same flags, and each destination sends only its priced
+session lines.
 
 ```sh
 token-max doctor --ssh devbox --ssh user@laptop --include-local

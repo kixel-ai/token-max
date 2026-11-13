@@ -45,7 +45,3 @@ Agent's choices, for the implementer to revisit:
   assets.
 
 The same PR updates `docs/releasing.md` and the README's install section.
-
-## Required
-
-- [Move the repository to the kixel-ai organization](/quest/m0/kixel-ai.md) - the release URLs and the flake reference contain the owner

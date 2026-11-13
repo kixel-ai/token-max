@@ -1551,10 +1551,8 @@ mod tests {
     /// Cancellation is sticky for the process; no other test here downloads.
     #[test]
     fn cancellation_deletes_partial_downloads_and_refuses_new_ones() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!("cancel-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let workspace = crate::test_support::Workspace::new();
+        let dir = &workspace.home;
         let partial = dir.join("models.json.partial.tmp");
         let finished = dir.join("models.json.finished.tmp");
         let mut file = create_temporary(&partial).unwrap();
@@ -1569,7 +1567,6 @@ mod tests {
         assert!(!partial.exists());
         assert!(create_temporary(&dir.join("models.json.late.tmp")).is_err());
         assert!(!dir.join("models.json.late.tmp").exists());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

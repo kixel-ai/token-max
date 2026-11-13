@@ -935,6 +935,11 @@ pub struct Profile {
     /// in `settings`, such as a project or named profile that sets it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_budget_unresolved: Option<String>,
+    /// Settings files that outrank `settings_file` for some recorded sessions, such as a
+    /// project's, a managed one or a named Codex profile, so a switch they set overrides
+    /// the same switch in `settings_file`. Only files that hold settings are listed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outranking_files: Vec<String>,
 }
 
 /// A setting's current value and the file or variable that sets it.

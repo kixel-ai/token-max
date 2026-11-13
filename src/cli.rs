@@ -12,11 +12,12 @@ use serde::Serialize;
 use serde_json::ser::Formatter;
 
 use crate::discovery::DiscoveryOptions;
+use crate::doctor::{Fix, Style, ask, finish, write};
 use crate::model::{Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Host, ReportOptions, format_report};
+use crate::report::{Host, ReportOptions, format_changes, format_report};
 use crate::safe::{ScanError, display};
 use crate::ssh;
 use crate::terminal::{WrapOptions, wrap_text};
@@ -24,8 +25,21 @@ use crate::wire::{Format, Request};
 
 const HELP: &str = "token-max: cheaper agent settings from local usage
 
-Usage: token-max [options]
-       token-max sessions [options]  Each session's priced usage as JSON lines; see its --help
+Usage: token-max <command> [options]
+
+Commands:
+  doctor    Report which settings to change, then offer to change them
+  sessions  Each session's priced usage as JSON lines
+
+  -v, --version  Show the package version
+  -h, --help     Show this help
+
+Run token-max <command> --help for a command's options.
+";
+
+const DOCTOR_HELP: &str = "token-max doctor: cheaper agent settings from local usage
+
+Usage: token-max doctor [options]
 
   --since YYYY-MM-DD|ISO  Select from midnight UTC or an instant with timezone
   --claude-dir DIR        Select a Claude profile (repeatable)
@@ -42,27 +56,36 @@ Usage: token-max [options]
   -v, --version           Show the package version
   -h, --help              Show this help
 
+Prints which settings to change, with the evidence for each. When stdin and stdout are
+both a terminal, it then offers each change it can make, one at a time: it shows the edit
+and writes the profile's own settings.json or config.toml only after a yes (y, n, or q to
+stop). A change another owner would override, such as a shell variable, a project or
+managed settings file or T3, is listed to make by hand. Without a terminal it prints the
+report and the changes, and edits nothing.
+
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
 and needs this same version installed there; it prices its own history with this host's
-prices, and only its report crosses SSH. Current settings are applied to the selected history;
-checks can use different windows and baselines. Independent savings do not add.
+prices, and only its report crosses SSH. Its changes are listed to make there. Current
+settings are applied to the selected history; checks can use different windows and
+baselines. Independent savings do not add.
 
 Examples:
-  token-max --since 2026-11-01
-  token-max --claude-dir ~/.claude-work --codex-dir ~/.codex --details
-  token-max --offline --plain
-  token-max --ssh devbox --ssh user@laptop --include-local
+  token-max doctor --since 2026-11-01
+  token-max doctor --claude-dir ~/.claude-work --codex-dir ~/.codex --details
+  token-max doctor --offline --plain
+  token-max doctor --ssh devbox --ssh user@laptop --include-local
 
-Public API-price estimates, not subscription bills. Reads transcripts/settings
-only; never edits settings or retains/prints prompt, reply or component text.
-Color is automatic on terminals; NO_COLOR disables it. Progress goes to stderr
-only on interactive terminals, never with redirected output.
-SIGINT/SIGTERM cancel with exit 2 and no success report.
+Public API-price estimates, not subscription bills. Never retains or prints prompt, reply
+or component text. Color is automatic on terminals; NO_COLOR disables it. Progress goes to
+stderr only on interactive terminals, never with redirected output.
+SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
+the last answer.
 
-Exit 0: no applicable change (advisory findings may remain).
-Exit 1: change recommended. Exit 2: scan, pricing, argument or cancellation failure.
+When it offers this host's changes on a terminal: exit 0, or 2 on failure or cancellation.
+Otherwise: exit 0 for no applicable change (advisory findings may remain), 1 for a
+recommended change, 2 for a scan, pricing, argument or cancellation failure.
 ";
 
 const SESSIONS_HELP: &str =
@@ -97,17 +120,28 @@ prompt or reply text. Errors go to stderr as JSON.
 Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";
 
-/// Whether this process has started its single final write. A cancelling signal holds this
-/// lock until the process exits, so a report is either written whole or not at all.
-static COMMITTED: Mutex<bool> = Mutex::new(false);
+/// What a cancelling signal interrupts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    /// Scanning and analyzing, before anything is written.
+    Running,
+    /// Waiting on the person's answers; nothing has been written to a settings file yet.
+    Asking,
+    /// Writing the report or settings, which finishes whole.
+    Writing,
+}
 
-/// Claim the final write; blocks forever if a cancelling signal already owns the process.
-fn commit() {
-    *COMMITTED.lock().unwrap_or_else(PoisonError::into_inner) = true;
+/// The current phase. A cancelling signal holds this lock until the process exits, so a
+/// report or a settings file is either written whole or not at all.
+static PHASE: Mutex<Phase> = Mutex::new(Phase::Running);
+
+/// Enter `phase`; blocks forever if a cancelling signal already owns the process.
+fn enter(phase: Phase) {
+    *PHASE.lock().unwrap_or_else(PoisonError::into_inner) = phase;
 }
 
 /// Parsed flags, as `node:util` `parseArgs` would return them in strict mode.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 struct Values {
     since: Option<String>,
     max_cost_per_use: Option<String>,
@@ -455,8 +489,19 @@ fn diagnose(json: bool, error: &ScanError) {
 /// What a successful run prints, decided before anything is written.
 enum Output {
     Text(String),
+    /// Help for a command line that names no command, which goes to stderr.
+    Usage(String),
     /// Already streamed, as an SSH audit destination does.
     Written,
+    /// A report, then the walk through its changes on this terminal.
+    Walk(Walk),
+}
+
+/// The doctor's report and the changes it offers.
+struct Walk {
+    text: String,
+    fixes: Vec<Fix>,
+    style: Style,
 }
 
 /// One host's audit before its report is printed: this host's scan, or a destination's report.
@@ -480,12 +525,16 @@ pub struct Render<'a> {
     pub format: &'a Format,
     /// The host's home directory, which its report shows as `~`.
     pub home: Option<&'a str>,
+    /// List the changes after the report, for output no one walks through.
+    pub changes: bool,
 }
 
-/// One host's printed report, and whether it recommends a change.
+/// One host's printed report, whether it recommends a change, and its changes.
 pub struct Rendered {
     pub text: String,
     pub change: bool,
+    /// Empty for a destination's report, whose changes are listed in its text.
+    pub fixes: Vec<Fix>,
 }
 
 /// Analyze one host's scan and print its report.
@@ -503,20 +552,28 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         .any(|c| c.action() == crate::model::Action::Change)
         || crate::context::setting_rows(&report.context).any(|c| c.verdict == Some(Verdict::Off));
     let format = options.format;
-    let text = format_report(
-        &report,
-        ReportOptions {
-            width: format.width,
-            color: format.color,
-            unicode: format.unicode,
-            details: format.details,
-            host: format.host.as_deref().map(|name| Host {
-                name,
-                home: options.home,
-            }),
-        },
-    );
-    Ok(Rendered { text, change })
+    let report_options = ReportOptions {
+        width: format.width,
+        color: format.color,
+        unicode: format.unicode,
+        details: format.details,
+        host: format.host.as_deref().map(|name| Host {
+            name,
+            home: options.home,
+        }),
+    };
+    let mut text = format_report(&report, report_options);
+    // Computed once, since each reads the files that may outrank a switch: the list
+    // printed here and the walk's offers are the same value.
+    let fixes = crate::doctor::fixes(&report, format.unicode);
+    if options.changes {
+        text += &format_changes(&report, &fixes, report_options);
+    }
+    Ok(Rendered {
+        text,
+        change,
+        fixes,
+    })
 }
 
 fn now() -> Millis {
@@ -598,14 +655,42 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     Ok((Output::Text(lines), 0))
 }
 
-/// Run one atomic scan, returning the output and exit code without writing either.
+/// Run one command, returning the output and exit code without writing either.
 fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
-    if args.first().is_some_and(|arg| arg == "sessions") {
-        return sessions(&args[1..]);
+    match args.first().map(String::as_str) {
+        None => return Ok((Output::Usage(help(HELP)), 2)),
+        Some("doctor") => return doctor(&args[1..]),
+        Some("sessions") => return sessions(&args[1..]),
+        Some(_) => {}
     }
-    let values = parse(args).ok_or_else(|| ScanError::new("invalid arguments; use --help"))?;
+    let invalid = || ScanError::new("invalid arguments; use --help");
+    let values = parse(args).ok_or_else(invalid)?;
+    let bare = Values {
+        help: values.help,
+        version: values.version,
+        ..Values::default()
+    };
+    if values != bare {
+        return Err(ScanError::new(
+            "options follow a command, such as token-max doctor --since 2026-11-01; use --help",
+        ));
+    }
     if values.help {
         return Ok((Output::Text(help(HELP)), 0));
+    }
+    if values.version {
+        return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
+    }
+    Err(invalid())
+}
+
+/// `token-max doctor`: audit the selected hosts, then walk through this host's changes when
+/// stdin and stdout are a terminal.
+fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
+    let invalid = || ScanError::new("invalid arguments; use token-max doctor --help");
+    let values = parse(args).ok_or_else(invalid)?;
+    if values.help {
+        return Ok((Output::Text(help(DOCTOR_HELP)), 0));
     }
     if values.version {
         return Ok((Output::Text(format!("{}\n", env!("CARGO_PKG_VERSION"))), 0));
@@ -629,7 +714,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             || !values.t3_dirs.is_empty()
             || !values.ssh.is_empty();
         if other {
-            return Err(ScanError::new("invalid arguments; use --help"));
+            return Err(invalid());
         }
         return Ok((Output::Written, ssh::serve(since)));
     }
@@ -656,6 +741,8 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
         ));
     }
     let stdout = io::stdout().is_terminal();
+    // Only this host's changes can be made here, so a run of destinations alone lists them.
+    let walk = local && stdout && io::stdin().is_terminal();
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let interactive = stdout && io::stderr().is_terminal() && !term_dumb;
     let progress = interactive;
@@ -774,6 +861,7 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
                             max_cost_per_use_usd,
                             format: &local_format,
                             home: home.as_deref(),
+                            changes: !walk,
                         },
                     )?,
                     Scanned::Remote(report) => report,
@@ -789,12 +877,15 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
     let sections = hosts.len();
     let mut code = 0;
     let mut text = String::new();
+    let mut fixes = vec![];
     for (ssh, rendered) in hosts.into_iter().zip(rendered) {
         let Rendered {
             text: report,
             change,
+            fixes: local,
         } = rendered.expect("every host sent a result");
         code = code.max(u8::from(change));
+        fixes.extend(local);
         if !text.is_empty() {
             text.push('\n');
         }
@@ -809,10 +900,36 @@ fn run(args: &[String]) -> Result<(Output, u8), ScanError> {
             "\nEach host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",
         );
     }
+    if walk {
+        let style = Style {
+            color,
+            width: width(),
+            home,
+        };
+        return Ok((Output::Walk(Walk { text, fixes, style }), 0));
+    }
     Ok((Output::Text(text), code))
 }
 
-/// Run the command line and return its exit code: 0 no change, 1 change recommended, 2 failure.
+/// Print the report, offer each change, then write the accepted ones.
+fn walk(walk: Walk) -> Result<(), ScanError> {
+    let Walk { text, fixes, style } = walk;
+    let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes()).map_err(failed)?;
+    stdout.flush().map_err(failed)?;
+    enter(Phase::Asking);
+    let plan = ask(fixes, &style, &mut io::stdin().lock(), &mut stdout).map_err(failed)?;
+    enter(Phase::Writing);
+    let written = write(&plan)?;
+    // The settings are written, so a failure to say so must not read as nothing changed.
+    let _ = stdout.write_all(finish(&plan, &written, &style).as_bytes());
+    let _ = stdout.flush();
+    Ok(())
+}
+
+/// Run the command line and return its exit code: 0 no change, or done on a terminal; 1 change
+/// recommended; 2 failure.
 pub fn main() -> ExitCode {
     // Panic payloads could quote transcript data; failures print only a safe message.
     panic::set_hook(Box::new(|_| {}));
@@ -823,16 +940,18 @@ pub fn main() -> ExitCode {
     // The session export keeps its diagnostics machine-readable too.
     let json = args.first().is_some_and(|a| a == "sessions");
     let handler = ctrlc::set_handler(move || {
-        let committed = COMMITTED.lock().unwrap_or_else(PoisonError::into_inner);
-        if *committed {
-            // The report or diagnostic is already being written whole.
-            return;
-        }
+        let phase = PHASE.lock().unwrap_or_else(PoisonError::into_inner);
+        let message = match *phase {
+            // The report, a settings file or a diagnostic is already being written whole.
+            Phase::Writing => return,
+            Phase::Asking => "cancelled; no settings were changed",
+            Phase::Running => "cancelled; no report produced",
+        };
         // The analysis may be blocked in I/O, so exit now, holding the lock so nothing else
         // is written, after deleting any partial price download it would have cleaned up.
         cancel_downloads();
         ssh::cancel();
-        diagnose(json, &ScanError::new("cancelled; no report produced"));
+        diagnose(json, &ScanError::new(message));
         std::process::exit(2);
     });
     let result = match handler {
@@ -841,14 +960,40 @@ pub fn main() -> ExitCode {
     };
     let result =
         result.unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-    commit();
+    // The walk's report leads into its prompts, so Ctrl-C while it prints cancels the walk;
+    // anything else is written whole.
+    enter(match result {
+        Ok((Output::Walk(_), _)) => Phase::Asking,
+        _ => Phase::Writing,
+    });
     let written = match result {
         Ok((Output::Text(text), code)) => io::stdout()
             .lock()
             .write_all(text.as_bytes())
             .and_then(|()| io::stdout().lock().flush())
             .map(|()| code),
+        Ok((Output::Usage(text), code)) => {
+            let _ = io::stderr().lock().write_all(text.as_bytes());
+            Ok(code)
+        }
         Ok((Output::Written, code)) => Ok(code),
+        Ok((Output::Walk(w), code)) => {
+            // The walk runs on this thread, outside the panic guard around the analysis.
+            match panic::catch_unwind(AssertUnwindSafe(|| walk(w))) {
+                Ok(Ok(())) => Ok(code),
+                Ok(Err(error)) => {
+                    diagnose(json, &error);
+                    return ExitCode::from(2);
+                }
+                Err(_) => {
+                    diagnose(
+                        json,
+                        &ScanError::new("doctor failed while applying changes"),
+                    );
+                    return ExitCode::from(2);
+                }
+            }
+        }
         Err(error) => {
             diagnose(json, &error);
             return ExitCode::from(2);

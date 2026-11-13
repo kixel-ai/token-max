@@ -684,6 +684,10 @@ pub fn discover_claude_controls(
         let user = settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
+        let mut outranking: Vec<String> = vec![];
+        if !managed.is_empty() {
+            outranking.push(managed_file.into());
+        }
         let mut speed_directories = IndexMap::default();
         let mut idle_directories = IndexMap::default();
         let relevant: Vec<&Request> = requests
@@ -735,6 +739,19 @@ pub fn discover_claude_controls(
             let project = settings(&project_file, Harness::Claude)?;
             let legacy = settings(&legacy_file, Harness::Claude)?;
             let local = settings(&local_file, Harness::Claude)?;
+            for (file, config) in [
+                (&project_file, &project),
+                (&legacy_file, &legacy),
+                (&local_file, &local),
+            ] {
+                // A session in the home directory reads the user's own file as its project's.
+                if !config.is_empty()
+                    && !same_file(file, &profile.settings_file)
+                    && !outranking.contains(file)
+                {
+                    outranking.push(file.clone());
+                }
+            }
             let scopes = [
                 SettingsScope {
                     config: &user,
@@ -820,6 +837,7 @@ pub fn discover_claude_controls(
         }
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
+        profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
         // Every request whose session changed directory shares its directory's unresolved list.
@@ -1011,9 +1029,13 @@ pub fn discover_codex_controls(
             .then(|| profile.settings_file.clone())
             .into_iter()
             .collect();
+        let mut outranking: Vec<String> = vec![];
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
+            if !config.is_empty() {
+                outranking.push(file.clone());
+            }
             if sets_codex_memory(&config) {
                 memory_profiles.push(file.clone());
             }
@@ -1106,7 +1128,26 @@ pub fn discover_codex_controls(
                 {
                     budget_overrides.push(file.clone());
                 }
+                // A layer Codex may read, unless it is the user's own file again.
+                if !config.is_empty()
+                    && !same_file(&file, &profile.settings_file)
+                    && !outranking.contains(&file)
+                {
+                    outranking.push(file.clone());
+                }
                 layers.push((file, config));
+            }
+            // A named profile's project_root_markers or projects can trust or root a
+            // project differently, so any project config up to the home may apply.
+            if marker_selection {
+                let keep = |config: &Map<String, Value>| !config.is_empty();
+                for file in
+                    ancestor_codex_configs(cwd, &profile.settings_file, &options.home, keep)?
+                {
+                    if !same_file(&file, &profile.settings_file) && !outranking.contains(&file) {
+                        outranking.push(file);
+                    }
+                }
             }
             let mut scopes = base_scopes.to_vec();
             if trust != Some("untrusted") {
@@ -1133,14 +1174,19 @@ pub fn discover_codex_controls(
                 // A named profile's project_root_markers or projects can change which
                 // project layers apply, which matters only where one sets memories.
                 let moved = if marker_selection {
-                    ancestors_setting_codex_memory(cwd, &profile.settings_file)?
+                    ancestors_setting_codex_memory(cwd, &profile.settings_file, &options.home)?
                 } else {
                     vec![]
                 };
                 let moved_layer = !moved.is_empty();
                 let mut overrides = memory_profiles.clone();
+                // The walk names files by resolved path, the project layers by the
+                // recorded one, so compare them resolved.
+                let same = |a: &str, b: &str| {
+                    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+                };
                 for file in untrusted.into_iter().chain(moved) {
-                    if !overrides.contains(&file) {
+                    if !overrides.iter().any(|o| same(o, &file)) {
                         overrides.push(file);
                     }
                 }
@@ -1197,6 +1243,7 @@ pub fn discover_codex_controls(
             }
             profile.background_directories.insert(cwd.into(), controls);
         }
+        profile.outranking_files = outranking;
         profile.instruction_budget_unresolved = (!budget_overrides.is_empty()).then(|| {
             format!(
                 "{} can set {AGENTS_BUDGET} for some runs, which the transcripts do not record",
@@ -1223,17 +1270,45 @@ fn codex_memory_stored(root: &str) -> bool {
         .any(|name| std::path::Path::new(&join(&[root, name])).is_dir())
 }
 
-/// Every `.codex/config.toml` from `cwd` up to the filesystem root, other than the
-/// user's own, that sets memories, whichever of them a project root would include.
-fn ancestors_setting_codex_memory(cwd: &str, user: &str) -> Result<Vec<String>, ScanError> {
+/// Every `.codex/config.toml` from `cwd` up to the user's home, or the filesystem root
+/// outside it, other than the user's own, that sets memories, whichever of them a
+/// project root would include. A home's `.codex` is the user layer, and directories
+/// above a home hold no one's project.
+fn ancestors_setting_codex_memory(
+    cwd: &str,
+    user: &str,
+    home: &str,
+) -> Result<Vec<String>, ScanError> {
+    ancestor_codex_configs(cwd, user, home, sets_codex_memory)
+}
+
+/// Whether two paths name one file, as recorded or once resolved.
+fn same_file(a: &str, b: &str) -> bool {
+    a == b || realpath(a).is_ok_and(|a| realpath(b).is_ok_and(|b| a == b))
+}
+
+/// Every `.codex/config.toml` from `cwd` up to the user's home, or the filesystem root
+/// outside it, other than the user's own, whose settings `keep` accepts.
+fn ancestor_codex_configs(
+    cwd: &str,
+    user: &str,
+    home: &str,
+    keep: impl Fn(&Map<String, Value>) -> bool,
+) -> Result<Vec<String>, ScanError> {
+    // Walk and stop on normalized forms, such as resolved symlinks and Windows' `\\?\`
+    // prefix: a symlinked cwd's physical parents are its ancestors, not the link's. A path
+    // that no longer exists is walked as recorded.
+    let normal = |path: &str| realpath(path).unwrap_or_else(|_| path.to_string());
+    let home = normal(home);
+    let cwd = normal(cwd);
     let mut files = vec![];
-    let mut path = cwd;
+    let mut path = cwd.as_str();
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
-        if file != user && sets_codex_memory(&settings(&file, Harness::Codex)?) {
+        if file != user && keep(&settings(&file, Harness::Codex)?) {
             files.push(file);
         }
-        if dirname(path) == path {
+        if path == home || dirname(path) == path {
             return Ok(files);
         }
         path = dirname(path);
@@ -1743,6 +1818,7 @@ pub(crate) fn profile(
         agents: crate::model::AgentControls::default(),
         instruction_budget_file,
         instruction_budget_unresolved: None,
+        outranking_files: vec![],
     })
 }
 
@@ -1936,6 +2012,46 @@ mod tests {
             built.profiles = vec![profile.id.clone()].into();
             built.cwd = cwd.map(|c| text(c).into());
             built
+        }
+    }
+
+    #[test]
+    fn codex_memory_ancestors_stop_at_the_home() {
+        let w = Workspace::new();
+        let home = w.home.join("user");
+        let cwd = home.join("repo/nested");
+        for dir in [&w.home, &home, &home.join("repo"), &cwd] {
+            std::fs::create_dir_all(dir.join(".codex")).unwrap();
+            std::fs::write(
+                dir.join(".codex/config.toml"),
+                "[features]\nmemories = true\n",
+            )
+            .unwrap();
+        }
+        let file = |dir: &Path| text(&dir.join(".codex/config.toml"));
+        let found = |stop: &Path| {
+            ancestors_setting_codex_memory(&text(&cwd), &file(&home), &text(stop)).unwrap()
+        };
+        // The home's own is the user layer, and above the home is no one's project.
+        assert_eq!(found(&home), [file(&cwd), file(&home.join("repo"))]);
+        // Outside the home, the walk reaches the filesystem root, still skipping the user's.
+        let outside = found(&cwd.join("elsewhere"));
+        assert!(outside.contains(&file(&w.home)) && !outside.contains(&file(&home)));
+        // A symlinked cwd outside the home walks its target's ancestors, not the link's.
+        #[cfg(unix)]
+        {
+            let outside = w.home.join("outside");
+            std::fs::create_dir_all(outside.join(".codex")).unwrap();
+            std::fs::write(
+                outside.join(".codex/config.toml"),
+                "[features]\nmemories = true\n",
+            )
+            .unwrap();
+            let link = outside.join("link");
+            std::os::unix::fs::symlink(&cwd, &link).unwrap();
+            let linked =
+                ancestors_setting_codex_memory(&text(&link), &file(&home), &text(&home)).unwrap();
+            assert_eq!(linked, [file(&cwd), file(&home.join("repo"))]);
         }
     }
 
@@ -2804,6 +2920,61 @@ mod tests {
             .unwrap();
         assert_eq!(p.background[0].value, None);
         assert!(p.background[0].reason.contains("legacy profile"));
+    }
+
+    #[test]
+    fn outranking_files_hold_project_and_named_profile_layers_but_not_the_user_file() {
+        let w = Workspace::new();
+        let repo = w.home.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        write(repo.join(".codex/config.toml"), "[features]\napps = true\n");
+        write(
+            repo.join(".claude/settings.json"),
+            r#"{"enableArtifact": true}"#,
+        );
+        write(
+            w.claude.join("settings.json"),
+            r#"{"enableArtifact": true}"#,
+        );
+        let trust = |level: &str| {
+            format!(
+                "[projects.{}]\ntrust_level = '{level}'\n",
+                serde_json::to_string(&text(&repo)).unwrap()
+            )
+        };
+        write(w.codex.join("config.toml"), &trust("untrusted"));
+        let outranking = |harness: Harness| {
+            let mut d = discover(&options(&w)).unwrap();
+            let p = d.profiles.iter().find(|p| p.harness == harness).unwrap();
+            let requests: Vec<Request> = [&repo, &w.home]
+                .into_iter()
+                .map(|cwd| {
+                    let mut r = request(p, Some(cwd.as_path()));
+                    r.harness = harness;
+                    r
+                })
+                .collect();
+            discover_claude_controls(&options(&w), &mut d.profiles, &requests).unwrap();
+            discover_codex_controls(&options(&w), &mut d.profiles, &requests).unwrap();
+            let p = d.profiles.iter().find(|p| p.harness == harness).unwrap();
+            p.outranking_files.clone()
+        };
+        // A session in the home reads the user's own file, which never outranks itself.
+        assert_eq!(
+            outranking(Harness::Claude),
+            [text(&repo.join(".claude/settings.json"))]
+        );
+        // An untrusted project's layer is not read.
+        assert!(outranking(Harness::Codex).is_empty());
+        // A named profile that trusts it can apply it, so both may outrank the user file.
+        write(w.codex.join("work.config.toml"), &trust("trusted"));
+        assert_eq!(
+            outranking(Harness::Codex),
+            [
+                text(&w.codex.join("work.config.toml")),
+                text(&repo.join(".codex/config.toml")),
+            ]
+        );
     }
 
     #[test]

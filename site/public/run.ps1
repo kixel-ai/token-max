@@ -35,7 +35,7 @@
 
 	$base = if ($env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME } else { Join-Path $HOME '.cache' }
 	$cache = Join-Path (Join-Path $base 'token-max') 'run'
-	$exe = Join-Path $cache "token-max-$tag.exe"
+	$exe = Join-Path $cache "token-max-$tag-$target.exe"
 	if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
 		# Beside the cache, so the final move is a rename.
 		$tmp = Join-Path $cache ('.download.' + [guid]::NewGuid())
@@ -57,7 +57,7 @@
 			Remove-Item -Recurse -Force -LiteralPath $tmp
 		}
 		# Older releases are never run again; one still running stays until next time.
-		Get-ChildItem -LiteralPath $cache -Filter 'token-max-v*.exe' |
+		Get-ChildItem -LiteralPath $cache -Filter "token-max-v*-$target.exe" |
 			Where-Object { $_.FullName -ne $exe } |
 			Remove-Item -Force -ErrorAction SilentlyContinue
 	}

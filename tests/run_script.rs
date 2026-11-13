@@ -263,7 +263,7 @@ fn runs_doctor(releases: &Releases) {
 }
 
 fn exe(tag: &str) -> String {
-    format!("token-max-{tag}{}", std::env::consts::EXE_SUFFIX)
+    format!("token-max-{tag}-{TARGET}{}", std::env::consts::EXE_SUFFIX)
 }
 
 #[test]
@@ -282,6 +282,24 @@ fn runs_the_latest_release_and_reuses_it_until_a_newer_one() {
     runs_doctor(&releases);
     assert_eq!(releases.downloads(), 4);
     assert_eq!(releases.cached(), [exe("v1.0.1")]);
+}
+
+#[test]
+fn keeps_other_platforms_binaries_in_a_shared_cache_apart() {
+    let releases = Releases::new();
+    releases.publish("v1.0.0", false);
+    // Another platform's binary for the same release, from a home shared with it.
+    let other = format!(
+        "token-max-v1.0.0-other-target{}",
+        std::env::consts::EXE_SUFFIX
+    );
+    std::fs::create_dir_all(releases.cache()).unwrap();
+    std::fs::write(releases.cache().join(&other), "not this platform's").unwrap();
+    runs_doctor(&releases);
+    assert_eq!(releases.downloads(), 2);
+    let mut both = vec![exe("v1.0.0"), other];
+    both.sort();
+    assert_eq!(releases.cached(), both);
 }
 
 #[test]

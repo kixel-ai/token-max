@@ -49,7 +49,8 @@ main() {
 	esac
 
 	cache=${XDG_CACHE_HOME:-$HOME/.cache}/token-max/run
-	bin=$cache/token-max-$tag
+	# The target too, since hosts of different platforms can share a home.
+	bin=$cache/token-max-$tag-$target
 	if [ ! -x "$bin" ]; then
 		mkdir -p "$cache"
 		# Beside the cache, so the final move is an atomic rename.
@@ -74,7 +75,7 @@ main() {
 		rm -rf "$tmp"
 		trap - EXIT
 		# Older releases are never run again.
-		for old in "$cache"/token-max-v*; do
+		for old in "$cache"/token-max-v*-"$target"; do
 			[ "$old" = "$bin" ] || rm -f "$old"
 		done
 	fi

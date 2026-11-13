@@ -588,13 +588,89 @@ impl Period<'_> {
     }
 }
 
+/// Known-on cohorts by version, client and flag state.
+type Cohorts<'r> = IndexMap<(&'r str, &'r str, &'static str), ActivationCohort>;
+
+/// The first window owning each (owner, model), as `find` would return.
+fn window_lookup(windows: &[ScenarioWindow]) -> HashMap<(&str, Option<&str>), Option<i64>> {
+    let mut lookup = HashMap::default();
+    for w in windows {
+        for model in &w.models {
+            lookup
+                .entry((w.owner.as_str(), model.as_deref()))
+                .or_insert(w.value);
+        }
+    }
+    lookup
+}
+
+/// Count the known-on returned outcomes of `periods` into their cohorts.
+fn count_cohorts<'r>(periods: &[Period<'r>], cohorts: &mut Cohorts<'r>) {
+    let truthy = |text: Option<&'r Text>| text.map(|t| &**t).filter(|t| !t.is_empty());
+    for p in periods {
+        let r: &'r Request = p.previous;
+        if p.kind.status != PeriodStatus::Eligible
+            || p.next.is_none_or(|n| n.id.is_empty())
+            || !p.known_on
+        {
+            continue;
+        }
+        let (Some(version), Some(client), Some(flag_state)) = (
+            truthy(r.version.as_ref()),
+            truthy(r.client.as_ref()),
+            p.flag_state,
+        ) else {
+            continue;
+        };
+        let c = cohorts
+            .entry((version, client, flag_state))
+            .or_insert(ActivationCohort {
+                version: version.into(),
+                client: client.into(),
+                flag_state,
+                eligible: 0,
+                applied: 0,
+                fraction: 0.0,
+            });
+        c.eligible += 1;
+        c.applied += u64::from(p.kind.outcome == PeriodOutcome::Applied);
+        c.fraction = c.applied as f64 / c.eligible as f64;
+    }
+}
+
+/// Set each period's activation from its recorded outcome or its cohort's applied fraction.
+fn activate<'r>(periods: &mut [Period<'r>], cohorts: &Cohorts<'r>) {
+    for p in periods {
+        if p.kind.status != PeriodStatus::Eligible {
+            p.activation = (p.kind.status != PeriodStatus::Unknown).then_some(0.0);
+            continue;
+        }
+        if p.kind.outcome != PeriodOutcome::Unobserved {
+            p.activation = Some(if p.kind.outcome == PeriodOutcome::Applied {
+                1.0
+            } else {
+                0.0
+            });
+            continue;
+        }
+        // Cohorts never hold a missing or empty version or client, so a missing value matches none.
+        let r: &'r Request = p.previous;
+        p.cohort = match (r.version.as_deref(), r.client.as_deref(), p.flag_state) {
+            (Some(version), Some(client), Some(flag_state)) => {
+                cohorts.get_index_of(&(version, client, flag_state))
+            }
+            _ => None,
+        };
+        p.activation = Some(p.cohort.map_or(1.0, |c| cohorts[c].fraction));
+    }
+}
+
 /// Which context-size groups each canonical period's charges count toward.
 struct SizeGroups {
     /// Each period's group, by its first-seen context size.
     of: Vec<usize>,
     /// For a canonical period whose request other periods share, those periods' groups.
     shared: HashMap<usize, Vec<usize>>,
-    len: usize,
 }
 
 /// How a run activates unobserved summaries and sizes them.
@@ -738,23 +814,50 @@ fn changed_cost(
 }
 
 /// A run's charges in total and, for a point run, per period.
-struct Ledger<'x> {
+/// One run's charges so far, carried from session to session in replay order.
+struct RunState<'r> {
     total: Sum,
-    sizes: &'x SizeGroups,
+    /// Charges per context size; only point runs, which report them, keep any.
     by_size: Option<Vec<Option<Sum>>>,
+    resumed: f64,
+    /// Boundaries already charged, which another session sharing them must not charge again.
+    charged: HashSet<&'r Id>,
 }
 
-impl Ledger<'_> {
+impl RunState<'_> {
+    /// An empty run, keeping charges for each of `sizes` context sizes when given.
+    fn new(sizes: Option<usize>) -> Self {
+        Self {
+            total: Sum::new(),
+            by_size: sizes.map(|n| vec![None; n]),
+            resumed: 0.0,
+            charged: HashSet::default(),
+        }
+    }
+
     /// Charge a canonical period, and each context size whose periods share its request.
-    fn charge(&mut self, period: Option<usize>, cost: &Cost, weight: f64) {
+    fn charge(&mut self, sizes: &SizeGroups, period: Option<usize>, cost: &Cost, weight: f64) {
         self.total.add_scaled(cost, weight);
         if let (Some(period), Some(by_size)) = (period, &mut self.by_size) {
-            let shared = self.sizes.shared.get(&period).into_iter().flatten();
-            for &size in std::iter::once(&self.sizes.of[period]).chain(shared) {
+            let shared = sizes.shared.get(&period).into_iter().flatten();
+            for &size in std::iter::once(&sizes.of[period]).chain(shared) {
                 by_size[size]
                     .get_or_insert_with(Sum::new)
                     .add_scaled(cost, weight);
             }
+        }
+    }
+
+    fn finish(self) -> Run {
+        Run {
+            adjustment: self.total.cost(),
+            by_size: self
+                .by_size
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.map(Sum::cost))
+                .collect(),
+            resumed: self.resumed,
         }
     }
 }
@@ -825,7 +928,8 @@ struct Runner<'r, 'x> {
     summaries: &'x Summaries<'r>,
     index: &'x ReplayIndex<'r>,
     periods: &'x [Period<'r>],
-    /// The first period with each request identity, which owns its charges.
+    /// The first period with each request identity, which owns its charges. The reader keeps
+    /// one request per identity, so periods sharing a request share its session.
     canonical: Vec<usize>,
     sizes: SizeGroups,
     sessions: Vec<Session<'r>>,
@@ -866,11 +970,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             index,
             periods,
             canonical,
-            sizes: SizeGroups {
-                of,
-                shared,
-                len: sizes.len(),
-            },
+            sizes: SizeGroups { of, shared },
             sessions: vec![],
         };
         runner.sessions = runner.ticks(context, ttls, false);
@@ -937,16 +1037,17 @@ impl<'r, 'x> Runner<'r, 'x> {
             .collect()
     }
 
-    /// Replay every session with idle compaction on or off; point runs also record each
-    /// detailed period's summary cost and calibration, when `detail` holds them.
+    /// Replay the runner's sessions with idle compaction on or off into `ledger`; point runs
+    /// also record each detailed period's summary cost and calibration, when `detail` holds
+    /// them.
     fn run(
         &self,
         context: &Profiled<'r>,
         scenario: &Ttls,
-        on: bool,
-        mode: Mode,
+        (on, mode): (bool, Mode),
         detail: &mut [IdlePeriod],
-    ) -> Run {
+        ledger: &mut RunState<'r>,
+    ) {
         let periods = self.periods;
         let late;
         let sessions = if mode == Mode::Late {
@@ -958,13 +1059,7 @@ impl<'r, 'x> Runner<'r, 'x> {
         let point = mode == Mode::Point;
         let catalog = self.catalog;
         let since = self.since;
-        let mut ledger = Ledger {
-            total: Sum::new(),
-            sizes: &self.sizes,
-            by_size: point.then(|| vec![None; self.sizes.len]),
-        };
-        let mut resumed = 0.0;
-        let mut charged: HashSet<&Id> = HashSet::default();
+        let sizes = &self.sizes;
         for session in sessions {
             let mut states = vec![State {
                 weight: 1.0,
@@ -1031,7 +1126,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     d.summary_cost =
                                         unknown_cost("summary calibration is unresolved");
                                 }
-                                ledger.charge(
+                                ledger.charge(sizes,
                                     Some(active),
                                     &unknown_cost(
                                         "no compatible linked summary and full post-compaction prefix calibration, or summary pricing cohort is ambiguous",
@@ -1057,7 +1152,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let retained = (g.prefix - g.output).min(g.read);
                             let window = item.window.expect("usable calibration has a window");
                             if retained < 0 || g.prefix >= input || g.prefix >= window {
-                                ledger.charge(
+                                ledger.charge(sizes,
                                     Some(active),
                                     &unknown_cost(
                                         "calibrated full post-compaction prefix does not shrink this eligible context",
@@ -1103,13 +1198,13 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 None => unknown_cost("outside-main summary TTL is unresolved"),
                                 Some(_) => price_part(catalog, sample.summary_request, &summary),
                             };
-                            ledger.charge(Some(active), &cost, weight);
+                            ledger.charge(sizes, Some(active), &cost, weight);
                             if let Some(d) = detail.get_mut(i).filter(|_| point) {
                                 d.summary_cost =
                                     add_costs([&d.summary_cost, &scale(&cost, weight)]);
                             }
                             if item.next.is_some() {
-                                resumed += weight;
+                                ledger.resumed += weight;
                             }
                             branched.push(State {
                                 weight: state.weight * (1.0 - activation),
@@ -1158,10 +1253,10 @@ impl<'r, 'x> Runner<'r, 'x> {
                         let summary_request = summary
                             .and_then(|s| s.request.as_deref())
                             .filter(|r| !r.is_empty());
-                        let allocated = !charged.contains(&e.id)
+                        let allocated = !ledger.charged.contains(&e.id)
                             && (summary_request.is_none()
                                 || summary.is_some_and(|s| s.cost.total_usd != Some(Usd::ZERO)));
-                        charged.insert(&e.id);
+                        ledger.charged.insert(&e.id);
                         // Changed input to the observed summary under each carried context.
                         let extra = |state: &State| -> Option<Cost> {
                             let linked = linked.filter(|_| !billed.is_empty())?;
@@ -1212,7 +1307,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                         zero_cost()
                                     };
                                     if linked.map_or(e.time, |l| l.time) >= since {
-                                        ledger.charge(Some(active), &cost, state.weight);
+                                        ledger.charge(sizes, Some(active), &cost, state.weight);
                                     }
                                     if let Some(d) = detail.get_mut(i).filter(|_| point) {
                                         d.summary_cost = add_costs([
@@ -1221,7 +1316,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                         ]);
                                     }
                                     if item.next.is_some() {
-                                        resumed += state.weight;
+                                        ledger.resumed += state.weight;
                                     }
                                     state.path.offset = 0;
                                     state.path.active = None;
@@ -1232,7 +1327,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     }
                                     match (e.pre_tokens, full) {
                                         (Some(pre), Some(full)) => state.path.offset += pre - full,
-                                        _ => ledger.charge(
+                                        _ => ledger.charge(sizes,
                                             Some(active),
                                             &unknown_cost(
                                                 "applied idle has no pre-context and full resumed-prefix geometry for the off path",
@@ -1263,7 +1358,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                             "counterfactual input to a later unmatched compaction is unknown",
                                         )
                                     });
-                                    ledger.charge(state.path.active, &extra, state.weight);
+                                    ledger.charge(sizes, state.path.active, &extra, state.weight);
                                 }
                                 let path = &mut state.path;
                                 path.offset = 0;
@@ -1319,7 +1414,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 };
                                 if r.time >= since {
                                     let cost = changed_cost(catalog, r, p, next.as_deref());
-                                    ledger.charge(state.path.active, &cost, state.weight);
+                                    ledger.charge(sizes, state.path.active, &cost, state.weight);
                                 }
                                 if conversation {
                                     let path = &mut state.path;
@@ -1342,20 +1437,10 @@ impl<'r, 'x> Runner<'r, 'x> {
                         if let Some(d) = detail.get_mut(i).filter(|_| point) {
                             d.summary_cost = cost.clone();
                         }
-                        ledger.charge(Some(self.canonical[i]), &cost, 1.0);
+                        ledger.charge(sizes, Some(self.canonical[i]), &cost, 1.0);
                     }
                 }
             }
-        }
-        Run {
-            adjustment: ledger.total.cost(),
-            by_size: ledger
-                .by_size
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.map(Sum::cost))
-                .collect(),
-            resumed,
         }
     }
 }
@@ -1543,280 +1628,214 @@ impl<'a> Profiled<'a> {
     }
 
     /// Classify each of `owner`'s request gaps and estimate unobserved activation by cohort.
-    fn periods<'r>(
+    /// One session's periods for `owner`, before their activation.
+    fn session_periods<'r>(
         &self,
         index: &ReplayIndex<'r>,
+        (session, group): (&'r str, &[&'r Request]),
         ttls: &Ttls,
-        windows: &[ScenarioWindow],
+        lookup: &HashMap<(&str, Option<&str>), Option<i64>>,
         owner: &str,
-    ) -> (Vec<Period<'r>>, Vec<ActivationCohort>) {
+    ) -> Vec<Period<'r>> {
         let mut periods = vec![];
-        // The first window owning each (owner, model), as `find` would return.
-        let mut lookup: HashMap<(&str, Option<&str>), Option<i64>> = HashMap::default();
-        for w in windows {
-            for model in &w.models {
-                lookup
-                    .entry((w.owner.as_str(), model.as_deref()))
-                    .or_insert(w.value);
+        let events = ReplayIndex::session(&index.events, session);
+        let boundaries: Vec<&StructuralEvent> = events
+            .iter()
+            .copied()
+            .filter(|e| {
+                e.kind == EventKind::Compaction && e.idle_attribution == IdleAttribution::Notice
+            })
+            .collect();
+        let mut boundary_index = 0;
+        let mut settings_index = 0;
+        let mut activity_index = 0;
+        let mut turn_start = Millis::MIN;
+        let mut turn_end = Millis::MIN;
+        let mut pending: HashSet<&Id> = HashSet::default();
+        let mut old: HashMap<&str, &Scalar> = HashMap::default();
+        for (position, &r) in group.iter().enumerate() {
+            let scope = self.scopes.scope(r);
+            let c = self.scopes.control(scope);
+            if c.owner != owner {
+                continue;
             }
-        }
-        for (&session, group) in &index.conversations {
-            let events = ReplayIndex::session(&index.events, session);
-            let boundaries: Vec<&StructuralEvent> = events
+            let next = group.get(position + 1).copied();
+            let end = next.map_or(self.now, |n| n.time);
+            if end < self.since || r.time + EARLY < self.since || end <= r.end_time {
+                continue;
+            }
+            let gap_ms = end - r.time;
+            let p = r
+                .parts
                 .iter()
+                .find(|p| is_conversation(p))
+                .expect("conversation requests have a conversation part");
+            while boundary_index < boundaries.len() && boundaries[boundary_index].time <= r.time {
+                boundary_index += 1;
+            }
+            let boundary = boundaries
+                .get(boundary_index)
                 .copied()
-                .filter(|e| {
-                    e.kind == EventKind::Compaction && e.idle_attribution == IdleAttribution::Notice
-                })
-                .collect();
-            let mut boundary_index = 0;
-            let mut settings_index = 0;
-            let mut activity_index = 0;
-            let mut turn_start = Millis::MIN;
-            let mut turn_end = Millis::MIN;
-            let mut pending: HashSet<&Id> = HashSet::default();
-            let mut old: HashMap<&str, &Scalar> = HashMap::default();
-            for (position, &r) in group.iter().enumerate() {
-                let scope = self.scopes.scope(r);
-                let c = self.scopes.control(scope);
-                if c.owner != owner {
-                    continue;
+                .filter(|b| b.time <= end);
+            while settings_index < events.len() && events[settings_index].time <= r.time {
+                let e = events[settings_index];
+                settings_index += 1;
+                if e.kind == EventKind::Settings {
+                    old.extend(e.settings.iter().map(|(k, v)| (k.as_str(), v)));
                 }
-                let next = group.get(position + 1).copied();
-                let end = next.map_or(self.now, |n| n.time);
-                if end < self.since || r.time + EARLY < self.since || end <= r.end_time {
-                    continue;
-                }
-                let gap_ms = end - r.time;
-                let p = r
-                    .parts
-                    .iter()
-                    .find(|p| is_conversation(p))
-                    .expect("conversation requests have a conversation part");
-                while boundary_index < boundaries.len() && boundaries[boundary_index].time <= r.time
-                {
-                    boundary_index += 1;
-                }
-                let boundary = boundaries
-                    .get(boundary_index)
-                    .copied()
-                    .filter(|b| b.time <= end);
-                while settings_index < events.len() && events[settings_index].time <= r.time {
-                    let e = events[settings_index];
-                    settings_index += 1;
-                    if e.kind == EventKind::Settings {
-                        old.extend(e.settings.iter().map(|(k, v)| (k.as_str(), v)));
-                    }
-                }
-                let flag_state = if supported(r.version.as_deref(), 314) {
-                    Some("not-required")
-                } else {
-                    match old.get("idleCompactionAvailable") {
-                        Some(Scalar::Bool(true)) => Some("true"),
-                        Some(Scalar::Bool(false)) => Some("false"),
-                        _ => None,
-                    }
-                };
-                let context_tokens = match (p.usage.input, p.usage.output) {
-                    (Some(input), Some(output)) => Some(input + output),
+            }
+            let flag_state = if supported(r.version.as_deref(), 314) {
+                Some("not-required")
+            } else {
+                match old.get("idleCompactionAvailable") {
+                    Some(Scalar::Bool(true)) => Some("true"),
+                    Some(Scalar::Bool(false)) => Some("false"),
                     _ => None,
-                };
-                let native = self.scopes.window(scope, p.model.as_deref());
-                let window = if supported(
-                    r.version.as_deref(),
-                    native.minimum_claude_patch.unwrap_or(288),
-                ) {
-                    lookup
-                        .get(&(native.owner.as_str(), p.model.as_deref()))
-                        .copied()
-                        .flatten()
-                } else {
-                    None
-                };
-                let period_ttls = self.scopes.ttls(scope, ttls);
-                while activity_index < events.len() && events[activity_index].time <= r.time + EARLY
-                {
-                    let e = events[activity_index];
-                    activity_index += 1;
-                    match e.kind {
-                        EventKind::TurnStart => {
-                            pending.clear();
-                            turn_start = e.time;
-                        }
-                        EventKind::TurnEnd => {
-                            pending.clear();
-                            turn_end = e.time;
-                        }
-                        EventKind::ToolStart => {
-                            pending.insert(e.tool_id.as_ref().unwrap_or(&e.id));
-                        }
-                        EventKind::ToolEnd => {
-                            if let Some(id) = &e.tool_id {
-                                pending.remove(id);
-                            }
-                        }
-                        _ => {}
-                    }
                 }
-                let interrupted =
-                    turn_start > r.end_time && turn_start < end && turn_start < r.time + EARLY;
-                let main_5m = period_ttls.main == Some(Ttl::FiveMinutes);
-                let client = client(r);
-                let busy = !pending.is_empty() || interrupted || r.end_time >= r.time + EARLY;
-                let below =
-                    matches!((context_tokens, c.threshold), (Some(t), Some(min)) if t < min);
-                let narrow = matches!((window, c.threshold), (Some(w), Some(min)) if w <= min);
-                let flag_off = flag_state.is_none_or(|f| f == "false");
-                let (status, reason) = if gap_ms < EARLY {
-                    (
-                        PeriodStatus::Censored,
-                        if next.is_some() {
-                            "return precedes the estimated near-expiry trigger"
-                        } else {
-                            "final observation has not reached the estimated idle trigger; no session end inferred"
-                        },
-                    )
-                } else if main_5m
-                    || c.auto_compact == Some(false)
-                    || client == Client::Unsupported
-                    || busy
-                    || below
-                    || narrow
-                {
-                    (
-                        PeriodStatus::Ineligible,
-                        if main_5m {
-                            "main TTL is 5m"
-                        } else if c.auto_compact == Some(false) {
-                            "automatic compaction is disabled"
-                        } else if client == Client::Unsupported {
-                            "SDK/headless/remote/subagent client is outside the confirmed interactive policy"
-                        } else if busy {
-                            "tool wait or active turn interrupts the idle interval"
-                        } else if below {
-                            "context is below the effective idle threshold"
-                        } else {
-                            "auto-compact window removes the eligible size band"
-                        },
-                    )
-                } else if !c.resolved
-                    || period_ttls.main.is_none()
-                    || context_tokens.is_none()
-                    || p.kind == PartKind::Unknown
-                    || c.threshold.is_none()
-                    || window.is_none()
-                    || (boundary.is_none()
-                        && (client != Client::Supported
-                            || !supported(r.version.as_deref(), 290)
-                            || flag_off))
-                {
-                    (
-                        PeriodStatus::Unknown,
-                        "effective threshold/window/TTL, input size, interactive execution, version or pre-2.1.314 flag availability is unresolved",
-                    )
-                } else {
-                    (
-                        PeriodStatus::Eligible,
-                        "interactive request gap under current native prerequisites; open-and-awake activation is estimated",
-                    )
-                };
-                let known_on = old.get("idleCompaction") == Some(&&Scalar::Bool(true))
-                    && matches!(old.get("promptCacheTtl"), Some(Scalar::Text(t)) if t == "1h")
-                    && old.get("autoCompactEnabled") == Some(&&Scalar::Bool(true))
-                    && !flag_off;
-                let eligible = status == PeriodStatus::Eligible;
-                periods.push(Period {
-                    previous: r,
-                    next,
-                    boundary,
-                    known_on,
-                    window,
-                    threshold: c.threshold,
-                    ttls: period_ttls,
-                    context_tokens,
-                    gap_ms,
-                    kind: PeriodKind {
-                        status,
-                        reason,
-                        return_timing: if next.is_none() {
-                            ReturnTiming::Final
-                        } else if (EARLY..=HOUR).contains(&gap_ms) {
-                            ReturnTiming::NearExpiry
-                        } else if gap_ms < HOUR {
-                            ReturnTiming::BeforeExpiry
-                        } else {
-                            ReturnTiming::AfterExpiry
-                        },
-                        outcome: if boundary.is_some() {
-                            PeriodOutcome::Applied
-                        } else if known_on && next.is_some() {
-                            PeriodOutcome::NotApplied
-                        } else {
-                            PeriodOutcome::Unobserved
-                        },
-                    },
-                    confirmed: eligible && turn_end >= r.end_time && turn_end < r.time + EARLY,
-                    flag_state,
-                    activation: None,
-                    cohort: None,
-                });
-            }
-        }
-        let truthy = |text: Option<&'r Text>| text.map(|t| &**t).filter(|t| !t.is_empty());
-        let mut cohorts: IndexMap<(&str, &str, &str), ActivationCohort> = IndexMap::default();
-        for p in &periods {
-            let r: &'r Request = p.previous;
-            if p.kind.status != PeriodStatus::Eligible
-                || p.next.is_none_or(|n| n.id.is_empty())
-                || !p.known_on
-            {
-                continue;
-            }
-            let (Some(version), Some(client), Some(flag_state)) = (
-                truthy(r.version.as_ref()),
-                truthy(r.client.as_ref()),
-                p.flag_state,
-            ) else {
-                continue;
             };
-            let c = cohorts
-                .entry((version, client, flag_state))
-                .or_insert(ActivationCohort {
-                    version: version.into(),
-                    client: client.into(),
-                    flag_state,
-                    eligible: 0,
-                    applied: 0,
-                    fraction: 0.0,
-                });
-            c.eligible += 1;
-            c.applied += u64::from(p.kind.outcome == PeriodOutcome::Applied);
-            c.fraction = c.applied as f64 / c.eligible as f64;
-        }
-        for p in &mut periods {
-            if p.kind.status != PeriodStatus::Eligible {
-                p.activation = (p.kind.status != PeriodStatus::Unknown).then_some(0.0);
-                continue;
-            }
-            if p.kind.outcome != PeriodOutcome::Unobserved {
-                p.activation = Some(if p.kind.outcome == PeriodOutcome::Applied {
-                    1.0
-                } else {
-                    0.0
-                });
-                continue;
-            }
-            // Cohorts never hold a missing or empty version or client, so a missing value matches none.
-            let r: &'r Request = p.previous;
-            p.cohort = match (r.version.as_deref(), r.client.as_deref(), p.flag_state) {
-                (Some(version), Some(client), Some(flag_state)) => {
-                    cohorts.get_index_of(&(version, client, flag_state))
-                }
+            let context_tokens = match (p.usage.input, p.usage.output) {
+                (Some(input), Some(output)) => Some(input + output),
                 _ => None,
             };
-            p.activation = Some(p.cohort.map_or(1.0, |c| cohorts[c].fraction));
+            let native = self.scopes.window(scope, p.model.as_deref());
+            let window = if supported(
+                r.version.as_deref(),
+                native.minimum_claude_patch.unwrap_or(288),
+            ) {
+                lookup
+                    .get(&(native.owner.as_str(), p.model.as_deref()))
+                    .copied()
+                    .flatten()
+            } else {
+                None
+            };
+            let period_ttls = self.scopes.ttls(scope, ttls);
+            while activity_index < events.len() && events[activity_index].time <= r.time + EARLY {
+                let e = events[activity_index];
+                activity_index += 1;
+                match e.kind {
+                    EventKind::TurnStart => {
+                        pending.clear();
+                        turn_start = e.time;
+                    }
+                    EventKind::TurnEnd => {
+                        pending.clear();
+                        turn_end = e.time;
+                    }
+                    EventKind::ToolStart => {
+                        pending.insert(e.tool_id.as_ref().unwrap_or(&e.id));
+                    }
+                    EventKind::ToolEnd => {
+                        if let Some(id) = &e.tool_id {
+                            pending.remove(id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let interrupted =
+                turn_start > r.end_time && turn_start < end && turn_start < r.time + EARLY;
+            let main_5m = period_ttls.main == Some(Ttl::FiveMinutes);
+            let client = client(r);
+            let busy = !pending.is_empty() || interrupted || r.end_time >= r.time + EARLY;
+            let below = matches!((context_tokens, c.threshold), (Some(t), Some(min)) if t < min);
+            let narrow = matches!((window, c.threshold), (Some(w), Some(min)) if w <= min);
+            let flag_off = flag_state.is_none_or(|f| f == "false");
+            let (status, reason) = if gap_ms < EARLY {
+                (
+                    PeriodStatus::Censored,
+                    if next.is_some() {
+                        "return precedes the estimated near-expiry trigger"
+                    } else {
+                        "final observation has not reached the estimated idle trigger; no session end inferred"
+                    },
+                )
+            } else if main_5m
+                || c.auto_compact == Some(false)
+                || client == Client::Unsupported
+                || busy
+                || below
+                || narrow
+            {
+                (
+                    PeriodStatus::Ineligible,
+                    if main_5m {
+                        "main TTL is 5m"
+                    } else if c.auto_compact == Some(false) {
+                        "automatic compaction is disabled"
+                    } else if client == Client::Unsupported {
+                        "SDK/headless/remote/subagent client is outside the confirmed interactive policy"
+                    } else if busy {
+                        "tool wait or active turn interrupts the idle interval"
+                    } else if below {
+                        "context is below the effective idle threshold"
+                    } else {
+                        "auto-compact window removes the eligible size band"
+                    },
+                )
+            } else if !c.resolved
+                || period_ttls.main.is_none()
+                || context_tokens.is_none()
+                || p.kind == PartKind::Unknown
+                || c.threshold.is_none()
+                || window.is_none()
+                || (boundary.is_none()
+                    && (client != Client::Supported
+                        || !supported(r.version.as_deref(), 290)
+                        || flag_off))
+            {
+                (
+                    PeriodStatus::Unknown,
+                    "effective threshold/window/TTL, input size, interactive execution, version or pre-2.1.314 flag availability is unresolved",
+                )
+            } else {
+                (
+                    PeriodStatus::Eligible,
+                    "interactive request gap under current native prerequisites; open-and-awake activation is estimated",
+                )
+            };
+            let known_on = old.get("idleCompaction") == Some(&&Scalar::Bool(true))
+                && matches!(old.get("promptCacheTtl"), Some(Scalar::Text(t)) if t == "1h")
+                && old.get("autoCompactEnabled") == Some(&&Scalar::Bool(true))
+                && !flag_off;
+            let eligible = status == PeriodStatus::Eligible;
+            periods.push(Period {
+                previous: r,
+                next,
+                boundary,
+                known_on,
+                window,
+                threshold: c.threshold,
+                ttls: period_ttls,
+                context_tokens,
+                gap_ms,
+                kind: PeriodKind {
+                    status,
+                    reason,
+                    return_timing: if next.is_none() {
+                        ReturnTiming::Final
+                    } else if (EARLY..=HOUR).contains(&gap_ms) {
+                        ReturnTiming::NearExpiry
+                    } else if gap_ms < HOUR {
+                        ReturnTiming::BeforeExpiry
+                    } else {
+                        ReturnTiming::AfterExpiry
+                    },
+                    outcome: if boundary.is_some() {
+                        PeriodOutcome::Applied
+                    } else if known_on && next.is_some() {
+                        PeriodOutcome::NotApplied
+                    } else {
+                        PeriodOutcome::Unobserved
+                    },
+                },
+                confirmed: eligible && turn_end >= r.end_time && turn_end < r.time + EARLY,
+                flag_state,
+                activation: None,
+                cohort: None,
+            });
         }
-        (periods, cohorts.into_values().collect())
+        periods
     }
 
     /// Compare idle on and off for `owner` in one replayed TTL/window configuration, with its
@@ -1830,11 +1849,46 @@ impl<'a> Profiled<'a> {
         windows: &[ScenarioWindow],
         baseline: &str,
     ) -> (IdleScenario, Vec<IdlePeriod>) {
-        let (periods, activation_cohorts) = self.periods(index, ttls, windows, owner);
-        let idle_events: HashSet<&Id> = periods
-            .iter()
-            .filter_map(|p| p.boundary.map(|b| &b.id))
-            .collect();
+        let lookup = window_lookup(windows);
+        // Each pass builds one session's periods at a time and drops them after it.
+        let sessions = || {
+            index
+                .conversations
+                .iter()
+                .map(|(&session, group)| {
+                    self.session_periods(index, (session, group), ttls, &lookup, owner)
+                })
+                .filter(|periods| !periods.is_empty())
+        };
+        // The first pass finds what needs every period but not their activation.
+        let mut cohorts = Cohorts::default();
+        let mut counts = PeriodCounts::default();
+        // Context sizes in first-seen order, with their period counts.
+        let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
+        let mut idle_events: HashSet<&Id> = HashSet::default();
+        let mut applicable = false;
+        for periods in sessions() {
+            count_cohorts(&periods, &mut cohorts);
+            for p in &periods {
+                counts.add(p.kind, p.confirmed);
+                *sizes.entry(p.context_tokens).or_default() += 1;
+                if let Some(b) = p.boundary {
+                    idle_events.insert(&b.id);
+                }
+                applicable = applicable
+                    || p.ttls.main != Some(Ttl::FiveMinutes)
+                        && self
+                            .scopes
+                            .control(self.scopes.scope(p.previous))
+                            .auto_compact
+                            != Some(false)
+                        && match (p.window, p.threshold) {
+                            (Some(window), Some(threshold)) => window > threshold,
+                            _ => true,
+                        };
+            }
+        }
+        let activation_cohorts: Vec<ActivationCohort> = cohorts.values().cloned().collect();
         let idle_requests: HashSet<&str> = self
             .all_summaries
             .iter()
@@ -1870,32 +1924,47 @@ impl<'a> Profiled<'a> {
             common.add(cost);
         }
         let common = common.cost();
-        let mut counts = PeriodCounts::default();
-        // Context sizes in first-seen order, with their period counts.
-        let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
-        for p in &periods {
-            counts.add(p.kind, p.confirmed);
-            *sizes.entry(p.context_tokens).or_default() += 1;
+        // The second pass runs every fixed mode, one session at a time.
+        const MODES: [(bool, Mode); 6] = [
+            (false, Mode::Point),
+            (true, Mode::Point),
+            (true, Mode::Closed),
+            (true, Mode::Open),
+            (true, Mode::Larger),
+            (true, Mode::Late),
+        ];
+        let mut states =
+            MODES.map(|(_, mode)| RunState::new((mode == Mode::Point).then_some(sizes.len())));
+        let mut detail: Vec<IdlePeriod> = vec![];
+        for mut periods in sessions() {
+            activate(&mut periods, &cohorts);
+            let first = detail.len();
+            if self.detail {
+                detail.extend(periods.iter().map(|p| p.detail(&activation_cohorts)));
+            }
+            let runner = Runner::new(self, index, &periods, &sizes, ttls);
+            for (state, mode) in states.iter_mut().zip(MODES) {
+                runner.run(self, ttls, mode, &mut detail[first..], state);
+            }
         }
-        let mut detail: Vec<IdlePeriod> = if self.detail {
-            periods
-                .iter()
-                .map(|p| p.detail(&activation_cohorts))
-                .collect()
-        } else {
-            vec![]
+        let [off, on, closed, open, larger, late] = states.map(RunState::finish);
+        // A fraction's run needs every session again, so it builds them again.
+        let run = |mode: Mode| {
+            let mut state = RunState::new(None);
+            for mut periods in sessions() {
+                activate(&mut periods, &cohorts);
+                let runner = Runner::new(self, index, &periods, &sizes, ttls);
+                runner.run(self, ttls, (true, mode), &mut [], &mut state);
+            }
+            state.finish()
         };
-        let runner = Runner::new(self, index, &periods, &sizes, ttls);
-        let mut run = |on: bool, mode: Mode| runner.run(self, ttls, on, mode, &mut detail);
-        let off = run(false, Mode::Point);
-        let on = run(true, Mode::Point);
         let delta = |r: &Run| {
             difference(&r.adjustment, &off.adjustment)
                 .total_usd
                 .map(Usd::to_f64)
         };
-        let closed = delta(&run(true, Mode::Closed));
-        let open = delta(&run(true, Mode::Open));
+        let closed = delta(&closed);
+        let open = delta(&open);
         let mut lifetime_break_even_fraction = None;
         if let (Some(closed), Some(open)) = (closed, open) {
             if closed == 0.0 {
@@ -1911,7 +1980,7 @@ impl<'a> Profiled<'a> {
                         lifetime_break_even_fraction = Some(middle);
                         break;
                     }
-                    let Some(value) = delta(&run(true, Mode::Fraction(middle))) else {
+                    let Some(value) = delta(&run(Mode::Fraction(middle))) else {
                         break;
                     };
                     if value == 0.0 {
@@ -1926,8 +1995,8 @@ impl<'a> Profiled<'a> {
                 }
             }
         }
-        let larger_summary_delta_usd = delta(&run(true, Mode::Larger));
-        let late_trigger_delta_usd = delta(&run(true, Mode::Late));
+        let larger_summary_delta_usd = delta(&larger);
+        let late_trigger_delta_usd = delta(&late);
         let unknown: IndexSet<&String> = replay
             .errors
             .iter()
@@ -1935,18 +2004,6 @@ impl<'a> Profiled<'a> {
             .chain(&off.adjustment.unknown)
             .collect();
         let unknown: Vec<String> = unknown.into_iter().cloned().collect();
-        let applicable = periods.iter().any(|p| {
-            p.ttls.main != Some(Ttl::FiveMinutes)
-                && self
-                    .scopes
-                    .control(self.scopes.scope(p.previous))
-                    .auto_compact
-                    != Some(false)
-                && match (p.window, p.threshold) {
-                    (Some(window), Some(threshold)) => window > threshold,
-                    _ => true,
-                }
-        });
         let delta_usd = if unknown.is_empty() { delta(&on) } else { None };
         let by_context = sizes
             .into_iter()

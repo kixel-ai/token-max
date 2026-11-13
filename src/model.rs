@@ -77,6 +77,7 @@ pub struct Interner {
     profiles: crate::collections::HashSet<Profiles>,
     tools: crate::collections::HashSet<ServerTools>,
     metas: crate::collections::HashSet<std::sync::Arc<RequestMeta>>,
+    event_metas: crate::collections::HashSet<std::sync::Arc<EventMeta>>,
 }
 
 impl Interner {
@@ -181,23 +182,40 @@ impl Interner {
         }
     }
 
-    /// Share every repeated string of a structural event.
+    /// Share every repeated string of a structural event, and the fields it records alike
+    /// with other events.
     pub fn event(&mut self, e: &mut StructuralEvent) {
-        e.session = self.text(&e.session);
+        let meta = std::sync::Arc::make_mut(&mut e.meta);
+        meta.session = self.text(&meta.session);
         for slot in [
-            &mut e.model,
-            &mut e.version,
-            &mut e.client,
-            &mut e.cwd,
-            &mut e.tool,
+            &mut meta.model,
+            &mut meta.version,
+            &mut meta.client,
+            &mut meta.cwd,
+            &mut meta.tool,
         ] {
             self.share(slot);
         }
+        meta.profiles = self.profiles(&meta.profiles);
         for origin in &mut e.origins {
             origin.session = self.text(&origin.session);
         }
-        e.profiles = self.profiles(&e.profiles);
         e.origins.shrink_to_fit();
+        self.event_meta(&mut e.meta);
+    }
+
+    /// Replace `meta` with the shared copy of its value; its strings must already be shared.
+    pub fn event_meta(&mut self, meta: &mut std::sync::Arc<EventMeta>) {
+        match self.event_metas.get(&**meta) {
+            Some(shared) => {
+                if !std::sync::Arc::ptr_eq(shared, meta) {
+                    *meta = shared.clone();
+                }
+            }
+            None => {
+                self.event_metas.insert(meta.clone());
+            }
+        }
     }
 }
 
@@ -490,7 +508,7 @@ pub enum Scalar {
 }
 
 /// Preceding pricing metadata from the same file.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Pricing {
     pub model: Option<Text>,
     pub provider: Option<Text>,
@@ -500,19 +518,36 @@ pub struct Pricing {
 }
 
 /// Structural context and timing evidence, never a billed boundary request.
+///
+/// Like a request, an event keeps only what differs per event and shares the rest with
+/// every event recorded alike, through `Deref`; a write copies the shared fields first.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralEvent {
     pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
-    pub harness: Harness,
-    pub session: Text,
     pub time: Millis,
     pub kind: EventKind,
-    pub profiles: Profiles,
     pub location: Location,
     pub request: Option<Text>,
+    pub tool_id: Option<Id>,
+    pub settings: Settings,
+    pub idle_attribution: IdleAttribution,
+    /// Claude Bash call details on its tool start and end, without the command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellCall>,
+    #[serde(flatten)]
+    pub meta: std::sync::Arc<EventMeta>,
+}
+
+/// What events recorded alike share: their file's context and any rare per-kind details.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventMeta {
+    pub harness: Harness,
+    pub session: Text,
+    pub profiles: Profiles,
     pub model: Option<Text>,
     pub version: Option<Text>,
     pub client: Option<Text>,
@@ -523,16 +558,24 @@ pub struct StructuralEvent {
     pub post_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
     pub tool: Option<Text>,
-    pub tool_id: Option<Id>,
-    pub settings: Settings,
-    pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
-    /// Claude Bash call details on its tool start and end, without the command.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell: Option<ShellCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<Box<T3Request>>,
+}
+
+impl std::ops::Deref for StructuralEvent {
+    type Target = EventMeta;
+    fn deref(&self) -> &EventMeta {
+        &self.meta
+    }
+}
+
+impl std::ops::DerefMut for StructuralEvent {
+    /// The shared fields, copied first unless this event holds the only reference.
+    fn deref_mut(&mut self) -> &mut EventMeta {
+        std::sync::Arc::make_mut(&mut self.meta)
+    }
 }
 
 /// Recorded settings values by key; most events carry none, so they hold no map.
@@ -815,7 +858,7 @@ pub struct AgentDefinition {
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum T3IdleMode {
     #[serde(rename = "onReturn")]
     OnReturn,
@@ -903,7 +946,7 @@ pub struct T3TextGeneration {
 }
 
 /// Historical projection evidence uniquely linked to a captured native request.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Request {
     pub thread: String,

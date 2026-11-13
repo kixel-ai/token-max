@@ -1183,29 +1183,32 @@ mod tests {
                 session: session.into(),
                 location: location.clone(),
             }],
-            harness: Harness::Claude,
-            session: session.into(),
             time,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()].into(),
             location,
             request: None,
-            model: None,
-            version: Some("2.1.314".into()),
-            client: None,
-            cwd: None,
-            trigger: Some("auto".into()),
-            precomputed: Some(false),
-            pre_tokens: None,
-            post_tokens: None,
-            duration_ms: None,
-            tool: None,
             tool_id: None,
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
-            t3: None,
-            pricing: None,
+            meta: crate::model::EventMeta {
+                harness: Harness::Claude,
+                session: session.into(),
+                profiles: vec!["profile".into()].into(),
+                model: None,
+                version: Some("2.1.314".into()),
+                client: None,
+                cwd: None,
+                trigger: Some("auto".into()),
+                precomputed: Some(false),
+                pre_tokens: None,
+                post_tokens: None,
+                duration_ms: None,
+                tool: None,
+                t3: None,
+                pricing: None,
+            }
+            .into(),
         }
     }
 
@@ -1557,10 +1560,13 @@ mod tests {
             end_time: 600_000,
             ..first.clone()
         };
-        let event = StructuralEvent {
-            client: Some("sdk-ts".into()),
-            precomputed: Some(true),
-            ..boundary("unpriced-summary", "other-session", 300_000)
+        let event = {
+            let mut built = StructuralEvent {
+                ..boundary("unpriced-summary", "other-session", 300_000)
+            };
+            built.client = Some("sdk-ts".into());
+            built.precomputed = Some(true);
+            built
         };
         let result = check(&data(vec![first, next], vec![event]), None, 1_200_000);
         assert_eq!(result.base.recommended, Some(H1));

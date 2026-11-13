@@ -20,7 +20,7 @@ use crate::discovery::{
 };
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness, Id,
+    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Harness, Id,
     IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
     Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall,
     Snapshot, StructuralEvent, Subagent, Text, Usage,
@@ -741,29 +741,32 @@ fn event(
             session: context.session.clone(),
             location: location.clone(),
         }],
-        harness: snapshot.harness,
-        session: context.session.clone(),
         time,
         kind,
-        profiles: context.profiles.clone(),
         location: location.clone(),
         request: None,
-        model: context.model.clone(),
-        version: context.version.clone(),
-        client: context.client.clone(),
-        cwd: context.cwd.clone(),
-        trigger: None,
-        precomputed: None,
-        pre_tokens: None,
-        post_tokens: None,
-        duration_ms: None,
-        tool: None,
         tool_id: None,
         settings: Settings::default(),
         idle_attribution: IdleAttribution::Unknown,
         shell: None,
-        t3: None,
-        pricing: context.pricing.clone(),
+        meta: EventMeta {
+            harness: snapshot.harness,
+            session: context.session.clone(),
+            profiles: context.profiles.clone(),
+            model: context.model.clone(),
+            version: context.version.clone(),
+            client: context.client.clone(),
+            cwd: context.cwd.clone(),
+            trigger: None,
+            precomputed: None,
+            pre_tokens: None,
+            post_tokens: None,
+            duration_ms: None,
+            tool: None,
+            t3: None,
+            pricing: context.pricing.clone(),
+        }
+        .into(),
     }
 }
 
@@ -1024,7 +1027,11 @@ impl Reader {
         match self.event_ids.get(&self.events, &e.id) {
             Some(index) => {
                 let previous = &mut self.events[index];
-                previous.profiles = self.strings.union(&previous.profiles, &e.profiles);
+                let profiles = self.strings.union(&previous.profiles, &e.profiles);
+                if !Arc::ptr_eq(&profiles, &previous.profiles) {
+                    previous.profiles = profiles;
+                    self.strings.event_meta(&mut previous.meta);
+                }
                 for origin in &mut e.origins {
                     origin.session = self.strings.text(&origin.session);
                 }
@@ -2050,30 +2057,36 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         r.locations.shrink_to_fit();
         strings.meta(&mut r.meta);
     }
-    // Events share their pricing context, so fill each shared copy once per provider. Each
-    // entry keeps its source alive, so no other copy can reuse the address it is keyed by.
-    let mut filled: HashMap<(usize, String), (Arc<Pricing>, Arc<Pricing>)> = HashMap::default();
+    // The provider an event's pricing is filled with depends only on its shared fields, so
+    // fill each shared copy once. Each entry keeps its source alive, so no other copy can
+    // reuse the address it is keyed by.
+    let mut filled: HashMap<usize, (Arc<EventMeta>, Arc<EventMeta>)> = HashMap::default();
     for e in &mut events {
         if let Some(reference) = e.request.as_deref().and_then(|r| r.strip_prefix("ref:")) {
             e.request = ref_to_request.get(reference).cloned();
         }
         if e.harness == Harness::Claude
-            && let Some(pricing) = &mut e.pricing
+            && let Some(pricing) = &e.pricing
             && pricing.provider.is_none()
             && let Some(provider) = agreed(&sharing(&profiles, &e.profiles))
         {
-            let provider = provider.unwrap_or_else(|| "anthropic".into());
-            let key = (Arc::as_ptr(pricing) as usize, provider);
-            let (_, shared) = filled.entry(key).or_insert_with_key(|(_, provider)| {
-                let shared = Arc::new(Pricing {
-                    provider: Some(provider.as_str().into()),
-                    ..(**pricing).clone()
+            let (_, shared) = filled
+                .entry(Arc::as_ptr(&e.meta) as usize)
+                .or_insert_with(|| {
+                    let provider = provider.unwrap_or_else(|| "anthropic".into());
+                    let mut meta = (*e.meta).clone();
+                    meta.pricing = Some(Arc::new(Pricing {
+                        provider: Some(strings.text(&provider)),
+                        ..(**pricing).clone()
+                    }));
+                    let mut shared = Arc::new(meta);
+                    strings.event_meta(&mut shared);
+                    (e.meta.clone(), shared)
                 });
-                (pricing.clone(), shared)
-            });
-            *pricing = shared.clone();
+            e.meta = shared.clone();
         }
     }
+    drop(filled);
     attribute_idle(&mut events, &event_ids, &compact_parents, &notice_parents);
     drop((
         event_ids,

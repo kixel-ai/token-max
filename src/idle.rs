@@ -3058,60 +3058,69 @@ mod tests {
         StructuralEvent {
             id: "boundary".into(),
             origins: origin("sample", 1),
-            harness: Harness::Claude,
-            session: "sample".into(),
             time: 2 * MINUTE,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()].into(),
             location: Location {
                 file: "synthetic".into(),
                 line: 1,
             },
             request: Some("summary".into()),
-            model: Some("claude-opus-5-5".into()),
-            version: Some("2.1.314".into()),
-            client: Some("cli".into()),
-            cwd: None,
-            trigger: Some("manual".into()),
-            precomputed: Some(false),
-            pre_tokens: Some(300_000),
-            post_tokens: Some(2000),
-            duration_ms: Some(1000),
-            tool: None,
             tool_id: None,
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
-            t3: None,
-            pricing: Some(std::sync::Arc::new(Pricing {
+            meta: crate::model::EventMeta {
+                harness: Harness::Claude,
+                session: "sample".into(),
+                profiles: vec!["profile".into()].into(),
                 model: Some("claude-opus-5-5".into()),
-                provider: Some("anthropic".into()),
-                tier: Some("standard".into()),
-                speed: Some("standard".into()),
-                geo: Some("global".into()),
-            })),
+                version: Some("2.1.314".into()),
+                client: Some("cli".into()),
+                cwd: None,
+                trigger: Some("manual".into()),
+                precomputed: Some(false),
+                pre_tokens: Some(300_000),
+                post_tokens: Some(2000),
+                duration_ms: Some(1000),
+                tool: None,
+                t3: None,
+                pricing: Some(std::sync::Arc::new(Pricing {
+                    model: Some("claude-opus-5-5".into()),
+                    provider: Some("anthropic".into()),
+                    tier: Some("standard".into()),
+                    speed: Some("standard".into()),
+                    geo: Some("global".into()),
+                })),
+            }
+            .into(),
         }
     }
 
     /// An event of `kind` in `session` at `minute`.
     fn session_event(id: &str, kind: EventKind, session: &str, minute: f64) -> StructuralEvent {
-        StructuralEvent {
-            id: id.into(),
-            kind,
-            session: session.into(),
-            origins: origin(session, 2),
-            time: (minute * MINUTE as f64) as Millis,
-            ..event()
+        {
+            let mut built = StructuralEvent {
+                id: id.into(),
+                kind,
+                origins: origin(session, 2),
+                time: (minute * MINUTE as f64) as Millis,
+                ..event()
+            };
+            built.session = session.into();
+            built
         }
     }
 
     /// An observed idle boundary in `session` linked to `request`.
     fn notice(id: &str, session: &str, minute: f64, request: Option<&str>) -> StructuralEvent {
-        StructuralEvent {
-            idle_attribution: IdleAttribution::Notice,
-            trigger: Some("auto".into()),
-            request: request.map(Text::from),
-            ..session_event(id, EventKind::Compaction, session, minute)
+        {
+            let mut built = StructuralEvent {
+                idle_attribution: IdleAttribution::Notice,
+                request: request.map(Text::from),
+                ..session_event(id, EventKind::Compaction, session, minute)
+            };
+            built.trigger = Some("auto".into());
+            built
         }
     }
 
@@ -3735,13 +3744,16 @@ mod tests {
         ];
         s.requests.extend(copies);
         s.requests.sort_by_key(|r| r.time);
-        s.events.push(StructuralEvent {
-            id: "different-boundary".into(),
-            session: "different-sample".into(),
-            origins: origin("different-sample", 7),
-            request: Some("different-summary".into()),
-            version: Some("2.1.315".into()),
-            ..event()
+        s.events.push({
+            let mut built = StructuralEvent {
+                id: "different-boundary".into(),
+                origins: origin("different-sample", 7),
+                request: Some("different-summary".into()),
+                ..event()
+            };
+            built.session = "different-sample".into();
+            built.version = Some("2.1.315".into());
+            built
         });
         s.events.sort_by_key(|e| e.time);
         let c = check(&s, 201.0);
@@ -3796,10 +3808,13 @@ mod tests {
         let mut later = request("later-summary", 220.0, 0);
         later.parts[0].kind = PartKind::Compaction;
         later.parts[0].usage = usage(0, 302_000, 2000, Ttl::FiveMinutes);
-        let boundary = StructuralEvent {
-            request: Some("later-summary".into()),
-            pre_tokens: Some(302_000),
-            ..session_event("later", EventKind::Compaction, "target", 220.5)
+        let boundary = {
+            let mut built = StructuralEvent {
+                request: Some("later-summary".into()),
+                ..session_event("later", EventKind::Compaction, "target", 220.5)
+            };
+            built.pre_tokens = Some(302_000);
+            built
         };
         let mut follow = request("follow", 210.0, 1000);
         follow.parts[0].usage = usage(1000, 301_000, 0, Ttl::OneHour);

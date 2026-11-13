@@ -2125,6 +2125,7 @@ pub(crate) fn enrich(
             .extend(r.profiles.iter().map(String::as_str));
     }
     for e in events {
+        let before = std::sync::Arc::as_ptr(&e.meta);
         let key = ids.events.contains_key(&e.id).then(|| e.id.to_string());
         if let Some(key) = &key
             && let Some(rows) = joins.get(key)
@@ -2143,7 +2144,14 @@ pub(crate) fn enrich(
             && owners.len() == 1
             && let Some(owner) = owners.iter().next()
         {
-            e.profiles = shared(&mut owned, owner);
+            let profiles = shared(&mut owned, owner);
+            if e.profiles != profiles {
+                e.profiles = profiles;
+            }
+        }
+        // A changed event no longer shares its fields; share them again.
+        if std::sync::Arc::as_ptr(&e.meta) != before {
+            strings.event_meta(&mut e.meta);
         }
     }
     for p in profiles.iter_mut() {

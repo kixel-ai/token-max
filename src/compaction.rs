@@ -722,11 +722,11 @@ fn simulate<'r>(
                                 .by_id
                                 .get(template.event)
                                 .expect("calibration samples come from the simulated events");
-                            result.events.push(StructuralEvent {
-                                id: format!("modeled:{}:{index}", req.id).into(),
-                                time: req.time,
-                                session: req.session.clone(),
-                                origins: req
+                            result.events.push({
+                                let mut built = StructuralEvent {
+                                    id: format!("modeled:{}:{index}", req.id).into(),
+                                    time: req.time,
+                                    origins: req
                                     .locations
                                     .iter()
                                     .map(|location| Origin {
@@ -734,8 +734,11 @@ fn simulate<'r>(
                                         location: location.clone(),
                                     })
                                     .collect(),
-                                request: None,
-                                ..(*event).clone()
+                                    request: None,
+                                    ..(*event).clone()
+                                };
+                                built.session = req.session.clone();
+                                built
                             });
                             st.removed = old_prefix - resumed;
                         }
@@ -1729,35 +1732,38 @@ mod tests {
                 session: "sample".into(),
                 location: location.clone(),
             }],
-            harness: Harness::Claude,
-            session: "sample".into(),
             time: 0,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()].into(),
             location,
             request: Some("sample-resume".into()),
-            model: Some("claude-opus-5-5".into()),
-            version: Some("2.1.314".into()),
-            client: Some("sdk-ts".into()),
-            cwd: None,
-            trigger: Some("auto".into()),
-            precomputed: Some(false),
-            pre_tokens: Some(300000),
-            post_tokens: Some(2000),
-            duration_ms: Some(1000),
-            tool: None,
             tool_id: None,
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
-            t3: None,
-            pricing: Some(std::sync::Arc::new(Pricing {
-                provider: Some("anthropic".into()),
+            meta: crate::model::EventMeta {
+                harness: Harness::Claude,
+                session: "sample".into(),
+                profiles: vec!["profile".into()].into(),
                 model: Some("claude-opus-5-5".into()),
-                tier: Some("standard".into()),
-                speed: Some("standard".into()),
-                geo: Some("global".into()),
-            })),
+                version: Some("2.1.314".into()),
+                client: Some("sdk-ts".into()),
+                cwd: None,
+                trigger: Some("auto".into()),
+                precomputed: Some(false),
+                pre_tokens: Some(300000),
+                post_tokens: Some(2000),
+                duration_ms: Some(1000),
+                tool: None,
+                t3: None,
+                pricing: Some(std::sync::Arc::new(Pricing {
+                    provider: Some("anthropic".into()),
+                    model: Some("claude-opus-5-5".into()),
+                    tier: Some("standard".into()),
+                    speed: Some("standard".into()),
+                    geo: Some("global".into()),
+                })),
+            }
+            .into(),
         }
     }
 

@@ -49,19 +49,9 @@ T3 prunes its event log, so the plan cannot reach the Goal for most histories.
   oversized item unknown rather than failing the whole read on the 1 MiB
   value bound.
 
-## Waiting
-
-- Maintainer: decide the scope now that T3 keeps about one day of events;
-  done once a `Decided` line in the Plan records the pick.
-  1. Recommended: rebuild guards after the prune boundary and limit the T3
-     idle check's window to it, so all three modes are priced on the same
-     retained day or more and extrapolated monthly. `off` and `onReturn`
-     lose their longer comparison window.
-  2. Rebuild after the boundary only, keeping the full-history window:
-     older gaps stay unpriced with a pruning reason, so `beforeCacheExpires`
-     stays unpriced for any history older than about a day, nearly always.
-  3. Ask T3 upstream to keep the lifecycle events the predicate reads; this
-     posts outside the `kixelated`, `kixel-ai` and `moq-dev` orgs, so it needs approval
-     and t3code's AI policy check, and old history stays pruned.
-  4. Drop the quest: `beforeCacheExpires` stays advisory, and its unpriced
-     reason names T3's event pruning.
+Decided 2026-11-13 (coordinator, on the maintainer's behalf while they were
+away, pending review in the quest's PR): ✅ rebuild guards after the prune
+boundary and limit the T3 idle check's window to it, so all three modes are
+priced on the same retained window and extrapolated monthly (rejected: keep
+the full-history window with older gaps unpriced; ask T3 upstream, which
+needs approval to post outside our orgs; drop the quest).

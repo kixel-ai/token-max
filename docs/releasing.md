@@ -86,20 +86,23 @@ through the protected, reviewed squash path, validates the complete tool, and
 updates the README's pre-release notice in that change.
 
 Dispatch **Release** on protected `main` with that exact version. Preflight
-refuses 0.0.0 and a mismatched version. Then, in order:
+refuses 0.0.0, a prerelease (the release is always marked latest, which the
+installers serve), a mismatched version, and a version crates.io already
+has. `draft` refuses an existing tag on another commit. Then, in order:
 
 1. The complete Check workflow and every target's build run.
 2. The installers and `sha256.sum` are built from all the archives.
 3. `draft` attests every asset and uploads it to a draft release, which is
-   not public and creates no tag. A retry, even from a later commit, reuses
-   the draft and moves it to the new commit.
+   not public and creates no tag. Until `publish` succeeds, a retry, even
+   from a later commit, reuses the draft and moves it to the new commit.
 4. `publish` runs `cargo publish --locked` from the restricted environment.
 5. `announce` publishes the draft as the latest release, which creates the
    tag at the dispatched commit.
 
 A failure before step 4 leaves nothing public. crates.io cannot be undone,
 so it goes after everything that can fail is staged; if `announce` fails,
-rerun it. Inspect the package first with `cargo publish --locked --dry-run`
+rerun it in the same run, since preflight refuses a new run for a version
+crates.io has. Inspect the package first with `cargo publish --locked --dry-run`
 and `cargo package --list`.
 
 To check a change to the release itself, dispatch **Release** from its

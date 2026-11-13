@@ -49,8 +49,21 @@ jobs:
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           test "$version" = "$RELEASE_VERSION"
-          if [ "$DRY_RUN" != true ]; then test "$version" != 0.0.0; fi
           echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if [ "$DRY_RUN" = true ]; then exit 0; fi
+          test "$version" != 0.0.0
+          # `announce` marks every release latest, which the installers serve.
+          case "$version" in
+            *-*) echo "::error::prerelease $version would become the latest release"; exit 1 ;;
+          esac
+          # Once crates.io has this version, a new run would stage other
+          # assets than its source; finish the original run's announce instead.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' -A 'token-max release (github.com/kixel-ai/token-max)' \
+            "https://crates.io/api/v1/crates/token-max/$version")
+          if [ "$status" != 404 ]; then
+            echo "::error::crates.io answered $status for token-max $version; a new release needs an unpublished version"
+            exit 1
+          fi
 
   validate:
     needs: preflight
@@ -189,6 +202,11 @@ jobs:
           subject-path: assets/*
       - name: Upload to a draft release
         run: |
+          # GitHub ignores --target for a tag that exists, so refuse one on
+          # another commit rather than publish these assets under it.
+          if tagged=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha 2>/dev/null); then
+            test "$tagged" = "$GITHUB_SHA"
+          fi
           # A retry reuses its draft, moved to this commit so the tag matches
           # these assets; a published release with this tag fails the job.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then

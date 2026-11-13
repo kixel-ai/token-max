@@ -363,8 +363,8 @@ supported schema and limits.
 `--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
 SSH configuration, keys and known hosts without prompting. Add
 `--include-local` to audit this host in the same run. Each destination needs
-the same version of token-max installed on its PATH; token-max installs
-nothing there itself. A missing or different version fails with the
+the same version of token-max installed; token-max installs nothing there
+itself. A missing or different version fails with the
 command to run. Linux and macOS destinations are supported.
 
 ```sh

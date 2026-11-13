@@ -86,7 +86,14 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
     /// The coordinator, with this host's home as `local` and only the test's environment.
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(BIN);
+        // Destinations must not find a token-max the developer installed.
         let path = std::env::var("PATH").unwrap();
+        let path = std::env::join_paths(
+            std::env::split_paths(&path).filter(|dir| !dir.join("token-max").exists()),
+        )
+        .unwrap()
+        .into_string()
+        .unwrap();
         command
             .args(["--prices-file", fixture("prices.json").to_str().unwrap()])
             .args(args)

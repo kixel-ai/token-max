@@ -2388,7 +2388,8 @@ mod tests {
             assert_eq!(scan.coverage.tier_known, 0);
             let cost = crate::prices::price_request(&catalog, r);
             assert_eq!(
-                cost.total_usd.map(|usd| (usd * 1_000_000.0).round()),
+                cost.total_usd
+                    .map(|usd| (usd.to_f64() * 1_000_000.0).round()),
                 expected.map(|usd: f64| (usd * 1_000_000.0).round()),
                 "native={native:?}, T3={selected:?}: {cost:?}"
             );

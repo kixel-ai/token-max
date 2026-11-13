@@ -5,7 +5,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use token_max::model::{Action, BackgroundFeature, CheckResult, Verdict};
+use token_max::model::{Action, BackgroundFeature, CheckResult, Usd, Verdict};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -214,7 +214,7 @@ fn conditional_codex_prices_keep_assumptions_in_the_analysis_and_text() {
         ];
         let report = analysis(&w, |d| d.codex_dirs = vec![text(&w.codex)], 1.0);
         let row = &report.historical[0];
-        assert_eq!(row.cost.total_usd, expected, "{tier:?}");
+        assert_eq!(row.cost.total_usd.map(Usd::to_f64), expected, "{tier:?}");
         assert_eq!(row.conditional_requests, u64::from(expected.is_some()));
         assert_eq!(report.scan.coverage.tier_known, 0);
         if expected.is_some() {

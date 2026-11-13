@@ -432,7 +432,7 @@ fn text_only_wire_requests_calibrate_matching_cohorts_and_keep_unknown_net_effec
         .unwrap();
     assert_eq!(server.name, "example");
     assert_eq!(server.priced, 1);
-    assert!(server.cost_usd > 0.0);
+    assert!(server.cost_usd.to_f64() > 0.0);
     let doubled: Vec<Request> = data
         .requests
         .iter()
@@ -783,7 +783,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     // Tools lead the prefix, so Artifact sits entirely inside the 2,000 cached-read tokens.
     let artifact_tokens = length(&tools[0]) as f64 * ratio;
     assert!(artifact_tokens < 2000.0);
-    assert!((artifact.cost_usd - (artifact_tokens * 0.2) / 1e6).abs() < 1e-12);
+    assert!((artifact.cost_usd.to_f64() - (artifact_tokens * 0.2) / 1e6).abs() < 1e-12);
     assert_eq!(row(&report, "Bash").control, None);
     assert_eq!(row(&report, "Bash").calls, Some(1));
     let docs = row(&report, "docs");
@@ -805,7 +805,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert!(prefix > 2900.0);
     assert_eq!(review.priced, 1);
     // Displayed tokens are rounded, so compare the per-token rate.
-    assert!((review.cost_usd / review.tokens.unwrap() as f64 / 4e-6 - 1.0).abs() < 0.01);
+    assert!((review.cost_usd.to_f64() / review.tokens.unwrap() as f64 / 4e-6 - 1.0).abs() < 0.01);
     assert_eq!(row(&report, "Claude Code system prompt").control, None);
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
     // A priced piece never used is off, however little it cost; the used ones
@@ -827,7 +827,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
         catalog: &prices(),
         since: None,
         now: NOW,
-        max_cost_per_use_usd: artifact.cost_usd / 2.0,
+        max_cost_per_use_usd: artifact.cost_usd.to_f64() / 2.0,
     })
     .unwrap();
     let verdict = |name: &str| row(&strict, name).verdict;
@@ -1041,16 +1041,19 @@ fn attachments_take_their_latest_cache_position_and_media_or_copied_calls_do_not
     );
     // The file is new in the second request, and its changed revision is new
     // in the third, so both pay the 1h write price rather than a cached read.
-    assert!((instructions.cost_usd / (tokens * (8.0 + 8.0) * 1e-6) - 1.0).abs() < 0.001);
+    assert!((instructions.cost_usd.to_f64() / (tokens * (8.0 + 8.0) * 1e-6) - 1.0).abs() < 0.001);
     // Claude Code caches through the last message, so the first request's
     // listing lies in its 1h writes rather than the ordinary input after them;
     // the next two read it from cache.
-    let write = instructions.cost_usd / (2.0 * tokens);
+    let write = instructions.cost_usd.to_f64() / (2.0 * tokens);
     assert_eq!(review.requests, 6);
     assert_eq!(review.priced, 3);
     let listing = review.tokens.unwrap() as f64;
-    assert!((review.cost_usd / (listing * (write + 2.0 * 0.2e-6)) - 1.0).abs() < 0.01);
-    assert_eq!(review.estimated_usd, Some((review.cost_usd * 6.0) / 3.0));
+    assert!((review.cost_usd.to_f64() / (listing * (write + 2.0 * 0.2e-6)) - 1.0).abs() < 0.01);
+    assert_eq!(
+        review.estimated_usd,
+        Some((review.cost_usd.to_f64() * 6.0) / 3.0)
+    );
     // The server row is priced where both its tool and its instructions were.
     let docs = row(&report, "docs");
     assert_eq!(docs.requests, 6);
@@ -1259,7 +1262,7 @@ fn cohort_calibration_outside_measured_request_support_leaves_that_comparison_un
     assert_eq!(system.requests, 2);
     assert_eq!(system.priced, 1);
     // The unpriced request is scaled from the priced one, never counted as free.
-    assert_eq!(system.estimated_usd, Some(system.cost_usd * 2.0));
+    assert_eq!(system.estimated_usd, Some(system.cost_usd.to_f64() * 2.0));
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
 }
 
@@ -1590,7 +1593,10 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
             .iter()
             .all(|c| c.priced == before.priced && c.requests == before.requests)
     );
-    assert!((parts.iter().map(|c| c.cost_usd).sum::<f64>() - before.cost_usd).abs() < 1e-12);
+    assert!(
+        (parts.iter().map(|c| c.cost_usd.to_f64()).sum::<f64>() - before.cost_usd.to_f64()).abs()
+            < 1e-12
+    );
     assert!(
         (parts.iter().map(|c| c.estimated_usd.unwrap()).sum::<f64>()
             - before.estimated_usd.unwrap())
@@ -1762,7 +1768,13 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
             .unwrap();
         assert_eq!(tool.calls, Some(1));
         assert!(
-            (server.cost_usd - server.details.iter().map(|c| c.cost_usd).sum::<f64>()).abs()
+            (server.cost_usd.to_f64()
+                - server
+                    .details
+                    .iter()
+                    .map(|c| c.cost_usd.to_f64())
+                    .sum::<f64>())
+            .abs()
                 < 1e-12
         );
         for c in [retained, redundant, server, tool] {

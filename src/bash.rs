@@ -6,6 +6,7 @@ use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BashCapCheck, BashCapControl, BashWaits, Bucket, CheckBase, Cost, EventKind, Evidence,
     Harness, Id, Millis, Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck,
+    Usd,
 };
 use crate::prices::{Catalog, add_costs, unit_rates, unknown_cost, zero_cost};
 
@@ -108,7 +109,7 @@ fn miss(catalog: &Catalog, issuing: Option<&Request>, next: Option<&Request>) ->
         Some(Ttl::OneHour) => rates.write1h,
         None => return unknown_cost("the write lifetime after the wait is not recorded"),
     };
-    let usd = rewritten as f64 * (write_rate - rates.read);
+    let usd = Usd::from_f64(rewritten as f64 * (write_rate - rates.read));
     Cost {
         known_usd: usd,
         total_usd: Some(usd),
@@ -472,7 +473,7 @@ mod tests {
             .unwrap();
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
-        assert!((w.miss_cost.total_usd.unwrap() - expected).abs() < 1e-9);
+        assert!((w.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
         let text = format_report(&report, ReportOptions::default());
         let line = crate::test_support::report_line(&text, "Bash timeout cap 10m -> 4m");
         assert_eq!(line.mark, "change");
@@ -523,7 +524,7 @@ mod tests {
         let next = data.requests.iter().find(|r| r.time > START).unwrap();
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
-        assert!((waits.miss_cost.total_usd.unwrap() - expected).abs() < 1e-9);
+        assert!((waits.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
     }
 
     #[test]

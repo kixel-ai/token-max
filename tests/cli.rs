@@ -631,6 +631,10 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     assert_eq!(lines[0]["session"], "session-a");
     assert_eq!(lines[0]["files"], json!([text(&w.transcript())]));
     assert!(lines[0]["costUsd"].as_f64().unwrap() > 0.0);
+    // This host, and no directory to find a checkout in.
+    for field in ["host", "cwd", "repositories", "repositoriesSource"] {
+        assert_eq!(lines[0].get(field), Some(&Value::Null), "{field}");
+    }
     // After the fixture's requests, nothing is selected.
     assert_eq!(
         invoke(&["--since", "2030-01-01"]),
@@ -639,7 +643,7 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     for extra in [
         &["--json"][..],
         &["--details"],
-        &["--ssh", "devbox"],
+        &["--max-cost-per-use", "1"],
         &["-v"],
     ] {
         let (status, stdout, stderr) = invoke(extra);

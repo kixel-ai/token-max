@@ -535,17 +535,31 @@ pub(crate) fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<S
     }
 }
 
-/// The main checkout of a linked worktree, reading only Git's path metadata.
-#[cfg(unix)]
-fn main_checkout(root: &str) -> Result<String, ScanError> {
+/// Where a checkout's Git metadata lives, read from Git's path metadata alone.
+#[derive(Debug, PartialEq)]
+pub(crate) struct GitDir {
+    /// The directory holding the repository's shared `config`.
+    pub common: String,
+    /// Whether the checkout is a linked worktree, whose common directory belongs to another.
+    pub linked: bool,
+}
+
+/// The Git directory of the checkout rooted at `root`, or None when it has no `.git`.
+pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
     let dotgit = join(&[root, ".git"]);
     let meta = match fs::metadata(&dotgit) {
         Ok(meta) => meta,
-        Err(e) if absent(e.kind()) => return Ok(root.into()),
+        Err(e) if absent(e.kind()) => return Ok(None),
         Err(_) => return Err(error("cannot inspect git directory", &dotgit, 0)),
     };
+    let own = |common: String| {
+        Ok(Some(GitDir {
+            common,
+            linked: false,
+        }))
+    };
     if meta.is_dir() {
-        return Ok(root.into());
+        return own(dotgit);
     }
     if !meta.is_file() {
         return Err(error("unsupported git directory pointer", &dotgit, 0));
@@ -561,7 +575,8 @@ fn main_checkout(root: &str) -> Result<String, ScanError> {
     let common_file = gitdir.join("commondir");
     let common = match fs::read_to_string(&common_file) {
         Ok(text) => text,
-        Err(e) if absent(e.kind()) => return Ok(root.into()),
+        // A submodule's own directory, not a linked worktree.
+        Err(e) if absent(e.kind()) => return own(gitdir.to_string_lossy().into_owned()),
         Err(_) => {
             return Err(error(
                 "cannot read git common directory",
@@ -585,6 +600,22 @@ fn main_checkout(root: &str) -> Result<String, ScanError> {
             0,
         )
     })?;
+    Ok(Some(GitDir {
+        common,
+        linked: true,
+    }))
+}
+
+/// The main checkout of a linked worktree, reading only Git's path metadata.
+#[cfg(unix)]
+fn main_checkout(root: &str) -> Result<String, ScanError> {
+    let Some(GitDir {
+        common,
+        linked: true,
+    }) = git_dir(root)?
+    else {
+        return Ok(root.into());
+    };
     // Like Claude Code, a common directory outside a checkout (a bare repository, or a
     // submodule under .git/modules) is itself the root; lacking .git, it owns no local file.
     if std::path::Path::new(&common)

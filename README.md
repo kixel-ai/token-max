@@ -53,7 +53,7 @@ That excerpt is from synthetic usage with synthetic prices, not a real host.
 From the first release on, each GitHub release has prebuilt binaries for
 Linux (x86_64 and arm64, statically linked), macOS (Apple silicon and Intel)
 and Windows (x86_64), and installers that put `token-max` in `~/.local/bin`
-(or `$XDG_BIN_HOME` when set):
+by default:
 
 ```sh
 curl -LsSf https://github.com/kixel-ai/token-max/releases/latest/download/token-max-installer.sh | sh

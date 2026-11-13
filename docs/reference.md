@@ -376,9 +376,9 @@ profiles from its home and environment, reads its transcripts and settings,
 and runs every check there, priced from the one catalog this host loads and
 sends it. Only its finished report comes back, so its transcripts and scan
 never leave it, and this host never holds more than its own scan. It looks for
-`token-max` on the non-interactive `PATH`, in the release installers'
-directory (`$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` or `~/.local/bin`) and in
-`~/.cargo/bin`.
+`token-max` on the non-interactive `PATH`, then in the release installers'
+directory (the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
+`~/.local/bin`), then in `~/.cargo/bin`.
 `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 

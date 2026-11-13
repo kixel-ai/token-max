@@ -770,9 +770,14 @@ fn background_controls_and_estimates_keep_their_remote_history() {
 #[test]
 fn the_release_installers_directory_is_searched() {
     let hosts = Hosts::new();
-    let bin = hosts.home("installed").join(".local/bin");
+    let home = hosts.home("installed");
+    let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
     symlink(BIN, bin.join("token-max")).unwrap();
+    // An older `cargo install` loses to the installers' copy.
+    let cargo = home.join(".cargo/bin");
+    std::fs::create_dir_all(&cargo).unwrap();
+    script(&cargo.join("token-max"), "exit 2");
     let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.starts_with("token-max: installed\n"), "{stdout}");
@@ -814,7 +819,7 @@ fn any_failed_destination_fails_the_whole_report() {
         ),
         (
             "bare",
-            "bare: token-max is not installed on PATH, in ~/.local/bin or in ~/.cargo/bin; install it with `cargo install --locked",
+            "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with `cargo install --locked",
         ),
         ("windows", "windows: unsupported platform"),
         (

@@ -563,10 +563,12 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         }),
     };
     let mut text = format_report(&report, report_options);
-    if options.changes {
-        text += &format_changes(&report, report_options);
-    }
+    // Computed once, since each reads the files that may outrank a switch: the list
+    // printed here and the walk's offers are the same value.
     let fixes = crate::doctor::fixes(&report, format.unicode);
+    if options.changes {
+        text += &format_changes(&report, &fixes, report_options);
+    }
     Ok(Rendered {
         text,
         change,

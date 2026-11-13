@@ -765,21 +765,46 @@ impl Target {
         let result = (|| {
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
-            // The copy is never readable by more people than the file it replaces, even
-            // before its permissions are copied over: settings can hold credentials.
+            // Settings can hold credentials, so the copy starts readable by its owner alone
+            // and takes the replaced file's owner and group before its permissions: group
+            // bits copied onto another group would widen who can read it.
             #[cfg(unix)]
             {
-                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-                let mode = existing.as_ref().map_or(0o600, |m| m.permissions().mode());
-                options.mode(mode & 0o777);
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
             }
             let mut file = options.open(&temp)?;
             if let Some(metadata) = &existing {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let made = file.metadata()?;
+                    if (made.uid(), made.gid()) != (metadata.uid(), metadata.gid()) {
+                        std::os::unix::fs::fchown(
+                            &file,
+                            Some(metadata.uid()),
+                            Some(metadata.gid()),
+                        )
+                        .map_err(|e| {
+                            io::Error::new(
+                                e.kind(),
+                                format!("cannot keep its owner and group: {e}"),
+                            )
+                        })?;
+                    }
+                }
                 file.set_permissions(metadata.permissions())?;
             }
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             drop(file);
+            // Check again just before replacing it, so a write by another tool since the
+            // walk's check is kept rather than overwritten.
+            if !self.unchanged()? {
+                return Err(io::Error::other(
+                    "it changed while token-max doctor was writing",
+                ));
+            }
             fs::rename(&temp, &self.resolved)
         })();
         if result.is_err() {

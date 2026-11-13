@@ -713,15 +713,19 @@ pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> Stri
 
 /// The changes the report recommends or suggests, each with its settings edit or the
 /// step to take by hand, for output that `token-max doctor` does not walk through.
-pub fn format_changes<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
+/// `fixes` are `doctor::fixes` of the same report, so the list and a walk agree.
+pub fn format_changes<'a>(
+    report: &'a Report,
+    fixes: &[crate::doctor::Fix],
+    options: ReportOptions<'a>,
+) -> String {
     let mut out = Out::new(report, options);
-    let fixes = crate::doctor::fixes(report, options.unicode);
     if fixes.is_empty() {
         return out.text;
     }
     out.blank();
     out.line("Changes to make:", 0, BOLD);
-    for fix in &fixes {
+    for fix in fixes {
         let lines = crate::doctor::describe(fix, out.home.as_deref());
         out.hang(&format!("  {}", lines.head), 4, PLAIN);
         for (text, raw) in lines.body {
@@ -4748,6 +4752,7 @@ mod tests {
     fn changes(report: &Report, width: Option<usize>) -> String {
         format_changes(
             report,
+            &crate::doctor::fixes(report, false),
             ReportOptions {
                 width,
                 ..Default::default()

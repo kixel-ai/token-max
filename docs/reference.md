@@ -47,9 +47,10 @@ writes it in; `config.toml` keeps its comments and formatting. A list gains the
 value once, and a Codex `[[skills.config]]` entry with the same `path` is
 updated in place. Each file is read when the walk starts and again before
 writing; if it changed in between, nothing is written and the run fails. A
-file is replaced atomically with its permissions kept, and its replacement is
-never readable by more people than the file was; a new file is readable only by
-you. A symlink is written through to its target, which the summary names, and
+file is replaced atomically with its owner, group and permission bits kept, and
+its replacement is never readable by more people than the file was; a new file
+is readable only by you. Other access controls, such as an ACL, are not copied.
+The file is checked once more just before it is replaced. A symlink is written through to its target, which the summary names, and
 profiles whose files resolve to one file share one write. A read-only target, or one
 that cannot take the edit, such as a `permissions` that is not an object, makes
 the change a step by hand naming the resolved path. Ctrl-C at a prompt exits 2

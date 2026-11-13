@@ -859,7 +859,8 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
             .evidence
             .contains(r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#)
     );
-    let snippet = crate::report::format_changes(&strict, ReportOptions::default());
+    let fixes = crate::doctor::fixes(&strict, false);
+    let snippet = crate::report::format_changes(&strict, &fixes, ReportOptions::default());
     let off = &snippet[..snippet.find("worth considering").unwrap()];
     assert!(off.contains(r#""enableArtifact": false"#), "{snippet}");
     assert!(

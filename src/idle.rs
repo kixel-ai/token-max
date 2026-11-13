@@ -2195,6 +2195,13 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
         if profile.harness != Harness::Claude {
             continue;
         }
+        // T3 prunes its event log, so the proactive mode can be priced only after the
+        // boundary; every mode is compared over that same window.
+        let retained = instance.retained_since;
+        let options = &IdleOptions {
+            since: options.since.max(retained),
+            ..*options
+        };
         let requests: Vec<&Request> = options
             .scan
             .cache_context
@@ -2340,16 +2347,55 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 action: if !applicable || winner.is_none() { Action::Advisory } else if winner==Some(instance.idle_mode) || savings==Some(0.0) { Action::Keep } else { Action::Change },
                 current: Some(instance.idle_mode), recommended: if applicable { winner } else { None },
                 owner: instance.idle_owner.clone(), since, until: Some(options.now),
-                window_basis: "captured native requests plus a separately bounded T3 SQLite snapshot".into(),
+                window_basis: if retained.is_some() && options.since == retained {
+                    "captured native requests since T3's pruned event log became complete, plus a separately bounded T3 SQLite snapshot"
+                } else {
+                    "captured native requests plus a separately bounded T3 SQLite snapshot"
+                }.into(),
                 baseline: format!("{}; onReturn assumes accepting the offered summary, beforeCacheExpires assumes the server remains running until its observed-expiry timer fires",instance.idle_mode.as_str()),
                 requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: None,
                 savings_usd: savings.filter(|_|applicable), monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
-                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session; 5m and 1h caches both apply".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
+                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
         });
     }
     checks
+}
+
+/// When T3's timer sends `/compact`: the last arm before the lead's `start` survives to wake
+/// then, and each later arm checks at once; none fires at or after `until`, the expiry or the
+/// user's return. Ok(None) when the guards hold it throughout.
+fn t3_fire(
+    guards: &crate::model::T3Guards,
+    start: Millis,
+    until: Millis,
+) -> Result<Option<Millis>, &'static str> {
+    let at = |t: Millis| {
+        let i = guards.spans.partition_point(|(from, _)| *from <= t);
+        i.checked_sub(1).map_or(
+            Err("T3's lifecycle guards are unknown before the run completed"),
+            |i| guards.spans[i].1,
+        )
+    };
+    let arms = guards.arms.iter().filter(|(a, _)| *a < until);
+    if let Some((_, armed)) = arms.clone().rfind(|(a, _)| *a < start)
+        && start < until
+    {
+        match (*armed, at(start)) {
+            (Ok(true), Ok(true)) => return Ok(Some(start)),
+            (Ok(false), _) | (_, Ok(false)) => {}
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+        }
+    }
+    for (a, armed) in arms.filter(|(a, _)| *a >= start) {
+        match *armed {
+            Ok(true) => return Ok(Some(*a)),
+            Ok(false) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(None)
 }
 
 /// T3 starts its proactive summary this long before the observed cache expiry.
@@ -2420,6 +2466,7 @@ fn t3_comparison(
     }
     let mut gaps = Vec::new();
     let mut periods = Vec::new();
+    let mut outside: Vec<(&str, Millis, Millis)> = Vec::new();
     for group in groups.values_mut() {
         group.sort_by_key(|r| r.time);
         for (i, &r) in group.iter().enumerate() {
@@ -2433,7 +2480,14 @@ fn t3_comparison(
                 continue;
             }
             let end = next.map_or(options.now, |r| r.time);
-            if options.since.is_some_and(|s| end < s) || end <= r.end_time {
+            if end <= r.end_time {
+                continue;
+            }
+            // A gap outside the window, including one that opens before T3's retained
+            // events, stays as recorded in every mode.
+            let retained = profile.t3.as_ref().and_then(|t| t.retained_since);
+            if options.since.is_some_and(|s| end < s) || retained.is_some_and(|b| r.end_time < b) {
+                outside.push((&*r.session, r.end_time, end));
                 continue;
             }
             // Without a linked api-request record, `r.time` is the first response record, which
@@ -2465,9 +2519,17 @@ fn t3_comparison(
             });
             // T3 evaluates the window when the run completes and starts a lapsed lead at once.
             let completed = meta.and_then(|t| t.completed_at).unwrap_or(r.end_time);
-            let trigger = expires
+            let earliest = expires
                 .filter(|t| completed < *t)
                 .map(|t| (t - T3_LEAD).max(completed));
+            // When the timer would send `/compact`, from the guards rebuilt for this run.
+            let fired = expires.map(|expires| {
+                let guards = meta
+                    .and_then(|t| t.guards.as_deref())
+                    .ok_or("T3 pruned the completion of this gap's run, so its lifecycle guards cannot be rebuilt")?;
+                t3_fire(guards, expires - T3_LEAD, expires.min(end))
+            });
+            let trigger = fired.and_then(|f| f.ok().flatten());
             let boundary = boundaries.get(&*r.session).and_then(|b| {
                 b.iter()
                     .copied()
@@ -2476,7 +2538,9 @@ fn t3_comparison(
             let observed = boundary
                 .and_then(|e| e.t3.as_ref())
                 .and_then(|t| t.idle_mode);
-            let (status, reason) = if observed.is_some() {
+            // A recorded compaction shows when T3 fired under the current TTL; another TTL
+            // moves the timer, so that gap is judged like any other.
+            let (status, reason) = if observed.is_some() && ttl == profile.ttl.main.value {
                 (
                     PeriodStatus::Eligible,
                     "explicit idle run identity and native applied compaction boundary",
@@ -2496,7 +2560,7 @@ fn t3_comparison(
                     PeriodStatus::Ineligible,
                     "T3 context is below 200000 tokens",
                 )
-            } else if trigger.is_some_and(|t| end < t) {
+            } else if earliest.is_some_and(|t| end < t) {
                 (
                     PeriodStatus::Censored,
                     "return or final snapshot precedes the observed-expiry timer",
@@ -2523,21 +2587,33 @@ fn t3_comparison(
                     PeriodStatus::Unknown,
                     "T3 recorded no usage with prompt cache expiry for the run's last request",
                 )
-            } else if trigger.is_none() {
+            } else if earliest.is_none() {
                 (
                     PeriodStatus::Ineligible,
                     "the cache expired before the run completed",
                 )
-            } else if meta.is_some_and(|t| t.lifecycle_eligible != Some(true)) {
-                (
-                    PeriodStatus::Unknown,
-                    "T3 keeps only current lifecycle guards, so this earlier idle gap's guards are unproven",
-                )
             } else {
-                (
-                    PeriodStatus::Eligible,
-                    "completed main-thread projection with observed expiry and verified current lifecycle guards; generation remains conditional on server liveness",
-                )
+                match fired {
+                    Some(Err(reason)) => (PeriodStatus::Unknown, reason),
+                    Some(Ok(None))
+                        if meta
+                            .and_then(|t| t.guards.as_ref())
+                            .is_some_and(|g| g.arms.is_empty()) =>
+                    {
+                        (
+                            PeriodStatus::Ineligible,
+                            "T3's run never completed, so it armed no timer",
+                        )
+                    }
+                    Some(Ok(None)) => (
+                        PeriodStatus::Ineligible,
+                        "T3's lifecycle guards held its timer until the user returned or the cache expired",
+                    ),
+                    _ => (
+                        PeriodStatus::Eligible,
+                        "completed main-thread run with observed expiry and lifecycle guards rebuilt from T3's event log; generation remains conditional on server liveness",
+                    ),
+                }
             };
             // The SDK offers its resume dialog when a new run resumes a cold session, which
             // needs no T3 lifecycle guard or recorded expiry.
@@ -2596,6 +2672,24 @@ fn t3_comparison(
             });
         }
     }
+    let within = |session: &str, t: Millis| {
+        outside
+            .iter()
+            .any(|(s, open, end)| *s == session && *open < t && t <= *end)
+    };
+    let kept = Kept {
+        events: events
+            .iter()
+            .filter(|e| e.idle_attribution == IdleAttribution::T3 && within(&e.session, e.time))
+            .map(|e| &e.id)
+            .collect(),
+        requests: requests
+            .iter()
+            .filter(|r| r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some()))
+            .filter(|r| within(&r.session, r.time))
+            .map(|r| &*r.id)
+            .collect(),
+    };
     let scenarios = [
         T3IdleMode::Off,
         T3IdleMode::OnReturn,
@@ -2611,6 +2705,7 @@ fn t3_comparison(
                 samples,
                 ttls,
                 replay,
+                kept: &kept,
             },
             &gaps,
             &mut periods,
@@ -2635,6 +2730,13 @@ struct T3Replay<'a> {
     samples: &'a CompactionSamples<'a>,
     ttls: &'a Ttls,
     replay: &'a Replay<'a>,
+    kept: &'a Kept<'a>,
+}
+
+/// Recorded idle runs and boundaries in gaps outside the window, which stay as recorded.
+struct Kept<'a> {
+    events: HashSet<&'a Id>,
+    requests: HashSet<&'a str>,
 }
 
 fn t3_replay(
@@ -2650,6 +2752,7 @@ fn t3_replay(
         samples,
         ttls,
         replay,
+        kept,
     } = input;
     let requests = *requests;
     let events = *events;
@@ -2663,7 +2766,7 @@ fn t3_replay(
     let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
     let idle_ids: HashSet<&Id> = events
         .iter()
-        .filter(|e| e.idle_attribution == IdleAttribution::T3)
+        .filter(|e| e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id))
         .map(|e| &e.id)
         .collect();
     let idle_requests: HashSet<&str> = options
@@ -2694,7 +2797,9 @@ fn t3_replay(
     // cancel in the comparison, so their missing usage cannot block it.
     let mut costs: Vec<Cost> = replay.errors.iter().cloned().map(unknown_cost).collect();
     if requests.iter().any(|r| {
-        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some()) && !idle_requests.contains(&*r.id)
+        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+            && !idle_requests.contains(&*r.id)
+            && !kept.requests.contains(&*r.id)
     }) {
         costs.push(unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
     }
@@ -2740,7 +2845,8 @@ fn t3_replay(
         for (time, _, tick) in ticks {
             match tick {
                 Tick::Request(r) => {
-                    let idle_run = r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some());
+                    let idle_run = r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+                        && !kept.requests.contains(&*r.id);
                     for (part, p) in r.parts.iter().enumerate() {
                         if idle_run
                             || (idle_requests.contains(&*r.id) && p.kind == PartKind::Compaction)
@@ -2834,7 +2940,7 @@ fn t3_replay(
                 }
                 Tick::Boundary(e) => {
                     let charge = options.summaries.iter().find(|s| s.event == e.id);
-                    if e.idle_attribution == IdleAttribution::T3 {
+                    if e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id) {
                         let next = requests.iter().copied().find(|r| {
                             r.session == e.session
                                 && r.time > e.time
@@ -4186,6 +4292,7 @@ mod tests {
             settings_unresolved: false,
             limitations: vec![],
             inherited_window: None,
+            retained_since: None,
         });
         for r in &mut scan.requests {
             r.client = Some("t3-code".into());
@@ -4207,14 +4314,30 @@ mod tests {
                     used_tokens: r.parts[0].usage.input,
                     cache_expires_at: Some(r.end_time + ttl_milliseconds(ttl)),
                     idle_mode: None,
-                    lifecycle_eligible: Some(true),
+                    guards: Some(guards(&[r.end_time], &[(r.end_time, Ok(true))])),
                 }));
             }
         }
         scan
     }
 
+    /// Guards armed at each of `arms`, holding each value from its time.
+    fn guards(
+        arms: &[Millis],
+        spans: &[(Millis, crate::model::T3Guard)],
+    ) -> std::sync::Arc<crate::model::T3Guards> {
+        let at = |t: Millis| spans.iter().rev().find(|(from, _)| *from <= t).unwrap().1;
+        std::sync::Arc::new(crate::model::T3Guards {
+            arms: arms.iter().map(|a| (*a, at(*a))).collect(),
+            spans: spans.to_vec(),
+        })
+    }
+
     fn t3_check(scan: &Scan, now: f64) -> crate::model::T3IdleCheck {
+        t3_check_with(scan, now, &[])
+    }
+
+    fn t3_check_with(scan: &Scan, now: f64, ttls: &[&TtlCheck]) -> crate::model::T3IdleCheck {
         let catalog = prices();
         let mut scan = scan.clone();
         let summaries = compaction_charges(&mut scan, &catalog);
@@ -4223,7 +4346,7 @@ mod tests {
             catalog: &catalog,
             summaries: &summaries,
             estimates: &IndexMap::default(),
-            ttls: &[],
+            ttls,
             windows: &[],
             since: None,
             now: (now * MINUTE as f64) as Millis,
@@ -4390,7 +4513,8 @@ mod tests {
         boundary.idle_attribution = IdleAttribution::T3;
         observed.events.push(boundary);
         observed.events.sort_by_key(|e| e.time);
-        let observed = t3_check(&observed, 10.0).current_settings.scenarios;
+        let scan = observed;
+        let observed = t3_check(&scan, 10.0).current_settings.scenarios;
         let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
         // Off grows the later request back from 20k to 300k uncached tokens, and charges
         // neither the recorded nor a new summary.
@@ -4403,6 +4527,55 @@ mod tests {
             s[2].cost.total_usd.unwrap().to_f64() - s[0].cost.total_usd.unwrap().to_f64()
         };
         near(Some(relative(&observed)), relative(&baseline));
+
+        // Under a recommended 1h cache the timer would start at minute 58, after the user
+        // returned, so the recorded summary is not replayed at its 5m time.
+        let one_hour = TtlCheck {
+            base: base(Action::Change, "", Some(Ttl::OneHour)),
+            window_basis_kind: WindowBasisKind::Available,
+            bucket: Bucket::Main,
+            one_hour_savings_usd: 0.0,
+            cost: Default::default(),
+            summary_cost: Default::default(),
+            comparison_cost: Default::default(),
+            fixed_cost: zero_cost(),
+            usage_estimates: vec![],
+            cache_evidence: vec![],
+            sensitivity: TtlSensitivity {
+                cold_prefix1h_usd: None,
+                cold_prefix1h_comparison_usd: None,
+                warm_reuse_break_even_fraction: None,
+                unlinked: None,
+            },
+        };
+        let check = t3_check_with(&scan, 10.0, &[&one_hour]);
+        let status = |c: &crate::model::T3IdleComparison| {
+            c.periods
+                .iter()
+                .find(|p| &*p.request == "a")
+                .unwrap()
+                .status
+        };
+        assert_eq!(status(&check.current_settings), PeriodStatus::Eligible);
+        assert_eq!(status(&check.after_recommendations), PeriodStatus::Censored);
+        assert_eq!(check.after_recommendations.scenarios[2].summaries, 0);
+
+        // A gap that opens before T3's retained events keeps its recorded summary in every
+        // mode, so none changes the later request.
+        let mut scan = scan;
+        scan.profiles[0].t3.as_mut().unwrap().retained_since = Some(MINUTE);
+        let check = t3_check(&scan, 10.0);
+        assert!(
+            check
+                .current_settings
+                .periods
+                .iter()
+                .all(|p| &*p.request != "a")
+        );
+        for s in &check.current_settings.scenarios {
+            near(s.cost.total_usd.map(Usd::to_f64), 0.0);
+            assert_eq!(s.summaries, 0);
+        }
     }
 
     #[test]
@@ -4453,16 +4626,16 @@ mod tests {
             Ttl::FiveMinutes,
             OnReturn,
         );
-        // A later run replaced the projection's guards for `a`.
-        t3_meta(&mut scan, "a").lifecycle_eligible = Some(false);
+        // T3 pruned the event holding one of `a`'s guards.
+        let pruned = "T3 pruned the event holding a lifecycle guard's state during this gap";
+        t3_meta(&mut scan, "a").guards = Some(guards(&[0], &[(0, Err(pruned))]));
         let check = t3_check(&scan, 10.0);
         let s = &check.current_settings.scenarios;
         near(s[0].cost.total_usd.map(Usd::to_f64), 0.0);
         assert!(s[1].cost.total_usd.is_some(), "{:?}", s[1].cost);
         assert_eq!(s[1].summaries, 1);
         assert_eq!(s[2].cost.total_usd, None);
-        let guards = "T3 keeps only current lifecycle guards";
-        assert!(s[2].cost.unknown.iter().all(|u| u.starts_with(guards)));
+        assert!(s[2].cost.unknown.iter().all(|u| u == pruned));
         assert_eq!(check.base.action, Action::Advisory);
         let mut report = report(scan, 10.0);
         report
@@ -4473,7 +4646,7 @@ mod tests {
         let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
             line.contains("changed cost per month: off $0, onReturn ")
-                && line.contains(&format!("beforeCacheExpires is unpriced: {guards}")),
+                && line.contains(&format!("beforeCacheExpires is unpriced: {pruned}")),
             "{text}"
         );
     }
@@ -4523,6 +4696,7 @@ mod tests {
         let a = t3_meta(&mut scan, "a");
         a.completed_at = Some(4 * MINUTE);
         a.cache_expires_at = Some(5 * MINUTE);
+        a.guards = Some(guards(&[4 * MINUTE], &[(4 * MINUTE, Ok(true))]));
         let check = t3_check(&scan, 10.0);
         assert_eq!(
             check.current_settings.periods[0].status,
@@ -4540,6 +4714,74 @@ mod tests {
         let s = &check.current_settings.scenarios;
         assert_eq!((s[1].summaries, s[2].summaries), (1, 0));
         assert!(s.iter().all(|s| s.cost.total_usd.is_some()));
+    }
+
+    #[test]
+    fn t3_timer_fires_at_the_lead_or_at_the_first_arm_its_guards_allow() {
+        let (start, until) = (3 * MINUTE, 5 * MINUTE);
+        let fire = |arms: &[Millis], spans: &[(Millis, crate::model::T3Guard)]| {
+            t3_fire(&guards(arms, spans), start, until)
+        };
+        // An arm before the lead sleeps until it starts and checks again then.
+        assert_eq!(fire(&[0], &[(0, Ok(true))]), Ok(Some(start)));
+        assert_eq!(fire(&[0], &[(0, Ok(true)), (MINUTE, Ok(false))]), Ok(None));
+        // A timer held when armed never sleeps, even if the guards clear by the lead.
+        assert_eq!(fire(&[0], &[(0, Ok(false)), (MINUTE, Ok(true))]), Ok(None));
+        // The latest arm before the lead replaces earlier ones.
+        let spans = [(0, Ok(true)), (MINUTE, Ok(false)), (2 * MINUTE, Ok(true))];
+        assert_eq!(fire(&[0, MINUTE], &spans), Ok(None));
+        // An arm within the lead fires at once if the guards allow, and none at or after
+        // the expiry or the user's return does.
+        let spans = [
+            (0, Ok(true)),
+            (2 * MINUTE, Ok(false)),
+            (4 * MINUTE, Ok(true)),
+        ];
+        assert_eq!(fire(&[0, 4 * MINUTE], &spans), Ok(Some(4 * MINUTE)));
+        assert_eq!(fire(&[0, until], &spans), Ok(None));
+        // Unknown guards leave the timer unknown.
+        let pruned = "pruned";
+        assert_eq!(
+            fire(&[0], &[(0, Ok(true)), (2 * MINUTE, Err(pruned))]),
+            Err(pruned)
+        );
+        assert_eq!(
+            fire(&[4 * MINUTE], &[(4 * MINUTE, Err(pruned))]),
+            Err(pruned)
+        );
+        assert_eq!(fire(&[], &[(4 * MINUTE, Ok(true))]), Ok(None));
+    }
+
+    #[test]
+    fn t3_window_starts_where_its_event_log_is_complete() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(
+            vec![
+                request("a", 0.0, 300_000),
+                request("b", 10.0, 320_000),
+                request("c", 20.0, 340_000),
+            ],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        // The calibration sample's own gap is outside this comparison.
+        let gaps = |check: &crate::model::T3IdleCheck| {
+            let periods = &check.current_settings.periods;
+            periods
+                .iter()
+                .map(|p| p.request.to_string())
+                .filter(|r| r != "sample-resume")
+                .collect::<Vec<_>>()
+        };
+        let check = t3_check(&scan, 30.0);
+        assert_eq!(gaps(&check), ["a", "b", "c"]);
+        assert!(!check.base.window_basis.contains("pruned"));
+        // T3 kept its events from minute 5 on, so `a`'s gap opened before they are complete.
+        scan.profiles[0].t3.as_mut().unwrap().retained_since = Some(5 * MINUTE);
+        let check = t3_check(&scan, 30.0);
+        assert_eq!(gaps(&check), ["b", "c"]);
+        assert_eq!(check.base.since, Some(5 * MINUTE));
+        assert!(check.base.window_basis.contains("pruned event log"));
     }
 
     #[test]

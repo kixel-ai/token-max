@@ -817,6 +817,9 @@ pub struct T3Instance {
     /// discovery resolves at each recorded project like a native profile's.
     #[serde(skip)]
     pub inherited_window: Option<crate::controls::Env>,
+    /// When T3's pruned event log becomes complete, which starts its idle check's window;
+    /// None when it never pruned or was not read.
+    pub retained_since: Option<Millis>,
 }
 
 /// Coverage of one selected T3 state, without aggregate usage or connection credentials.
@@ -879,8 +882,21 @@ pub struct T3Request {
     pub used_tokens: Option<i64>,
     pub cache_expires_at: Option<Millis>,
     pub idle_mode: Option<T3IdleMode>,
-    /// Current lifecycle guards, not proof that a lost in-memory timer fired.
-    pub lifecycle_eligible: Option<bool>,
+    /// The idle-timer guards after this turn's run, rebuilt from T3's event log; None when
+    /// T3 pruned the run's completion. They are not proof that a lost in-memory timer fired.
+    pub guards: Option<std::sync::Arc<T3Guards>>,
+}
+
+/// Whether T3's lifecycle guards let its idle timer run, or why that is unknown.
+pub type T3Guard = Result<bool, &'static str>;
+
+/// T3's idle-timer guards after one completed run, from its completion until a later run starts.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct T3Guards {
+    /// Each completed-run event that re-armed the thread's timer, and the guards just after it.
+    pub arms: Vec<(Millis, T3Guard)>,
+    /// The guards from each time until the next entry.
+    pub spans: Vec<(Millis, T3Guard)>,
 }
 
 /// A model request the client makes on its own, outside the turns the user drives.

@@ -20,12 +20,13 @@ use crate::discovery::{
 };
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness,
+    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, Harness, Id,
     IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
     Request, RequestEvidence, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall, Snapshot,
-    StructuralEvent, Text, Usage,
+    StructuralEvent, Subagent, Text, Usage,
 };
-use crate::safe::{ScanError, count, id, identity, iso, label, object, timestamp};
+use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
+use crate::sessions::{Record, Sessions};
 
 /// Select a time window and local roots.
 #[derive(Clone, Debug)]
@@ -208,6 +209,57 @@ fn fill(usage: &mut Usage, old: &Usage) {
         if value.is_none() {
             *value = old;
         }
+    }
+}
+
+/// What a Codex `session_meta` says about its thread, parsed once for the report and the
+/// session export.
+pub(crate) struct CodexThread<'a> {
+    pub id: Option<&'a str>,
+    /// The thread it was spawned from: a spawn's immediate parent, or the root that a native
+    /// source such as `review` names as `session_id`.
+    pub parent: Option<&'a str>,
+    /// Set when a subagent source spawned it.
+    pub spawn: Option<CodexSpawn>,
+}
+
+/// How a Codex subagent was spawned.
+pub(crate) struct CodexSpawn {
+    /// Its agent role (`default` when unnamed) or, when native, its source such as `review`.
+    pub kind: Option<String>,
+    /// A subagent source such as `review`, which no agent role defines.
+    pub native: bool,
+}
+
+impl<'a> CodexThread<'a> {
+    pub(crate) fn parse(meta: &'a Map<String, Value>) -> Self {
+        let str = |v: Option<&'a Value>| v.and_then(Value::as_str).filter(|s| !s.is_empty());
+        let id = str(meta.get("id")).or_else(|| str(meta.get("session_id")));
+        let source = member(meta, "source");
+        let subagent = object(source).get("subagent");
+        let thread_spawn = subagent
+            .and_then(Value::as_object)
+            .and_then(|s| s.get("thread_spawn"));
+        let spawn_map = object(thread_spawn.unwrap_or(&NULL));
+        // `session_id` is the root thread, so a nested spawn's own parent comes first; older
+        // spawns name it at the top level.
+        let parent = str(spawn_map.get("parent_thread_id"))
+            .or_else(|| str(meta.get("parent_thread_id")))
+            .or_else(|| str(meta.get("session_id")).filter(|root| Some(*root) != id));
+        let spawn = truthy(subagent).then(|| {
+            let native = thread_spawn.is_none();
+            let kind = if native {
+                let subagent = subagent.unwrap_or(&NULL);
+                label(subagent).or_else(|| label(member(object(subagent), "other")))
+            } else {
+                match coalesce(spawn_map.get("agent_role"), spawn_map.get("agent_type")) {
+                    None | Some(Value::Null) => Some("default".into()),
+                    Some(role) => label(role),
+                }
+            };
+            CodexSpawn { kind, native }
+        });
+        Self { id, parent, spawn }
     }
 }
 
@@ -556,6 +608,9 @@ fn replace_lone_surrogates(text: &str) -> Option<String> {
     })
 }
 
+/// The kind of a subagent no record names.
+pub const UNRECORDED: &str = "unrecorded";
+
 /// Metadata established by earlier records of the same file.
 /// Fields every structural event copies are shared, since a history holds millions of events.
 struct Context {
@@ -570,6 +625,7 @@ struct Context {
     tier: Option<Text>,
     source: Option<Text>,
     cwd: Option<Text>,
+    effort: Option<Text>,
     pricing: Option<Arc<Pricing>>,
     profiles: Profiles,
 }
@@ -588,6 +644,43 @@ struct FileState {
     /// The raw Claude session ID that `context.session` was derived from.
     session_raw: Option<String>,
     previous_total: Option<Usage>,
+    /// The model of the last pre-window Codex request kept; None before the first.
+    earlier_model: Option<Option<Text>>,
+    /// A Claude subagent transcript's spawn metadata, read from the file beside it.
+    spawn: Option<Spawn>,
+}
+
+/// What a Claude subagent's `agent-*.meta.json` records about its spawn, never its task.
+#[derive(Clone, Debug, Default)]
+struct Spawn {
+    kind: Option<String>,
+    built_in: Option<bool>,
+    fork: bool,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+impl Spawn {
+    /// Read the metadata beside a subagent transcript; an absent or unreadable file records nothing.
+    fn read(transcript: &str) -> Self {
+        let Some(stem) = transcript.strip_suffix(".jsonl") else {
+            return Self::default();
+        };
+        let Some(meta) = std::fs::read(format!("{stem}.meta.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        else {
+            return Self::default();
+        };
+        let meta = object(&meta);
+        Self {
+            kind: label(member(meta, "agentType")),
+            built_in: meta.get("isBuiltIn").and_then(Value::as_bool),
+            fork: is_true(meta, "isFork"),
+            model: label(member(meta, "model")),
+            effort: label(member(meta, "effort")),
+        }
+    }
 }
 
 impl FileState {
@@ -610,10 +703,14 @@ impl FileState {
                 tier: None,
                 source: None,
                 cwd: None,
+                effort: None,
                 pricing: None,
                 profiles: strings.profiles(&snapshot.profiles),
             },
+            spawn: (subagent && snapshot.harness == Harness::Claude)
+                .then(|| Spawn::read(&snapshot.file)),
             subagent,
+            earlier_model: None,
             session_raw: None,
             previous_total: None,
         }
@@ -632,8 +729,8 @@ fn event(
     let harness = harness_name(snapshot.harness);
     let kind_text = kind_name(kind);
     let id = match key {
-        Some(key) => identity(&format!("{harness}:{kind_text}:{key}")),
-        None => identity(&format!(
+        Some(key) => digest(&format!("{harness}:{kind_text}:{key}")),
+        None => digest(&format!(
             "{harness}:{kind_text}:{}:{}",
             snapshot.file, location.line
         )),
@@ -699,6 +796,7 @@ fn request(
         version: context.version.clone(),
         client: context.client.clone(),
         cwd: context.cwd.clone(),
+        effort: context.effort.clone(),
         parts: vec![],
         server_tools: None,
         profiles: context.profiles.clone(),
@@ -734,7 +832,7 @@ fn line_key(snapshot: &Snapshot, location: &Location) -> String {
 #[derive(PartialEq)]
 struct Link {
     parent: Option<Key>,
-    boundary: Option<String>,
+    boundary: Option<Id>,
 }
 
 /// Requests in first-seen order, and each one's position by id, so the scan can take the
@@ -751,26 +849,26 @@ struct Requests {
 struct EventIndex {
     hasher: foldhash::fast::RandomState,
     by_hash: HashMap<u64, usize>,
-    collisions: HashMap<String, usize>,
+    collisions: HashMap<Id, usize>,
 }
 
 impl EventIndex {
-    fn get(&self, events: &[StructuralEvent], id: &str) -> Option<usize> {
+    fn get(&self, events: &[StructuralEvent], id: &Id) -> Option<usize> {
         match self.by_hash.get(&self.hasher.hash_one(id)) {
-            Some(&index) if events[index].id == id => Some(index),
+            Some(&index) if events[index].id == *id => Some(index),
             Some(_) => self.collisions.get(id).copied(),
             None => None,
         }
     }
 
     /// Record a new event's position; its id must not be indexed yet.
-    fn insert(&mut self, id: &str, index: usize) {
+    fn insert(&mut self, id: &Id, index: usize) {
         match self.by_hash.entry(self.hasher.hash_one(id)) {
             std::collections::hash_map::Entry::Vacant(slot) => {
                 slot.insert(index);
             }
             std::collections::hash_map::Entry::Occupied(_) => {
-                self.collisions.insert(id.to_string(), index);
+                self.collisions.insert(id.clone(), index);
             }
         }
     }
@@ -779,6 +877,7 @@ impl EventIndex {
 /// What an API request record adds to the requests that answer it.
 struct RefFacts {
     source: Option<Text>,
+    effort: Option<Text>,
     attempt: Option<Attempt>,
     requested_speed: Option<RequestedSpeed>,
     time: Millis,
@@ -789,6 +888,7 @@ impl RefFacts {
     fn of(r: &Request) -> Self {
         Self {
             source: r.source.clone(),
+            effort: r.effort.clone(),
             attempt: r.attempt.clone(),
             requested_speed: r.requested_speed.clone(),
             time: r.time,
@@ -864,14 +964,53 @@ struct Reader {
     // Only explicit compaction lineage can connect a notice to its boundary.
     // Ordinary messages stop the walk; a missing parent is not a historical match.
     compact_parents: HashMap<Key, Option<Link>>,
-    notice_parents: HashMap<String, HashSet<Option<Key>>>,
+    notice_parents: HashMap<Id, HashSet<Option<Key>>>,
     refs: Refs,
     issues: IndexSet<Text>,
     modern_totals: HashSet<String>,
     legacy: Vec<(Request, String)>,
+    subagents: IndexMap<Text, Subagent>,
+    earlier: Vec<Request>,
+    sessions: Sessions,
 }
 
 impl Reader {
+    /// Keep a pre-window Codex request, without usage, when it starts its transcript or changes
+    /// its model: subagent attribution needs a run's start and its parent's model at spawn.
+    fn earlier(
+        &mut self,
+        snapshot: &Snapshot,
+        file: &mut FileState,
+        location: &Location,
+        time: Option<Millis>,
+    ) {
+        let Some(time) = time else { return };
+        if file.earlier_model.as_ref() == Some(&file.context.model) {
+            return;
+        }
+        file.earlier_model = Some(file.context.model.clone());
+        let mut r = request(snapshot, location, &file.context, time, String::new());
+        r.requested_speed = None;
+        self.strings.request(&mut r);
+        self.earlier.push(r);
+    }
+
+    /// Record a subagent session once; a later copy can only name a type the first left unrecorded.
+    fn spawned(&mut self, mut subagent: Subagent) {
+        subagent.session = self.strings.text(&subagent.session);
+        self.strings.share(&mut subagent.parent);
+        match self.subagents.get_mut(&subagent.session) {
+            Some(known) if known.kind == UNRECORDED => {
+                known.kind = subagent.kind;
+                known.native = subagent.native;
+            }
+            Some(_) => {}
+            None => {
+                self.subagents.insert(subagent.session.clone(), subagent);
+            }
+        }
+    }
+
     fn add(&mut self, mut r: Request) {
         self.strings.request(&mut r);
         let answered = add(&mut self.requests, &mut self.strings, r);
@@ -918,9 +1057,20 @@ impl Reader {
             );
         }
         match snapshot.harness {
-            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected),
-            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected),
+            Harness::Claude => self.claude(snapshot, file, raw, location, time, selected)?,
+            Harness::Codex => self.codex(snapshot, file, raw, location, time, selected)?,
         }
+        self.sessions.observe(Record {
+            harness: snapshot.harness,
+            session: &file.context.session,
+            subagent: file.subagent,
+            file: &location.file,
+            cwd: file.context.cwd.as_ref(),
+            raw,
+            time,
+            selected,
+        });
+        Ok(())
     }
 
     fn claude(
@@ -951,11 +1101,36 @@ impl Reader {
                     let name = snapshot.file.rsplit(['/', '\\']).next().unwrap_or_default();
                     identity(&format!("{opaque}:{name}"))
                 } else {
-                    opaque
+                    opaque.clone()
                 }
                 .into();
                 file.session_raw = Some(session.to_string());
+                if let Some(spawn) = file.spawn.clone() {
+                    self.spawned(Subagent {
+                        harness: Harness::Claude,
+                        session: context.session.clone(),
+                        parent: Some(opaque.into()),
+                        kind: spawn.kind.unwrap_or_else(|| UNRECORDED.into()),
+                        built_in: spawn.built_in,
+                        fork: spawn.fork,
+                        native: false,
+                        model: spawn.model,
+                        effort: spawn.effort,
+                    });
+                }
             }
+        }
+        // Transcripts without a metadata file still name their agent type on records.
+        if file.spawn.as_ref().is_some_and(|s| s.kind.is_none())
+            && let Some(known) = self.subagents.get_mut(&context.session)
+            && known.kind == UNRECORDED
+            && let Some(kind) = label(member(raw, "attributionAgent")).or_else(|| {
+                string(raw, "querySource")
+                    .and_then(|s| s.strip_prefix("agent:builtin:"))
+                    .and_then(|kind| label(&Value::from(kind)))
+            })
+        {
+            known.kind = kind;
         }
         if let Some(version) = label(member(raw, "version")) {
             set(&mut context.version, Some(&version));
@@ -977,7 +1152,7 @@ impl Reader {
             let link = Link {
                 parent: parent.map(|parent| lineage(&context.session, parent)),
                 boundary: (kind == Some("system"))
-                    .then(|| identity(&format!("claude:compaction:{uuid}"))),
+                    .then(|| digest(&format!("claude:compaction:{uuid}"))),
             };
             match self.compact_parents.get_mut(&record) {
                 Some(existing) if existing.as_ref() != Some(&link) => *existing = None,
@@ -1004,6 +1179,7 @@ impl Reader {
             pending.source = text(member(raw, "querySource"));
             let params = nested(raw, "params");
             pending.model = text(member(params, "model"));
+            pending.effort = text(member(nested(params, "output_config"), "effort"));
             pending.attempt = Some(Attempt {
                 max_output_tokens: match count(params.get("max_tokens")) {
                     Ok(budget) => budget,
@@ -1094,6 +1270,7 @@ impl Reader {
             };
             let mut r = request(snapshot, location, context, time, name);
             r.model = text(member(m, "model"));
+            r.effort = text(member(raw, "effort"));
             r.reference = opaque(raw, "requestRef")?.map(Text::from);
             r.source = text(member(raw, "querySource"));
             r.agent = if is_true(raw, "isSidechain") || subagent {
@@ -1138,7 +1315,7 @@ impl Reader {
                             string(b, "id"),
                         );
                         e.tool = text(member(b, "name"));
-                        e.tool_id = opaque(b, "id")?;
+                        e.tool_id = opaque(b, "id")?.map(Id::from);
                         e.request = Some(request_id.clone());
                         if is(b, "name", "Bash") {
                             let input = nested(b, "input");
@@ -1228,7 +1405,7 @@ impl Reader {
                             EventKind::ToolEnd,
                             string(b, "tool_use_id"),
                         );
-                        e.tool_id = opaque(b, "tool_use_id")?;
+                        e.tool_id = opaque(b, "tool_use_id")?.map(Id::from);
                         if timed_out {
                             e.shell = Some(ShellCall {
                                 timed_out,
@@ -1299,6 +1476,26 @@ impl Reader {
                 Value::String(_) => Agent::Main,
                 _ => Agent::Unknown,
             };
+            let thread = CodexThread::parse(p);
+            if let Some(spawn) = thread.spawn {
+                let CodexSpawn { kind, native } = spawn;
+                let parent = match thread.parent {
+                    Some(parent) => Some(id(&Value::from(parent))?.into()),
+                    None => None,
+                };
+                let session = context.session.clone();
+                self.spawned(Subagent {
+                    harness: Harness::Codex,
+                    session,
+                    parent,
+                    kind: kind.unwrap_or_else(|| UNRECORDED.into()),
+                    built_in: None,
+                    fork: false,
+                    native,
+                    model: None,
+                    effort: None,
+                });
+            }
             if let Some(time) = time
                 && selected
             {
@@ -1318,6 +1515,12 @@ impl Reader {
                 set(&mut context.cwd, Some(cwd));
             }
             set(&mut context.model, label(member(p, "model")).as_deref());
+            let mode = nested(nested(p, "collaboration_mode"), "settings");
+            set(
+                &mut context.effort,
+                label(coalesce(p.get("effort"), mode.get("reasoning_effort")).unwrap_or(&NULL))
+                    .as_deref(),
+            );
             context.turn = opaque(p, "turn_id")?.map(Text::from);
             context.tier = text(member(p, "service_tier"));
             if let Some(time) = time
@@ -1336,6 +1539,7 @@ impl Reader {
             }
         } else if kind == Some("token_usage_record") {
             if !selected {
+                self.earlier(snapshot, file, location, time);
                 return Ok(());
             }
             let time = time.ok_or_else(|| ScanError::new("missing request timestamp"))?;
@@ -1378,6 +1582,7 @@ impl Reader {
                 Ok(total) => total,
                 Err(_) if !selected => {
                     file.previous_total = None;
+                    self.earlier(snapshot, file, location, time);
                     return Ok(());
                 }
                 Err(error) => return Err(error),
@@ -1387,6 +1592,7 @@ impl Reader {
             let repeated = file.previous_total == Some(total);
             if !selected {
                 file.previous_total = Some(total);
+                self.earlier(snapshot, file, location, time);
                 return Ok(());
             }
             let mut u = if !nested(info, "last_token_usage").is_empty() {
@@ -1501,6 +1707,9 @@ impl Reader {
                 if let Some(model) = label(member(applied, "model")) {
                     set(&mut context.model, Some(&model));
                 }
+                if let Some(effort) = label(member(applied, "reasoning_effort")) {
+                    set(&mut context.effort, Some(&effort));
+                }
                 if let Some(provider) = label(member(applied, "model_provider_id")) {
                     context.provider = Some(provider.into());
                 }
@@ -1548,7 +1757,7 @@ impl Reader {
                     string(p, "call_id"),
                 );
                 e.tool = text(member(p, "name"));
-                e.tool_id = opaque(p, "call_id")?;
+                e.tool_id = opaque(p, "call_id")?.map(Id::from);
                 self.add_event(e);
             }
         }
@@ -1646,6 +1855,9 @@ fn add(requests: &mut Requests, strings: &mut Interner, mut r: Request) -> Optio
     if previous.source.is_none() {
         previous.source = r.source;
     }
+    if previous.effort.is_none() {
+        previous.effort = r.effort;
+    }
     if previous.provider.is_none() {
         previous.provider = r.provider;
     }
@@ -1700,7 +1912,11 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         issues: IndexSet::default(),
         modern_totals: HashSet::default(),
         legacy: vec![],
+        subagents: IndexMap::default(),
+        earlier: vec![],
+        sessions: Sessions::default(),
     };
+    reader.exposure.roots(&profiles);
     for snapshot in &mut snapshots {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
@@ -1727,6 +1943,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         mut issues,
         modern_totals,
         legacy,
+        subagents,
+        earlier,
+        sessions,
         ..
     } = reader;
     for (r, total_key) in legacy {
@@ -1768,6 +1987,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                     r.source = found.source.clone();
                 }
                 r.attempt = found.attempt.clone();
+                if r.effort.is_none() {
+                    r.effort = found.effort.clone();
+                }
                 if found.requested_speed.is_some() {
                     r.requested_speed = found.requested_speed.clone();
                 }
@@ -1849,6 +2071,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
     events.sort_by_cached_key(|e| e.time);
     discover_claude_controls(&options.discovery, &mut profiles, &requests)?;
     discover_codex_controls(&options.discovery, &mut profiles, &requests)?;
+    crate::subagents::discover(&options.discovery, &mut profiles, &requests, &earlier)?;
     crate::t3::enrich(
         &mut t3,
         &mut profiles,
@@ -1920,6 +2143,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         events,
         cache_context: CacheContext {
             requests: context_requests,
+            codex: earlier,
             prompts: context_events
                 .iter()
                 .filter(|e| e.kind == EventKind::TurnStart)
@@ -1931,7 +2155,9 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
                 .collect(),
         },
         coverage,
+        subagents: subagents.into_values().collect(),
         t3,
+        sessions,
     })
 }
 
@@ -1942,7 +2168,7 @@ fn attribute_idle(
     events: &mut [StructuralEvent],
     ids: &EventIndex,
     compact_parents: &HashMap<Key, Option<Link>>,
-    notice_parents: &HashMap<String, HashSet<Option<Key>>>,
+    notice_parents: &HashMap<Id, HashSet<Option<Key>>>,
 ) {
     let notices: Vec<(Millis, Vec<String>, Option<Key>)> = events
         .iter()
@@ -2135,6 +2361,20 @@ mod tests {
     }
 
     #[test]
+    fn a_later_copy_of_a_request_fills_its_unrecorded_effort() {
+        let w = Workspace::new();
+        let mut later = assistant("session", "message");
+        later["effort"] = json!("high");
+        write(
+            w.claude.join("projects/project/main.jsonl"),
+            jsonl(&[assistant("session", "message"), later]),
+        );
+        let data = scan(&options(&w)).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        assert_eq!(data.requests[0].effort.as_deref(), Some("high"));
+    }
+
+    #[test]
     fn codex_response_usage_replaces_overlapping_totals_and_duplicate_response_ids() {
         let w = Workspace::new();
         w.fixture(w.codex.join("sessions/main.jsonl"), "codex.jsonl");
@@ -2182,6 +2422,182 @@ mod tests {
                 .any(|r| r.path == text(&w.claude) && r.status == RootState::Excluded)
         );
         assert_eq!(selected.profiles[0].ttl.main.value, Some(Ttl::OneHour));
+    }
+
+    #[test]
+    fn subagent_types_come_from_metadata_or_records_and_never_keep_the_task() {
+        let w = Workspace::new();
+        let dir = w.claude.join("projects/project/parent/subagents");
+        let mut explore = assistant("parent", "explore-message");
+        explore["effort"] = json!("medium");
+        write(dir.join("agent-a.jsonl"), jsonl(&[explore]));
+        write(
+            dir.join("agent-a.meta.json"),
+            json!({
+                "agentType": "Explore",
+                "isBuiltIn": true,
+                "model": "haiku",
+                "effort": "low",
+                "description": "SYNTHETIC_PRIVATE task",
+            })
+            .to_string(),
+        );
+        // No metadata file: the records name the type.
+        let mut older = assistant("parent", "older-message");
+        older["attributionAgent"] = json!("reviewer");
+        write(dir.join("agent-b.jsonl"), jsonl(&[older]));
+        // Unreadable metadata records nothing rather than failing the scan.
+        write(
+            dir.join("agent-c.jsonl"),
+            jsonl(&[assistant("parent", "c")]),
+        );
+        write(dir.join("agent-c.meta.json"), "{");
+        let data = scan(&options(&w)).unwrap();
+        let kinds: Vec<(&str, Option<&str>, Option<&str>)> = data
+            .subagents
+            .iter()
+            .map(|s| (s.kind.as_str(), s.model.as_deref(), s.effort.as_deref()))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Explore", Some("haiku"), Some("low")),
+                ("reviewer", None, None),
+                (UNRECORDED, None, None),
+            ]
+        );
+        let first = &data.subagents[0];
+        assert_eq!(first.built_in, Some(true));
+        assert_eq!(first.parent.as_deref(), Some(identity("parent").as_str()));
+        let explore = data
+            .requests
+            .iter()
+            .find(|r| r.session == first.session)
+            .unwrap();
+        assert_eq!(explore.effort.as_deref(), Some("medium"));
+        assert!(!private(&data));
+    }
+
+    #[test]
+    fn codex_subagents_are_named_by_role_or_source_with_their_effort() {
+        let w = Workspace::new();
+        let thread = |id: &str, source: Value| {
+            let mut meta = json!({
+                "type": "session_meta",
+                "timestamp": "2026-11-01T00:00:00Z",
+                "payload": { "id": id, "source": source, "model_provider": "openai" },
+            });
+            // Every thread names its root; a review names no other parent.
+            meta["payload"]["session_id"] = json!("thread-root");
+            meta
+        };
+        let spawn = |role: Value| {
+            json!({ "subagent": { "thread_spawn": {
+            "parent_thread_id": "thread-a", "depth": 1, "agent_role": role,
+        } } })
+        };
+        let turn = json!({
+            "type": "turn_context",
+            "timestamp": "2026-11-01T00:00:00Z",
+            "payload": { "turn_id": "turn-x", "model": "gpt-6.1-sol", "effort": "low" },
+        });
+        for (name, source) in [
+            ("default", spawn(Value::Null)),
+            ("explorer", spawn(json!("explorer"))),
+            ("review", json!({ "subagent": "review" })),
+        ] {
+            let usage = json!({
+                "type": "token_usage_record",
+                "timestamp": "2026-11-01T00:00:01Z",
+                "payload": { "response_id": format!("response-{name}"), "turn_id": "turn-x",
+                    "usage": { "input_tokens": 10, "output_tokens": 1 } },
+            });
+            write(
+                w.codex.join(format!("sessions/{name}.jsonl")),
+                jsonl(&[
+                    thread(&format!("thread-{name}"), source),
+                    turn.clone(),
+                    usage,
+                ]),
+            );
+        }
+        let data = scan(&options(&w)).unwrap();
+        let mut kinds: Vec<(&str, bool)> = data
+            .subagents
+            .iter()
+            .map(|s| (s.kind.as_str(), s.native))
+            .collect();
+        kinds.sort();
+        assert_eq!(
+            kinds,
+            [("default", false), ("explorer", false), ("review", true)]
+        );
+        // Spawns keep their immediate parent; only the review falls back to the root.
+        let parent = |thread: &str| Some(Text::from(id(&json!(thread)).unwrap()));
+        for s in &data.subagents {
+            let expected = if s.native { "thread-root" } else { "thread-a" };
+            assert_eq!(s.parent, parent(expected), "{}", s.kind);
+        }
+        assert!(
+            data.requests
+                .iter()
+                .all(|r| r.agent == Agent::Subagent && r.effort.as_deref() == Some("low"))
+        );
+    }
+
+    #[test]
+    fn codex_keeps_pre_window_starts_and_model_changes_without_usage() {
+        let w = Workspace::new();
+        let line = |kind: &str, time: &str, payload: Value| json!({ "type": kind, "timestamp": time, "payload": payload });
+        let usage = |id: &str, time: &str| {
+            line(
+                "token_usage_record",
+                time,
+                json!({ "response_id": id, "usage": { "input_tokens": 10, "output_tokens": 1 } }),
+            )
+        };
+        write(
+            w.codex.join("sessions/parent.jsonl"),
+            jsonl(&[
+                line(
+                    "session_meta",
+                    "2026-10-01T00:00:00Z",
+                    json!({ "id": "thread-a", "source": "cli" }),
+                ),
+                line(
+                    "turn_context",
+                    "2026-10-01T00:00:00Z",
+                    json!({ "model": "gpt-6-luna" }),
+                ),
+                usage("a1", "2026-10-01T00:00:01Z"),
+                usage("a2", "2026-10-01T00:00:02Z"),
+                line(
+                    "turn_context",
+                    "2026-10-02T00:00:00Z",
+                    json!({ "model": "gpt-6.1-sol" }),
+                ),
+                usage("a3", "2026-10-02T00:00:01Z"),
+                usage("a4", "2026-11-02T00:00:01Z"),
+            ]),
+        );
+        let data = scan(&since(options(&w), "2026-11-01T00:00:00Z")).unwrap();
+        assert_eq!(data.requests.len(), 1);
+        // The transcript's first request and its model change, but not their cost.
+        let earlier: Vec<(Millis, Option<&str>, usize)> = data
+            .cache_context
+            .codex
+            .iter()
+            .map(|r| (r.time, r.model.as_deref(), r.parts.len()))
+            .collect();
+        let at = |t: &str| crate::safe::parse_instant(t).unwrap();
+        assert_eq!(
+            earlier,
+            [
+                (at("2026-10-01T00:00:01Z"), Some("gpt-6-luna"), 0),
+                (at("2026-10-02T00:00:01Z"), Some("gpt-6.1-sol"), 0),
+            ]
+        );
+        assert!(data.cache_context.requests.is_empty());
     }
 
     #[test]

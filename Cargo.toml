@@ -5,7 +5,7 @@ edition = "2024"
 rust-version = "1.99"
 description = "Recommends cheaper agent settings from your Claude Code and Codex transcripts"
 license = "MIT"
-repository = "https://github.com/kixelated/token-max"
+repository = "https://github.com/kixel-ai/token-max"
 readme = "README.md"
 keywords = ["claude", "codex", "cost", "cache", "cli"]
 categories = ["command-line-utilities", "development-tools"]
@@ -27,9 +27,26 @@ toml = "1.2.1"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 ureq = "3.5.1"
+mimalloc = "0.1.52"
+toml_edit = { version = "0.25.19", default-features = false, features = ["parse", "display"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"
 
 [target."cfg(windows)".dependencies]
 winapi-util = "0.1.11"
+
+# The profile cargo-dist builds release binaries with.
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Where `cargo binstall` finds the archives cargo-dist attaches to each release.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-fmt = "zip"
+bin-dir = "{ bin }{ binary-ext }"

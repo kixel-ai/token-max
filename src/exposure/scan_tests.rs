@@ -6,11 +6,11 @@ use super::*;
 use crate::context::control_text;
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
-use crate::model::{ContextCost, ContextKind, Report, Scan, Verdict};
+use crate::model::{ContextCost, ContextKind, MemoryAccess, Report, Scan, Verdict};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
 use crate::report::{ReportOptions, format_report};
-use crate::test_support::{Workspace, prices};
+use crate::test_support::{Workspace, prices, report_line};
 
 /// A fixed report time; none of these assertions depend on it.
 const NOW: Millis = 1_800_000_000_000;
@@ -168,7 +168,7 @@ fn text(report: &Report) -> String {
     format_report(
         report,
         ReportOptions {
-            width: Some(200),
+            width: None,
             color: false,
             unicode: false,
             details: false,
@@ -177,9 +177,9 @@ fn text(report: &Report) -> String {
     )
 }
 
-/// Whether the serialized value contains any of `needles`.
-fn leaks(value: &impl serde::Serialize, needles: &[&str]) -> bool {
-    let text = serde_json::to_string(value).unwrap();
+/// Whether any field of the value holds any of `needles`.
+fn leaks(value: &impl std::fmt::Debug, needles: &[&str]) -> bool {
+    let text = format!("{value:?}");
     needles.iter().any(|n| text.contains(n))
 }
 
@@ -202,25 +202,14 @@ fn categories(e: &ExposureScan, category: Category) -> usize {
         .count()
 }
 
-/// Whether some line holds `name`, an optional ` [...]` tag, then a rest that
-/// satisfies `rest`, like the pattern `name( \[[^\]]*\])?rest`.
-fn labelled(text: &str, name: &str, rest: impl Fn(&str) -> bool) -> bool {
-    text.match_indices(name).any(|(i, _)| {
-        let after = &text[i + name.len()..];
-        let line = |s: &str| rest(s.split('\n').next().unwrap());
-        let tagged = after
-            .strip_prefix(" [")
-            .and_then(|t| t.find(']').map(|end| &t[end + 1..]));
-        line(after) || tagged.is_some_and(line)
-    })
-}
-
-/// A rest that starts with `prefix` and later holds `suffix` on the same line.
-fn then(prefix: &str, suffix: &str) -> impl Fn(&str) -> bool {
-    move |s: &str| {
-        s.strip_prefix(prefix)
-            .is_some_and(|tail| tail.contains(suffix))
+/// Whether a report line's heading starts with `head` and its evidence holds every one of `parts`.
+fn shows(text: &str, mark: &str, head: &str, parts: &[&str]) -> bool {
+    let line = report_line(text, head);
+    let ok = line.mark == mark && parts.iter().all(|p| line.evidence.contains(p));
+    if !ok {
+        eprintln!("{line:#?}");
     }
+    ok
 }
 
 #[test]
@@ -264,7 +253,7 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
     let hash = e
         .components
         .iter()
-        .find(|c| c.provenance == "opaque-schema-identity")
+        .find(|c| &*c.provenance == "opaque-schema-identity")
         .unwrap();
     assert_eq!(hash.size.characters, None);
     assert_eq!(hash.size.recorded_tokens, None);
@@ -277,7 +266,7 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
     assert!(
         e.visibility
             .iter()
-            .all(|v| !v.automatic_unused && v.nested_calls == Visible::Unknown)
+            .all(|v| v.nested_calls == Visible::Unknown)
     );
     assert!(!leaks(e, &["SYNTHETIC_PRIVATE", "0123456789"]));
 }
@@ -443,7 +432,7 @@ fn text_only_wire_requests_calibrate_matching_cohorts_and_keep_unknown_net_effec
         .unwrap();
     assert_eq!(server.name, "example");
     assert_eq!(server.priced, 1);
-    assert!(server.cost_usd > 0.0);
+    assert!(server.cost_usd.to_f64() > 0.0);
     let doubled: Vec<Request> = data
         .requests
         .iter()
@@ -493,9 +482,20 @@ fn image_inputs_and_unlinked_requests_never_calibrate_from_partial_text() {
     let report = report(&data, 1.0);
     assert!(report.context.iter().all(|c| c.estimated_usd.is_none()));
     let text = text(&report);
-    assert!(labelled(&text, "Artifact tool", |s| s
-        .starts_with(": on. Cost unknown")));
-    assert!(text.contains("and the skill and subagent lists: cost unknown."));
+    let artifact = report_line(&text, "Artifact tool");
+    assert!(
+        artifact.head.starts_with("Artifact tool on ["),
+        "{artifact:?}"
+    );
+    assert!(
+        artifact
+            .evidence
+            .starts_with("Not enough evidence: none of its requests could be priced;")
+    );
+    assert_eq!(
+        report_line(&text, "System prompt").head,
+        "System prompt and core tools costs unknown"
+    );
 }
 
 #[test]
@@ -569,9 +569,7 @@ fn typed_skill_aliases_deduplicate_while_nested_calls_and_script_references_stay
     assert!(
         e.visibility
             .iter()
-            .all(|v| v.nested_calls == Visible::Partial
-                && v.typed_skills == Observed::Observed
-                && !v.automatic_unused)
+            .all(|v| v.nested_calls == Visible::Partial && v.typed_skills == Observed::Observed)
     );
     assert!(!leaks(&data, &["SYNTHETIC_PRIVATE"]));
 }
@@ -785,7 +783,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     // Tools lead the prefix, so Artifact sits entirely inside the 2,000 cached-read tokens.
     let artifact_tokens = length(&tools[0]) as f64 * ratio;
     assert!(artifact_tokens < 2000.0);
-    assert!((artifact.cost_usd - (artifact_tokens * 0.2) / 1e6).abs() < 1e-12);
+    assert!((artifact.cost_usd.to_f64() - (artifact_tokens * 0.2) / 1e6).abs() < 1e-12);
     assert_eq!(row(&report, "Bash").control, None);
     assert_eq!(row(&report, "Bash").calls, Some(1));
     let docs = row(&report, "docs");
@@ -807,52 +805,69 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert!(prefix > 2900.0);
     assert_eq!(review.priced, 1);
     // Displayed tokens are rounded, so compare the per-token rate.
-    assert!((review.cost_usd / review.tokens.unwrap() as f64 / 4e-6 - 1.0).abs() < 0.01);
+    assert!((review.cost_usd.to_f64() / review.tokens.unwrap() as f64 / 4e-6 - 1.0).abs() < 0.01);
     assert_eq!(row(&report, "Claude Code system prompt").control, None);
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
-    // Every priced piece here costs well under the default $1 per use; an
-    // unpriced one gets no verdict.
+    // A priced piece never used is off, however little it cost; the used ones
+    // cost well under the default $1 per use. An unpriced one gets no verdict.
     assert!(report.context.iter().all(|c| {
         let priced = c.control.is_some() && c.estimated_usd.is_some();
-        c.verdict == priced.then_some(Verdict::Keep)
+        let expected = if c.calls == Some(0) {
+            Verdict::Off
+        } else {
+            Verdict::Keep
+        };
+        c.verdict == priced.then_some(expected)
     }));
 
-    // A piece is recommended off when its cost per use, counting no use as one,
-    // exceeds the limit. Typed skill requests would not count as uses.
+    // A used piece above the limit per use is only worth considering off. Typed
+    // skill requests would not count as uses.
     let strict = analyze(AnalyzeOptions {
         scan: data.clone(),
         catalog: &prices(),
         since: None,
         now: NOW,
-        max_cost_per_use_usd: artifact.cost_usd / 2.0,
+        max_cost_per_use_usd: artifact.cost_usd.to_f64() / 2.0,
     })
     .unwrap();
     let verdict = |name: &str| row(&strict, name).verdict;
     assert_eq!(verdict("Artifact"), Some(Verdict::Off));
-    assert_eq!(verdict("docs"), Some(Verdict::Off));
-    assert_eq!(verdict("review"), Some(Verdict::Keep));
+    assert_eq!(verdict("docs"), Some(Verdict::Consider));
+    assert_eq!(verdict("review"), Some(Verdict::Off));
     assert_eq!(verdict("Bash"), None);
     let text = text(&strict);
-    assert!(labelled(
-        &text,
-        "Artifact tool",
-        then(": on -> off. Costs ", "; never used.")
-    ));
-    assert!(labelled(
-        &text,
-        "Skill review",
-        then(": on. Costs ", "; the model never used it.")
-    ));
-    let snippet = &text[text.find("To turn these off").unwrap()..];
-    assert!(snippet.contains(r#""enableArtifact": false"#));
-    let denies_docs = snippet.match_indices(r#""deny": ["#).any(|(i, d)| {
-        let after = snippet[i + d.len()..].trim_start();
-        after
-            .strip_prefix(r#""mcp__docs""#)
-            .is_some_and(|rest| rest.trim_start().starts_with(']'))
-    });
-    assert!(denies_docs);
-    assert!(!snippet.contains("skillOverrides"));
+    let line = |head: &str| report_line(&text, head);
+    assert!(
+        line("Artifact tool")
+            .head
+            .starts_with("Artifact tool on -> off costs ")
+    );
+    assert!(line("Artifact tool").evidence.starts_with("Never used."));
+    assert!(
+        line("Skill review")
+            .head
+            .starts_with("Skill review on -> typed only costs ")
+    );
+    assert!(
+        line("Skill review")
+            .evidence
+            .starts_with("The model never used it.")
+    );
+    assert_eq!(line("MCP server docs").mark, "consider");
+    assert!(
+        line("MCP server docs")
+            .evidence
+            .contains(r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#)
+    );
+    let fixes = crate::doctor::fixes(&strict, false);
+    let snippet = crate::report::format_changes(&strict, &fixes, ReportOptions::default());
+    let off = &snippet[..snippet.find("worth considering").unwrap()];
+    assert!(off.contains(r#""enableArtifact": false"#), "{snippet}");
+    assert!(
+        off.contains(r#""review": "user-invocable-only""#),
+        "{snippet}"
+    );
+    assert!(!off.contains("mcp__docs"), "{snippet}");
 }
 
 #[test]
@@ -1031,16 +1046,19 @@ fn attachments_take_their_latest_cache_position_and_media_or_copied_calls_do_not
     );
     // The file is new in the second request, and its changed revision is new
     // in the third, so both pay the 1h write price rather than a cached read.
-    assert!((instructions.cost_usd / (tokens * (8.0 + 8.0) * 1e-6) - 1.0).abs() < 0.001);
+    assert!((instructions.cost_usd.to_f64() / (tokens * (8.0 + 8.0) * 1e-6) - 1.0).abs() < 0.001);
     // Claude Code caches through the last message, so the first request's
     // listing lies in its 1h writes rather than the ordinary input after them;
     // the next two read it from cache.
-    let write = instructions.cost_usd / (2.0 * tokens);
+    let write = instructions.cost_usd.to_f64() / (2.0 * tokens);
     assert_eq!(review.requests, 6);
     assert_eq!(review.priced, 3);
     let listing = review.tokens.unwrap() as f64;
-    assert!((review.cost_usd / (listing * (write + 2.0 * 0.2e-6)) - 1.0).abs() < 0.01);
-    assert_eq!(review.estimated_usd, Some((review.cost_usd * 6.0) / 3.0));
+    assert!((review.cost_usd.to_f64() / (listing * (write + 2.0 * 0.2e-6)) - 1.0).abs() < 0.01);
+    assert_eq!(
+        review.estimated_usd,
+        Some((review.cost_usd.to_f64() * 6.0) / 3.0)
+    );
     // The server row is priced where both its tool and its instructions were.
     let docs = row(&report, "docs");
     assert_eq!(docs.requests, 6);
@@ -1143,7 +1161,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     let member = e
         .components
         .iter()
-        .find(|c| c.id == aggregate.members[0])
+        .find(|c| *c.id == *aggregate.members[0])
         .unwrap();
     assert_eq!(
         member.size.characters,
@@ -1168,7 +1186,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
     assert!(
         e.components
             .iter()
-            .any(|c| c.provenance == "provided-additional-tools" && c.size.characters.is_some())
+            .any(|c| &*c.provenance == "provided-additional-tools" && c.size.characters.is_some())
     );
     assert!(!leaks(e, &["SYNTHETIC_PRIVATE"]));
 }
@@ -1249,7 +1267,7 @@ fn cohort_calibration_outside_measured_request_support_leaves_that_comparison_un
     assert_eq!(system.requests, 2);
     assert_eq!(system.priced, 1);
     // The unpriced request is scaled from the priced one, never counted as free.
-    assert_eq!(system.estimated_usd, Some(system.cost_usd * 2.0));
+    assert_eq!(system.estimated_usd, Some(system.cost_usd.to_f64() * 2.0));
     assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
 }
 
@@ -1308,7 +1326,7 @@ fn deferred_definitions_keep_active_revisions_and_repeated_results_stay_in_histo
     let active = e
         .components
         .iter()
-        .find(|c| c.provenance == "prompt-snapshot-tool")
+        .find(|c| &*c.provenance == "prompt-snapshot-tool")
         .unwrap();
     assert!(has(&e.requests[1].view.candidates, &active.id));
     assert!(!has(&e.requests[1].view.removed, &active.id));
@@ -1482,7 +1500,7 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
     assert!(
         e.components
             .iter()
-            .any(|c| c.provenance == "unclassified-rendered-attachment")
+            .any(|c| &*c.provenance == "unclassified-rendered-attachment")
     );
     let error = transcript(
         Harness::Claude,
@@ -1515,7 +1533,7 @@ fn current_record_shapes_request_blobs_rendered_attachments_same_as_definitions_
             .exposure
             .components
             .iter()
-            .any(|c| c.provenance == "world-state-metadata-only")
+            .any(|c| &*c.provenance == "world-state-metadata-only")
     );
 }
 
@@ -1580,7 +1598,10 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
             .iter()
             .all(|c| c.priced == before.priced && c.requests == before.requests)
     );
-    assert!((parts.iter().map(|c| c.cost_usd).sum::<f64>() - before.cost_usd).abs() < 1e-12);
+    assert!(
+        (parts.iter().map(|c| c.cost_usd.to_f64()).sum::<f64>() - before.cost_usd.to_f64()).abs()
+            < 1e-12
+    );
     assert!(
         (parts.iter().map(|c| c.estimated_usd.unwrap()).sum::<f64>()
             - before.estimated_usd.unwrap())
@@ -1591,7 +1612,7 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         .control
         .as_ref()
         .unwrap();
-    let patch = crate::context::config_patch([control, control]);
+    let patch = crate::doctor::apply_toml("", &[control.into(), control.into()]).unwrap();
     let parsed: toml::Value = toml::from_str(&patch).unwrap();
     assert_eq!(parsed["skills"]["config"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -1678,12 +1699,10 @@ fn codex_catalog_conditional_prices_preserve_evidence_and_duplicate_controls() {
             ..Default::default()
         },
     );
-    let unresolved = output
-        .lines()
-        .find(|line| line.contains("Skill same (/skills/a/SKILL.md)"))
-        .unwrap();
-    assert!(unresolved.contains("Estimated cost"), "{output}");
-    assert!(unresolved.contains("keep/off unresolved because tier sensitivity could reverse it"));
+    let line = report_line(&output, "Skill same (/skills/a/SKILL.md)");
+    assert!(line.head.contains(" costs <$0.01"), "{output}");
+    let unresolved = line.evidence;
+    assert!(unresolved.contains("tier sensitivity could reverse keep or off"));
     assert!(
         unresolved
             .contains("1 requested; 1 confirmed SKILL.md loads; successful invocation unknown")
@@ -1754,7 +1773,13 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
             .unwrap();
         assert_eq!(tool.calls, Some(1));
         assert!(
-            (server.cost_usd - server.details.iter().map(|c| c.cost_usd).sum::<f64>()).abs()
+            (server.cost_usd.to_f64()
+                - server
+                    .details
+                    .iter()
+                    .map(|c| c.cost_usd.to_f64())
+                    .sum::<f64>())
+            .abs()
                 < 1e-12
         );
         for c in [retained, redundant, server, tool] {
@@ -1768,10 +1793,14 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
                 assert!(!c.assumptions.is_empty());
             }
         }
-        let patch = crate::context::config_patch([
-            retained.control.as_ref().unwrap(),
-            tool.control.as_ref().unwrap(),
-        ]);
+        let patch = crate::doctor::apply_toml(
+            "",
+            &[
+                retained.control.as_ref().unwrap().into(),
+                tool.control.as_ref().unwrap().into(),
+            ],
+        )
+        .unwrap();
         let parsed: toml::Value = toml::from_str(&patch).unwrap();
         assert_eq!(
             parsed["skills"]["config"][0]["path"].as_str(),
@@ -1791,7 +1820,11 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
         );
         assert!(output.contains("1 requested; 1 confirmed SKILL.md loads"));
         assert!(output.contains("Codex MCP loading:"));
-        assert!(output.contains("Recorded rendered AGENTS.md:"));
+        assert!(
+            report_line(&output, "AGENTS.md")
+                .evidence
+                .starts_with("Under the 32,768 bytes Codex loads")
+        );
         assert!(output.contains("Duplicate skill same"));
         assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
     }
@@ -1862,7 +1895,7 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
     let threshold = report(&priced, cost * 0.75);
     assert_eq!(
         skill_row(&threshold, "/skills/b/SKILL.md").verdict,
-        Some(Verdict::Off)
+        Some(Verdict::Consider)
     );
     assert_eq!(
         skill_row(&threshold, "/skills/b/SKILL.md").cost_per_use_usd,
@@ -1874,13 +1907,10 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
     assert!(output.contains("not promised savings"));
     assert!(output.contains("Visibility is incomplete"));
     assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
-    let compact = crate::compact::report(r.clone());
     assert!(
-        compact["context"]
-            .as_array()
-            .unwrap()
+        r.context
             .iter()
-            .any(|c| c["skill"]["loaded"] == 1)
+            .any(|c| c.skill.as_ref().is_some_and(|s| s.loaded == 1))
     );
 }
 
@@ -1924,8 +1954,9 @@ fn codex_duplicates_are_actionable_without_prices_and_same_path_repeats_keep_one
     );
     let output = text(&r);
     assert!(
-        labelled(&output, "Skill same (/skills/b/SKILL.md)", |rest| rest
-            .starts_with(": on -> off. Cost unknown")),
+        report_line(&output, "Skill same (/skills/b/SKILL.md)")
+            .head
+            .starts_with("Skill same (/skills/b/SKILL.md) on -> off costs unknown"),
         "{output}"
     );
     assert!(output.contains("does not resolve an absolute SKILL.md path"));
@@ -1951,7 +1982,10 @@ fn codex_catalog_replacement_resolves_requests_chronologically_and_retires_old_d
     }
     let r = report(&data, 0.0);
     assert_eq!(skill_row(&r, "/new/a/SKILL.md").calls, Some(1));
-    assert_eq!(skill_row(&r, "/new/a/SKILL.md").verdict, Some(Verdict::Off));
+    assert_eq!(
+        skill_row(&r, "/new/a/SKILL.md").verdict,
+        Some(Verdict::Consider)
+    );
     for path in ["/old/a/SKILL.md", "/old/b/SKILL.md"] {
         let c = skill_row(&r, path);
         assert_eq!((c.current, c.calls, c.verdict), (false, Some(0), None));
@@ -2170,4 +2204,728 @@ fn a_one_letter_plugin_name_is_not_a_windows_drive() {
         data.exposure.invocations[0].group,
         Some(identity("plugin:a"))
     );
+}
+
+/// One Claude session, with auto memory's system prompt section and MEMORY.md when
+/// `memory` is on, that reads one memory file and writes another.
+fn claude_memory_session(root: &str, memory: bool) -> Vec<Value> {
+    let mut prompt = "SYNTHETIC_PRIVATE_INTRO\n".to_string();
+    if memory {
+        prompt += "# Memory\n\nSYNTHETIC_PRIVATE_MEMORY_GUIDE \"quoted\"\n\n";
+    }
+    prompt += "# Environment\nSYNTHETIC_PRIVATE_ENV\n";
+    let system = json!([{ "type": "text", "text": prompt }]);
+    let tools =
+        [json!({ "name": "Read", "description": "r", "input_schema": { "type": "object" } })];
+    // Without memory, the same calls touch ordinary files.
+    let dir = if memory {
+        format!("{root}/projects/project/memory")
+    } else {
+        "/repo/notes".into()
+    };
+    let mut files = vec![
+        json!({ "path": "/repo/CLAUDE.md", "type": "Project", "content": "SYNTHETIC_PRIVATE_RULES" }),
+    ];
+    if memory {
+        files.push(json!({ "path": format!("{dir}/MEMORY.md"), "type": "AutoMem", "content": "SYNTHETIC_PRIVATE_INDEX" }));
+    }
+    let request = |n: u32| {
+        json!({
+            "type": "api-request",
+            "id": format!("api-{n}"),
+            "timestamp": at(n),
+            "sessionId": "session",
+            "shapeHash": "shape",
+            "keep": 0,
+            "tail": ["m1"],
+            "requestDigest": format!("d{n}"),
+            "params": { "model": "claude-opus-5-5" },
+        })
+    };
+    vec![
+        attachment(0, json!({ "type": "instructions", "files": files })),
+        json!({
+            "type": "api-request-shape",
+            "sessionId": "session",
+            "timestamp": at(0),
+            "shapeHash": "shape",
+            "shape": { "system": system, "tools": tools },
+        }),
+        json!({ "type": "api-request-blob", "sessionId": "session", "hash": "m1", "message": { "role": "user", "content": "SYNTHETIC_PRIVATE_PROMPT" } }),
+        request(1),
+        assistant(
+            1,
+            json!([
+                { "type": "tool_use", "id": "read", "name": "Read", "input": { "file_path": format!("{dir}/note.md") } },
+                { "type": "tool_use", "id": "write", "name": "Write",
+                  "input": { "file_path": format!("{dir}/new.md"), "content": "SYNTHETIC_PRIVATE_NOTE" } },
+                { "type": "tool_use", "id": "other", "name": "Read", "input": { "file_path": "/repo/src/main.rs" } },
+            ]),
+        ),
+        json!({
+            "type": "user",
+            "timestamp": at(2),
+            "sessionId": "session",
+            "message": { "content": [
+                { "type": "tool_result", "tool_use_id": "read", "content": "SYNTHETIC_PRIVATE_RECALLED" },
+                { "type": "tool_result", "tool_use_id": "write", "content": "ok" },
+                { "type": "tool_result", "tool_use_id": "other", "content": "SYNTHETIC_PRIVATE_SOURCE" },
+            ] },
+        }),
+        request(3),
+        assistant(3, json!([])),
+    ]
+}
+
+fn memory_check(report: &Report, harness: Harness) -> &crate::model::MemoryCheck {
+    report
+        .checks
+        .iter()
+        .find_map(|c| match c {
+            crate::model::CheckResult::Memory(m) if m.harness == harness => Some(m),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let root = root.to_string_lossy();
+    let records = claude_memory_session(&root, true);
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let e = &data.exposure;
+    let component = |name: &str| e.components.iter().find(|c| c.name == name).unwrap();
+    // The section is measured as JSON text, so its quotes count escaped.
+    let section = r#"# Memory\n\nSYNTHETIC_PRIVATE_MEMORY_GUIDE \"quoted\"\n\n"#;
+    let system = &records[1]["shape"]["system"];
+    let memory_section = component(MEMORY_SECTION);
+    assert_eq!(memory_section.category, Category::Memory);
+    assert_eq!(memory_section.size.characters, Some(section.len() as i64));
+    assert_eq!(
+        component("wire-system").size.characters,
+        Some((length(system) - section.len()) as i64)
+    );
+    assert_eq!(e.requests[0].view.prefix, 3);
+    let index = component(&format!("{root}/projects/project/memory/MEMORY.md"));
+    assert_eq!(index.category, Category::Memory);
+    assert_eq!(e.memory.len(), 2);
+    let write = e
+        .memory
+        .iter()
+        .find(|m| m.access == MemoryAccess::Write)
+        .unwrap();
+    assert_eq!(write.request.as_deref(), Some(&*data.requests[0].id));
+    assert!(write.characters.unwrap() > "SYNTHETIC_PRIVATE_NOTE".len() as i64);
+    // The memory file read back is memory's output, not the Read tool's.
+    let read: Vec<&str> = e.tool_results.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(read, [MEMORY_OUTPUT, "Write", "Read"]);
+
+    let report = report(&data, 1.0);
+    let memory = row(&report, crate::context::CLAUDE_MEMORY);
+    assert_eq!(memory.kind, ContextKind::Memory);
+    assert_eq!(memory.calls, Some(2));
+    assert_eq!(memory.verdict, None);
+    assert_eq!(
+        control_text(memory.control.as_ref().unwrap(), Harness::Claude),
+        r#""autoMemoryEnabled": false"#
+    );
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!((check.reads, check.writes), (1, 1));
+    assert!(check.writes_usd.unwrap() > 0.0);
+    assert_eq!(
+        check.base.savings_usd,
+        Some(memory.estimated_usd.unwrap() + check.writes_usd.unwrap())
+    );
+    let text = format_report(
+        &report,
+        ReportOptions {
+            width: None,
+            color: false,
+            unicode: false,
+            details: false,
+            host: None,
+        },
+    );
+    assert!(shows(
+        &text,
+        "consider",
+        "Auto memory on costs $",
+        &[
+            "Opinion: ",
+            "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
+        ]
+    ));
+    assert!(!text.contains("MEMORY.md"));
+    // Advice is not a change, so it leaves the exit code alone.
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+    );
+    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+}
+
+/// The note auto memory's check gives when recorded sessions disagree with the setting.
+fn memory_note(check: &crate::model::MemoryCheck) -> Option<&str> {
+    check
+        .base
+        .uncertainty
+        .iter()
+        .find(|u| u.contains("a session keeps the setting it started with"))
+        .map(String::as_str)
+}
+
+#[test]
+fn claude_auto_memory_turned_off_is_kept_off() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    std::fs::write(
+        w.claude.join("settings.json"),
+        r#"{ "autoMemoryEnabled": false }"#,
+    )
+    .unwrap();
+    let records = claude_memory_session(&root.to_string_lossy(), false);
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert_eq!(categories(&data.exposure, Category::Memory), 0);
+    let first = report(&data, 1.0);
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(memory_note(check), None);
+    let rendered = text(&first);
+    assert!(shows(
+        &rendered,
+        "keep",
+        "Auto memory off [",
+        &["Measured: costs nothing."]
+    ));
+
+    // Turned off after an earlier session used it: still kept off, but what it cost
+    // in the window shows, and the earlier session is noted.
+    let root = root.to_string_lossy();
+    std::fs::write(
+        w.claude.join("projects/project/early.jsonl"),
+        jsonl(&claude_memory_session(&root, true)),
+    )
+    .unwrap();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&later(claude_memory_session(&root, false))),
+    )
+    .unwrap();
+    let turned_off = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&turned_off, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert!(check.writes_usd.unwrap() > 0.0);
+    assert!(
+        memory_note(check)
+            .unwrap()
+            .starts_with("1 of 2 sessions still carried memory")
+    );
+    let text = text(&turned_off);
+    assert!(shows(
+        &text,
+        "keep",
+        "Auto memory off costs",
+        &["Measured: used 2 times (1 read, 1 write)"]
+    ));
+
+    // A T3 instance whose launch arguments or environment could override the
+    // setting leaves it unknown, advised off as it may be on.
+    let mut data = scan(&options(&w, None)).unwrap();
+    for profile in &mut data.profiles {
+        profile.t3 = Some(crate::model::T3Instance {
+            state: "/synthetic/t3".into(),
+            instance: "claudeAgent".into(),
+            enabled: true,
+            idle_mode: crate::model::T3IdleMode::Off,
+            idle_owner: "synthetic".into(),
+            ownership_resolved: false,
+            settings_unresolved: true,
+            limitations: vec![],
+            inherited_window: None,
+        });
+    }
+    let t3 = report(&data, 1.0);
+    let check = memory_check(&t3, Harness::Claude);
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert!(
+        check
+            .unresolved
+            .as_deref()
+            .unwrap()
+            .starts_with("the T3 instance's launch arguments")
+    );
+}
+
+/// The same records as a later session, with their own ids.
+fn later(records: Vec<Value>) -> Vec<Value> {
+    fn walk(key: &str, value: &mut Value) {
+        match value {
+            Value::Object(map) => map.iter_mut().for_each(|(k, v)| walk(k, v)),
+            Value::Array(items) => items.iter_mut().for_each(|v| walk(key, v)),
+            Value::String(text) if key == "timestamp" => {
+                let second: u32 = text[17..19].parse().unwrap();
+                *text = at(second + 30);
+            }
+            Value::String(text) if key == "sessionId" => *text = "later".into(),
+            Value::String(text) if ["id", "requestRef", "uuid", "shapeHash"].contains(&key) => {
+                *text = format!("later-{text}");
+            }
+            _ => {}
+        }
+    }
+    records
+        .into_iter()
+        .map(|mut r| {
+            walk("", &mut r);
+            r
+        })
+        .collect()
+}
+
+#[test]
+fn claude_auto_memory_follows_settings_at_the_latest_sessions_directory() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    std::fs::write(
+        w.claude.join("settings.json"),
+        r#"{ "autoMemoryEnabled": false }"#,
+    )
+    .unwrap();
+    // Every recorded session started before the setting changed and still carries
+    // memory, and one of them made the newest request: today's setting decides.
+    let mut early = claude_memory_session(&root.to_string_lossy(), true);
+    early.push(json!({
+        "type": "api-request", "id": "api-50", "timestamp": at(50), "sessionId": "session",
+        "shapeHash": "shape", "keep": 0, "tail": ["m1"], "requestDigest": "d50",
+        "params": { "model": "claude-opus-5-5" },
+    }));
+    early.push(assistant(50, json!([])));
+    std::fs::write(w.claude.join("projects/project/main.jsonl"), jsonl(&early)).unwrap();
+    let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(check.base.action, crate::model::Action::Keep);
+    assert_eq!(check.off, r#""autoMemoryEnabled": false"#);
+    assert!(
+        check
+            .off_file
+            .as_deref()
+            .unwrap()
+            .ends_with("settings.json")
+    );
+    assert_eq!(
+        memory_note(check).unwrap(),
+        format!(
+            "1 of 1 sessions still carried memory at their latest request, though {}:autoMemoryEnabled turns it off: a session keeps the setting it started with until it restarts, and an environment variable set only where it was launched is not visible here",
+            check.off_file.as_deref().unwrap()
+        )
+    );
+    let rendered = text(&first);
+    assert!(!rendered.contains("settings.local.json"));
+    assert!(shows(&rendered, "keep", "Auto memory off costs", &[]));
+
+    // A project setting at the latest session's directory owns it, even when the
+    // user setting agrees.
+    std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+    let project = w.home.join("project");
+    std::fs::create_dir_all(project.join(".claude")).unwrap();
+    let local = project.join(".claude/settings.local.json");
+    std::fs::write(&local, r#"{ "autoMemoryEnabled": true }"#).unwrap();
+    let project = std::fs::canonicalize(&project).unwrap();
+    let records: Vec<Value> = claude_memory_session(&root.to_string_lossy(), true)
+        .into_iter()
+        .map(|mut r| {
+            r["cwd"] = json!(project.to_string_lossy());
+            r
+        })
+        .collect();
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let report = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&report, Harness::Claude);
+    assert_eq!(check.base.current, Some(true));
+    let local = std::fs::canonicalize(&local).unwrap();
+    let local = local.to_string_lossy();
+    assert_eq!(check.off_file.as_deref(), Some(&*local));
+    // The context row's details name the same setting, not the user settings file.
+    let details = format_report(
+        &report,
+        ReportOptions {
+            width: None,
+            color: false,
+            unicode: false,
+            details: true,
+            host: None,
+        },
+    );
+    assert!(details.lines().any(|l| {
+        l.trim_start()
+            .strip_prefix("Turn off: \"autoMemoryEnabled\": false in ")
+            .is_some_and(|file| {
+                std::path::Path::new(file).ends_with(
+                    std::path::Path::new("project")
+                        .join(".claude")
+                        .join("settings.local.json"),
+                )
+            })
+    }));
+}
+
+#[test]
+fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
+    let w = Workspace::new();
+    let root = std::fs::canonicalize(&w.claude).unwrap();
+    let file = format!(
+        "{}/projects/project/memory/MEMORY.md",
+        root.to_string_lossy()
+    );
+    let records = [
+        attachment(
+            0,
+            json!({ "type": "instructions", "files": [
+                { "path": file, "type": "AutoMem", "content": "SYNTHETIC_PRIVATE_INDEX" },
+            ] }),
+        ),
+        assistant(1, json!([])),
+    ];
+    std::fs::write(
+        w.claude.join("projects/project/main.jsonl"),
+        jsonl(&records),
+    )
+    .unwrap();
+    let first = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&first, Harness::Claude);
+    assert_eq!(check.context_usd, None);
+    assert_eq!(check.base.savings_usd, None);
+    assert!(
+        check
+            .base
+            .uncertainty
+            .iter()
+            .any(|u| u.contains("loaded memory is unmeasured"))
+    );
+
+    // Beside a session that recorded its context, the total is a lower bound.
+    std::fs::write(
+        w.claude.join("projects/project/later.jsonl"),
+        jsonl(&later(claude_memory_session(&root.to_string_lossy(), true))),
+    )
+    .unwrap();
+    let both = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&both, Harness::Claude);
+    let coverage = check.base.coverage.unwrap();
+    assert_eq!((coverage.priced, coverage.total), (2, 3));
+    assert!(check.base.savings_usd.unwrap() > 0.0);
+    // The temporary path's length moves the cents, since the loaded paths are part
+    // of the priced context.
+    let both = text(&both);
+    assert!(shows(
+        &both,
+        "consider",
+        "Auto memory on costs at least $0.",
+        &["; from the 66.6% of requests that recorded their context."]
+    ));
+}
+
+#[test]
+fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_default() {
+    let w = Workspace::new();
+    // Resolved as discovery resolves the profile root; a Windows shell names the file
+    // without the `\\?\` prefix `fs::canonicalize` adds.
+    let home = crate::discovery::realpath(&w.codex.to_string_lossy()).unwrap();
+    let records = [
+        codex_meta(),
+        turn(),
+        json!({
+            "type": "response_item",
+            "timestamp": at(1),
+            "payload": {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    { "type": "input_text", "text": "SYNTHETIC_PRIVATE_PERMISSIONS" },
+                    { "type": "input_text", "text": "## Memory\nSYNTHETIC_PRIVATE_SUMMARY" },
+                    { "type": "input_text", "text": "SYNTHETIC_PRIVATE_CONTINUED" },
+                ],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["permissions", "memories.instructions", "memories.instructions"],
+                },
+            },
+        }),
+        // A full world state does not drop the summary.
+        world(
+            1,
+            json!({ "agents_md": { "text": "SYNTHETIC_PRIVATE_AGENTS" } }),
+            true,
+        ),
+        json!({
+            "type": "response_item",
+            "timestamp": at(2),
+            "payload": { "type": "function_call", "namespace": "memories", "name": "read",
+                         "call_id": "recall", "arguments": "{\"path\":\"SYNTHETIC_PRIVATE_PATH\"}" },
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": at(3),
+            "payload": { "type": "function_call_output", "call_id": "recall", "output": "SYNTHETIC_PRIVATE_RECALLED" },
+        }),
+        json!({
+            "type": "response_item",
+            "timestamp": at(3),
+            "payload": { "type": "function_call", "namespace": "memories", "name": "add_ad_hoc_note",
+                         "call_id": "note", "arguments": "{\"note\":\"SYNTHETIC_PRIVATE_NOTE\"}" },
+        }),
+        json!({
+            "type": "event_msg",
+            "timestamp": at(4),
+            "payload": { "type": "item_completed", "item": {
+                "type": "CommandExecution", "id": "shell", "exit_code": 0, "status": "completed",
+                "parsed_cmd": [{ "type": "read", "name": "notes.md", "path": format!("{home}/memories/notes.md"), "cmd": "cat" }],
+                "aggregated_output": "SYNTHETIC_PRIVATE_SHELL",
+            } },
+        }),
+        billed(5),
+    ];
+    let file = w.codex.join("sessions/main.jsonl");
+    std::fs::write(&file, jsonl(&records)).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let e = &data.exposure;
+    let summary = e
+        .components
+        .iter()
+        .find(|c| c.category == Category::Memory)
+        .unwrap();
+    assert_eq!(
+        summary.size.characters,
+        Some("## Memory\nSYNTHETIC_PRIVATE_SUMMARY\nSYNTHETIC_PRIVATE_CONTINUED".len() as i64)
+    );
+    assert!(has(&e.requests[0].view.candidates, &summary.id));
+    let accesses: Vec<MemoryAccess> = e.memory.iter().map(|m| m.access).collect();
+    assert_eq!(
+        accesses,
+        [MemoryAccess::Read, MemoryAccess::Write, MemoryAccess::Read]
+    );
+    let r = report(&data, 1.0);
+    let memory = row(&r, crate::context::CODEX_MEMORY);
+    assert_eq!(memory.calls, Some(3));
+    assert_eq!(memory.requests, 1);
+    // Off by default: the session that carried a summary is noted, not taken as on.
+    let check = memory_check(&r, Harness::Codex);
+    assert_eq!(check.base.current, Some(false));
+    assert_eq!(check.off, "features.memories = false");
+    assert_eq!(check.context_usd, memory.estimated_usd);
+    assert!(
+        memory_note(check)
+            .unwrap()
+            .starts_with("1 of 1 sessions still carried memory")
+    );
+    assert!(shows(
+        &text(&r),
+        "keep",
+        "Codex memories off costs unknown",
+        &["; extraction and consolidation are not measured."]
+    ));
+    assert!(!leaks(&r, &["SYNTHETIC_PRIVATE"]));
+
+    // Turned on in settings, it is advised off.
+    std::fs::write(w.codex.join("config.toml"), "[features]\nmemories = true\n").unwrap();
+    let on = report(&scan(&options(&w, None)).unwrap(), 1.0);
+    let check = memory_check(&on, Harness::Codex);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(memory_note(check), None);
+    assert!(shows(
+        &text(&on),
+        "consider",
+        "Codex memories on",
+        &["Opinion: ", "Set features.memories = false in "]
+    ));
+    std::fs::remove_file(w.codex.join("config.toml")).unwrap();
+
+    // Compaction rebuilds the developer context: a summary its replacement history
+    // carries stays, and one it leaves out is gone.
+    let developer = |text: &str| {
+        json!({ "type": "message", "role": "developer",
+                "content": [{ "type": "input_text", "text": text }],
+                "internal_chat_message_metadata_passthrough": {
+                    "content_item_kinds": ["memories.instructions"] } })
+    };
+    for (history, kept) in [
+        (vec![developer("## Memory\nSYNTHETIC_PRIVATE_NEWER")], true),
+        (vec![], false),
+    ] {
+        let mut records = records[..3].to_vec();
+        records.push(json!({ "type": "compacted", "timestamp": at(2),
+                             "payload": { "message": "", "replacement_history": history } }));
+        records.push(billed(5));
+        std::fs::write(&file, jsonl(&records)).unwrap();
+        let data = scan(&options(&w, None)).unwrap();
+        let e = &data.exposure;
+        let carried = e.requests[0].view.candidates.iter().any(|id| {
+            e.components
+                .iter()
+                .any(|c| c.id == *id && c.category == Category::Memory)
+        });
+        assert_eq!(carried, kept);
+    }
+
+    // With no summary and no setting, Codex memories are off.
+    let context = world(
+        1,
+        json!({ "agents_md": { "text": "SYNTHETIC_PRIVATE_AGENTS" } }),
+        true,
+    );
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), context, billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(shows(
+        &text(&report(&data, 1.0)),
+        "keep",
+        "Codex memories off [",
+        &["Measured: costs nothing."]
+    ));
+    // A memory store shows Codex generated memories at some point, in requests it
+    // records only in telemetry, so the line cannot say they cost nothing.
+    std::fs::create_dir_all(w.codex.join("memories")).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(shows(
+        &text(&report(&data, 1.0)),
+        "keep",
+        "Codex memories off [",
+        &[
+            "Measured: never read back or written; no measured cost, but extraction and consolidation are not measured."
+        ]
+    ));
+    std::fs::remove_dir(w.codex.join("memories")).unwrap();
+    // A request that recorded no context may have loaded memories while they were
+    // on, so turning them off does not make its cost zero.
+    std::fs::write(&file, jsonl(&[codex_meta(), turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    assert!(shows(
+        &text(&report(&data, 1.0)),
+        "keep",
+        "Codex memories off costs unknown",
+        &[]
+    ));
+
+    // A trusted project's config at the latest session's directory turns them on.
+    let project = w.home.join("repo");
+    std::fs::create_dir_all(project.join(".git")).unwrap();
+    std::fs::create_dir_all(project.join(".codex")).unwrap();
+    let project = crate::discovery::realpath(&project.to_string_lossy()).unwrap();
+    let project_config = std::path::Path::new(&project)
+        .join(".codex")
+        .join("config.toml")
+        .to_string_lossy()
+        .into_owned();
+    std::fs::write(&project_config, "[features]\nmemories = true\n").unwrap();
+    std::fs::write(
+        w.codex.join("config.toml"),
+        format!("[projects.{project:?}]\ntrust_level = \"trusted\"\n"),
+    )
+    .unwrap();
+    let mut meta = codex_meta();
+    meta["payload"]["cwd"] = json!(project);
+    std::fs::write(&file, jsonl(&[meta, turn(), billed(5)])).unwrap();
+    let data = scan(&options(&w, None)).unwrap();
+    let check = memory_check(&report(&data, 1.0), Harness::Codex).clone();
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!(check.off_file.as_deref(), Some(&*project_config));
+
+    // Without a recorded trust decision, whether the project layer applies is
+    // unknown, so the state is too: a yellow advisory that it may be on.
+    std::fs::write(w.codex.join("config.toml"), "").unwrap();
+    let unresolved = |data: &crate::model::Scan| {
+        let r = report(data, 1.0);
+        let check = memory_check(&r, Harness::Codex).clone();
+        let wide = ReportOptions {
+            width: None,
+            color: false,
+            unicode: false,
+            details: false,
+            host: None,
+        };
+        (check, format_report(&r, wide))
+    };
+    let (check, rendered) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert_eq!(check.base.action, crate::model::Action::Advisory);
+    assert_eq!(
+        check.unresolved.as_deref(),
+        Some("a project .codex/config.toml sets memories, but the project's trust is not recorded")
+    );
+    assert!(shows(
+        &rendered,
+        "consider",
+        "Codex memories may be on",
+        &[
+            "Unknown whether it is on: a project .codex/config.toml sets memories, but the project's trust is not recorded. Opinion: ",
+            "Set features.memories = false in "
+        ]
+    ));
+    assert!(
+        !report(&scan(&options(&w, None)).unwrap(), 1.0)
+            .checks
+            .iter()
+            .any(|c| c.action() == crate::model::Action::Change)
+    );
+
+    // Trusted, but a named profile that sets memories may have been selected.
+    let trusted = format!("[projects.{project:?}]\ntrust_level = \"trusted\"\n");
+    std::fs::write(w.codex.join("config.toml"), &trusted).unwrap();
+    let named = w.codex.join("loud.config.toml");
+    std::fs::write(&named, "[features]\nmemories = false\n").unwrap();
+    let (check, rendered) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert!(
+        check
+            .unresolved
+            .unwrap()
+            .starts_with("a named config profile sets memories")
+    );
+    // Turning it off in the user config alone would leave the profile's setting.
+    assert!(rendered.contains("loud.config.toml where it sets memories."));
+    std::fs::remove_file(&named).unwrap();
+
+    // A named profile that changes project roots matters only where a layer it could
+    // add or drop sets memories: here the root's layer, seen from a nested directory.
+    let nested = format!("{project}/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let mut meta = codex_meta();
+    meta["payload"]["cwd"] = json!(nested);
+    std::fs::write(&file, jsonl(&[meta, turn(), billed(5)])).unwrap();
+    std::fs::write(
+        w.codex.join("quiet.config.toml"),
+        "project_root_markers = []\n",
+    )
+    .unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!(check.base.current, None);
+    assert!(
+        check
+            .unresolved
+            .unwrap()
+            .starts_with("a .codex/config.toml above the latest session's directory sets memories")
+    );
+    std::fs::remove_file(&project_config).unwrap();
+    let (check, _) = unresolved(&scan(&options(&w, None)).unwrap());
+    assert_eq!((check.base.current, check.unresolved), (Some(false), None));
 }

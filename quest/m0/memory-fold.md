@@ -9,39 +9,76 @@ identical, and the runtime is no worse than after
 
 ## Plan
 
-Decided 2026-11-11 (maintainer, /quest-plan): ✅ after
-[cutting the redundant memory](/quest/m0/memory-cheap-wins.md) (rejected:
-the fold alone; the cheap wins alone). ✅ m0 (rejected: m1). ✅ the
+Decided 2026-11-11 (maintainer, /quest-plan): ✅ after cutting the
+redundant memory in
+[kixelated/token-max#56](https://github.com/kixelated/token-max/pull/56)
+(rejected: the fold alone; the cheap wins alone). ✅ m0 (rejected: m1). ✅ the
 implementer chooses between one pass and two by measurement against the
 runtime bound (rejected: one pass only; two passes regardless of time).
 
+Multi-host runs are done:
+[kixelated/token-max#78](https://github.com/kixelated/token-max/pull/78)
+has each SSH destination analyze its own scan and send only its report, so
+the coordinator never holds more than its own scan. Destinations run the same
+`scan()` and `analyze()`, so this fold applies to them unchanged.
+
 The reader already streams lines, but `scan()` keeps every deduplicated
 request, event and exposure observation, sorts them, and hands the whole
-`Scan` to `analyze()`, which the `Report` keeps. Most checks need only one
-session at a time:
+`Scan` to `analyze()`, which the `Report` keeps. On synthetic histories peak
+memory grows linearly, about 4.4 KB per request (2.83 GB for 640,000
+requests).
 
-- TTL (`CacheChain`), idle (`Profiled::replay`), keepalive and background
-  already replay per session. Fast and Bash are per request.
-- Global steps produce small outputs: the default window from setting-change
-  times (`default_since`), the compaction calibration medians, cross-file
-  dedup of requests and tool calls, and the T3 owner joins.
+### One pass, by measurement
 
-Options for the implementer:
+A sessions-only pass (`token-max sessions`) took 1.1 s of user CPU against
+1.5 s for the full run on a 0.6 GB history, so the scan is about 70% of the
+CPU and a second full read would put the runtime near 1.7 times the bound, on
+top of reading about 26 GB twice on the maintainer's mostly I/O-bound host. Agent's
+recommendation: one pass that folds each session as it completes into a
+compact per-request record, then finishes the checks from those records once
+the global facts are known.
 
-- Two passes: the first keeps only compact keys, timestamps, samples and T3
-  ids; the second re-reads the frozen snapshots by session and folds into
-  per-check totals. It costs a second read of about 26 GB on the
-  maintainer's host, where runs are mostly I/O-bound.
-- One pass: fold each session as it completes, keep per-session partial
-  results small enough to fix up once the global facts are known.
-- Either way, copies of one request can land in different session groups,
-  and `equivalent()` must still detect copies that disagree. Assign each
-  request to one owner session, or merge outputs by request id.
+### What crosses sessions
+
+Surveyed 2026-11-12 on main at `edc08ed`. The checks run as a chain of
+sweeps, each needing facts only the previous one finishes over the whole
+history:
+
+1. Compaction charges, which mutate requests before anything prices them.
+2. Global facts: the default window from setting changes
+   (`default_since`), cohorts and tuned windows, the compaction calibration
+   samples and medians, candidate and current windows with their owners, and
+   the subagent directories.
+3. TTL verdicts (`CacheChain`).
+4. Compaction, which reads the TTL verdicts.
+5. Idle: an activation-cohort pass, then the adaptive break-even bisection,
+   up to 52 runs, each needing the history-wide delta.
+6. Keepalive.
+
+Each later sweep can run from per-request records, but the record must hold
+what each sweep reads, and 5 is the costliest to keep small.
+
+Other joins span sessions or files and need a key that survives the fold:
+
+- Copies of one request can land in different sessions, and `equivalent()`
+  must still detect copies that disagree: assign each request one owner, or
+  merge by request id.
+- Event origins, `event.request`, compaction charge request ids, subagent to
+  parent, Codex fork owners found through location files, `NativeIds`
+  parents, call and invocation ids, and refs.
+- Events sort by time with ties in arrival order, so the fold needs a global
+  arrival key in place of the vector index.
+- T3 enrichment is two-phase over every profile (`ambiguous_profiles`,
+  `removed`, `t3_ids`); its SQLite joins are the largest transient, about
+  0.9 GB on the maintainer's host.
+- Exposure keeps request shapes by hash and each component's `first_seen`
+  across the whole history.
+- Every first-seen ordered set or list, such as a cost's unknown reasons and
+  assumptions, needs a global ordinal so a merged list keeps today's order.
+- Cost totals need no ordering: `Cost`, `PairedSavings`, session, context and
+  memory costs and keepalive's per-cap totals add `Usd`, an integer count of
+  2^-64 dollars, so partial sums merge exactly in any order. Values derived
+  from them, such as per-month rates, are f64 and are taken after the merge.
 
 Rough floor from reading the structs: 100-150 bytes per request and 60-100
-per event, about 0.3-0.4 GB for 1M requests, against about 6 KB per request
-today.
-
-## Required
-
-- [Cut the scan's redundant memory](/quest/m0/memory-cheap-wins.md) - ids, snapshots and replayed requests are stored once, and hosts are analyzed one at a time
+per event, about 0.3-0.4 GB for 1M requests.

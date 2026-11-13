@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::model::{Location, Millis};
+use crate::model::{Id, Location, Millis};
 
 /// An error whose message is safe for terminal and JSON diagnostics.
 #[derive(Clone, Debug, PartialEq, thiserror::Error)]
@@ -64,6 +64,11 @@ pub fn originator(value: &Value) -> Option<String> {
     label(&Value::from(text.replace(' ', "_")))
         .filter(|_| valid)
         .map(|_| text.to_string())
+}
+
+/// [`identity`] held as its digest.
+pub fn digest(value: &str) -> Id {
+    Id::Digest(Sha256::digest(value.as_bytes()).into())
 }
 
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.
@@ -162,23 +167,59 @@ pub fn display(value: &str) -> String {
     terminal_text(&serde_json::to_string(value).expect("strings serialize"))
 }
 
+/// Terminal controls and direction overrides, which metadata must never print raw.
+fn unsafe_char(c: char) -> bool {
+    let code = c as u32;
+    code <= 0x1f
+        || (0x7f..=0x9f).contains(&code)
+        || code == 0x061c
+        || code == 0x200e
+        || code == 0x200f
+        || (0x2028..=0x202e).contains(&code)
+        || (0x2066..=0x2069).contains(&code)
+}
+
+fn escape(c: char, out: &mut String) {
+    out.push_str(&format!("\\u{:04x}", c as u32));
+}
+
 /// Escape terminal controls and direction overrides without dropping metadata.
 pub fn terminal_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
-        let code = c as u32;
-        let unsafe_char = code <= 0x1f
-            || (0x7f..=0x9f).contains(&code)
-            || code == 0x061c
-            || code == 0x200e
-            || code == 0x200f
-            || (0x2028..=0x202e).contains(&code)
-            || (0x2066..=0x2069).contains(&code);
-        if unsafe_char {
-            out.push_str(&format!("\\u{code:04x}"));
+        if unsafe_char(c) {
+            escape(c, &mut out);
         } else {
             out.push(c);
         }
+    }
+    out
+}
+
+/// A report another host printed, escaped like [`terminal_text`] except for its line breaks
+/// and, when `color` is on, the SGR color sequences reports style lines with.
+pub fn remote_text(value: &str, color: bool) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(c) = rest.chars().next() {
+        let style = rest
+            .strip_prefix("\u{1b}[")
+            .filter(|_| color)
+            .and_then(|tail| {
+                let end = tail.find(|c: char| !c.is_ascii_digit() && c != ';')?;
+                tail[end..].starts_with('m').then_some(2 + end + 1)
+            });
+        if let Some(length) = style {
+            out.push_str(&rest[..length]);
+            rest = &rest[length..];
+            continue;
+        }
+        if c != '\n' && unsafe_char(c) {
+            escape(c, &mut out);
+        } else {
+            out.push(c);
+        }
+        rest = &rest[c.len_utf8()..];
     }
     out
 }
@@ -187,6 +228,23 @@ pub fn terminal_text(value: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn ids_hold_digests_compactly_and_print_as_recorded() {
+        let hex = identity("event");
+        assert_eq!(Id::from(hex.as_str()), digest("event"));
+        for text in [
+            hex.as_str(),
+            "modeled:claude:abc:0",
+            &hex.to_uppercase(),
+            &hex[1..],
+        ] {
+            let id = Id::from(text);
+            assert_eq!(id.to_string(), text);
+            assert_eq!(serde_json::to_value(&id).unwrap(), json!(text));
+        }
+        assert!(matches!(Id::from(hex.to_uppercase()), Id::Text(_)));
+    }
 
     #[test]
     fn labels_reject_free_text() {
@@ -233,5 +291,28 @@ mod tests {
         );
         assert_eq!(display("a\nb"), "\"a\\\\nb\"".replace("\\\\", "\\"));
         assert_eq!(identity("x").len(), 64);
+    }
+
+    #[test]
+    fn remote_reports_keep_only_line_breaks_and_colors() {
+        let styled = "\u{1b}[1;31mChange\u{1b}[0m\nnext";
+        assert_eq!(remote_text(styled, true), styled);
+        assert_eq!(
+            remote_text(styled, false),
+            "\\u001b[1;31mChange\\u001b[0m\nnext"
+        );
+        // Anything else stays escaped, colors included when they are off.
+        for hostile in [
+            "\u{1b}]8;;https://invalid\u{7}",
+            "\u{1b}[2J",
+            "\u{1b}[31",
+            "\r\t\u{9b}31m\u{202e}",
+        ] {
+            assert_eq!(
+                remote_text(hostile, true),
+                terminal_text(hostile),
+                "{hostile:?}"
+            );
+        }
     }
 }

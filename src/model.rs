@@ -1,4 +1,4 @@
-//! Shared data types. Serialized names match the JSON report.
+//! Shared data types. Types the SSH stream carries derive serde; their names are its wire names.
 
 use crate::collections::{HashSet, IndexMap};
 use serde::{Deserialize, Serialize};
@@ -8,6 +8,67 @@ pub type Millis = i64;
 
 /// A shared immutable string, for identifiers repeated across many records.
 pub type Text = std::sync::Arc<str>;
+
+/// An opaque identifier. Nearly every one is a SHA-256 hex digest, held as its 32 bytes
+/// rather than 64 characters; any other text, such as a modeled event's, is kept as is.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum Id {
+    Digest([u8; 32]),
+    Text(Box<str>),
+}
+
+impl From<&str> for Id {
+    fn from(text: &str) -> Self {
+        let digit = |b: u8| match b {
+            b'0'..=b'9' => Some(b - b'0'),
+            b'a'..=b'f' => Some(b - b'a' + 10),
+            _ => None,
+        };
+        let b = text.as_bytes();
+        if b.len() == 64 {
+            let mut digest = [0; 32];
+            if digest.iter_mut().enumerate().all(|(i, out)| {
+                match (digit(b[2 * i]), digit(b[2 * i + 1])) {
+                    (Some(high), Some(low)) => {
+                        *out = high << 4 | low;
+                        true
+                    }
+                    _ => false,
+                }
+            }) {
+                return Id::Digest(digest);
+            }
+        }
+        Id::Text(text.into())
+    }
+}
+
+impl From<String> for Id {
+    fn from(text: String) -> Self {
+        Id::from(text.as_str())
+    }
+}
+
+impl std::fmt::Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Id::Digest(digest) => digest.iter().try_for_each(|b| write!(f, "{b:02x}")),
+            Id::Text(text) => f.write_str(text),
+        }
+    }
+}
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.to_string())
+    }
+}
+
+impl Serialize for Id {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
 
 /// One shared copy of each distinct string and profile set the records of a scan repeat.
 #[derive(Default)]
@@ -71,6 +132,7 @@ impl Interner {
             &mut r.version,
             &mut r.client,
             &mut r.cwd,
+            &mut r.effort,
         ] {
             self.share(slot);
         }
@@ -121,7 +183,7 @@ impl Interner {
 }
 
 /// The two locally supported transcript formats.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
@@ -129,7 +191,7 @@ pub enum Harness {
 }
 
 /// A documented Claude cache lifetime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum Ttl {
     #[serde(rename = "5m")]
     FiveMinutes,
@@ -148,11 +210,9 @@ impl Ttl {
 }
 
 /// A value for each TTL, serialized as `{"5m": .., "1h": ..}`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PerTtl<T> {
-    #[serde(rename = "5m")]
     pub five_minutes: T,
-    #[serde(rename = "1h")]
     pub one_hour: T,
 }
 
@@ -172,7 +232,7 @@ impl<T> PerTtl<T> {
 }
 
 /// A value for the main conversation and for sub-agents.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct PerBucket<T> {
     pub main: T,
     pub subagent: T,
@@ -194,8 +254,7 @@ impl<T> PerBucket<T> {
 }
 
 /// The two Claude TTL buckets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Bucket {
     Main,
     Subagent,
@@ -212,8 +271,7 @@ impl Bucket {
 }
 
 /// Evidence for a result, separate from whether it recommends a change.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Evidence {
     Measured,
     Estimated,
@@ -224,13 +282,12 @@ pub enum Evidence {
 /// A safe source location without transcript content.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Location {
-    #[serde(with = "crate::wire::text")]
     pub file: Text,
     pub line: u64,
 }
 
 /// Normalized counts: reads and writes are subsets of input, reasoning of output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub input: Option<i64>,
@@ -248,7 +305,7 @@ pub struct Usage {
     pub reasoning: Option<i64>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PartKind {
     Message,
@@ -258,21 +315,17 @@ pub enum PartKind {
 }
 
 /// One non-overlapping billed sampling iteration.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct BillingPart {
     pub kind: PartKind,
-    #[serde(with = "crate::wire::opt_text")]
     pub model: Option<Text>,
     pub usage: Usage,
-    #[serde(with = "crate::wire::opt_text")]
     pub tier: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub speed: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub geo: Option<Text>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestEvidence {
     Measured,
@@ -280,7 +333,7 @@ pub enum RequestEvidence {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
     Main,
@@ -288,7 +341,7 @@ pub enum Agent {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Api {
     Responses,
@@ -296,7 +349,7 @@ pub enum Api {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Accounting {
     Individual,
@@ -305,18 +358,16 @@ pub enum Accounting {
 }
 
 /// Recorded API-attempt budget; this does not establish execution or billing.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     pub max_output_tokens: Option<i64>,
 }
 
 /// Requested controls never establish the billed response tier.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RequestedSpeed {
-    #[serde(with = "crate::wire::opt_text")]
     pub tier: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub speed: Option<Text>,
 }
 
@@ -324,37 +375,28 @@ pub struct RequestedSpeed {
 ///
 /// Strings are shared: a request holds references to values that thousands of requests
 /// repeat, such as its model, session and profiles, so a full history fits in memory.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub evidence: RequestEvidence,
-    #[serde(with = "crate::wire::text")]
     pub id: Text,
     pub harness: Harness,
-    #[serde(with = "crate::wire::text")]
     pub session: Text,
     pub agent: Agent,
     pub time: Millis,
     pub end_time: Millis,
-    #[serde(with = "crate::wire::opt_text")]
     pub model: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub provider: Option<Text>,
     pub api: Api,
-    #[serde(with = "crate::wire::opt_text")]
     pub source: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub trigger: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub reference: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub turn: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub version: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub client: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub cwd: Option<Text>,
+    /// The recorded reasoning effort, such as `high`.
+    pub effort: Option<Text>,
     pub parts: Vec<BillingPart>,
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
@@ -363,20 +405,19 @@ pub struct Request {
     pub attempt: Option<Attempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
-    #[serde(with = "crate::wire::texts")]
     pub issues: Vec<Text>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<Box<T3Request>>,
 }
 
 /// A safe location under one conversation alias.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Origin {
     pub session: Text,
     pub location: Location,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
     Compaction,
@@ -389,7 +430,7 @@ pub enum EventKind {
     IdleNotice,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdleAttribution {
     Unknown,
@@ -398,7 +439,7 @@ pub enum IdleAttribution {
 }
 
 /// A scalar settings value as recorded.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Scalar {
     Bool(bool),
@@ -407,7 +448,7 @@ pub enum Scalar {
 }
 
 /// Preceding pricing metadata from the same file.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Pricing {
     pub model: Option<Text>,
     pub provider: Option<Text>,
@@ -417,37 +458,30 @@ pub struct Pricing {
 }
 
 /// Structural context and timing evidence, never a billed boundary request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralEvent {
-    pub id: String,
+    pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
     pub origins: Vec<Origin>,
     pub harness: Harness,
-    #[serde(with = "crate::wire::text")]
     pub session: Text,
     pub time: Millis,
     pub kind: EventKind,
     pub profiles: Profiles,
     pub location: Location,
-    #[serde(with = "crate::wire::opt_text")]
     pub request: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub model: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub version: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub client: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub cwd: Option<Text>,
     pub trigger: Option<String>,
     pub precomputed: Option<bool>,
     pub pre_tokens: Option<i64>,
     pub post_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
-    #[serde(with = "crate::wire::opt_text")]
     pub tool: Option<Text>,
-    pub tool_id: Option<String>,
+    pub tool_id: Option<Id>,
     pub settings: Settings,
     pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
@@ -455,7 +489,7 @@ pub struct StructuralEvent {
     /// Claude Bash call details on its tool start and end, without the command.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellCall>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<Box<T3Request>>,
 }
 
@@ -503,12 +537,6 @@ impl Serialize for Settings {
     }
 }
 
-impl<'de> Deserialize<'de> for Settings {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        IndexMap::deserialize(deserializer).map(Settings::new)
-    }
-}
-
 /// The profiles a record belongs to, shared by every record with the same set.
 pub type Profiles = std::sync::Arc<[String]>;
 
@@ -536,14 +564,8 @@ impl Serialize for ServerTools {
     }
 }
 
-impl<'de> Deserialize<'de> for ServerTools {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        IndexMap::<String, i64>::deserialize(deserializer).map(|tools| tools.into_iter().collect())
-    }
-}
-
 /// What a Claude Bash call asked for and how it ended, never its command or output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellCall {
     /// Started with `run_in_background`, so the model did not wait on it.
@@ -555,7 +577,7 @@ pub struct ShellCall {
 }
 
 /// A current window control and the setting that owns it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowControl {
     pub value: Option<i64>,
@@ -567,12 +589,15 @@ pub struct WindowControl {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison_unknown: Option<String>,
     /// No setting names a window, so Claude Code's tuned window for the model applies.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
+    /// The window a setting names when the model's context window caps it; `value` is the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setting: Option<i64>,
 }
 
 /// Claude Code's window for one model when no setting names one.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TunedWindow {
     /// The trigger in tokens, or None when neither a compaction nor the documented table establishes it.
     pub value: Option<i64>,
@@ -580,7 +605,7 @@ pub struct TunedWindow {
 }
 
 /// A current TTL control for one bucket.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TtlControl {
     pub value: Option<Ttl>,
     pub owner: String,
@@ -588,23 +613,27 @@ pub struct TtlControl {
 }
 
 /// Window controls for the default and per-model overrides.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CompactionControls {
     pub default: WindowControl,
     pub models: IndexMap<String, WindowControl>,
     /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at a 200k window.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
-    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size a model ID Claude Code does not recognize.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub declared: bool,
+    /// The positive `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which may size a model ID Claude Code does not recognize.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared: Option<u64>,
     /// Tuned windows by undated model ID, for every model the profile used.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub tuned: IndexMap<String, TunedWindow>,
+    /// Context windows by undated model ID, for each used model Claude Code holds below the 1M
+    /// maximum; any window larger than its model's runs at this size.
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
+    pub contexts: IndexMap<String, i64>,
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IdleControl {
     pub value: Option<bool>,
@@ -621,7 +650,7 @@ pub struct IdleControl {
 }
 
 /// Current speed preference after known disabling controls, without inferred session overrides.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SpeedControl {
     pub value: Option<String>,
     pub owner: String,
@@ -631,7 +660,7 @@ pub struct SpeedControl {
 }
 
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BashCapControl {
     /// The larger of `BASH_MAX_TIMEOUT_MS` (default 600000) and `BASH_DEFAULT_TIMEOUT_MS`.
@@ -644,7 +673,7 @@ pub struct BashCapControl {
 }
 
 /// A selected profile's current settings and their owning controls.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Profile {
     pub id: String,
@@ -673,13 +702,79 @@ pub struct Profile {
     /// Background generation features and the controls that switch them.
     pub background: Vec<BackgroundControl>,
     /// Background controls at recorded working directories; an empty key means no directory.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub background_directories: IndexMap<String, Vec<BackgroundControl>>,
     /// Request-specific overrides when session transitions or launch precedence are unresolved.
-    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Auto memory's current setting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory: Option<MemoryControl>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<T3Instance>,
+    /// Current controls that choose subagent models and efforts.
+    pub agents: AgentControls,
+    /// The file that sets Codex's `project_doc_max_bytes` in `settings`, when one does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_budget_file: Option<String>,
+    /// Why Codex's `project_doc_max_bytes` may differ from the system and user value
+    /// in `settings`, such as a project or named profile that sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instruction_budget_unresolved: Option<String>,
+    /// Settings files that outrank `settings_file` for some recorded sessions, such as a
+    /// project's, a managed one or a named Codex profile, so a switch they set overrides
+    /// the same switch in `settings_file`. Only files that hold settings are listed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outranking_files: Vec<String>,
+}
+
+/// A setting's current value and the file or variable that sets it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Owned {
+    pub value: String,
+    pub owner: String,
+}
+
+/// The current settings that choose subagent models and efforts, which history does not record.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentControls {
+    /// Claude's `CLAUDE_CODE_SUBAGENT_MODEL` or Codex's `agents.default_subagent_model`.
+    pub model: Option<Owned>,
+    /// Claude's `CLAUDE_CODE_SUBAGENT_EFFORT` or Codex's `agents.default_subagent_reasoning_effort`.
+    pub effort: Option<Owned>,
+    /// Claude's `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, which drops call and definition models.
+    pub force: bool,
+    /// Claude's `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`, which lets Explore inherit any main model.
+    pub explore_uncapped: bool,
+    /// Codex's `review_model`.
+    pub review: Option<Owned>,
+    /// Codex's configured session `model`, which a review without `review_model` runs on.
+    pub session: Option<Owned>,
+    /// Agent definition files: Claude `agents/*.md`, Codex agent role files.
+    pub definitions: Vec<AgentDefinition>,
+    /// Codex roles a config layer declares with a description but no role file, by name, to
+    /// the config file declaring them. They run on the default subagent model or the parent's.
+    pub declared: IndexMap<String, String>,
+    /// Why these controls may not be the ones a run used, such as a project of unknown trust.
+    pub unresolved: Option<String>,
+    /// The controls at each recorded subagent working directory whose project settings or
+    /// agent files change them; other directories use these.
+    pub directories: IndexMap<String, AgentControls>,
+}
+
+/// One agent definition file's model and effort, never its prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinition {
+    pub name: String,
+    pub file: String,
+    /// The project directory whose agents it defines; None for the profile's own agents.
+    pub project: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// When the file last changed, so runs from before a change are not attributed to it.
+    pub modified: Option<Millis>,
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.
@@ -705,7 +800,7 @@ impl T3IdleMode {
 }
 
 /// An instance's allowlisted current controls; disabled instances retain historical usage.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Instance {
     pub state: String,
@@ -714,6 +809,9 @@ pub struct T3Instance {
     pub idle_mode: T3IdleMode,
     pub idle_owner: String,
     pub ownership_resolved: bool,
+    /// Whether launch arguments, a secret environment value or machine policy could
+    /// override native settings in ways discovery does not resolve.
+    pub settings_unresolved: bool,
     pub limitations: Vec<String>,
     /// The instance's environment when it inherits the native settings window, which
     /// discovery resolves at each recorded project like a native profile's.
@@ -722,7 +820,7 @@ pub struct T3Instance {
 }
 
 /// Coverage of one selected T3 state, without aggregate usage or connection credentials.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3State {
     pub path: String,
@@ -734,10 +832,8 @@ pub struct T3State {
     pub joined_requests: u64,
     pub ambiguous_requests: u64,
     /// Requests whose T3 or native control owner stays unresolved, counted by cause.
-    #[serde(default)]
     pub unresolved: IndexMap<String, u64>,
     /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
-    #[serde(default)]
     pub removed: IndexMap<String, u64>,
     /// Every instance the settings name, which tells a removed owner from one not selected.
     #[serde(skip)]
@@ -747,7 +843,7 @@ pub struct T3State {
 }
 
 /// A T3 model selection: the instance or text generator it routes to, and its model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Selection {
     pub instance: String,
@@ -755,7 +851,7 @@ pub struct T3Selection {
 }
 
 /// T3's current text-generation model; its cost is unmeasured because T3 keeps no native records.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3TextGeneration {
     pub selection: T3Selection,
@@ -770,7 +866,7 @@ pub struct T3TextGeneration {
 }
 
 /// Historical projection evidence uniquely linked to a captured native request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Request {
     pub thread: String,
@@ -788,7 +884,7 @@ pub struct T3Request {
 }
 
 /// A model request the client makes on its own, outside the turns the user drives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum BackgroundFeature {
     /// Claude's predicted next prompt after each response.
@@ -801,8 +897,34 @@ pub enum BackgroundFeature {
     AutoRecaps,
 }
 
+/// Whether auto memory is on in current settings, and the setting that turns it off.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryControl {
+    pub value: bool,
+    /// Where the effective value comes from.
+    pub owner: String,
+    /// The setting that turns it off.
+    pub off: String,
+    /// The file to set it in; null for an environment variable.
+    pub off_file: Option<String>,
+    /// The working directory it was resolved at, the latest session's; null when
+    /// only profile-wide settings were read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    /// Why a setting that may apply could not be resolved, such as an unrecorded
+    /// project trust or profile selection; null when it resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unresolved: Option<String>,
+    /// Files whose memory settings may override `offFile` but could not be resolved.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<String>,
+    /// Whether Codex's memory store exists, so memories were generated at some point.
+    pub stored: bool,
+}
+
 /// One background feature's current state and the control that owns it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackgroundControl {
     pub feature: BackgroundFeature,
@@ -820,7 +942,7 @@ pub struct BackgroundControl {
     pub off_file: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RootState {
     Selected,
@@ -829,7 +951,7 @@ pub enum RootState {
     Inaccessible,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RootOrigin {
     Default,
@@ -839,7 +961,7 @@ pub enum RootOrigin {
 }
 
 /// Discovery includes exclusions and failures so selection cannot imply full-host coverage.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct RootStatus {
     pub harness: Harness,
     pub path: String,
@@ -848,7 +970,7 @@ pub struct RootStatus {
 }
 
 /// File identity and byte boundary frozen before any transcript is parsed.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub file: String,
@@ -863,21 +985,140 @@ pub struct Snapshot {
     pub lines: u64,
 }
 
-/// A price may be partially known without pretending the known subtotal is the total.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+/// One subagent transcript's type and what its spawn requested, never its task.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Subagent {
+    pub harness: Harness,
+    pub session: Text,
+    /// The conversation that spawned it, when recorded.
+    pub parent: Option<Text>,
+    /// Claude's agent type; Codex's agent role (`default` when unnamed) or other subagent source.
+    pub kind: String,
+    /// Whether Claude recorded it as built in; None when unrecorded.
+    pub built_in: Option<bool>,
+    /// A Claude fork, which always runs on its parent's model.
+    pub fork: bool,
+    /// A Codex subagent source such as `review` or `compact`, which no agent role defines,
+    /// even when a role has the same name.
+    pub native: bool,
+    /// The model the spawning call requested, when recorded.
+    pub model: Option<String>,
+    /// The effort the spawning call requested, when recorded.
+    pub effort: Option<String>,
+}
+
+/// Dollars as a whole number of 2^-64 dollar steps, so totals are exact and come out the
+/// same whatever order their parts are added in, unlike f64 sums.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Usd(i128);
+
+impl Usd {
+    /// No dollars.
+    pub const ZERO: Self = Self(0);
+    /// Steps per dollar: a power of two, so converting scales an f64 exactly.
+    const STEPS: f64 = 18_446_744_073_709_551_616.0;
+
+    /// Round `usd` to the nearest step.
+    ///
+    /// Panics on a non-finite amount or one of at least 2^63 dollars either way, which no
+    /// validated price produces.
+    pub fn from_f64(usd: f64) -> Self {
+        let steps = (usd * Self::STEPS).round();
+        assert!(
+            steps.is_finite() && steps.abs() < 2f64.powi(127),
+            "dollar amount out of range: {usd}"
+        );
+        Self(steps as i128)
+    }
+
+    /// The nearest f64, for printing and comparing.
+    pub fn to_f64(self) -> f64 {
+        self.0 as f64 / Self::STEPS
+    }
+
+    /// `self` times `factor`, rounded to a step.
+    ///
+    /// Scaling does not distribute over addition, so scale each charge before summing, never
+    /// a total, or the result depends on how the total was grouped.
+    pub fn scale(self, factor: f64) -> Self {
+        if factor == 1.0 {
+            self
+        } else {
+            Self::from_f64(self.to_f64() * factor)
+        }
+    }
+
+    /// The magnitude.
+    pub fn abs(self) -> Self {
+        Self(self.0.checked_abs().expect("dollar total overflow"))
+    }
+
+    /// `self` times `n`, saturating instead of overflowing.
+    pub fn saturating_mul(self, n: u64) -> Self {
+        Self(self.0.saturating_mul(i128::from(n)))
+    }
+}
+
+// Overflow panics in release builds too, rather than wrapping into a wrong total.
+impl std::ops::Add for Usd {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self(self.0.checked_add(other.0).expect("dollar total overflow"))
+    }
+}
+
+impl std::ops::Sub for Usd {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        Self(self.0.checked_sub(other.0).expect("dollar total overflow"))
+    }
+}
+
+impl std::ops::Neg for Usd {
+    type Output = Self;
+    fn neg(self) -> Self {
+        Self(self.0.checked_neg().expect("dollar total overflow"))
+    }
+}
+
+impl std::ops::AddAssign for Usd {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl std::ops::SubAssign for Usd {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
+    }
+}
+
+impl std::iter::Sum for Usd {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        iter.fold(Self::ZERO, |a, b| a + b)
+    }
+}
+
+impl Serialize for Usd {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_f64(self.to_f64())
+    }
+}
+
+/// A price may be partially known without pretending the known subtotal is the total.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cost {
-    pub known_usd: f64,
-    pub total_usd: Option<f64>,
+    pub known_usd: Usd,
+    pub total_usd: Option<Usd>,
     pub unknown: Vec<String>,
     pub assumptions: Vec<String>,
 }
 
 /// An observed boundary with either linked usage or one explicit summary estimate.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactionCharge {
-    pub event: String,
+    pub event: Id,
     pub request: Option<Text>,
     pub evidence: Evidence,
     pub cost: Cost,
@@ -885,16 +1126,14 @@ pub struct CompactionCharge {
     pub assumptions: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EstimateEvidence {
     Estimated,
     Unknown,
 }
 
 /// A comparison-only input estimate, with original measured coverage left untouched.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UsageEstimate {
     pub request: Text,
     pub evidence: EstimateEvidence,
@@ -905,16 +1144,14 @@ pub struct UsageEstimate {
     pub assumptions: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KnownState {
     Known,
     Estimated,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PrefixEvidence {
     Measured,
     Estimated,
@@ -922,8 +1159,7 @@ pub enum PrefixEvidence {
 }
 
 /// Cache-history witnesses distinguish measured prefixes from estimates and unresolved cohorts.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CachePredecessor {
     pub request: Text,
     pub part: usize,
@@ -934,8 +1170,7 @@ pub struct CachePredecessor {
     pub reason: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReplayOutcome {
     Invariant,
     Estimated,
@@ -943,7 +1178,7 @@ pub enum ReplayOutcome {
 }
 
 /// Evidence for one selected request's counterfactual cache geometry, independent of prices.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CacheReplayEvidence {
     pub request: Text,
     pub part: usize,
@@ -954,8 +1189,7 @@ pub struct CacheReplayEvidence {
     pub reason: &'static str,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Change,
     Keep,
@@ -963,15 +1197,14 @@ pub enum Action {
 }
 
 /// Request parts priced in both compared scenarios.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Coverage {
     pub priced: u64,
     pub total: u64,
 }
 
 /// Shared recommendation metadata; savings are relative to the named baseline.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CheckBase<V> {
     pub profile: String,
     pub history_profiles: Vec<String>,
@@ -985,7 +1218,7 @@ pub struct CheckBase<V> {
     pub window_basis: String,
     pub baseline: String,
     pub requests: u64,
-    /// Request parts priced in both compared scenarios; null when the check is not a per-part replay.
+    /// Request parts priced in both compared scenarios; None when the check is not a per-part replay.
     pub coverage: Option<Coverage>,
     pub savings_usd: Option<f64>,
     pub monthly_savings_usd: Option<f64>,
@@ -995,23 +1228,20 @@ pub struct CheckBase<V> {
     pub sources: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowBasisKind {
     Explicit,
     TtlTransition,
     Available,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UnlinkedSensitivity {
     pub no_billed_attempt: PerTtl<Cost>,
     pub cold_cache: PerTtl<Cost>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TtlSensitivity {
     pub cold_prefix1h_usd: Option<f64>,
     pub cold_prefix1h_comparison_usd: Option<f64>,
@@ -1020,10 +1250,8 @@ pub struct TtlSensitivity {
 }
 
 /// A TTL comparison preserves cache and fixed costs separately.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TtlCheck {
-    #[serde(flatten)]
     pub base: CheckBase<Ttl>,
     pub window_basis_kind: WindowBasisKind,
     pub bucket: Bucket,
@@ -1041,15 +1269,14 @@ pub struct TtlCheck {
 }
 
 /// An observed compaction event and the request that resumed after it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactionBasis {
-    pub event: String,
+    pub event: Id,
     pub request: Text,
 }
 
 /// One extra modeled compaction and the observations supporting its geometry.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AddedCompaction {
     pub request: Text,
     pub input_tokens: i64,
@@ -1060,8 +1287,7 @@ pub struct AddedCompaction {
     pub prefix_cost: Cost,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowSensitivity {
     pub larger_summary_savings_usd: Option<f64>,
     pub cold_summary_savings_usd: Option<f64>,
@@ -1069,8 +1295,7 @@ pub struct WindowSensitivity {
 }
 
 /// One candidate window, net of added summaries and subsequent prefix charges.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowScenario {
     pub window: i64,
     pub cost: Cost,
@@ -1086,18 +1311,17 @@ pub struct WindowScenario {
 }
 
 /// A compaction check runs after the TTL choices and retains observed boundaries.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactionCheck {
-    #[serde(flatten)]
     pub base: CheckBase<i64>,
     /// Always "all".
     pub bucket: &'static str,
     pub model: Option<Text>,
     pub models: Vec<Option<Text>>,
     /// No setting names the window, so `current` is Claude Code's tuned window for the model.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
+    /// The window a setting names when the model's context window caps it; `current` is the cap.
+    pub setting: Option<i64>,
     pub baseline_cost: Cost,
     pub observed_summary_cost: Cost,
     pub ttls: PerBucket<Option<Ttl>>,
@@ -1106,8 +1330,7 @@ pub struct CompactionCheck {
     pub cache_evidence: Vec<CacheReplayEvidence>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObservedPremium {
     pub premium_parts: u64,
     pub standard_parts: u64,
@@ -1116,8 +1339,7 @@ pub struct ObservedPremium {
     pub monthly_premium_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CurrentPremium {
     pub premium: Cost,
     pub priced_parts: u64,
@@ -1125,10 +1347,8 @@ pub struct CurrentPremium {
 }
 
 /// Rate-only premium comparisons keep current-setting estimates separate from observed response premiums.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SpeedCheck {
-    #[serde(flatten)]
     pub base: CheckBase<String>,
     /// Always "all".
     pub bucket: &'static str,
@@ -1140,22 +1360,20 @@ pub struct SpeedCheck {
 }
 
 /// What a background feature cost, estimated from the turns where it would have run.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BackgroundCheck {
     /// Current and recommended values: true is on.
-    #[serde(flatten)]
     pub base: CheckBase<bool>,
     pub feature: BackgroundFeature,
-    /// Recorded directories whose requests this control applies to; null means absent.
+    /// Recorded directories whose requests this control applies to; None means absent.
     pub directories: Vec<Option<Text>>,
     /// Current ownership and any unresolved scope or selection.
     pub reason: String,
     /// The setting that turns it off.
     pub off: String,
-    /// The file to set it in; null for an environment variable.
+    /// The file to set it in; None for an environment variable.
     pub off_file: Option<String>,
-    /// Turns where it would have run; null when they cannot be found in transcripts.
+    /// Turns where it would have run; None when they cannot be found in transcripts.
     pub generations: Option<u64>,
     /// Estimated cost of its requests over the window.
     pub cost: Cost,
@@ -1163,9 +1381,34 @@ pub struct BackgroundCheck {
     pub lost_warming: Cost,
 }
 
+/// Auto memory's cost over the window. It is advised off whatever it cost, since
+/// notes the agent writes for itself are not reviewed like checked-in instructions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MemoryCheck {
+    /// Current and recommended values: true is on.
+    pub base: CheckBase<bool>,
+    pub harness: Harness,
+    /// The setting that turns it off.
+    pub off: String,
+    /// The file to set it in; None for an environment variable.
+    pub off_file: Option<String>,
+    /// Loaded memory and the memory files read back, priced like other context; None when unpriced.
+    pub context_usd: Option<f64>,
+    /// Memory writes at the output price, estimated from their characters; None when unpriced.
+    pub writes_usd: Option<f64>,
+    pub reads: u64,
+    pub writes: u64,
+    /// Why whether it is on could not be resolved, leaving the current value unknown.
+    pub unresolved: Option<String>,
+    /// Files whose memory settings may override `off_file`, to turn it off in too.
+    pub overrides: Vec<String>,
+    /// Whether Codex may have extracted or consolidated memories in the window, which
+    /// is never measured, so the total is a lower bound.
+    pub unmeasured_generation: bool,
+}
+
 /// Foreground Bash calls that held the cache idle, and what their misses cost.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BashWaits {
     /// Foreground Bash calls with a recorded result.
     pub calls: u64,
@@ -1180,10 +1423,8 @@ pub struct BashWaits {
 }
 
 /// Whether the foreground Bash timeout cap outlasts the cache TTL.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BashCapCheck {
-    #[serde(flatten)]
     pub base: CheckBase<Millis>,
     /// Always "all".
     pub bucket: &'static str,
@@ -1194,8 +1435,7 @@ pub struct BashCapCheck {
     pub waits: BashWaits,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PeriodStatus {
     Eligible,
     Ineligible,
@@ -1203,8 +1443,7 @@ pub enum PeriodStatus {
     Censored,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReturnTiming {
     BeforeExpiry,
     AfterExpiry,
@@ -1212,25 +1451,22 @@ pub enum ReturnTiming {
     Final,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PeriodOutcome {
     Applied,
     NotApplied,
     Unobserved,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PeriodCalibration {
-    pub events: Vec<String>,
+    pub events: Vec<Id>,
     pub summary_tokens: i64,
     pub prefix_tokens: i64,
 }
 
 /// One request gap or final observation period, without an assumed session end.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IdlePeriod {
     pub request: Text,
     pub resume: Option<Text>,
@@ -1242,41 +1478,38 @@ pub struct IdlePeriod {
     pub confirmed: bool,
     pub return_timing: ReturnTiming,
     pub outcome: PeriodOutcome,
-    pub event: Option<String>,
+    pub event: Option<Id>,
     pub version: Option<Text>,
     pub client: Option<Text>,
     pub flag_state: Option<&'static str>,
     pub activation: Option<f64>,
     pub activation_basis: std::borrow::Cow<'static, str>,
     pub summary_cost: Cost,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub calibration: Option<PeriodCalibration>,
 }
 
 /// A value for idle compaction on and off.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct OnOff<T> {
     pub on: T,
     pub off: T,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScenarioWindow {
     pub owner: String,
     pub models: Vec<Option<Text>>,
     pub value: Option<i64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ContextDelta {
     pub tokens: Option<i64>,
     pub periods: u64,
     pub delta_usd: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ActivationCohort {
     pub version: Text,
     pub client: Text,
@@ -1286,8 +1519,7 @@ pub struct ActivationCohort {
     pub fraction: f64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IdleSensitivity {
     pub closed_delta_usd: Option<f64>,
     pub open_delta_usd: Option<f64>,
@@ -1298,8 +1530,7 @@ pub struct IdleSensitivity {
 }
 
 /// An aggregate idle policy comparison at one named TTL/window configuration.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IdleScenario {
     pub baseline: String,
     pub applicable: bool,
@@ -1318,10 +1549,8 @@ pub struct IdleScenario {
 }
 
 /// Idle on/off runs after the TTL and window decisions, with a current-policy comparison.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IdleCheck {
-    #[serde(flatten)]
     pub base: CheckBase<bool>,
     /// Always "main".
     pub bucket: &'static str,
@@ -1332,8 +1561,7 @@ pub struct IdleCheck {
 }
 
 /// The changed cost of one T3 idle mode at a named TTL/window baseline.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct T3IdleScenario {
     pub mode: T3IdleMode,
     pub cost: Cost,
@@ -1342,8 +1570,7 @@ pub struct T3IdleScenario {
 }
 
 /// One T3 comparison preserves the conditional native TTL/window baseline.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct T3IdleComparison {
     pub baseline: String,
     pub ttl: Option<Ttl>,
@@ -1353,18 +1580,15 @@ pub struct T3IdleComparison {
 }
 
 /// T3 idle modes use observed expiry and lifecycle evidence, independently of native interactive eligibility.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct T3IdleCheck {
-    #[serde(flatten)]
     pub base: CheckBase<T3IdleMode>,
     pub current_settings: T3IdleComparison,
     pub after_recommendations: T3IdleComparison,
 }
 
 /// Pinging every interval for up to one cap, against leaving sessions idle.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeepaliveScenario {
     /// How long after the last request pings continue.
     pub cap_ms: Millis,
@@ -1383,14 +1607,12 @@ pub struct KeepaliveScenario {
 }
 
 /// Capped cache keepalive pings, against leaving sessions idle and idle compaction.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct KeepaliveCheck {
-    #[serde(flatten)]
     pub base: CheckBase<String>,
     /// Always "main".
     pub bucket: &'static str,
-    /// The cache lifetime pings must beat; null when unknown.
+    /// The cache lifetime pings must beat; None when unknown.
     pub lifetime_ms: Option<Millis>,
     pub interval_ms: Option<Millis>,
     /// Median incremental prompt input and recorded reply output per ping.
@@ -1402,7 +1624,7 @@ pub struct KeepaliveCheck {
     pub finals: u64,
     /// Periods in sessions whose complete policy comparison could not be priced.
     pub unpriced: u64,
-    /// Idle compaction's estimated saving where recommended; null when unknown or unsupported.
+    /// Idle compaction's estimated saving where recommended; None when unknown or unsupported.
     pub idle_compaction_savings_usd: Option<f64>,
     /// The best cap's saving minus the best alternative's; negative when pinging loses.
     pub margin_usd: Option<f64>,
@@ -1412,25 +1634,17 @@ pub struct KeepaliveCheck {
 
 /// Setting-specific evidence accompanies one common recommendation model.
 #[allow(clippy::large_enum_variant)]
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(tag = "check")]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CheckResult {
-    #[serde(rename = "claude-cache-ttl")]
     Ttl(TtlCheck),
-    #[serde(rename = "compaction-window")]
     Compaction(CompactionCheck),
-    #[serde(rename = "idle-compaction")]
     Idle(IdleCheck),
-    #[serde(rename = "t3-idle-compaction")]
     T3Idle(T3IdleCheck),
-    #[serde(rename = "fast-mode")]
     Speed(SpeedCheck),
-    #[serde(rename = "background-generation")]
     Background(BackgroundCheck),
-    #[serde(rename = "bash-timeout-cap")]
     BashCap(BashCapCheck),
-    #[serde(rename = "keepalive")]
     Keepalive(KeepaliveCheck),
+    Memory(MemoryCheck),
 }
 
 impl CheckResult {
@@ -1445,6 +1659,7 @@ impl CheckResult {
             CheckResult::Background(c) => c.base.action,
             CheckResult::BashCap(c) => c.base.action,
             CheckResult::Keepalive(c) => c.base.action,
+            CheckResult::Memory(c) => c.base.action,
         }
     }
 }
@@ -1452,7 +1667,7 @@ impl CheckResult {
 // ---------------------------------------------------------------------------
 // Exposure: recurring context components and how they were used.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
     ToolSchema,
@@ -1467,6 +1682,9 @@ pub enum Category {
     PluginInstructions,
     AppInstructions,
     ManagedInstructions,
+    /// Auto memory the harness loads on its own: Claude's MEMORY.md and system
+    /// prompt section, or Codex's memory summary.
+    Memory,
     Other,
 }
 
@@ -1486,28 +1704,29 @@ impl Category {
             Category::PluginInstructions => "plugin-instructions",
             Category::AppInstructions => "app-instructions",
             Category::ManagedInstructions => "managed-instructions",
+            Category::Memory => "memory",
             Category::Other => "other",
         }
     }
 }
 
 /// Measured size of one component.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Size {
     pub characters: Option<i64>,
     pub recorded_tokens: Option<i64>,
-    pub fingerprint: String,
+    pub fingerprint: Id,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Owner {
     Skills,
     Context,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
     Component,
@@ -1515,47 +1734,49 @@ pub enum Scope {
 }
 
 /// One revision of one historical component, with no retained content.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Component {
     #[serde(flatten)]
     pub size: Size,
-    pub id: String,
-    pub key: String,
+    /// The revision, sharing the copy that indexes it.
+    pub id: Text,
+    pub key: Id,
     /// Readable name: a tool, skill, server or file path, never content.
     pub name: String,
     pub category: Category,
     pub owner: Owner,
     pub group: Option<String>,
-    pub provenance: String,
+    /// One of a few fixed descriptions, shared across components.
+    pub provenance: Text,
     pub first_seen: Millis,
     pub current: Current,
     pub scope: Scope,
     pub members: Vec<String>,
     pub targets: Vec<String>,
     /// Absolute SKILL.md identity resolved from a rendered Codex catalog, without filesystem reads.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_path: Option<String>,
     /// Recorded instruction text size, without retaining its content.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_size: Option<InstructionSize>,
 }
 
 /// UTF-8 bytes and lines of recorded instruction text, including rendered wrappers.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct InstructionSize {
     pub bytes: usize,
     pub lines: usize,
 }
 
 /// Whether a historical component is still sent; scans never resolve it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Current {
     Unresolved,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InvocationKind {
     SkillRequest,
@@ -1568,7 +1789,7 @@ pub enum InvocationKind {
     ScriptReference,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InvocationStatus {
     Requested,
@@ -1578,7 +1799,7 @@ pub enum InvocationStatus {
     Reference,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
     Typed,
@@ -1589,7 +1810,7 @@ pub enum Via {
     Script,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IdentityBasis {
     Recorded,
@@ -1597,7 +1818,7 @@ pub enum IdentityBasis {
 }
 
 /// Actual calls, requested skills and weak script references are different evidence.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Invocation {
     pub id: String,
@@ -1610,7 +1831,7 @@ pub struct Invocation {
     pub sessions: Vec<String>,
     pub identity_basis: IdentityBasis,
     /// Opaque Codex user-turn boundary, recorded or inferred from native user-message aliases.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<String>,
     pub harness: Harness,
     pub client: Option<String>,
@@ -1619,7 +1840,7 @@ pub struct Invocation {
     pub profiles: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Linkage {
     Wire,
@@ -1627,7 +1848,7 @@ pub enum Linkage {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextCoverage {
     CompleteText,
@@ -1635,11 +1856,10 @@ pub enum TextCoverage {
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct References {
-    pub base: Option<String>,
+    pub base: Option<Id>,
     pub keep: Option<i64>,
-    #[serde(with = "crate::wire::ids")]
     pub tail: Ids,
     pub items: Option<Ids>,
 }
@@ -1817,9 +2037,14 @@ impl std::fmt::Debug for Ids {
     }
 }
 
+impl Serialize for Ids {
+    /// A flat list, however its chain is shared in memory.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
+
 /// A request-local view of historical state, including unresolved visibility.
-///
-/// Serialized by [`crate::wire`], which shares views and result totals once per SSH stream.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exposure {
     pub request: Text,
@@ -1829,8 +2054,25 @@ pub struct Exposure {
     pub results: Option<std::sync::Arc<ResultTotals>>,
 }
 
+impl Serialize for Exposure {
+    /// The request and its view's fields, without the tool-output totals.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Flat<'a> {
+            request: &'a str,
+            #[serde(flatten)]
+            view: &'a ExposureView,
+        }
+        Flat {
+            request: &self.request,
+            view: &self.view,
+        }
+        .serialize(serializer)
+    }
+}
+
 /// Characters of tool output a conversation holds, by tool, since its last compaction.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct ResultTotals {
     /// Changes at every compaction and transcript, so equal epochs mean one unbroken conversation.
     pub epoch: u64,
@@ -1839,18 +2081,13 @@ pub struct ResultTotals {
 }
 
 /// The request-independent part of an exposure.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExposureView {
-    #[serde(with = "crate::wire::ids")]
     pub components: Ids,
-    #[serde(with = "crate::wire::ids")]
     pub candidates: Ids,
-    #[serde(with = "crate::wire::ids")]
     pub removed: Ids,
-    #[serde(with = "crate::wire::ids")]
     pub inherited: Ids,
-    #[serde(with = "crate::wire::ids")]
     pub deferred: Ids,
     pub linkage: Linkage,
     pub coverage: TextCoverage,
@@ -1858,18 +2095,19 @@ pub struct ExposureView {
     pub complete_characters: Option<i64>,
     /// How many leading components are the recorded tools and system prompt, in cache-prefix order.
     pub prefix: usize,
-    pub wire_model: Option<String>,
-    pub reasons: Vec<String>,
+    pub wire_model: Option<Text>,
+    /// Views repeat a few fixed reasons, so they share one copy of each list.
+    pub reasons: std::sync::Arc<[String]>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Visible {
     Partial,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Observed {
     Observed,
@@ -1877,16 +2115,13 @@ pub enum Observed {
 }
 
 /// Coverage is scoped to a concrete harness, client, version, component and window.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Visibility {
     pub harness: Harness,
-    #[serde(with = "crate::wire::opt_text")]
     pub client: Option<Text>,
-    #[serde(with = "crate::wire::opt_text")]
     pub version: Option<Text>,
     pub profiles: Profiles,
-    #[serde(with = "crate::wire::opt_text")]
     pub component: Option<Text>,
     pub since: Millis,
     pub until: Millis,
@@ -1894,14 +2129,12 @@ pub struct Visibility {
     pub direct_calls: Observed,
     pub nested_calls: Visible,
     pub typed_skills: Observed,
-    /// Always false.
-    pub automatic_unused: bool,
     /// The same reasons for every row, so rows share one list.
     pub reasons: std::sync::Arc<[String]>,
 }
 
 /// How often one tool was called within the window, per profile set.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCalls {
     pub name: String,
@@ -1911,7 +2144,7 @@ pub struct ToolCalls {
 }
 
 /// How much output one tool returned within the window, per profile set.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolResults {
     pub name: String,
@@ -1922,7 +2155,7 @@ pub struct ToolResults {
 }
 
 /// Parser output shared by later skills and context checks.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExposureScan {
     pub components: Vec<Component>,
@@ -1933,9 +2166,33 @@ pub struct ExposureScan {
     pub tool_calls: Vec<ToolCalls>,
     /// Selected-window output of each tool, deduplicated by call id.
     pub tool_results: Vec<ToolResults>,
+    /// Selected-window reads and writes of auto memory, deduplicated by call id.
+    pub memory: Vec<MemoryUse>,
 }
 
+/// Whether the agent read or wrote auto memory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryAccess {
+    Read,
+    Write,
+}
+
+/// One read or write of auto memory by the agent.
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryUse {
+    pub harness: Harness,
+    pub access: MemoryAccess,
+    pub profiles: Vec<String>,
+    pub time: Millis,
+    /// Characters of the tool input that wrote it, which the model generated as output.
+    pub characters: Option<i64>,
+    /// The request whose reply made the call, when its record was found.
+    pub request: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CalibrationSample {
     pub request: Text,
     pub characters: i64,
@@ -1943,8 +2200,7 @@ pub struct CalibrationSample {
 }
 
 /// Character estimates are calibrated only within a matching model and client cohort.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Calibration {
     pub cohort: String,
     pub samples: Vec<CalibrationSample>,
@@ -1957,8 +2213,7 @@ pub struct Calibration {
 // Context costs.
 
 /// A settings.json value a control sets or appends.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ControlValue {
     Text(String),
     Bool(bool),
@@ -1966,15 +2221,14 @@ pub enum ControlValue {
 }
 
 /// One settings.json change: set `path` to `value`, or add `value` to the list at `path`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Control {
     pub path: Vec<String>,
     pub value: ControlValue,
     pub append: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ContextKind {
     Tool,
     McpServer,
@@ -1985,19 +2239,23 @@ pub enum ContextKind {
     System,
     /// A tool's output, carried in the conversation after the call that returned it.
     ToolOutput,
+    /// Auto memory: its loaded context and the memory files the agent read.
+    Memory,
     Other,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Verdict {
+    /// Never used across a window that would have recorded a use: a recommended change.
     Off,
+    /// Worth considering off, an advisory: it cost more than the limit per use, or no
+    /// use was recorded but the window cannot rule one out.
+    Consider,
     Keep,
 }
 
 /// Observations for a Codex catalog member; counts are evidence events, not successful executions.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CatalogSkill {
     pub path: Option<String>,
     pub requested: u64,
@@ -2013,14 +2271,13 @@ pub struct CatalogSkill {
 }
 
 /// What one piece of always-sent context cost over the window, and how to turn it off.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ContextCost {
     pub harness: Harness,
     pub profiles: Vec<String>,
     pub kind: ContextKind,
     pub name: String,
-    /// The settings change that removes it, or null without a resolved control.
+    /// The settings change that removes it, or None without a resolved control.
     pub control: Option<Control>,
     /// Selected requests that carried it.
     pub requests: u64,
@@ -2035,22 +2292,22 @@ pub struct ContextCost {
     /// Tokens it took in the most recent request that carried it.
     pub tokens: Option<i64>,
     /// API-price equivalent over the priced requests only.
-    pub cost_usd: f64,
-    /// costUsd scaled to every request that carried it; null when none could be priced.
+    pub cost_usd: Usd,
+    /// cost_usd scaled to every request that carried it; None when none could be priced.
     pub estimated_usd: Option<f64>,
-    /// Observed uses in the window; null when uses are not observable.
+    /// Observed uses in the window; None when uses are not observable.
     pub calls: Option<u64>,
     pub last_used: Option<Millis>,
     /// Whether the profile's most recent request still carried it.
     pub current: bool,
-    /// estimatedUsd divided by uses, counting no use as one; null without both.
+    /// estimated_usd divided by uses; None without a price or a recorded use.
     pub cost_per_use_usd: Option<f64>,
-    /// "off" above the cost-per-use limit; null when unpriced, unswitchable,
-    /// no longer sent, tier-sensitive, or covered by a server-off verdict.
+    /// "off" when never used, "consider" above the cost-per-use limit or when
+    /// nonuse is unproven, else "keep"; None when unpriced, unswitchable, no
+    /// longer sent, tier-sensitive, or covered by a server-off verdict.
     pub verdict: Option<Verdict>,
     /// Characters of the largest single result, for tool output.
     pub largest_characters: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub skill: Option<CatalogSkill>,
     /// MCP tool and discovery costs already included in this server's total.
     pub details: Vec<ContextCost>,
@@ -2059,18 +2316,89 @@ pub struct ContextCost {
 }
 
 // ---------------------------------------------------------------------------
+// Subagent costs.
+
+/// Where a subagent run's model came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ModelSource {
+    /// The spawning call's `model`.
+    Call,
+    /// The agent definition or role file, or a built-in agent's own definition.
+    Definition,
+    /// A setting for every subagent without a definition model.
+    Setting,
+    /// The parent conversation's model.
+    Inherited,
+    /// History and current settings cannot settle it.
+    Unknown,
+}
+
+/// How many requests or runs share one value.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Share {
+    pub name: String,
+    pub count: u64,
+}
+
+/// How many runs took their model from one source.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SourceShare {
+    pub source: ModelSource,
+    /// The setting, file or rule behind it, or why it is unknown.
+    pub detail: String,
+    pub runs: u64,
+}
+
+/// What one subagent type or agent role cost and ran on; evidence, never a recommendation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubagentCost {
+    pub harness: Harness,
+    pub profiles: Vec<String>,
+    /// Claude's agent type, or Codex's agent role or subagent source; `unrecorded` when no record names it.
+    pub kind: String,
+    /// Whether `kind` is a Codex subagent source, such as `review`, rather than an agent role.
+    pub native: bool,
+    /// Subagent transcripts of this type in the window.
+    pub runs: u64,
+    pub requests: u64,
+    /// Requests with a complete price.
+    pub priced: u64,
+    /// The API-price equivalent of its recorded requests.
+    pub cost: Cost,
+    /// Requests by recorded model, most first.
+    pub models: Vec<Share>,
+    /// Requests by recorded effort, most first; `unrecorded` when none was recorded.
+    pub efforts: Vec<Share>,
+    /// Runs by where their model came from, most first.
+    pub sources: Vec<SourceShare>,
+    /// The provider's cheapest current model in the price catalog, when it has one.
+    pub cheapest: Option<String>,
+    /// The same recorded tokens priced on `cheapest`, assuming the same turns; None when
+    /// every request already ran on it or no cheapest model is known.
+    pub reprice: Option<Cost>,
+    /// The settings that change its model.
+    pub model_setting: String,
+    /// The settings that change its effort; a lower effort changes output tokens, so its cost is unmeasured.
+    pub effort_setting: String,
+}
+
+// ---------------------------------------------------------------------------
 // Scan and report.
 
-/// Pre-window Claude metadata supplies cache evidence, never selected billing or coverage.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// Pre-window metadata supplies cache and spawn evidence, never selected billing or coverage.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct CacheContext {
     pub requests: Vec<Request>,
+    /// Pre-window Codex requests, without usage, that start a transcript or change its model,
+    /// so a subagent's start and its parent's model at spawn are known. Claude's earlier
+    /// requests are in `requests`.
+    pub codex: Vec<Request>,
     pub boundaries: Vec<StructuralEvent>,
     /// Earlier user turns, which count toward per-session thresholds.
     pub prompts: Vec<StructuralEvent>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCoverage {
     pub requests: u64,
@@ -2085,7 +2413,7 @@ pub struct ScanCoverage {
 }
 
 /// The reusable parser output for downstream checks.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scan {
     pub snapshot_started_at: String,
@@ -2101,20 +2429,23 @@ pub struct Scan {
     pub exposure: ExposureScan,
     pub cache_context: CacheContext,
     pub coverage: ScanCoverage,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// Each subagent transcript's type and spawn request, by session.
+    pub subagents: Vec<Subagent>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub t3: Vec<T3State>,
+    /// Native session identities, which only the local session export prints.
+    #[serde(skip)]
+    pub sessions: crate::sessions::Sessions,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PriceSource {
     pub source: String,
     pub fetched_at: Option<String>,
     pub offline: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct HistoricalCost {
     pub bucket: String,
     pub profiles: Vec<String>,
@@ -2125,31 +2456,25 @@ pub struct HistoricalCost {
     pub conditional_requests: u64,
     /// Alternative served tiers for missing-tier parts only; these are scenarios, not bounds.
     pub tier_sensitivity: Vec<TierScenario>,
-    /// Always "estimated".
-    pub evidence: &'static str,
     pub cost: Cost,
 }
 
 /// One hypothetical served tier, preserving every recorded effective tier.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TierScenario {
     pub tier: &'static str,
     pub cost: Cost,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ExposureSummary {
     pub calibration: Vec<Calibration>,
     pub assumptions: Vec<String>,
 }
 
-/// One host's analysis, which `--json` and the text report each present.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// One host's analysis, which the text report presents.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Report {
-    /// Always 2.
-    pub schema_version: u32,
     pub generated_at: String,
     pub scan: Scan,
     pub prices: PriceSource,
@@ -2160,6 +2485,8 @@ pub struct Report {
     pub context: Vec<ContextCost>,
     /// A piece that cost more than this per use is recommended off.
     pub max_cost_per_use_usd: f64,
+    /// What each subagent type or agent role cost and ran on, as evidence only.
+    pub subagents: Vec<SubagentCost>,
     pub checks: Vec<CheckResult>,
     pub assumptions: Vec<String>,
 }
@@ -2227,5 +2554,26 @@ mod ids_tests {
         assert_eq!(json[0], "0");
         assert_eq!(json[19_999], "19999");
         drop(ids);
+    }
+}
+
+#[cfg(test)]
+mod usd_tests {
+    use super::Usd;
+
+    fn most_negative() -> Usd {
+        Usd::from_f64(-(2f64.powi(62))) - Usd::from_f64(2f64.powi(62))
+    }
+
+    #[test]
+    #[should_panic(expected = "dollar total overflow")]
+    fn magnitude_of_the_most_negative_total_panics() {
+        most_negative().abs();
+    }
+
+    #[test]
+    #[should_panic(expected = "dollar total overflow")]
+    fn negating_the_most_negative_total_panics() {
+        let _ = -most_negative();
     }
 }

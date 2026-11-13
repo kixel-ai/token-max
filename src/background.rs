@@ -13,7 +13,7 @@ use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BackgroundCheck, BackgroundControl, BackgroundFeature, BillingPart, CheckBase, Cost,
     Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
-    Scan, Text, Ttl, Usage,
+    Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
     Catalog, add_costs, paired_savings, price_components, unit_rates, unknown_cost, zero_cost,
@@ -53,7 +53,7 @@ pub struct BackgroundInput<'a> {
     pub since: Option<Millis>,
     /// The window end, which monthly values scale to.
     pub now: Millis,
-    /// Recommend turning a feature off when it cost more than this per recorded use.
+    /// Suggest turning a feature off when its whole cost exceeds this, since uses are not recorded.
     pub max_cost_per_use_usd: f64,
 }
 
@@ -355,9 +355,10 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
         Ttl::FiveMinutes => rates.write5m,
         Ttl::OneHour => rates.write1h,
     };
+    let usd = Usd::from_f64(read as f64 * (write - rates.read));
     Cost {
-        known_usd: read as f64 * (write - rates.read),
-        total_usd: Some(read as f64 * (write - rates.read)),
+        known_usd: usd,
+        total_usd: Some(usd),
         ..zero_cost()
     }
 }
@@ -382,7 +383,7 @@ fn recap_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
     ) else {
         return unknown_cost("the recap's cached prefix has no priced usage");
     };
-    let usd = (read + write) as f64 * (rates.ordinary - rates.read);
+    let usd = Usd::from_f64((read + write) as f64 * (rates.ordinary - rates.read));
     Cost {
         known_usd: usd,
         total_usd: Some(usd),
@@ -455,7 +456,7 @@ fn check(
     let paired = paired_savings(pairs.iter().map(|(on, off)| (on, off)), 0);
     // Scale the measured net cost up to every turn where it ran, as context costs do.
     let estimate = (paired.priced > 0)
-        .then(|| paired.usd * paired.total as f64 / paired.priced as f64)
+        .then(|| paired.usd.to_f64() * paired.total as f64 / paired.priced as f64)
         .or((paired.total == 0).then_some(0.0));
     let start = input.since.or(requests.iter().map(|r| r.time).min());
     let month = |v: Option<f64>| match (v, start) {
@@ -464,12 +465,13 @@ fn check(
         }
         _ => v,
     };
-    // A suggestion or recap use is not recorded, so its whole cost counts as one use.
+    // A suggestion or recap use is not recorded, so nonuse is never proven: a whole
+    // cost above the per-use limit may still be under it per use, and stays advisory.
     let action = match (control.value, measurable, estimate) {
         (None, _, _) => Action::Advisory,
         (Some(false), _, _) => Action::Keep,
         (Some(true), false, _) | (Some(true), true, None) => Action::Advisory,
-        (Some(true), true, Some(usd)) if usd > input.max_cost_per_use_usd => Action::Change,
+        (Some(true), true, Some(usd)) if usd > input.max_cost_per_use_usd => Action::Advisory,
         (Some(true), true, Some(_)) => Action::Keep,
     };
     let other = ends.iter().filter(|e| !e.interactive).count();
@@ -543,11 +545,7 @@ fn check(
             },
             action,
             current: control.value,
-            recommended: match action {
-                Action::Change => Some(false),
-                Action::Keep => control.value,
-                Action::Advisory => None,
-            },
+            recommended: (action == Action::Keep).then_some(control.value).flatten(),
             owner: control.owner.clone(),
             since: start,
             until: Some(input.now),
@@ -579,7 +577,7 @@ fn check(
                 "a fork sends the conversation's prefix as a cache read before expiry or ordinary input after expiry, plus the last response and its instruction as new input, without writing cache",
                 "recaps require two new user turns after the previous modeled recap, including recaps before the analysis window",
                 "live-prefix reads by enabled suggestions and recaps refresh the cache; turning one feature off keeps the other's modeled requests and refreshes, including any extra recap input or later cache rewrite",
-                "uses are not recorded, so the whole cost counts as one use against --max-cost-per-use",
+                "uses are not recorded, so a whole cost above --max-cost-per-use is advisory and one below it is kept",
             ]
             .map(String::from)
             .into(),
@@ -617,7 +615,7 @@ mod tests {
 
     fn prompt(time: Millis) -> StructuralEvent {
         StructuralEvent {
-            id: format!("prompt-{time}"),
+            id: format!("prompt-{time}").into(),
             origins: vec![],
             harness: Harness::Claude,
             session: "session".into(),
@@ -674,6 +672,7 @@ mod tests {
         let mut profile = make_profile("profile", "/synthetic/.claude");
         profile.background = features.iter().map(|&(f, v)| control(f, v)).collect();
         Scan {
+            subagents: vec![],
             snapshot_started_at: String::new(),
             snapshot_finished_at: String::new(),
             since: None,
@@ -686,6 +685,7 @@ mod tests {
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
             t3: vec![],
+            sessions: Default::default(),
         }
     }
 
@@ -733,7 +733,7 @@ mod tests {
             (checks[0].base.requests, checks[0].generations),
             (2, Some(1))
         );
-        assert_eq!(checks[0].base.action, Action::Change);
+        assert_eq!(checks[0].base.action, Action::Advisory);
         assert_eq!(checks[0].directories, [Some("/synthetic/a".into())]);
         assert_eq!(
             (checks[1].base.requests, checks[1].generations),
@@ -814,15 +814,15 @@ mod tests {
             &turn_ends(&s, &s.profiles[0])[0],
             BackgroundFeature::PromptSuggestions,
         );
-        let expected = one.total_usd.unwrap() * 3.0;
-        assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
+        let expected = one.total_usd.unwrap().to_f64() * 3.0;
+        assert!((c.cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-12);
         assert!((c.base.savings_usd.unwrap() - expected).abs() < 1e-12);
         assert_eq!(c.base.action, Action::Keep);
-        // Any cost above the per-use limit turns it off, since uses are not recorded.
+        // Uses are not recorded, so a cost above the per-use limit is only advisory.
         let c = &run(&s, expected / 2.0)[0];
         assert_eq!(
             (c.base.action, c.base.recommended),
-            (Action::Change, Some(false))
+            (Action::Advisory, None)
         );
     }
 
@@ -864,18 +864,18 @@ mod tests {
         // The recap at 5 minutes kept the 5m cache warm for the prompt at 10.
         let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
         let lost = 100_000.0 * (rates.write5m - rates.read);
-        assert!((c.lost_warming.total_usd.unwrap() - lost).abs() < 1e-12);
+        assert!((c.lost_warming.total_usd.unwrap().to_f64() - lost).abs() < 1e-12);
         let recap = fork_cost(
             &prices(),
             &turn_ends(&s, &s.profiles[0])[2],
             BackgroundFeature::SessionRecaps,
         );
-        let net = recap.total_usd.unwrap() - lost;
+        let net = recap.total_usd.unwrap().to_f64() - lost;
         assert!((c.base.savings_usd.unwrap() - net).abs() < 1e-12);
         // A request on another model reads a cache the recap never touched.
         let mut other = s.clone();
         other.requests[3].parts[0].model = Some("claude-sonnet-5".into());
-        assert_eq!(run(&other, 1.0)[0].lost_warming.total_usd, Some(0.0));
+        assert_eq!(run(&other, 1.0)[0].lost_warming.total_usd, Some(Usd::ZERO));
     }
 
     #[test]
@@ -905,11 +905,12 @@ mod tests {
             )
             .total()
             .total_usd
-            .unwrap();
+            .unwrap()
+            .to_f64();
             let c = &run(&s, 1.0)[0];
             assert_eq!(c.generations, Some(1));
-            assert!((c.cost.total_usd.unwrap() - expected).abs() < 1e-12);
-            assert_eq!(c.lost_warming.total_usd, Some(0.0));
+            assert!((c.cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-12);
+            assert_eq!(c.lost_warming.total_usd.map(Usd::to_f64), Some(0.0));
         }
     }
 
@@ -958,7 +959,7 @@ mod tests {
             let expected = expected_reads as f64 * (rates.write5m - rates.read);
             let c = &run(&s, 1.0)[0];
             assert_eq!(c.generations, Some(1));
-            assert!((c.lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
+            assert!((c.lost_warming.total_usd.unwrap().to_f64() - expected).abs() < 1e-12);
         }
     }
 
@@ -978,18 +979,18 @@ mod tests {
             ],
             &[0, 1, 2, 9],
         );
-        let warm_recap = run(&s, 1.0)[1].cost.total_usd.unwrap();
+        let warm_recap = run(&s, 1.0)[1].cost.total_usd.unwrap().to_f64();
         // The suggestion at minute five keeps the prefix warm for the recap at eight.
         s.requests[2].end_time = 5 * MINUTE;
         let checks = run(&s, 1.0);
-        assert!((checks[1].cost.total_usd.unwrap() - warm_recap).abs() < 1e-12);
+        assert!((checks[1].cost.total_usd.unwrap().to_f64() - warm_recap).abs() < 1e-12);
         // The prompt at nine is still inside the suggestion's lifetime without a recap.
-        assert_eq!(checks[1].lost_warming.total_usd, Some(0.0));
+        assert_eq!(checks[1].lost_warming.total_usd.map(Usd::to_f64), Some(0.0));
         // Without suggestions the recap loses its read, and the next request loses warming.
         let rates = unit_rates(&prices(), &s.requests[2], &s.requests[2].parts[0]).unwrap();
         let extra =
             100_100.0 * (rates.ordinary - rates.read) + 100_000.0 * (rates.write5m - rates.read);
-        assert!((checks[0].lost_warming.total_usd.unwrap() - extra).abs() < 1e-12);
+        assert!((checks[0].lost_warming.total_usd.unwrap().to_f64() - extra).abs() < 1e-12);
     }
 
     #[test]
@@ -1011,7 +1012,9 @@ mod tests {
             s.requests[2].end_time = 3 * MINUTE;
             let rates = unit_rates(&prices(), &s.requests[3], &s.requests[3].parts[0]).unwrap();
             let expected = reads as f64 * (rates.write5m - rates.read);
-            assert!((run(&s, 1.0)[1].lost_warming.total_usd.unwrap() - expected).abs() < 1e-12);
+            assert!(
+                (run(&s, 1.0)[1].lost_warming.total_usd.unwrap().to_f64() - expected).abs() < 1e-12
+            );
         }
     }
 
@@ -1055,7 +1058,7 @@ mod tests {
         let checks = run(&s, 1.0);
         assert_eq!(checks[0].base.action, Action::Keep);
         assert_eq!(checks[0].base.savings_usd, None);
-        assert_eq!(checks[0].cost.total_usd, Some(0.0));
+        assert_eq!(checks[0].cost.total_usd.map(Usd::to_f64), Some(0.0));
         assert_eq!(checks[1].base.action, Action::Advisory);
         assert_eq!(checks[1].base.evidence, Evidence::Guidance);
         assert_eq!(checks[1].generations, None);
@@ -1074,7 +1077,9 @@ mod tests {
             &turn_ends(&s, &s.profiles[0])[0],
             BackgroundFeature::PromptSuggestions,
         );
-        assert!((c.base.savings_usd.unwrap() - one.total_usd.unwrap() * 3.0).abs() < 1e-12);
+        assert!(
+            (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 3.0).abs() < 1e-12
+        );
         for r in &mut s.requests {
             r.evidence = RequestEvidence::Unknown;
         }

@@ -238,6 +238,7 @@ mod tests {
 
     fn scan(requests: Vec<Request>) -> Scan {
         Scan {
+            subagents: vec![],
             snapshot_started_at: String::new(),
             snapshot_finished_at: String::new(),
             since: None,
@@ -250,6 +251,7 @@ mod tests {
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
             t3: vec![],
+            sessions: Default::default(),
         }
     }
 

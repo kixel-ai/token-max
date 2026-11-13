@@ -18,10 +18,11 @@ use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
-    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, IdleAttribution, IdleCheck,
-    IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
-    PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar, Scan,
-    ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowControl,
+    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
+    IdleCheck, IdleControl, IdlePeriod, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind,
+    PerBucket, PeriodCalibration, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming,
+    Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
+    WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sum, add_costs, price_components, price_part, server_cost,
@@ -98,8 +99,8 @@ fn scale(cost: &Cost, fraction: f64) -> Cost {
         return zero_cost();
     }
     Cost {
-        known_usd: cost.known_usd * fraction,
-        total_usd: cost.total_usd.map(|t| t * fraction),
+        known_usd: cost.known_usd.scale(fraction),
+        total_usd: cost.total_usd.map(|t| t.scale(fraction)),
         ..cost.clone()
     }
 }
@@ -364,7 +365,7 @@ struct ReplayIndex<'r> {
     /// The last request with each identity.
     by_id: HashMap<&'r str, &'r Request>,
     /// Identities with an event at or after the window start.
-    selected_events: HashSet<&'r str>,
+    selected_events: HashSet<&'r Id>,
     calibration: HashMap<SampleKey<'r>, Calibration<'r>>,
 }
 
@@ -392,11 +393,11 @@ impl<'r> ReplayIndex<'r> {
             index.by_id.insert(&*r.id, r);
         }
         // The last event with each identity, like a JavaScript Map built from the array.
-        let mut by_id: HashMap<&str, &StructuralEvent> = HashMap::default();
+        let mut by_id: HashMap<&Id, &StructuralEvent> = HashMap::default();
         for &e in events {
-            by_id.insert(e.id.as_str(), e);
+            by_id.insert(&e.id, e);
             if e.time >= since {
-                index.selected_events.insert(e.id.as_str());
+                index.selected_events.insert(&e.id);
             }
             for (i, origin) in e.origins.iter().enumerate() {
                 let session = &*origin.session;
@@ -612,11 +613,12 @@ fn changed_cost(
         };
         price_components(catalog, r, &unit).output
     };
-    let output = if difference(&output_unit(after), &output_unit(before)).total_usd == Some(0.0) {
-        zero_cost()
-    } else {
-        difference(&a.output, &b.output)
-    };
+    let output =
+        if difference(&output_unit(after), &output_unit(before)).total_usd == Some(Usd::ZERO) {
+            zero_cost()
+        } else {
+            difference(&a.output, &b.output)
+        };
     add_costs([
         &difference(&a.cache, &b.cache),
         &difference(&a.ordinary, &b.ordinary),
@@ -696,7 +698,7 @@ struct Session<'r> {
 /// Charges shared by every profile.
 struct Summaries<'a> {
     /// The last charge for each event, like a JavaScript Map built from the array.
-    by_event: HashMap<&'a str, &'a CompactionCharge>,
+    by_event: HashMap<&'a Id, &'a CompactionCharge>,
     requests: HashSet<&'a str>,
 }
 
@@ -754,10 +756,10 @@ impl<'r, 'x> Runner<'r, 'x> {
         groups
             .into_iter()
             .map(|(session, ps)| {
-                let mut idle_by_event: HashMap<&str, usize> = HashMap::default();
+                let mut idle_by_event: HashMap<&Id, usize> = HashMap::default();
                 for &i in &ps {
                     if let Some(b) = self.prepared[i].boundary {
-                        idle_by_event.insert(b.id.as_str(), i);
+                        idle_by_event.insert(&b.id, i);
                     }
                 }
                 let requests = ReplayIndex::session(&self.index.requests, session);
@@ -770,7 +772,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                 }
                 for &e in boundaries {
                     let key = tick_key(e.time, true, keyed.len());
-                    let idle = idle_by_event.get(e.id.as_str()).copied();
+                    let idle = idle_by_event.get(&e.id).copied();
                     let source = idle
                         .map(|i| self.prepared[i].previous)
                         .or_else(|| {
@@ -778,7 +780,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             self.index.by_id.get(id).copied()
                         })
                         .unwrap_or(requests[0]);
-                    let summary = self.summaries.by_event.get(e.id.as_str()).copied();
+                    let summary = self.summaries.by_event.get(&e.id).copied();
                     let id = summary.and_then(|s| s.request.as_deref()).unwrap_or("");
                     let tick = Tick::Boundary {
                         e,
@@ -831,7 +833,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             by_period: vec![None; self.prepared.len()],
         };
         let mut resumed = 0.0;
-        let mut charged: HashSet<&str> = HashSet::default();
+        let mut charged: HashSet<&Id> = HashSet::default();
         for session in sessions {
             let mut states = vec![State {
                 weight: 1.0,
@@ -916,7 +918,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let sample = c.samples[0];
                             if point {
                                 periods[i].calibration = Some(PeriodCalibration {
-                                    events: c.samples.iter().map(|s| s.event.to_string()).collect(),
+                                    events: c.samples.iter().map(|s| s.event.clone()).collect(),
                                     summary_tokens: g.output,
                                     prefix_tokens: g.prefix,
                                 });
@@ -1025,10 +1027,10 @@ impl<'r, 'x> Runner<'r, 'x> {
                         let summary_request = summary
                             .and_then(|s| s.request.as_deref())
                             .filter(|r| !r.is_empty());
-                        let allocated = !charged.contains(e.id.as_str())
+                        let allocated = !charged.contains(&e.id)
                             && (summary_request.is_none()
-                                || summary.is_some_and(|s| s.cost.total_usd != Some(0.0)));
-                        charged.insert(e.id.as_str());
+                                || summary.is_some_and(|s| s.cost.total_usd != Some(Usd::ZERO)));
+                        charged.insert(&e.id);
                         // Changed input to the observed summary under each carried context.
                         let extra = |state: &State| -> Option<Cost> {
                             let linked = linked.filter(|_| !billed.is_empty())?;
@@ -1415,7 +1417,7 @@ impl<'a> Profiled<'a> {
             let mut activity_index = 0;
             let mut turn_start = Millis::MIN;
             let mut turn_end = Millis::MIN;
-            let mut pending: HashSet<&str> = HashSet::default();
+            let mut pending: HashSet<&Id> = HashSet::default();
             let mut old: HashMap<&str, &Scalar> = HashMap::default();
             for (position, &r) in group.iter().enumerate() {
                 let scope = self.scopes.scope(r);
@@ -1489,10 +1491,10 @@ impl<'a> Profiled<'a> {
                             turn_end = e.time;
                         }
                         EventKind::ToolStart => {
-                            pending.insert(e.tool_id.as_deref().unwrap_or(&e.id));
+                            pending.insert(e.tool_id.as_ref().unwrap_or(&e.id));
                         }
                         EventKind::ToolEnd => {
-                            if let Some(id) = e.tool_id.as_deref().filter(|id| !id.is_empty()) {
+                            if let Some(id) = &e.tool_id {
                                 pending.remove(id);
                             }
                         }
@@ -1681,14 +1683,14 @@ impl<'a> Profiled<'a> {
         baseline: &str,
     ) -> IdleScenario {
         let (prepared, mut periods, activation_cohorts) = self.periods(index, ttls, windows, owner);
-        let idle_events: HashSet<&str> = prepared
+        let idle_events: HashSet<&Id> = prepared
             .iter()
-            .filter_map(|p| p.boundary.map(|b| b.id.as_str()))
+            .filter_map(|p| p.boundary.map(|b| &b.id))
             .collect();
         let idle_requests: HashSet<&str> = self
             .all_summaries
             .iter()
-            .filter(|s| idle_events.contains(s.event.as_str()) && s.cost.total_usd != Some(0.0))
+            .filter(|s| idle_events.contains(&s.event) && s.cost.total_usd != Some(Usd::ZERO))
             .filter_map(|s| s.request.as_deref().filter(|r| !r.is_empty()))
             .collect();
         let mut common = Sum::new();
@@ -1699,8 +1701,8 @@ impl<'a> Profiled<'a> {
         }
         for s in self.all_summaries {
             if s.request.as_deref().is_none_or(str::is_empty)
-                && !idle_events.contains(s.event.as_str())
-                && index.selected_events.contains(s.event.as_str())
+                && !idle_events.contains(&s.event)
+                && index.selected_events.contains(&s.event)
             {
                 common.add(&s.cost);
             }
@@ -1718,7 +1720,11 @@ impl<'a> Profiled<'a> {
         let mut run = |on: bool, mode: Mode| runner.run(self, ttls, on, mode, &mut periods);
         let off = run(false, Mode::Point);
         let on = run(true, Mode::Point);
-        let delta = |r: &Run| difference(&r.adjustment, &off.adjustment).total_usd;
+        let delta = |r: &Run| {
+            difference(&r.adjustment, &off.adjustment)
+                .total_usd
+                .map(Usd::to_f64)
+        };
         let closed = delta(&run(true, Mode::Closed));
         let open = delta(&run(true, Mode::Open));
         let mut lifetime_break_even_fraction = None;
@@ -1791,7 +1797,9 @@ impl<'a> Profiled<'a> {
                 ContextDelta {
                     tokens,
                     periods: selected.len() as u64,
-                    delta_usd: difference(&total(&on), &total(&off)).total_usd,
+                    delta_usd: difference(&total(&on), &total(&off))
+                        .total_usd
+                        .map(Usd::to_f64),
                 }
             })
             .collect();
@@ -1970,7 +1978,7 @@ fn profile_checks<'a>(
         requests: HashSet::default(),
     };
     for s in options.summaries {
-        summaries.by_event.insert(s.event.as_str(), s);
+        summaries.by_event.insert(&s.event, s);
         if let Some(r) = s.request.as_deref().filter(|r| !r.is_empty()) {
             summaries.requests.insert(r);
         }
@@ -2308,7 +2316,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                     a.cost
                         .total_usd
                         .unwrap()
-                        .total_cmp(&b.cost.total_usd.unwrap())
+                        .cmp(&b.cost.total_usd.unwrap())
                         .then_with(|| {
                             (b.mode == instance.idle_mode).cmp(&(a.mode == instance.idle_mode))
                         })
@@ -2323,7 +2331,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             .and_then(|s| s.cost.total_usd);
         let savings = baseline_cost
             .zip(best.and_then(|s| s.cost.total_usd))
-            .map(|(a, b)| a - b);
+            .map(|(a, b)| (a - b).to_f64());
         let applicable = instance.enabled && instance.ownership_resolved;
         checks.push(T3IdleCheck {
             base: CheckBase {
@@ -2653,15 +2661,15 @@ fn t3_replay(
         Generate(usize),
     }
     let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
-    let idle_ids: HashSet<&str> = events
+    let idle_ids: HashSet<&Id> = events
         .iter()
         .filter(|e| e.idle_attribution == IdleAttribution::T3)
-        .map(|e| e.id.as_str())
+        .map(|e| &e.id)
         .collect();
     let idle_requests: HashSet<&str> = options
         .summaries
         .iter()
-        .filter(|s| idle_ids.contains(s.event.as_str()))
+        .filter(|s| idle_ids.contains(&s.event))
         .filter_map(|s| s.request.as_deref())
         .collect();
     for &r in requests {
@@ -2898,7 +2906,7 @@ fn t3_replay(
                                 (s.summary.usage.input.unwrap_or(0)
                                     - events
                                         .iter()
-                                        .find(|e| e.id == s.event)
+                                        .find(|e| e.id == *s.event)
                                         .and_then(|e| e.pre_tokens)
                                         .unwrap_or(s.summary.usage.input.unwrap_or(0)))
                                 .max(0)
@@ -2947,7 +2955,7 @@ fn t3_replay(
                     if mode == T3IdleMode::BeforeCacheExpires {
                         periods[*i].summary_cost = cost;
                         periods[*i].calibration = Some(PeriodCalibration {
-                            events: matches.iter().map(|s| s.event.into()).collect(),
+                            events: matches.iter().map(|s| s.event.clone()).collect(),
                             summary_tokens: output,
                             prefix_tokens: full,
                         });
@@ -3116,6 +3124,10 @@ mod tests {
             reason: "explicit".into(),
         };
         Profile {
+            agents: Default::default(),
+            instruction_budget_file: None,
+            instruction_budget_unresolved: None,
+            outranking_files: vec![],
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -3156,6 +3168,7 @@ mod tests {
             background: vec![],
             background_directories: IndexMap::default(),
             background_requests: IndexMap::default(),
+            memory: None,
             t3: None,
         }
     }
@@ -3173,6 +3186,7 @@ mod tests {
         events.extend(boundaries);
         events.sort_by_key(|e| e.time);
         Scan {
+            subagents: vec![],
             snapshot_started_at: "1970-01-01T00:00:00.000Z".into(),
             snapshot_finished_at: "1970-01-01T00:00:00.000Z".into(),
             since: None,
@@ -3185,6 +3199,7 @@ mod tests {
             cache_context: CacheContext::default(),
             coverage: ScanCoverage::default(),
             t3: vec![],
+            sessions: Default::default(),
         }
     }
 
@@ -3287,7 +3302,7 @@ mod tests {
         assert_eq!(c.base.recommended, Some(true));
         let a = &c.after_recommendations;
         let p = period(a, "before");
-        near(p.summary_cost.total_usd, 0.1);
+        near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         let calibration = p.calibration.as_ref().unwrap();
         assert_eq!(calibration.prefix_tokens, 20_000);
         assert_eq!(calibration.summary_tokens, 2000);
@@ -3295,7 +3310,7 @@ mod tests {
         // Off: 301k cold writes; following 302k reads 301k and writes 1k.
         near(a.delta_usd, -2.196);
         near(
-            Some(a.cost.on.total_usd.unwrap() - a.cost.off.total_usd.unwrap()),
+            Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             a.delta_usd.unwrap(),
         );
         assert!(
@@ -3319,7 +3334,7 @@ mod tests {
         near(a.delta_usd, 0.1);
         let last = period(a, "final");
         assert_eq!(last.resume, None);
-        near(last.summary_cost.total_usd, 0.1);
+        near(last.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         near(a.sensitivity.closed_delta_usd, 0.0);
         near(a.sensitivity.open_delta_usd, 0.1);
         let recent = check(&s, 150.0);
@@ -3467,9 +3482,69 @@ mod tests {
         let c = check_with(&s, 200.0, &policies);
         let current = &c.current_settings;
         assert_eq!(current.periods[0].context_tokens, Some(300_000));
-        near(Some(current.cost.off.known_usd), 2.4);
+        near(Some(current.cost.off.known_usd.to_f64()), 2.4);
         assert_eq!(current.delta_usd, None);
         assert_eq!(c.usage_estimates.len(), 1);
+    }
+
+    #[test]
+    fn directories_sized_apart_replay_their_own_tuned_windows() {
+        let mut open = request("open", 100.0, 150_000);
+        open.cwd = Some("/open".into());
+        let mut capped = in_session(request("capped", 101.0, 150_000), "elsewhere");
+        capped.cwd = Some("/capped".into());
+        let mut s = data(vec![open, capped], vec![]);
+        let unset = |env: &Env| {
+            compaction_controls(&CompactionSources {
+                harness: Harness::Claude,
+                user: &Map::new(),
+                managed: &Map::new(),
+                env,
+                file: "settings.json",
+                managed_file: "managed.json",
+                scopes: None,
+            })
+            .unwrap()
+        };
+        let mut cap = Env::default();
+        cap.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let profile = &mut s.profiles[0];
+        profile.compaction = unset(&Env::default());
+        let idle = profile.idle.clone().unwrap();
+        profile.idle_directories = Some(IndexMap::from_iter([
+            (
+                "/open".to_string(),
+                IdleControl {
+                    compaction: Some(unset(&Env::default())),
+                    ..idle.clone()
+                },
+            ),
+            (
+                "/capped".to_string(),
+                IdleControl {
+                    compaction: Some(unset(&cap)),
+                    ..idle
+                },
+            ),
+        ]));
+        crate::controls::tune_windows(&mut s);
+        let row = "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow";
+        let windows: Vec<(String, Option<i64>)> = check(&s, 200.0)
+            .current_settings
+            .windows
+            .into_iter()
+            .map(|w| (w.owner, w.value))
+            .collect();
+        assert_eq!(
+            windows,
+            [
+                (row.to_string(), Some(967_000)),
+                (
+                    format!("{row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)"),
+                    Some(200_000)
+                ),
+            ]
+        );
     }
 
     #[test]
@@ -3478,7 +3553,7 @@ mod tests {
             for kind in [EventKind::TurnStart, EventKind::TurnEnd] {
                 let mut s = data(vec![request("final", 100.0, 300_000)], vec![]);
                 s.events.push(StructuralEvent {
-                    tool_id: tool_id.map(str::to_string),
+                    tool_id: tool_id.map(Id::from),
                     ..session_event("abandoned", EventKind::ToolStart, "target", 50.0)
                 });
                 s.events
@@ -3557,6 +3632,7 @@ mod tests {
             model: None,
             models: vec![],
             unset: false,
+            setting: None,
             baseline_cost: zero_cost(),
             observed_summary_cost: zero_cost(),
             ttls: PerBucket::default(),
@@ -3597,10 +3673,10 @@ mod tests {
         let a = &c.after_recommendations;
         let p = period(a, "before");
         assert_eq!(p.outcome, PeriodOutcome::Applied);
-        near(p.summary_cost.total_usd, 0.1);
+        near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         near(a.delta_usd, 0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6);
         near(
-            Some(a.cost.on.total_usd.unwrap() - a.cost.off.total_usd.unwrap()),
+            Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             a.delta_usd.unwrap(),
         );
     }
@@ -3668,13 +3744,13 @@ mod tests {
         assert_eq!(a.activation_cohorts[0].fraction, 0.5);
         let last = period(a, "final");
         near(last.activation, 0.5);
-        near(last.summary_cost.total_usd, 0.05);
+        near(last.summary_cost.total_usd.map(Usd::to_f64), 0.05);
         let no = period(a, "no");
         assert_eq!(no.outcome, PeriodOutcome::NotApplied);
-        near(no.summary_cost.total_usd, 0.0);
+        near(no.summary_cost.total_usd.map(Usd::to_f64), 0.0);
         let other = period(a, "different");
         near(other.activation, 1.0);
-        near(other.summary_cost.total_usd, 0.1);
+        near(other.summary_cost.total_usd.map(Usd::to_f64), 0.1);
         assert!(
             c.base
                 .uncertainty
@@ -3706,7 +3782,7 @@ mod tests {
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
             report.checks[0] = CheckResult::Idle(c);
             let text = format_report(&report, ReportOptions::default());
-            assert!(text.contains("On and off cost the same"), "{text}");
+            assert!(text.contains("on and off cost the same"), "{text}");
         }
     }
 
@@ -3736,7 +3812,7 @@ mod tests {
         let a = &c.after_recommendations;
         near(a.delta_usd, -2.252);
         near(
-            Some(a.cost.on.total_usd.unwrap() - a.cost.off.total_usd.unwrap()),
+            Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             -2.252,
         );
     }
@@ -3823,7 +3899,7 @@ mod tests {
             [(Some(20_000), 1), (Some(300_000), 2), (Some(250_000), 1)]
         );
         // Each final period only adds its summary, so a size's delta sums its own periods'.
-        let summary = |id| period(a, id).summary_cost.total_usd.unwrap();
+        let summary = |id| period(a, id).summary_cost.total_usd.unwrap().to_f64();
         near(a.by_context[1].delta_usd, summary("a") + summary("c"));
         near(a.by_context[2].delta_usd, summary("b"));
         assert!(summary("b") < summary("a"));
@@ -3989,11 +4065,7 @@ mod tests {
             Some(Ttl::FiveMinutes)
         );
         let full = report(parsed, 100.0);
-        assert!(
-            !serde_json::to_string(&full)
-                .unwrap()
-                .contains("Compacted while idle")
-        );
+        assert!(!format!("{full:?}").contains("Compacted while idle"));
         assert!(format_report(&full, ReportOptions::default()).contains("Idle compaction"));
         let details = ReportOptions {
             details: true,
@@ -4111,6 +4183,7 @@ mod tests {
             idle_mode: mode,
             idle_owner: "t3/settings.json:idleCompaction".into(),
             ownership_resolved: true,
+            settings_unresolved: false,
             limitations: vec![],
             inherited_window: None,
         });
@@ -4180,11 +4253,13 @@ mod tests {
         assert_eq!(scenarios[1].summaries, 1);
         assert_eq!(scenarios[2].summaries, 1);
         assert!(
-            scenarios[2].cost.total_usd.unwrap() < scenarios[1].cost.total_usd.unwrap(),
+            scenarios[2].cost.total_usd.unwrap().to_f64()
+                < scenarios[1].cost.total_usd.unwrap().to_f64(),
             "warm proactive summary should beat cold on-return summary"
         );
         assert!(
-            scenarios[2].cost.total_usd.unwrap() < scenarios[0].cost.total_usd.unwrap(),
+            scenarios[2].cost.total_usd.unwrap().to_f64()
+                < scenarios[0].cost.total_usd.unwrap().to_f64(),
             "full resumed-prefix savings should cover the summary"
         );
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
@@ -4243,7 +4318,7 @@ mod tests {
         let s = &check.current_settings.scenarios;
         assert_eq!(s[1].summaries, 0);
         assert_eq!(s[2].final_summaries, 1);
-        assert!(s[2].cost.total_usd.unwrap() > s[0].cost.total_usd.unwrap());
+        assert!(s[2].cost.total_usd.unwrap().to_f64() > s[0].cost.total_usd.unwrap().to_f64());
         assert_eq!(check.base.recommended, Some(Off));
         let short = t3_check(&scan, 2.0);
         assert_eq!(
@@ -4264,6 +4339,16 @@ mod tests {
                 .all(|s| s.summaries == 0)
         );
         assert_eq!(short.base.recommended, Some(BeforeCacheExpires));
+        // Turning it off writes no summary, so no summary's lost detail is mentioned.
+        let mut report = report(scan, 10.0);
+        report
+            .checks
+            .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
+        report.checks.push(CheckResult::T3Idle(check));
+        let text = format_report(&report, ReportOptions::default());
+        let line = crate::test_support::report_line(&text, "T3 idle compaction");
+        assert_eq!(line.mark, "change", "{text}");
+        assert!(!line.evidence.contains("A summary drops detail"), "{text}");
     }
 
     #[test]
@@ -4309,13 +4394,13 @@ mod tests {
         let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
         // Off grows the later request back from 20k to 300k uncached tokens, and charges
         // neither the recorded nor a new summary.
-        near(observed[0].cost.total_usd, 1.5 - 0.1);
+        near(observed[0].cost.total_usd.map(Usd::to_f64), 1.5 - 0.1);
         assert_eq!(observed[0].summaries, 0);
-        near(baseline[0].cost.total_usd, 0.0);
+        near(baseline[0].cost.total_usd.map(Usd::to_f64), 0.0);
         // The proactive summary replaces the recorded one, so both histories compare alike.
         // onReturn is left out: the recorded summary also calibrates its cache reads.
         let relative = |s: &[crate::model::T3IdleScenario]| {
-            s[2].cost.total_usd.unwrap() - s[0].cost.total_usd.unwrap()
+            s[2].cost.total_usd.unwrap().to_f64() - s[0].cost.total_usd.unwrap().to_f64()
         };
         near(Some(relative(&observed)), relative(&baseline));
     }
@@ -4372,7 +4457,7 @@ mod tests {
         t3_meta(&mut scan, "a").lifecycle_eligible = Some(false);
         let check = t3_check(&scan, 10.0);
         let s = &check.current_settings.scenarios;
-        near(s[0].cost.total_usd, 0.0);
+        near(s[0].cost.total_usd.map(Usd::to_f64), 0.0);
         assert!(s[1].cost.total_usd.is_some(), "{:?}", s[1].cost);
         assert_eq!(s[1].summaries, 1);
         assert_eq!(s[2].cost.total_usd, None);
@@ -4385,9 +4470,9 @@ mod tests {
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
         report.checks.push(CheckResult::T3Idle(check));
         let text = format_report(&report, ReportOptions::default());
-        let line = text.lines().find(|l| l.contains("T3 idle")).unwrap();
+        let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
-            line.contains("Changed cost per month: off $0, onReturn ")
+            line.contains("changed cost per month: off $0, onReturn ")
                 && line.contains(&format!("beforeCacheExpires is unpriced: {guards}")),
             "{text}"
         );
@@ -4417,7 +4502,7 @@ mod tests {
         let proactive = &check.current_settings.scenarios[2];
         assert_eq!(
             (proactive.cost.total_usd, proactive.summaries),
-            (Some(0.0), 0)
+            (Some(Usd::ZERO), 0)
         );
         // With no earlier request, `a` may have started long before its first record.
         scan.requests.retain(|r| &*r.id != "p");
@@ -4472,7 +4557,10 @@ mod tests {
         scan.requests.push(unpriced);
         let check = t3_check(&scan, 10.0);
         for (with, without) in check.current_settings.scenarios.iter().zip(&priced) {
-            near(with.cost.total_usd, without.cost.total_usd.unwrap());
+            near(
+                with.cost.total_usd.map(Usd::to_f64),
+                without.cost.total_usd.unwrap().to_f64(),
+            );
         }
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
     }

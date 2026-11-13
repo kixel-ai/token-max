@@ -6,7 +6,8 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, EventKind, Harness,
-    IdleAttribution, IdleControl, Location, Millis, Scan, SpeedControl, TunedWindow, WindowControl,
+    IdleAttribution, IdleControl, Location, MemoryControl, Millis, Scan, SpeedControl, TunedWindow,
+    WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -345,6 +346,82 @@ pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundContro
     }])
 }
 
+/// Claude auto memory, on by default: `CLAUDE_CODE_DISABLE_AUTO_MEMORY` in the
+/// environment or settings env wins over `autoMemoryEnabled`.
+/// <https://code.claude.com/docs/en/memory#auto-memory>
+pub fn claude_memory(scopes: &[SettingsScope], env: &Env) -> Result<MemoryControl, ScanError> {
+    let key = "autoMemoryEnabled";
+    let variable = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+    let environment = scoped_environment(scopes, env);
+    if let Some(disabled) = environment.values.get(variable).and_then(env_flag) {
+        let owner = environment.owners[variable].clone();
+        let scope = scopes
+            .iter()
+            .find(|s| owner == format!("{}:env.{variable}", s.file));
+        return Ok(MemoryControl {
+            value: !disabled,
+            owner,
+            off: match scope {
+                Some(_) => format!("\"env\": {{\"{variable}\": \"1\"}}"),
+                None => format!("{variable}=1"),
+            },
+            off_file: scope.map(|s| s.file.to_string()),
+            directory: None,
+            unresolved: None,
+            overrides: vec![],
+            stored: false,
+        });
+    }
+    let first = scopes.first().map_or("settings.json", |s| s.file);
+    let (value, owner, file) = match scoped_bool(scopes, key)? {
+        Some((value, file)) => (value, format!("{file}:{key}"), file),
+        None => (true, format!("{first}:{key} (default)"), first),
+    };
+    Ok(MemoryControl {
+        value,
+        owner,
+        off: format!("\"{key}\": false"),
+        off_file: Some(file.into()),
+        directory: None,
+        unresolved: None,
+        overrides: vec![],
+        stored: false,
+    })
+}
+
+/// Codex memories, off by default: `features.memories` turns them on.
+/// `memories.use_memories = false` only keeps them out of the prompt and
+/// `memories.generate_memories = false` only stops new ones, so both together are
+/// off too. Scopes run from lowest to highest precedence; `user` is the file a
+/// default is set in.
+/// <https://learn.chatgpt.com/docs/customization/memories>
+pub fn codex_memory(scopes: &[SettingsScope], user: &str) -> Result<MemoryControl, ScanError> {
+    let key = "features.memories";
+    let (enabled, file, owner) = match scoped_bool(scopes, key)? {
+        Some((value, file)) => (value, file, format!("{file}:{key}")),
+        None => (false, user, format!("{user}:{key} (default)")),
+    };
+    let used = scoped_bool(scopes, "memories.use_memories")?;
+    let generated = scoped_bool(scopes, "memories.generate_memories")?;
+    let (value, owner) = match (used, generated) {
+        (Some((false, used)), Some((false, generated))) if enabled => (
+            false,
+            format!("{used}:memories.use_memories and {generated}:memories.generate_memories"),
+        ),
+        _ => (enabled, owner),
+    };
+    Ok(MemoryControl {
+        value,
+        owner,
+        off: format!("{key} = false"),
+        off_file: Some(file.into()),
+        directory: None,
+        unresolved: None,
+        overrides: vec![],
+        stored: false,
+    })
+}
+
 /// A positive millisecond count as Claude Code parses it: a leading integer, or an integral exponent form.
 fn timeout_millis(value: &Value) -> Option<Millis> {
     let text = js_string(Some(value));
@@ -487,11 +564,13 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
                 comparison_unknown: (!supported)
                     .then(|| "effective Codex threshold scope is unsupported".into()),
                 unset: false,
+                setting: None,
             },
             models,
             capped: false,
-            declared: false,
+            declared: None,
             tuned: IndexMap::default(),
+            contexts: IndexMap::default(),
         });
     }
     let env_key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -568,6 +647,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             minimum_claude_patch: Some(if suffix { 304 } else { 288 }),
             comparison_unknown: None,
             unset: value.is_none() && !disabled,
+            setting: None,
         })
     };
     for scope in scopes {
@@ -591,12 +671,11 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             .values
             .get("CLAUDE_CODE_MAX_CONTEXT_TOKENS")
             .map(|value| js_string(Some(value)))
-            .is_some_and(|text| {
-                !text.is_empty()
-                    && text.bytes().all(|b| b.is_ascii_digit())
-                    && text.parse::<u64>().is_ok_and(|n| n > 0)
-            }),
+            .filter(|text| !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
+            .and_then(|text| text.parse::<u64>().ok())
+            .filter(|&n| n > 0),
         tuned: IndexMap::default(),
+        contexts: IndexMap::default(),
     })
 }
 
@@ -618,6 +697,10 @@ fn strip_dated(text: &str, digits: usize) -> Option<&str> {
     let tail = tail.strip_prefix('-')?;
     tail.bytes().all(|b| b.is_ascii_digit()).then_some(head)
 }
+
+/// Why a capped window that applies to every model stays advisory.
+pub const CAPPED_SHARED: &str =
+    "the window applies to every model, so no setting changes this model's capped window alone";
 
 /// Exact model settings win; known dated Claude IDs share their undated model row.
 pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> WindowControl {
@@ -654,6 +737,8 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
             value: None,
             applicable: false,
             reason: "model alias or [1m] setting may own the current window; effective alias selection is unresolved".into(),
+            // The alias's row may name the window, so its triggers do not show the default.
+            unset: false,
             ..current.clone()
         };
     }
@@ -665,11 +750,39 @@ pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> W
         if let Some(value) = tuned.value {
             control.value = Some(value);
             control.applicable = true;
-            // Tuned windows differ by model, so only the model's own row changes one alone.
+            // Tuned windows differ by model, so only the model's own row changes one alone; they
+            // also differ by what sizes the context, so scopes sized apart never share an owner,
+            // even where the model's own row is already the owner, as with an explicit "auto".
             if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
                 control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
             }
+            if let Some(sized) = Sizing::of(compaction, canonical).suffix() {
+                control.owner += &sized;
+            }
         }
+    } else if let (Some(setting), Some(&context)) =
+        (control.value, compaction.contexts.get(canonical))
+        && setting > context
+    {
+        control.setting = Some(setting);
+        control.value = Some(context);
+        let mut reason = format!(
+            "Claude Code caps this {setting}-token window at the model's {context}-token context window"
+        );
+        // The cap differs by model, so only the model's own row changes its window alone; a
+        // variable or T3 window above every row would change other models too.
+        if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
+            control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
+        } else if !control.owner.contains(":modelSettings.") {
+            control.applicable = false;
+            reason += &format!(" and {CAPPED_SHARED}");
+        }
+        // The owner keys one replayed window, so it names what sets the cap: scopes sized apart
+        // never share one, nor do a capped model and an uncapped one under a shared window.
+        control.owner += &Sizing::of(compaction, canonical)
+            .suffix()
+            .unwrap_or_else(|| format!(" (capped at {context})"));
+        control.reason = format!("{reason}; {}", control.reason);
     }
     control
 }
@@ -705,8 +818,61 @@ fn native_million(model: &str) -> Option<bool> {
     }
 }
 
-/// Fill each Claude profile's tuned window for every model it used: the trigger of its latest
-/// automatic compaction on that model, else Claude Code's documented default.
+/// What sets a model's context window, and so its tuned window, under one scope's environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Sizing {
+    /// The model's own context window.
+    Native,
+    /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds the model at 200k.
+    Capped,
+    /// `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size an ID outside the documented table.
+    Declared(u64),
+}
+
+impl Sizing {
+    fn of(compaction: &CompactionControls, model: &str) -> Self {
+        // The cap holds even an explicit window; only a declared window can size an ID Claude
+        // Code does not recognize, and it never sizes a documented model.
+        match compaction.declared {
+            Some(tokens) if native_million(model).is_none() => Self::Declared(tokens),
+            _ if compaction.capped => Self::Capped,
+            _ => Self::Native,
+        }
+    }
+
+    /// The owner suffix that keeps windows sized this way apart from the model's native ones.
+    fn suffix(self) -> Option<String> {
+        match self {
+            Self::Native => None,
+            Self::Capped => Some(" (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)".into()),
+            Self::Declared(tokens) => {
+                Some(format!(" (under CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens})"))
+            }
+        }
+    }
+
+    /// The context window that caps any window, when Claude Code holds the model below the 1M
+    /// maximum. A model documented at 200k runs larger only through its `[1m]` variant, and an
+    /// unrecognized `[1m]` spelling ignores a declared window unless the 1M opt-out is set, so a
+    /// recorded request above either size shows that variant ran. Without a declared window, an
+    /// ID outside the table may be one Claude Code recognizes, so its context stays unknown.
+    fn context(self, compaction: &CompactionControls, model: &str, largest: i64) -> Option<i64> {
+        match self {
+            Self::Capped => Some(TUNED_STANDARD),
+            Self::Declared(tokens) => {
+                let tokens = i64::try_from(tokens).unwrap_or(i64::MAX);
+                (compaction.capped || largest <= tokens).then_some(tokens)
+            }
+            Self::Native => (native_million(model) == Some(false) && largest <= TUNED_STANDARD)
+                .then_some(TUNED_STANDARD),
+        }
+    }
+}
+
+/// Fill the tuned window of every model a Claude profile used, in the profile's controls and in
+/// each recorded directory's, which idle and keepalive read: the trigger of the latest automatic
+/// compaction on that model under the same sizing, else Claude Code's documented default. Also
+/// fill each model's context window there, which caps an explicit window.
 pub fn tune_windows(scan: &mut Scan) {
     let Scan {
         profiles,
@@ -729,7 +895,20 @@ pub fn tune_windows(scan: &mut Scan) {
                 }
             }
         }
-        let mut observed: IndexMap<String, (Millis, i64)> = IndexMap::default();
+        // Idle and keepalive read a recorded directory's own controls, else the profile's.
+        let scope = |cwd: Option<&str>| {
+            cwd.filter(|c| !c.is_empty())
+                .and_then(|c| {
+                    profile
+                        .idle_directories
+                        .as_ref()?
+                        .get(c)?
+                        .compaction
+                        .as_ref()
+                })
+                .unwrap_or(&profile.compaction)
+        };
+        let mut observed: IndexMap<(String, Sizing), (Millis, i64)> = IndexMap::default();
         for e in cache_context.boundaries.iter().chain(events.iter()) {
             if let (
                 EventKind::Compaction,
@@ -746,49 +925,75 @@ pub fn tune_windows(scan: &mut Scan) {
             ) && e.profiles.contains(&profile.id)
                 && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
             {
-                let latest = observed.entry(undated(model)).or_insert((e.time, tokens));
+                // A trigger under an explicit window does not show the default.
+                let at = scope(e.cwd.as_deref());
+                if !window_control(at, Some(model)).unset {
+                    continue;
+                }
+                let model = undated(model);
+                let sizing = Sizing::of(at, &model);
+                let latest = observed.entry((model, sizing)).or_insert((e.time, tokens));
                 if e.time >= latest.0 {
                     *latest = (e.time, tokens);
                 }
             }
         }
-        let CompactionControls {
-            capped, declared, ..
-        } = profile.compaction;
-        for (model, size) in largest {
-            let documented = native_million(&model);
-            let (value, reason) = match (observed.get(&model), documented) {
-                // The cap holds even an explicit window, so a trigger from before it cannot lift
-                // it; only a declared window can size an ID Claude Code does not recognize.
-                _ if capped && (documented.is_some() || !declared) => (
-                    Some(TUNED_STANDARD),
-                    "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
-                ),
-                (Some(&(_, tokens)), _) => (
-                    Some(tokens),
-                    format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
-                ),
-                (None, Some(true)) => (
-                    Some(TUNED_MILLION),
-                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
-                ),
-                (None, Some(false)) if size <= TUNED_STANDARD => (
-                    Some(TUNED_STANDARD),
-                    "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
-                ),
-                (None, Some(false)) => (
-                    None,
-                    "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
-                ),
-                (None, None) => (
-                    None,
-                    "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
-                ),
-            };
-            profile
-                .compaction
-                .tuned
-                .insert(model, TunedWindow { value, reason });
+        let directories = profile.idle_directories.iter_mut().flatten();
+        for compaction in std::iter::once(&mut profile.compaction)
+            .chain(directories.filter_map(|(_, idle)| idle.compaction.as_mut()))
+        {
+            // Directories share the profile's history, so its largest requests stand for each.
+            compaction.contexts = largest
+                .iter()
+                .filter_map(|(model, &size)| {
+                    let context = Sizing::of(compaction, model).context(compaction, model, size);
+                    Some((model.clone(), context?))
+                })
+                .collect();
+            for (model, &size) in &largest {
+                let sizing = Sizing::of(compaction, model);
+                let trigger = observed.get(&(model.clone(), sizing));
+                let (value, reason) = match (sizing, trigger, native_million(model)) {
+                    // A trigger from before the cap cannot lift it.
+                    (Sizing::Capped, ..) => (
+                        Some(TUNED_STANDARD),
+                        "no setting names a window; CLAUDE_CODE_DISABLE_1M_CONTEXT=1 holds this model at the documented 200k".into(),
+                    ),
+                    (_, Some(&(_, tokens)), _) => (
+                        Some(tokens),
+                        format!("no setting names a window; the latest automatic compaction on this model triggered at {tokens} tokens"),
+                    ),
+                    (_, None, Some(true)) => (
+                        Some(TUNED_MILLION),
+                        "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented default of about 967k tokens for native-1M models, which the server can retune".into(),
+                    ),
+                    (_, None, Some(false)) if size <= TUNED_STANDARD => (
+                        Some(TUNED_STANDARD),
+                        "no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code's documented 200k default for this model".into(),
+                    ),
+                    (_, None, Some(false)) => (
+                        None,
+                        "no setting names a window and a recorded request exceeded this model's documented 200k default, so a [1m] variant may set it; its tuned default is not established".into(),
+                    ),
+                    // Claude Code compacts a provider or custom ID it cannot resolve at the
+                    // declared window, but not a bare claude- name, nor an unrecognized [1m]
+                    // spelling, which a recorded request above the declared window shows ran.
+                    (Sizing::Declared(tokens), None, None)
+                        if !model.starts_with("claude-")
+                            && compaction.contexts.contains_key(model) =>
+                    (
+                        compaction.contexts.get(model).copied(),
+                        format!("no setting names a window and no automatic compaction on this model was recorded; assumed Claude Code compacts this unrecognized ID at CLAUDE_CODE_MAX_CONTEXT_TOKENS={tokens}"),
+                    ),
+                    (_, None, None) => (
+                        None,
+                        "no setting names a window and Claude Code documents no default for this model ID; its tuned default is not established".into(),
+                    ),
+                };
+                compaction
+                    .tuned
+                    .insert(model.clone(), TunedWindow { value, reason });
+            }
         }
     }
 }
@@ -1262,6 +1467,76 @@ mod tests {
         }])
         .unwrap_err();
         assert_eq!(error.message, "invalid tui.auto_recap");
+    }
+
+    #[test]
+    fn memory_controls_follow_the_environment_then_settings_with_harness_defaults() {
+        let user = map(json!({ "autoMemoryEnabled": false }));
+        let managed = map(json!({ "env": { "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "0" } }));
+        let scope = |config, file| SettingsScope { config, file };
+        let empty = Map::new();
+        let default = claude_memory(&[scope(&empty, "user.json")], &Env::default()).unwrap();
+        assert_eq!(
+            (default.value, default.owner.as_str(), default.off.as_str()),
+            (
+                true,
+                "user.json:autoMemoryEnabled (default)",
+                r#""autoMemoryEnabled": false"#
+            )
+        );
+        let set = claude_memory(&[scope(&user, "user.json")], &Env::default()).unwrap();
+        assert!(!set.value);
+        // The environment wins over the setting, whether from the shell or settings env.
+        let shell = env(&[("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")]);
+        let forced = claude_memory(&[scope(&empty, "user.json")], &shell).unwrap();
+        assert_eq!(
+            (forced.value, forced.off.as_str(), forced.off_file),
+            (false, "CLAUDE_CODE_DISABLE_AUTO_MEMORY=1", None)
+        );
+        let scoped = claude_memory(
+            &[scope(&user, "user.json"), scope(&managed, "managed.json")],
+            &Env::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            (scoped.value, scoped.off_file.as_deref()),
+            (true, Some("managed.json"))
+        );
+
+        let codex = |config: Value| {
+            let config = map(config);
+            codex_memory(
+                &[SettingsScope {
+                    config: &config,
+                    file: "config.toml",
+                }],
+                "config.toml",
+            )
+            .unwrap()
+        };
+        assert!(!codex(json!({})).value);
+        let on = codex(json!({ "features": { "memories": true } }));
+        assert_eq!(
+            (on.value, on.off.as_str()),
+            (true, "features.memories = false")
+        );
+        // Keeping them out of the prompt alone still generates new ones.
+        let unused = codex(json!({
+            "features": { "memories": true },
+            "memories": { "use_memories": false },
+        }));
+        assert!(unused.value);
+        let inert = codex(json!({
+            "features": { "memories": true },
+            "memories": { "use_memories": false, "generate_memories": false },
+        }));
+        assert_eq!(
+            (inert.value, inert.owner.as_str()),
+            (
+                false,
+                "config.toml:memories.use_memories and config.toml:memories.generate_memories"
+            )
+        );
     }
 
     // Ported from compaction.test.ts: "effective per-model controls honor managed scope, environment ownership and dated IDs".

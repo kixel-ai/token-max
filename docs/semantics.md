@@ -5,7 +5,7 @@ any transcript. It streams one newline-terminated JSON record at a time. Raw
 objects live only through that line's normalization; retained data contains
 counts, opaque identities, times, and whitelisted structural metadata. A file
 that changes identity or shrinks fails. Appended bytes are outside the snapshot.
-`--json` reports the file count, frozen and deferred bytes, and skipped lines. Metadata storage grows with requests/events, not transcript text.
+The report counts skipped lines, and `--details` the files with a deferred final line. Metadata storage grows with requests/events, not transcript text.
 
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
@@ -64,7 +64,7 @@ inspected 2026-11-07, defines these counters and their accumulation.
 Counts are measured evidence where individually recorded; cumulative differences
 are estimated and unverifiable deltas are unknown. Costs are estimates at the
 catalog's present public API rates. Missing costs have both a known subtotal and
-a null total, with reasons. An internal model is never replaced with a public one.
+an unknown total, with reasons. An internal model is never replaced with a public one.
 A Claude profile with a custom `ANTHROPIC_BASE_URL`, such as a gateway or proxy,
 still speaks the Anthropic API and is priced as the public Anthropic API
 equivalent. Unsupported providers/tiers are not assigned standard rates.
@@ -117,8 +117,8 @@ most the largest priced difference. A winner is recommended only when that bound
 cannot flip the sign; otherwise the check stays unknown. A handful of failed or
 in-flight requests therefore cannot hide a clear winner, while a close call stays
 unresolved. `coverage` gives the priced and total part counts, and the TTL result
-adds `oneHourSavingsUsd` so a kept setting can state its margin. Scenario totals
-still keep null and the unknown reasons.
+adds the 1h saving so a kept setting can state its margin. Scenario totals
+still stay unknown with their reasons.
 
 The maintainer's [B1 cache-state decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6710296074)
 uses explicit known, estimated and unknown predecessor states. A recorded cache
@@ -135,9 +135,9 @@ in that cohort, while a zero-cache
 request cannot renew or erase an older cached prefix. Pre-window states are replayed
 without charging them or adding them to the selected request count.
 
-`cacheEvidence` reports predecessor request/part IDs, times, state and the outcome
+Cache evidence records predecessor request/part IDs, times, state and the outcome
 of each uncertain or estimated transition. Each predecessor separately records
-`prefixEvidence` (measured/estimated/unknown) and `cohortKnown`, so an estimated
+whether its prefix is measured, estimated or unknown and whether its cohort is known, so an estimated
 prefix with missing cohort metadata retains both facts. Witnesses cover the latest possible
 expired/recent predecessors and the prefix extrema in the 5-to-60-minute range;
 they are not a duplicate inventory of every attempt. Every original attempt stays
@@ -148,11 +148,11 @@ subtotal for the request. If the geometry is invariant, the comparison can be
 priced while predecessor attribution remains unknown. This is an evidence test,
 not a demand that every sensitivity scenario favor the aggregate winner.
 
-`comparisonCost` contains cache charges. `fixedCost` contains ordinary input,
+The cache comparison contains cache charges. The fixed cost contains ordinary input,
 output, server fees and unmatched summary proxies. TTL changes preserve total
 input/context tier and output under the fixed-behavior assumption, so these fixed
 terms cancel even when their price or token count is unknown. Full scenario totals
-retain null and the reason. Recorded zero cache reads/writes need no cache price;
+stay unknown with the reason. Recorded zero cache reads/writes need no cache price;
 missing cache counters cannot be cancelled as if they were zero. An unsupported
 model/context tier needed for nonzero cache charges keeps the comparison unpriced.
 Mixed agent/source TTLs preserve the available history; a transition is inferred
@@ -181,7 +181,7 @@ directly. Claude does
 not record a complete settings-change history; matching observed metadata cannot
 prove that unrecorded controls stayed unchanged. Consecutive unlinked attempts,
 missing brackets, shrinking geometry, inconsistent warm reads, expired growing-context brackets and
-differing attribution remain unsupported. `usageEstimates` names the bracket
+differing attribution remain unsupported. A usage estimate records the bracket
 request IDs, estimated input geometry, recorded output limit when available,
 assumptions, and reasons. Equal counts do not prove equal content or prefix identity.
 
@@ -258,17 +258,40 @@ client version is the applicability assumption.
 
 When no setting names a window, each model the profile used gets Claude Code's
 tuned window, owned by that model's `modelSettings` row because the defaults
-differ by model. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
+differ by model. The profile's controls and each recorded directory's, which
+idle and keepalive read, are tuned under what sizes the model's context there.
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at 200k,
 except an ID outside the table when `CLAUDE_CODE_MAX_CONTEXT_TOKENS` may size it.
+A window sized by either variable is owned by the row under that variable and
+value, so directories sized apart never share a replayed window.
 Otherwise the trigger of the profile's latest automatic, non-idle compaction on
-the model comes first, including one before `--since`, since the server can
+the model under the same sizing and no explicit window comes first, including
+one before `--since`, since the server can
 retune the default without a release. Failing that, the [documented defaults](https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds),
 checked 2026-11-11, are an assumption: about 967k for native-1M models (Fable,
 Sonnet 5 and later, Haiku 5.5, Opus 4.7 and later), and 200k for older Opus,
 Sonnet and Haiku models.
 A recorded request above 200k on an older model leaves its default unresolved,
 because a `[1m]` variant may have set it; so does a model ID outside that table,
-such as a gateway alias or Mythos. Per-model controls require v2.1.288; environment suffixes require
+such as a gateway alias or Mythos, unless `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is
+set. Claude Code then [compacts](https://code.claude.com/docs/en/model-config#which-ids-claude_code_max_context_tokens-applies-to)
+(checked 2026-11-11) a provider or custom ID at the declared window, which is
+assumed as its default unless the ID is a bare `claude-` name, where the variable
+applies only with compaction off, or a recorded request above the declared
+window without the 1M opt-out shows a `[1m]` spelling ran, which ignores it.
+Claude Code caps any window at the model's context window, so a larger explicit
+window replays at that context window where it is known: 200k under
+`CLAUDE_CODE_DISABLE_1M_CONTEXT=1`, or for an older model unless a recorded
+request above 200k shows its `[1m]` variant ran; and the
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` value for an ID outside the table, unless,
+without the opt-out, a recorded request above it shows a `[1m]` spelling ran.
+Without that variable, an ID outside the table may be one Claude Code
+recognizes, so its window stays uncapped. The report names both the setting's
+value and the capped window. A capped user or managed global window is owned by
+the model's `modelSettings` row, the only setting that changes it alone; a
+capped environment or T3 window applies to every model, so it stays advisory.
+Either owner then names what caps it, the variable and value or the cap itself.
+Per-model controls require v2.1.288; environment suffixes require
 v2.1.304. Project, launch and per-agent overrides remain an explicit limitation of
 the observed-file analysis. See [Claude model configuration](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)
 and [settings reference](https://code.claude.com/docs/en/settings-reference#modelsettings),
@@ -305,9 +328,8 @@ median first post-boundary prefix, which can contain instructions, retained item
 and new context. Added passes require linked billed summary output. Claude `postTokens` remains
 a proxy only for unmatched observed charges in the baseline; it cannot
 establish output size for calibrating additional passes. Disagreeing summary-model
-attribution leaves the affected comparison unpriced. JSON gives each supporting
-boundary and resumed request identity. The new prefix is cold on the resumed
-request, whose charge already includes it; `prefixCost` is attribution, not another
+attribution leaves the affected comparison unpriced. The new prefix is cold on the resumed
+request, whose charge already includes it; the prefix cost is attribution, not another
 charge to add. Subsequent growing prefixes reuse only within the chosen Claude
 lifetime or the documented default 30m billed Codex lifetime. A new prefix cannot
 inherit external warming of the replaced transcript.
@@ -484,7 +506,7 @@ is a range. Every cap compares the
 same fully priced sessions; unresolved sessions leave the aggregate winner
 unknown, without bounding their cost by unrelated priced sessions.
 
-Current ping state is unknown (`current: null`): scheduled-task metadata does
+Current ping state is unknown: scheduled-task metadata does
 not establish a task's purpose, and recorded turns remain ordinary activity.
 There are no task-ID flags or text heuristics. Every result stays advisory and
 never changes the exit code, including a priced recommendation for no pings.
@@ -563,8 +585,8 @@ priced but whose instructions are not, is unpriced for that request. Each piece'
 tokens are charged at the slot they fall in: cached reads, then 1h writes, then
 5m writes, then ordinary input, at the request's model, provider and context
 tier. A request whose calibrated pieces exceed its recorded input is left
-unpriced rather than clipped. `costUsd` covers priced requests only;
-`estimatedUsd` scales it to every request that carried the piece and is null
+unpriced rather than clipped. A piece's cost covers priced requests only; its
+estimate scales that to every request that carried the piece and is unknown
 when none could be priced, which the report shows as unknown, never $0. A piece repeated within one request counts
 once. Skill listings split into their member skills plus the listing framing;
 Codex rendered catalogs split into path-identified
@@ -593,7 +615,7 @@ Tool results are `tool-output` rows, one per tool and one per MCP server. A
 result stays in the conversation until it compacts: output the previous request
 held is carried, and output beyond it is new, under the bounds above. A result
 that is not plain text, such as an image, leaves its row unpriced for that
-request. `calls` counts results in the window and `largestCharacters` the
+request. The report counts results in the window and the characters of the
 largest one. The report lists each beside the cap that limits it:
 `bashOutputMaxChars` or `BASH_MAX_OUTPUT_LENGTH` for Claude's Bash (about 30,000
 characters when unset), `MAX_MCP_OUTPUT_TOKENS` for Claude MCP servers (25,000
@@ -626,18 +648,26 @@ server/tool identity exactly matches the candidate control in each profile;
 model-facing tool names may be sanitized or shortened, so unmatched names get
 no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
 A recommendation to disable the server covers its individual tool changes,
-so the settings snippet does not add redundant per-tool blocks.
-Instruction files have no switch. Core tools, the system prompt
+so the changes do not add redundant per-tool edits.
+Instruction files have no switch; Claude's MEMORY.md is auto memory, not an
+instruction file (see [Auto memory](#auto-memory)). Core tools, the system prompt
 and the listing framing are always
 sent. Calls count `tool_use` IDs in the window once, even when copied into several
 transcript files. A copy cannot say which profile made a call, so it counts for
 every row of its tool that shares a profile with it; skill uses count only the
 model's Skill calls, since a hidden skill can still be typed, except where the
 switch removes the skill entirely, where typed requests count too. A piece still sent
-today is recommended off when `estimatedUsd` divided by its uses, counting no
-use as one, exceeds `maxCostPerUseUsd` (default $1, `--max-cost-per-use`);
-otherwise it is kept. The ratio does not depend on the window's length. A piece
-with no priced request or unresolved service-tier evidence gets no cost-per-use verdict. Duplicate Codex copies can
+today with a positive cost and no recorded use is recommended off (`verdict:
+"off"`, exit 1), whatever the amount, when its profile's first shaped request in
+the window already carried it and none of that profile's transcripts has an
+unreadable or deferred line, which could hold a call. One first sent later, one
+whose profile's transcripts are incomplete, or a Codex catalog skill, whose
+uses are only partly recorded, gets `"consider"`, an advisory that exits
+0, since the window cannot rule out a use. A used piece whose `estimatedUsd`
+divided by its uses (`costPerUseUsd`) exceeds `maxCostPerUseUsd` (default $1,
+`--max-cost-per-use`) also gets `"consider"`; otherwise it is kept. The ratio
+does not depend on the window's length. A piece with no priced request or
+unresolved service-tier evidence gets no verdict. Duplicate Codex copies can
 still receive a path-based recommendation without dollars. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
@@ -680,9 +710,9 @@ observations never prove nonuse.
 
 An absolute-path `[[skills.config]]` entry with `enabled = false` removes a
 Codex skill entirely, including explicit invocation, so typed requests count.
-The JSON control uses `path: ["skills", "config"]`, an object `value` containing
-`path` and `enabled`, and `append: true`; generated TOML appends array-of-table
-entries rather than replacing existing controls. Last matching entries win;
+Its control is `skills.config`, an entry containing `path` and `enabled`;
+generated TOML appends array-of-table entries rather than replacing existing
+controls. Last matching entries win;
 restart Codex after changing config. `allow_implicit_invocation: false` changes
 invocation policy and is not claimed to remove listing cost.
 
@@ -690,8 +720,8 @@ Duplicate detection is by exact name within the latest catalog for each owning
 profile set, independent of pricing. Retain the identifiable path with the
 most recorded observations, breaking ties in listing order, and recommend
 disabling other paths even without prices. The preferred copy keeps its
-cost-per-use verdict when prices and service-tier evidence permit one, so all
-copies may be off when even that copy exceeds the threshold. Conditional prices
+cost-per-use verdict when prices and service-tier evidence permit one, so it
+may be worth considering off when even that copy exceeds the threshold. Conditional prices
 retain the skill's observed-use evidence and disable control while leaving its
 cost-per-use verdict unresolved. Repeated discovery of the same path
 cannot be removed with a path control while keeping that path enabled; remove
@@ -765,9 +795,12 @@ Calibration
 estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
-currently guarantees complete typed-skill or nested-call visibility, so automatic
-unused findings remain blocked. Context verdicts rest on cost per recorded use,
-not on a claim that a piece is unused, and change no local agent settings.
+currently guarantees complete typed-skill or nested-call visibility, so the
+exposure scan's `automaticUnused` stays false. Context verdicts instead rest on
+the calls each transcript records: Claude records every tool, MCP and Skill
+call, subagents' included, so a piece carried from the window's start with none
+is unused. Codex catalog skills and pieces first sent mid-window stay advisory
+when unused. Verdicts change no local agent settings.
 
 Record shapes were checked on 2026-11-07 using local structural metadata only;
 no real transcript text was printed or copied into fixtures. Claude's existing
@@ -780,6 +813,87 @@ Current provider guidance distinguishes skill discovery from body loading:
 [Claude deferred tools](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search).
 [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search)
 documents provided tool definitions. All guidance was checked on 2026-11-07.
+
+## Auto memory
+
+`auto-memory` checks each profile once. It is advisory while memory is on and
+keep once it is off, and never exits 1: notes the agent writes for itself skip
+the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
+slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not
+apply. The check reports the total cost, the reads and writes, and the setting
+that turns it off; its `savingsUsd` is that total. Once memory is off, the line
+still shows what it cost and how often it was used earlier in the window.
+Requests that recorded no context leave the memory they loaded unmeasured. When
+no request recorded one, the cost is unknown rather than zero; otherwise the
+total is a lower bound, shown as "at least", and `coverage` counts the requests
+that recorded their context.
+
+[Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
+memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or
+`autoMemoryEnabled: false` says otherwise. While it is on, the system prompt has
+a `# Memory` section and the `instructions` attachment carries `MEMORY.md` as
+type `AutoMem`. The section, from its heading to the next top-level heading, is
+measured apart from the rest of the recorded system prompt and placed right
+after it; `MEMORY.md` is placed like any other attachment. Both form the
+`memory` context row. A request that loads `MEMORY.md` without such a section,
+as subagents do, leaves any memory instructions elsewhere in its prompt
+unmeasured, and the check says how many did. Today's setting decides whether
+memory is on, as every other check reads today's settings. It is resolved at the
+working directory of the latest main-agent request, where the user worked most
+recently, including the project's `.claude/settings.json` and
+`.claude/settings.local.json`, so `offFile` names the file that owns it. Claude
+Code reads the setting when a session starts, so a session begun before a change
+keeps the old value until it restarts. When main-agent sessions in that
+directory disagree with the setting at their latest request with a recorded
+shape, such as one that still carries the `# Memory` section after memory was
+turned off, the check notes how many, without changing its verdict. The scan
+cannot see an environment variable set only in the process that launched
+Claude Code.
+
+Uses are Read, Write, Edit and MultiEdit calls on files in a memory directory:
+`<root>/projects/<project>/memory/` under the profile root or alias, or the
+directory a loaded `MEMORY.md` came from, which `autoMemoryDirectory` can move.
+Read results move from the Read tool's output row to the memory row. The input a
+write sent, which the model generated, is estimated at the output price of the
+request whose reply made the call, using that model's calibrated token ratio;
+writes without one stay unpriced rather than zero.
+
+[Codex](https://developers.openai.com/codex/memories) memories are off unless
+`features.memories = true`, or both `memories.use_memories = false` (which
+keeps them out of the prompt) and `memories.generate_memories = false` (which
+stops new ones) are set. With each full context Codex 0.167.0 adds a developer message part
+tagged `memories.instructions` holding `memory_summary.md`, split into several
+parts when long; earlier versions start it with `## Memory`. A full world
+state leaves it in context. Compaction rebuilds it: the summary in the
+`compacted` record's `replacement_history` takes its place, and without one it
+is gone. The settings decide whether memory is on, resolved like Claude Code's
+at the latest main-agent request's directory, including the `.codex/config.toml` layers of
+a trusted project. When something the scan cannot record could change that, the
+state is unknown and the line is a yellow advisory that memories may be on,
+naming why: a project layer that sets memories in a project whose trust is not
+recorded, a named config profile (or legacy `profiles` entry) that sets
+memories, a named profile's `project_root_markers` or `projects` that could
+add or drop a `.codex/config.toml` above the session's directory, up to the
+user's home (whose own `.codex` is the user layer), that sets
+them, or a T3 instance whose launch arguments, secret environment values or
+machine policy could override them (as for Claude Code's T3 instances). Its turn-off advice then also names each file that sets memories, since
+the user setting alone would not override them. Fully resolved settings keep a
+definite on or off. A session there that carried a summary at its latest
+request while the settings turn memory off is noted, and requests that recorded no context leave the cost
+a lower bound or unknown even with memories off now, since they may have run
+while memories were on. A missing summary shows nothing, since it appears only once one has
+been written. Uses are
+the dedicated `memories` tools (`list`, `read` and `search` as reads,
+`add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token
+rule of thumb) and shell reads under `<codex home>/memories/` or
+`memories_v2/`. Dedicated tool output moves to the memory row; shell output
+stays on the shell's row. Extraction and consolidation run as requests Codex
+records only in telemetry, so their cost is not measured: wherever memories may
+have run in the window (not definitely off, used or loaded, or with a
+`memories` or `memories_v2` store under the Codex home, which Codex creates only
+once it generates memories), the line says so and its total is a lower bound. No local session has
+enabled Codex memories, so its tests use synthetic records derived from the
+0.167.0 source.
 
 ## Background generation
 
@@ -815,12 +929,12 @@ recap override wins over named-profile recap values. A worktree's `.git` file is
 a root marker, so discovery never walks into its parent checkout.
 
 Each distinct control retains only its applicable main requests, working
-directories, owner, disable snippet and pricing coverage. Missing or relative
+directories, owner, disabling setting and pricing coverage. Missing or relative
 working directories, unknown trust with project overrides and unresolved
-selection have a null current value, unknown cost and no recommendation.
+selection have an unknown current value, unknown cost and no recommendation.
 Current values model the selected history; they do not prove historical enablement.
-Only allowlisted control metadata is retained or sent through SSH, never other
-settings, environment values or file contents.
+Only allowlisted control metadata is retained, never other settings,
+environment values or file contents.
 
 Claude Code 2.1.319 sends suggestions and recaps as forks of the main
 conversation with `skipTranscript` and `skipCacheWrite`, so no transcript records
@@ -856,9 +970,11 @@ on the same model, speed and provider count, up to the prefix the recap read. Tu
 recorded usage are scaled from the priced ones, and with none priced the check
 is unknown.
 
-Uses (an accepted suggestion, a read recap) are not recorded, so the whole
-estimate counts as one use: a feature is recommended off when it cost more than
-`--max-cost-per-use` over the window. Goal check-ins start ordinary-looking task
+Uses (an accepted suggestion, a read recap) are not recorded, so nonuse is never
+proven and the check never recommends a change: a feature that cost more than
+`--max-cost-per-use` over the window is worth considering off (`action:
+"advisory"`, exit 0), and one that cost less is kept, since it cannot have cost
+more than that per use. Goal check-ins start ordinary-looking task
 notification turns and Codex does not record automatic recaps, so both report an
 unknown cost and stay advisory. Each line names where to turn the feature off:
 the settings file that owns the effective value, managed settings included, or
@@ -932,35 +1048,40 @@ content is stored or tested.
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
 commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
-the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
-`~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
-snapshots, readers and exposure extraction produce the same scan a local run
-would; it fetches no prices and runs no checks. Its stderr is discarded, so
+the destination's `sh` to run `token-max doctor --ssh-scan` from `PATH`, the
+release installers' directory or `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
+snapshots, readers, exposure extraction and checks produce the same report a
+local run there would, priced from the catalog the coordinator sends and dated
+by the destination's own clock once its scan ends. Its stderr is discarded, so
 login-script output cannot reach the report; failures come from the stream or
 from the exit status of `ssh` (255), the shell (127 when token-max is missing)
 or the platform check.
 
-The stream is private to one build: a header naming the package version and a
-fingerprint of the scan types, then either the scan or the destination's safe
-diagnostic, then the end of the stream. Any other build, a truncated or
-trailing value, a reference to an unsent value, or a nonzero exit fails the
-run. Strings, identifier lists, exposure views, tool-output totals and
-message-digest chains are sent once and then referenced by index, so the stream and the coordinator's
-copy keep the sharing the destination's scan had in memory. The coordinator
-reads the stream as it arrives rather than buffering it, and checks that the
-scan covers the requested window.
+The stream is private to one build. The destination writes a header naming the
+package version and a fingerprint of the stream's types, and starts scanning.
+The coordinator loads prices meanwhile and writes one request on the
+destination's stdin: the price catalog, `--max-cost-per-use`, and the report
+format (this terminal's width, color and Unicode settings,
+`--details` and the host's label). The destination then writes either its
+printed report, its window and whether it recommends a change, or its safe
+diagnostic, then ends the stream. Any other build, a truncated or trailing
+value, a report for another window than requested, or a nonzero exit
+fails the run. The coordinator prints a destination's text with every terminal
+control escaped except line breaks and, when color is on, the color sequences
+reports use.
 
-Background controls, their owning files and pre-window prompts and requests
-travel with the scan, so background estimates use the destination's settings
-and full eligibility history, just as a local run there would.
+The scan never leaves its host, so the coordinator holds at most its own scan
+however many hosts it audits, and each destination's memory is that of a local
+run there.
 
-Every host's scan is analyzed separately against one price catalog, so cache
-replay, profile ownership, coverage and settings never mix between hosts, and
-paths keep each host's meaning. A history copied between hosts is billed in
-each host's report, which is why amounts across hosts must not be added; no
-cross-host total is reported. The first failed host stops the others: their
-`ssh` processes are killed and reaped, and a destination stops scanning when
-its stdin closes. SIGINT and SIGTERM do the same before exiting 2.
+Every host is analyzed separately against one price catalog, so cache replay,
+profile ownership, coverage and settings never mix between hosts, and paths
+keep each host's meaning. A history copied between hosts is billed in each
+host's report, which is why amounts across hosts must not be added; no
+cross-host total is reported. The first failure, of a host or of loading
+prices, stops the run at once: every `ssh` process is killed and reaped, a
+destination stops when its stdin closes, and a partial price download is
+deleted. SIGINT and SIGTERM do the same before exiting 2.
 
 ## Bash timeout cap
 
@@ -997,3 +1118,87 @@ Sources, checked 2026-11-08:
 [Claude environment variables](https://code.claude.com/docs/en/env-vars),
 [tools reference](https://code.claude.com/docs/en/tools-reference) and
 [prompt caching](https://code.claude.com/docs/en/prompt-caching).
+
+## Subagent models
+
+`Report.subagents` gives each Claude subagent type and Codex agent role one
+line per set of profiles: its runs (subagent transcripts), requests, cost, the
+recorded models and efforts, where each run's model came from, and the same
+recorded tokens on the provider's cheapest current model. The lines are
+evidence only. They never recommend a model, offer no change
+and never change the exit code: a cheaper model or lower effort trades
+capability, and the main agent's extra work after a weaker subagent lands in
+its own requests, where transcripts cannot attribute it. When runs in
+different projects are set by different files, the model and effort settings
+name each.
+
+The reader names a Claude subagent from the `agentType`, `isBuiltIn`, `isFork`,
+`model` and `effort` keys of the `agent-*.meta.json` beside its transcript, and
+never its `description`. Without that file, the records' `attributionAgent` or
+`querySource` `agent:builtin:<type>` names it. A Codex thread is named by its
+`source.subagent.thread_spawn.agent_role`, null meaning `default`; other
+subagent sources, such as `review`, keep their source name and are marked
+native, so a role named `review` stays its own line. token-max does not model
+how Codex picks the model of a native source other than `review`, so those
+runs are unknown. Each request keeps
+its recorded effort: Claude's per-record `effort`, Codex's `turn_context`
+`effort` or applied `reasoning_effort`.
+
+A run's model source follows Claude Code 2.1.322: the Agent call's `model`,
+then the agent definition's `model:`, then `CLAUDE_CODE_SUBAGENT_MODEL`, then
+the main model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` drops the call and definition
+models, so the line then names the variable as the setting to change. A user or project agent file with a built-in's name replaces it. Built-in
+Explore and Plan say `inherit`, so the variable never reaches them; Explore is
+capped at Opus on the first-party API when the main model ranks above it
+(Fable, Mythos), unless
+`CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP` is set, and ran on Haiku before
+Claude Code 2.1.198. Forks always run on the main model. Codex 0.167 applies an
+agent role file's `model`, then the `spawn_agent` call's `model`, then
+`[agents] default_subagent_model`, then the parent thread's model; a review uses
+`review_model`, else its parent's model, or the configured session model when
+no parent is recorded. A Codex subagent's parent is the
+thread its `session_meta` names: the spawning thread, or for a review its root
+`session_id`. Efforts follow the same order with
+Claude's `effort:` and `CLAUDE_CODE_SUBAGENT_EFFORT`, and Codex's
+`model_reasoning_effort` and `default_subagent_reasoning_effort`.
+
+History records the requested call model but not the settings, so the source
+reads today's agent files and settings at each run's recorded working
+directory, then checks the rule against the recorded model and the parent's
+model at spawn. For Claude these are the profile's `agents/` and settings, and
+each directory's `.claude/agents/` up to its Git root and project and local
+settings. Codex loads its system, user and project config layers as 0.167
+does: each layer's `[agents.<role>] config_file` and `agents/*.toml` role files
+(a file's own `name` wins over its declaration; a later layer's role replaces
+an earlier one; a role without a description is ignored, and one declared
+with a description but no role file runs on the default subagent model or the
+parent's), and project layers
+only for a project its config trusts. A project whose layers change the
+subagent settings but whose trust is not recorded makes its runs unknown, and
+so does a named profile (`NAME.config.toml`, or a legacy `[profiles.NAME]`
+table) that sets `[agents]`, `review_model`, `project_root_markers` or
+`projects`, since history does not record
+which `--profile` a run used. The setting lines then name the files that may
+override them. A
+directory that no longer exists uses the profile's controls. A run's start and
+its parent's model come from all scanned history, including requests before
+`--since`. A run is unknown when its agent file changed after it started,
+no current file defines a custom type, the version or parent model is not
+recorded, or the recorded model is not what the rule gives, for example after
+a setting changed or a Codex `spawn_agent` call asked for another model.
+Agent files are read for their frontmatter `name`, `model` and `effort` only,
+as YAML scalars without trailing comments.
+
+The cheapest current model is, among the provider's catalog models that are not
+deprecated, call tools and reply in text, the newest of each family with the
+lowest output then input rate: the newest Haiku for Anthropic, the cheapest
+current GPT for OpenAI. The reprice swaps only the model on each recorded part,
+keeping its tokens, cache categories, speed and geography, so it assumes the
+same turns. A type already on that model is not repriced. A lower effort changes
+the output tokens, so its cost is not measured.
+
+Sources, checked 2026-11-11: the Claude Code 2.1.322 binary and
+[changelog](https://github.com/anthropics/claude-code/blob/main/CHANGELOG.md)
+(2.1.198, 2.1.284), and Codex
+[0.167](https://github.com/openai/codex/tree/rust-v0.167.0/codex-rs/core/src/agent)
+`child_config.rs` and `role.rs`.

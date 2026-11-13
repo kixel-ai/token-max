@@ -9,9 +9,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Api, BillingPart, Cost, Harness, PartKind, Request, TierScenario};
+use crate::model::{Api, BillingPart, Cost, Harness, PartKind, Request, TierScenario, Usd};
 use crate::safe::{ScanError, iso, label, object};
 
 const PRICE_URL: &str = "https://models.dev/api.json";
@@ -98,7 +99,7 @@ fn service_tier<'a>(r: &'a Request, p: &'a BillingPart) -> Result<&'a str, &'sta
 }
 
 /// Dollars per million tokens; absent rates stay unknown.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct Rates {
     input: Option<f64>,
     output: Option<f64>,
@@ -106,22 +107,30 @@ struct Rates {
     write: Option<f64>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct Tier {
     size: f64,
     rates: Rates,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct ModelPrice {
     base: Rates,
     tiers: Vec<Tier>,
     legacy: Option<Rates>,
     invalid: bool,
+    /// The catalog's model family, such as `claude-haiku`.
+    family: Option<String>,
+    /// The ISO release date, which orders a family's models.
+    release: Option<String>,
+    /// Not deprecated, replies in text and calls tools, so it could run an agent.
+    agentic: bool,
 }
 
 /// Catalog stores only numeric pricing metadata, keyed by exact provider and model.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// SSH destinations receive it whole, so every host is priced from one catalog.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     models: HashMap<String, HashMap<String, ModelPrice>>,
     pub source: String,
@@ -139,6 +148,41 @@ impl Catalog {
         self.model(provider, model)
             .into_iter()
             .flat_map(|m| m.tiers.iter().map(|t| t.size))
+    }
+
+    /// The provider's cheapest current model that can run an agent: of the newest
+    /// non-deprecated, tool-calling text model in each family, the one with the lowest
+    /// output then input rate.
+    pub fn cheapest(&self, provider: &str) -> Option<&str> {
+        let mut newest: HashMap<&str, (&String, &ModelPrice)> = HashMap::default();
+        for (name, price) in self.models.get(provider)? {
+            let rates = price.base;
+            if !price.agentic
+                || price.invalid
+                || rates.input.is_none()
+                || rates.output.is_none()
+                || rates.read.is_none()
+            {
+                continue;
+            }
+            let family = price.family.as_deref().unwrap_or(name);
+            let newer = newest
+                .get(family)
+                .is_none_or(|(n, p)| (&price.release, name) > (&p.release, *n));
+            if newer {
+                newest.insert(family, (name, price));
+            }
+        }
+        newest
+            .into_values()
+            .min_by(|(a, x), (b, y)| {
+                let key = |p: &ModelPrice| (p.base.output, p.base.input);
+                key(x)
+                    .partial_cmp(&key(y))
+                    .expect("finite rates")
+                    .then(a.cmp(b))
+            })
+            .map(|(name, _)| name.as_str())
     }
 }
 
@@ -167,13 +211,21 @@ fn rate(value: Option<&Value>) -> Result<Option<f64>, ScanError> {
     }
 }
 
+/// Dollars per million tokens no real model charges, so a larger rate is a malformed catalog
+/// rather than a price; it keeps every charge far inside [`Usd`]'s range.
+const MAX_RATE: f64 = 1e6;
+
 fn rates(value: &Value) -> Result<Rates, ScanError> {
     let c = object(value);
+    let price = |key| match rate(c.get(key))? {
+        Some(r) if r > MAX_RATE => Err(ScanError::new("price catalog rate out of range")),
+        r => Ok(r),
+    };
     Ok(Rates {
-        input: rate(c.get("input"))?,
-        output: rate(c.get("output"))?,
-        read: rate(c.get("cache_read"))?,
-        write: rate(c.get("cache_write"))?,
+        input: price("input")?,
+        output: price("output")?,
+        read: price("cache_read")?,
+        write: price("cache_write")?,
     })
 }
 
@@ -215,11 +267,21 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
         Some(value) if truthy(value) => Some(rates(value)?),
         _ => None,
     };
+    let model = object(value);
+    let text_output = object(model.get("modalities").unwrap_or(&Value::Null))
+        .get("output")
+        .and_then(Value::as_array)
+        .is_some_and(|output| output.iter().any(|m| m == "text"));
     Ok(ModelPrice {
         base: rates(cost)?,
         tiers,
         legacy,
         invalid,
+        family: model.get("family").and_then(label),
+        release: model.get("release_date").and_then(label),
+        agentic: text_output
+            && model.get("tool_call") == Some(&Value::Bool(true))
+            && model.get("status").and_then(Value::as_str) != Some("deprecated"),
     })
 }
 
@@ -540,8 +602,8 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
 /// A known zero with no missing components.
 pub fn zero_cost() -> Cost {
     Cost {
-        known_usd: 0.0,
-        total_usd: Some(0.0),
+        known_usd: Usd::ZERO,
+        total_usd: Some(Usd::ZERO),
         unknown: vec![],
         assumptions: vec![],
     }
@@ -549,8 +611,8 @@ pub fn zero_cost() -> Cost {
 
 /// Keep partial known charges separate from an unknown total.
 pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
-    let mut known = 0.0;
-    let mut total = Some(0.0);
+    let mut known = Usd::ZERO;
+    let mut total = Some(Usd::ZERO);
     let mut unknown = IndexSet::default();
     let mut assumptions = IndexSet::default();
     for cost in costs {
@@ -573,8 +635,8 @@ pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
 /// A running [`add_costs`], so charges need not be kept to be totaled.
 #[derive(Clone, Debug)]
 pub struct Sum {
-    known: f64,
-    total: Option<f64>,
+    known: Usd,
+    total: Option<Usd>,
     unknown: IndexSet<String>,
     assumptions: IndexSet<String>,
 }
@@ -589,8 +651,8 @@ impl Sum {
     /// The total of no costs.
     pub fn new() -> Self {
         Self {
-            known: 0.0,
-            total: Some(0.0),
+            known: Usd::ZERO,
+            total: Some(Usd::ZERO),
             unknown: IndexSet::default(),
             assumptions: IndexSet::default(),
         }
@@ -604,19 +666,11 @@ impl Sum {
     /// Add `scale(cost, weight)` without building it.
     pub fn add_scaled(&mut self, cost: &Cost, weight: f64) {
         if weight == 0.0 {
-            self.known += 0.0;
-            self.total = self.total.map(|t| t + 0.0);
             return;
         }
-        self.known += if weight == 1.0 {
-            cost.known_usd
-        } else {
-            cost.known_usd * weight
-        };
+        self.known += cost.known_usd.scale(weight);
         self.total = match (self.total, cost.total_usd) {
-            (Some(sum), Some(value)) => {
-                Some(sum + if weight == 1.0 { value } else { value * weight })
-            }
+            (Some(sum), Some(value)) => Some(sum + value.scale(weight)),
             _ => None,
         };
         for reason in &cost.unknown {
@@ -645,7 +699,7 @@ impl Sum {
 /// Baseline-minus-alternative savings over the items both scenarios price.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PairedSavings {
-    pub usd: f64,
+    pub usd: Usd,
     pub priced: u64,
     pub total: u64,
     /// True when the unpriced items cannot flip the sign, each bounded by the largest priced difference.
@@ -659,10 +713,10 @@ pub fn paired_savings<'a>(
     pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
     unknown: u64,
 ) -> PairedSavings {
-    let mut usd = 0.0;
+    let mut usd = Usd::ZERO;
     let mut priced = 0;
     let mut count = 0;
-    let mut largest: f64 = 0.0;
+    let mut largest = Usd::ZERO;
     for (baseline, alternative) in pairs {
         count += 1;
         let (Some(baseline), Some(alternative)) = (baseline.total_usd, alternative.total_usd)
@@ -679,14 +733,14 @@ pub fn paired_savings<'a>(
         usd,
         priced,
         total: count + unknown,
-        decided: unpriced == 0 || (priced > 0 && usd.abs() > unpriced as f64 * largest),
+        decided: unpriced == 0 || (priced > 0 && usd.abs() > largest.saturating_mul(unpriced)),
     }
 }
 
 /// Represent missing pricing without substituting a different model.
 pub fn unknown_cost(reason: impl Into<String>) -> Cost {
     Cost {
-        known_usd: 0.0,
+        known_usd: Usd::ZERO,
         total_usd: None,
         unknown: vec![reason.into()],
         assumptions: vec![],
@@ -1028,6 +1082,11 @@ pub fn unit_rates(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<Uni
     })
 }
 
+/// One part's per-token output price; None when unpriced.
+pub fn output_rate(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<f64> {
+    Some(selected_rates(catalog, r, p).ok()?.rates.output? / 1e6)
+}
+
 /// One part's input as consecutive spans of its prompt prefix, each with its
 /// token count and per-token price: cache reads, then cache writes, then
 /// ordinary input, which runs to the end. None when usage or a price is missing,
@@ -1080,7 +1139,7 @@ impl Components {
 fn charge(cost: &mut Cost, tokens: Option<i64>, rate: Option<f64>, component: &str) {
     match tokens {
         Some(t) if t <= 0 || rate.is_some() => {
-            cost.known_usd += (t as f64 * rate.unwrap_or(0.0)) / 1e6;
+            cost.known_usd += Usd::from_f64((t as f64 * rate.unwrap_or(0.0)) / 1e6);
         }
         _ => cost.unknown.push(component.to_string()),
     }
@@ -1090,7 +1149,7 @@ fn charge(cost: &mut Cost, tokens: Option<i64>, rate: Option<f64>, component: &s
 fn ordinary_charge(cost: &mut Cost, tokens: Option<i64>, rate: Option<f64>) {
     match tokens {
         Some(t) if t <= 0 || rate.is_some() => {
-            cost.known_usd = (t as f64 * rate.unwrap_or(0.0)) / 1e6;
+            cost.known_usd = Usd::from_f64((t as f64 * rate.unwrap_or(0.0)) / 1e6);
         }
         _ => cost.unknown.push("ordinary input unknown".to_string()),
     }
@@ -1134,7 +1193,7 @@ pub fn price_components(catalog: &Catalog, r: &Request, p: &BillingPart) -> Comp
     let rates = selected.rates;
     match u.output {
         Some(o) if o <= 0 || rates.output.is_some() => {
-            output.known_usd = (o as f64 * rates.output.unwrap_or(0.0)) / 1e6;
+            output.known_usd = Usd::from_f64((o as f64 * rates.output.unwrap_or(0.0)) / 1e6);
         }
         _ => output
             .unknown
@@ -1258,7 +1317,7 @@ pub fn server_cost(r: &Request) -> Cost {
     let mut result = zero_cost();
     for (name, requests) in tools.iter() {
         if name == "web_search_requests" && r.provider.as_deref() == Some("anthropic") {
-            result.known_usd += requests as f64 * 0.01;
+            result.known_usd += Usd::from_f64(requests as f64 * 0.01);
         } else if name != "web_fetch_requests" && requests > 0 {
             result.unknown.push(
                 "server-tool charge requires execution time, free allowance, tool version, or provider rate"
@@ -1281,7 +1340,8 @@ pub fn price_request(catalog: &Catalog, r: &Request) -> Cost {
     request_evidence(r, add_costs(&parts))
 }
 
-fn request_evidence(r: &Request, mut result: Cost) -> Cost {
+/// A request's priced parts and fees, unknown when its own record says usage is missing.
+pub(crate) fn request_evidence(r: &Request, mut result: Cost) -> Cost {
     let mut assumptions: IndexSet<String> = result.assumptions.drain(..).collect();
     for issue in &r.issues {
         if !assumptions.contains(&**issue) {
@@ -1353,8 +1413,8 @@ mod tests {
                 _ => 2.0,
             };
             assert!(close(
-                cost.total_usd,
-                standard.total_usd.unwrap() * multiplier
+                cost.total_usd.map(Usd::to_f64),
+                standard.total_usd.unwrap().to_f64() * multiplier
             ));
             assert_eq!(r.parts, original.parts);
         }
@@ -1386,7 +1446,10 @@ mod tests {
                 tier: tier.map(Text::from),
                 speed: None,
             });
-            assert!(close(price_request(&c, &r).total_usd, 0.00355));
+            assert!(close(
+                price_request(&c, &r).total_usd.map(Usd::to_f64),
+                0.00355
+            ));
         }
         for tier in ["flex", "scale", "unknown", "ultrafast"] {
             r.requested_speed.as_mut().unwrap().tier = Some(tier.into());
@@ -1441,10 +1504,10 @@ mod tests {
         r.parts.push(recorded);
         let original = r.clone();
         let rows = tier_sensitivity(&c, &[&r]);
-        let unit = price_part(&c, &r, &r.parts[0]).total_usd.unwrap();
-        assert!(close(rows[0].cost.total_usd, unit * 3.0));
-        assert!(close(rows[1].cost.total_usd, unit * 4.0));
-        assert!(close(rows[2].cost.total_usd, unit * 8.0));
+        let unit = price_part(&c, &r, &r.parts[0]).total_usd.unwrap().to_f64();
+        assert!(close(rows[0].cost.total_usd.map(Usd::to_f64), unit * 3.0));
+        assert!(close(rows[1].cost.total_usd.map(Usd::to_f64), unit * 4.0));
+        assert!(close(rows[2].cost.total_usd.map(Usd::to_f64), unit * 8.0));
         assert_eq!(rows[3].cost.total_usd, None);
         assert_eq!(rows[4].cost.total_usd, None);
         assert_eq!(r, original);
@@ -1463,10 +1526,8 @@ mod tests {
     /// Cancellation is sticky for the process; no other test here downloads.
     #[test]
     fn cancellation_deletes_partial_downloads_and_refuses_new_ones() {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!("cancel-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let workspace = crate::test_support::Workspace::new();
+        let dir = &workspace.home;
         let partial = dir.join("models.json.partial.tmp");
         let finished = dir.join("models.json.finished.tmp");
         let mut file = create_temporary(&partial).unwrap();
@@ -1481,7 +1542,6 @@ mod tests {
         assert!(!partial.exists());
         assert!(create_temporary(&dir.join("models.json.late.tmp")).is_err());
         assert!(!dir.join("models.json.late.tmp").exists());
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1507,7 +1567,7 @@ mod tests {
         };
         let result = price_part(&catalog, &r, &p);
         assert!(close(
-            result.total_usd,
+            result.total_usd.map(Usd::to_f64),
             (1000.0 * 2.0 + 4000.0 * 0.1 + 3000.0 * 2.5 + 4000.0 * 5.0 + 100.0 * 10.0) / 1e6
         ));
         let missing = price_part(
@@ -1546,7 +1606,7 @@ mod tests {
             ..r.parts[0].clone()
         };
         assert_eq!(
-            price_part(&c, &r, &p).total_usd,
+            price_part(&c, &r, &p).total_usd.map(Usd::to_f64),
             Some((800.0 * 2.5 + 200.0 * 0.25 + 100.0 * 15.0) / 1e6)
         );
         let internal = BillingPart {
@@ -1577,13 +1637,20 @@ mod tests {
             },
             ..p.clone()
         };
-        assert_eq!(price_part(&c, &r, &p).total_usd, Some(0.501));
         assert_eq!(
-            price_part(&c, &r, &with_input(272000)).total_usd,
+            price_part(&c, &r, &p).total_usd.map(Usd::to_f64),
+            Some(0.501)
+        );
+        assert_eq!(
+            price_part(&c, &r, &with_input(272000))
+                .total_usd
+                .map(Usd::to_f64),
             Some(0.545)
         );
         assert_eq!(
-            price_part(&c, &r, &with_input(272001)).total_usd,
+            price_part(&c, &r, &with_input(272001))
+                .total_usd
+                .map(Usd::to_f64),
             Some(1.089504)
         );
         let mut h = make_request();
@@ -1594,7 +1661,10 @@ mod tests {
             output: 0,
             ..ClaudeUsage::default()
         });
-        assert_eq!(price_part(&c, &h, &h.parts[0]).total_usd, Some(0.0500005));
+        assert_eq!(
+            price_part(&c, &h, &h.parts[0]).total_usd.map(Usd::to_f64),
+            Some(0.0500005)
+        );
     }
 
     #[test]
@@ -1615,7 +1685,7 @@ mod tests {
         };
         let cost = price_part(&c, &r, &p);
         assert!(close(
-            cost.total_usd,
+            cost.total_usd.map(Usd::to_f64),
             ((1000.0 * 8.0 + 200.0 * 0.2 + 100.0 * 20.0) * 2.0 * 1.1) / 1e6
         ));
         let priority = BillingPart {
@@ -1637,7 +1707,8 @@ mod tests {
                 ("web_search_requests", 2),
                 ("web_fetch_requests", 3)
             ]))
-            .total_usd,
+            .total_usd
+            .map(Usd::to_f64),
             Some(0.02)
         );
         assert_eq!(
@@ -1678,10 +1749,65 @@ mod tests {
     }
 
     #[test]
+    fn cost_totals_do_not_depend_on_the_order_or_grouping_of_their_parts() {
+        // Charges spanning many magnitudes, as per-token prices produce, from a fixed LCG.
+        let mut state: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            state
+        };
+        let costs: Vec<Cost> = (0..1000)
+            .map(|_| {
+                let mantissa = (next() >> 11) as f64 / (1u64 << 53) as f64;
+                let usd = mantissa * 10f64.powi((next() % 12) as i32 - 9);
+                Cost {
+                    known_usd: Usd::from_f64(usd),
+                    total_usd: Some(Usd::from_f64(usd)),
+                    ..Cost::default()
+                }
+            })
+            .collect();
+        let forward = add_costs(&costs);
+        assert_eq!(add_costs(costs.iter().rev()), forward);
+        // Partial sums merged in another order, as a per-session fold would.
+        let mut merged = Sum::new();
+        for chunk in costs.chunks(37).rev() {
+            merged.add(&add_costs(chunk));
+        }
+        assert_eq!(merged.cost(), forward);
+        let parts = costs.iter().map(|c| (c, &costs[0]));
+        let mut reversed: Vec<_> = parts.clone().collect();
+        reversed.reverse();
+        assert_eq!(paired_savings(parts, 0), paired_savings(reversed, 0));
+        // f64 addition is not associative, so the old sums differed here.
+        let f64s: Vec<f64> = costs.iter().map(|c| c.known_usd.to_f64()).collect();
+        assert_ne!(
+            f64s.iter().sum::<f64>().to_bits(),
+            f64s.iter().rev().sum::<f64>().to_bits()
+        );
+    }
+
+    #[test]
+    fn dollar_amounts_round_once_to_the_grid() {
+        // Amounts of at least 2^-12 dollars are on the grid already.
+        for usd in [0.0, 0.501, -1.089504, 3.849, 1e6] {
+            assert_eq!(Usd::from_f64(usd).to_f64(), usd);
+        }
+        let step = 2f64.powi(-64);
+        assert_eq!(Usd::from_f64(step * 0.4), Usd::ZERO);
+        assert_eq!(Usd::from_f64(step * 0.6).to_f64(), step);
+        assert_eq!(Usd::from_f64(-step * 0.6).to_f64(), -step);
+        assert!(std::panic::catch_unwind(|| Usd::from_f64(f64::NAN)).is_err());
+        assert!(std::panic::catch_unwind(|| Usd::from_f64(1e40)).is_err());
+    }
+
+    #[test]
     fn paired_savings_decide_only_when_unpriced_parts_cannot_flip_the_sign() {
         let known = |usd: f64| Cost {
-            known_usd: usd,
-            total_usd: Some(usd),
+            known_usd: Usd::from_f64(usd),
+            total_usd: Some(Usd::from_f64(usd)),
             ..Cost::default()
         };
         let missing = unknown_cost("missing");
@@ -1692,7 +1818,7 @@ mod tests {
         assert_eq!(
             paired_savings([a, b], 0),
             PairedSavings {
-                usd: 3.0,
+                usd: Usd::from_f64(3.0),
                 priced: 2,
                 total: 2,
                 decided: true
@@ -1749,6 +1875,10 @@ mod tests {
             "invalid price catalog rate"
         );
         assert_eq!(
+            parse(r#"{"p":{"models":{"m":{"cost":{"output":1e30}}}}}"#).unwrap_err(),
+            "price catalog rate out of range"
+        );
+        assert_eq!(
             parse(r#"{"p":{"models":{"m":{"cost":{"tiers":null}}}}}"#).unwrap_err(),
             "invalid price catalog tiers"
         );
@@ -1792,18 +1922,20 @@ mod tests {
             parts: vec![p.clone()],
             ..codex_request()
         };
-        let normal = price_part(&catalog, &r, &p).total_usd.unwrap();
+        let normal = price_part(&catalog, &r, &p).total_usd.unwrap().to_f64();
         for tier in ["fast", "priority", "ultrafast"] {
             let multiplier = if tier == "ultrafast" { 6.0 } else { 2.0 };
             let repriced = BillingPart {
                 tier: Some(tier.into()),
                 ..p.clone()
             };
-            assert_eq!(
-                price_part(&catalog, &r, &repriced).total_usd,
-                Some(normal * multiplier),
-                "{tier}"
-            );
+            // Each component is priced at the higher rate on its own, so the total matches
+            // six times the standard one only to rounding.
+            let repriced = price_part(&catalog, &r, &repriced)
+                .total_usd
+                .unwrap()
+                .to_f64();
+            assert!((repriced - normal * multiplier).abs() < 1e-12, "{tier}");
         }
         let luna = BillingPart {
             tier: Some("ultrafast".into()),
@@ -1843,14 +1975,46 @@ mod tests {
             speed: None,
             ..r.parts[0].clone()
         };
-        let standard = price_part(&c, &r, &p).total_usd.unwrap();
+        let standard = price_part(&c, &r, &p).total_usd.unwrap().to_f64();
         assert!(standard > 0.0);
         let fast = BillingPart {
             tier: Some("fast".into()),
             ..p
         };
-        assert_eq!(price_part(&c, &r, &fast).total_usd, Some(standard * 2.0));
+        assert_eq!(
+            price_part(&c, &r, &fast).total_usd.map(Usd::to_f64),
+            Some(standard * 2.0)
+        );
         c.remove_model("openai", "gpt-5.6");
         assert_eq!(price_part(&c, &r, &fast).total_usd, None);
+    }
+
+    #[test]
+    fn the_cheapest_model_is_the_newest_agentic_model_of_the_cheapest_family() {
+        let model = |family: &str, release: &str, output: f64, extra: &str| {
+            format!(
+                r#"{{"family":"{family}","release_date":"{release}","tool_call":true,"modalities":{{"output":["text"]}},"cost":{{"input":1,"output":{output},"cache_read":0.1}}{extra}}}"#
+            )
+        };
+        let catalog = parse_catalog(
+            format!(
+                r#"{{"p":{{"models":{{"small-old":{},"small-new":{},"big":{},"retired":{},"image":{},"unpriced":{}}}}}}}"#,
+                model("small", "2026-01-01", 1.0, ""),
+                model("small", "2026-06-01", 2.0, ""),
+                model("big", "2026-06-01", 5.0, ""),
+                model("retired", "2026-06-01", 0.5, r#","status":"deprecated""#),
+                r#"{"family":"image","release_date":"2026-06-01","tool_call":true,"modalities":{"output":["image"]},"cost":{"input":1,"output":0.1,"cache_read":0.1}}"#,
+                r#"{"family":"unpriced","release_date":"2026-06-01","tool_call":true,"modalities":{"output":["text"]},"cost":{"input":1,"output":0.1}}"#,
+            )
+            .as_bytes(),
+        )
+        .ok()
+        .unwrap();
+        // The older, cheaper model of a family is no longer current.
+        assert_eq!(catalog.cheapest("p"), Some("small-new"));
+        assert_eq!(catalog.cheapest("other"), None);
+        let fixture = crate::test_support::prices();
+        assert_eq!(fixture.cheapest("anthropic"), Some("claude-haiku-5-5"));
+        assert_eq!(fixture.cheapest("openai"), Some("gpt-6.1-sol"));
     }
 }

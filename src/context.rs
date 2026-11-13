@@ -5,11 +5,11 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{calibrate, codex_server, cohort};
+use crate::exposure::{MEMORY_OUTPUT, calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
-    Text, Verdict, Via,
+    Text, Usd, Verdict, Via,
 };
 use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
@@ -17,26 +17,27 @@ use crate::safe::identity;
 /// The settings fragment for one control: settings.json's `"enableArtifact": false`,
 /// or config.toml's `features.apps = false`.
 pub fn control_text(control: &Control, harness: Harness) -> String {
+    setting_text(
+        &control.path,
+        json_value(&control.value),
+        control.append,
+        harness,
+    )
+}
+
+/// The settings fragment that sets `path` to `value`, or adds it to the list there.
+pub fn setting_text(path: &[String], value: Value, append: bool, harness: Harness) -> String {
+    let mut value = if append {
+        Value::Array(vec![value])
+    } else {
+        value
+    };
     if harness == Harness::Codex {
-        let path: Vec<String> = control.path.iter().map(|key| toml_key(key)).collect();
-        let value = match &control.value {
-            ControlValue::Text(text) => toml::Value::String(text.clone()),
-            ControlValue::Bool(b) => toml::Value::Boolean(*b),
-            ControlValue::Skill { .. } => toml::Value::try_from(json_value(&control.value))
-                .expect("skill controls are tables"),
-        };
-        let value = if control.append {
-            toml::Value::Array(vec![value])
-        } else {
-            value
-        };
+        let path: Vec<String> = path.iter().map(|key| toml_key(key)).collect();
+        let value = toml::Value::try_from(value).expect("settings values are TOML values");
         return format!("{} = {value}", path.join("."));
     }
-    let mut value = json_value(&control.value);
-    if control.append {
-        value = Value::Array(vec![value]);
-    }
-    for key in control.path.iter().skip(1).rev() {
+    for key in path.iter().skip(1).rev() {
         let mut map = Map::new();
         map.insert(key.clone(), value);
         value = Value::Object(map);
@@ -69,45 +70,8 @@ pub fn control_text(control: &Control, harness: Harness) -> String {
         .replace(" }", "}");
     format!(
         "{}: {flat}",
-        serde_json::to_string(&control.path[0]).expect("strings serialize")
+        serde_json::to_string(&path[0]).expect("strings serialize")
     )
-}
-
-/// Merge controls into one settings.json object, adding to lists rather than replacing them.
-pub fn settings_patch<'a>(controls: impl IntoIterator<Item = &'a Control>) -> Map<String, Value> {
-    let mut root = Map::new();
-    for c in controls {
-        let Some((last, parents)) = c.path.split_last() else {
-            continue;
-        };
-        let mut node = &mut root;
-        for key in parents {
-            let child = node
-                .entry(key.clone())
-                .or_insert_with(|| Value::Object(Map::new()));
-            // Controls never nest under a scalar; replacing one keeps the patch an object.
-            if !child.is_object() {
-                *child = Value::Object(Map::new());
-            }
-            node = child.as_object_mut().expect("just made an object");
-        }
-        let value = json_value(&c.value);
-        if !c.append {
-            node.insert(last.clone(), value);
-            continue;
-        }
-        let list = node
-            .entry(last.clone())
-            .or_insert_with(|| Value::Array(vec![]));
-        if !list.is_array() {
-            *list = Value::Array(vec![]);
-        }
-        let list = list.as_array_mut().expect("just made an array");
-        if !list.contains(&value) {
-            list.push(value);
-        }
-    }
-    root
 }
 
 /// A TOML key, quoted unless it is bare.
@@ -123,12 +87,7 @@ fn toml_key(key: &str) -> String {
     }
 }
 
-/// Merge controls into one config.toml fragment, as `settings_patch` does for settings.json.
-pub fn config_patch<'a>(controls: impl IntoIterator<Item = &'a Control>) -> String {
-    toml::to_string(&Value::Object(settings_patch(controls))).expect("controls are TOML tables")
-}
-
-fn json_value(value: &ControlValue) -> Value {
+pub(crate) fn json_value(value: &ControlValue) -> Value {
     match value {
         ControlValue::Text(text) => Value::String(text.clone()),
         ControlValue::Bool(b) => Value::Bool(*b),
@@ -148,8 +107,19 @@ pub struct ContextInput<'a> {
     pub profiles: &'a [Profile],
     /// Public prices.
     pub catalog: &'a Catalog,
-    /// Recommend turning a piece off when it cost more than this per use.
+    /// Profiles whose transcripts have unreadable or deferred lines, which could hold a use.
+    pub incomplete: &'a HashSet<String>,
+    /// Suggest turning a used piece off when it cost more than this per use.
     pub max_cost_per_use_usd: f64,
+}
+
+/// Profiles whose transcripts have unreadable or deferred lines, which could hold a use.
+pub fn incomplete_profiles(snapshots: &[crate::model::Snapshot]) -> HashSet<String> {
+    snapshots
+        .iter()
+        .filter(|s| s.skipped_lines > 0 || s.deferred_bytes > 0)
+        .flat_map(|s| s.profiles.iter().cloned())
+        .collect()
 }
 
 /// Context setting rows whose controls are not covered by a server recommendation.
@@ -462,6 +432,7 @@ fn pieces(
                 deny(format!("mcp__{server}")),
             )
         }
+        Category::Memory => vec![(memory_piece(Harness::Claude, interned), characters)],
         Category::Agents => one(
             "other:agents".into(),
             ContextKind::Other,
@@ -559,13 +530,42 @@ fn codex_pieces(
             "Managed developer instructions".into(),
             None,
         ),
+        Category::Memory => return vec![(memory_piece(Harness::Codex, interned), characters)],
         _ => return vec![],
     };
     vec![(interned.intern(key, kind, name, control), characters)]
 }
 
+/// The report name for Claude's auto memory.
+pub const CLAUDE_MEMORY: &str = "Auto memory";
+
+/// The report name for Codex's memories.
+pub const CODEX_MEMORY: &str = "Codex memories";
+
+/// The piece for everything auto memory adds: its loaded context and the files read back.
+fn memory_piece(harness: Harness, interned: &mut Pieces<'_>) -> usize {
+    if harness == Harness::Codex {
+        interned.intern(
+            "codex:memory".into(),
+            ContextKind::Memory,
+            CODEX_MEMORY.into(),
+            disable(&["features", "memories"]),
+        )
+    } else {
+        interned.intern(
+            "memory".into(),
+            ContextKind::Memory,
+            CLAUDE_MEMORY.into(),
+            disable(&["autoMemoryEnabled"]),
+        )
+    }
+}
+
 /// The piece for one tool's output, filed under the tool, or its MCP server.
 fn output_piece(owner: &str, harness: Harness, interned: &mut Pieces<'_>) -> usize {
+    if owner == MEMORY_OUTPUT {
+        return memory_piece(harness, interned);
+    }
     let prefix = if harness == Harness::Codex {
         "codex:"
     } else {
@@ -645,6 +645,9 @@ struct Row {
     owner: usize,
     key: usize,
     time: Millis,
+    /// Whether its owner's first shaped request carried it, so the whole window
+    /// could have recorded a use. One first sent later stays advisory when unused.
+    from_start: bool,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -672,7 +675,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .collect();
     let requests: HashMap<&str, &Request> = input.requests.iter().map(|r| (&*r.id, r)).collect();
     let components: HashMap<&str, &Component> =
-        scan.components.iter().map(|c| (c.id.as_str(), c)).collect();
+        scan.components.iter().map(|c| (&*c.id, c)).collect();
     let mut interned = Pieces::default();
     let mut owners: HashMap<Vec<String>, usize> = HashMap::default();
     let mut owner_profiles: Vec<Vec<String>> = vec![];
@@ -680,6 +683,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::default();
     let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::default();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
+    let mut first_shaped: HashMap<usize, &str> = HashMap::default();
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -711,6 +715,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             (Harness::Codex, Linkage::Chronological) => (view.candidates.iter().collect(), true),
             _ => (vec![], false),
         };
+        if shaped {
+            first_shaped.entry(owner).or_insert(&*r.id);
+        }
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
             .profiles
@@ -849,7 +856,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         tier_unknown_requests: 0,
                         assumptions: vec![],
                         tokens: None,
-                        cost_usd: 0.0,
+                        cost_usd: Usd::ZERO,
                         estimated_usd: None,
                         calls: None,
                         last_used: None,
@@ -872,6 +879,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     key,
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
+                    from_start: first_shaped.get(&owner) == Some(&&*r.id),
                 }
             });
             row.cost.requests += 1;
@@ -1022,7 +1030,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 let row = &mut rows[&(owner, key)];
                 row.cost.priced += 1;
-                row.cost.cost_usd += cost;
+                row.cost.cost_usd += Usd::from_f64(cost);
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));
                 }
@@ -1057,6 +1065,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 | ContextKind::McpTool
                 | ContextKind::Skill
                 | ContextKind::ToolOutput
+                | ContextKind::Memory
         ) {
             continue;
         }
@@ -1172,6 +1181,24 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             );
         }
     }
+    for m in &scan.memory {
+        let name = if m.harness == Harness::Codex {
+            CODEX_MEMORY
+        } else {
+            CLAUDE_MEMORY
+        };
+        credit(
+            families.get(&(ContextKind::Memory, name)),
+            ObservedUse {
+                profiles: &m.profiles,
+                time: m.time,
+                calls: 1,
+                invocation: None,
+                ambiguous: false,
+                fallback: false,
+            },
+        );
+    }
     let synced_group = identity(&format!("plugin:{SYNCED_NAMESPACE}"));
     for i in &scan.invocations {
         let indices = if i.harness == Harness::Codex {
@@ -1259,7 +1286,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
             c.estimated_usd =
-                (c.priced > 0).then(|| (c.cost_usd * c.requests as f64) / c.priced as f64);
+                (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
             c.largest_characters = largest.get(&index).copied();
             if c.harness == Harness::Codex
@@ -1276,16 +1303,27 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     c.control = None;
                 }
             }
-            if let Some(calls) = c.calls {
-                c.cost_per_use_usd = c.estimated_usd.map(|usd| usd / calls.max(1) as f64);
-            }
-            if let (Some(_), true, Some(per_use)) = (&c.control, c.current, c.cost_per_use_usd)
+            c.cost_per_use_usd = c
+                .estimated_usd
+                .zip(c.calls.filter(|&calls| calls > 0))
+                .map(|(usd, calls)| usd / calls as f64);
+            // Auto memory is advised off by policy, never by its cost per use.
+            if let (Some(_), true, Some(usd), Some(calls)) =
+                (&c.control, c.current, c.estimated_usd, c.calls)
                 && c.tier_unknown_requests == 0
+                && c.kind != ContextKind::Memory
             {
-                c.verdict = Some(if per_use > input.max_cost_per_use_usd {
-                    Verdict::Off
-                } else {
-                    Verdict::Keep
+                // Codex catalog skill uses are only partly recorded, and an unreadable or
+                // deferred line could hold a call, so their nonuse is unproven.
+                let visible = row.from_start
+                    && c.skill.is_none()
+                    && !c.profiles.iter().any(|p| input.incomplete.contains(p));
+                c.verdict = Some(match calls {
+                    _ if usd <= 0.0 => Verdict::Keep,
+                    0 if visible => Verdict::Off,
+                    0 => Verdict::Consider,
+                    _ if usd / calls as f64 > input.max_cost_per_use_usd => Verdict::Consider,
+                    _ => Verdict::Keep,
                 });
             }
             if let Some(parent) = interned.kinds[row.key].parent {
@@ -1388,7 +1426,7 @@ mod tests {
                 fingerprint: id.into(),
             },
             id: id.into(),
-            key: format!("{}:{name}", category.as_str()),
+            key: format!("{}:{name}", category.as_str()).into(),
             name: name.into(),
             category,
             owner: Owner::Context,
@@ -1423,7 +1461,7 @@ mod tests {
                 complete_characters: Some(characters),
                 prefix,
                 wire_model: Some("claude-opus-5-5".into()),
-                reasons: vec![],
+                reasons: [].into(),
             }),
             results: None,
         }
@@ -1459,6 +1497,7 @@ mod tests {
             requests,
             profiles: &profiles,
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: limit,
         })
     }
@@ -1526,13 +1565,13 @@ mod tests {
         // the system prompt's 600 span the last 350 cached reads, all 200 1h writes
         // and 50 ordinary input tokens.
         let artifact = row(&rows, "Artifact");
-        assert!(close(artifact.cost_usd, 1200.0 * READ));
+        assert!(close(artifact.cost_usd.to_f64(), 1200.0 * READ));
         assert_eq!(artifact.tokens, Some(1200));
         assert_eq!(artifact.calls, Some(0));
-        assert_eq!(artifact.verdict, Some(Verdict::Keep));
+        assert_eq!(artifact.verdict, Some(Verdict::Off));
         let system = row(&rows, "Claude Code system prompt");
         assert!(close(
-            system.cost_usd,
+            system.cost_usd.to_f64(),
             350.0 * READ + 200.0 * WRITE1H + 50.0 * ORDINARY
         ));
         assert_eq!(
@@ -1543,9 +1582,9 @@ mod tests {
         // possible offset is ordinary input, so it is priced.
         let review = row(&rows, "review");
         assert_eq!(review.kind, ContextKind::Skill);
-        assert!(close(review.cost_usd, 90.0 * ORDINARY));
+        assert!(close(review.cost_usd.to_f64(), 90.0 * ORDINARY));
         assert!(close(
-            row(&rows, "Skill list framing").cost_usd,
+            row(&rows, "Skill list framing").cost_usd.to_f64(),
             15.0 * ORDINARY
         ));
         let docs = row(&rows, "docs");
@@ -1566,23 +1605,45 @@ mod tests {
     }
 
     #[test]
-    fn verdicts_compare_cost_per_use_with_the_limit() {
-        let (scan, requests) = shaped();
-        let artifact = 1200.0 * READ;
-        let rows = costs(&scan, &requests, artifact / 2.0);
-        // No use counts as one use.
-        assert_eq!(row(&rows, "Artifact").verdict, Some(Verdict::Off));
-        assert!(close(
-            row(&rows, "Artifact").cost_per_use_usd.unwrap(),
-            artifact
-        ));
+    fn verdicts_turn_off_unused_pieces_and_weigh_used_ones_per_use() {
+        let (mut scan, mut requests) = shaped();
+        // Never used across the window: off, however little it cost.
+        let rows = costs(&scan, &requests, 1.0);
+        let artifact = row(&rows, "Artifact");
+        assert_eq!(
+            (artifact.verdict, artifact.cost_per_use_usd),
+            (Some(Verdict::Off), None)
+        );
         // Two calls halve the docs server's 150-token read cost.
-        assert!(close(
-            row(&rows, "docs").cost_per_use_usd.unwrap(),
-            150.0 * READ / 2.0
-        ));
+        let docs = 150.0 * READ / 2.0;
+        assert!(close(row(&rows, "docs").cost_per_use_usd.unwrap(), docs));
         assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Keep));
         assert_eq!(row(&rows, "Bash").verdict, None);
+        // Used, but above the limit per use: advisory.
+        let rows = costs(&scan, &requests, docs / 2.0);
+        assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Consider));
+        // An unreadable or deferred line in the profile's transcripts could hold a call.
+        let profiles = [crate::test_support::make_profile("profile", "/synthetic")];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            incomplete: &HashSet::from_iter(["profile".to_string()]),
+            max_cost_per_use_usd: 1.0,
+        });
+        assert_eq!(row(&rows, "Artifact").verdict, Some(Verdict::Consider));
+        // First sent after the window's first request, so the window cannot rule out a use.
+        scan.requests.insert(
+            0,
+            exposure("r0", &["bash", "docs", "system", "listing"], 3, 6000),
+        );
+        requests.insert(0, request("r0", 0, 1200, 120, 480));
+        let rows = costs(&scan, &requests, 1.0);
+        let artifact = row(&rows, "Artifact");
+        assert!(artifact.estimated_usd.is_some());
+        assert_eq!(artifact.verdict, Some(Verdict::Consider));
+        assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Keep));
     }
 
     /// One token per character: each request's complete text equals its input.
@@ -1625,14 +1686,17 @@ mod tests {
         let rows = costs(&scan, &requests, 1.0);
         let file = row(&rows, "/repo/CLAUDE.md");
         assert_eq!((file.requests, file.priced), (3, 2));
-        assert!(close(file.cost_usd, 500.0 * WRITE1H + 500.0 * READ));
+        assert!(close(
+            file.cost_usd.to_f64(),
+            500.0 * WRITE1H + 500.0 * READ
+        ));
         assert!(close(
             file.estimated_usd.unwrap(),
-            file.cost_usd * 3.0 / 2.0
+            file.cost_usd.to_f64() * 3.0 / 2.0
         ));
         let new = row(&rows, "/repo/sub/CLAUDE.md");
         assert_eq!((new.requests, new.priced), (2, 1));
-        assert!(close(new.cost_usd, 300.0 * WRITE1H));
+        assert!(close(new.cost_usd.to_f64(), 300.0 * WRITE1H));
         assert!(file.current && new.current);
     }
 
@@ -1646,6 +1710,7 @@ mod tests {
             requests: &requests,
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: 1.0,
         });
         assert_eq!(row(&rows, "/repo/CLAUDE.md").requests, 2);
@@ -1679,7 +1744,7 @@ mod tests {
         let system = row(&rows, "Claude Code system prompt");
         assert_eq!((system.requests, system.priced), (2, 1));
         // The unpriced request is scaled from the priced one, never counted as free.
-        assert_eq!(system.estimated_usd, Some(system.cost_usd * 2.0));
+        assert_eq!(system.estimated_usd, Some(system.cost_usd.to_f64() * 2.0));
         // The file is new in the high request, after a prior whose input fits.
         assert_eq!(row(&rows, "/repo/CLAUDE.md").priced, 1);
     }
@@ -1779,8 +1844,8 @@ mod tests {
         );
         assert_eq!(server.details.len(), 3);
         assert!(close(
-            server.cost_usd,
-            server.details.iter().map(|c| c.cost_usd).sum()
+            server.cost_usd.to_f64(),
+            server.details.iter().map(|c| c.cost_usd.to_f64()).sum()
         ));
         let read = row(&server.details, "mcp__docs__read");
         assert_eq!((read.tokens, read.calls), (Some(400), Some(3)));
@@ -1788,19 +1853,15 @@ mod tests {
             control_text(read.control.as_ref().unwrap(), Harness::Claude),
             r#""permissions": {"deny": ["mcp__docs__read"]}"#
         );
-        let off = costs(&scan, &requests, 0.0);
+        let unused = ExposureScan {
+            tool_calls: vec![],
+            ..scan.clone()
+        };
+        let off = costs(&unused, &requests, 1.0);
         let off = row(&off, "docs");
         assert_eq!(off.verdict, Some(Verdict::Off));
         assert!(off.details.iter().all(|d| d.verdict.is_none()));
         assert!(off.details.iter().any(|d| d.control.is_some()));
-        let json = serde_json::to_value(off).unwrap();
-        assert!(
-            json["details"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .all(|d| d["verdict"].is_null())
-        );
         let discovery = row(&server.details, "mcp__docs");
         assert_eq!(
             (discovery.kind, discovery.tokens, discovery.calls),
@@ -1884,6 +1945,13 @@ mod tests {
                     }),
                     results: None,
                 }],
+                // A used tool keeps its own verdict, rather than one an unused server's off covers.
+                tool_calls: vec![ToolCalls {
+                    name: format!("mcp__docs_server__{exposed}"),
+                    profiles: vec!["profile".into()],
+                    calls: 1,
+                    last_used: 2,
+                }],
                 ..ExposureScan::default()
             };
             if let Some(raw) = raw {
@@ -1923,6 +1991,7 @@ mod tests {
                     requests: std::slice::from_ref(&r),
                     profiles: std::slice::from_ref(&profile),
                     catalog: &prices(),
+                    incomplete: &HashSet::default(),
                     max_cost_per_use_usd: 1.0,
                 });
                 let server = &costs[0];
@@ -2082,7 +2151,7 @@ mod tests {
         assert_eq!(bash.kind, ContextKind::ToolOutput);
         assert_eq!((bash.requests, bash.priced), (4, 4));
         assert!(close(
-            bash.cost_usd,
+            bash.cost_usd.to_f64(),
             1000.0 * WRITE1H + (1000.0 * READ + 300.0 * WRITE1H) + 200.0 * ORDINARY + 200.0 * READ
         ));
         assert_eq!(
@@ -2165,6 +2234,7 @@ mod tests {
             requests: &requests,
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: 1.0,
         });
         // A quarter token per character. The first request read nothing from cache;
@@ -2175,7 +2245,7 @@ mod tests {
             (apps.harness, apps.kind),
             (Harness::Codex, ContextKind::McpServer)
         );
-        assert!(close(apps.cost_usd, 100.0 * input + 100.0 * read));
+        assert!(close(apps.cost_usd.to_f64(), 100.0 * input + 100.0 * read));
         assert_eq!(
             control_text(apps.control.as_ref().unwrap(), Harness::Codex),
             "features.apps = false"
@@ -2187,13 +2257,16 @@ mod tests {
             control_text(docs.control.as_ref().unwrap(), Harness::Codex),
             "mcp_servers.docs-server.enabled = false"
         );
-        assert_eq!(docs.verdict, Some(Verdict::Keep));
+        assert_eq!(docs.verdict, Some(Verdict::Off));
         let agents = row(&rows, "AGENTS.md");
         assert_eq!(
             (agents.kind, agents.control.as_ref()),
             (ContextKind::Instructions, None)
         );
-        assert!(close(agents.cost_usd, 500.0 * input + 500.0 * read));
+        assert!(close(
+            agents.cost_usd.to_f64(),
+            500.0 * input + 500.0 * read
+        ));
         // A catalog without parsed member spans remains one piece with no per-skill control.
         assert_eq!(row(&rows, "Skill list").control, None);
         assert!(rows.iter().all(|c| c.kind != ContextKind::Skill));
@@ -2223,6 +2296,7 @@ mod tests {
                 requests: &requests,
                 profiles: std::slice::from_ref(&profile),
                 catalog: &prices(),
+                incomplete: &HashSet::default(),
                 max_cost_per_use_usd: 1.0,
             });
             let apps = row(&rows, "codex_apps");
@@ -2313,6 +2387,7 @@ mod tests {
             ],
             profiles: &[profile("a", "docs-server"), profile("b", "docs_server")],
             catalog: &prices(),
+            incomplete: &HashSet::default(),
             max_cost_per_use_usd: 1.0,
         });
         let of = |name: &str, profile: &str| {
@@ -2523,52 +2598,6 @@ mod tests {
                 Harness::Codex
             ),
             r#"mcp_servers."my.server".enabled = false"#
-        );
-    }
-
-    #[test]
-    fn config_patch_renders_toml_tables() {
-        let off = |path: &[&str]| Control {
-            path: path.iter().map(|p| p.to_string()).collect(),
-            value: ControlValue::Bool(false),
-            append: false,
-        };
-        let patch = config_patch([
-            &off(&["features", "apps"]),
-            &off(&["mcp_servers", "t3-code", "enabled"]),
-        ]);
-        let parsed: toml::Table = toml::from_str(&patch).expect("valid TOML");
-        assert_eq!(parsed["features"]["apps"], toml::Value::Boolean(false));
-        assert_eq!(
-            parsed["mcp_servers"]["t3-code"]["enabled"],
-            toml::Value::Boolean(false)
-        );
-    }
-
-    #[test]
-    fn settings_patch_merges_and_appends_without_duplicates() {
-        let deny = |rule: &str| Control {
-            path: vec!["permissions".into(), "deny".into()],
-            value: ControlValue::Text(rule.into()),
-            append: true,
-        };
-        let artifact = Control {
-            path: vec!["enableArtifact".into()],
-            value: ControlValue::Bool(false),
-            append: false,
-        };
-        let patch = settings_patch([
-            &deny("Agent"),
-            &artifact,
-            &deny("mcp__docs"),
-            &deny("Agent"),
-        ]);
-        assert_eq!(
-            Value::Object(patch),
-            serde_json::json!({
-                "permissions": {"deny": ["Agent", "mcp__docs"]},
-                "enableArtifact": false
-            })
         );
     }
 }

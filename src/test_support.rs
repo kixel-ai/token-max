@@ -1,4 +1,4 @@
-//! Synthetic requests and checkout-local scratch profiles for unit tests.
+//! Synthetic requests and isolated scratch profiles for unit tests.
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
@@ -88,6 +88,7 @@ pub fn make_request() -> Request {
         version: Some("2.1.314".into()),
         client: Some("sdk-ts".into()),
         cwd: None,
+        effort: None,
         parts: vec![message_part(claude_usage(ClaudeUsage::default()))],
         server_tools: Some(Default::default()),
         profiles: vec!["profile".into()].into(),
@@ -107,7 +108,7 @@ pub fn make_request() -> Request {
 pub fn prices() -> Catalog {
     load_prices(&PriceOptions {
         file: Some(fixture_path("prices.json")),
-        cache: Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/unused-cache.json"),
+        cache: std::env::temp_dir().join("token-max-unused-cache.json"),
         offline: false,
     })
     .unwrap()
@@ -120,7 +121,8 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// An isolated home with empty Claude and Codex profiles under the checkout's `.tmp/`.
+/// An isolated home with empty Claude and Codex profiles in the system temp directory,
+/// outside any checkout or real home whose settings discovery would read as a project's.
 pub struct Workspace {
     pub home: PathBuf,
     pub claude: PathBuf,
@@ -130,13 +132,23 @@ pub struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let home = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!(
-                "test-{}-{}",
+        // create_dir fails on an existing path, so a planted symlink is never followed; a
+        // name a killed run left behind is skipped.
+        let home = loop {
+            let home = std::env::temp_dir().join(format!(
+                "token-max-test-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
+            match std::fs::create_dir(&home) {
+                Ok(()) => break home,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("{}: {e}", home.display()),
+            }
+        };
+        // Tests compare discovered paths, normalized as discovery does: symlinks such as
+        // macOS's /var resolve, and Windows' verbatim prefix is stripped.
+        let home = PathBuf::from(crate::discovery::realpath(home.to_str().unwrap()).unwrap());
         let claude = home.join(".claude");
         let codex = home.join(".codex");
         std::fs::create_dir_all(claude.join("projects/project")).unwrap();
@@ -194,6 +206,10 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         reason: "explicit setting".into(),
     };
     Profile {
+        agents: Default::default(),
+        instruction_budget_file: None,
+        instruction_budget_unresolved: None,
+        outranking_files: vec![],
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),
@@ -216,11 +232,13 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
                 minimum_claude_patch: None,
                 comparison_unknown: None,
                 unset: false,
+                setting: None,
             },
             models: IndexMap::default(),
             capped: false,
-            declared: false,
+            declared: None,
             tuned: IndexMap::default(),
+            contexts: IndexMap::default(),
         },
         idle: None,
         speed: None,
@@ -230,6 +248,59 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         background: vec![],
         background_directories: IndexMap::default(),
         background_requests: IndexMap::default(),
+        memory: None,
         t3: None,
     }
+}
+
+/// One setting's two lines in a plain-text default report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportLine {
+    /// The section's kind of claim: "MEASURED", "OFFICIAL" or "OPINION".
+    pub claim: String,
+    /// The verdict word, such as "change".
+    pub mark: String,
+    /// The heading line, with its column padding collapsed to single spaces.
+    pub head: String,
+    pub evidence: String,
+}
+
+/// The setting lines of a plain, unwrapped default report.
+pub fn report_lines(text: &str) -> Vec<ReportLine> {
+    let mut claim = String::new();
+    let mut rows = vec![];
+    let lines: Vec<&str> = text.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if let Some((title, _)) = line.split_once("  ")
+            && ["MEASURED", "OFFICIAL", "OPINION"].contains(&title)
+        {
+            claim = title.into();
+            continue;
+        }
+        let word = line.split(' ').next().unwrap_or_default();
+        let evidence = lines.get(i + 1).and_then(|l| l.strip_prefix("         "));
+        if claim.is_empty()
+            || !["change", "consider", "keep", "unknown", "info"].contains(&word)
+            || line.len() < 9
+        {
+            continue;
+        }
+        let Some(evidence) = evidence else { continue };
+        rows.push(ReportLine {
+            claim: claim.clone(),
+            mark: word.into(),
+            head: line[9..].split_whitespace().collect::<Vec<_>>().join(" "),
+            evidence: evidence.into(),
+        });
+    }
+    rows
+}
+
+/// The report line whose heading starts with `head`.
+pub fn report_line(text: &str, head: &str) -> ReportLine {
+    let rows = report_lines(text);
+    rows.iter()
+        .find(|r| r.head.starts_with(head))
+        .cloned()
+        .unwrap_or_else(|| panic!("no line starts with {head:?} in {rows:#?}"))
 }

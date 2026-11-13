@@ -1593,8 +1593,14 @@ mod tests {
         assert_eq!(efforts, [("medium", 1), (UNRECORDED, 1)]);
         assert_eq!(explore.sources[0].source, ModelSource::Inherited);
         assert_eq!(explore.cheapest.as_deref(), Some("claude-haiku-5-5"));
-        let recorded = explore.cost.total_usd.unwrap();
-        let cheaper = explore.reprice.as_ref().unwrap().total_usd.unwrap();
+        let recorded = explore.cost.total_usd.unwrap().to_f64();
+        let cheaper = explore
+            .reprice
+            .as_ref()
+            .unwrap()
+            .total_usd
+            .unwrap()
+            .to_f64();
         assert!(
             cheaper > 0.0 && cheaper < recorded,
             "{cheaper} vs {recorded}"

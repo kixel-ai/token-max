@@ -18,7 +18,7 @@ use crate::model::{
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
     HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
     RequestEvidence, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
-    UnlinkedSensitivity, Usage, UsageEstimate, WindowBasisKind,
+    UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sum, add_costs, conditional_tier, paired_savings, price_part,
@@ -618,7 +618,9 @@ fn ttl_check(
         cold_comparison.total_usd,
         comparison_cost.five_minutes.total_usd,
     ) {
-        (Some(benefit), Some(cold), Some(short)) if benefit > 0.0 => Some((cold - short) / benefit),
+        (Some(benefit), Some(cold), Some(short)) if benefit > Usd::ZERO => {
+            Some((cold - short).to_f64() / benefit.to_f64())
+        }
         _ => None,
     };
     let current = profile.ttl.get(bucket);
@@ -633,9 +635,9 @@ fn ttl_check(
     );
     let recommended = if !paired.decided {
         None
-    } else if paired.usd > 0.0 {
+    } else if paired.usd > Usd::ZERO {
         Some(Ttl::OneHour)
-    } else if paired.usd < 0.0 {
+    } else if paired.usd < Usd::ZERO {
         Some(Ttl::FiveMinutes)
     } else {
         current.value
@@ -659,8 +661,8 @@ fn ttl_check(
     };
     let savings = match (current.value, recommended) {
         (Some(current), Some(recommended)) if current == recommended => Some(0.0),
-        (Some(Ttl::FiveMinutes), Some(_)) => Some(paired.usd),
-        (Some(_), Some(_)) => Some(-paired.usd),
+        (Some(Ttl::FiveMinutes), Some(_)) => Some(paired.usd.to_f64()),
+        (Some(_), Some(_)) => Some(-paired.usd.to_f64()),
         _ => None,
     };
     let profiles: IndexSet<&str> = relevant
@@ -777,7 +779,7 @@ fn ttl_check(
             WindowBasisKind::Available
         },
         bucket,
-        one_hour_savings_usd: paired.usd,
+        one_hour_savings_usd: paired.usd.to_f64(),
         cost,
         summary_cost,
         comparison_cost,
@@ -785,8 +787,8 @@ fn ttl_check(
         usage_estimates,
         cache_evidence: short.evidence.into_iter().chain(long.evidence).collect(),
         sensitivity: TtlSensitivity {
-            cold_prefix1h_usd: cold.total_usd,
-            cold_prefix1h_comparison_usd: cold_comparison.total_usd,
+            cold_prefix1h_usd: cold.total_usd.map(Usd::to_f64),
+            cold_prefix1h_comparison_usd: cold_comparison.total_usd.map(Usd::to_f64),
             warm_reuse_break_even_fraction: break_even,
             unlinked,
         },
@@ -1155,7 +1157,7 @@ mod tests {
     }
 
     fn total(cost: &Cost) -> Option<f64> {
-        cost.total_usd
+        cost.total_usd.map(Usd::to_f64)
     }
 
     fn retime(r: &mut Request, time: Millis) {

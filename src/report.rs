@@ -15,7 +15,7 @@ use crate::model::{
     CheckResult, ContextCost, ContextKind, Control, ControlValue, Cost, Coverage, EstimateEvidence,
     Evidence, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile,
     Report, RequestEvidence, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl,
-    UsageEstimate, Verdict,
+    UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -96,8 +96,8 @@ fn usd(value: f64) -> String {
 
 fn money(cost: &Cost) -> String {
     match cost.total_usd {
-        None => format!("unknown ({} known subtotal)", usd(cost.known_usd)),
-        Some(total) => usd(total),
+        None => format!("unknown ({} known subtotal)", usd(cost.known_usd.to_f64())),
+        Some(total) => usd(total.to_f64()),
     }
 }
 
@@ -1103,8 +1103,10 @@ fn shares(values: &[Share], whole: u64) -> String {
 /// A cost scaled by `scale`, a known lower bound, or unknown.
 fn scaled(cost: &Cost, scale: &dyn Fn(f64) -> String) -> String {
     match cost.total_usd {
-        Some(value) => scale(value),
-        None if cost.known_usd > 0.0 => format!("at least {}", scale(cost.known_usd)),
+        Some(value) => scale(value.to_f64()),
+        None if cost.known_usd > Usd::ZERO => {
+            format!("at least {}", scale(cost.known_usd.to_f64()))
+        }
         None => "an unknown amount".into(),
     }
 }
@@ -2037,7 +2039,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
                 .map(|usd| {
                     format!(
                         "Conditional baseline cost {}. ",
-                        per_month(usd, r.since, r.until)
+                        per_month(usd.to_f64(), r.since, r.until)
                     )
                 })
                 .unwrap_or_default(),
@@ -2145,7 +2147,7 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     let priced: Vec<String> = scenarios
         .iter()
         .filter_map(|s| {
-            let usd = s.cost.total_usd?;
+            let usd = s.cost.total_usd?.to_f64();
             Some(format!(
                 "{} {}",
                 s.mode.as_str(),
@@ -2784,8 +2786,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         let cost = &w.miss_cost;
         let cost = match cost.total_usd {
-            Some(usd) => about(usd),
-            None if cost.known_usd > 0.0 => format!("at least {}", about(cost.known_usd)),
+            Some(usd) => about(usd.to_f64()),
+            None if cost.known_usd > Usd::ZERO => {
+                format!("at least {}", about(cost.known_usd.to_f64()))
+            }
             None => "an unknown amount".into(),
         };
         format!(
@@ -3545,8 +3549,8 @@ mod tests {
 
     fn cost(total: Option<f64>, known: f64) -> Cost {
         Cost {
-            known_usd: known,
-            total_usd: total,
+            known_usd: Usd::from_f64(known),
+            total_usd: total.map(Usd::from_f64),
             unknown: if total.is_none() {
                 vec!["synthetic unknown charge".into()]
             } else {
@@ -3840,7 +3844,7 @@ mod tests {
             tier_unknown_requests: 0,
             assumptions: vec![],
             tokens: estimated.map(|_| 12_345),
-            cost_usd: estimated.map_or(0.0, |e| e * 0.9),
+            cost_usd: Usd::from_f64(estimated.map_or(0.0, |e| e * 0.9)),
             estimated_usd: estimated,
             calls,
             last_used: calls.filter(|&c| c > 0).map(|_| NOV1 + 5 * DAY_MS),
@@ -4706,8 +4710,8 @@ mod tests {
         let mut report = synthetic();
         let before = text(&report, None, false);
         let cost = |usd: f64| Cost {
-            known_usd: usd,
-            total_usd: Some(usd),
+            known_usd: Usd::from_f64(usd),
+            total_usd: Some(Usd::from_f64(usd)),
             unknown: vec![],
             assumptions: vec![],
         };
@@ -4949,13 +4953,13 @@ mod tests {
         let mut report = synthetic_report();
         let result = ttl_mut(&mut report);
         result.cost.one_hour = Cost {
-            known_usd: 9.87,
+            known_usd: Usd::from_f64(9.87),
             total_usd: None,
             unknown: vec!["synthetic unknown fixed charge".into()],
             assumptions: vec!["synthetic price assumption".into()],
         };
         result.fixed_cost = Cost {
-            known_usd: 0.0,
+            known_usd: Usd::from_f64(0.0),
             total_usd: None,
             unknown: vec!["synthetic unknown fixed charge".into()],
             assumptions: vec![],
@@ -5148,7 +5152,7 @@ mod tests {
             tier_unknown_requests: 0,
             assumptions: vec![],
             tokens: Some(100),
-            cost_usd: 5.0,
+            cost_usd: Usd::from_f64(5.0),
             estimated_usd: Some(5.0),
             calls: Some(0),
             last_used: None,
@@ -5183,7 +5187,7 @@ mod tests {
             kind: ContextKind::System,
             name: "Claude Code system prompt".into(),
             control: None,
-            cost_usd: 1.0,
+            cost_usd: Usd::from_f64(1.0),
             estimated_usd: Some(1.0),
             calls: None,
             cost_per_use_usd: None,

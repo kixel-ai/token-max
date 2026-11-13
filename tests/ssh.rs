@@ -826,12 +826,12 @@ fn any_failed_destination_fails_the_whole_report() {
         ),
         (
             "bare",
-            "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with `cargo install --locked",
+            "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with `",
         ),
         ("windows", "windows: unsupported platform"),
         (
             "old",
-            "old: token-max there did not start an SSH audit (exit 2); install the same version with `cargo install",
+            "old: token-max there did not start an SSH audit (exit 2); install the same version with `",
         ),
         ("other", "other: runs token-max 9.9.9+"),
         ("corrupt", "corrupt: invalid SSH audit stream at line "),

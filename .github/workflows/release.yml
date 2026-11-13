@@ -53,17 +53,19 @@ jobs:
           if [ "$DRY_RUN" = true ]; then exit 0; fi
           test "$version" != 0.0.0
           # `announce` marks every release latest, which the installers serve.
-          case "$version" in
+          case "${version%%+*}" in
             *-*) echo "::error::prerelease $version would become the latest release"; exit 1 ;;
           esac
           # Once crates.io has this version, a new run would stage other
           # assets than its source; finish the original run's announce instead.
-          status=$(curl -sS -o /dev/null -w '%{http_code}' -A 'token-max release (github.com/kixel-ai/token-max)' \
+          status=$(curl -sS --max-time 30 --retry 3 -o /dev/null -w '%{http_code}' \
+            -A 'token-max release (github.com/kixel-ai/token-max)' \
             "https://crates.io/api/v1/crates/token-max/$version")
-          if [ "$status" != 404 ]; then
-            echo "::error::crates.io answered $status for token-max $version; a new release needs an unpublished version"
-            exit 1
-          fi
+          case "$status" in
+            404) ;;
+            200) echo "::error::crates.io already has token-max $version; rerun announce in its original run"; exit 1 ;;
+            *) echo "::error::crates.io answered $status, so whether $version is published is unknown; dispatch again"; exit 1 ;;
+          esac
 
   validate:
     needs: preflight
@@ -204,17 +206,21 @@ jobs:
         run: |
           # GitHub ignores --target for a tag that exists, so refuse one on
           # another commit rather than publish these assets under it.
-          if tagged=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha 2>/dev/null); then
+          tags=$(gh api "repos/$GH_REPO/git/matching-refs/tags/$TAG" \
+            --jq "map(select(.ref == \"refs/tags/$TAG\")) | length")
+          if [ "$tags" != 0 ]; then
+            tagged=$(gh api "repos/$GH_REPO/commits/$TAG" --jq .sha)
             test "$tagged" = "$GITHUB_SHA"
           fi
           # A retry reuses its draft, moved to this commit so the tag matches
-          # these assets; a published release with this tag fails the job.
-          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
-            test "$draft" = true
-            gh release edit "$TAG" --target "$GITHUB_SHA"
-          else
-            gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" --generate-notes
-          fi
+          # these assets; a published release or several drafts fail the job.
+          drafts=$(gh api --paginate "repos/$GH_REPO/releases" \
+            --jq ".[] | select(.tag_name == \"$TAG\") | .draft")
+          case "$drafts" in
+            "") gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" --generate-notes ;;
+            true) gh release edit "$TAG" --target "$GITHUB_SHA" ;;
+            *) echo "::error::$TAG already has a published release or several drafts"; exit 1 ;;
+          esac
           gh release upload "$TAG" --clobber assets/*
 
   publish:

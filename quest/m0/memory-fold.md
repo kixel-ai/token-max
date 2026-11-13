@@ -16,6 +16,12 @@ redundant memory in
 implementer chooses between one pass and two by measurement against the
 runtime bound (rejected: one pass only; two passes regardless of time).
 
+Decided 2026-11-13 (maintainer, on
+[#87](https://github.com/kixel-ai/token-max/pull/87)): ✅ finish the fold
+in #87, including the idle-period storage below (rejected: land the cheap
+folds alone first; land them and drop the fold). ✅ accept the breaking
+library API change (rejected: keep the old constructors).
+
 Multi-host runs are done:
 [kixelated/token-max#78](https://github.com/kixelated/token-max/pull/78)
 has each SSH destination analyze its own scan and send only its report, so
@@ -25,33 +31,28 @@ the coordinator never holds more than its own scan. Destinations run the same
 The reader already streams lines, but `scan()` keeps every deduplicated
 request, event and exposure observation, sorts them, and hands the whole
 `Scan` to `analyze()`, which the `Report` keeps. On synthetic histories peak
-memory grows linearly: about 4.4 KB per request before
-[#87](https://github.com/kixel-ai/token-max/pull/87) (2.83 GB for 640,000
-requests), about 2.8 KB after it (1.83 GB peak RSS).
+memory grows linearly, about 4.4 KB per request (2.83 GB for 640,000
+requests).
 
-### What #87 left
+### Where the memory goes
 
-#87 shrank what each record holds and stopped the checks keeping whole
-replays, without the fold: requests and events share their recorded-alike
-fields, and the TTL, compaction and idle replays total their parts as they
-stream. Heap on the 160,000-request synthetic history, measured with a
-counting allocator: 169 MB live when analysis starts (1.06 KB per request:
-events 65 MB at 200 B each, billing parts 38 MB, requests 26 MB, exposure
-28 MB), then these peaks above it:
+#87's first steps share requests' and events' recorded-alike fields and total
+the TTL, compaction and idle replays as they stream, which brings that to
+about 2.8 KB per request (1.83 GB peak RSS). Heap on the 160,000-request
+synthetic history, measured with a counting allocator, then: 169 MB live
+when analysis starts (1.06 KB per request: events 65 MB at 200 B each,
+billing parts 38 MB, requests 26 MB, exposure 28 MB), and these peaks above
+it:
 
 - Idle, 481 MB, the run's peak. The report keeps every `IdlePeriod` (352 B,
   one per request gap, in both scenarios: about 190 MB with their costs)
   though it renders only counts and groups, and each owner's scenario holds
-  its periods, prepared gaps and the point runs' per-period charges.
-  Recommendation: keep counts per (status, return timing, outcome, reason)
-  in the report, and give the tests, which check single periods, their own
-  way to reach them.
+  its periods, prepared gaps and the point runs' per-period charges. Keep
+  counts per (status, return timing, outcome, reason) in the report, and
+  give the tests, which check single periods, their own way to reach them.
 - Reading, 285 MB: the scan holds every request and event until it ends.
 - Compaction, 294 MB: the current window's replay keeps one 240 B record per
   part, and each simulation copies every request it changes.
-
-The fold below removes the per-request floor; the idle item is independent
-of it and the largest single step left.
 
 ### One pass, by measurement
 

@@ -25,8 +25,33 @@ the coordinator never holds more than its own scan. Destinations run the same
 The reader already streams lines, but `scan()` keeps every deduplicated
 request, event and exposure observation, sorts them, and hands the whole
 `Scan` to `analyze()`, which the `Report` keeps. On synthetic histories peak
-memory grows linearly, about 4.4 KB per request (2.83 GB for 640,000
-requests).
+memory grows linearly: about 4.4 KB per request before
+[#87](https://github.com/kixel-ai/token-max/pull/87) (2.83 GB for 640,000
+requests), about 2.8 KB after it (1.83 GB peak RSS).
+
+### What #87 left
+
+#87 shrank what each record holds and stopped the checks keeping whole
+replays, without the fold: requests and events share their recorded-alike
+fields, and the TTL, compaction and idle replays total their parts as they
+stream. Heap on the 160,000-request synthetic history, measured with a
+counting allocator: 169 MB live when analysis starts (1.06 KB per request:
+events 65 MB at 200 B each, billing parts 38 MB, requests 26 MB, exposure
+28 MB), then these peaks above it:
+
+- Idle, 481 MB, the run's peak. The report keeps every `IdlePeriod` (352 B,
+  one per request gap, in both scenarios: about 190 MB with their costs)
+  though it renders only counts and groups, and each owner's scenario holds
+  its periods, prepared gaps and the point runs' per-period charges.
+  Recommendation: keep counts per (status, return timing, outcome, reason)
+  in the report, and give the tests, which check single periods, their own
+  way to reach them.
+- Reading, 285 MB: the scan holds every request and event until it ends.
+- Compaction, 294 MB: the current window's replay keeps one 240 B record per
+  part, and each simulation copies every request it changes.
+
+The fold below removes the per-request floor; the idle item is independent
+of it and the largest single step left.
 
 ### One pass, by measurement
 

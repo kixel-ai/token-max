@@ -76,6 +76,8 @@ pub struct Interner {
     texts: crate::collections::HashSet<Text>,
     profiles: crate::collections::HashSet<Profiles>,
     tools: crate::collections::HashSet<ServerTools>,
+    metas: crate::collections::HashSet<std::sync::Arc<RequestMeta>>,
+    event_metas: crate::collections::HashSet<std::sync::Arc<EventMeta>>,
 }
 
 impl Interner {
@@ -120,36 +122,33 @@ impl Interner {
         self.profiles(&ids)
     }
 
-    /// Share every repeated string of a request, keeping its unique identifiers as they are.
+    /// Share every repeated string of a request, keeping its unique identifiers as they are,
+    /// and the fields it records alike with other requests.
     pub fn request(&mut self, r: &mut Request) {
-        r.session = self.text(&r.session);
+        let meta = std::sync::Arc::make_mut(&mut r.meta);
+        meta.session = self.text(&meta.session);
         for slot in [
-            &mut r.model,
-            &mut r.provider,
-            &mut r.source,
-            &mut r.trigger,
-            &mut r.turn,
-            &mut r.version,
-            &mut r.client,
-            &mut r.cwd,
-            &mut r.effort,
+            &mut meta.model,
+            &mut meta.provider,
+            &mut meta.source,
+            &mut meta.trigger,
+            &mut meta.version,
+            &mut meta.client,
+            &mut meta.cwd,
+            &mut meta.effort,
         ] {
             self.share(slot);
         }
-        for p in &mut r.parts {
-            for slot in [&mut p.model, &mut p.tier, &mut p.speed, &mut p.geo] {
-                self.share(slot);
-            }
-        }
-        if let Some(speed) = &mut r.requested_speed {
+        if let Some(speed) = &mut meta.requested_speed {
             self.share(&mut speed.tier);
             self.share(&mut speed.speed);
         }
-        for issue in &mut r.issues {
+        for issue in &mut meta.issues {
             *issue = self.text(issue);
         }
-        r.profiles = self.profiles(&r.profiles);
-        if let Some(tools) = &mut r.server_tools {
+        meta.issues.shrink_to_fit();
+        meta.profiles = self.profiles(&meta.profiles);
+        if let Some(tools) = &mut meta.server_tools {
             match self.tools.get(tools) {
                 Some(shared) => *tools = shared.clone(),
                 None => {
@@ -157,28 +156,66 @@ impl Interner {
                 }
             }
         }
+        self.share(&mut r.turn);
+        for p in &mut r.parts {
+            for slot in [&mut p.model, &mut p.tier, &mut p.speed, &mut p.geo] {
+                self.share(slot);
+            }
+        }
+        self.meta(&mut r.meta);
         r.parts.shrink_to_fit();
         r.locations.shrink_to_fit();
-        r.issues.shrink_to_fit();
     }
 
-    /// Share every repeated string of a structural event.
+    /// Replace `meta` with the shared copy of its value; its strings must already be shared.
+    pub fn meta(&mut self, meta: &mut std::sync::Arc<RequestMeta>) {
+        match self.metas.get(&**meta) {
+            Some(shared) => {
+                if !std::sync::Arc::ptr_eq(shared, meta) {
+                    *meta = shared.clone();
+                }
+            }
+            None => {
+                std::sync::Arc::make_mut(meta).issues.shrink_to_fit();
+                self.metas.insert(meta.clone());
+            }
+        }
+    }
+
+    /// Share every repeated string of a structural event, and the fields it records alike
+    /// with other events.
     pub fn event(&mut self, e: &mut StructuralEvent) {
-        e.session = self.text(&e.session);
+        let meta = std::sync::Arc::make_mut(&mut e.meta);
+        meta.session = self.text(&meta.session);
         for slot in [
-            &mut e.model,
-            &mut e.version,
-            &mut e.client,
-            &mut e.cwd,
-            &mut e.tool,
+            &mut meta.model,
+            &mut meta.version,
+            &mut meta.client,
+            &mut meta.cwd,
+            &mut meta.tool,
         ] {
             self.share(slot);
         }
+        meta.profiles = self.profiles(&meta.profiles);
         for origin in &mut e.origins {
             origin.session = self.text(&origin.session);
         }
-        e.profiles = self.profiles(&e.profiles);
         e.origins.shrink_to_fit();
+        self.event_meta(&mut e.meta);
+    }
+
+    /// Replace `meta` with the shared copy of its value; its strings must already be shared.
+    pub fn event_meta(&mut self, meta: &mut std::sync::Arc<EventMeta>) {
+        match self.event_metas.get(&**meta) {
+            Some(shared) => {
+                if !std::sync::Arc::ptr_eq(shared, meta) {
+                    *meta = shared.clone();
+                }
+            }
+            None => {
+                self.event_metas.insert(meta.clone());
+            }
+        }
     }
 }
 
@@ -358,14 +395,14 @@ pub enum Accounting {
 }
 
 /// Recorded API-attempt budget; this does not establish execution or billing.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
     pub max_output_tokens: Option<i64>,
 }
 
 /// Requested controls never establish the billed response tier.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct RequestedSpeed {
     pub tier: Option<Text>,
     pub speed: Option<Text>,
@@ -373,41 +410,65 @@ pub struct RequestedSpeed {
 
 /// One deduplicated model request, with no message content.
 ///
-/// Strings are shared: a request holds references to values that thousands of requests
-/// repeat, such as its model, session and profiles, so a full history fits in memory.
+/// A history holds a million requests, so each keeps only what differs per request and
+/// shares the rest, such as its session, model and profiles, with every request recorded
+/// alike. Shared fields read and write through `Deref`; a write copies them first.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub evidence: RequestEvidence,
     pub id: Text,
+    pub time: Millis,
+    pub end_time: Millis,
+    pub reference: Option<Text>,
+    pub turn: Option<Text>,
+    pub parts: Vec<BillingPart>,
+    pub locations: Few<Location>,
+    /// Shared with every request the same T3 provider turn ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub t3: Option<std::sync::Arc<T3Request>>,
+    #[serde(flatten)]
+    pub meta: std::sync::Arc<RequestMeta>,
+}
+
+/// What requests recorded alike share: everything but their identity, time, usage and location.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestMeta {
     pub harness: Harness,
     pub session: Text,
     pub agent: Agent,
-    pub time: Millis,
-    pub end_time: Millis,
     pub model: Option<Text>,
     pub provider: Option<Text>,
     pub api: Api,
     pub source: Option<Text>,
     pub trigger: Option<Text>,
-    pub reference: Option<Text>,
-    pub turn: Option<Text>,
     pub version: Option<Text>,
     pub client: Option<Text>,
     pub cwd: Option<Text>,
     /// The recorded reasoning effort, such as `high`.
     pub effort: Option<Text>,
-    pub parts: Vec<BillingPart>,
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
-    pub locations: Vec<Location>,
     pub accounting: Accounting,
     pub attempt: Option<Attempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
     pub issues: Vec<Text>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub t3: Option<Box<T3Request>>,
+}
+
+impl std::ops::Deref for Request {
+    type Target = RequestMeta;
+    fn deref(&self) -> &RequestMeta {
+        &self.meta
+    }
+}
+
+impl std::ops::DerefMut for Request {
+    /// The shared fields, copied first unless this request holds the only reference.
+    fn deref_mut(&mut self) -> &mut RequestMeta {
+        std::sync::Arc::make_mut(&mut self.meta)
+    }
 }
 
 /// A safe location under one conversation alias.
@@ -415,6 +476,133 @@ pub struct Request {
 pub struct Origin {
     pub session: Text,
     pub location: Location,
+}
+
+/// A short list, such as an event's origins or a request's locations. Nearly every one
+/// holds exactly one item, which it keeps inline rather than in an allocation of its own.
+#[derive(Clone, Debug, Default)]
+pub enum Few<T> {
+    #[default]
+    None,
+    One(T),
+    Many(Vec<T>),
+}
+
+/// An event's origins.
+pub type Origins = Few<Origin>;
+
+impl<T> Few<T> {
+    pub fn push(&mut self, item: T) {
+        *self = match std::mem::take(self) {
+            Few::None => Few::One(item),
+            Few::One(first) => Few::Many(vec![first, item]),
+            Few::Many(mut all) => {
+                all.push(item);
+                Few::Many(all)
+            }
+        };
+    }
+
+    /// Move every item of `other` to the end of this list.
+    pub fn append(&mut self, other: &mut Self) {
+        self.extend(std::mem::take(other));
+    }
+
+    /// Hold a single item inline, and release any spare capacity.
+    pub fn shrink_to_fit(&mut self) {
+        if let Few::Many(all) = self {
+            match all.len() {
+                0 => *self = Few::None,
+                1 => *self = Few::One(all.pop().expect("one item")),
+                _ => all.shrink_to_fit(),
+            }
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Few<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match self {
+            Few::None => &[],
+            Few::One(item) => std::slice::from_ref(item),
+            Few::Many(all) => all,
+        }
+    }
+}
+
+impl<T> std::ops::DerefMut for Few<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match self {
+            Few::None => &mut [],
+            Few::One(item) => std::slice::from_mut(item),
+            Few::Many(all) => all,
+        }
+    }
+}
+
+/// Equal when they list the same items, however they hold them.
+impl<T: PartialEq> PartialEq for Few<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T> From<Vec<T>> for Few<T> {
+    fn from(all: Vec<T>) -> Self {
+        let mut few = Few::Many(all);
+        few.shrink_to_fit();
+        few
+    }
+}
+
+impl<T> FromIterator<T> for Few<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+impl<T> Extend<T> for Few<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            self.push(item);
+        }
+    }
+}
+
+impl<T> IntoIterator for Few<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Few::None => vec![],
+            Few::One(item) => vec![item],
+            Few::Many(all) => all,
+        }
+        .into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Few<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Few<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T: Serialize> Serialize for Few<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
@@ -448,7 +636,7 @@ pub enum Scalar {
 }
 
 /// Preceding pricing metadata from the same file.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct Pricing {
     pub model: Option<Text>,
     pub provider: Option<Text>,
@@ -458,19 +646,36 @@ pub struct Pricing {
 }
 
 /// Structural context and timing evidence, never a billed boundary request.
+///
+/// Like a request, an event keeps only what differs per event and shares the rest with
+/// every event recorded alike, through `Deref`; a write copies the shared fields first.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StructuralEvent {
     pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
-    pub origins: Vec<Origin>,
-    pub harness: Harness,
-    pub session: Text,
+    pub origins: Origins,
     pub time: Millis,
     pub kind: EventKind,
-    pub profiles: Profiles,
     pub location: Location,
     pub request: Option<Text>,
+    pub tool_id: Option<Id>,
+    pub settings: Settings,
+    pub idle_attribution: IdleAttribution,
+    /// Claude Bash call details on its tool start and end, without the command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ShellCall>,
+    #[serde(flatten)]
+    pub meta: std::sync::Arc<EventMeta>,
+}
+
+/// What events recorded alike share: their file's context and any rare per-kind details.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventMeta {
+    pub harness: Harness,
+    pub session: Text,
+    pub profiles: Profiles,
     pub model: Option<Text>,
     pub version: Option<Text>,
     pub client: Option<Text>,
@@ -481,16 +686,24 @@ pub struct StructuralEvent {
     pub post_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
     pub tool: Option<Text>,
-    pub tool_id: Option<Id>,
-    pub settings: Settings,
-    pub idle_attribution: IdleAttribution,
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
-    /// Claude Bash call details on its tool start and end, without the command.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub shell: Option<ShellCall>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub t3: Option<Box<T3Request>>,
+    pub t3: Option<std::sync::Arc<T3Request>>,
+}
+
+impl std::ops::Deref for StructuralEvent {
+    type Target = EventMeta;
+    fn deref(&self) -> &EventMeta {
+        &self.meta
+    }
+}
+
+impl std::ops::DerefMut for StructuralEvent {
+    /// The shared fields, copied first unless this event holds the only reference.
+    fn deref_mut(&mut self) -> &mut EventMeta {
+        std::sync::Arc::make_mut(&mut self.meta)
+    }
 }
 
 /// Recorded settings values by key; most events carry none, so they hold no map.
@@ -704,9 +917,10 @@ pub struct Profile {
     /// Background controls at recorded working directories; an empty key means no directory.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub background_directories: IndexMap<String, Vec<BackgroundControl>>,
-    /// Request-specific overrides when session transitions or launch precedence are unresolved.
+    /// Request-specific overrides when session transitions or launch precedence are unresolved,
+    /// by request id; requests resolved alike share one list.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
-    pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
+    pub background_requests: IndexMap<Text, std::sync::Arc<[BackgroundControl]>>,
     /// Auto memory's current setting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryControl>,
@@ -778,7 +992,7 @@ pub struct AgentDefinition {
 }
 
 /// T3's three idle policies, independent of native Claude's interactive idle setting.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum T3IdleMode {
     #[serde(rename = "onReturn")]
     OnReturn,
@@ -866,14 +1080,14 @@ pub struct T3TextGeneration {
 }
 
 /// Historical projection evidence uniquely linked to a captured native request.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Request {
-    pub thread: String,
-    pub run: String,
-    pub attempt: String,
-    pub provider_turn: String,
-    pub status: String,
+    pub thread: Id,
+    pub run: Id,
+    pub attempt: Id,
+    pub provider_turn: Id,
+    pub status: &'static str,
     pub completed_at: Option<Millis>,
     pub usage_updated_at: Option<Millis>,
     pub used_tokens: Option<i64>,
@@ -1469,34 +1683,53 @@ pub enum PeriodOutcome {
     Unobserved,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct PeriodCalibration {
-    pub events: Vec<Id>,
-    pub summary_tokens: i64,
-    pub prefix_tokens: i64,
-}
-
-/// One request gap or final observation period, without an assumed session end.
-#[derive(Clone, Debug, PartialEq)]
-pub struct IdlePeriod {
-    pub request: Text,
-    pub resume: Option<Text>,
-    pub session: Text,
-    pub context_tokens: Option<i64>,
-    pub gap_ms: i64,
+/// What decided one idle period, which the report counts periods by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct PeriodKind {
     pub status: PeriodStatus,
-    pub reason: &'static str,
-    pub confirmed: bool,
     pub return_timing: ReturnTiming,
     pub outcome: PeriodOutcome,
-    pub event: Option<Id>,
-    pub version: Option<Text>,
-    pub client: Option<Text>,
-    pub flag_state: Option<&'static str>,
-    pub activation: Option<f64>,
-    pub activation_basis: std::borrow::Cow<'static, str>,
-    pub summary_cost: Cost,
-    pub calibration: Option<PeriodCalibration>,
+    pub reason: &'static str,
+}
+
+/// How many periods of one kind a scenario had.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PeriodGroup {
+    pub kind: PeriodKind,
+    pub periods: u64,
+}
+
+/// A scenario's request gaps and final observation periods, counted by kind.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PeriodCounts {
+    /// Each kind in the order its first period was seen.
+    pub groups: Vec<PeriodGroup>,
+    /// Eligible periods whose turn had ended before the estimated trigger.
+    pub confirmed: u64,
+}
+
+impl PeriodCounts {
+    pub(crate) fn add(&mut self, kind: PeriodKind, confirmed: bool) {
+        match self.groups.iter_mut().find(|g| g.kind == kind) {
+            Some(g) => g.periods += 1,
+            None => self.groups.push(PeriodGroup { kind, periods: 1 }),
+        }
+        self.confirmed += u64::from(confirmed);
+    }
+
+    /// Every counted period.
+    pub fn total(&self) -> u64 {
+        self.groups.iter().map(|g| g.periods).sum()
+    }
+
+    /// The periods with `status`.
+    pub fn with_status(&self, status: PeriodStatus) -> u64 {
+        self.groups
+            .iter()
+            .filter(|g| g.kind.status == status)
+            .map(|g| g.periods)
+            .sum()
+    }
 }
 
 /// A value for idle compaction on and off.
@@ -1547,7 +1780,7 @@ pub struct IdleScenario {
     pub applicable: bool,
     pub ttls: PerBucket<Option<Ttl>>,
     pub windows: Vec<ScenarioWindow>,
-    pub periods: Vec<IdlePeriod>,
+    pub periods: PeriodCounts,
     pub cost: OnOff<Cost>,
     /// Only changed charges, relative to the shared recorded-request baseline.
     pub adjustment: OnOff<Cost>,
@@ -1586,8 +1819,8 @@ pub struct T3IdleComparison {
     pub baseline: String,
     pub ttl: Option<Ttl>,
     pub scenarios: Vec<T3IdleScenario>,
-    /// Shared eligibility; summary cost and calibration describe beforeCacheExpires only.
-    pub periods: Vec<IdlePeriod>,
+    /// Shared eligibility, counted once for every mode.
+    pub periods: PeriodCounts,
 }
 
 /// T3 idle modes use observed expiry and lifecycle evidence, independently of native interactive eligibility.

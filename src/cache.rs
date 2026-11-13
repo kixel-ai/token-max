@@ -328,6 +328,8 @@ struct Session {
     histories: IndexMap<Cohort, History>,
     /// The next unpassed boundary in each layer.
     cursors: Vec<usize>,
+    /// Boundaries added while replaying, in time order, not yet passed.
+    pending: std::collections::VecDeque<Millis>,
 }
 
 /// Claude compaction boundary times in each origin session, sorted; build once per event set
@@ -382,25 +384,51 @@ impl<'b> CacheChain<'b> {
         }
     }
 
+    fn session<'s>(
+        sessions: &'s mut HashMap<Text, Session>,
+        session: &Text,
+        layers: usize,
+    ) -> &'s mut Session {
+        if !sessions.contains_key(session) {
+            let state = Session {
+                histories: IndexMap::default(),
+                cursors: vec![0; layers],
+                pending: Default::default(),
+            };
+            sessions.insert(session.clone(), state);
+        }
+        sessions.get_mut(session).expect("inserted")
+    }
+
+    /// Reset `session`'s histories at `time`, as a boundary in another layer would. Each
+    /// session's boundaries must arrive in time order, before the first touch they reset.
+    pub fn boundary(&mut self, session: &Text, time: Millis) {
+        Self::session(&mut self.sessions, session, self.boundaries.len())
+            .pending
+            .push_back(time);
+    }
+
+    /// Forget a session that has no more touches.
+    pub fn finish(&mut self, session: &str) {
+        self.sessions.remove(session);
+    }
+
     /// Record one touch; selected touches also return their replayed geometry.
     pub fn replay(&mut self, touch: &Touch) -> Option<Replayed> {
         let r = touch.request;
         let p = touch.p;
         let ttl = touch.ttl;
-        if !self.sessions.contains_key(&r.session) {
-            let session = Session {
-                histories: IndexMap::default(),
-                cursors: vec![0; self.boundaries.len()],
-            };
-            self.sessions.insert(r.session.clone(), session);
-        }
-        let session = self.sessions.get_mut(&r.session).expect("inserted");
+        let session = Self::session(&mut self.sessions, &r.session, self.boundaries.len());
         for (layer, cursor) in self.boundaries.iter().zip(&mut session.cursors) {
             let times = layer.get(&r.session);
             while *cursor < times.len() && times[*cursor] <= r.time {
                 session.histories.clear();
                 *cursor += 1;
             }
+        }
+        while session.pending.front().is_some_and(|&time| time <= r.time) {
+            session.histories.clear();
+            session.pending.pop_front();
         }
         let histories = &mut session.histories;
         let cohort = CohortRef {
@@ -811,43 +839,48 @@ mod tests {
                     location: location.clone(),
                 })
                 .collect(),
-            harness: Harness::Claude,
-            session: "original".into(),
             time: 18 * 60000,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()].into(),
             location,
             request: None,
-            model: None,
-            version: Some("2.1.314".into()),
-            client: Some("sdk-ts".into()),
-            cwd: None,
-            trigger: None,
-            precomputed: None,
-            pre_tokens: None,
-            post_tokens: None,
-            duration_ms: None,
-            tool: None,
             tool_id: None,
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
-            t3: None,
-            pricing: None,
+            meta: crate::model::EventMeta {
+                harness: Harness::Claude,
+                session: "original".into(),
+                profiles: vec!["profile".into()].into(),
+                model: None,
+                version: Some("2.1.314".into()),
+                client: Some("sdk-ts".into()),
+                cwd: None,
+                trigger: None,
+                precomputed: None,
+                pre_tokens: None,
+                post_tokens: None,
+                duration_ms: None,
+                tool: None,
+                t3: None,
+                pricing: None,
+            }
+            .into(),
         };
         for session in ["original", "copy"] {
             let boundaries = CacheBoundaries::new([&boundary]);
             let mut chain = CacheChain::new([&boundaries]);
             for r in [&first, &missing] {
-                let r = Request {
-                    session: session.into(),
-                    ..r.clone()
+                let r = {
+                    let mut built = Request { ..r.clone() };
+                    built.session = session.into();
+                    built
                 };
                 feed(&mut chain, &r, Ttl::FiveMinutes, false, false);
             }
-            let r = Request {
-                session: session.into(),
-                ..last.clone()
+            let r = {
+                let mut built = Request { ..last.clone() };
+                built.session = session.into();
+                built
             };
             let result = feed(&mut chain, &r, Ttl::FiveMinutes, true, false).unwrap();
             assert!(!result.unknown);

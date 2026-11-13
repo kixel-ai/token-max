@@ -87,7 +87,23 @@ pub struct ReplayedPart<'a> {
     pub p: BillingPart,
     pub selected: bool,
     pub components: Components,
+    /// Why the cache charge is unknown though the part prices, if it is.
+    pub cache_unknown: Option<&'static str>,
     pub evidence: Option<Box<CacheReplayEvidence>>,
+}
+
+/// Price one replayed part, whose cache charge is unknown for `cache_unknown`.
+pub(crate) fn replayed_components(
+    catalog: &Catalog,
+    r: &Request,
+    p: &BillingPart,
+    cache_unknown: Option<&str>,
+) -> Components {
+    let mut components = price_components(catalog, r, p);
+    if let Some(reason) = cache_unknown {
+        components.cache = unknown_cost(reason);
+    }
+    components
 }
 
 /// Replay the same cache histories and usage estimates for every setting consumer.
@@ -102,9 +118,47 @@ pub fn replay_parts<'a, 'b>(
     boundaries: impl IntoIterator<Item = &'b CacheBoundaries>,
     options: &ReplayOptions,
 ) -> impl Iterator<Item = ReplayedPart<'a>> {
-    let mut chain = CacheChain::new(boundaries);
-    let options = *options;
-    requests.into_iter().flat_map(move |r| {
+    let mut replay = PartReplay::new(boundaries, options);
+    requests
+        .into_iter()
+        .flat_map(move |r| replay.request(r, &[]))
+}
+
+/// A replay fed one request at a time, for callers that model each request just before it.
+pub(crate) struct PartReplay<'b, 'o> {
+    chain: CacheChain<'b>,
+    options: ReplayOptions<'o>,
+}
+
+impl<'b, 'o> PartReplay<'b, 'o> {
+    pub(crate) fn new(
+        boundaries: impl IntoIterator<Item = &'b CacheBoundaries>,
+        options: &ReplayOptions<'o>,
+    ) -> Self {
+        Self {
+            chain: CacheChain::new(boundaries),
+            options: *options,
+        }
+    }
+
+    /// Reset `session`'s cache histories at `time`, as a compaction boundary there would.
+    pub(crate) fn boundary(&mut self, session: &Text, time: Millis) {
+        self.chain.boundary(session, time);
+    }
+
+    /// Forget a session that has no more requests.
+    pub(crate) fn finish(&mut self, session: &str) {
+        self.chain.finish(session);
+    }
+
+    /// Replay the next request's parts, with `estimated` naming further parts whose
+    /// geometry is estimated.
+    pub(crate) fn request<'a>(
+        &mut self,
+        r: &'a Request,
+        estimated: &[usize],
+    ) -> Vec<ReplayedPart<'a>> {
+        let options = self.options;
         let mut result = Vec::new();
         let estimate = options.estimates.get(&r.id).and_then(|e| e.part.as_ref());
         if estimate.is_some() && options.attempt_scenario == AttemptScenario::NoBilledAttempt {
@@ -116,12 +170,13 @@ pub fn replay_parts<'a, 'b>(
             let ttl = options.ttls.get(bucket);
             let selected = r.time >= options.since;
             let replayed = if r.harness == Harness::Claude {
-                chain.replay(&Touch {
+                self.chain.replay(&Touch {
                     request: r,
                     p,
                     part,
                     estimated: estimate.is_some()
                         || r.evidence == RequestEvidence::Estimated
+                        || estimated.contains(&part)
                         || options
                             .estimated_parts
                             .is_some_and(|set| set.contains(&(r.id.clone(), part))),
@@ -154,34 +209,34 @@ pub fn replay_parts<'a, 'b>(
                 });
                 u.write1h = Some(if ttl == Some(Ttl::OneHour) { write } else { 0 });
             }
-            let mut components = price_components(options.catalog, r, &replayed.p);
+            let mut cache_unknown = None;
             if r.harness == Harness::Claude && (p.usage.read != Some(0) || p.usage.write != Some(0))
             {
                 if bucket.is_none() {
-                    components.cache =
-                        unknown_cost("cache TTL bucket is not established for this part");
+                    cache_unknown = Some("cache TTL bucket is not established for this part");
                 } else if ttl.is_none() {
-                    components.cache =
-                        unknown_cost("effective cache TTL policy is not established");
+                    cache_unknown = Some("effective cache TTL policy is not established");
                 } else if replayed.unknown {
                     let evidence = replayed
                         .evidence
                         .as_ref()
                         .expect("unknown replay has evidence");
-                    components.cache = unknown_cost(evidence.reason);
+                    cache_unknown = Some(evidence.reason);
                 }
             }
+            let components = replayed_components(options.catalog, r, &replayed.p, cache_unknown);
             result.push(ReplayedPart {
                 request: r,
                 part,
                 p: replayed.p,
                 selected,
                 components,
+                cache_unknown,
                 evidence: replayed.evidence,
             });
         }
         result
-    })
+    }
 }
 
 #[cfg(test)]
@@ -191,12 +246,15 @@ mod tests {
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
 
     fn at(id: &str, session: &str, time: Millis, read: i64, write: i64) -> Request {
-        let mut r = Request {
-            id: id.into(),
-            session: session.into(),
-            time,
-            end_time: time,
-            ..make_request()
+        let mut r = {
+            let mut built = Request {
+                id: id.into(),
+                time,
+                end_time: time,
+                ..make_request()
+            };
+            built.session = session.into();
+            built
         };
         r.parts[0].usage = claude_usage(ClaudeUsage {
             read,
@@ -216,30 +274,34 @@ mod tests {
             origins: vec![Origin {
                 session: session.into(),
                 location: location.clone(),
-            }],
-            harness: Harness::Claude,
-            session: session.into(),
+            }]
+            .into(),
             time,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()].into(),
             location,
             request: None,
-            model: None,
-            version: None,
-            client: None,
-            cwd: None,
-            trigger: None,
-            precomputed: None,
-            pre_tokens: None,
-            post_tokens: None,
-            duration_ms: None,
-            tool: None,
             tool_id: None,
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
-            t3: None,
-            pricing: None,
+            meta: crate::model::EventMeta {
+                harness: Harness::Claude,
+                session: session.into(),
+                profiles: vec!["profile".into()].into(),
+                model: None,
+                version: None,
+                client: None,
+                cwd: None,
+                trigger: None,
+                precomputed: None,
+                pre_tokens: None,
+                post_tokens: None,
+                duration_ms: None,
+                tool: None,
+                t3: None,
+                pricing: None,
+            }
+            .into(),
         }
     }
 

@@ -17,15 +17,17 @@ use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
     HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
-    RequestEvidence, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
+    RequestEvidence, RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
     UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sum, add_costs, conditional_tier, paired_savings, price_part,
+    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
     price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::safe::{ScanError, identity, iso};
-use crate::scenarios::{AttemptScenario, ReplayOptions, ReplayTtls, cache_bucket, replay_parts};
+use crate::scenarios::{
+    AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
+};
 
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 const MINUTE: Millis = 60_000;
@@ -75,32 +77,11 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
     Some(Request {
         evidence: RequestEvidence::Estimated,
         id: identity(&event.id.to_string()).into(),
-        harness: event.harness,
-        session: event.session.clone(),
         time: event.time,
         end_time: event.time,
-        agent: Agent::Subagent,
-        model: model.clone(),
-        provider: event
-            .pricing
-            .as_ref()
-            .and_then(|p| p.provider.clone())
-            .or_else(|| previous.and_then(|r| r.provider.clone())),
-        api: Api::Messages,
-        source: Some("compaction".into()),
-        trigger: event.trigger.as_deref().map(Text::from),
         reference: None,
         turn: None,
-        version: event.version.clone(),
-        client: event.client.clone(),
-        cwd: event.cwd.clone(),
-        effort: None,
-        profiles: event.profiles.clone(),
-        locations: vec![event.location.clone()],
-        accounting: Accounting::Individual,
-        attempt: None,
-        server_tools: Some(crate::model::ServerTools::default()),
-        requested_speed: None,
+        locations: vec![event.location.clone()].into(),
         t3: event.t3.clone(),
         parts: vec![BillingPart {
             model: model.clone(),
@@ -120,9 +101,33 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
                 reasoning: None,
             },
         }],
-        issues: vec![
-            "summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into(),
-        ],
+        meta: RequestMeta {
+            harness: event.harness,
+            session: event.session.clone(),
+            agent: Agent::Subagent,
+            model: model.clone(),
+            provider: event
+                .pricing
+                .as_ref()
+                .and_then(|p| p.provider.clone())
+                .or_else(|| previous.and_then(|r| r.provider.clone())),
+            api: Api::Messages,
+            source: Some("compaction".into()),
+            trigger: event.trigger.as_deref().map(Text::from),
+            version: event.version.clone(),
+            client: event.client.clone(),
+            cwd: event.cwd.clone(),
+            effort: None,
+            profiles: event.profiles.clone(),
+            accounting: Accounting::Individual,
+            attempt: None,
+            server_tools: Some(crate::model::ServerTools::default()),
+            requested_speed: None,
+            issues: vec![
+                "summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into(),
+            ],
+        }
+        .into(),
     })
 }
 
@@ -411,13 +416,45 @@ fn default_since(requests: &[&Request], selected: Bucket) -> Window {
 }
 
 /// One cache replay of a profile's requests, restricted to the checked bucket's selected parts.
-struct Replay<'a> {
+struct Replay {
     comparison: Cost,
-    /// Cache cost per selected request part, keyed by request id and part index.
-    items: IndexMap<(&'a str, usize), Cost>,
     fixed: Cost,
     predecessors: HashSet<Text>,
     evidence: Vec<CacheReplayEvidence>,
+}
+
+/// A [`Replay`] totaled as its parts arrive, so none is kept.
+#[derive(Default)]
+struct Totals {
+    comparison: Sum,
+    fixed: Sum,
+    predecessors: HashSet<Text>,
+    evidence: Vec<CacheReplayEvidence>,
+}
+
+impl Totals {
+    /// Add one part, returning its cache cost.
+    fn add(&mut self, item: ReplayedPart) -> Cost {
+        if let Some(e) = item.evidence {
+            for predecessor in &e.predecessors {
+                self.predecessors.insert(predecessor.request.clone());
+            }
+            self.evidence.push(*e);
+        }
+        self.comparison.add(&item.components.cache);
+        self.fixed.add(&item.components.ordinary);
+        self.fixed.add(&item.components.output);
+        item.components.cache
+    }
+
+    fn finish(self) -> Replay {
+        Replay {
+            comparison: self.comparison.cost(),
+            fixed: self.fixed.cost(),
+            predecessors: self.predecessors,
+            evidence: self.evidence,
+        }
+    }
 }
 
 /// Shared inputs for every TTL check in one report.
@@ -440,9 +477,14 @@ struct Replayer<'i, 'a> {
     since: Millis,
 }
 
-impl<'a> Replayer<'_, 'a> {
-    fn run(&self, ttl: Ttl, cold_prefixes: bool, attempt_scenario: AttemptScenario) -> Replay<'a> {
-        let options = ReplayOptions {
+impl Replayer<'_, '_> {
+    fn options(
+        &self,
+        ttl: Ttl,
+        cold_prefixes: bool,
+        attempt_scenario: AttemptScenario,
+    ) -> ReplayOptions<'_> {
+        ReplayOptions {
             estimates: self.input.estimates,
             catalog: self.input.catalog,
             ttls: ReplayTtls::all(Some(ttl)),
@@ -450,38 +492,58 @@ impl<'a> Replayer<'_, 'a> {
             cold_prefixes,
             estimated_parts: None,
             attempt_scenario,
-        };
-        let mut predecessors = HashSet::default();
-        let mut evidence = vec![];
-        let mut items = IndexMap::default();
-        let mut fixed = Sum::new();
-        let replayed = replay_parts(
+        }
+    }
+
+    /// Whether a replayed part is one of the checked bucket's selected parts.
+    fn checked(&self, item: &ReplayedPart) -> bool {
+        item.selected && in_bucket(item.request, &item.p, self.bucket)
+    }
+
+    fn run(&self, ttl: Ttl, cold_prefixes: bool, attempt_scenario: AttemptScenario) -> Replay {
+        let options = self.options(ttl, cold_prefixes, attempt_scenario);
+        let mut totals = Totals::default();
+        for item in replay_parts(
             self.requests.iter().copied(),
             [self.input.boundaries],
             &options,
-        );
-        for item in replayed {
-            if !item.selected || !in_bucket(item.request, &item.p, self.bucket) {
-                continue;
+        ) {
+            if self.checked(&item) {
+                totals.add(item);
             }
-            if let Some(e) = item.evidence {
-                for predecessor in &e.predecessors {
-                    predecessors.insert(predecessor.request.clone());
-                }
-                evidence.push(*e);
-            }
-            // Replay clones each part, so only its recorded index identifies it.
-            items.insert((&*item.request.id, item.part), item.components.cache);
-            fixed.add(&item.components.ordinary);
-            fixed.add(&item.components.output);
         }
-        Replay {
-            comparison: add_costs(items.values()),
-            items,
-            fixed: fixed.cost(),
-            predecessors,
-            evidence,
+        totals.finish()
+    }
+
+    /// Replay 5m and 1h side by side, pairing each part's cache cost as (5m, 1h) with
+    /// `unknown` further unpriced items, so neither replay keeps its parts. Both yield the
+    /// same parts in the same order: a part's bucket and selection do not depend on its TTL,
+    /// and a request id appears once in a profile's requests.
+    fn compare(&self, unknown: u64) -> (Replay, Replay, PairedSavings) {
+        let short_options = self.options(Ttl::FiveMinutes, false, AttemptScenario::Point);
+        let long_options = self.options(Ttl::OneHour, false, AttemptScenario::Point);
+        let parts = |options| {
+            replay_parts(
+                self.requests.iter().copied(),
+                [self.input.boundaries],
+                options,
+            )
+            .filter(|item| self.checked(item))
+        };
+        let mut longs = parts(&long_options);
+        let (mut short, mut long, mut pairs) =
+            (Totals::default(), Totals::default(), Pairs::default());
+        for item in parts(&short_options) {
+            let other = longs.next().expect("both replays yield the same parts");
+            debug_assert_eq!(
+                (&item.request.id, item.part),
+                (&other.request.id, other.part)
+            );
+            let five_minutes = short.add(item);
+            pairs.add(&five_minutes, &long.add(other));
         }
+        debug_assert!(longs.next().is_none(), "both replays yield the same parts");
+        (short.finish(), long.finish(), pairs.savings(unknown))
     }
 }
 
@@ -563,8 +625,8 @@ fn ttl_check(
         since,
     };
     let replay = |ttl, attempt| replayer.run(ttl, false, attempt);
-    let short = replay(Ttl::FiveMinutes, AttemptScenario::Point);
-    let long = replay(Ttl::OneHour, AttemptScenario::Point);
+    // Positive savings when 1h is cheaper than 5m on the parts both replays price.
+    let (short, long, paired) = replayer.compare(skipped_lines(scan, &profile.id));
     let comparison_cost = PerTtl {
         five_minutes: short.comparison.clone(),
         one_hour: long.comparison.clone(),
@@ -624,15 +686,6 @@ fn ttl_check(
         _ => None,
     };
     let current = profile.ttl.get(bucket);
-    // Positive when 1h is cheaper than 5m on the parts both replays price.
-    let not_replayed = unknown_cost("part not replayed");
-    let paired = paired_savings(
-        short
-            .items
-            .iter()
-            .map(|(key, baseline)| (baseline, long.items.get(key).unwrap_or(&not_replayed))),
-        skipped_lines(scan, &profile.id),
-    );
     let recommended = if !paired.decided {
         None
     } else if paired.usd > Usd::ZERO {
@@ -841,7 +894,17 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let historical = groups
         .into_iter()
         .map(|(key, requests)| {
-            let costs: Vec<Cost> = requests.iter().map(|r| price_request(catalog, r)).collect();
+            let mut cost = Sum::new();
+            let (mut priced_requests, mut conditional_requests) = (0, 0);
+            for &r in &requests {
+                let c = price_request(catalog, r);
+                if c.total_usd.is_some() {
+                    priced_requests += 1;
+                    conditional_requests +=
+                        u64::from(r.parts.iter().any(|p| conditional_tier(r, p)));
+                }
+                cost.add(&c);
+            }
             HistoricalCost {
                 bucket: if requests[0].profiles.len() > 1 {
                     format!("shared:{key}")
@@ -850,16 +913,10 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 },
                 profiles: requests[0].profiles.to_vec(),
                 requests: requests.len() as u64,
-                priced_requests: costs.iter().filter(|c| c.total_usd.is_some()).count() as u64,
-                conditional_requests: requests
-                    .iter()
-                    .zip(&costs)
-                    .filter(|(r, c)| {
-                        c.total_usd.is_some() && r.parts.iter().any(|p| conditional_tier(r, p))
-                    })
-                    .count() as u64,
+                priced_requests,
+                conditional_requests,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
-                cost: add_costs(&costs),
+                cost: cost.cost(),
             }
         })
         .collect();
@@ -1179,30 +1236,34 @@ mod tests {
             origins: vec![Origin {
                 session: session.into(),
                 location: location.clone(),
-            }],
-            harness: Harness::Claude,
-            session: session.into(),
+            }]
+            .into(),
             time,
             kind: EventKind::Compaction,
-            profiles: vec!["profile".into()].into(),
             location,
             request: None,
-            model: None,
-            version: Some("2.1.314".into()),
-            client: None,
-            cwd: None,
-            trigger: Some("auto".into()),
-            precomputed: Some(false),
-            pre_tokens: None,
-            post_tokens: None,
-            duration_ms: None,
-            tool: None,
             tool_id: None,
             settings: Default::default(),
             idle_attribution: IdleAttribution::Unknown,
             shell: None,
-            t3: None,
-            pricing: None,
+            meta: crate::model::EventMeta {
+                harness: Harness::Claude,
+                session: session.into(),
+                profiles: vec!["profile".into()].into(),
+                model: None,
+                version: Some("2.1.314".into()),
+                client: None,
+                cwd: None,
+                trigger: Some("auto".into()),
+                precomputed: Some(false),
+                pre_tokens: None,
+                post_tokens: None,
+                duration_ms: None,
+                tool: None,
+                t3: None,
+                pricing: None,
+            }
+            .into(),
         }
     }
 
@@ -1315,9 +1376,12 @@ mod tests {
         let result = check(&data(vec![first, read], vec![]), None, 1_200_000);
         assert_eq!(result.base.recommended, Some(H1));
         assert!(total(&result.cost.five_minutes).unwrap() > total(&result.cost.one_hour).unwrap());
-        let unshared = Request {
-            session: "different".into(),
-            ..at("separate", 600_000)
+        let unshared = {
+            let mut built = Request {
+                ..at("separate", 600_000)
+            };
+            built.session = "different".into();
+            built
         };
         let c = check(
             &data(vec![make_request(), unshared], vec![]),
@@ -1331,10 +1395,13 @@ mod tests {
     fn a_large_returned_period_decides_the_aggregate() {
         let mut requests: Vec<Request> = (0..4)
             .map(|i| {
-                let r = Request {
-                    id: format!("small-{i}").into(),
-                    session: format!("small-{i}").into(),
-                    ..make_request()
+                let r = {
+                    let mut built = Request {
+                        id: format!("small-{i}").into(),
+                        ..make_request()
+                    };
+                    built.session = format!("small-{i}").into();
+                    built
                 };
                 with(r, u(10, 0, M5))
             })
@@ -1455,12 +1522,13 @@ mod tests {
 
     #[test]
     fn scenario_invariant_unknown_server_fees_do_not_veto() {
-        let first = Request {
-            server_tools: Some(crate::model::ServerTools::from_iter([(
+        let first = {
+            let mut built = Request { ..make_request() };
+            built.server_tools = Some(crate::model::ServerTools::from_iter([(
                 "code_execution_requests".into(),
                 1,
-            )])),
-            ..make_request()
+            )]));
+            built
         };
         let mut next = Request {
             id: "later".into(),
@@ -1490,16 +1558,20 @@ mod tests {
 
     #[test]
     fn mixed_outside_main_agent_ttls_keep_the_available_window() {
-        let first = Request {
-            agent: Agent::Subagent,
-            source: Some("agent:builtin:general-purpose".into()),
-            ..make_request()
+        let first = {
+            let mut built = Request { ..make_request() };
+            built.agent = Agent::Subagent;
+            built.source = Some("agent:builtin:general-purpose".into());
+            built
         };
-        let helper = Request {
-            session: "helper-session".into(),
-            agent: Agent::Subagent,
-            source: Some("session_title".into()),
-            ..at("helper", 600_000)
+        let helper = {
+            let mut built = Request {
+                ..at("helper", 600_000)
+            };
+            built.session = "helper-session".into();
+            built.agent = Agent::Subagent;
+            built.source = Some("session_title".into());
+            built
         };
         let helper = with(helper, u(1000, 0, H1));
         let again = Request {
@@ -1531,10 +1603,11 @@ mod tests {
 
     #[test]
     fn an_unknown_unmatched_proxy_cancels_without_hiding_its_cost() {
-        let first = Request {
-            agent: Agent::Subagent,
-            source: Some("agent:builtin:general-purpose".into()),
-            ..make_request()
+        let first = {
+            let mut built = Request { ..make_request() };
+            built.agent = Agent::Subagent;
+            built.source = Some("agent:builtin:general-purpose".into());
+            built
         };
         let next = Request {
             id: "next".into(),
@@ -1542,10 +1615,13 @@ mod tests {
             end_time: 600_000,
             ..first.clone()
         };
-        let event = StructuralEvent {
-            client: Some("sdk-ts".into()),
-            precomputed: Some(true),
-            ..boundary("unpriced-summary", "other-session", 300_000)
+        let event = {
+            let mut built = StructuralEvent {
+                ..boundary("unpriced-summary", "other-session", 300_000)
+            };
+            built.client = Some("sdk-ts".into());
+            built.precomputed = Some(true);
+            built
         };
         let result = check(&data(vec![first, next], vec![event]), None, 1_200_000);
         assert_eq!(result.base.recommended, Some(H1));
@@ -1558,10 +1634,13 @@ mod tests {
 
     #[test]
     fn unknown_comparison_reports_missing_linked_usage_first() {
-        let mut r = Request {
-            evidence: RequestEvidence::Unknown,
-            issues: vec![UNLINKED.into()],
-            ..make_request()
+        let mut r = {
+            let mut built = Request {
+                evidence: RequestEvidence::Unknown,
+                ..make_request()
+            };
+            built.issues = vec![UNLINKED.into()];
+            built
         };
         r.parts[0].usage = empty_usage();
         r.parts[0].tier = None;
@@ -1590,15 +1669,18 @@ mod tests {
 
     fn bracketed_attempt() -> Bracket {
         let first = at("before", 0);
-        let mut attempt = Request {
-            evidence: RequestEvidence::Unknown,
-            reference: Some("attempt-ref".into()),
-            attempt: Some(Attempt {
+        let mut attempt = {
+            let mut built = Request {
+                evidence: RequestEvidence::Unknown,
+                reference: Some("attempt-ref".into()),
+                ..at("attempt", 600_000)
+            };
+            built.attempt = Some(Attempt {
                 max_output_tokens: Some(100),
-            }),
-            server_tools: None,
-            issues: vec![UNLINKED.into()],
-            ..at("attempt", 600_000)
+            });
+            built.server_tools = None;
+            built.issues = vec![UNLINKED.into()];
+            built
         };
         attempt.parts[0] = BillingPart {
             usage: empty_usage(),
@@ -1758,9 +1840,12 @@ mod tests {
             end_time: 480_000,
             ..first.clone()
         };
-        let other = Request {
-            session: "other".into(),
-            ..at("other", 60_000)
+        let other = {
+            let mut built = Request {
+                ..at("other", 60_000)
+            };
+            built.session = "other".into();
+            built
         };
         let other = with(other, u(10, 0, M5));
         let transition = Request {
@@ -1804,10 +1889,13 @@ mod tests {
         attempt.parts[0].speed = speed.map(Text::from);
         retime(&mut after, 20 * MIN);
         after.parts[0].usage = claude_usage(u(200, 1000, H1));
-        let mut other = Request {
-            session: "other".into(),
-            source: Some("other".into()),
-            ..at("other", 60_000)
+        let mut other = {
+            let mut built = Request {
+                ..at("other", 60_000)
+            };
+            built.session = "other".into();
+            built.source = Some("other".into());
+            built
         };
         other.parts[0] = BillingPart {
             usage: claude_usage(u(10, 0, M5)),
@@ -1954,11 +2042,12 @@ mod tests {
             after,
         } = bracketed_attempt();
         let after = with(after, u(1200, 0, M5));
-        let sub = Request {
-            agent: Agent::Subagent,
-            source: Some("agent:builtin:general-purpose".into()),
-            session: "child".into(),
-            ..at("sub", 0)
+        let sub = {
+            let mut built = Request { ..at("sub", 0) };
+            built.agent = Agent::Subagent;
+            built.source = Some("agent:builtin:general-purpose".into());
+            built.session = "child".into();
+            built
         };
         let s = data(vec![first, attempt, after, sub], vec![]);
         let report = report_at(&s, None, 1_800_000);
@@ -2020,16 +2109,19 @@ mod tests {
                 attempt,
                 after,
             } = bracketed_attempt();
-            let other = Request {
-                id: "other".into(),
-                session: if layout == "mixed" {
+            let other = {
+                let mut built = Request {
+                    id: "other".into(),
+                    time: 900_000,
+                    end_time: 900_000,
+                    ..attempt.clone()
+                };
+                built.session = if layout == "mixed" {
                     "unbracketed-session".into()
                 } else {
                     attempt.session.clone()
-                },
-                time: 900_000,
-                end_time: 900_000,
-                ..attempt.clone()
+                };
+                built
             };
             let requests = match layout {
                 "first" => vec![attempt, after],
@@ -2057,9 +2149,10 @@ mod tests {
     fn unknown_rates_for_a_cache_free_part_cancel_but_an_unknown_tier_does_not() {
         let mut first = at("before", 0);
         let after = at("after", 600_000);
-        let mut fixed = Request {
-            session: "separate".into(),
-            ..at("fixed", 0)
+        let mut fixed = {
+            let mut built = Request { ..at("fixed", 0) };
+            built.session = "separate".into();
+            built
         };
         fixed.parts[0].model = Some("private-internal".into());
         fixed.parts[0].usage = Usage {
@@ -2206,9 +2299,12 @@ mod tests {
     fn unknown_subagent_kinds_cannot_affect_the_main_bucket() {
         let first = with(at("main-first", 0), u(50_000, 0, M5));
         let after = with(at("main-after", 20 * MIN), u(1000, 50_000, M5));
-        let mut child = Request {
-            agent: Agent::Subagent,
-            ..at("child", 60_000)
+        let mut child = {
+            let mut built = Request {
+                ..at("child", 60_000)
+            };
+            built.agent = Agent::Subagent;
+            built
         };
         child.parts[0].kind = PartKind::Unknown;
         child.parts[0].usage = claude_usage(u(20_000, 0, M5));

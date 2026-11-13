@@ -2,8 +2,7 @@
 
 PRs into `main` land by squash through protected auto-merge. The required
 `Check` job runs `nix develop --command just check`, and the branch must be
-up to date with `main` before merging. GitHub's native merge queue is not
-available for personal repositories.
+up to date with `main` before merging. GitHub's merge queue is not enabled.
 
 Run local checks and the independent review before requesting landing.
 After local checks and independent review pass, use `quest merge <pr> --squash --land <full-head-sha>`

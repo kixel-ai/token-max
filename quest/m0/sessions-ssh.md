@@ -9,10 +9,16 @@ Every host is priced from this host's catalog, and the first failed host
 fails the whole run, as `--ssh` reports do today. Only the session lines
 cross SSH, never a scan or transcript text.
 
-Every line, local or remote, also carries `repositories`: the remote URLs
-of the Git checkout at the session's `cwd`, read on the host where it ran,
-or the repository a Codex session recorded. It is null when the checkout
-is gone, so a consumer never resolves another host's path on its own.
+Every line, local or remote, also carries `repositories`, resolved on the
+host where the session ran: the repository a Codex session recorded when
+there is one, otherwise the remote URLs of the Git checkout now at the
+session's `cwd`. It is null when neither exists, so a consumer never
+resolves another host's path on its own. A `repositories_source` field
+says which (`recorded` or `checkout`), since a checkout read at export
+time may have been replaced since the session; a consumer treats
+`checkout` as unverified evidence. Each URL is printed without its
+userinfo, so a credential such as `https://user:token@host` never leaves
+the host.
 
 Out of scope: merging a session that appears on several hosts, such as a
 history copied between them. Each host's copy is printed with its own

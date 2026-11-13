@@ -118,9 +118,47 @@ pub fn replay_parts<'a, 'b>(
     boundaries: impl IntoIterator<Item = &'b CacheBoundaries>,
     options: &ReplayOptions,
 ) -> impl Iterator<Item = ReplayedPart<'a>> {
-    let mut chain = CacheChain::new(boundaries);
-    let options = *options;
-    requests.into_iter().flat_map(move |r| {
+    let mut replay = PartReplay::new(boundaries, options);
+    requests
+        .into_iter()
+        .flat_map(move |r| replay.request(r, &[]))
+}
+
+/// A replay fed one request at a time, for callers that model each request just before it.
+pub(crate) struct PartReplay<'b, 'o> {
+    chain: CacheChain<'b>,
+    options: ReplayOptions<'o>,
+}
+
+impl<'b, 'o> PartReplay<'b, 'o> {
+    pub(crate) fn new(
+        boundaries: impl IntoIterator<Item = &'b CacheBoundaries>,
+        options: &ReplayOptions<'o>,
+    ) -> Self {
+        Self {
+            chain: CacheChain::new(boundaries),
+            options: *options,
+        }
+    }
+
+    /// Reset `session`'s cache histories at `time`, as a compaction boundary there would.
+    pub(crate) fn boundary(&mut self, session: &Text, time: Millis) {
+        self.chain.boundary(session, time);
+    }
+
+    /// Forget a session that has no more requests.
+    pub(crate) fn finish(&mut self, session: &str) {
+        self.chain.finish(session);
+    }
+
+    /// Replay the next request's parts, with `estimated` naming further parts whose
+    /// geometry is estimated.
+    pub(crate) fn request<'a>(
+        &mut self,
+        r: &'a Request,
+        estimated: &[usize],
+    ) -> Vec<ReplayedPart<'a>> {
+        let options = self.options;
         let mut result = Vec::new();
         let estimate = options.estimates.get(&r.id).and_then(|e| e.part.as_ref());
         if estimate.is_some() && options.attempt_scenario == AttemptScenario::NoBilledAttempt {
@@ -132,12 +170,13 @@ pub fn replay_parts<'a, 'b>(
             let ttl = options.ttls.get(bucket);
             let selected = r.time >= options.since;
             let replayed = if r.harness == Harness::Claude {
-                chain.replay(&Touch {
+                self.chain.replay(&Touch {
                     request: r,
                     p,
                     part,
                     estimated: estimate.is_some()
                         || r.evidence == RequestEvidence::Estimated
+                        || estimated.contains(&part)
                         || options
                             .estimated_parts
                             .is_some_and(|set| set.contains(&(r.id.clone(), part))),
@@ -197,7 +236,7 @@ pub fn replay_parts<'a, 'b>(
             });
         }
         result
-    })
+    }
 }
 
 #[cfg(test)]

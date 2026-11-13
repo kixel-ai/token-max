@@ -1,4 +1,4 @@
-# [M] Serve install.sh and run.sh from max.kixel.ai
+# [M] Serve the install and run scripts from max.kixel.ai
 
 ## Goal
 
@@ -7,7 +7,7 @@
 runs `token-max doctor` once without installing anything. On Windows,
 `irm https://max.kixel.ai/install.ps1 | iex` and
 `irm https://max.kixel.ai/run.ps1 | iex` do the same. A stand-alone
-Cloudflare Worker in this repository serves both. The README leads with
+Cloudflare Worker in this repository serves all four. The README leads with
 these lines, and the SSH hint for a missing or mismatched destination
 names the install line.
 

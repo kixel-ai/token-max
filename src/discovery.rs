@@ -444,6 +444,9 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
     }
 }
 
+/// Codex's byte budget for the AGENTS.md chain it loads.
+const AGENTS_BUDGET: &str = "project_doc_max_bytes";
+
 /// Settings that current or planned checks consume; anything else is never retained.
 const STRUCTURAL_SETTINGS: [&str; 20] = [
     "project_doc_max_bytes",
@@ -988,6 +991,12 @@ pub fn discover_codex_controls(
             );
         }
         let mut marker_selection = legacy_selection;
+        // Files that can replace the system and user instruction budget for some runs.
+        let mut budget_overrides: Vec<String> = members(user.get("profiles"))
+            .iter()
+            .filter(|(_, p)| members(Some(p)).contains_key(AGENTS_BUDGET))
+            .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
+            .collect();
         // Profiles that set memories, which a --profile selection could apply.
         let mut memory_profiles: Vec<String> = members(user.get("profiles"))
             .values()
@@ -1000,6 +1009,9 @@ pub fn discover_codex_controls(
             let config = settings(&file, Harness::Codex)?;
             if sets_codex_memory(&config) {
                 memory_profiles.push(file.clone());
+            }
+            if config.contains_key(AGENTS_BUDGET) {
+                budget_overrides.push(file.clone());
             }
             marker_selection |=
                 config.contains_key("project_root_markers") || config.contains_key("projects");
@@ -1080,6 +1092,12 @@ pub fn discover_codex_controls(
                         reason: "current project overrides exist; trust, profile and CLI/session selection are not established".into(),
                         ..speed
                     });
+                }
+                if config.contains_key(AGENTS_BUDGET)
+                    && file != profile.settings_file
+                    && !budget_overrides.contains(&file)
+                {
+                    budget_overrides.push(file.clone());
                 }
                 layers.push((file, config));
             }
@@ -1177,6 +1195,12 @@ pub fn discover_codex_controls(
             }
             profile.background_directories.insert(cwd.into(), controls);
         }
+        profile.instruction_budget_unresolved = (!budget_overrides.is_empty()).then(|| {
+            format!(
+                "{} can set {AGENTS_BUDGET} for some runs, which the transcripts do not record",
+                budget_overrides.join(", ")
+            )
+        });
     }
     Ok(())
 }
@@ -1641,6 +1665,16 @@ pub(crate) fn profile(
         scopes: None,
     });
     let mut settings = structural_settings(config);
+    let mut instruction_budget_file = None;
+    if !claude {
+        if settings.contains_key(AGENTS_BUDGET) {
+            instruction_budget_file = Some(settings_file.clone());
+        } else if let Some(value) = structural_settings(&system).shift_remove(AGENTS_BUDGET) {
+            // The system config sets Codex's instruction budget unless the user's replaces it.
+            settings.insert(AGENTS_BUDGET.into(), value);
+            instruction_budget_file = Some(system_file.to_string());
+        }
+    }
     if claude {
         // Output caps use the same terminal environment precedence as other controls.
         for key in ["BASH_MAX_OUTPUT_LENGTH", "MAX_MCP_OUTPUT_TOKENS"] {
@@ -1717,6 +1751,8 @@ pub(crate) fn profile(
         memory: Some(memory),
         t3: None,
         agents: crate::model::AgentControls::default(),
+        instruction_budget_file,
+        instruction_budget_unresolved: None,
     })
 }
 
@@ -2803,6 +2839,77 @@ mod tests {
             .unwrap();
         assert_eq!(p.background[0].value, None);
         assert!(p.background[0].reason.contains("legacy profile"));
+    }
+
+    #[test]
+    fn codex_instruction_budget_reads_system_config_and_flags_other_layers() {
+        let w = Workspace::new();
+        let root = w.home.join("repo");
+        fs::create_dir_all(root.join(".git")).unwrap();
+        write(w.home.join("system.toml"), "project_doc_max_bytes = 8192\n");
+        write(w.codex.join("config.toml"), "model = 'gpt-5'\n");
+        let budget = |d: &Discovery| {
+            let p = d
+                .profiles
+                .iter()
+                .find(|p| p.harness == Harness::Codex)
+                .unwrap();
+            (
+                p.settings.get("project_doc_max_bytes").cloned(),
+                p.instruction_budget_unresolved.clone(),
+            )
+        };
+        let file = |d: &Discovery| {
+            d.profiles
+                .iter()
+                .find(|p| p.harness == Harness::Codex)
+                .unwrap()
+                .instruction_budget_file
+                .clone()
+        };
+        let mut d = discover(&options(&w)).unwrap();
+        assert_eq!(budget(&d).0, Some(Scalar::Number(8192.0)));
+        assert_eq!(file(&d), Some(text(&w.home.join("system.toml"))));
+        // The user's own value replaces the system's.
+        write(
+            w.codex.join("config.toml"),
+            "project_doc_max_bytes = 65536\n",
+        );
+        d = discover(&options(&w)).unwrap();
+        assert_eq!(budget(&d).0, Some(Scalar::Number(65536.0)));
+        assert_eq!(file(&d), Some(text(&w.codex.join("config.toml"))));
+        let id = d
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap()
+            .id
+            .clone();
+        let req = Request {
+            harness: Harness::Codex,
+            profiles: vec![id].into(),
+            cwd: Some(text(&root).into()),
+            ..make_request()
+        };
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert_eq!(budget(&d).1, None);
+        // A project layer at a recorded directory can replace it.
+        let project = root.join(".codex/config.toml");
+        write(&project, "project_doc_max_bytes = 4096\n");
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        let reason = budget(&d).1.unwrap();
+        assert!(reason.starts_with(&text(&project)), "{reason}");
+        // So can a named profile, whose selection no record names.
+        fs::remove_file(&project).unwrap();
+        write(
+            w.codex.join("big.config.toml"),
+            "project_doc_max_bytes = 1\n",
+        );
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert!(budget(&d).1.unwrap().contains("big.config.toml"));
+        fs::remove_file(w.codex.join("big.config.toml")).unwrap();
+        discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
+        assert_eq!(budget(&d).1, None);
     }
 
     #[test]

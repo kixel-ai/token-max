@@ -132,13 +132,20 @@ pub struct Workspace {
 impl Workspace {
     pub fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let home = std::env::temp_dir().join(format!(
-            "token-max-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        // create_dir fails on an existing path, so a planted symlink is never followed.
-        std::fs::create_dir(&home).unwrap();
+        // create_dir fails on an existing path, so a planted symlink is never followed; a
+        // name a killed run left behind is skipped.
+        let home = loop {
+            let home = std::env::temp_dir().join(format!(
+                "token-max-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match std::fs::create_dir(&home) {
+                Ok(()) => break home,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => panic!("{}: {e}", home.display()),
+            }
+        };
         // Tests compare discovered paths, normalized as discovery does: symlinks such as
         // macOS's /var resolve, and Windows' verbatim prefix is stripped.
         let home = PathBuf::from(crate::discovery::realpath(home.to_str().unwrap()).unwrap());

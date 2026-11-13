@@ -49,6 +49,7 @@ impl Hosts {
                 .map(|dir| dir.join(tool))
                 .find(|file| file.is_file())
                 .unwrap_or_else(|| panic!("{tool} is not on PATH"));
+            let found = std::env::current_dir().unwrap().join(found);
             symlink(found, tools.join(tool)).unwrap();
         }
         script(

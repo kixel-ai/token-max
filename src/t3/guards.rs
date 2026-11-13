@@ -196,7 +196,8 @@ pub(super) struct Boundary {
     pub(super) since: Option<Millis>,
 }
 
-const BOUNDARY: &str = "SELECT last_sequence, updated_at FROM orchestration_v2_projection_metadata
+pub(super) const BOUNDARY: &str =
+    "SELECT last_sequence, updated_at FROM orchestration_v2_projection_metadata
  WHERE projection_name='event-log-pruned-through'";
 
 /// T3's prune boundary. A pass prunes through the mark an earlier pass left at least
@@ -899,7 +900,7 @@ impl<'a> Log<'a> {
             }
             for &t in &live {
                 if let Some(wake) = trackers[t].wake.filter(|w| *w < at) {
-                    trackers[t].record(self, candidates[t].1, wake);
+                    let _ = trackers[t].record(self, candidates[t].1, wake);
                 }
             }
             // Events committed together are read together.
@@ -934,9 +935,8 @@ impl<'a> Log<'a> {
             }
             live.retain(|&t| {
                 let (_, c) = candidates[t];
-                trackers[t].record(self, c, at);
+                let guard = trackers[t].record(self, c, at);
                 if armed {
-                    let guard = self.guard(c, at);
                     trackers[t].guards.arms.push((at, guard));
                 }
                 if self.superseded(c.run) {
@@ -948,7 +948,7 @@ impl<'a> Log<'a> {
         }
         for &t in &live {
             if let Some(wake) = trackers[t].wake {
-                trackers[t].record(self, candidates[t].1, wake);
+                let _ = trackers[t].record(self, candidates[t].1, wake);
             }
         }
         trackers
@@ -989,9 +989,11 @@ impl Default for Tracker {
 
 impl Tracker {
     /// Evaluate the guards at `at`, and note when a snooze in effect then ends.
-    fn record(&mut self, log: &Log<'_>, c: &Candidate<'_>, at: Millis) {
-        self.span(at, log.guard(c, at));
+    fn record(&mut self, log: &Log<'_>, c: &Candidate<'_>, at: Millis) -> T3Guard {
+        let guard = log.guard(c, at);
+        self.span(at, guard);
         self.wake = log.wake(at);
+        guard
     }
 
     fn span(&mut self, at: Millis, guard: T3Guard) {
@@ -1002,5 +1004,585 @@ impl Tracker {
         if spans.last().is_none_or(|(_, g)| *g != guard) {
             spans.push((at, guard));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+    use serde_json::{Value, json};
+
+    const T0: Millis = 1_793_491_200_000;
+
+    fn at(seconds: i64) -> Millis {
+        T0 + seconds * 1000
+    }
+
+    fn iso(seconds: i64) -> String {
+        crate::safe::iso(at(seconds))
+    }
+
+    fn with(mut base: Value, extra: Value) -> Value {
+        for (k, v) in extra.as_object().unwrap() {
+            base[k] = v.clone();
+        }
+        base
+    }
+
+    /// A listed thread on the Claude instance whose active provider thread is `pt`.
+    fn thread(extra: Value) -> Value {
+        with(
+            json!({"id":"th","createdAt":iso(0),"providerInstanceId":"claude",
+                "activeProviderThreadId":"pt","lineage":{"relationshipToParent":null},
+                "settledAt":null,"archivedAt":null,"deletedAt":null,"snoozedUntil":null,
+                "title":"PRIVATE_TITLE"}),
+            extra,
+        )
+    }
+
+    fn provider_thread(extra: Value) -> Value {
+        with(
+            json!({"id":"pt","appThreadId":"th","driver":"claudeAgent",
+                "providerInstanceId":"claude","status":"ready","createdAt":iso(1),
+                "pendingBackgroundTasks":[],"firstRunOrdinal":1,
+                "nativeThreadRef":{"nativeId":"native"},"providerSessionId":"session"}),
+            extra,
+        )
+    }
+
+    fn run(id: &str, ordinal: i64, extra: Value) -> Value {
+        with(
+            json!({"id":id,"ordinal":ordinal,"status":"queued","requestedAt":iso(2),
+                "startedAt":null,"completedAt":null,"providerThreadId":"pt",
+                "providerInstanceId":"claude","userMessageId":"PRIVATE_MESSAGE"}),
+            extra,
+        )
+    }
+
+    fn turn(id: &str, extra: Value) -> Value {
+        with(
+            json!({"id":id,"providerThreadId":"pt","startedAt":iso(3),
+                "tokenUsage":{"updatedAt":iso(4),"usedTokens":300_000}}),
+            extra,
+        )
+    }
+
+    fn item(id: &str, kind: &str, status: &str, extra: Value) -> Value {
+        with(
+            json!({"id":id,"type":kind,"status":status,"runId":"run1","startedAt":iso(20),
+                "output":"PRIVATE_OUTPUT"}),
+            extra,
+        )
+    }
+
+    /// Thread `th` with run `run1` on provider thread `pt`, started and with usage, but not
+    /// yet completed; nothing was pruned.
+    struct Fixture {
+        db: Connection,
+        sequence: i64,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch(include_str!("../../test/fixtures/t3-schema.sql"))
+                .unwrap();
+            let mut f = Self { db, sequence: 0 };
+            f.event(
+                0,
+                "thread.created",
+                thread(json!({"activeProviderThreadId":null})),
+            )
+            .event(1, "provider-thread.updated", provider_thread(json!({})))
+            .event(2, "run.created", run("run1", 1, json!({})))
+            .event(
+                3,
+                "run.updated",
+                run("run1", 1, json!({"status":"running","startedAt":iso(3)})),
+            )
+            .event(4, "provider-turn.updated", turn("turn1", json!({})));
+            f
+        }
+
+        /// The run completes at 10s, arming the timer.
+        fn complete(&mut self) -> &mut Self {
+            self.event(
+                10,
+                "run.updated",
+                run(
+                    "run1",
+                    1,
+                    json!({"status":"completed","startedAt":iso(3),"completedAt":iso(10)}),
+                ),
+            )
+        }
+
+        fn event(&mut self, seconds: i64, event_type: &str, payload: Value) -> &mut Self {
+            self.raw(&iso(seconds), event_type, &payload.to_string())
+        }
+
+        fn raw(&mut self, occurred: &str, event_type: &str, payload: &str) -> &mut Self {
+            self.sequence += 1;
+            self.db
+                .execute(
+                    "INSERT INTO orchestration_events VALUES(?1,'thread',2,'th',?2,?3,?4)",
+                    rusqlite::params![self.sequence, event_type, occurred, payload],
+                )
+                .unwrap();
+            self
+        }
+
+        /// The guards for each `(turn, run)`, read under T3's value bound with events
+        /// through `bound` seconds.
+        fn guards(&mut self, turns: &[(&str, &str)], bound: i64) -> HashMap<String, T3Guards> {
+            self.db
+                .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, VALUE_BOUND)
+                .unwrap();
+            let tx = self.db.transaction().unwrap();
+            let boundary = boundary(&tx).unwrap();
+            let candidates = turns
+                .iter()
+                .map(|(turn, run)| {
+                    let c = Candidate {
+                        thread: "th",
+                        run,
+                        usage_at: Some(at(4)),
+                        compactable: true,
+                    };
+                    (*turn, c)
+                })
+                .collect();
+            let out = rebuild(&tx, boundary, &candidates, at(bound)).unwrap();
+            let debug = format!("{out:?}");
+            assert!(!debug.contains("PRIVATE"), "{debug}");
+            out.into_iter()
+                .map(|(k, v)| (k, Arc::unwrap_or_clone(v)))
+                .collect()
+        }
+
+        fn run1(&mut self) -> T3Guards {
+            self.guards(&[("turn1", "run1")], 3600)
+                .remove("turn1")
+                .unwrap()
+        }
+    }
+
+    fn expect(arms: &[(i64, T3Guard)], spans: &[(i64, T3Guard)]) -> T3Guards {
+        T3Guards {
+            arms: arms.iter().map(|(t, g)| (at(*t), *g)).collect(),
+            spans: spans.iter().map(|(t, g)| (at(*t), *g)).collect(),
+        }
+    }
+
+    #[test]
+    fn a_completed_run_arms_with_every_guard_clear() {
+        let mut f = Fixture::new();
+        f.complete();
+        assert_eq!(f.run1(), expect(&[(10, Ok(true))], &[(10, Ok(true))]));
+    }
+
+    #[test]
+    fn events_committed_together_are_read_together() {
+        let mut f = Fixture::new();
+        f.complete()
+            .event(10, "thread.settled", thread(json!({"settledAt":iso(10)})));
+        assert_eq!(f.run1(), expect(&[(10, Ok(false))], &[(10, Ok(false))]));
+    }
+
+    #[test]
+    fn settled_and_snoozed_spells_hold_the_timer_until_they_end() {
+        let mut f = Fixture::new();
+        f.complete()
+            .event(60, "thread.settled", thread(json!({"settledAt":iso(60)})))
+            .event(120, "thread.unsettled", thread(json!({})))
+            .event(
+                180,
+                "thread.snoozed",
+                thread(json!({"snoozedUntil":iso(300)})),
+            )
+            .event(
+                400,
+                "thread.visited",
+                thread(json!({"snoozedUntil":iso(300)})),
+            )
+            .event(
+                500,
+                "thread.snoozed",
+                thread(json!({"snoozedUntil":iso(600)})),
+            );
+        // A snooze ends without an event, both before a later event and after the last one.
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[
+                    (10, Ok(true)),
+                    (60, Ok(false)),
+                    (120, Ok(true)),
+                    (180, Ok(false)),
+                    (300, Ok(true)),
+                    (500, Ok(false)),
+                    (600, Ok(true)),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn pending_requests_and_merge_backs_hold_the_timer() {
+        let mut f = Fixture::new();
+        let request = |status| json!({"id":"req","status":status,"createdAt":iso(20)});
+        let transfer = |kind, status| {
+            json!({"id":kind,"type":kind,"targetThreadId":"th","status":status,
+                "createdAt":iso(40)})
+        };
+        f.complete()
+            .event(20, "runtime-request.updated", request("pending"))
+            .event(30, "runtime-request.updated", request("resolved"))
+            .event(40, "context-transfer.created", transfer("fork", "pending"))
+            .event(
+                50,
+                "context-transfer.created",
+                transfer("merge_back", "pending"),
+            )
+            .event(
+                60,
+                "context-transfer.updated",
+                transfer("merge_back", "completed"),
+            );
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[
+                    (10, Ok(true)),
+                    (20, Ok(false)),
+                    (30, Ok(true)),
+                    (50, Ok(false)),
+                    (60, Ok(true)),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn active_background_work_holds_the_timer() {
+        let mut f = Fixture::new();
+        let tasks = |tasks: Value| provider_thread(json!({"pendingBackgroundTasks":tasks}));
+        f.complete()
+            // Neither a rolled-back run's item, a persistent tool, a message nor a task
+            // without an id is pending background work.
+            .event(
+                15,
+                "run.created",
+                run(
+                    "run0",
+                    0,
+                    json!({"status":"rolled_back","requestedAt":iso(0)}),
+                ),
+            )
+            .event(
+                20,
+                "turn-item.updated",
+                item(
+                    "i0",
+                    "command_execution",
+                    "running",
+                    json!({"runId":"run0"}),
+                ),
+            )
+            .event(
+                20,
+                "turn-item.updated",
+                item(
+                    "i1",
+                    "dynamic_tool",
+                    "running",
+                    json!({"input":{"persistent":true}}),
+                ),
+            )
+            .event(
+                20,
+                "turn-item.updated",
+                item("i2", "assistant_message", "running", json!({})),
+            )
+            .event(
+                20,
+                "provider-thread.updated",
+                tasks(json!([{"taskId":""},{"description":"PRIVATE"}])),
+            )
+            .event(
+                30,
+                "turn-item.updated",
+                item("i3", "subagent", "running", json!({})),
+            )
+            .event(
+                40,
+                "turn-item.updated",
+                item("i3", "subagent", "completed", json!({})),
+            )
+            .event(
+                50,
+                "provider-thread.updated",
+                tasks(json!([{"taskId":"task"}])),
+            )
+            .event(60, "provider-thread.updated", tasks(json!([])));
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[
+                    (10, Ok(true)),
+                    (30, Ok(false)),
+                    (40, Ok(true)),
+                    (50, Ok(false)),
+                    (60, Ok(true)),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn the_session_and_usage_must_stay_the_runs() {
+        // A queued provider thread leaves the active one alone; a loaded one replaces it.
+        let mut f = Fixture::new();
+        let placeholder = json!({"id":"pt2","status":"not_loaded","firstRunOrdinal":null,
+            "nativeThreadRef":null,"providerSessionId":null});
+        f.complete()
+            .event(20, "provider-thread.updated", provider_thread(placeholder))
+            .event(
+                30,
+                "provider-thread.updated",
+                provider_thread(json!({"id":"pt2"})),
+            );
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Ok(true))], &[(10, Ok(true)), (30, Ok(false))])
+        );
+
+        // An update without usage keeps the turn's last; a newer usage on the session wins.
+        let mut f = Fixture::new();
+        f.complete()
+            .event(
+                20,
+                "provider-turn.updated",
+                turn("turn1", json!({"tokenUsage":null})),
+            )
+            .event(
+                30,
+                "provider-turn.updated",
+                turn("turn2", json!({"tokenUsage":{"updatedAt":iso(30)}})),
+            );
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Ok(true))], &[(10, Ok(true)), (30, Ok(false))])
+        );
+    }
+
+    #[test]
+    fn a_later_run_holds_the_timer_and_starting_ends_the_gap() {
+        let mut f = Fixture::new();
+        f.complete()
+            .event(
+                20,
+                "run.created",
+                run("run2", 2, json!({"requestedAt":iso(20)})),
+            )
+            // A run cancelled before it started does not count as the latest.
+            .event(
+                30,
+                "run.updated",
+                run(
+                    "run2",
+                    2,
+                    json!({"status":"cancelled","requestedAt":iso(20)}),
+                ),
+            )
+            .event(
+                40,
+                "run.created",
+                run("run3", 3, json!({"requestedAt":iso(40)})),
+            )
+            .event(
+                50,
+                "run.updated",
+                run("run3", 3, json!({"status":"running","startedAt":iso(50)})),
+            )
+            .event(
+                60,
+                "run.updated",
+                run(
+                    "run3",
+                    3,
+                    json!({"status":"completed","startedAt":iso(50),"completedAt":iso(60)}),
+                ),
+            );
+        let mut guards = f.guards(&[("turn1", "run1"), ("turn2", "run2")], 3600);
+        assert_eq!(
+            guards.remove("turn1").unwrap(),
+            expect(
+                &[(10, Ok(true))],
+                &[
+                    (10, Ok(true)),
+                    (20, Ok(false)),
+                    (30, Ok(true)),
+                    (40, Ok(false))
+                ]
+            )
+        );
+        // A run that never completed armed nothing.
+        assert_eq!(guards.remove("turn2").unwrap(), expect(&[], &[]));
+    }
+
+    #[test]
+    fn events_after_the_native_snapshot_are_not_read() {
+        let mut f = Fixture::new();
+        f.complete()
+            .event(60, "thread.settled", thread(json!({"settledAt":iso(60)})));
+        let guards = f.guards(&[("turn1", "run1")], 50).remove("turn1").unwrap();
+        assert_eq!(guards, expect(&[(10, Ok(true))], &[(10, Ok(true))]));
+        let mut f = Fixture::new();
+        assert!(
+            f.guards(&[("turn1", "run1")], 3600)["turn1"]
+                .arms
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn pruned_state_is_unknown_until_a_retained_event_and_projection_rows_fill_the_rest() {
+        let mut f = Fixture::new();
+        // Everything so far is pruned: the boundary falls between the run's start and end.
+        f.db.execute(
+            "INSERT INTO orchestration_v2_projection_metadata VALUES('event-log-pruned-through',1,?1,?2)",
+            rusqlite::params![f.sequence, crate::safe::iso(at(5) + RETAINED)],
+        )
+        .unwrap();
+        let rows = [
+            (
+                "INSERT INTO orchestration_v2_projection_threads VALUES('th','claude','pt',NULL,NULL,NULL,?1)",
+                thread(json!({"settledAt":iso(60)})),
+            ),
+            (
+                "INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt','th','claudeAgent','claude',NULL,?1)",
+                provider_thread(json!({})),
+            ),
+            (
+                "INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn1','th','pt',NULL,'completed',NULL,NULL,?1)",
+                turn("turn1", json!({})),
+            ),
+            (
+                "INSERT INTO orchestration_v2_projection_runs VALUES('run1','th',1,'completed',?1)",
+                run(
+                    "run1",
+                    1,
+                    json!({"status":"completed","completedAt":iso(10)}),
+                ),
+            ),
+            (
+                "INSERT INTO orchestration_v2_projection_runs VALUES('run0','th',0,'completed',?1)",
+                run(
+                    "run0",
+                    0,
+                    json!({"status":"completed","completedAt":iso(1)}),
+                ),
+            ),
+        ];
+        for (sql, payload) in rows {
+            f.db.execute(sql, [payload.to_string()]).unwrap();
+        }
+        f.complete()
+            .event(60, "thread.settled", thread(json!({"settledAt":iso(60)})));
+        let mut guards = f.guards(&[("turn1", "run1"), ("turn0", "run0")], 3600);
+        assert_eq!(
+            guards.remove("turn1").unwrap(),
+            expect(&[(10, Err(PRUNED))], &[(10, Err(PRUNED)), (60, Ok(false))])
+        );
+        // A run whose completion T3 pruned cannot be rebuilt at all.
+        assert_eq!(guards.remove("turn0"), None);
+    }
+
+    #[test]
+    fn oversized_and_unsupported_events_leave_guards_unknown_without_failing_the_read() {
+        let huge = |mut v: Value| {
+            v["output"] = json!("PRIVATE".repeat(200_000));
+            v.to_string()
+        };
+        // An oversized thread snapshot hides the thread until its next readable one.
+        let mut f = Fixture::new();
+        f.complete()
+            .raw(
+                &iso(20),
+                "thread.metadata-updated",
+                &huge(thread(json!({}))),
+            )
+            .event(30, "thread.visited", thread(json!({})));
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[(10, Ok(true)), (20, Err(OVERSIZED)), (30, Ok(true))]
+            )
+        );
+        // An oversized item names no entity, so every background item stays unknown.
+        let mut f = Fixture::new();
+        f.complete()
+            .raw(
+                &iso(20),
+                "turn-item.updated",
+                &huge(item("i1", "command_execution", "completed", json!({}))),
+            )
+            .event(30, "thread.visited", thread(json!({})));
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Ok(true))], &[(10, Ok(true)), (20, Err(OVERSIZED))])
+        );
+        // So does an event type this adapter does not know, or one it cannot place in time.
+        for (occurred, event_type, from) in [
+            (iso(20), "thread.reticulated", 20),
+            ("never".into(), "thread.visited", 30),
+        ] {
+            let mut f = Fixture::new();
+            f.complete()
+                .raw(&occurred, event_type, &thread(json!({})).to_string())
+                .event(30, "thread.visited", thread(json!({})));
+            assert_eq!(
+                f.run1(),
+                expect(
+                    &[(10, Ok(true))],
+                    &[(10, Ok(true)), (from, Err(UNSUPPORTED))]
+                ),
+                "{event_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_prune_boundary_trails_its_mark_by_the_retained_day() {
+        let mut f = Fixture::new();
+        let read = |f: &mut Fixture| {
+            let tx = f.db.transaction().unwrap();
+            boundary(&tx)
+        };
+        assert_eq!(read(&mut f).unwrap(), Boundary::default());
+        f.db.execute(
+            "INSERT INTO orchestration_v2_projection_metadata VALUES('event-log-pruned-through',1,7,?1)",
+            [iso(100)],
+        )
+        .unwrap();
+        assert_eq!(
+            read(&mut f).unwrap(),
+            Boundary {
+                sequence: 7,
+                since: Some(at(100) - RETAINED)
+            }
+        );
+        f.db.execute(
+            "UPDATE orchestration_v2_projection_metadata SET updated_at='never'",
+            [],
+        )
+        .unwrap();
+        assert!(matches!(read(&mut f), Err(Unavailable::Schema(_))));
     }
 }

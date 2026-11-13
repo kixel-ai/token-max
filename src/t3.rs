@@ -3546,12 +3546,15 @@ mod tests {
         let root = state(&w, json!({}));
         let database = db(&root);
         for (query, scans) in [
-            (PROVIDER_THREADS, 1),
-            (OWNER_EVENT, 0),
-            (NATIVE_REFS, 0),
-            (TURN, 0),
-            (ITEM_THREAD, 0),
-            (FIRST_ITEM, 0),
+            (PROVIDER_THREADS.to_string(), 1),
+            (OWNER_EVENT.to_string(), 0),
+            (NATIVE_REFS.to_string(), 0),
+            (TURN.to_string(), 0),
+            (ITEM_THREAD.to_string(), 0),
+            (FIRST_ITEM.to_string(), 0),
+            (guards::BOUNDARY.to_string(), 0),
+            (guards::events_query(), 0),
+            (guards::projection_query(), 0),
         ] {
             let mut plan = database
                 .prepare(&format!("EXPLAIN QUERY PLAN {query}"))

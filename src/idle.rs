@@ -4607,6 +4607,7 @@ mod tests {
         let a = t3_meta(&mut scan, "a");
         a.completed_at = Some(4 * MINUTE);
         a.cache_expires_at = Some(5 * MINUTE);
+        a.guards = Some(guards(&[4 * MINUTE], &[(4 * MINUTE, Ok(true))]));
         let check = t3_check(&scan, 10.0);
         assert_eq!(
             check.current_settings.periods[0].status,
@@ -4624,6 +4625,74 @@ mod tests {
         let s = &check.current_settings.scenarios;
         assert_eq!((s[1].summaries, s[2].summaries), (1, 0));
         assert!(s.iter().all(|s| s.cost.total_usd.is_some()));
+    }
+
+    #[test]
+    fn t3_timer_fires_at_the_lead_or_at_the_first_arm_its_guards_allow() {
+        let (start, until) = (3 * MINUTE, 5 * MINUTE);
+        let fire = |arms: &[Millis], spans: &[(Millis, crate::model::T3Guard)]| {
+            t3_fire(&guards(arms, spans), start, until)
+        };
+        // An arm before the lead sleeps until it starts and checks again then.
+        assert_eq!(fire(&[0], &[(0, Ok(true))]), Ok(Some(start)));
+        assert_eq!(fire(&[0], &[(0, Ok(true)), (MINUTE, Ok(false))]), Ok(None));
+        // A timer held when armed never sleeps, even if the guards clear by the lead.
+        assert_eq!(fire(&[0], &[(0, Ok(false)), (MINUTE, Ok(true))]), Ok(None));
+        // The latest arm before the lead replaces earlier ones.
+        let spans = [(0, Ok(true)), (MINUTE, Ok(false)), (2 * MINUTE, Ok(true))];
+        assert_eq!(fire(&[0, MINUTE], &spans), Ok(None));
+        // An arm within the lead fires at once if the guards allow, and none at or after
+        // the expiry or the user's return does.
+        let spans = [
+            (0, Ok(true)),
+            (2 * MINUTE, Ok(false)),
+            (4 * MINUTE, Ok(true)),
+        ];
+        assert_eq!(fire(&[0, 4 * MINUTE], &spans), Ok(Some(4 * MINUTE)));
+        assert_eq!(fire(&[0, until], &spans), Ok(None));
+        // Unknown guards leave the timer unknown.
+        let pruned = "pruned";
+        assert_eq!(
+            fire(&[0], &[(0, Ok(true)), (2 * MINUTE, Err(pruned))]),
+            Err(pruned)
+        );
+        assert_eq!(
+            fire(&[4 * MINUTE], &[(4 * MINUTE, Err(pruned))]),
+            Err(pruned)
+        );
+        assert_eq!(fire(&[], &[(4 * MINUTE, Ok(true))]), Ok(None));
+    }
+
+    #[test]
+    fn t3_window_starts_where_its_event_log_is_complete() {
+        use crate::model::T3IdleMode::*;
+        let mut scan = t3_data(
+            vec![
+                request("a", 0.0, 300_000),
+                request("b", 10.0, 320_000),
+                request("c", 20.0, 340_000),
+            ],
+            Ttl::FiveMinutes,
+            Off,
+        );
+        // The calibration sample's own gap is outside this comparison.
+        let gaps = |check: &crate::model::T3IdleCheck| {
+            let periods = &check.current_settings.periods;
+            periods
+                .iter()
+                .map(|p| p.request.to_string())
+                .filter(|r| r != "sample-resume")
+                .collect::<Vec<_>>()
+        };
+        let check = t3_check(&scan, 30.0);
+        assert_eq!(gaps(&check), ["a", "b", "c"]);
+        assert!(!check.base.window_basis.contains("pruned"));
+        // T3 kept its events from minute 5 on, so `a`'s gap opened before they are complete.
+        scan.profiles[0].t3.as_mut().unwrap().retained_since = Some(5 * MINUTE);
+        let check = t3_check(&scan, 30.0);
+        assert_eq!(gaps(&check), ["b", "c"]);
+        assert_eq!(check.base.since, Some(5 * MINUTE));
+        assert!(check.base.window_basis.contains("pruned event log"));
     }
 
     #[test]

@@ -33,20 +33,25 @@ for the installers.
 Each release carries, per target, `token-max-<target>.tar.xz` (a
 `token-max-<target>/` directory holding the binary, README and LICENSE) or,
 on Windows, a flat `token-max-<target>.zip`, each with a `.sha256` file;
-`token-max-installer.sh` and `token-max-installer.ps1`, which embed those
-checksums and install into `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` or
-`~/.local/bin`; `source.tar.gz`; and `sha256.sum` over the archives. Every
+`token-max-installer.sh` and `token-max-installer.ps1`, which install into
+the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`; `source.tar.gz`; and `sha256.sum` over the archives. Every
 asset gets a GitHub build provenance attestation, which
 `gh attestation verify <file> --repo kixel-ai/token-max` checks.
 `[package.metadata.binstall]` in `Cargo.toml` points `cargo binstall` at the
 same archives.
 
+The shell installer embeds each archive's checksum and refuses a mismatch,
+but skips the check, saying so, on a system without `sha256sum`.
+cargo-dist's PowerShell installer checks nothing. Where either applies,
+verify the archive against `sha256.sum` or with `gh attestation verify`.
+
 The flake's default package builds from source and needs no release:
 `nix run github:kixel-ai/token-max`.
 
 To upgrade cargo-dist, change `cargo-dist-version` in `dist-workspace.toml`
-and `DIST_VERSION` in `release.yml`, and replace the workflow's `dist-sha256`
-values with the matching lines of that release's `sha256.sum`.
+and `DIST_VERSION` in `release.yml`, and replace every pinned SHA-256 in
+`release.yml` (each matrix `dist-sha256` and the `installers` job's
+`sha256`) with the matching line of that release's `sha256.sum`.
 
 ## Release setup
 
@@ -86,7 +91,8 @@ refuses 0.0.0 and a mismatched version. Then, in order:
 1. The complete Check workflow and every target's build run.
 2. The installers and `sha256.sum` are built from all the archives.
 3. `draft` attests every asset and uploads it to a draft release, which is
-   not public and creates no tag. A rerun reuses the draft.
+   not public and creates no tag. A retry, even from a later commit, reuses
+   the draft and moves it to the new commit.
 4. `publish` runs `cargo publish --locked` from the restricted environment.
 5. `announce` publishes the draft as the latest release, which creates the
    tag at the dispatched commit.
@@ -101,9 +107,9 @@ branch with `dry-run` and the branch's `Cargo.toml` version (0.0.0 is
 allowed). It builds every archive and installer and uploads them as workflow
 artifacts; the jobs that publish only run on `main` without `dry-run`.
 
-After publication, from a clean home and without a Rust toolchain, run both
-installers and `cargo binstall token-max`, and from a clean `CARGO_HOME` run
-`cargo install --locked token-max`; verify help, version and a synthetic
+After publication, run both installers from a clean home without a Rust
+toolchain, and `cargo binstall token-max` and `cargo install --locked
+token-max` from a clean `CARGO_HOME`; verify help, version and a synthetic
 priced analysis for each. Then clear m0's publication wait and Quest's
 release handoff. A failed publish is a release failure, never permission to
 publish an incomplete placeholder.

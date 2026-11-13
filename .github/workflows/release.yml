@@ -189,10 +189,11 @@ jobs:
           subject-path: assets/*
       - name: Upload to a draft release
         run: |
-          # A rerun after a partial upload reuses its draft; a published
-          # release with this tag fails the job.
+          # A retry reuses its draft, moved to this commit so the tag matches
+          # these assets; a published release with this tag fails the job.
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft); then
             test "$draft" = true
+            gh release edit "$TAG" --target "$GITHUB_SHA"
           else
             gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TAG" --generate-notes
           fi

@@ -1048,7 +1048,7 @@ content is stored or tested.
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
 commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
-the destination's `sh` to run `token-max --ssh-scan` from `PATH` or
+the destination's `sh` to run `token-max --ssh-scan` from `PATH`, the release installers' directory or
 `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
 snapshots, readers, exposure extraction and checks produce the same report a
 local run there would, priced from the catalog the coordinator sends and dated

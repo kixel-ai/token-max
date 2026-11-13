@@ -52,7 +52,8 @@ That excerpt is from synthetic usage with synthetic prices, not a real host.
 
 From the first release on, each GitHub release has prebuilt binaries for
 Linux (x86_64 and arm64, statically linked), macOS (Apple silicon and Intel)
-and Windows (x86_64), and installers that put `token-max` in `~/.local/bin`:
+and Windows (x86_64), and installers that put `token-max` in `~/.local/bin`
+(or `$XDG_BIN_HOME` when set):
 
 ```sh
 curl -LsSf https://github.com/kixel-ai/token-max/releases/latest/download/token-max-installer.sh | sh
@@ -63,7 +64,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/kixel-ai/token-max
 ```
 
 `cargo binstall token-max` downloads the same binary, and
-`cargo install --locked token-max` builds it. Nix builds it from source:
+`cargo install --locked token-max` builds it. On Linux and Apple silicon,
+Nix builds it from source:
 
 ```sh
 nix run github:kixel-ai/token-max

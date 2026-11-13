@@ -648,7 +648,7 @@ server/tool identity exactly matches the candidate control in each profile;
 model-facing tool names may be sanitized or shortened, so unmatched names get
 no per-tool patch or verdict. The Codex deny list applies after `enabled_tools`.
 A recommendation to disable the server covers its individual tool changes,
-so the settings snippet does not add redundant per-tool blocks.
+so the changes do not add redundant per-tool edits.
 Instruction files have no switch; Claude's MEMORY.md is auto memory, not an
 instruction file (see [Auto memory](#auto-memory)). Core tools, the system prompt
 and the listing framing are always
@@ -929,7 +929,7 @@ recap override wins over named-profile recap values. A worktree's `.git` file is
 a root marker, so discovery never walks into its parent checkout.
 
 Each distinct control retains only its applicable main requests, working
-directories, owner, disable snippet and pricing coverage. Missing or relative
+directories, owner, disabling setting and pricing coverage. Missing or relative
 working directories, unknown trust with project overrides and unresolved
 selection have an unknown current value, unknown cost and no recommendation.
 Current values model the selected history; they do not prove historical enablement.
@@ -1048,8 +1048,8 @@ content is stored or tested.
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
 commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
-the destination's `sh` to run `token-max --ssh-scan` from `PATH`, the release installers' directory or
-`~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
+the destination's `sh` to run `token-max doctor --ssh-scan` from `PATH`, the
+release installers' directory or `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
 snapshots, readers, exposure extraction and checks produce the same report a
 local run there would, priced from the catalog the coordinator sends and dated
 by the destination's own clock once its scan ends. Its stderr is discarded, so
@@ -1125,8 +1125,8 @@ Sources, checked 2026-11-08:
 line per set of profiles: its runs (subagent transcripts), requests, cost, the
 recorded models and efforts, where each run's model came from, and the same
 recorded tokens on the provider's cheapest current model. The lines are
-evidence only. They never recommend a model, add nothing to the settings
-snippet and never change the exit code: a cheaper model or lower effort trades
+evidence only. They never recommend a model, offer no change
+and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
 its own requests, where transcripts cannot attribute it. When runs in
 different projects are set by different files, the model and effort settings

@@ -108,7 +108,7 @@ pub fn make_request() -> Request {
 pub fn prices() -> Catalog {
     load_prices(&PriceOptions {
         file: Some(fixture_path("prices.json")),
-        cache: Path::new(env!("CARGO_MANIFEST_DIR")).join(".tmp/unused-cache.json"),
+        cache: std::env::temp_dir().join("token-max-unused-cache.json"),
         offline: false,
     })
     .unwrap()
@@ -209,6 +209,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         agents: Default::default(),
         instruction_budget_file: None,
         instruction_budget_unresolved: None,
+        outranking_files: vec![],
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),

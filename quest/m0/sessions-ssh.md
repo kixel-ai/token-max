@@ -56,12 +56,7 @@ Find the checkout containing `cwd` with `project_directories` and
 resolves, and read its remotes from Git config rather than running `git`.
 Add `src/sessions.rs` to the stream fingerprint in `wire::build()`, since
 the session lines now cross SSH.
-Update `SESSIONS_HELP`, the top-level help's SSH line in `src/cli.rs`, the
+Update `SESSIONS_HELP`, `DOCTOR_HELP`'s SSH line in `src/cli.rs`, the
 `src/sessions.rs` module comment that session IDs never cross SSH, the
 README's `sessions` line, the `sessions` and SSH sections of
 `docs/reference.md`, and the SSH section of `docs/semantics.md`.
-
-## Related
-
-- [Run the report as an interactive doctor](/quest/m0/doctor.md) - moves the
-  report under `doctor`; `sessions` stays its own command

@@ -46,7 +46,7 @@ cargo-dist's PowerShell installer checks nothing. Where either applies,
 verify the archive against `sha256.sum` or with `gh attestation verify`.
 
 The flake's default package builds from source and needs no release:
-`nix run github:kixel-ai/token-max`.
+`nix run github:kixel-ai/token-max -- doctor`.
 
 To upgrade cargo-dist, change `cargo-dist-version` in `dist-workspace.toml`
 and `DIST_VERSION` in `release.yml`, and replace every pinned SHA-256 in

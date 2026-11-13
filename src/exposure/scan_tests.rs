@@ -859,10 +859,15 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
             .evidence
             .contains(r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#)
     );
-    let snippet = &text[text.find("To turn these off").unwrap()..];
-    assert!(snippet.contains(r#""enableArtifact": false"#));
-    assert!(snippet.contains(r#""review": "user-invocable-only""#));
-    assert!(!snippet.contains("mcp__docs"));
+    let fixes = crate::doctor::fixes(&strict, false);
+    let snippet = crate::report::format_changes(&strict, &fixes, ReportOptions::default());
+    let off = &snippet[..snippet.find("worth considering").unwrap()];
+    assert!(off.contains(r#""enableArtifact": false"#), "{snippet}");
+    assert!(
+        off.contains(r#""review": "user-invocable-only""#),
+        "{snippet}"
+    );
+    assert!(!off.contains("mcp__docs"), "{snippet}");
 }
 
 #[test]
@@ -1607,7 +1612,7 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         .control
         .as_ref()
         .unwrap();
-    let patch = crate::context::config_patch([control, control]);
+    let patch = crate::doctor::apply_toml("", &[control.into(), control.into()]).unwrap();
     let parsed: toml::Value = toml::from_str(&patch).unwrap();
     assert_eq!(parsed["skills"]["config"].as_array().unwrap().len(), 1);
     assert_eq!(
@@ -1788,10 +1793,14 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
                 assert!(!c.assumptions.is_empty());
             }
         }
-        let patch = crate::context::config_patch([
-            retained.control.as_ref().unwrap(),
-            tool.control.as_ref().unwrap(),
-        ]);
+        let patch = crate::doctor::apply_toml(
+            "",
+            &[
+                retained.control.as_ref().unwrap().into(),
+                tool.control.as_ref().unwrap().into(),
+            ],
+        )
+        .unwrap();
         let parsed: toml::Value = toml::from_str(&patch).unwrap();
         assert_eq!(
             parsed["skills"]["config"][0]["path"].as_str(),

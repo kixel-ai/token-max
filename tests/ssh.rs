@@ -20,7 +20,7 @@ use token_max::replay::{AnalyzeOptions, analyze};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
-/// Destinations under one checkout-local directory whose path has a space, removed on drop.
+/// Destinations under one target scratch directory whose path has a space, removed on drop.
 ///
 /// `ssh` runs the destination's command with `sh`, its home under `homes/` and its `PATH`
 /// of `remote/<host>`, which links the real binary unless a test replaces it, then `tools/`.
@@ -31,13 +31,11 @@ struct Hosts {
 impl Hosts {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join(".tmp")
-            .join(format!(
-                "ssh test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+        let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "ssh test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(root.join("bin")).unwrap();
         // Destinations get only the commands their scripts run, so a token-max the developer
         // installed can't stand in for the one under test.
@@ -101,7 +99,11 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         let mut command = Command::new(BIN);
         let path = std::env::var("PATH").unwrap();
         command
-            .args(["--prices-file", fixture("prices.json").to_str().unwrap()])
+            .args([
+                "doctor",
+                "--prices-file",
+                fixture("prices.json").to_str().unwrap(),
+            ])
             .args(args)
             .env_clear()
             .env("HOME", self.root.join("homes/local"))
@@ -119,11 +121,11 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         run(&mut self.command(args))
     }
 
-    /// The first line `--ssh-scan` prints: the header naming this build.
+    /// The first line `doctor --ssh-scan` prints: the header naming this build.
     fn header(&self) -> String {
         // Held open: a destination stops when its stdin closes.
         let mut child = Command::new(BIN)
-            .arg("--ssh-scan")
+            .args(["doctor", "--ssh-scan"])
             .env_clear()
             .env("HOME", self.root.join("homes/empty"))
             .stdin(Stdio::piped())
@@ -453,6 +455,13 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert!(
         section(&stdout, "devbox").contains("BASH_MAX_TIMEOUT_MS"),
+        "{stdout}"
+    );
+    // The destination's change is listed as an edit to make there, in its own home.
+    assert!(
+        section(&stdout, "devbox").contains(
+            "  Bash timeout cap: 2h -> 55m (Measured)\n    In ~/.claude/settings.json:\n      \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"}\n"
+        ),
         "{stdout}"
     );
     let (status, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));

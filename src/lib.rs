@@ -9,6 +9,7 @@ pub mod compaction;
 pub mod context;
 pub mod controls;
 pub mod discovery;
+pub mod doctor;
 pub mod estimates;
 pub mod exposure;
 pub mod fast;

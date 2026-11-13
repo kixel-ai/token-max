@@ -107,10 +107,10 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
             agent: Agent::Subagent,
             model: model.clone(),
             provider: event
-            .pricing
-            .as_ref()
-            .and_then(|p| p.provider.clone())
-            .or_else(|| previous.and_then(|r| r.provider.clone())),
+                .pricing
+                .as_ref()
+                .and_then(|p| p.provider.clone())
+                .or_else(|| previous.and_then(|r| r.provider.clone())),
             api: Api::Messages,
             source: Some("compaction".into()),
             trigger: event.trigger.as_deref().map(Text::from),
@@ -124,8 +124,8 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
             server_tools: Some(crate::model::ServerTools::default()),
             requested_speed: None,
             issues: vec![
-            "summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into(),
-        ],
+                "summary model/tier/provider assumed from preceding metadata in its own file; public API equivalent if endpoint is unrecorded".into(),
+            ],
         }
         .into(),
     })

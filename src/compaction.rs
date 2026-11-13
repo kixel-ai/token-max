@@ -662,10 +662,10 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 })
             {
                 self.result.fail(
-                &req.session,
-                req.time,
-                "missing input/cache geometry or iteration semantics can affect window eligibility",
-            );
+                    &req.session,
+                    req.time,
+                    "missing input/cache geometry or iteration semantics can affect window eligibility",
+                );
                 st.input = None;
                 continue;
             }
@@ -677,10 +677,10 @@ impl<'r, 'o> Simulator<'r, 'o> {
                     || matches!((st.input, u.input), (Some(before), Some(now)) if now < before))
             {
                 self.result.fail(
-                &req.session,
-                req.time,
-                "compacted context crosses multipart, model/agent/provider/speed changes or an unexplained input decrease",
-            );
+                    &req.session,
+                    req.time,
+                    "compacted context crosses multipart, model/agent/provider/speed changes or an unexplained input decrease",
+                );
                 st.removed = 0;
             }
             if st.removed > 0 && old_prefix.is_some_and(|old| old < st.removed) {
@@ -699,76 +699,76 @@ impl<'r, 'o> Simulator<'r, 'o> {
             {
                 let matches = options.samples.cohort(&req, &req.parts[index]);
                 match (old_prefix, matches) {
-                (Some(old_prefix), Some(matches)) if messages == 1 => {
-                    let template = &options.samples.samples[matches.indexes[0]];
-                    // Mixed summary models cannot establish which model an added pass would use.
-                    if !matches.uniform_summary {
-                        self.result.fail(
-                            &req.session,
-                            req.time,
-                            "compatible samples disagree about summary model/provider/tier/speed/geography",
-                        );
+                    (Some(old_prefix), Some(matches)) if messages == 1 => {
+                        let template = &options.samples.samples[matches.indexes[0]];
+                        // Mixed summary models cannot establish which model an added pass would use.
+                        if !matches.uniform_summary {
+                            self.result.fail(
+                                &req.session,
+                                req.time,
+                                "compatible samples disagree about summary model/provider/tier/speed/geography",
+                            );
+                        }
+                        let (output, resumed) = if larger {
+                            (matches.max_output, matches.max_prefix)
+                        } else {
+                            (matches.median_output, matches.median_prefix)
+                        };
+                        let ordinary = input - old_prefix;
+                        if resumed + ordinary > window || resumed >= old_prefix - st.removed {
+                            self.result.fail(
+                                &req.session,
+                                req.time,
+                                "observed resumed-prefix proxy does not shrink this context below the candidate window",
+                            );
+                        } else {
+                            let summary_input = input - st.removed;
+                            self.result.added.push(AddedCompaction {
+                                request: req.id.clone(),
+                                input_tokens: summary_input,
+                                summary_tokens: output,
+                                prefix_tokens: resumed,
+                                basis: matches.basis.clone(),
+                                summary_cost: price_part(
+                                    catalog,
+                                    template.summary_request,
+                                    &summary_part(template, summary_input, output, cold),
+                                ),
+                                prefix_cost: zero_cost(),
+                            });
+                            added = Some(self.result.added.len() - 1);
+                            let event = options
+                                .events
+                                .by_id
+                                .get(template.event)
+                                .expect("calibration samples come from the simulated events");
+                            self.result.events.push({
+                                let mut built = StructuralEvent {
+                                    id: format!("modeled:{}:{index}", req.id).into(),
+                                    time: req.time,
+                                    origins: req
+                                        .locations
+                                        .iter()
+                                        .map(|location| Origin {
+                                            session: req.session.clone(),
+                                            location: location.clone(),
+                                        })
+                                        .collect(),
+                                    request: None,
+                                    ..(*event).clone()
+                                };
+                                built.session = req.session.clone();
+                                built
+                            });
+                            st.removed = old_prefix - resumed;
+                        }
                     }
-                    let (output, resumed) = if larger {
-                        (matches.max_output, matches.max_prefix)
-                    } else {
-                        (matches.median_output, matches.median_prefix)
-                    };
-                    let ordinary = input - old_prefix;
-                    if resumed + ordinary > window || resumed >= old_prefix - st.removed {
-                        self.result.fail(
-                            &req.session,
-                            req.time,
-                            "observed resumed-prefix proxy does not shrink this context below the candidate window",
-                        );
-                    } else {
-                        let summary_input = input - st.removed;
-                        self.result.added.push(AddedCompaction {
-                            request: req.id.clone(),
-                            input_tokens: summary_input,
-                            summary_tokens: output,
-                            prefix_tokens: resumed,
-                            basis: matches.basis.clone(),
-                            summary_cost: price_part(
-                                catalog,
-                                template.summary_request,
-                                &summary_part(template, summary_input, output, cold),
-                            ),
-                            prefix_cost: zero_cost(),
-                        });
-                        added = Some(self.result.added.len() - 1);
-                        let event = options
-                            .events
-                            .by_id
-                            .get(template.event)
-                            .expect("calibration samples come from the simulated events");
-                        self.result.events.push({
-                            let mut built = StructuralEvent {
-                                id: format!("modeled:{}:{index}", req.id).into(),
-                                time: req.time,
-                                origins: req
-                                .locations
-                                .iter()
-                                .map(|location| Origin {
-                                    session: req.session.clone(),
-                                    location: location.clone(),
-                                })
-                                .collect(),
-                                request: None,
-                                ..(*event).clone()
-                            };
-                            built.session = req.session.clone();
-                            built
-                        });
-                        st.removed = old_prefix - resumed;
-                    }
+                    _ => self.result.fail(
+                        &req.session,
+                        req.time,
+                        "no compatible measured compaction summary and resumed-prefix sample, or ambiguous multipart request",
+                    ),
                 }
-                _ => self.result.fail(
-                    &req.session,
-                    req.time,
-                    "no compatible measured compaction summary and resumed-prefix sample, or ambiguous multipart request",
-                ),
-            }
             }
             if selected
                 && st.removed > 0
@@ -797,10 +797,10 @@ impl<'r, 'o> Simulator<'r, 'o> {
                     && next.read.unwrap_or(0) > 0
                 {
                     self.result.fail(
-                    &req.session,
-                    req.time,
-                    "counterfactual prefix cache retention is not established for this Codex model",
-                );
+                        &req.session,
+                        req.time,
+                        "counterfactual prefix cache retention is not established for this Codex model",
+                    );
                 }
                 let read = match st.prefix {
                     Some(prefix) if warm => prefix.min(remaining),

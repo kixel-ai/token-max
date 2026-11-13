@@ -1126,7 +1126,8 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     d.summary_cost =
                                         unknown_cost("summary calibration is unresolved");
                                 }
-                                ledger.charge(sizes,
+                                ledger.charge(
+                                    sizes,
                                     Some(active),
                                     &unknown_cost(
                                         "no compatible linked summary and full post-compaction prefix calibration, or summary pricing cohort is ambiguous",
@@ -1152,7 +1153,8 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let retained = (g.prefix - g.output).min(g.read);
                             let window = item.window.expect("usable calibration has a window");
                             if retained < 0 || g.prefix >= input || g.prefix >= window {
-                                ledger.charge(sizes,
+                                ledger.charge(
+                                    sizes,
                                     Some(active),
                                     &unknown_cost(
                                         "calibrated full post-compaction prefix does not shrink this eligible context",
@@ -1327,7 +1329,8 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     }
                                     match (e.pre_tokens, full) {
                                         (Some(pre), Some(full)) => state.path.offset += pre - full,
-                                        _ => ledger.charge(sizes,
+                                        _ => ledger.charge(
+                                            sizes,
                                             Some(active),
                                             &unknown_cost(
                                                 "applied idle has no pre-context and full resumed-prefix geometry for the off path",

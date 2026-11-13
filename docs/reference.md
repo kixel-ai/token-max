@@ -436,8 +436,8 @@ supported schema and limits.
 `--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
 SSH configuration, keys and known hosts without prompting. Add
 `--include-local` to audit this host in the same run. Each destination needs
-the same version of token-max installed with `cargo install`; token-max
-installs nothing there itself. A missing or different version fails with the
+the same version of token-max installed; token-max installs nothing there
+itself. A missing or different version fails with the
 command to run. Linux and macOS destinations are supported. `token-max
 sessions` takes the same flags, and each destination sends only its priced
 session lines.
@@ -451,7 +451,9 @@ profiles from its home and environment, reads its transcripts and settings,
 and runs every check there, priced from the one catalog this host loads and
 sends it. Only its finished report comes back, so its transcripts and scan
 never leave it, and this host never holds more than its own scan. It looks for
-`token-max` on the non-interactive `PATH` and in `~/.cargo/bin`.
+`token-max` on the non-interactive `PATH`, then in the release installers'
+directory (the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
+`~/.local/bin`), then in `~/.cargo/bin`.
 `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 

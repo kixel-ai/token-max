@@ -36,7 +36,11 @@ Agent's choices, for the implementer to revisit:
 
 - `install.sh` is cargo-dist's shell installer from the latest release,
   redirected or proxied, not a second script to maintain. Serve
-  `install.ps1` the same way for Windows.
+  `install.ps1` the same way for Windows. Each release carries
+  `token-max-installer.sh`, `token-max-installer.ps1`, and per target
+  `token-max-<target>.tar.xz` (a `token-max-<target>/` directory) or, on
+  Windows, a flat `token-max-<target>.zip`, each with a `.sha256`, plus
+  `sha256.sum`; [releasing](/docs/releasing.md) lists the targets.
 - `run.ps1` is ours too, mirroring `run.sh`: download the latest Windows
   binary to the cache directory, verify its checksum, and run `doctor` in
   the console. Test it on Windows CI against the same fixture release.
@@ -51,7 +55,3 @@ Agent's choices, for the implementer to revisit:
 - Deploying needs a wrangler login for the kixel.ai zone on the host. If
   `wrangler whoami` fails, hand back with a `Maintainer:` wait naming the
   login, rather than asking for a token in chat.
-
-## Required
-
-- [Ship prebuilt binaries with cargo-dist](/quest/m0/binaries.md) - the scripts download its release assets

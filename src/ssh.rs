@@ -40,14 +40,18 @@ fn install() -> String {
             "`cargo install --locked --git https://github.com/kixel-ai/token-max` on both hosts"
                 .into()
         }
-        version => format!("`cargo install --locked token-max --version {version}` there"),
+        version => format!(
+            "`curl -LsSf https://github.com/kixel-ai/token-max/releases/download/v{version}/token-max-installer.sh | sh` or `cargo install --locked token-max --version {version}` there"
+        ),
     }
 }
 
 /// Runs on the destination through its login shell, which may not be POSIX: only `sh` reads
-/// the script, and the script holds no single quotes or backslashes. `cargo install` puts the
-/// command in `~/.cargo/bin`, which non-interactive shells often leave off `PATH`.
-const SCRIPT: &str = r#"case "$(uname -s)" in Linux|Darwin) ;; *) exit 3 ;; esac; PATH="$PATH:${CARGO_HOME:-$HOME/.cargo}/bin"; command -v token-max >/dev/null || exit 127; exec token-max "$@""#;
+/// the script, and the script holds no single quotes or backslashes. The release installers
+/// put the command in the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
+/// `~/.local/bin`, searched first since they are the documented install, and `cargo install`
+/// in `~/.cargo/bin`; non-interactive shells often leave these off `PATH`.
+const SCRIPT: &str = r#"case "$(uname -s)" in Linux|Darwin) ;; *) exit 3 ;; esac; PATH="$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin"; command -v token-max >/dev/null || exit 127; exec token-max "$@""#;
 
 /// Exit statuses the script and OpenSSH report before a stream starts.
 const UNSUPPORTED: i32 = 3;
@@ -205,7 +209,7 @@ pub fn audit(
                     "SSH connection failed; check that `ssh {destination} true` works without a prompt"
                 ),
                 Some(NOT_INSTALLED) => format!(
-                    "token-max is not installed on PATH or in ~/.cargo/bin; install it with {}",
+                    "token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with {}",
                     install()
                 ),
                 Some(UNSUPPORTED) => {

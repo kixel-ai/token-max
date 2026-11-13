@@ -36,7 +36,7 @@ fn install() -> String {
     // source matches, on both hosts.
     match env!("CARGO_PKG_VERSION") {
         "0.0.0" => {
-            "`cargo install --locked --git https://github.com/kixelated/token-max` on both hosts"
+            "`cargo install --locked --git https://github.com/kixel-ai/token-max` on both hosts"
                 .into()
         }
         version => format!("`cargo install --locked token-max --version {version}` there"),

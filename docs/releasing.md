@@ -27,7 +27,7 @@ so the first release publishes with a token:
    `CARGO_BOOTSTRAP_TOKEN`, and dispatch with `bootstrap`. Revoke the token
    and delete the secret afterwards.
 3. Then add a trusted publisher on the crate's crates.io settings for owner
-   `kixelated`, repository `token-max`, workflow `release.yml` and
+   `kixel-ai`, repository `token-max`, workflow `release.yml` and
    environment `crates-io`. Later releases use the default `trusted` mode,
    where `rust-lang/crates-io-auth-action` exchanges the job's OIDC token
    for a temporary publish token and revokes it when the job ends.

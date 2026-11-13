@@ -1,13 +1,14 @@
 # Landing
 
-PRs into `main` land by squash through protected auto-merge. The required
-`Check` job runs `nix develop --command just check`, and the branch must be
-up to date with `main` before merging. GitHub's native merge queue is not
-available for personal repositories.
+PRs into `main` land by squash through GitHub's merge queue, which tests
+each entry against the current `main` with the required `Check` job
+(`nix develop --command just check`, plus the macOS and Windows tests). A
+branch only behind `main` needs no merge; merge `main` only when the PR
+conflicts or the queue refuses its head.
 
 Run local checks and the independent review before requesting landing.
-After local checks and independent review pass, use `quest merge <pr> --squash --land <full-head-sha>`
-to land the reviewed head or arm auto-merge while checks are pending.
+Then use `quest merge <pr> --squash --land <full-head-sha>`, which enqueues
+the reviewed head, or arms auto-merge bound to it while checks are pending.
 Never bypass the required checks or use `--direct`.
 
 Workflows use read-only credentials and GitHub-hosted runners. Publication

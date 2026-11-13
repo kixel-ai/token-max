@@ -8,6 +8,8 @@ on:
     branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, edited, ready_for_review]
+  # The merge queue tests each entry against the current base before it lands.
+  merge_group:
   workflow_call:
 
 concurrency:

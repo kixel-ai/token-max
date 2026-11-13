@@ -184,8 +184,9 @@ its recommendations, superseding recommend only; ✅ each machine output is
 its own sub-command with a named consumer, such as `token-max sessions`,
 and `--json` is removed; ✅ the repository moves to kixel-ai and keeps the
 name token-max. The reasons and rejected options are in the
-[doctor](/quest/m0/doctor.md), [JSON removal](/quest/m0/remove-json.md) and
-[kixel-ai](/quest/m0/kixel-ai.md) quests. Where this entry and an older one
+[doctor](/quest/m0/doctor.md) and [kixel-ai](/quest/m0/kixel-ai.md) quests,
+and for the JSON removal in
+[kixelated/token-max#74](https://github.com/kixelated/token-max/pull/74). Where this entry and an older one
 disagree, such as "never edits settings", "both text and JSON" or
 "Repository: ✅ kixelated", this one holds.
 
@@ -193,6 +194,6 @@ Decided 2026-11-11 (maintainer, /quest-plan for that audit's follow-ups):
 ✅ 0.1.0 ships [prebuilt binaries](/quest/m0/binaries.md) built by
 cargo-dist, with `install.sh` and `run.sh` at
 [max.kixel.ai](/quest/m0/install-site.md); ✅ the report is
-[sectioned by kind of claim](/quest/m0/claim-tiers.md): Measured, Official
-and Opinion. The epic's end-to-end validation also runs both curl lines
+sectioned by kind of claim, Measured, Official and Opinion
+([kixelated/token-max#82](https://github.com/kixelated/token-max/pull/82)). The epic's end-to-end validation also runs both curl lines
 against the published release.

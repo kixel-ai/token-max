@@ -1,7 +1,7 @@
 # Reference
 
 Every flag, report section and check. [Replay semantics](semantics.md) covers
-the accounting underneath, and [JSON reports](json.md) the `--json` schema.
+the accounting underneath.
 
 ## Running it
 
@@ -18,7 +18,7 @@ profiles. Codex includes archived sessions; Claude includes nested subagents.
 T3 instances are included from `~/.t3/userdata`, an existing `~/.t3/dev`,
 and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir` and
 `--t3-dir` flags select only those roots across both harnesses. `--t3-dir`
-takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` and JSON show every discovered root's selection. A missing or
+takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
 
 ## Prices
@@ -43,26 +43,52 @@ setting or environment override and never apply it.
 
 Exit codes are `0` for no applicable change, `1` for a recommended setting or
 feature change, and `2`
-for a failed scan, price fetch, invalid argument, or cancellation. JSON errors go to stderr; a failed run emits no
+for a failed scan, price fetch, invalid argument, or cancellation. A failed run emits no
 success report or partial recommendations. Invalid selected usage fails with only
 a file and line. Complete lines that are not JSON objects, which harnesses leave
-after crashes and concurrent writes, are skipped and counted in the report and in
-JSON `coverage.skippedLines`; their usage counts as missing, and each one counts
-as an unpriced request in that profile's comparisons. Unterminated final
-lines are deferred, with frozen file lengths and deferred byte counts in JSON.
+after crashes and concurrent writes, are skipped and counted in the report;
+their usage counts as missing, and each one counts as an unpriced request in
+that profile's comparisons. Unterminated final lines are deferred, and
+`--details` counts the files that had one.
 
 ## Reading the report
 
-The default report says what was read, then puts every setting and feature on
-one line under **Change**, **Consider turning off**, **Keep**, or **Not enough
-evidence**. Comparisons
-between setting values are per 30 days at the window's rate, so checks with
-different windows compare; what features, context and long Bash waits cost,
-and how often they were used, are totals over the whole window. Settings that don't change the
-experience, such as the cache TTL, name the current and suggested values, the
-savings, and the file that owns the setting. Not enough evidence says why in one
-sentence, such as two options being too close to call. Unresolved current
-ownership stays there and does not cause exit 1.
+The default report says what was read, then gives every setting and feature
+two lines in one of three sections, by the kind of claim its recommendation
+rests on:
+
+- **Measured**: replayed from your own transcripts at public API prices: the
+  cache TTL, compaction window, idle compaction (native and T3), the Bash cap,
+  keepalive pings, background generation, tool output caps, and every tool,
+  skill and MCP server, with subagent types and context no setting turns off.
+  The evidence line says what the replay held constant, such as the same
+  sessions, and what it could not measure, such as the detail a smaller
+  compaction window or idle summary loses, or what checking on a backgrounded
+  Bash command costs.
+- **Official**: the provider's own guidance beside what the transcripts show:
+  CLAUDE.md length and the AGENTS.md byte budget, and MCP tool loading. The
+  section ends with its sources.
+- **Opinion**: the maintainer's preference, beside whatever was measured: fast
+  mode off and auto memory off.
+
+The first line names the setting or feature, its current value (and the
+recommended one after an arrow for a change), what it saves per 30 days or
+costs over the window, and the profile when several were read. The second line
+is the evidence, ending with the setting that changes it. A dot's color carries
+the verdict: red for a recommended change (exit 1), yellow for one worth
+considering (exit 0), green for a value already at its recommendation, and a
+dim hollow dot for no verdict, either for lack of evidence, which the line
+explains, or because nothing can be set. Without color a word replaces the dot:
+`change`, `consider`, `keep`, `unknown` or `info`. Within a section, lines are
+ordered by that verdict, red first.
+
+Comparisons between setting values are per 30 days at the window's rate, so
+checks with different windows compare; what features, context and long Bash
+waits cost, and how often they were used, are totals over the whole window.
+Settings that don't change the experience, such as the cache TTL, name the
+current and suggested values, the savings, and the setting that owns them. A
+line without enough evidence says why, such as two options being too close to
+call. Unresolved current ownership stays there and does not cause exit 1.
 
 Features sent with every request, such as a tool, MCP server or skill, show what
 they cost and how often they were used. One never used is recommended off,
@@ -89,10 +115,10 @@ review and encourage slop, so durable guidance belongs in a reviewed,
 checked-in CLAUDE.md or AGENTS.md. Its line shows the total cost of the loaded
 memory, the memory files read back and the writes, and how often it was read or
 written, but `--max-cost-per-use` does not apply and it does not cause exit 1. A
-profile with memory off shows it under **Keep**.
-Instruction files, Claude plugin skills, which `skillOverrides` does not reach, and the
-system prompt, core tools such as Bash and Read, and the skill and subagent
-lists have no switch and are listed after the verdicts.
+profile with memory off shows it as kept.
+Claude plugin skills, which `skillOverrides` does not reach, and the system
+prompt, core tools such as Bash and Read, and the skill and subagent lists have
+no switch, so their Measured lines give no verdict.
 The report ends with one `settings.json` or `config.toml` snippet per settings file holding every
 recommended change, such as `"enableArtifact": false` or a bare tool name in
 `permissions.deny`; merge it by hand. `--details` lists every piece, including
@@ -112,18 +138,28 @@ the raw tool name in every owning profile;
 surfaces. These exposure controls do not establish net savings: search turns,
 returned definitions, cache changes and repeated loading are not completely
 attributable. A small frequently used server can be cheaper to load upfront.
+An MCP tool with no switch of its own, or whose server's off already covers
+it, keeps an info line with its cost, which its server's line already includes.
 App controls require the actual app id, which these transcripts do not map to
 the exposed app namespaces; the report names the supported controls without
 inventing per-app costs or a settings patch.
 
-Instruction-budget notes compare recorded CLAUDE.md line counts with Claude's
-under-200-line guidance, and show the selected profile's `project_doc_max_bytes`
-(32 KiB by default) beside recorded rendered AGENTS.md bytes. Codex records can
-include headers and wrappers, so these bytes cannot diagnose source-chain truncation. Effective
-project/CLI overrides and original file sizes may be unavailable; recorded
-text can already be truncated. Length alone is not a quality score. Output-cap
-lines still recommend no value because truncation-related read-back cannot be
-priced from these transcripts.
+Instruction files are Official lines. A CLAUDE.md is worth considering
+shorter at 200 recorded lines or more, Claude Code's documented guidance, and
+kept below that. A Codex AGENTS.md is compared with the selected profiles'
+`project_doc_max_bytes` from the system and user configuration (32 KiB by
+default): the recorded rendered bytes include headers and wrappers, so under
+the budget it is kept, and at or above it Codex may have truncated it, which is
+worth considering. The evidence names the file that sets the budget, or says
+it is the default. A project `.codex/config.toml` at a recorded directory or a named
+profile that sets it gives no verdict, since the transcripts do not record
+which applied; neither do profiles with different or unreadable budgets, or
+records with no rendered text. Command-line overrides and original file sizes
+are unavailable.
+Length alone is not a quality score. Other instruction files Claude loads have
+no size guidance and get a Measured line with their cost. Output-cap lines
+still recommend no value because truncation-related read-back cannot be priced
+from these transcripts.
 
 An auto-compact window without enough evidence also shows how large that
 model's requests got (median and 90th percentile), to judge whether a smaller
@@ -158,35 +194,24 @@ grouped by their recorded outcomes and reasons. Token ranges and combined costs
 summarize modeled compactions; geometry sources are listed once. Identifiers in
 grouped cache and attempt evidence are examples. Nothing is hidden behind an interactive prompt
 or a top-N limit. The layout wraps long paths and
-names on narrow terminals. Redirected output keeps each field on one line so
-paths remain copyable. On terminals, color repeats each line's verdict: red
-for a recommended change (exit 1), yellow for an advisory or missing evidence
-(exit 0), and green for a setting or feature already at its recommended value.
-Color never replaces the words; `NO_COLOR` disables it, and `--plain` also disables decorative Unicode. Redirected output
+names on narrow terminals, where the name column narrows first and a line too
+long for the width wraps under its name. Redirected output keeps each field on
+one line so paths remain copyable. On terminals, the default report's colored
+dot carries each line's verdict, with a legend above the sections; `NO_COLOR`
+disables color, and `--plain` also disables decorative Unicode, and either
+puts the verdict word back in place of the dot. Evidence cards keep their
+verdict words and only add color, and each names its claim. Redirected output
 is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
 with exit 2 and no success report.
 Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
 
-## JSON
+## Machine-readable output
 
-Text and `--json` share the same analysis. `--json` emits schema version 2. It retains every check's costs, coverage, current and recommended
-values, owning controls, assumptions, uncertainty and sensitivity, plus every
-per-piece cost and use count in `context`. Large evidence arrays become counts
-and groups of distinct conditions; unknown totals remain null with their known
-subtotal and every unknown-cost reason. `--json-full` and its per-request schema
-version 1 are removed; see [JSON migration](json.md).
+The report is for people and has no machine-readable form; `--json` was
+removed. Each machine output is its own sub-command with a named consumer, such
+as the session export below.
 
-Each check has a `check` discriminator: `claude-cache-ttl`
-retains its TTL-specific fields, while `compaction-window` includes candidate
-windows, modeled summaries, prefix charges and sensitivity. `idle-compaction` adds
-current-settings and post-recommendation on/off costs, grouped periods,
-activation cohorts, context-size costs and lifetime/summary/timing sensitivities.
-`background-generation` adds the feature, the setting that turns it off, its
-estimated request count and cost, and the cache rewrites it avoided.
-`keepalive` adds the cache lifetime, ping interval and size, and one scenario
-per cap. Consumers
-should branch on `check` before reading setting-specific fields.
-IDs are opaque hashes. Shared histories are read once and historical costs stay
+IDs in the report are opaque hashes. Shared histories are read once and historical costs stay
 in a shared bucket when profile provenance is ambiguous. A replay for an alias
 names that profile and is conditional, not another copy of historical spend.
 Independent check savings must not be summed.
@@ -228,7 +253,7 @@ winner, and unknown fixed charges can cancel without pretending they cost zero.
 
 Cache replay preserves known, estimated and unknown predecessor states, including
 unsupported attempts before the selected window. Missing cohort metadata spans
-compatible histories; JSON and text group
+compatible histories; `--details` groups
 their states and reasons. A comparison
 stays unpriced when those histories imply different cache charges, while invariant
 charges can still be compared.
@@ -356,9 +381,7 @@ never leave it, and this host never holds more than its own scan. It looks for
 `--ssh` they need `--include-local`.
 
 Each host is analyzed on its own and gets its own section, labeled with the
-destination, or `this host`. With `--ssh`, JSON is
-`{"schemaVersion": 2, "hosts": [{"ssh": "devbox", "report": {...}}]}`, one
-report per host and `ssh` null for this host. A history copied between hosts
+destination, or `this host`. A history copied between hosts
 counts in each host's report, so don't add amounts across hosts. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination.
@@ -420,8 +443,8 @@ a different tier. Today's config never establishes a historical tier. Unsupporte
 requested tiers, conflicting evidence, missing usage and unavailable prices stay
 unknown. Recorded effective tiers always take precedence.
 
-Reports count conditional requests separately from recorded tier coverage. Details
-and JSON show standard, fast and ultrafast served-tier scenarios for
+Reports count conditional requests separately from recorded tier coverage.
+`--details` shows standard, fast and ultrafast served-tier scenarios for
 conditionally priced parts, preserving recorded tiers and all context/cache
 categories. Unsupported scenarios, including Flex and Scale without verified
 rates, remain unknown. These are sensitivity examples, not bounds on actual
@@ -474,7 +497,7 @@ and each poll reads the cache, so it is not checked.
 
 ## Subagent models
 
-A **Subagents** section, after the verdicts, gives every Claude Code subagent
+The Measured section gives every Claude Code subagent
 type (Explore, Plan, general-purpose, forks and each custom agent) and every
 Codex agent role its own line: what it cost over how many runs, the models and
 reasoning efforts it ran on, where its model came from, and what the same
@@ -486,8 +509,8 @@ model and the effort, such as `model:` and `effort:` in
 default_subagent_model`. A file that replaces a built-in such as Explore must
 restate its tool restriction and system prompt.
 
-The lines are evidence, never recommendations: they have no color and do not
-change the exit code or the settings snippet. A cheaper model trades
+The lines are evidence, never recommendations: their dot is dim, with no
+verdict, and they do not change the exit code or the settings snippet. A cheaper model trades
 capability, and the main agent's extra work after a weaker subagent cannot be
 attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent

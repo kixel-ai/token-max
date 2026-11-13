@@ -5,6 +5,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
+use token_max::model::{Action, BackgroundFeature, CheckResult, Usd, Verdict};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -85,6 +86,23 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
     command
 }
 
+/// A plain report's line whose heading starts with `head`: its verdict word,
+/// heading with padding collapsed, and evidence.
+fn report_line(text: &str, head: &str) -> (String, String, String) {
+    let lines: Vec<&str> = text.lines().collect();
+    lines
+        .windows(2)
+        .find_map(|pair| {
+            let (word, rest) = pair[0].split_once(' ')?;
+            let heading = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+            let evidence = pair[1].strip_prefix("         ")?;
+            heading
+                .starts_with(head)
+                .then(|| (word.to_string(), heading, evidence.to_string()))
+        })
+        .unwrap_or_else(|| panic!("no line starts with {head:?} in {text}"))
+}
+
 fn run(command: &mut Command) -> (i32, String, String) {
     let Output {
         status,
@@ -107,6 +125,58 @@ fn prices_args(w: &Workspace) -> Vec<String> {
     ]
 }
 
+/// An instant after every fixture request, so analyses don't depend on the wall clock.
+const NOW: i64 = 1_796_083_200_000;
+
+/// The analysis the binary runs on this workspace, through the library, with `select`
+/// choosing the profiles as the binary's directory flags would.
+fn analysis(
+    w: &Workspace,
+    select: impl FnOnce(&mut token_max::discovery::DiscoveryOptions),
+    max_cost_per_use_usd: f64,
+) -> token_max::model::Report {
+    use token_max::controls::Env;
+    use token_max::discovery::DiscoveryOptions;
+    use token_max::prices::{PriceOptions, load_prices};
+    use token_max::reader::{ScanOptions, scan};
+    use token_max::replay::{AnalyzeOptions, analyze};
+
+    let mut discovery = DiscoveryOptions {
+        home: text(&w.home),
+        env: Env::default(),
+        claude_dirs: vec![],
+        codex_dirs: vec![],
+        t3_dirs: vec![],
+        managed_settings_file: text(&w.home.join("managed-settings.json")),
+        codex_system_config_file: text(&w.home.join("system.toml")),
+        codex_requirements_file: text(&w.home.join("requirements.toml")),
+    };
+    select(&mut discovery);
+    let catalog = load_prices(&PriceOptions {
+        file: Some(fixture("prices.json")),
+        cache: PathBuf::new(),
+        offline: false,
+    })
+    .unwrap();
+    analyze(AnalyzeOptions {
+        scan: scan(&ScanOptions {
+            discovery,
+            since: None,
+        })
+        .unwrap(),
+        catalog: &catalog,
+        since: None,
+        now: NOW,
+        max_cost_per_use_usd,
+    })
+    .unwrap()
+}
+
+/// The first check `find` matches, which the test expects to exist.
+fn check(report: &token_max::model::Report, find: impl Fn(&CheckResult) -> bool) -> &CheckResult {
+    report.checks.iter().find(|c| find(c)).expect("the check")
+}
+
 fn args<'a>(base: &'a [String], extra: &[&'a str]) -> Vec<&'a str> {
     base.iter()
         .map(String::as_str)
@@ -115,7 +185,7 @@ fn args<'a>(base: &'a [String], extra: &[&'a str]) -> Vec<&'a str> {
 }
 
 #[test]
-fn conditional_codex_prices_keep_assumptions_in_both_json_projections() {
+fn conditional_codex_prices_keep_assumptions_in_the_analysis_and_text() {
     let w = Workspace::new();
     // Today's premium setting must not price a past request with no selection.
     std::fs::write(w.codex.join("config.toml"), "service_tier = 'ultrafast'\n").unwrap();
@@ -142,42 +212,40 @@ fn conditional_codex_prices_keep_assumptions_in_both_json_projections() {
             "--prices-file".into(),
             text(&fixture("prices.json")),
         ];
-        let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &["--json"])));
-        assert!((0..=1).contains(&status), "{stderr}");
-        let report: Value = serde_json::from_str(&stdout).unwrap();
-        let row = &report["historical"][0];
-        assert_eq!(row["cost"]["totalUsd"], json!(expected), "{tier:?}");
-        assert_eq!(row["conditionalRequests"], u64::from(expected.is_some()));
-        assert_eq!(report["scan"]["coverage"]["tierKnown"], 0);
+        let report = analysis(&w, |d| d.codex_dirs = vec![text(&w.codex)], 1.0);
+        let row = &report.historical[0];
+        assert_eq!(row.cost.total_usd.map(Usd::to_f64), expected, "{tier:?}");
+        assert_eq!(row.conditional_requests, u64::from(expected.is_some()));
+        assert_eq!(report.scan.coverage.tier_known, 0);
         if expected.is_some() {
             assert!(
-                row["cost"]["assumptions"]
-                    .to_string()
-                    .contains("conditional")
+                row.cost
+                    .assumptions
+                    .iter()
+                    .any(|a| a.contains("conditional"))
             );
             assert!(
-                row["tierSensitivity"]
-                    .as_array()
-                    .unwrap()
+                row.tier_sensitivity
                     .iter()
-                    .any(|s| s["tier"] == "flex" && s["cost"]["totalUsd"].is_null())
+                    .any(|s| s.tier == "flex" && s.cost.total_usd.is_none())
             );
         }
-        let (_, stdout, _) = run(&mut command(&w, &args(&base, &[])));
+        let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &[])));
+        assert!((0..=1).contains(&status), "{stderr}");
         assert!(stdout.contains("Conditional Codex pricing"), "{stdout}");
         assert!(stdout.contains("tier sensitivity"), "{stdout}");
     }
 }
 
 #[test]
-fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
+fn exit_codes_and_no_partial_findings_or_transcript_content() {
     let w = Workspace::new();
     w.fixture();
     w.settings(r#"{"promptCacheTtl":"5m"}"#);
     let before = std::fs::read(w.transcript()).unwrap();
     let base = prices_args(&w);
     let invoke = || {
-        let mut c = command(&w, &args(&base, &["--json"]));
+        let mut c = command(&w, &args(&base, &[]));
         c.env("CLAUDE_CONFIG_DIR", &w.claude)
             .env("CODEX_HOME", &w.codex);
         run(&mut c)
@@ -185,9 +253,7 @@ fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
     let (status, stdout, stderr) = invoke();
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
-    let report: Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(report["schemaVersion"], 2);
-    assert_eq!(report["scan"]["requests"], 2);
+    assert!(stdout.contains("Read 2 requests"), "{stdout}");
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(std::fs::read(w.transcript()).unwrap(), before);
     w.settings(r#"{"promptCacheTtl":"1h"}"#);
@@ -202,8 +268,10 @@ fn json_exit_codes_and_no_partial_findings_or_transcript_content() {
     assert_eq!(status, 2);
     assert_eq!(stdout, "");
     assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("recommended"));
-    let diagnostic: Value = serde_json::from_str(&stderr).unwrap();
-    assert_eq!(diagnostic["location"]["line"], 1);
+    assert!(
+        stderr.starts_with("token-max: ") && stderr.ends_with(":1\n"),
+        "{stderr}"
+    );
 }
 
 #[test]
@@ -241,54 +309,20 @@ fn a_tool_only_recommendation_sets_exit_one() {
     let base = prices_args(&w);
     let (status, stdout, stderr) = run(&mut command(
         &w,
-        &args(&base, &["--json", "--max-cost-per-use", "0.001"]),
+        &args(&base, &["--max-cost-per-use", "0.001"]),
     ));
     assert_eq!(status, 1, "{stderr}\n{stdout}");
-    let report: Value = serde_json::from_str(&stdout).unwrap();
-    assert!(
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|c| c["action"] != "change")
-    );
-    let server = report["context"]
-        .as_array()
-        .unwrap()
+    assert!(stdout.contains("mcp__docs__write"), "{stdout}");
+    let report = analysis(&w, |d| d.claude_dirs = vec![text(&w.claude)], 0.001);
+    assert!(report.checks.iter().all(|c| c.action() != Action::Change));
+    let server = report.context.iter().find(|c| c.name == "docs").unwrap();
+    assert_eq!(server.verdict, Some(Verdict::Keep));
+    let write = server
+        .details
         .iter()
-        .find(|c| c["name"] == "docs")
+        .find(|c| c.name == "mcp__docs__write")
         .unwrap();
-    assert_eq!(server["verdict"], "keep");
-    let write = server["details"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["name"] == "mcp__docs__write")
-        .unwrap();
-    assert_eq!(write["verdict"], "off");
-}
-
-#[test]
-fn json_counts_requests_instead_of_listing_them() {
-    let w = Workspace::new();
-    w.fixture();
-    w.settings(r#"{"promptCacheTtl":"5m"}"#);
-    let before = std::fs::read(w.transcript()).unwrap();
-    let base = prices_args(&w);
-    let (status, compact, stderr) = run(&mut command(&w, &args(&base, &["--json"])));
-    assert_eq!(status, 1, "{stderr}");
-    assert!(stderr.is_empty());
-    assert!(!compact.contains("SYNTHETIC_PRIVATE"));
-    let compact: Value = serde_json::from_str(&compact).unwrap();
-    assert_eq!(compact["schemaVersion"], 2);
-    assert_eq!(compact["scan"]["requests"], 2);
-    assert_eq!(compact["scan"]["events"], 1);
-    assert_eq!(std::fs::read(w.transcript()).unwrap(), before);
-    let (_, _, diagnostic) = run(&mut command(&w, &args(&base, &["--json", "--bogus"])));
-    assert_eq!(
-        serde_json::from_str::<Value>(&diagnostic).unwrap()["error"],
-        "invalid arguments; use --help"
-    );
+    assert_eq!(write.verdict, Some(Verdict::Off));
 }
 
 /// The synthetic fixture rewritten so one recorded summary precedes four large writes.
@@ -356,18 +390,15 @@ fn renders_priced_compaction_windows_alongside_ttl_checks() {
     std::fs::write(w.transcript(), compaction_transcript()).unwrap();
     w.settings(r#"{"promptCacheTtl":"5m","autoCompactWindow":400000}"#);
     let base = prices_args(&w);
-    let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &["--json"])));
-    assert_eq!(status, 1, "{stderr}");
-    let report: Value = serde_json::from_str(&stdout).unwrap();
-    let result = report["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["check"] == "compaction-window")
-        .unwrap();
-    assert_eq!(result["action"], "change");
-    assert_eq!(result["current"], 400_000);
-    assert_eq!(result["recommended"], 100_000);
+    let report = analysis(&w, |d| d.claude_dirs = vec![text(&w.claude)], 1.0);
+    let CheckResult::Compaction(result) =
+        check(&report, |c| matches!(c, CheckResult::Compaction(_)))
+    else {
+        unreachable!()
+    };
+    assert_eq!(result.base.action, Action::Change);
+    assert_eq!(result.base.current, Some(400_000));
+    assert_eq!(result.base.recommended, Some(100_000));
     let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &["--details", "--plain"])));
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
@@ -380,7 +411,7 @@ fn renders_priced_compaction_windows_alongside_ttl_checks() {
         "Added compaction",
         "Geometry basis",
         "compaction loses detail",
-        result["owner"].as_str().unwrap(),
+        &result.base.owner,
     ] {
         assert!(stdout.contains(value), "{value}");
     }
@@ -420,7 +451,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     let (status, stdout, stderr) = invoke(&["--plain"]);
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.contains("No setting changes recommended"));
-    assert!(stdout.lines().any(|l| l == "Keep"));
+    assert!(stdout.lines().any(|l| l.starts_with("keep     ")));
     assert!(!stdout.contains('\x1b') && !stdout.contains('→'));
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(stderr, "");
@@ -477,7 +508,6 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
         "--codex-dir",
         "--details",
         "--plain",
-        "--json",
         "NO_COLOR",
         "Exit 0",
         "Exit 1",
@@ -485,6 +515,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     ] {
         assert!(help.contains(flag), "{flag}");
     }
+    assert!(!help.contains("--json"));
 }
 
 #[test]
@@ -494,7 +525,8 @@ fn arguments_follow_strict_parse_args() {
     let invoke = |extra: &[&str]| run(&mut command(&w, &args(&base, extra)));
     for extra in [
         &["positional"][..],
-        &["--json=1"],
+        &["--json"],
+        &["--plain=1"],
         &["--since"],
         &["--since", "-x"],
         &["-x"],
@@ -510,9 +542,6 @@ fn arguments_follow_strict_parse_args() {
             "{extra:?}"
         );
     }
-    let (status, _, stderr) = invoke(&["--json", "--bogus"]);
-    assert_eq!(status, 2);
-    assert_eq!(stderr, "{\"error\":\"invalid arguments; use --help\"}\n");
     let (status, stdout, _) = invoke(&["-hv"]);
     assert_eq!(
         (status, stdout.starts_with("token-max: cheaper")),
@@ -593,14 +622,23 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
 
 /// Floats print as JavaScript prints them: integers without a fraction, no `1.0`.
 #[test]
-fn json_numbers_print_like_javascript() {
+fn session_numbers_print_like_javascript() {
     let w = Workspace::new();
-    w.fixture();
-    w.settings(r#"{"promptCacheTtl":"5m"}"#);
+    // An unpriced model costs a whole 0 dollars.
+    let lines = std::fs::read_to_string(fixture("claude.jsonl"))
+        .unwrap()
+        .replace("claude-opus-5-5", "synthetic-unpriced-model");
+    std::fs::write(w.transcript(), lines).unwrap();
     let base = prices_args(&w);
-    let (_, stdout, _) = run(&mut command(&w, &args(&base, &["--json"])));
-    assert!(stdout.contains(r#""maxCostPerUseUsd":1,"#));
-    assert!(!stdout.contains(".0,") && !stdout.contains(".0}"));
+    let mut all = vec!["sessions"];
+    all.extend(args(&base, &[]));
+    let (status, stdout, stderr) = run(&mut command(&w, &all));
+    assert_eq!(status, 0, "{stderr}");
+    assert!(stdout.contains(r#""costUsd":0,"#), "{stdout}");
+    assert!(
+        !stdout.contains(".0,") && !stdout.contains(".0}"),
+        "{stdout}"
+    );
     assert!(stdout.ends_with("}\n") && stdout.matches('\n').count() == 1);
 }
 
@@ -613,6 +651,7 @@ fn explicit_windows_match_the_library_replay() {
     use token_max::prices::{PriceOptions, load_prices};
     use token_max::reader::{ScanOptions, scan};
     use token_max::replay::{AnalyzeOptions, analyze};
+    use token_max::report::{ReportOptions, format_report};
 
     const MIN: i64 = 60_000;
     let iso = |minute: i64| {
@@ -699,9 +738,10 @@ fn explicit_windows_match_the_library_replay() {
             max_cost_per_use_usd: 1.0,
         })
         .unwrap();
-        let Some(CheckResult::Ttl(check)) = report.checks.first() else {
-            panic!("{mode}: no TTL check");
-        };
+        assert!(
+            matches!(report.checks.first(), Some(CheckResult::Ttl(_))),
+            "{mode}: no TTL check"
+        );
         let claude = text(&w.claude);
         let prices = text(&fixture("prices.json"));
         let window = iso(18);
@@ -714,19 +754,28 @@ fn explicit_windows_match_the_library_replay() {
                 &window,
                 "--prices-file",
                 &prices,
-                "--json",
+                "--details",
             ],
         );
         c.env("CLAUDE_CONFIG_DIR", &w.claude);
         let (status, stdout, stderr) = run(&mut c);
         let expected = i32::from(report.checks.iter().any(|c| c.action() == Action::Change));
         assert_eq!(status, expected, "{mode}: {stderr}");
-        let cli: Value = serde_json::from_str(&stdout).unwrap();
-        assert_eq!(
-            numbers(cli["checks"][0]["comparisonCost"].clone()),
-            numbers(serde_json::to_value(&check.comparison_cost).unwrap()),
-            "{mode}"
+        // The binary prints the library's window-total comparison for this check.
+        let line = |text: &str| {
+            text.lines()
+                .find(|l| l.contains("Cache comparison"))
+                .map(str::to_owned)
+        };
+        let library = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                ..ReportOptions::default()
+            },
         );
+        assert!(line(&library).is_some(), "{mode}: {library}");
+        assert_eq!(line(&stdout), line(&library), "{mode}");
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     }
 }
@@ -780,9 +829,6 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
             .stdin(Stdio::null());
         run(&mut c)
     };
-    let last_line = |stderr: &str| -> Value {
-        serde_json::from_str(stderr.trim().lines().last().unwrap()).unwrap()
-    };
     let profile = ["--claude-dir", "profile", "--prices-file", "prices.json"];
     let with = |extra: &'static str| [&profile[..], &[extra][..]].concat();
 
@@ -796,41 +842,15 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     std::fs::write(&settings, r#"{"promptCacheTtl":"5m"}"#).unwrap();
     let (status, text, text_err) = invoke(&with("--plain"));
     assert_eq!(status, 1, "{text_err}");
+    let (mark, head, _) = report_line(&text, "Main-agent prompt cache TTL 5m -> 1h");
+    assert_eq!(mark, "change");
     assert!(
-        text.contains("Main-agent prompt cache TTL: 5m -> 1h"),
+        head.contains("saves $") || head.contains("saves <$"),
         "{text}"
     );
-    assert!(
-        text.contains("Saves $") || text.contains("Saves <$"),
-        "{text}"
-    );
-    let (status, json, json_err) = invoke(&with("--json"));
-    assert_eq!(status, 1, "{json_err}");
-    let report: Value = serde_json::from_str(&json).unwrap();
-    assert_eq!(report["schemaVersion"], 2);
-    assert_eq!(report["scan"]["requests"], 2);
-    let check = |name: &str| {
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|c| c["check"] == name)
-            .unwrap_or_else(|| panic!("{name}"))
-            .clone()
-    };
-    let ttl = check("claude-cache-ttl");
-    assert_eq!(ttl["action"], "change");
-    assert_eq!(ttl["recommended"], "1h");
-    assert_eq!(
-        check("idle-compaction")["action"],
-        "advisory",
-        "SDK usage must retain the idle check without recommending a native toggle"
-    );
-    let unknown = text
-        .find("Not enough evidence")
-        .unwrap_or_else(|| panic!("{text}"));
-    assert!(text[unknown..].contains("Idle compaction"), "{text}");
-    let all = format!("{text}{json}{text_err}{json_err}");
+    assert!(text.contains("Read 2 requests"), "{text}");
+    assert_eq!(report_line(&text, "Idle compaction").0, "unknown", "{text}");
+    let all = format!("{text}{text_err}");
     assert!(!all.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(std::fs::read(&transcript).unwrap(), original);
     assert_eq!(
@@ -839,17 +859,14 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     );
 
     std::fs::write(&settings, r#"{"promptCacheTtl":"1h"}"#).unwrap();
-    let (status, clear, stderr) = invoke(&with("--json"));
+    let (status, clear, stderr) = invoke(&with("--plain"));
     assert_eq!(status, 0, "{stderr}");
-    let clear: Value = serde_json::from_str(&clear).unwrap();
-    let checks = clear["checks"].as_array().unwrap();
-    assert!(checks.iter().all(|c| c["action"] != "change"));
+    assert!(clear.contains("No setting changes recommended"), "{clear}");
 
-    let (status, stdout, stderr) = invoke(&["--bogus", "--json"]);
+    let (status, stdout, stderr) = invoke(&["--bogus"]);
     assert_eq!(status, 2, "{stderr}");
     assert_eq!(stdout, "");
-    let error = last_line(&stderr)["error"].as_str().unwrap().to_string();
-    assert!(error.contains("invalid arguments"), "{error}");
+    assert!(stderr.contains("invalid arguments"), "{stderr}");
 
     std::fs::write(
         &transcript,
@@ -857,21 +874,11 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
 "#,
     )
     .unwrap();
-    let (status, stdout, stderr) = invoke(&with("--json"));
+    let (status, stdout, stderr) = invoke(&with("--plain"));
     assert_eq!(status, 2, "{stderr}");
     assert_eq!(stdout, "");
-    assert_eq!(last_line(&stderr)["location"]["line"], 1);
+    assert!(stderr.ends_with(":1\n"), "{stderr}");
     assert!(!stderr.contains("SYNTHETIC_PRIVATE"));
-}
-
-/// Every JSON number as a float, so `1` and `1.0` compare equal.
-fn numbers(value: Value) -> Value {
-    match value {
-        Value::Number(n) => json!(n.as_f64().unwrap()),
-        Value::Array(a) => Value::Array(a.into_iter().map(numbers).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, numbers(v))).collect()),
-        v => v,
-    }
 }
 
 // Ported from fast.test.ts: "built CLI warns from current settings alone, remains read-only and skips unreadable lines".
@@ -886,7 +893,6 @@ fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_l
         text(&w.codex),
         "--prices-file".into(),
         text(&fixture("prices.json")),
-        "--json".into(),
     ];
     let invoke = || {
         let mut c = command(&w, &args(&base, &[]));
@@ -895,14 +901,13 @@ fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_l
     };
     let (status, stdout, stderr) = invoke();
     assert_eq!(status, 1, "{stderr}");
-    let report: Value = serde_json::from_str(&stdout).unwrap();
-    let fast = report["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["check"] == "fast-mode")
-        .unwrap();
-    assert_eq!(fast["savingsUsd"], Value::Null);
+    assert!(stdout.contains("Fast mode"), "{stdout}");
+    let report = analysis(&w, |d| d.codex_dirs = vec![text(&w.codex)], 1.0);
+    let fast = check(&report, |c| matches!(c, CheckResult::Speed(_)));
+    let CheckResult::Speed(fast) = fast else {
+        unreachable!()
+    };
+    assert_eq!(fast.base.savings_usd, None);
     assert_eq!(std::fs::read_to_string(&settings).unwrap(), config);
     std::fs::write(
         &settings,
@@ -1055,13 +1060,6 @@ mod unix {
         let both = format!("{stdout}{stderr}");
         assert!(!both.contains('\x1b') && !both.contains('→'));
         assert!(stdout.contains("Uncertainty:"));
-        let (status, stdout, stderr) = invoke(&["--json", "--details", "--plain"], &[]);
-        assert_eq!(status, 1, "{stderr}");
-        assert_eq!(stderr, "");
-        let report: Value = serde_json::from_str(&stdout).unwrap();
-        assert_eq!(report["schemaVersion"], 2);
-        assert_eq!(report["scan"]["requests"], 2);
-        assert_eq!(report["checks"][0]["action"], "change");
         let (_, stdout, stderr) = run(&mut command(&w, &args(&base, &[])));
         assert_eq!(stderr, "");
         assert!(!stdout.contains('\x1b') && !stdout.contains('→'));
@@ -1100,12 +1098,9 @@ mod unix {
         let claude = text(&w.claude);
         let cache = text(&w.home.join("prices.json"));
         for sig in [libc::SIGINT, libc::SIGTERM] {
-            for json in [false, true] {
+            {
                 let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
-                let mut args = vec!["--claude-dir", &claude, "--price-cache", &cache];
-                if json {
-                    args.push("--json");
-                }
+                let args = ["--claude-dir", &claude, "--price-cache", &cache];
                 let mut c = command(&w, &args);
                 c.env(
                     "ALL_PROXY",
@@ -1122,21 +1117,10 @@ mod unix {
                 let stderr = String::from_utf8(output.stderr).unwrap();
                 assert_eq!(output.status.code(), Some(2), "{stderr}");
                 assert_eq!(stdout, "");
-                for leak in ["SYNTHETIC_PRIVATE", "recommended", "schemaVersion"] {
+                for leak in ["SYNTHETIC_PRIVATE", "recommended"] {
                     assert!(!stderr.contains(leak), "{leak}");
                 }
-                let message = if json {
-                    serde_json::from_str::<Value>(&stderr).unwrap()["error"]
-                        .as_str()
-                        .unwrap()
-                        .to_string()
-                } else {
-                    stderr
-                };
-                assert!(
-                    message.contains("cancelled; no report produced"),
-                    "{message}"
-                );
+                assert_eq!(stderr, "token-max: cancelled; no report produced\n");
             }
         }
         assert!(!std::fs::read_dir(&w.home).unwrap().any(|e| {
@@ -1196,63 +1180,52 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
         )
         .unwrap();
     }
-    let mut args = prices_args(&w);
-    args.extend(["--json".into(), "--max-cost-per-use".into(), "0".into()]);
-    let (_, stdout, stderr) = run(&mut command(
-        &w,
-        &args.iter().map(String::as_str).collect::<Vec<_>>(),
-    ));
-    assert_eq!(stderr, "");
-    assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
-    let report: Value = serde_json::from_str(&stdout).unwrap();
-    let checks: Vec<&Value> = report["checks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|c| c["check"] == "background-generation")
-        .collect();
-    let feature = |directory: Option<&Path>, name: &str| {
-        *checks
+    let report = analysis(&w, |d| d.claude_dirs = vec![text(&w.claude)], 0.0);
+    let feature = |directory: Option<&Path>, name: BackgroundFeature| {
+        report
+            .checks
             .iter()
-            .find(|c| {
-                c["feature"] == name
-                    && c["directories"][0]
-                        == directory
-                            .map(text)
-                            .map(Value::String)
-                            .unwrap_or(Value::Null)
+            .find_map(|c| match c {
+                CheckResult::Background(b)
+                    if b.feature == name
+                        && b.directories[0].as_deref() == directory.map(text).as_deref() =>
+                {
+                    Some(b)
+                }
+                _ => None,
             })
             .unwrap()
     };
-    let disabled = feature(Some(&off), "prompt-suggestions");
-    assert_eq!(disabled["current"], false);
-    assert_eq!(disabled["action"], "keep");
-    assert_eq!(disabled["requests"], 2);
+    let disabled = feature(Some(&off), BackgroundFeature::PromptSuggestions);
+    assert_eq!(disabled.base.current, Some(false));
+    assert_eq!(disabled.base.action, Action::Keep);
+    assert_eq!(disabled.base.requests, 2);
     assert_eq!(
-        disabled["offFile"],
-        text(&off.join(".claude/settings.local.json"))
+        disabled.off_file.as_deref(),
+        Some(&*text(&off.join(".claude/settings.local.json")))
     );
     // Uses are not recorded, so a cost above the per-use limit is only advisory.
-    let enabled = feature(Some(&on), "prompt-suggestions");
-    assert_eq!(enabled["action"], "advisory");
-    assert_eq!(enabled["recommended"], Value::Null);
-    assert_eq!(enabled["requests"], 2);
-    assert_eq!(enabled["generations"], 1);
-    let patch: Value =
-        serde_json::from_str(&format!("{{{}}}", enabled["off"].as_str().unwrap())).unwrap();
+    let enabled = feature(Some(&on), BackgroundFeature::PromptSuggestions);
+    assert_eq!(enabled.base.action, Action::Advisory);
+    assert_eq!(enabled.base.recommended, None);
+    assert_eq!(enabled.base.requests, 2);
+    assert_eq!(enabled.generations, Some(1));
+    let patch: Value = serde_json::from_str(&format!("{{{}}}", enabled.off)).unwrap();
     assert_eq!(
         patch["env"]["CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"],
         "false"
     );
     let gone = w.home.join("gone");
     for directory in [None, Some(gone.as_path())] {
-        let unknown = feature(directory, "prompt-suggestions");
-        assert_eq!(unknown["current"], Value::Null);
-        assert_eq!(unknown["action"], "advisory");
-        assert_eq!(unknown["cost"]["totalUsd"], Value::Null);
-        assert_eq!(unknown["coverage"], Value::Null);
+        let unknown = feature(directory, BackgroundFeature::PromptSuggestions);
+        assert_eq!(unknown.base.current, None);
+        assert_eq!(unknown.base.action, Action::Advisory);
+        assert_eq!(unknown.cost.total_usd, None);
+        assert_eq!(unknown.base.coverage, None);
     }
-    args.retain(|a| a != "--json");
+    assert!(!format!("{report:?}").contains("SYNTHETIC_PRIVATE"));
+    let mut args = prices_args(&w);
+    args.extend(["--max-cost-per-use".into(), "0".into()]);
     let (_, stdout, stderr) = run(&mut command(
         &w,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1262,10 +1235,9 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
     assert!(stdout.contains("scope or launch selection is unresolved"));
     assert!(stdout.contains("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION"));
     assert!(stdout.contains("Background estimates apply current files to history"));
-    let consider = &stdout[stdout.find("\nConsider turning off\n").unwrap() + 1..];
-    let consider = &consider[..consider.find("\n\n").unwrap()];
-    assert!(consider.contains("Prompt suggestions"));
-    assert!(consider.contains("its uses are not recorded"));
+    let (mark, _, evidence) = report_line(&stdout, "Prompt suggestions");
+    assert_eq!(mark, "consider");
+    assert!(evidence.contains("its uses are not recorded"));
 }
 
 #[test]
@@ -1287,36 +1259,21 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
             &["--t3-dir", &state, "--prices-file", &prices, output],
         ))
     };
-    let (status, report, stderr) = invoke("--json");
-    assert_ne!(status, 2, "{stderr}");
-    assert!(stderr.is_empty());
-    let report: Value = serde_json::from_str(&report).unwrap();
-    assert_eq!(report["scan"]["requests"], 2);
-    assert_eq!(report["scan"]["t3"].as_array().unwrap().len(), 1);
-    assert!(
-        report["scan"]["t3"][0]["metadata"]
-            .as_str()
-            .unwrap()
-            .contains("unavailable")
-    );
-    assert!(
-        report["scan"]["t3"][0]["exclusions"]
-            .to_string()
-            .contains("unsupported")
-    );
+    let report = analysis(&w, |d| d.t3_dirs = vec![state.clone()], 1.0);
+    assert_eq!(report.scan.requests.len(), 2);
+    assert_eq!(report.scan.t3.len(), 1);
+    let t3 = &report.scan.t3[0];
+    assert!(t3.metadata.contains("unavailable"));
+    assert!(t3.exclusions.iter().any(|e| e.contains("unsupported")));
+    let selection = &t3.text_generation.as_ref().unwrap().selection;
     assert_eq!(
-        report["scan"]["t3"][0]["textGeneration"]["selection"],
-        json!({"instance": "codex", "model": "gpt-6-luna"})
+        (&*selection.instance, &*selection.model),
+        ("codex", "gpt-6-luna")
     );
-    assert!(
-        report["checks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|c| c["check"] == "t3-idle-compaction"
-                && c["currentSettings"]["scenarios"].as_array().unwrap().len() == 3)
-    );
-    let (_, details, stderr) = invoke("--details");
+    assert!(report.checks.iter().any(|c| matches!(c,
+        CheckResult::T3Idle(c) if c.current_settings.scenarios.len() == 3)));
+    let (status, details, stderr) = invoke("--details");
+    assert_ne!(status, 2, "{stderr}");
     assert!(stderr.is_empty());
     assert!(
         details.contains("t3-idle-compaction")
@@ -1329,15 +1286,19 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
         &["--t3-dir", &state, "--prices-file", &prices],
     ));
     assert!(stderr.is_empty());
-    let unmeasured = summary.split("Not enough evidence").nth(1).unwrap();
+    let (mark, head, unmeasured) = report_line(&summary, "T3 text generation");
+    assert_eq!(
+        (mark.as_str(), head.as_str()),
+        ("unknown", "T3 text generation codex gpt-6-luna")
+    );
     assert!(
-        unmeasured.contains("T3 text generation: codex gpt-6-luna (T3 default). Cost unmeasured")
+        unmeasured.contains("ephemeral sessions that keep no native records (T3 default).")
             && unmeasured.contains(&format!(
                 "Set in ~{0}selected-t3{0}settings.json:textGenerationModelSelection.",
                 std::path::MAIN_SEPARATOR
             ))
     );
-    for output in [report.to_string(), details, summary] {
+    for output in [format!("{report:?}"), details, summary] {
         assert!(!output.contains("SYNTHETIC_PRIVATE") && !output.contains("PRIVATE_CONFIG"));
     }
     assert!(!Path::new(&state).join("statev2.sqlite").exists());

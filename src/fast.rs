@@ -5,7 +5,7 @@ use crate::collections::IndexSet;
 use crate::controls::claude_fast_support;
 use crate::model::{
     Action, BillingPart, CheckBase, Cost, CurrentPremium, Evidence, Harness, Millis,
-    ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl, Text,
+    ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl, Text, Usd,
 };
 use crate::prices::{Catalog, add_costs, price_components, unknown_cost, zero_cost};
 
@@ -100,7 +100,7 @@ fn difference(catalog: &Catalog, r: &Request, p: &BillingPart) -> Cost {
                 known_usd: if both.is_some() || shared_coverage {
                     a.known_usd - b.known_usd
                 } else {
-                    0.0
+                    Usd::ZERO
                 },
                 total_usd: both.map(|(a, b)| a - b),
                 unknown: union(&a.unknown, &b.unknown),
@@ -263,6 +263,7 @@ fn check(
         Some(_) => Action::Change,
     };
     let change = action == Action::Change;
+    let current_usd = current_cost.total_usd.map(Usd::to_f64);
     let history_profiles: IndexSet<&String> =
         requests.iter().flat_map(|r| r.profiles.iter()).collect();
     let mut uncertainty = vec![
@@ -291,8 +292,8 @@ fn check(
             baseline: "current profile speed, holding recorded model, work, tokens, cache categories, geography, context tiers and all other settings constant; independent of TTL/window/idle recommendations".into(),
             requests: requests.len() as u64,
             coverage: None,
-            savings_usd: if change { current_cost.total_usd } else { None },
-            monthly_savings_usd: if change { month(current_cost.total_usd) } else { None },
+            savings_usd: if change { current_usd } else { None },
+            monthly_savings_usd: if change { month(current_usd) } else { None },
             break_even: None,
             assumptions: [
                 "maintainer cost preference: fast and ultrafast off; setting warning does not require historical billing metadata",
@@ -313,7 +314,7 @@ fn check(
             premium_parts,
             standard_parts,
             unknown_parts,
-            monthly_premium_usd: month(observed_cost.total_usd),
+            monthly_premium_usd: month(observed_cost.total_usd.map(Usd::to_f64)),
             premium: observed_cost,
         },
         current_estimate: CurrentPremium {
@@ -413,12 +414,15 @@ mod tests {
         assert_eq!(result.base.evidence, Evidence::Guidance);
         // Fast doubles every rate; the US part carries the 1.1 geography multiplier.
         let observed = ((100.0 * 4.0 + 200.0 * 5.0 + 300.0 * 0.2 + 50.0 * 20.0) * 1.1) / 1e6;
-        assert!(close(result.observed.premium.total_usd.unwrap(), observed));
+        assert!(close(
+            result.observed.premium.total_usd.unwrap().to_f64(),
+            observed
+        ));
         let estimate = observed + (100.0 * 4.0 + 200.0 * 8.0 + 300.0 * 0.2 + 50.0 * 20.0) / 1e6;
         assert!(close(result.base.savings_usd.unwrap(), estimate));
         assert_eq!(
             result.observed.monthly_premium_usd,
-            result.observed.premium.total_usd
+            result.observed.premium.total_usd.map(Usd::to_f64)
         );
         assert_eq!(
             (
@@ -435,7 +439,7 @@ mod tests {
         let keep = &checks(&standard, None, DAY_MS)[0];
         assert_eq!(keep.base.action, Action::Keep);
         assert_eq!(keep.base.savings_usd, None);
-        assert!(keep.observed.premium.total_usd.unwrap() > 0.0);
+        assert!(keep.observed.premium.total_usd.unwrap().to_f64() > 0.0);
 
         let mut open = s;
         open.profiles[0].speed = Some(control(Some("fast"), false));
@@ -454,8 +458,8 @@ mod tests {
         let result = &checks(&s, Some(50), 200)[0];
         assert_eq!(result.observed.unknown_parts, 1);
         assert_eq!(result.observed.premium.total_usd, None);
-        assert_eq!(result.observed.premium.known_usd, 0.0);
-        assert!(result.current_estimate.premium.total_usd.unwrap() > 0.0);
+        assert_eq!(result.observed.premium.known_usd.to_f64(), 0.0);
+        assert!(result.current_estimate.premium.total_usd.unwrap().to_f64() > 0.0);
 
         let excluded = &checks(&s, Some(150), 200)[0];
         assert_eq!(excluded.base.requests, 0);
@@ -706,18 +710,25 @@ mod tests {
             assert_eq!(result.base.action, Action::Change);
             assert_eq!(result.base.evidence, Evidence::Guidance);
             let observed = ((100.0 * 4.0 + 200.0 * 5.0 + 300.0 * 0.2 + 50.0 * 20.0) * 1.1) / 1e6;
-            assert!(close(result.observed.premium.total_usd.unwrap(), observed));
+            assert!(close(
+                result.observed.premium.total_usd.unwrap().to_f64(),
+                observed
+            ));
             let estimate = observed + (100.0 * 4.0 + 200.0 * 8.0 + 300.0 * 0.2 + 50.0 * 20.0) / 1e6;
             assert!(close(result.base.savings_usd.unwrap(), estimate));
             assert_eq!(
                 result.observed.monthly_premium_usd,
-                result.observed.premium.total_usd
+                result.observed.premium.total_usd.map(Usd::to_f64)
             );
             assert_eq!(result.observed.premium_parts, 1);
             assert_eq!(result.observed.standard_parts, 1);
             assert_eq!(result.current_estimate.priced_parts, 2);
-            let json = serde_json::to_string(&report).unwrap();
-            assert!(format_report(&report, ReportOptions::default()).contains("Fast mode ["));
+            let text = format_report(&report, ReportOptions::default());
+            assert!(
+                crate::test_support::report_lines(&text)
+                    .iter()
+                    .any(|l| l.claim == "OPINION" && l.head.starts_with("Fast mode "))
+            );
             let details = format_report(
                 &report,
                 ReportOptions {
@@ -734,7 +745,6 @@ mod tests {
             ] {
                 assert!(details.contains(expected), "{expected}");
             }
-            assert_eq!(serde_json::to_string(&report).unwrap(), json);
             let profile = s
                 .profiles
                 .iter_mut()
@@ -752,7 +762,7 @@ mod tests {
                 "old billed premiums must not recommend changing current standard speed"
             );
             assert_eq!(standard.base.savings_usd, None);
-            assert!(standard.observed.premium.total_usd.unwrap() > 0.0);
+            assert!(standard.observed.premium.total_usd.unwrap().to_f64() > 0.0);
         }
 
         // Ported from fast.test.ts: "current-setting warning survives missing billing metadata; historical unknowns and prices stay unknown".
@@ -908,8 +918,8 @@ mod tests {
             let result = checks(&s, &c, Some(50), 200).remove(0);
             assert_eq!(result.observed.unknown_parts, 1);
             assert_eq!(result.observed.premium.total_usd, None);
-            assert_eq!(result.observed.premium.known_usd, 0.0);
-            assert!(result.current_estimate.premium.total_usd.unwrap() > 0.0);
+            assert_eq!(result.observed.premium.known_usd.to_f64(), 0.0);
+            assert!(result.current_estimate.premium.total_usd.unwrap().to_f64() > 0.0);
             let excluded = checks(&s, &c, Some(150), 200).remove(0);
             assert_eq!(excluded.base.requests, 0);
             assert_eq!(excluded.base.savings_usd, None);
@@ -941,7 +951,7 @@ mod tests {
                 s.requests[0].parts[0].model = Some(model.into());
                 let result = checks(&s, &c, None, 100).remove(0);
                 assert_eq!(
-                    result.current_estimate.premium.total_usd,
+                    result.current_estimate.premium.total_usd.map(Usd::to_f64),
                     Some(0.0),
                     "{model}"
                 );
@@ -1118,9 +1128,12 @@ mod tests {
             let result = checks(&s, &prices(), None, 100).remove(0);
             let known = (100.0 * 4.0 + 300.0 * 0.2 + 200.0 * 5.0) / 1e6;
             assert_eq!(result.observed.premium.total_usd, None);
-            assert!(close(result.observed.premium.known_usd, known));
+            assert!(close(result.observed.premium.known_usd.to_f64(), known));
             assert_eq!(result.base.savings_usd, None);
-            assert!(close(result.current_estimate.premium.known_usd, known));
+            assert!(close(
+                result.current_estimate.premium.known_usd.to_f64(),
+                known
+            ));
             assert!(result.observed.premium.unknown.join(" ").contains("output"));
         }
     }

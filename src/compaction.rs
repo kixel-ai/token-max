@@ -12,8 +12,8 @@ use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
     Harness, Id, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
-    StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, WindowBasisKind, WindowControl,
-    WindowScenario, WindowSensitivity,
+    StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
+    WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sum, TIER_SENSITIVITY, add_costs, paired_savings, price_components,
@@ -464,7 +464,10 @@ fn output_unit(catalog: &Catalog, item: &ReplayedPart) -> Option<f64> {
         },
         ..item.p.clone()
     };
-    price_components(catalog, item.request, &p).output.total_usd
+    price_components(catalog, item.request, &p)
+        .output
+        .total_usd
+        .map(Usd::to_f64)
 }
 
 /// Requests after modeled compactions, with what the simulation could not establish.
@@ -1397,7 +1400,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 let savings_usd = if control.comparison_unknown.is_some() || !paired.decided {
                     None
                 } else {
-                    Some(paired.usd)
+                    Some(paired.usd.to_f64())
                 };
                 Run {
                     cost,
@@ -1759,6 +1762,8 @@ mod tests {
     fn data(count: i64) -> Scan {
         let profile = Profile {
             agents: Default::default(),
+            instruction_budget_file: None,
+            instruction_budget_unresolved: None,
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),
@@ -2252,8 +2257,28 @@ mod tests {
         env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
         capped.profiles[0].compaction = unset(&env);
         crate::controls::tune_windows(&mut capped);
-        assert_eq!(window(&capped, "gateway-opus").value, None);
+        assert_eq!(window(&capped, "gateway-opus").value, Some(400_000));
         assert_eq!(window(&capped, "claude-fable-5-2").value, Some(200_000));
+        // Without the cap, a declared window sizes a gateway ID whose requests fit it.
+        let mut declared = scan.clone();
+        let mut env = Env::default();
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "400000".into());
+        declared.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut declared);
+        let control = window(&declared, "gateway-opus");
+        assert_eq!(control.value, Some(400_000));
+        assert!(control.applicable);
+        assert!(control.reason.contains("assumed"));
+        assert!(
+            control
+                .owner
+                .ends_with("(under CLAUDE_CODE_MAX_CONTEXT_TOKENS=400000)")
+        );
+        // A request above the declared window shows a [1m] spelling ran, which ignores it.
+        env.insert("CLAUDE_CODE_MAX_CONTEXT_TOKENS".into(), "500".into());
+        declared.profiles[0].compaction = unset(&env);
+        crate::controls::tune_windows(&mut declared);
+        assert_eq!(window(&declared, "gateway-opus").value, None);
 
         // Each recorded directory's controls, which idle and keepalive read, tune under what
         // sizes their context, and directories sized apart never share an owner.
@@ -2366,8 +2391,16 @@ mod tests {
             auto_capped.owner,
             format!("{auto_row} (under CLAUDE_CODE_DISABLE_1M_CONTEXT=1)")
         );
-        // Another declared value, or none, sizes the ID differently, so the trigger is not theirs.
-        assert_eq!(scoped("/redeclared", "gateway-opus").value, None);
+        // Another declared value, or none, sizes the ID differently, so the trigger is not theirs:
+        // a directory declaring another value assumes its own declared window instead.
+        let redeclared = scoped("/redeclared", "gateway-opus");
+        assert_eq!(redeclared.value, Some(400000));
+        assert!(
+            redeclared
+                .owner
+                .ends_with("(under CLAUDE_CODE_MAX_CONTEXT_TOKENS=400000)")
+        );
+        assert!(redeclared.reason.contains("assumed"));
         assert_eq!(window(&directories, "gateway-opus").value, None);
 
         env.insert("DISABLE_AUTO_COMPACT".into(), "1".into());
@@ -2822,13 +2855,16 @@ mod tests {
         );
         let scenario = &check.scenarios[0];
         near(
-            Some(check.baseline_cost.total_usd.unwrap() - scenario.cost.total_usd.unwrap()),
+            Some(
+                check.baseline_cost.total_usd.unwrap().to_f64()
+                    - scenario.cost.total_usd.unwrap().to_f64(),
+            ),
             1.96,
         );
         assert_eq!(scenario.added.len(), 1);
         let added = &scenario.added[0];
-        near(added.summary_cost.total_usd, 0.64);
-        near(added.prefix_cost.total_usd, 0.1);
+        near(added.summary_cost.total_usd.map(Usd::to_f64), 0.64);
+        near(added.prefix_cost.total_usd.map(Usd::to_f64), 0.1);
         assert_eq!(
             (
                 added.input_tokens,
@@ -2844,7 +2880,7 @@ mod tests {
                 request: "sample-resume".into(),
             }]
         );
-        near(check.observed_summary_cost.total_usd, 1.24);
+        near(check.observed_summary_cost.total_usd.map(Usd::to_f64), 1.24);
         assert!(
             check
                 .base
@@ -3292,8 +3328,11 @@ mod tests {
             ]
         );
         assert_eq!(result.added.len(), 1);
-        near(result.added[0].summary_cost.total_usd, 0.64);
-        near(result.added[0].prefix_cost.total_usd, 0.1);
+        near(
+            result.added[0].summary_cost.total_usd.map(Usd::to_f64),
+            0.64,
+        );
+        near(result.added[0].prefix_cost.total_usd.map(Usd::to_f64), 0.1);
         assert!(result.errors.is_empty() && result.uncertain.is_empty());
         let affected: Vec<&str> = result.affected.iter().map(|a| &**a).collect();
         assert_eq!(affected, ["large-0", "attempt", "large-1"]);
@@ -3410,13 +3449,22 @@ mod tests {
             let scenario = window(check, 100000);
             near(scenario.savings_usd, 1.96);
             near(
-                Some(check.baseline_cost.total_usd.unwrap() - scenario.cost.total_usd.unwrap()),
+                Some(
+                    check.baseline_cost.total_usd.unwrap().to_f64()
+                        - scenario.cost.total_usd.unwrap().to_f64(),
+                ),
                 1.96,
             );
             assert_eq!(scenario.added.len(), 1);
-            near(scenario.added[0].summary_cost.total_usd, 0.64);
-            near(scenario.added[0].prefix_cost.total_usd, 0.1);
-            near(check.observed_summary_cost.total_usd, 1.24);
+            near(
+                scenario.added[0].summary_cost.total_usd.map(Usd::to_f64),
+                0.64,
+            );
+            near(
+                scenario.added[0].prefix_cost.total_usd.map(Usd::to_f64),
+                0.1,
+            );
+            near(check.observed_summary_cost.total_usd.map(Usd::to_f64), 1.24);
             assert_eq!(
                 scenario.added[0].basis,
                 [CompactionBasis {
@@ -3484,7 +3532,7 @@ mod tests {
             unresolved.base.savings_usd = None;
             unresolved.base.monthly_savings_usd = None;
             unresolved.baseline_cost = Cost {
-                known_usd: 1.23,
+                known_usd: Usd::from_f64(1.23),
                 total_usd: None,
                 unknown: vec!["synthetic unknown charge".into()],
                 assumptions: vec![],
@@ -3526,8 +3574,8 @@ mod tests {
             near(check.base.savings_usd, 0.0);
             near(check.scenarios[0].savings_usd, 0.0);
             near(
-                check.baseline_cost.total_usd,
-                check.scenarios[0].cost.total_usd.unwrap(),
+                check.baseline_cost.total_usd.map(Usd::to_f64),
+                check.scenarios[0].cost.total_usd.unwrap().to_f64(),
             );
         }
 
@@ -3635,10 +3683,13 @@ mod tests {
             let first_check = check(&s);
             assert_eq!(first_check.base.action, Action::Change);
             assert_eq!(first_check.base.recommended, Some(20000));
-            near(first_check.observed_summary_cost.total_usd, 1.23);
+            near(
+                first_check.observed_summary_cost.total_usd.map(Usd::to_f64),
+                1.23,
+            );
             let first = &window(&first_check, 20000).added[0];
-            near(first.summary_cost.total_usd, 1.23);
-            near(first.prefix_cost.total_usd, 0.05);
+            near(first.summary_cost.total_usd.map(Usd::to_f64), 1.23);
+            near(first.prefix_cost.total_usd.map(Usd::to_f64), 0.05);
             near(window(&first_check, 20000).savings_usd, 4.5702);
             let mut unpriced = s.clone();
             let unsupported = &mut unpriced.profiles[0];
@@ -3769,8 +3820,14 @@ mod tests {
             let next = next.clone();
             let warm_check = check(&s);
             assert_eq!(warm_check.ttls.main, Some(Ttl::OneHour));
-            near(warm_check.scenarios[0].added[0].prefix_cost.total_usd, 0.16);
-            let warm = warm_check.scenarios[0].cost.total_usd.unwrap();
+            near(
+                warm_check.scenarios[0].added[0]
+                    .prefix_cost
+                    .total_usd
+                    .map(Usd::to_f64),
+                0.16,
+            );
+            let warm = warm_check.scenarios[0].cost.total_usd.unwrap().to_f64();
             let mut external = Request {
                 id: "externally-warmed".into(),
                 time: next.time + HOUR,
@@ -3786,7 +3843,7 @@ mod tests {
             assert_eq!(cold.ttls.main, Some(Ttl::OneHour));
             // The first new prefix expired: its 20k rewrite costs $0.16, not an inherited old read.
             near(
-                Some(cold.scenarios[0].cost.total_usd.unwrap() - warm),
+                Some(cold.scenarios[0].cost.total_usd.unwrap().to_f64() - warm),
                 0.1602,
             );
             assert_eq!(s.requests[2].parts[0].usage.read, Some(0));
@@ -3872,9 +3929,15 @@ mod tests {
             let check = compaction(&report);
             assert_eq!(check.base.since, Some(1000));
             assert_eq!(check.base.requests, 5);
-            near(check.observed_summary_cost.total_usd, 0.0);
+            near(check.observed_summary_cost.total_usd.map(Usd::to_f64), 0.0);
             assert_eq!(report.compactions.len(), 0);
-            near(check.scenarios[0].added[0].summary_cost.total_usd, 0.64);
+            near(
+                check.scenarios[0].added[0]
+                    .summary_cost
+                    .total_usd
+                    .map(Usd::to_f64),
+                0.64,
+            );
             near(check.base.savings_usd, 1.96);
         }
 
@@ -4023,10 +4086,11 @@ mod tests {
             let check = compaction(&report);
             assert_eq!(check.base.action, Action::Keep);
             assert!(check.scenarios.iter().all(|c| c.coverage.total == 0));
-            let text = text(&report, Some(200), false);
-            let keep = text.find("Keep").expect("a Keep section");
-            assert!(
-                text[keep..].contains("Auto-compact window (claude-opus-5-5): 400,000 tokens"),
+            let text = text(&report, None, false);
+            let line = crate::test_support::report_line(&text, "Auto-compact window");
+            assert_eq!(
+                (line.mark.as_str(), line.head.as_str()),
+                ("keep", "Auto-compact window (claude-opus-5-5) 400k"),
                 "{text}"
             );
             assert!(!text.contains("could not confirm"), "{text}");

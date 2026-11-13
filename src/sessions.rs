@@ -9,8 +9,9 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::collections::{HashMap, IndexMap};
-use crate::model::{Harness, Millis, Request, Scan, Text};
+use crate::model::{Harness, Millis, Request, Scan, Text, Usd};
 use crate::prices::{Catalog, add_costs, price_part, request_evidence, server_cost};
+use crate::reader::CodexThread;
 use crate::safe::{iso, label};
 
 /// What one transcript record says about its session.
@@ -67,25 +68,6 @@ pub struct Sessions {
 /// A recorded native ID, such as a UUID; anything else is not kept.
 fn native(value: Option<&Value>) -> Option<String> {
     label(value?)
-}
-
-/// The thread a Codex `session_meta` names and the thread it was spawned from: its root as
-/// `session_id`, or in older spawns its parent as `parent_thread_id`.
-pub(crate) fn codex_thread(meta: &Map<String, Value>) -> (Option<&str>, Option<&str>) {
-    fn text(v: Option<&Value>) -> Option<&str> {
-        v.and_then(Value::as_str).filter(|s| !s.is_empty())
-    }
-    let id = text(meta.get("id")).or_else(|| text(meta.get("session_id")));
-    let parent = text(meta.get("session_id"))
-        .filter(|root| Some(*root) != id)
-        .or_else(|| text(meta.get("parent_thread_id")))
-        .or_else(|| {
-            text(
-                meta.get("source")
-                    .and_then(|s| s.pointer("/subagent/thread_spawn/parent_thread_id")),
-            )
-        });
-    (id, parent)
 }
 
 /// A name Git could have given a branch.
@@ -159,21 +141,22 @@ impl Sessions {
                     return;
                 };
                 facts.created = earliest(facts.created);
-                let (id, parent) = codex_thread(meta);
+                let thread = CodexThread::parse(meta);
                 facts.id = facts
                     .id
                     .take()
-                    .or_else(|| native(id.map(Value::from).as_ref()));
+                    .or_else(|| native(thread.id.map(Value::from).as_ref()));
                 facts.parent = facts
                     .parent
                     .take()
-                    .or_else(|| native(parent.map(Value::from).as_ref()));
+                    .or_else(|| native(thread.parent.map(Value::from).as_ref()));
                 facts.forked_from = facts
                     .forked_from
                     .take()
                     .or_else(|| native(meta.get("forked_from_id")));
-                facts.review |= meta.get("source").and_then(|s| s.get("subagent"))
-                    == Some(&Value::from("review"));
+                facts.review |= thread
+                    .spawn
+                    .is_some_and(|s| s.native && s.kind.as_deref() == Some("review"));
                 branch(meta.get("git").and_then(|git| git.get("branch")))
             }
         };
@@ -219,7 +202,7 @@ pub struct ModelUsage {
     pub cache_read_tokens: i64,
     pub output_tokens: i64,
     /// The priced cost; a lower bound unless `complete`.
-    pub cost_usd: f64,
+    pub cost_usd: Usd,
     pub complete: bool,
 }
 
@@ -237,7 +220,9 @@ pub struct Session {
     pub start: String,
     pub end: String,
     pub models: Vec<ModelUsage>,
-    pub cost_usd: f64,
+    /// The exact total of the models' costs, which can differ in the last digit from adding
+    /// their rounded values.
+    pub cost_usd: Usd,
     /// False when any request could not be priced or a file had unreadable lines.
     pub complete: bool,
     pub skipped_lines: u64,
@@ -324,7 +309,7 @@ pub fn export<'s>(scan: &'s Scan, catalog: &Catalog) -> Vec<Session> {
                 cache_write_tokens: 0,
                 cache_read_tokens: 0,
                 output_tokens: 0,
-                cost_usd: 0.0,
+                cost_usd: Usd::ZERO,
                 complete: true,
             });
             let u = &p.usage;
@@ -506,8 +491,8 @@ mod tests {
             )
         };
         assert_eq!(tokens(high), (1, 100, 1000, 500, 50));
-        assert!(high.complete && close(high.cost_usd, 0.0041));
-        assert!(close(main.cost_usd, 0.0082));
+        assert!(high.complete && close(high.cost_usd.to_f64(), 0.0041));
+        assert!(close(main.cost_usd.to_f64(), 0.0082));
         // The truncated line may have held usage, so the total is only a lower bound.
         assert_eq!(main.skipped_lines, 1);
         assert!(!main.complete);
@@ -520,14 +505,14 @@ mod tests {
         let sub = &sessions[1];
         assert_eq!(sub.parent.as_deref(), Some("session-a"));
         assert_eq!(sub.branches[0].name, "quest/a");
-        assert!(sub.complete && close(sub.cost_usd, 0.0041));
+        assert!(sub.complete && close(sub.cost_usd.to_f64(), 0.0041));
 
         let fork = &sessions[2];
         assert_eq!(
             fork.models[0].requests, 1,
             "the copied reply stays with session-a"
         );
-        assert!(fork.complete && close(fork.cost_usd, 0.0041));
+        assert!(fork.complete && close(fork.cost_usd.to_f64(), 0.0041));
     }
 
     #[test]
@@ -589,8 +574,54 @@ mod tests {
                 m.output_tokens,
             );
             assert_eq!(found, (Some("gpt-6.1-sol"), Some("medium"), 800, 200, 100));
-            assert!(s.complete && s.cost_usd > 0.0);
+            assert!(s.complete && s.cost_usd.to_f64() > 0.0);
         }
+    }
+
+    #[test]
+    fn a_nested_codex_spawn_names_its_immediate_parent_not_the_root() {
+        let w = Workspace::new();
+        let thread = |id: &str, source: Value| {
+            let meta = json!({"type": "session_meta", "timestamp": "2026-11-01T00:00:00Z",
+                "payload": {"id": id, "session_id": "root", "source": source,
+                    "model_provider": "openai"}});
+            let usage = json!({"type": "token_usage_record",
+                "timestamp": "2026-11-01T00:00:02Z",
+                "payload": {"response_id": format!("response-{id}"), "turn_id": "turn",
+                    "usage": {"input_tokens": 1000, "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 0, "output_tokens": 100}}});
+            write(
+                &w.codex.join(format!("sessions/rollout-{id}.jsonl")),
+                &[meta, usage],
+                "",
+            );
+        };
+        let spawn = |parent: &str| json!({"subagent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}});
+        thread("root", json!("exec"));
+        thread("mid", spawn("root"));
+        thread("leaf", spawn("mid"));
+        let scan = scan(&w.scan_options()).unwrap();
+        let mut found: Vec<_> = export(&scan, &prices())
+            .into_iter()
+            .map(|s| (s.session, s.parent))
+            .collect();
+        found.sort();
+        let pair = |a: &str, b: Option<&str>| (Some(a.to_string()), b.map(String::from));
+        assert_eq!(
+            found,
+            [
+                pair("leaf", Some("mid")),
+                pair("mid", Some("root")),
+                pair("root", None)
+            ]
+        );
+        // The report's Subagents attribution reads the same parent.
+        let leaf = crate::safe::identity("leaf");
+        let parent = scan.subagents.iter().find(|s| *s.session == *leaf).unwrap();
+        assert_eq!(
+            parent.parent.as_deref(),
+            Some(crate::safe::identity("mid").as_str())
+        );
     }
 
     #[test]

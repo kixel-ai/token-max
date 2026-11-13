@@ -48,29 +48,16 @@ pub struct Request {
     pub format: Format,
 }
 
-/// How a host's report is printed.
+/// How a host's report is printed for this host's terminal, under the host's name when the
+/// run covers several.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub enum Format {
-    /// Text for this host's terminal, under the host's name when the run covers several.
-    #[serde(rename_all = "camelCase")]
-    Text {
-        width: Option<usize>,
-        color: bool,
-        unicode: bool,
-        details: bool,
-        host: Option<String>,
-    },
-    /// The JSON report.
-    Json,
-}
-
-/// One host's report as printed.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Printed {
-    Text(String),
-    Json(serde_json::Value),
+pub struct Format {
+    pub width: Option<usize>,
+    pub color: bool,
+    pub unicode: bool,
+    pub details: bool,
+    pub host: Option<String>,
 }
 
 /// How the destination's audit ended: its report, or a diagnostic as safe as a local one.
@@ -81,7 +68,8 @@ pub enum Outcome {
     Report {
         /// The window the destination scanned, which must be the one requested.
         since: Option<Millis>,
-        printed: Printed,
+        /// The report's text.
+        text: String,
         /// Whether the report recommends a change, which sets the exit code.
         change: bool,
     },
@@ -136,7 +124,7 @@ mod tests {
         Request {
             catalog: prices(),
             max_cost_per_use_usd: 0.5,
-            format: Format::Text {
+            format: Format {
                 width: Some(80),
                 color: true,
                 unicode: false,
@@ -155,7 +143,7 @@ mod tests {
         assert_eq!(decoded.max_cost_per_use_usd, 0.5);
         assert!(matches!(
             decoded.format,
-            Format::Text { host: Some(host), width: Some(80), .. } if host == "devbox"
+            Format { host: Some(host), width: Some(80), .. } if host == "devbox"
         ));
     }
 
@@ -173,7 +161,7 @@ mod tests {
             &mut bytes,
             &Outcome::Report {
                 since: None,
-                printed: Printed::Text("report\n".into()),
+                text: "report\n".into(),
                 change: true,
             },
         )
@@ -182,7 +170,7 @@ mod tests {
         assert_eq!(stream.header().unwrap().token_max_scan, build());
         assert!(matches!(
             stream.outcome().unwrap(),
-            Outcome::Report { printed: Printed::Text(text), change: true, .. } if text == "report\n"
+            Outcome::Report { text, change: true, .. } if text == "report\n"
         ));
         // Truncated, or followed by anything.
         let mut stream = Stream::new(&bytes[..bytes.len() - 3]);

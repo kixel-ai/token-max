@@ -13,25 +13,32 @@ Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
 
 2 setting changes recommended.
-Setting comparisons are per 30 days at this window's rate; what features and context cost, and how often they were used, are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
+Savings are per 30 days at this window's rate; costs and uses are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
 
-Change
-  Main-agent prompt cache TTL: 5m -> 1h. Saves $150. Set in ~/.claude/settings.json:promptCacheTtl.
-  Artifact tool: on -> off. Costs $90; never used.
+MEASURED  replayed from your own sessions
+change   Main-agent prompt cache TTL   5m -> 1h   saves $150
+         Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Set in ~/.claude/settings.json:promptCacheTtl.
+change   Artifact tool                 on -> off  costs  $90
+         Never used. Turn off: "enableArtifact": false.
+consider Skill example                 on         costs  $12
+         The model used it 2 times, $6 each. Hide it from the model: "skillOverrides": {"example": "user-invocable-only"}.
+keep     Agent tool                    on         costs  $40
+         Used 310 times, $0.13 each. Turn off: "permissions": {"deny": ["Agent"]}.
+unknown  Idle compaction               on
+         Not enough evidence: no idle gaps could be compared with it on and off. Set in ~/.claude/settings.json:idleCompaction.
+info     System prompt and core tools             costs $210
+         Includes core tools such as Bash and Read, and the skill and subagent lists. No setting turns these off.
 
-Consider turning off
-  Skill example: on. Costs $12; the model used it 2 times ($6 each). Hide it from the model: "skillOverrides": {"example": "user-invocable-only"}.
+OFFICIAL  the provider's own guidance
+consider ~/.claude/CLAUDE.md  412 lines  costs $5
+         Claude Code suggests under 200 lines per CLAUDE.md; length alone is not a quality score. Shorten it, or move parts into path-scoped rules or skills. Imports still load together.
+Sources: https://code.claude.com/docs/en/memory#write-effective-instructions
 
-Keep
-  Fast mode: off.
-  Agent tool: on. Costs $40; used 310 times ($0.13 each).
-
-Not enough evidence
-  Idle compaction: on. No idle gaps could be compared with it on and off.
-
-No setting turns these off
-  ~/.claude/CLAUDE.md: costs $5. Shorten it, or move parts into path-scoped rules or skills.
-  System prompt, core tools such as Bash and Read, and the skill and subagent lists: $210.
+OPINION  the maintainer's preference
+consider Auto memory  on   costs $12
+         Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md. Measured: used 3 times (1 read, 2 writes). Set "autoMemoryEnabled": false in ~/.claude/settings.json.
+keep     Fast mode    off
+         Opinion: standard speed is enough, and fast mode bills a premium for the same work. Set in ~/.claude/settings.json:fastMode.
 
 To turn these off, merge this into ~/.claude/settings.json, adding to any lists already there:
   {
@@ -85,31 +92,41 @@ tool output text is kept or printed.
 
 ## Reading the report
 
-Every setting and feature gets one line under **Change**, **Consider turning
-off**, **Keep** or **Not enough evidence**. On a terminal, color repeats the
-verdict: red for a recommended change (exit 1), yellow for an advisory or
-missing evidence (exit 0), green for a setting already at its recommended value.
+The report has one section for each kind of claim, so a preference never
+reads as a measurement:
+
+- **Measured**: replayed from your own sessions at public API prices. Each
+  line says what the replay held constant and what it could not measure.
+- **Official**: the provider's own guidance, such as Claude Code's suggestion
+  to keep a CLAUDE.md under 200 lines, cited beside what the file cost.
+- **Opinion**: the maintainer's preference, such as fast mode and auto memory
+  off, beside whatever was measured.
+
+Every setting and feature gets two lines: its name, value and cost, then its
+evidence. On a terminal a colored dot gives the verdict: red for a recommended
+change (exit 1), yellow for one worth considering (exit 0), green for a setting
+already at its recommended value, and a dim hollow dot where there is no
+verdict. Without color (`--plain`, `NO_COLOR` or redirected output), as above,
+a word replaces the dot. Red lines come first in each section.
 
 - Dollars are at public API prices, not your subscription bill. Comparisons
   between setting values are per 30 days; what a feature cost, and how often
   it was used, are totals over the whole window.
-- A **Saves** figure comes from replaying your own sessions under the other
+- A **saves** figure comes from replaying your own sessions under the other
   value, assuming the sessions would otherwise have gone the same way. A
   smaller compaction window, for example, can also lose detail the replay
-  cannot see.
+  cannot see, and its line says so.
 - A tool, skill or MCP server that was never used is recommended off. One that
   cost more than $1 per use (`--max-cost-per-use`) is worth considering off.
   You know what a use was worth; the report only knows what it cost.
-- Fast mode off and auto memory off are the maintainer's preferences, not
-  measurements.
-- **Not enough evidence** says why in one sentence. A cost that cannot be
-  measured is shown as unknown, never as zero.
+- A line without enough evidence for a verdict says why. A cost that cannot
+  be measured is shown as unknown, never as zero.
 - Savings on different lines do not add up.
 
 ## More
 
 - [Reference](https://github.com/kixelated/token-max/blob/main/docs/reference.md):
-  every flag, report section and check, including `--json`, `--ssh`, T3 Code
+  every flag, report section and check, including `--ssh`, T3 Code
   and the `token-max sessions` export.
 - [Replay semantics](https://github.com/kixelated/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.

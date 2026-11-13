@@ -9,7 +9,7 @@ use crate::context::CODEX_TOKENS_PER_CHARACTER;
 use crate::exposure::{MEMORY_SECTION, calibrate, cohort};
 use crate::model::{
     Action, Agent, Category, CheckBase, Component, ContextCost, ContextKind, Evidence, Harness,
-    Linkage, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, Request, Scan,
+    Linkage, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, Request, Scan, Usd,
 };
 use crate::prices::{Catalog, output_rate};
 
@@ -169,8 +169,8 @@ fn check(
         .collect();
     let context_usd = rows
         .iter()
-        .map(|c| c.estimated_usd)
-        .sum::<Option<f64>>()
+        .map(|c| c.estimated_usd.map(Usd::from_f64))
+        .sum::<Option<Usd>>()
         .filter(|_| !rows.is_empty() || unrecorded == 0);
     let reads = uses
         .iter()
@@ -196,11 +196,12 @@ fn check(
                 .collect::<Option<Vec<f64>>>()?;
             let rate = *rates.first()?;
             rates.iter().all(|&x| x == rate).then_some(())?;
-            Some(m.characters? as f64 * ratio * rate)
+            Some(Usd::from_f64(m.characters? as f64 * ratio * rate))
         })
-        .sum::<Option<f64>>();
+        .sum::<Option<Usd>>();
     let writes = uses.len() as u64 - reads;
-    let total = context_usd.zip(writes_usd).map(|(a, b)| a + b);
+    let total = context_usd.zip(writes_usd).map(|(a, b)| (a + b).to_f64());
+    let (context_usd, writes_usd) = (context_usd.map(Usd::to_f64), writes_usd.map(Usd::to_f64));
     let start = input.since.or(mine.iter().map(|r| r.time).min());
     let monthly = match (total, start) {
         (Some(usd), Some(start)) if input.now > start => {

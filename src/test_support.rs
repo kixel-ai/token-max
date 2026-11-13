@@ -81,7 +81,8 @@ pub fn make_request() -> Request {
         locations: vec![Location {
             file: "synthetic".into(),
             line: 1,
-        }],
+        }]
+        .into(),
         t3: None,
         meta: RequestMeta {
             harness: Harness::Claude,

@@ -16,10 +16,12 @@ use crate::model::{
     WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sum, TIER_SENSITIVITY, add_costs, paired_savings, price_components,
+    Catalog, Components, PRICE_SOURCES, Pairs, Sum, TIER_SENSITIVITY, add_costs, price_components,
     price_part, server_cost, tier_sensitive, unknown_cost, write_billing, zero_cost,
 };
-use crate::scenarios::{ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
+use crate::scenarios::{
+    ReplayOptions, ReplayTtls, ReplayedPart, replay_parts, replayed_components,
+};
 
 const SOURCES: [&str; 7] = [
     "https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction (2026-11-07)",
@@ -456,15 +458,15 @@ fn summary_part(sample: &CompactionSample, input: i64, output: i64, cold: bool) 
     }
 }
 
-fn output_unit(catalog: &Catalog, item: &ReplayedPart) -> Option<f64> {
+fn output_unit(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<f64> {
     let p = BillingPart {
         usage: Usage {
             output: Some(1),
-            ..item.p.usage
+            ..p.usage
         },
-        ..item.p.clone()
+        ..p.clone()
     };
-    price_components(catalog, item.request, &p)
+    price_components(catalog, r, &p)
         .output
         .total_usd
         .map(Usd::to_f64)
@@ -926,25 +928,25 @@ struct Replayer<'a> {
 }
 
 impl Replayer<'_> {
-    fn selected<'r>(
+    /// Replay `requests` as recorded, handing each selected part to `visit` in order.
+    fn recorded<'r>(
         &self,
         requests: impl IntoIterator<Item = &'r Request>,
         estimates: &IndexMap<Text, UsageEstimate>,
-        extra: Option<&CacheBoundaries>,
-        estimated_parts: Option<&HashSet<(Text, usize)>>,
-    ) -> Vec<ReplayedPart<'r>> {
+        visit: impl FnMut(ReplayedPart<'r>),
+    ) {
         let options = ReplayOptions {
             estimates,
             catalog: self.catalog,
             ttls: self.ttls,
             since: self.since,
             cold_prefixes: false,
-            estimated_parts,
+            estimated_parts: None,
             attempt_scenario: Default::default(),
         };
-        replay_parts(requests, iter::once(self.cache).chain(extra), &options)
+        replay_parts(requests, [self.cache], &options)
             .filter(|i| i.selected)
-            .collect()
+            .for_each(visit);
     }
 
     /// Replay a simulated window, handing each selected part to `visit` in order, and total
@@ -954,7 +956,7 @@ impl Replayer<'_> {
         simulation: &'s Simulation<'s>,
         control: &WindowControl,
         fixed: &Cost,
-        mut visit: impl FnMut(&ReplayedPart<'s>),
+        mut visit: impl FnMut(ReplayedPart<'s>),
     ) -> (Vec<Cost>, Cost) {
         let extra = CacheBoundaries::new(&simulation.events);
         let no_estimates = IndexMap::default();
@@ -976,7 +978,7 @@ impl Replayer<'_> {
         );
         for item in parts.filter(|i| i.selected) {
             sum.add(&item.components.total());
-            visit(&item);
+            visit(item);
         }
         let mut reasons: IndexSet<&str> = simulation.errors.iter().copied().collect();
         if let Some(reason) = &control.comparison_unknown {
@@ -997,15 +999,22 @@ impl Replayer<'_> {
         (errors, sum.cost())
     }
 
-    /// Replay a simulated window and keep every selected part, to compare windows against.
+    /// Replay a simulated window and keep every selected part, to compare windows against,
+    /// with its cache evidence when `detail` reports it.
     fn point<'s>(
         &self,
         simulation: &'s Simulation<'s>,
         control: &WindowControl,
         fixed: &Cost,
+        detail: bool,
     ) -> Point<'s> {
         let mut after = vec![];
-        let (errors, cost) = self.replay(simulation, control, fixed, |i| after.push(i.clone()));
+        let (errors, cost) = self.replay(simulation, control, fixed, |mut i| {
+            if !detail {
+                i.evidence = None;
+            }
+            after.push(Kept::from(i));
+        });
         Point {
             simulation,
             after,
@@ -1018,9 +1027,50 @@ impl Replayer<'_> {
 /// One simulated window and its replay.
 struct Point<'s> {
     simulation: &'s Simulation<'s>,
-    after: Vec<ReplayedPart<'s>>,
+    after: Vec<Kept<'s>>,
     errors: Vec<Cost>,
     cost: Cost,
+}
+
+/// What a later replay compares one selected part against. A replay keeps one for each
+/// selected part of a profile's history, so it holds no prices: [`Kept::components`] prices
+/// it again for the parts a candidate changes.
+struct Kept<'s> {
+    request: &'s Request,
+    p: BillingPart,
+    cache_unknown: Option<&'static str>,
+    evidence: Option<Box<CacheReplayEvidence>>,
+}
+
+impl<'s> From<ReplayedPart<'s>> for Kept<'s> {
+    fn from(item: ReplayedPart<'s>) -> Self {
+        Self {
+            request: item.request,
+            p: item.p,
+            cache_unknown: item.cache_unknown,
+            evidence: item.evidence,
+        }
+    }
+}
+
+impl Kept<'_> {
+    /// The part's prices, as its replay priced them.
+    fn components(&self, catalog: &Catalog) -> Components {
+        replayed_components(catalog, self.request, &self.p, self.cache_unknown)
+    }
+}
+
+/// What one model's conversation parts in the recorded replay tell its window candidates.
+#[derive(Default)]
+struct Observed<'r> {
+    /// The position of the model's last conversation part, and that part's request.
+    last: Option<(usize, &'r Request)>,
+    /// The largest recorded input, or zero.
+    input: i64,
+    /// The largest ordinary input beyond the cached prefix, or zero.
+    ordinary: i64,
+    /// Every recorded provider, for the model's catalog tier sizes.
+    providers: IndexSet<&'r str>,
 }
 
 /// A candidate's comparison against the current window.
@@ -1171,8 +1221,38 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             since,
             cache: &index.cache,
         };
-        let baseline = replayer.selected(requests.iter().copied(), options.estimates, None, None);
-        let baseline_totals: Vec<Cost> = baseline.iter().map(|i| i.components.total()).collect();
+        // The recorded replay, folded as it streams: each part's charges, its model's facts
+        // for window candidates, and its cache evidence. Its parts are kept only while a group
+        // without a current window may compare against them.
+        let mut baseline_totals = Sum::new();
+        let mut baseline_summaries = Sum::new();
+        let mut observed: IndexMap<Option<Text>, Observed> = IndexMap::default();
+        let mut baseline_evidence: Vec<CacheReplayEvidence> = vec![];
+        let mut baseline: Vec<Kept> = vec![];
+        replayer.recorded(requests.iter().copied(), options.estimates, |mut item| {
+            let total = item.components.total();
+            baseline_totals.add(&total);
+            if item.p.kind == PartKind::Compaction {
+                baseline_summaries.add(&total);
+            }
+            if is_conversation(&item.p) {
+                let facts = observed.entry(item.p.model.clone()).or_default();
+                facts.last = Some((baseline.len(), item.request));
+                let usage = &item.p.usage;
+                facts.input = facts.input.max(usage.input.unwrap_or(0));
+                facts.ordinary = match (usage.input, prefix(item.request.harness, usage)) {
+                    (Some(input), Some(prefix)) => facts.ordinary.max(input - prefix),
+                    _ => facts.ordinary.max(0),
+                };
+                if let (Some(provider), Some(_)) = (&item.request.provider, &item.p.model) {
+                    facts.providers.insert(&**provider);
+                }
+            }
+            if let Some(evidence) = item.evidence.take() {
+                baseline_evidence.push(*evidence);
+            }
+            baseline.push(Kept::from(item));
+        });
         let summary_ids: HashSet<&Id> = events
             .iter()
             .filter(|e| e.time >= since)
@@ -1191,25 +1271,13 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .map(|r| server_cost(r))
             .collect();
         let fixed = add_costs(iter::once(&unmatched).chain(&servers));
-        let recorded_cost = add_costs(iter::once(&fixed).chain(&baseline_totals));
-        let observed_summary_cost = add_costs(
-            iter::once(&unmatched).chain(
-                baseline
-                    .iter()
-                    .zip(&baseline_totals)
-                    .filter(|(i, _)| i.p.kind == PartKind::Compaction)
-                    .map(|(_, total)| total),
-            ),
-        );
+        // Totals of totals: Usd sums are exact and first-seen reasons keep their order.
+        let recorded_cost = add_costs([&fixed, &baseline_totals.cost()]);
+        let observed_summary_cost = add_costs([&unmatched, &baseline_summaries.cost()]);
         let calibration = compaction_samples(&requests, &events, options.summaries);
-        let observed_models: IndexSet<Option<Text>> = baseline
-            .iter()
-            .filter(|i| is_conversation(&i.p))
-            .map(|i| i.p.model.clone())
-            .collect();
         // One effective key has one aggregate winner, including global/environment controls.
         let mut groups: IndexMap<String, (WindowControl, Vec<Option<Text>>)> = IndexMap::default();
-        for model in observed_models {
+        for model in observed.keys().cloned() {
             let control = window_control(
                 &profile.compaction,
                 match profile.harness {
@@ -1223,6 +1291,15 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .1
                 .push(model);
         }
+        // Windows compare against the current window's replay when one is set.
+        if groups.values().all(|(control, _)| control.value.is_some()) {
+            baseline = vec![];
+        }
+        let predecessors: HashSet<&str> = baseline_evidence
+            .iter()
+            .flat_map(|e| &e.predecessors)
+            .map(|p| &*p.request)
+            .collect();
         let window_options = WindowOptions {
             events: &index,
             estimates: options.estimates,
@@ -1236,31 +1313,36 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 [only] => only.clone(),
                 _ => None,
             };
-            let relevant: Vec<&ReplayedPart> = baseline
+            // Conversation parts of an unrecorded model count toward every group.
+            let relevant: Vec<(&Option<Text>, &Observed)> = observed
                 .iter()
-                .filter(|i| is_conversation(&i.p))
-                .filter(|i| i.p.model.is_none() || models.contains(&i.p.model))
+                .filter(|(m, _)| m.is_none() || models.contains(m))
                 .collect();
-            let Some(recent) = relevant.last().map(|i| i.request) else {
+            let Some(recent) = relevant
+                .iter()
+                .filter_map(|(_, facts)| facts.last)
+                .max_by_key(|&(at, _)| at)
+                .map(|(_, r)| r)
+            else {
                 continue;
             };
             let claude = profile.harness == Harness::Claude;
             let minimum = if claude { CLAUDE_WINDOW_MINIMUM } else { 1 };
-            let ceiling = control.value.unwrap_or_else(|| {
-                relevant
-                    .iter()
-                    .fold(0, |n, i| n.max(i.p.usage.input.unwrap_or(0)))
-            });
+            let ceiling = control
+                .value
+                .unwrap_or_else(|| relevant.iter().fold(0, |n, (_, f)| n.max(f.input)));
             let mut candidates: BTreeSet<i64> = BTreeSet::new();
             if claude {
                 candidates.insert(minimum);
             }
             // Economic discontinuities and measured replacement geometry form a small,
             // evidence-derived family instead of one replay per distinct request size.
-            for i in &relevant {
-                if let (Some(provider), Some(model)) = (&i.request.provider, &i.p.model) {
-                    // Catalog sizes are whole token counts; a fraction would compare like its floor.
-                    candidates.extend(catalog.tier_sizes(provider, model).map(|s| s as i64));
+            for (model, facts) in &relevant {
+                if let Some(model) = model {
+                    for provider in &facts.providers {
+                        // Catalog sizes are whole token counts; a fraction would compare like its floor.
+                        candidates.extend(catalog.tier_sizes(provider, model).map(|s| s as i64));
+                    }
                 }
             }
             let mut geometries: IndexMap<_, Vec<i64>> = IndexMap::default();
@@ -1279,12 +1361,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 );
                 geometries.entry(key).or_default().push(sample.prefix);
             }
-            let ordinary = relevant.iter().fold(0, |n, i| {
-                match (i.p.usage.input, prefix(i.request.harness, &i.p.usage)) {
-                    (Some(input), Some(prefix)) => n.max(input - prefix),
-                    _ => n.max(0),
-                }
-            });
+            let ordinary = relevant.iter().fold(0, |n, (_, f)| n.max(f.ordinary));
             for sizes in geometries.into_values() {
                 candidates.insert(median(sizes) + ordinary);
             }
@@ -1343,10 +1420,18 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                         .1
                         .push(&a.summary_cost);
                 }
-                let mut pairs: Vec<(Cost, Cost)> = summaries
-                    .into_values()
-                    .map(|(b, a)| (add_costs(b), add_costs(a)))
-                    .collect();
+                // Each (baseline, alternative) pair is totaled as it comes, so none are kept.
+                let mut baseline_sum = Sum::new();
+                let mut alternative_sum = Sum::new();
+                let mut pairs = Pairs::default();
+                let mut pair = |b: &Cost, a: &Cost| {
+                    baseline_sum.add(b);
+                    alternative_sum.add(a);
+                    pairs.add(b, a);
+                };
+                for (b, a) in summaries.into_values() {
+                    pair(&add_costs(b), &add_costs(a));
+                }
                 let uncertain = |r: &Request| {
                     before
                         .map(|b| &b.simulation.uncertain)
@@ -1356,50 +1441,68 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 };
                 let mut cache_evidence = vec![];
                 let mut index = 0;
-                let mut compare = |item: &ReplayedPart| {
-                    let original = &previous[index];
-                    index += 1;
-                    if detail && let Some(evidence) = &item.evidence {
-                        cache_evidence.push((**evidence).clone());
-                    }
-                    if uncertain(item.request) {
-                        let reason = "session replay is unknown after a request it cannot model";
-                        pairs.push((unknown_cost(reason), unknown_cost(reason)));
-                        return;
-                    }
-                    if original.p == item.p {
-                        return;
-                    }
-                    let mut baseline_parts =
-                        vec![&original.components.cache, &original.components.ordinary];
-                    let mut alternative_parts =
-                        vec![&item.components.cache, &item.components.ordinary];
-                    let old_output = output_unit(catalog, original);
-                    let new_output = output_unit(catalog, item);
-                    if old_output.is_none() || new_output.is_none() || old_output != new_output {
-                        baseline_parts.push(&original.components.output);
-                        alternative_parts.push(&item.components.output);
-                    }
-                    pairs.push((add_costs(baseline_parts), add_costs(alternative_parts)));
-                };
+                // `components` are the candidate's own prices; the current window compared
+                // with itself has none to give and never differs.
+                let mut compare =
+                    |request: &Request,
+                     p: &BillingPart,
+                     evidence: Option<&CacheReplayEvidence>,
+                     components: Option<&Components>| {
+                        let original = &previous[index];
+                        index += 1;
+                        if detail && let Some(evidence) = evidence {
+                            cache_evidence.push(evidence.clone());
+                        }
+                        if uncertain(request) {
+                            let reason =
+                                "session replay is unknown after a request it cannot model";
+                            pair(&unknown_cost(reason), &unknown_cost(reason));
+                            return;
+                        }
+                        if original.p == *p {
+                            return;
+                        }
+                        let components = components.expect("only a candidate's replay differs");
+                        let prices = original.components(catalog);
+                        let mut baseline_parts = vec![&prices.cache, &prices.ordinary];
+                        let mut alternative_parts = vec![&components.cache, &components.ordinary];
+                        let old_output = output_unit(catalog, original.request, &original.p);
+                        let new_output = output_unit(catalog, request, p);
+                        if old_output.is_none() || new_output.is_none() || old_output != new_output
+                        {
+                            baseline_parts.push(&prices.output);
+                            alternative_parts.push(&components.output);
+                        }
+                        pair(&add_costs(baseline_parts), &add_costs(alternative_parts));
+                    };
                 let owned_errors;
                 let (errors, cost) = match before {
                     Some(before) if Some(window) == control.value => {
-                        before.after.iter().for_each(&mut compare);
+                        for kept in &before.after {
+                            compare(kept.request, &kept.p, kept.evidence.as_deref(), None);
+                        }
                         (&before.errors, before.cost.clone())
                     }
                     _ => {
-                        let (errors, cost) = replayer.replay(simulation, control, &fixed, compare);
+                        let (errors, cost) = replayer.replay(simulation, control, &fixed, |item| {
+                            compare(
+                                item.request,
+                                &item.p,
+                                item.evidence.as_deref(),
+                                Some(&item.components),
+                            )
+                        });
                         owned_errors = errors;
                         (&owned_errors, cost)
                     }
                 };
                 let before_errors = before.map_or(&[][..], |b| b.errors.as_slice());
-                let baseline_comparison_cost =
-                    add_costs(pairs.iter().map(|p| &p.0).chain(before_errors));
-                let comparison_cost = add_costs(pairs.iter().map(|p| &p.1).chain(errors));
+                before_errors.iter().for_each(|e| baseline_sum.add(e));
+                errors.iter().for_each(|e| alternative_sum.add(e));
+                let baseline_comparison_cost = baseline_sum.cost();
+                let comparison_cost = alternative_sum.cost();
                 // Per-session failures are unpriced pairs; an unknown current control still blocks a price.
-                let paired = paired_savings(pairs.iter().map(|(b, a)| (b, a)), skipped);
+                let paired = pairs.savings(skipped);
                 let savings_usd = if control.comparison_unknown.is_some() || !paired.decided {
                     None
                 } else {
@@ -1432,7 +1535,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 let current = control
                     .value
                     .map(|value| raw(value, scenario == 1, scenario == 2));
-                let before = current.as_ref().map(|s| replayer.point(s, control, &fixed));
+                let before = current
+                    .as_ref()
+                    .map(|s| replayer.point(s, control, &fixed, scenario == 0));
                 if scenario == 0
                     && let Some(before) = &before
                 {
@@ -1519,12 +1624,6 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .and_then(|w| w.savings_usd)
                 .or(recommended.map(|_| 0.0))
                 .filter(|_| !conditional);
-            let predecessors: HashSet<&str> = baseline
-                .iter()
-                .filter_map(|i| i.evidence.as_ref())
-                .flat_map(|e| &e.predecessors)
-                .map(|p| &*p.request)
-                .collect();
             let mut uncertainty: IndexSet<String> = [
                 "compaction loses detail; re-reading files, repeated tool calls or changed reasoning may erase savings; that work is unmeasured, not priced at zero",
                 "observed boundary timestamps, precomputed flags and durations do not prove summary generation time or idle attribution; unlogged/discarded summaries remain unknown",
@@ -1636,10 +1735,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     .filter(|r| r.time >= since || predecessors.contains(&*r.id))
                     .filter_map(|r| options.estimates.get(&r.id).cloned())
                     .collect(),
-                cache_evidence: baseline
-                    .iter()
-                    .filter_map(|i| i.evidence.as_deref().cloned())
-                    .collect(),
+                cache_evidence: baseline_evidence.clone(),
             });
         }
     }
@@ -1731,7 +1827,8 @@ mod tests {
             origins: vec![Origin {
                 session: "sample".into(),
                 location: location.clone(),
-            }],
+            }]
+            .into(),
             time: 0,
             kind: EventKind::Compaction,
             location,
@@ -1881,7 +1978,7 @@ mod tests {
                 end_time: e.time,
                 reference: None,
                 turn: None,
-                locations: vec![e.location.clone()],
+                locations: vec![e.location.clone()].into(),
                 t3: None,
                 parts: vec![BillingPart {
                     kind: PartKind::Compaction,

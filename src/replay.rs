@@ -21,11 +21,13 @@ use crate::model::{
     UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sum, add_costs, conditional_tier, paired_savings, price_part,
+    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
     price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::safe::{ScanError, identity, iso};
-use crate::scenarios::{AttemptScenario, ReplayOptions, ReplayTtls, cache_bucket, replay_parts};
+use crate::scenarios::{
+    AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
+};
 
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 const MINUTE: Millis = 60_000;
@@ -79,7 +81,7 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
         end_time: event.time,
         reference: None,
         turn: None,
-        locations: vec![event.location.clone()],
+        locations: vec![event.location.clone()].into(),
         t3: event.t3.clone(),
         parts: vec![BillingPart {
             model: model.clone(),
@@ -414,13 +416,45 @@ fn default_since(requests: &[&Request], selected: Bucket) -> Window {
 }
 
 /// One cache replay of a profile's requests, restricted to the checked bucket's selected parts.
-struct Replay<'a> {
+struct Replay {
     comparison: Cost,
-    /// Cache cost per selected request part, keyed by request id and part index.
-    items: IndexMap<(&'a str, usize), Cost>,
     fixed: Cost,
     predecessors: HashSet<Text>,
     evidence: Vec<CacheReplayEvidence>,
+}
+
+/// A [`Replay`] totaled as its parts arrive, so none is kept.
+#[derive(Default)]
+struct Totals {
+    comparison: Sum,
+    fixed: Sum,
+    predecessors: HashSet<Text>,
+    evidence: Vec<CacheReplayEvidence>,
+}
+
+impl Totals {
+    /// Add one part, returning its cache cost.
+    fn add(&mut self, item: ReplayedPart) -> Cost {
+        if let Some(e) = item.evidence {
+            for predecessor in &e.predecessors {
+                self.predecessors.insert(predecessor.request.clone());
+            }
+            self.evidence.push(*e);
+        }
+        self.comparison.add(&item.components.cache);
+        self.fixed.add(&item.components.ordinary);
+        self.fixed.add(&item.components.output);
+        item.components.cache
+    }
+
+    fn finish(self) -> Replay {
+        Replay {
+            comparison: self.comparison.cost(),
+            fixed: self.fixed.cost(),
+            predecessors: self.predecessors,
+            evidence: self.evidence,
+        }
+    }
 }
 
 /// Shared inputs for every TTL check in one report.
@@ -443,9 +477,14 @@ struct Replayer<'i, 'a> {
     since: Millis,
 }
 
-impl<'a> Replayer<'_, 'a> {
-    fn run(&self, ttl: Ttl, cold_prefixes: bool, attempt_scenario: AttemptScenario) -> Replay<'a> {
-        let options = ReplayOptions {
+impl Replayer<'_, '_> {
+    fn options(
+        &self,
+        ttl: Ttl,
+        cold_prefixes: bool,
+        attempt_scenario: AttemptScenario,
+    ) -> ReplayOptions<'_> {
+        ReplayOptions {
             estimates: self.input.estimates,
             catalog: self.input.catalog,
             ttls: ReplayTtls::all(Some(ttl)),
@@ -453,38 +492,58 @@ impl<'a> Replayer<'_, 'a> {
             cold_prefixes,
             estimated_parts: None,
             attempt_scenario,
-        };
-        let mut predecessors = HashSet::default();
-        let mut evidence = vec![];
-        let mut items = IndexMap::default();
-        let mut fixed = Sum::new();
-        let replayed = replay_parts(
+        }
+    }
+
+    /// Whether a replayed part is one of the checked bucket's selected parts.
+    fn checked(&self, item: &ReplayedPart) -> bool {
+        item.selected && in_bucket(item.request, &item.p, self.bucket)
+    }
+
+    fn run(&self, ttl: Ttl, cold_prefixes: bool, attempt_scenario: AttemptScenario) -> Replay {
+        let options = self.options(ttl, cold_prefixes, attempt_scenario);
+        let mut totals = Totals::default();
+        for item in replay_parts(
             self.requests.iter().copied(),
             [self.input.boundaries],
             &options,
-        );
-        for item in replayed {
-            if !item.selected || !in_bucket(item.request, &item.p, self.bucket) {
-                continue;
+        ) {
+            if self.checked(&item) {
+                totals.add(item);
             }
-            if let Some(e) = item.evidence {
-                for predecessor in &e.predecessors {
-                    predecessors.insert(predecessor.request.clone());
-                }
-                evidence.push(*e);
-            }
-            // Replay clones each part, so only its recorded index identifies it.
-            items.insert((&*item.request.id, item.part), item.components.cache);
-            fixed.add(&item.components.ordinary);
-            fixed.add(&item.components.output);
         }
-        Replay {
-            comparison: add_costs(items.values()),
-            items,
-            fixed: fixed.cost(),
-            predecessors,
-            evidence,
+        totals.finish()
+    }
+
+    /// Replay 5m and 1h side by side, pairing each part's cache cost as (5m, 1h) with
+    /// `unknown` further unpriced items, so neither replay keeps its parts. Both yield the
+    /// same parts in the same order: a part's bucket and selection do not depend on its TTL,
+    /// and a request id appears once in a profile's requests.
+    fn compare(&self, unknown: u64) -> (Replay, Replay, PairedSavings) {
+        let short_options = self.options(Ttl::FiveMinutes, false, AttemptScenario::Point);
+        let long_options = self.options(Ttl::OneHour, false, AttemptScenario::Point);
+        let parts = |options| {
+            replay_parts(
+                self.requests.iter().copied(),
+                [self.input.boundaries],
+                options,
+            )
+            .filter(|item| self.checked(item))
+        };
+        let mut longs = parts(&long_options);
+        let (mut short, mut long, mut pairs) =
+            (Totals::default(), Totals::default(), Pairs::default());
+        for item in parts(&short_options) {
+            let other = longs.next().expect("both replays yield the same parts");
+            debug_assert_eq!(
+                (&item.request.id, item.part),
+                (&other.request.id, other.part)
+            );
+            let five_minutes = short.add(item);
+            pairs.add(&five_minutes, &long.add(other));
         }
+        debug_assert!(longs.next().is_none(), "both replays yield the same parts");
+        (short.finish(), long.finish(), pairs.savings(unknown))
     }
 }
 
@@ -566,8 +625,8 @@ fn ttl_check(
         since,
     };
     let replay = |ttl, attempt| replayer.run(ttl, false, attempt);
-    let short = replay(Ttl::FiveMinutes, AttemptScenario::Point);
-    let long = replay(Ttl::OneHour, AttemptScenario::Point);
+    // Positive savings when 1h is cheaper than 5m on the parts both replays price.
+    let (short, long, paired) = replayer.compare(skipped_lines(scan, &profile.id));
     let comparison_cost = PerTtl {
         five_minutes: short.comparison.clone(),
         one_hour: long.comparison.clone(),
@@ -627,15 +686,6 @@ fn ttl_check(
         _ => None,
     };
     let current = profile.ttl.get(bucket);
-    // Positive when 1h is cheaper than 5m on the parts both replays price.
-    let not_replayed = unknown_cost("part not replayed");
-    let paired = paired_savings(
-        short
-            .items
-            .iter()
-            .map(|(key, baseline)| (baseline, long.items.get(key).unwrap_or(&not_replayed))),
-        skipped_lines(scan, &profile.id),
-    );
     let recommended = if !paired.decided {
         None
     } else if paired.usd > Usd::ZERO {
@@ -1182,7 +1232,8 @@ mod tests {
             origins: vec![Origin {
                 session: session.into(),
                 location: location.clone(),
-            }],
+            }]
+            .into(),
             time,
             kind: EventKind::Compaction,
             location,

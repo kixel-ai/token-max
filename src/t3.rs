@@ -1244,8 +1244,9 @@ impl std::fmt::Display for Unavailable {
 
 #[derive(Clone)]
 struct Joined {
-    instance: String,
-    evidence: T3Request,
+    instance: Text,
+    /// Shared by every request this turn joins.
+    evidence: std::sync::Arc<T3Request>,
     requested: Option<RequestedSpeed>,
 }
 #[derive(Default)]
@@ -1270,51 +1271,66 @@ struct TurnMatch {
 /// One provider turn's allowlisted columns, read once and judged against each native request.
 struct TurnRow {
     native_session: Option<String>,
-    instance: Option<String>,
-    thread: Option<String>,
-    run: Option<String>,
-    attempt: Option<String>,
-    provider_turn: Option<String>,
-    status: Option<String>,
+    instance: Option<Text>,
     started_at: Option<Millis>,
     completed_at: Option<Millis>,
     usage_updated_at: Option<Millis>,
-    used_tokens: Option<i64>,
-    cache_expires_at: Option<Millis>,
     model: Option<String>,
     tier: Option<String>,
     fast: Option<bool>,
     tier_count: Option<i64>,
     fast_count: Option<i64>,
     event_time: Option<Millis>,
-    idle_mode: Option<T3IdleMode>,
-    thread_updated_at: Option<Millis>,
-    lifecycle: Option<bool>,
+    /// What the turn records for every request it joins, read once; None when incomplete.
+    evidence: Option<std::sync::Arc<T3Request>>,
 }
 impl TurnRow {
-    fn read(row: &rusqlite::Row<'_>) -> Self {
+    fn read(row: &rusqlite::Row<'_>, bound_ms: Millis) -> Self {
+        let completed_at = instant(text_column(row, 8));
+        let usage_updated_at = instant(text_column(row, 9));
+        let id = |index| text_column(row, index).map(|text| Id::from(identity(&text)));
+        let evidence = (|| {
+            Some(T3Request {
+                thread: id(2)?,
+                run: id(3)?,
+                attempt: id(4)?,
+                provider_turn: id(5)?,
+                status: match text_column(row, 6)?.as_str() {
+                    "completed" => "completed",
+                    "running" => "running",
+                    "failed" => "failed",
+                    "interrupted" => "interrupted",
+                    "cancelled" => "cancelled",
+                    _ => "unknown",
+                },
+                completed_at,
+                usage_updated_at,
+                used_tokens: integer_column(row, 10).filter(|n| {
+                    (0..=9_007_199_254_740_991).contains(n)
+                        && usage_updated_at.is_some_and(|t| t <= bound_ms)
+                }),
+                cache_expires_at: usage_updated_at
+                    .filter(|t| *t <= bound_ms)
+                    .and(instant(text_column(row, 11))),
+                idle_mode: mode(text_column(row, 18)),
+                lifecycle_eligible: instant(text_column(row, 19))
+                    .filter(|t| *t <= bound_ms)
+                    .and(bool_column(row, 20)),
+            })
+        })();
         Self {
             native_session: text_column(row, 0),
-            instance: text_column(row, 1),
-            thread: text_column(row, 2),
-            run: text_column(row, 3),
-            attempt: text_column(row, 4),
-            provider_turn: text_column(row, 5),
-            status: text_column(row, 6),
+            instance: text_column(row, 1).map(Text::from),
             started_at: instant(text_column(row, 7)),
-            completed_at: instant(text_column(row, 8)),
-            usage_updated_at: instant(text_column(row, 9)),
-            used_tokens: integer_column(row, 10),
-            cache_expires_at: instant(text_column(row, 11)),
+            completed_at,
+            usage_updated_at,
             model: text_column(row, 12),
             tier: text_column(row, 13),
             fast: bool_column(row, 14),
             tier_count: integer_column(row, 15),
             fast_count: integer_column(row, 16),
             event_time: instant(text_column(row, 17)),
-            idle_mode: mode(text_column(row, 18)),
-            thread_updated_at: instant(text_column(row, 19)),
-            lifecycle: bool_column(row, 20),
+            evidence: evidence.map(std::sync::Arc::new),
         }
     }
 
@@ -1364,35 +1380,7 @@ impl TurnRow {
         } else {
             None
         };
-        let evidence = T3Request {
-            thread: identity(self.thread.as_deref()?),
-            run: identity(self.run.as_deref()?),
-            attempt: identity(self.attempt.as_deref()?),
-            provider_turn: identity(self.provider_turn.as_deref()?),
-            status: match self.status.as_deref()? {
-                "completed" => "completed",
-                "running" => "running",
-                "failed" => "failed",
-                "interrupted" => "interrupted",
-                "cancelled" => "cancelled",
-                _ => "unknown",
-            }
-            .into(),
-            completed_at,
-            usage_updated_at,
-            used_tokens: self.used_tokens.filter(|n| {
-                (0..=9_007_199_254_740_991).contains(n)
-                    && usage_updated_at.is_some_and(|t| t <= bound_ms)
-            }),
-            cache_expires_at: usage_updated_at
-                .filter(|t| *t <= bound_ms)
-                .and(self.cache_expires_at),
-            idle_mode: self.idle_mode,
-            lifecycle_eligible: self
-                .thread_updated_at
-                .filter(|t| *t <= bound_ms)
-                .and(self.lifecycle),
-        };
+        let evidence = self.evidence.clone()?;
         let valid = native_session == r.native_session
             && completed_at.is_none_or(|t| t <= bound_ms)
             && usage_updated_at.is_none_or(|t| t <= bound_ms)
@@ -1658,7 +1646,9 @@ fn metadata(
             [turn] => {
                 if !turn_rows.contains_key(turn) {
                     let row = turn_query
-                        .query_row(rusqlite::params![turn, bound], |row| Ok(TurnRow::read(row)))
+                        .query_row(rusqlite::params![turn, bound], |row| {
+                            Ok(TurnRow::read(row, bound_ms))
+                        })
                         .map(Some)
                         .or_else(|e| match e {
                             rusqlite::Error::QueryReturnedNoRows => Ok(None),
@@ -1700,7 +1690,6 @@ pub(crate) fn enrich(
     ids: &NativeIds,
     bound: &str,
     since: Option<Millis>,
-    strings: &mut Interner,
 ) {
     let mut projections: Vec<NativeRequest<'_>> = requests
         .iter()
@@ -1922,7 +1911,7 @@ pub(crate) fn enrich(
         if let Some(owner) = owner {
             r.profiles = shared(&mut owned, owner);
             if let Some((_, joined)) = unique {
-                r.t3 = Some(Box::new(joined.evidence.clone()));
+                r.t3 = Some(joined.evidence.clone());
                 if joined.evidence.idle_mode.is_some() {
                     for part in &mut r.parts {
                         if part.kind == PartKind::Message {
@@ -2098,7 +2087,6 @@ pub(crate) fn enrich(
             };
             roots.insert(key, merged);
         }
-        strings.meta(&mut r.meta);
     }
     for state in states.iter_mut() {
         let mut causes: Vec<(&str, u64)> = unresolved
@@ -2125,7 +2113,6 @@ pub(crate) fn enrich(
             .extend(r.profiles.iter().map(String::as_str));
     }
     for e in events {
-        let before = std::sync::Arc::as_ptr(&e.meta);
         let key = ids.events.contains_key(&e.id).then(|| e.id.to_string());
         if let Some(key) = &key
             && let Some(rows) = joins.get(key)
@@ -2135,7 +2122,7 @@ pub(crate) fn enrich(
         {
             let (owner, joined) = &rows[0];
             e.profiles = shared(&mut owned, owner);
-            e.t3 = Some(Box::new(joined.evidence.clone()));
+            e.t3 = Some(joined.evidence.clone());
             if joined.evidence.idle_mode.is_some() {
                 e.idle_attribution = IdleAttribution::T3;
             }
@@ -2148,10 +2135,6 @@ pub(crate) fn enrich(
             if e.profiles != profiles {
                 e.profiles = profiles;
             }
-        }
-        // A changed event no longer shares its fields; share them again.
-        if std::sync::Arc::as_ptr(&e.meta) != before {
-            strings.event_meta(&mut e.meta);
         }
     }
     for p in profiles.iter_mut() {
@@ -2259,7 +2242,7 @@ mod tests {
             r.requested_speed.as_ref().unwrap().tier.as_deref(),
             Some("fast")
         );
-        assert_eq!(r.t3.as_ref().unwrap().run, identity("run"));
+        assert_eq!(r.t3.as_ref().unwrap().run, Id::from(identity("run")));
         assert_eq!(r.profiles.len(), 1);
         assert!(
             scan.profiles

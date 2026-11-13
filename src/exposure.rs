@@ -3742,7 +3742,8 @@ mod tests {
                     locations: vec![Location {
                         file: self.file.clone(),
                         line,
-                    }],
+                    }]
+                    .into(),
                     ..make_request()
                 };
                 built.profiles = self.snapshot.profiles.clone().into();

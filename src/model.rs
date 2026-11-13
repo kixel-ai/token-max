@@ -423,9 +423,10 @@ pub struct Request {
     pub reference: Option<Text>,
     pub turn: Option<Text>,
     pub parts: Vec<BillingPart>,
-    pub locations: Vec<Location>,
+    pub locations: Few<Location>,
+    /// Shared with every request the same T3 provider turn ran.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub t3: Option<Box<T3Request>>,
+    pub t3: Option<std::sync::Arc<T3Request>>,
     #[serde(flatten)]
     pub meta: std::sync::Arc<RequestMeta>,
 }
@@ -477,6 +478,133 @@ pub struct Origin {
     pub location: Location,
 }
 
+/// A short list, such as an event's origins or a request's locations. Nearly every one
+/// holds exactly one item, which it keeps inline rather than in an allocation of its own.
+#[derive(Clone, Debug, Default)]
+pub enum Few<T> {
+    #[default]
+    None,
+    One(T),
+    Many(Vec<T>),
+}
+
+/// An event's origins.
+pub type Origins = Few<Origin>;
+
+impl<T> Few<T> {
+    pub fn push(&mut self, item: T) {
+        *self = match std::mem::take(self) {
+            Few::None => Few::One(item),
+            Few::One(first) => Few::Many(vec![first, item]),
+            Few::Many(mut all) => {
+                all.push(item);
+                Few::Many(all)
+            }
+        };
+    }
+
+    /// Move every item of `other` to the end of this list.
+    pub fn append(&mut self, other: &mut Self) {
+        self.extend(std::mem::take(other));
+    }
+
+    /// Hold a single item inline, and release any spare capacity.
+    pub fn shrink_to_fit(&mut self) {
+        if let Few::Many(all) = self {
+            match all.len() {
+                0 => *self = Few::None,
+                1 => *self = Few::One(all.pop().expect("one item")),
+                _ => all.shrink_to_fit(),
+            }
+        }
+    }
+}
+
+impl<T> std::ops::Deref for Few<T> {
+    type Target = [T];
+    fn deref(&self) -> &[T] {
+        match self {
+            Few::None => &[],
+            Few::One(item) => std::slice::from_ref(item),
+            Few::Many(all) => all,
+        }
+    }
+}
+
+impl<T> std::ops::DerefMut for Few<T> {
+    fn deref_mut(&mut self) -> &mut [T] {
+        match self {
+            Few::None => &mut [],
+            Few::One(item) => std::slice::from_mut(item),
+            Few::Many(all) => all,
+        }
+    }
+}
+
+/// Equal when they list the same items, however they hold them.
+impl<T: PartialEq> PartialEq for Few<T> {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl<T> From<Vec<T>> for Few<T> {
+    fn from(all: Vec<T>) -> Self {
+        let mut few = Few::Many(all);
+        few.shrink_to_fit();
+        few
+    }
+}
+
+impl<T> FromIterator<T> for Few<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        iter.into_iter().collect::<Vec<_>>().into()
+    }
+}
+
+impl<T> Extend<T> for Few<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            self.push(item);
+        }
+    }
+}
+
+impl<T> IntoIterator for Few<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Few::None => vec![],
+            Few::One(item) => vec![item],
+            Few::Many(all) => all,
+        }
+        .into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Few<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Few<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T: Serialize> Serialize for Few<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        (**self).serialize(serializer)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
@@ -526,7 +654,7 @@ pub struct Pricing {
 pub struct StructuralEvent {
     pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
-    pub origins: Vec<Origin>,
+    pub origins: Origins,
     pub time: Millis,
     pub kind: EventKind,
     pub location: Location,
@@ -561,7 +689,7 @@ pub struct EventMeta {
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub t3: Option<Box<T3Request>>,
+    pub t3: Option<std::sync::Arc<T3Request>>,
 }
 
 impl std::ops::Deref for StructuralEvent {
@@ -789,9 +917,10 @@ pub struct Profile {
     /// Background controls at recorded working directories; an empty key means no directory.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub background_directories: IndexMap<String, Vec<BackgroundControl>>,
-    /// Request-specific overrides when session transitions or launch precedence are unresolved.
+    /// Request-specific overrides when session transitions or launch precedence are unresolved,
+    /// by request id; requests resolved alike share one list.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
-    pub background_requests: IndexMap<String, Vec<BackgroundControl>>,
+    pub background_requests: IndexMap<Text, std::sync::Arc<[BackgroundControl]>>,
     /// Auto memory's current setting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryControl>,
@@ -949,11 +1078,11 @@ pub struct T3TextGeneration {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Request {
-    pub thread: String,
-    pub run: String,
-    pub attempt: String,
-    pub provider_turn: String,
-    pub status: String,
+    pub thread: Id,
+    pub run: Id,
+    pub attempt: Id,
+    pub provider_turn: Id,
+    pub status: &'static str,
     pub completed_at: Option<Millis>,
     pub usage_updated_at: Option<Millis>,
     pub used_tokens: Option<i64>,
@@ -1540,7 +1669,8 @@ pub enum PeriodOutcome {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PeriodCalibration {
-    pub events: Vec<Id>,
+    /// The calibrating summaries' events, shared by every period one cohort calibrates.
+    pub events: std::sync::Arc<[Id]>,
     pub summary_tokens: i64,
     pub prefix_tokens: i64,
 }

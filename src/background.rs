@@ -122,12 +122,14 @@ fn controls<'a>(profile: &'a Profile, request: &Request) -> &'a [BackgroundContr
     profile
         .background_requests
         .get(&*request.id)
+        .map(|controls| &controls[..])
         .or_else(|| {
             profile
                 .background_directories
                 .get(request.cwd.as_deref().unwrap_or_default())
+                .map(Vec::as_slice)
         })
-        .map_or(&profile.background, Vec::as_slice)
+        .unwrap_or(&profile.background)
 }
 
 /// A main-conversation response that finished a turn.
@@ -616,7 +618,7 @@ mod tests {
     fn prompt(time: Millis) -> StructuralEvent {
         StructuralEvent {
             id: format!("prompt-{time}").into(),
-            origins: vec![],
+            origins: Default::default(),
             time,
             kind: EventKind::TurnStart,
             location: Location {
@@ -795,7 +797,7 @@ mod tests {
         unknown[0].reason = "unrecorded session launch precedence".into();
         s.profiles[0]
             .background_requests
-            .insert(s.requests[2].id.to_string(), unknown);
+            .insert(s.requests[2].id.clone(), unknown.into());
         let checks = run(&s, 0.0);
         assert_eq!(checks.len(), 2);
         assert_eq!(

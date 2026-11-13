@@ -20,10 +20,10 @@ use crate::discovery::{
 };
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Harness, Id,
-    IdleAttribution, Interner, Location, Millis, Origin, PartKind, Pricing, Profile, Profiles,
-    Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings, ShellCall,
-    Snapshot, StructuralEvent, Subagent, Text, Usage,
+    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Few, Harness,
+    Id, IdleAttribution, Interner, Location, Millis, Origin, Origins, PartKind, Pricing, Profile,
+    Profiles, Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings,
+    ShellCall, Snapshot, StructuralEvent, Subagent, Text, Usage,
 };
 use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
 use crate::sessions::{Record, Sessions};
@@ -737,10 +737,10 @@ fn event(
     };
     StructuralEvent {
         id,
-        origins: vec![Origin {
+        origins: Origins::One(Origin {
             session: context.session.clone(),
             location: location.clone(),
-        }],
+        }),
         time,
         kind,
         location: location.clone(),
@@ -786,7 +786,7 @@ fn request(
         reference: None,
         turn: context.turn.clone(),
         parts: vec![],
-        locations: vec![location.clone()],
+        locations: Few::One(location.clone()),
         t3: None,
         meta: RequestMeta {
             harness: snapshot.harness,
@@ -2111,8 +2111,18 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         &native_ids,
         &snapshot_finished_at,
         since,
-        &mut strings,
     );
+    // What T3 changed holds its own copy of the shared fields; share them again.
+    for r in &mut requests {
+        if Arc::strong_count(&r.meta) == 1 {
+            strings.meta(&mut r.meta);
+        }
+    }
+    for e in &mut events {
+        if Arc::strong_count(&e.meta) == 1 {
+            strings.event_meta(&mut e.meta);
+        }
+    }
     let before = |time: Millis| since.is_some_and(|since| time < since);
     let split = requests.partition_point(|r| before(r.time));
     let context_requests: Vec<Request> = requests.drain(..split).collect();

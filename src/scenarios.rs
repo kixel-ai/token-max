@@ -87,7 +87,23 @@ pub struct ReplayedPart<'a> {
     pub p: BillingPart,
     pub selected: bool,
     pub components: Components,
+    /// Why the cache charge is unknown though the part prices, if it is.
+    pub cache_unknown: Option<&'static str>,
     pub evidence: Option<Box<CacheReplayEvidence>>,
+}
+
+/// Price one replayed part, whose cache charge is unknown for `cache_unknown`.
+pub fn replayed_components(
+    catalog: &Catalog,
+    r: &Request,
+    p: &BillingPart,
+    cache_unknown: Option<&str>,
+) -> Components {
+    let mut components = price_components(catalog, r, p);
+    if let Some(reason) = cache_unknown {
+        components.cache = unknown_cost(reason);
+    }
+    components
 }
 
 /// Replay the same cache histories and usage estimates for every setting consumer.
@@ -154,29 +170,29 @@ pub fn replay_parts<'a, 'b>(
                 });
                 u.write1h = Some(if ttl == Some(Ttl::OneHour) { write } else { 0 });
             }
-            let mut components = price_components(options.catalog, r, &replayed.p);
+            let mut cache_unknown = None;
             if r.harness == Harness::Claude && (p.usage.read != Some(0) || p.usage.write != Some(0))
             {
                 if bucket.is_none() {
-                    components.cache =
-                        unknown_cost("cache TTL bucket is not established for this part");
+                    cache_unknown = Some("cache TTL bucket is not established for this part");
                 } else if ttl.is_none() {
-                    components.cache =
-                        unknown_cost("effective cache TTL policy is not established");
+                    cache_unknown = Some("effective cache TTL policy is not established");
                 } else if replayed.unknown {
                     let evidence = replayed
                         .evidence
                         .as_ref()
                         .expect("unknown replay has evidence");
-                    components.cache = unknown_cost(evidence.reason);
+                    cache_unknown = Some(evidence.reason);
                 }
             }
+            let components = replayed_components(options.catalog, r, &replayed.p, cache_unknown);
             result.push(ReplayedPart {
                 request: r,
                 part,
                 p: replayed.p,
                 selected,
                 components,
+                cache_unknown,
                 evidence: replayed.evidence,
             });
         }
@@ -219,7 +235,8 @@ mod tests {
             origins: vec![Origin {
                 session: session.into(),
                 location: location.clone(),
-            }],
+            }]
+            .into(),
             time,
             kind: EventKind::Compaction,
             location,

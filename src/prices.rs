@@ -713,27 +713,51 @@ pub fn paired_savings<'a>(
     pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
     unknown: u64,
 ) -> PairedSavings {
-    let mut usd = Usd::ZERO;
-    let mut priced = 0;
-    let mut count = 0;
-    let mut largest = Usd::ZERO;
+    let mut sum = Pairs::default();
     for (baseline, alternative) in pairs {
-        count += 1;
+        sum.add(baseline, alternative);
+    }
+    sum.savings(unknown)
+}
+
+/// [`paired_savings`] taken one pair at a time, so a whole history's pairs need not be kept.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Pairs {
+    usd: Usd,
+    priced: u64,
+    count: u64,
+    largest: Usd,
+}
+
+impl Pairs {
+    /// Add one (baseline, alternative) pair.
+    pub fn add(&mut self, baseline: &Cost, alternative: &Cost) {
+        self.count += 1;
         let (Some(baseline), Some(alternative)) = (baseline.total_usd, alternative.total_usd)
         else {
-            continue;
+            return;
         };
         let delta = baseline - alternative;
-        usd += delta;
-        priced += 1;
-        largest = largest.max(delta.abs());
+        self.usd += delta;
+        self.priced += 1;
+        self.largest = self.largest.max(delta.abs());
     }
-    let unpriced = count - priced + unknown;
-    PairedSavings {
-        usd,
-        priced,
-        total: count + unknown,
-        decided: unpriced == 0 || (priced > 0 && usd.abs() > largest.saturating_mul(unpriced)),
+
+    /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
+    pub fn savings(&self, unknown: u64) -> PairedSavings {
+        let Self {
+            usd,
+            priced,
+            count,
+            largest,
+        } = *self;
+        let unpriced = count - priced + unknown;
+        PairedSavings {
+            usd,
+            priced,
+            total: count + unknown,
+            decided: unpriced == 0 || (priced > 0 && usd.abs() > largest.saturating_mul(unpriced)),
+        }
     }
 }
 

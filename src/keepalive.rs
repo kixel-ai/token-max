@@ -1305,7 +1305,8 @@ mod tests {
                     file: "synthetic".into(),
                     line: 1,
                 },
-            }],
+            }]
+            .into(),
             time: HOUR,
             kind: EventKind::Compaction,
             location: crate::model::Location {
@@ -1378,7 +1379,8 @@ mod tests {
                     file: "synthetic".into(),
                     line: 1,
                 },
-            }],
+            }]
+            .into(),
             time,
             kind: EventKind::Compaction,
             location: crate::model::Location {

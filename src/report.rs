@@ -4234,7 +4234,7 @@ mod tests {
             activation_basis: "synthetic cohort".into(),
             summary_cost: cost(Some(0.875), 0.875),
             calibration: Some(PeriodCalibration {
-                events: vec!["synthetic-boundary".into(), "second".into()],
+                events: ["synthetic-boundary".into(), "second".into()].into(),
                 summary_tokens: 1500,
                 prefix_tokens: 30000,
             }),

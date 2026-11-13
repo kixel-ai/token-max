@@ -289,12 +289,28 @@ impl<'p> Scopes<'p> {
     }
 }
 
-/// A selected replayed part, kept for the shared baseline cost.
+/// A selected replayed part's charge, for T3 modes priced part by part.
 struct Selected {
     part: usize,
     request: Text,
-    compaction: bool,
     cost: Cost,
+}
+
+/// The charges of a replay's selected parts, in replay order.
+enum Charges {
+    /// Each part's.
+    Parts(Vec<Selected>),
+    /// What the shared baseline needs, which leaves out only some compaction parts: each
+    /// stretch of other parts totaled, then the compaction part ending it. Totals of totals
+    /// keep exact sums and first-seen reasons, without a charge kept per part.
+    Stretches(Vec<Stretch>),
+}
+
+/// Selected parts up to and including one compaction part, or to the end.
+struct Stretch {
+    others: Cost,
+    /// The compaction part's request and charge.
+    compaction: Option<(Text, Cost)>,
 }
 
 /// Requests after one TTL/window configuration, with their replayed parts.
@@ -304,7 +320,7 @@ struct Replay<'a> {
     added: Vec<Cost>,
     /// Modeled window compaction boundaries.
     modeled: Vec<StructuralEvent>,
-    selected: Vec<Selected>,
+    selected: Charges,
     /// Every request in time order, with replayed parts.
     requests: Vec<Modeled<'a>>,
 }
@@ -347,6 +363,8 @@ struct Geometry {
 /// One cohort's matching samples, with median and maximum geometry computed once.
 struct Calibration<'a> {
     samples: Vec<&'a CompactionSample<'a>>,
+    /// The samples' events, for every period this cohort calibrates.
+    events: std::sync::Arc<[Id]>,
     /// Whether every sample shares one summary pricing cohort.
     uniform: bool,
     median: Geometry,
@@ -460,6 +478,7 @@ impl<'r> ReplayIndex<'r> {
             index.calibration.insert(
                 key,
                 Calibration {
+                    events: matches.iter().map(|s| s.event.clone()).collect(),
                     samples: matches,
                     uniform: summaries.len() == 1,
                     median,
@@ -626,17 +645,17 @@ fn changed_cost(
     ])
 }
 
-/// A run's charges in total and per period.
+/// A run's charges in total and, for a point run, per period.
 struct Ledger {
     total: Sum,
-    by_period: Vec<Option<Sum>>,
+    by_period: Option<Vec<Option<Sum>>>,
 }
 
 impl Ledger {
     fn charge(&mut self, period: Option<usize>, cost: &Cost, weight: f64) {
         self.total.add_scaled(cost, weight);
-        if let Some(period) = period {
-            self.by_period[period]
+        if let (Some(period), Some(by_period)) = (period, &mut self.by_period) {
+            by_period[period]
                 .get_or_insert_with(Sum::new)
                 .add_scaled(cost, weight);
         }
@@ -646,7 +665,7 @@ impl Ledger {
 /// One run's changed charges relative to the shared baseline.
 struct Run {
     adjustment: Cost,
-    /// Charges per canonical period index.
+    /// Charges per canonical period index; only point runs, which report them, keep any.
     by_period: Vec<Option<Cost>>,
     resumed: f64,
 }
@@ -830,7 +849,7 @@ impl<'r, 'x> Runner<'r, 'x> {
         let since = self.since;
         let mut ledger = Ledger {
             total: Sum::new(),
-            by_period: vec![None; self.prepared.len()],
+            by_period: point.then(|| vec![None; self.prepared.len()]),
         };
         let mut resumed = 0.0;
         let mut charged: HashSet<&Id> = HashSet::default();
@@ -918,7 +937,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let sample = c.samples[0];
                             if point {
                                 periods[i].calibration = Some(PeriodCalibration {
-                                    events: c.samples.iter().map(|s| s.event.clone()).collect(),
+                                    events: c.events.clone(),
                                     summary_tokens: g.output,
                                     prefix_tokens: g.prefix,
                                 });
@@ -1220,6 +1239,7 @@ impl<'r, 'x> Runner<'r, 'x> {
             adjustment: ledger.total.cost(),
             by_period: ledger
                 .by_period
+                .unwrap_or_default()
                 .into_iter()
                 .map(|s| s.map(Sum::cost))
                 .collect(),
@@ -1245,15 +1265,21 @@ struct Profiled<'a> {
 }
 
 impl<'a> Profiled<'a> {
-    /// Apply window controls per conversation, then replay every part's cache under `ttls`.
-    fn replay(&self, ttls: &Ttls, windows: &[ScenarioWindow]) -> Replay<'a> {
+    /// Apply window controls per conversation, then replay every part's cache under `ttls`,
+    /// keeping each selected part's charge when `parts` asks for it.
+    fn replay(&self, ttls: &Ttls, windows: &[ScenarioWindow], parts: bool) -> Replay<'a> {
         let mut result = Replay {
             errors: vec![],
             added: vec![],
             modeled: vec![],
-            selected: vec![],
+            selected: if parts {
+                Charges::Parts(vec![])
+            } else {
+                Charges::Stretches(vec![])
+            },
             requests: vec![],
         };
+        let mut others = Sum::new();
         let no_estimates = IndexMap::default();
         for group in self.groups.values() {
             let source = group
@@ -1339,12 +1365,24 @@ impl<'a> Profiled<'a> {
                     let mut parts: Option<Vec<BillingPart>> = estimate.map(|_| base.to_vec());
                     while let Some(item) = items.next_if(|i| std::ptr::eq(i.request, &**r)) {
                         if item.selected {
-                            result.selected.push(Selected {
-                                part: item.part,
-                                request: item.request.id.clone(),
-                                compaction: item.p.kind == PartKind::Compaction,
-                                cost: item.components.total(),
-                            });
+                            let cost = item.components.total();
+                            match &mut result.selected {
+                                Charges::Parts(parts) => parts.push(Selected {
+                                    part: item.part,
+                                    request: item.request.id.clone(),
+                                    cost,
+                                }),
+                                Charges::Stretches(stretches) => {
+                                    if item.p.kind == PartKind::Compaction {
+                                        stretches.push(Stretch {
+                                            others: std::mem::take(&mut others).cost(),
+                                            compaction: Some((item.request.id.clone(), cost)),
+                                        });
+                                    } else {
+                                        others.add(&cost);
+                                    }
+                                }
+                            }
                         }
                         if item.p != base[item.part] || parts.is_some() {
                             parts.get_or_insert_with(|| base.to_vec())[item.part] = item.p;
@@ -1375,6 +1413,12 @@ impl<'a> Profiled<'a> {
             result
                 .errors
                 .extend(simulation.errors.into_iter().map(String::from));
+        }
+        if let Charges::Stretches(stretches) = &mut result.selected {
+            stretches.push(Stretch {
+                others: others.cost(),
+                compaction: None,
+            });
         }
         result.requests.sort_by(|a, b| {
             a.time
@@ -1694,9 +1738,15 @@ impl<'a> Profiled<'a> {
             .filter_map(|s| s.request.as_deref().filter(|r| !r.is_empty()))
             .collect();
         let mut common = Sum::new();
-        for s in &replay.selected {
-            if !(s.compaction && idle_requests.contains(&*s.request)) {
-                common.add(&s.cost);
+        let Charges::Stretches(stretches) = &replay.selected else {
+            unreachable!("native idle replays total their charges");
+        };
+        for s in stretches {
+            common.add(&s.others);
+            if let Some((request, cost)) = &s.compaction
+                && !idle_requests.contains(&**request)
+            {
+                common.add(cost);
             }
         }
         for s in self.all_summaries {
@@ -1804,6 +1854,8 @@ impl<'a> Profiled<'a> {
             })
             .collect();
         let elapsed = self.now - self.since;
+        // The report keeps one period per request gap, so it keeps no spare capacity.
+        periods.shrink_to_fit();
         IdleScenario {
             baseline: baseline.to_string(),
             applicable,
@@ -2020,7 +2072,7 @@ fn profile_checks<'a>(
     }
     // Each replay covers the whole history, so the current one is released before the next.
     let current_settings: Vec<IdleScenario> = {
-        let current = profiled.replay(&current_ttls, &current_windows);
+        let current = profiled.replay(&current_ttls, &current_windows, false);
         let current_events = all_events(&events, &current.modeled);
         let current_index = ReplayIndex::new(
             &current.requests,
@@ -2042,7 +2094,7 @@ fn profile_checks<'a>(
             })
             .collect()
     };
-    let recommended = profiled.replay(&after_ttls, &recommended_windows);
+    let recommended = profiled.replay(&after_ttls, &recommended_windows, false);
     let recommended_events = all_events(&events, &recommended.modeled);
     let recommended_index = ReplayIndex::new(
         &recommended.requests,
@@ -2254,7 +2306,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
             main: profile.ttl.main.value,
             subagent: profile.ttl.subagent.value,
         };
-        let mut current_replay = profiled.replay(&current_ttls, &current_windows);
+        let mut current_replay = profiled.replay(&current_ttls, &current_windows, true);
         // The unresolved window causes the replay's own errors, so it is named first.
         current_replay
             .errors
@@ -2291,7 +2343,7 @@ pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleChec
                 .and_then(|c| c.base.recommended)
                 .or(profile.ttl.subagent.value),
         };
-        let mut after_replay = profiled.replay(&after_ttls, &after_windows);
+        let mut after_replay = profiled.replay(&after_ttls, &after_windows, true);
         after_replay
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
@@ -2619,6 +2671,7 @@ fn t3_comparison(
     })
     .collect();
     // All values are changed charges against the same native request baseline.
+    periods.shrink_to_fit();
     T3IdleComparison {
         baseline: baseline.into(),
         ttl,
@@ -2684,8 +2737,10 @@ fn t3_replay(
             .or_default()
             .push((e.time, 0, Tick::Boundary(e)));
     }
-    let baseline: HashMap<(&str, usize), &Cost> = replay
-        .selected
+    let Charges::Parts(parts) = &replay.selected else {
+        unreachable!("T3 replays keep each part's charge");
+    };
+    let baseline: HashMap<(&str, usize), &Cost> = parts
         .iter()
         .map(|s| ((&*s.request, s.part), &s.cost))
         .collect();
@@ -3043,14 +3098,14 @@ mod tests {
         r
     }
 
-    fn origin(session: &str, line: u64) -> Vec<Origin> {
-        vec![Origin {
+    fn origin(session: &str, line: u64) -> crate::model::Origins {
+        crate::model::Origins::One(Origin {
             session: session.into(),
             location: Location {
                 file: "synthetic".into(),
                 line,
             },
-        }]
+        })
     }
 
     /// A linked compaction boundary in the sample session.
@@ -4216,12 +4271,12 @@ mod tests {
                     0,
                     ttl,
                 );
-                r.t3 = Some(Box::new(T3Request {
-                    thread: r.session.to_string(),
-                    run: r.id.to_string(),
-                    attempt: r.id.to_string(),
-                    provider_turn: r.id.to_string(),
-                    status: "completed".into(),
+                r.t3 = Some(std::sync::Arc::new(T3Request {
+                    thread: r.session.to_string().into(),
+                    run: r.id.to_string().into(),
+                    attempt: r.id.to_string().into(),
+                    provider_turn: r.id.to_string().into(),
+                    status: "completed",
                     completed_at: Some(r.end_time),
                     usage_updated_at: Some(r.end_time),
                     used_tokens: r.parts[0].usage.input,
@@ -4396,8 +4451,9 @@ mod tests {
             .t3
             .clone()
             .unwrap();
-        identity.run = "idle-run".into();
-        identity.idle_mode = Some(BeforeCacheExpires);
+        let shared = std::sync::Arc::make_mut(&mut identity);
+        shared.run = "idle-run".into();
+        shared.idle_mode = Some(BeforeCacheExpires);
         observed
             .requests
             .iter_mut()
@@ -4462,6 +4518,7 @@ mod tests {
             .unwrap()
             .t3
             .as_mut()
+            .map(std::sync::Arc::make_mut)
             .unwrap()
     }
 

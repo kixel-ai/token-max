@@ -774,6 +774,7 @@ pub fn discover_claude_controls(
                     .zip(local_env.get(*key))
                     .is_some_and(|(setting, inherited)| js_string(Some(setting)) != *inherited)
             });
+            let mut conflicted = None;
             for request in requests.iter().filter(|r| {
                 launch_conflict
                     && r.agent == Agent::Main
@@ -781,14 +782,17 @@ pub fn discover_claude_controls(
                     && r.cwd.as_deref() == Some(cwd)
                     && r.client.as_deref() != Some("cli")
             }) {
-                let mut controls = background.clone();
-                unresolved_background(
-                    &mut controls,
-                    "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
-                );
+                let controls = conflicted.get_or_insert_with(|| {
+                    let mut controls = background.clone();
+                    unresolved_background(
+                        &mut controls,
+                        "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
+                    );
+                    std::sync::Arc::<[BackgroundControl]>::from(controls)
+                });
                 profile
                     .background_requests
-                    .insert(request.id.to_string(), controls);
+                    .insert(request.id.clone(), controls.clone());
             }
             let config = merged(&[&user, &project, &legacy, &local, &managed]);
             idle.ttl = Some(ttl_controls(&TtlSources {
@@ -818,6 +822,9 @@ pub fn discover_claude_controls(
         profile.idle_directories = Some(idle_directories);
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
+        // Every request whose session changed directory shares its directory's unresolved list.
+        let mut carried: crate::collections::HashMap<&str, std::sync::Arc<[BackgroundControl]>> =
+            crate::collections::HashMap::default();
         for request in requests
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
@@ -827,19 +834,19 @@ pub fn discover_claude_controls(
                 .or_insert((request.cwd.as_deref(), false));
             *changed |= *previous != request.cwd.as_deref();
             *previous = request.cwd.as_deref();
-            if *changed
-                && let Some(controls) = profile
-                    .background_directories
-                    .get(request.cwd.as_deref().unwrap_or_default())
-            {
-                let mut controls = controls.clone();
-                unresolved_background(
-                    &mut controls,
-                    "session working directory changed; /cd environment carry-over and launch selection are not recorded",
-                );
+            let cwd = request.cwd.as_deref().unwrap_or_default();
+            if *changed && let Some(controls) = profile.background_directories.get(cwd) {
+                let controls = carried.entry(cwd).or_insert_with(|| {
+                    let mut controls = controls.clone();
+                    unresolved_background(
+                        &mut controls,
+                        "session working directory changed; /cd environment carry-over and launch selection are not recorded",
+                    );
+                    controls.into()
+                });
                 profile
                     .background_requests
-                    .insert(request.id.to_string(), controls);
+                    .insert(request.id.clone(), controls.clone());
             }
         }
     }
@@ -2575,7 +2582,10 @@ mod tests {
         assert!(!p.background_requests.contains_key("r0"));
         assert!(!p.background_requests.contains_key("r1"));
         for i in 2..7 {
-            assert_eq!(p.background_requests[&format!("r{i}")][1].value, None);
+            assert_eq!(
+                p.background_requests[format!("r{i}").as_str()][1].value,
+                None
+            );
         }
         assert!(p.background_requests["r4"][1].reason.contains("carry-over"));
         assert!(

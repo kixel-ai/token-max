@@ -3553,6 +3553,7 @@ mod tests {
             (ITEM_THREAD.to_string(), 0),
             (FIRST_ITEM.to_string(), 0),
             (guards::BOUNDARY.to_string(), 0),
+            (guards::IDLE_RUNS.to_string(), 0),
             (guards::events_query(), 0),
             (guards::projection_query(), 0),
         ] {

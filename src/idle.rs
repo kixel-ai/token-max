@@ -2466,6 +2466,7 @@ fn t3_comparison(
     }
     let mut gaps = Vec::new();
     let mut periods = Vec::new();
+    let mut outside: Vec<(&str, Millis, Millis)> = Vec::new();
     for group in groups.values_mut() {
         group.sort_by_key(|r| r.time);
         for (i, &r) in group.iter().enumerate() {
@@ -2479,12 +2480,14 @@ fn t3_comparison(
                 continue;
             }
             let end = next.map_or(options.now, |r| r.time);
-            // A gap that opens before T3's retained events stays as recorded in every mode.
+            if end <= r.end_time {
+                continue;
+            }
+            // A gap outside the window, including one that opens before T3's retained
+            // events, stays as recorded in every mode.
             let retained = profile.t3.as_ref().and_then(|t| t.retained_since);
-            if options.since.is_some_and(|s| end < s)
-                || end <= r.end_time
-                || retained.is_some_and(|b| r.end_time < b)
-            {
+            if options.since.is_some_and(|s| end < s) || retained.is_some_and(|b| r.end_time < b) {
+                outside.push((&*r.session, r.end_time, end));
                 continue;
             }
             // Without a linked api-request record, `r.time` is the first response record, which
@@ -2535,7 +2538,9 @@ fn t3_comparison(
             let observed = boundary
                 .and_then(|e| e.t3.as_ref())
                 .and_then(|t| t.idle_mode);
-            let (status, reason) = if observed.is_some() {
+            // A recorded compaction shows when T3 fired under the current TTL; another TTL
+            // moves the timer, so that gap is judged like any other.
+            let (status, reason) = if observed.is_some() && ttl == profile.ttl.main.value {
                 (
                     PeriodStatus::Eligible,
                     "explicit idle run identity and native applied compaction boundary",
@@ -2667,6 +2672,24 @@ fn t3_comparison(
             });
         }
     }
+    let within = |session: &str, t: Millis| {
+        outside
+            .iter()
+            .any(|(s, open, end)| *s == session && *open < t && t <= *end)
+    };
+    let kept = Kept {
+        events: events
+            .iter()
+            .filter(|e| e.idle_attribution == IdleAttribution::T3 && within(&e.session, e.time))
+            .map(|e| &e.id)
+            .collect(),
+        requests: requests
+            .iter()
+            .filter(|r| r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some()))
+            .filter(|r| within(&r.session, r.time))
+            .map(|r| &*r.id)
+            .collect(),
+    };
     let scenarios = [
         T3IdleMode::Off,
         T3IdleMode::OnReturn,
@@ -2682,6 +2705,7 @@ fn t3_comparison(
                 samples,
                 ttls,
                 replay,
+                kept: &kept,
             },
             &gaps,
             &mut periods,
@@ -2706,6 +2730,13 @@ struct T3Replay<'a> {
     samples: &'a CompactionSamples<'a>,
     ttls: &'a Ttls,
     replay: &'a Replay<'a>,
+    kept: &'a Kept<'a>,
+}
+
+/// Recorded idle runs and boundaries in gaps outside the window, which stay as recorded.
+struct Kept<'a> {
+    events: HashSet<&'a Id>,
+    requests: HashSet<&'a str>,
 }
 
 fn t3_replay(
@@ -2721,6 +2752,7 @@ fn t3_replay(
         samples,
         ttls,
         replay,
+        kept,
     } = input;
     let requests = *requests;
     let events = *events;
@@ -2734,7 +2766,7 @@ fn t3_replay(
     let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
     let idle_ids: HashSet<&Id> = events
         .iter()
-        .filter(|e| e.idle_attribution == IdleAttribution::T3)
+        .filter(|e| e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id))
         .map(|e| &e.id)
         .collect();
     let idle_requests: HashSet<&str> = options
@@ -2765,7 +2797,9 @@ fn t3_replay(
     // cancel in the comparison, so their missing usage cannot block it.
     let mut costs: Vec<Cost> = replay.errors.iter().cloned().map(unknown_cost).collect();
     if requests.iter().any(|r| {
-        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some()) && !idle_requests.contains(&*r.id)
+        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+            && !idle_requests.contains(&*r.id)
+            && !kept.requests.contains(&*r.id)
     }) {
         costs.push(unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
     }
@@ -2811,7 +2845,8 @@ fn t3_replay(
         for (time, _, tick) in ticks {
             match tick {
                 Tick::Request(r) => {
-                    let idle_run = r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some());
+                    let idle_run = r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+                        && !kept.requests.contains(&*r.id);
                     for (part, p) in r.parts.iter().enumerate() {
                         if idle_run
                             || (idle_requests.contains(&*r.id) && p.kind == PartKind::Compaction)
@@ -2905,7 +2940,7 @@ fn t3_replay(
                 }
                 Tick::Boundary(e) => {
                     let charge = options.summaries.iter().find(|s| s.event == e.id);
-                    if e.idle_attribution == IdleAttribution::T3 {
+                    if e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id) {
                         let next = requests.iter().copied().find(|r| {
                             r.session == e.session
                                 && r.time > e.time
@@ -4299,6 +4334,10 @@ mod tests {
     }
 
     fn t3_check(scan: &Scan, now: f64) -> crate::model::T3IdleCheck {
+        t3_check_with(scan, now, &[])
+    }
+
+    fn t3_check_with(scan: &Scan, now: f64, ttls: &[&TtlCheck]) -> crate::model::T3IdleCheck {
         let catalog = prices();
         let mut scan = scan.clone();
         let summaries = compaction_charges(&mut scan, &catalog);
@@ -4307,7 +4346,7 @@ mod tests {
             catalog: &catalog,
             summaries: &summaries,
             estimates: &IndexMap::default(),
-            ttls: &[],
+            ttls,
             windows: &[],
             since: None,
             now: (now * MINUTE as f64) as Millis,
@@ -4474,7 +4513,8 @@ mod tests {
         boundary.idle_attribution = IdleAttribution::T3;
         observed.events.push(boundary);
         observed.events.sort_by_key(|e| e.time);
-        let observed = t3_check(&observed, 10.0).current_settings.scenarios;
+        let scan = observed;
+        let observed = t3_check(&scan, 10.0).current_settings.scenarios;
         let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
         // Off grows the later request back from 20k to 300k uncached tokens, and charges
         // neither the recorded nor a new summary.
@@ -4487,6 +4527,55 @@ mod tests {
             s[2].cost.total_usd.unwrap().to_f64() - s[0].cost.total_usd.unwrap().to_f64()
         };
         near(Some(relative(&observed)), relative(&baseline));
+
+        // Under a recommended 1h cache the timer would start at minute 58, after the user
+        // returned, so the recorded summary is not replayed at its 5m time.
+        let one_hour = TtlCheck {
+            base: base(Action::Change, "", Some(Ttl::OneHour)),
+            window_basis_kind: WindowBasisKind::Available,
+            bucket: Bucket::Main,
+            one_hour_savings_usd: 0.0,
+            cost: Default::default(),
+            summary_cost: Default::default(),
+            comparison_cost: Default::default(),
+            fixed_cost: zero_cost(),
+            usage_estimates: vec![],
+            cache_evidence: vec![],
+            sensitivity: TtlSensitivity {
+                cold_prefix1h_usd: None,
+                cold_prefix1h_comparison_usd: None,
+                warm_reuse_break_even_fraction: None,
+                unlinked: None,
+            },
+        };
+        let check = t3_check_with(&scan, 10.0, &[&one_hour]);
+        let status = |c: &crate::model::T3IdleComparison| {
+            c.periods
+                .iter()
+                .find(|p| &*p.request == "a")
+                .unwrap()
+                .status
+        };
+        assert_eq!(status(&check.current_settings), PeriodStatus::Eligible);
+        assert_eq!(status(&check.after_recommendations), PeriodStatus::Censored);
+        assert_eq!(check.after_recommendations.scenarios[2].summaries, 0);
+
+        // A gap that opens before T3's retained events keeps its recorded summary in every
+        // mode, so none changes the later request.
+        let mut scan = scan;
+        scan.profiles[0].t3.as_mut().unwrap().retained_since = Some(MINUTE);
+        let check = t3_check(&scan, 10.0);
+        assert!(
+            check
+                .current_settings
+                .periods
+                .iter()
+                .all(|p| &*p.request != "a")
+        );
+        for s in &check.current_settings.scenarios {
+            near(s.cost.total_usd.map(Usd::to_f64), 0.0);
+            assert_eq!(s.summaries, 0);
+        }
     }
 
     #[test]

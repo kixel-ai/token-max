@@ -86,7 +86,7 @@ const KEYS: &str = "('id','status','type','ordinal','createdAt','requestedAt','s
  'completedAt','providerThreadId','providerInstanceId','driver','runId','targetThreadId',
  'appThreadId','deletedAt','archivedAt','settledAt','settledOverride','snoozedUntil','lineage',
  'activeProviderThreadId','tokenUsage','input','firstRunOrdinal','nativeThreadRef',
- 'providerSessionId','pendingBackgroundTasks')";
+ 'providerSessionId','pendingBackgroundTasks','runAttemptId')";
 /// Each key's value as an identifier, status, time, count or flag; nested values are reduced
 /// in SQLite, so no text, tool input or task description leaves it.
 const VALUE: &str = "CASE j.key
@@ -220,6 +220,24 @@ pub(super) fn boundary(tx: &Transaction<'_>) -> Result<Boundary, Unavailable> {
     }
 }
 
+/// One thread's recorded idle-compaction runs, the same `/compact` runs the turn query marks
+/// with an idle mode, and their attempts. Only an oversized message goes unread, and it is
+/// never an idle compaction.
+pub(super) const IDLE_RUNS: &str = "SELECT r.run_id, a.attempt_id
+ FROM orchestration_v2_projection_runs r
+ JOIN orchestration_v2_projection_messages msg
+   ON msg.message_id=CASE WHEN octet_length(r.payload_json)<=?2
+     THEN json_extract(r.payload_json,'$.userMessageId') END
+   AND msg.thread_id=r.thread_id
+ LEFT JOIN orchestration_v2_projection_run_attempts a
+   ON a.thread_id=r.thread_id AND a.run_id=r.run_id
+ WHERE r.thread_id=?1 AND octet_length(msg.payload_json)<=?2
+   AND lower(trim(json_extract(msg.payload_json,'$.text')))='/compact'
+   AND COALESCE(json_extract(msg.payload_json,'$.idleCompaction'),
+     CASE WHEN json_extract(msg.payload_json,'$.createdBy')='agent'
+       AND json_extract(msg.payload_json,'$.creationSource')='server'
+     THEN 'beforeCacheExpires' END) IN ('beforeCacheExpires','onReturn')";
+
 /// A joined provider turn whose run may arm T3's idle timer.
 pub(super) struct Candidate<'a> {
     pub(super) thread: &'a str,
@@ -244,6 +262,7 @@ pub(super) fn rebuild(
     }
     let mut events = tx.prepare(&events_query())?;
     let mut projection = tx.prepare(&projection_query())?;
+    let mut idle = tx.prepare(IDLE_RUNS)?;
     let mut out = HashMap::default();
     for (thread, list) in threads {
         let mut log = Log::new(thread, boundary);
@@ -291,6 +310,27 @@ pub(super) fn rebuild(
                 snapshot.set(&key, row.get_ref(4)?);
             }
         }
+        // Every scenario removes T3's recorded idle compactions, so their runs and turns
+        // neither hold nor re-arm the timer the scenarios replay.
+        let (mut runs, mut attempts) = (HashSet::default(), HashSet::default());
+        let mut rows = idle.query(rusqlite::params![thread, VALUE_BOUND])?;
+        while let Some(row) = rows.next()? {
+            runs.extend(text_column(row, 0));
+            attempts.extend(text_column(row, 1));
+        }
+        let removed = |kind: Kind, s: &Snapshot| match kind {
+            Kind::Run => s.id.as_ref().is_some_and(|id| runs.contains(id)),
+            Kind::Turn => s.attempt.as_ref().is_some_and(|a| attempts.contains(a)),
+            _ => false,
+        };
+        for e in &mut read {
+            if let (Some(Some(kind)), Some(s)) = (e.kind, &e.snapshot)
+                && removed(kind, s)
+            {
+                e.kind = Some(None);
+            }
+        }
+        current.retain(|(kind, _, s)| !s.as_ref().is_some_and(|s| removed(*kind, s)));
         log.load(&read, current);
         out.extend(log.sweep(&read, &list, bound));
     }
@@ -363,6 +403,8 @@ struct Snapshot {
     instance: Option<String>,
     driver: Option<String>,
     run: Option<String>,
+    /// A provider turn's run attempt.
+    attempt: Option<String>,
     target: Option<String>,
     app_thread: Option<String>,
     /// Archived, deleted or settled.
@@ -405,6 +447,7 @@ impl Snapshot {
             "providerInstanceId" => self.instance = text(),
             "driver" => self.driver = text(),
             "runId" => self.run = text(),
+            "runAttemptId" => self.attempt = text(),
             "targetThreadId" => self.target = text(),
             "appThreadId" => self.app_thread = text(),
             "deletedAt" | "archivedAt" | "settledAt" => self.closed |= !null,
@@ -887,17 +930,25 @@ impl<'a> Log<'a> {
             by_run.entry(c.run).or_default().push(i);
         }
         let mut live: Vec<usize> = Vec::new();
+        let mut last = None;
         let mut i = 0;
         while i < events.len() {
             let Some(at) = events[i].at else {
-                // An event with no time cannot be placed, so nothing after it is known.
+                // An event with no time cannot be placed, so nothing after the last dated
+                // one is known.
                 self.unsupported = true;
+                if let Some(last) = last {
+                    for &t in &live {
+                        trackers[t].span(last, Err(UNSUPPORTED));
+                    }
+                }
                 i += 1;
                 continue;
             };
             if at > bound {
                 break;
             }
+            last = Some(at);
             for &t in &live {
                 if let Some(wake) = trackers[t].wake.filter(|w| *w < at) {
                     let _ = trackers[t].record(self, candidates[t].1, wake);
@@ -1436,6 +1487,65 @@ mod tests {
     }
 
     #[test]
+    fn recorded_idle_compactions_leave_the_replayed_timeline() {
+        let mut f = Fixture::new();
+        let message = |id: &str, created_by: &str| {
+            json!({"text":" /COMPACT ","createdBy":created_by,"creationSource":"server",
+                "runId":id})
+        };
+        let record = |f: &mut Fixture, id: &str, ordinal: i64, created_by: &str| {
+            let attempt = format!("{id}-attempt");
+            let payload = run(id, ordinal, json!({"userMessageId":id}));
+            f.db.execute(
+                "INSERT INTO orchestration_v2_projection_runs VALUES(?1,'th',?2,'completed',?3)",
+                rusqlite::params![id, ordinal, payload.to_string()],
+            )
+            .unwrap();
+            f.db.execute(
+                "INSERT INTO orchestration_v2_projection_messages VALUES(?1,'th',?2)",
+                rusqlite::params![id, message(id, created_by).to_string()],
+            )
+            .unwrap();
+            f.db.execute(
+                "INSERT INTO orchestration_v2_projection_run_attempts VALUES(?1,'th','pt',?2,'claude','{}')",
+                rusqlite::params![attempt, id],
+            )
+            .unwrap();
+        };
+        // T3's own `/compact` run and its smaller usage are gone from every scenario.
+        record(&mut f, "idle", 2, "agent");
+        let started = json!({"status":"running","startedAt":iso(200),"userMessageId":"idle"});
+        f.complete()
+            .event(200, "run.updated", run("idle", 2, started))
+            .event(
+                220,
+                "provider-turn.updated",
+                turn(
+                    "idle-turn",
+                    json!({"runAttemptId":"idle-attempt","tokenUsage":{"updatedAt":iso(220)}}),
+                ),
+            )
+            .event(
+                230,
+                "run.updated",
+                run(
+                    "idle",
+                    2,
+                    json!({"status":"completed","completedAt":iso(230)}),
+                ),
+            );
+        assert_eq!(f.run1(), expect(&[(10, Ok(true))], &[(10, Ok(true))]));
+        // A `/compact` the user typed is a real later run.
+        record(&mut f, "typed", 3, "user");
+        let started = json!({"status":"running","startedAt":iso(300),"userMessageId":"typed"});
+        f.event(300, "run.updated", run("typed", 3, started));
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Ok(true))], &[(10, Ok(true)), (300, Ok(false))])
+        );
+    }
+
+    #[test]
     fn events_after_the_native_snapshot_are_not_read() {
         let mut f = Fixture::new();
         f.complete()
@@ -1541,20 +1651,19 @@ mod tests {
         // So does an event type this adapter does not know, or one it cannot place in time.
         for (occurred, event_type, from) in [
             (iso(20), "thread.reticulated", 20),
-            ("never".into(), "thread.visited", 30),
+            // It happened some time after the completion before it.
+            ("never".into(), "thread.visited", 10),
         ] {
             let mut f = Fixture::new();
             f.complete()
                 .raw(&occurred, event_type, &thread(json!({})).to_string())
                 .event(30, "thread.visited", thread(json!({})));
-            assert_eq!(
-                f.run1(),
-                expect(
-                    &[(10, Ok(true))],
-                    &[(10, Ok(true)), (from, Err(UNSUPPORTED))]
-                ),
-                "{event_type}"
-            );
+            let spans: &[_] = if from == 10 {
+                &[(10, Err(UNSUPPORTED))]
+            } else {
+                &[(10, Ok(true)), (from, Err(UNSUPPORTED))]
+            };
+            assert_eq!(f.run1(), expect(&[(10, Ok(true))], spans), "{event_type}");
         }
     }
 

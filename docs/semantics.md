@@ -47,6 +47,15 @@ top-level counters equalled their nonempty message-iteration counters. That
 sample missed valid empty lists and does not establish a complete host audit.
 All committed fixtures are synthetic.
 
+When a subagent compacts, Claude Code (seen in 2.1.322) copies its last assistant
+records into the continuing transcript with the same message ID and `requestRef`,
+zeroing the four top-level counters but keeping `output_tokens_details`,
+`cache_creation` and `iterations`. Usage whose four counters are all zero while a
+thinking or cache-lifetime count is nonzero is read as unknown, not zero: the
+original record supplies the counts when it is on the host, and the request stays
+unpriced when it is not. Any other disagreement between a total and its subsets
+still fails the scan.
+
 Codex `token_usage_record.usage` is individual response usage, deduplicated by
 `response_id`. `turn_token_usage` and `thread_token_usage` are cumulative.
 Overlapping `event_msg.token_count` records are removed by matching cumulative

@@ -161,6 +161,15 @@ fn usage_of(u: &Map<String, Value>, harness: Harness) -> Result<Usage, ScanError
         ),
         output_details.get("thinking_tokens"),
     ))?;
+    // Claude Code copies a compacted subagent's tail into the next transcript with the top-level
+    // counters zeroed but their breakdowns kept; the original record holds the real counts.
+    let zeroed = [input, read, write, output].iter().all(|c| *c == Some(0));
+    let detailed = [reasoning, write5m, write1h]
+        .iter()
+        .any(|c| c.is_some_and(|c| c > 0));
+    if claude && zeroed && detailed {
+        return Ok(Usage::default());
+    }
     if input.is_some_and(|input| read.unwrap_or(0) + write.unwrap_or(0) > input) {
         return Err(ScanError::new("cache subsets exceed total input"));
     }
@@ -2950,6 +2959,43 @@ mod tests {
         assert_eq!(part.usage.write5m, Some(1000));
         assert_eq!(part.usage.output, Some(10));
         assert_eq!(part.geo.as_deref(), Some("global"));
+    }
+
+    #[test]
+    fn a_zeroed_carried_copy_keeps_its_original_usage_and_is_unpriced_alone() {
+        let w = Workspace::new();
+        let dir = w.claude.join("projects/project/carried-session/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        w.fixture(dir.join("agent-copy.jsonl"), "claude-carried-copy.jsonl");
+        let alone = scan(&options(&w)).unwrap();
+        assert_eq!(alone.requests.len(), 1);
+        assert_eq!(alone.requests[0].parts[0].usage, Usage::default());
+        // Either file may be read first.
+        for name in ["agent-a.jsonl", "agent-z.jsonl"] {
+            w.fixture(dir.join(name), "claude-carried-original.jsonl");
+            let result = scan(&options(&w)).unwrap();
+            assert_eq!(result.requests.len(), 1);
+            let usage = result.requests[0].parts[0].usage;
+            assert_eq!((usage.output, usage.write1h), (Some(611), Some(2832)));
+            std::fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn claude_usage_zeroed_only_in_part_still_fails() {
+        let claude = |v: Value| usage(&v, Harness::Claude).map_err(|e| e.message);
+        let zero = json!({
+            "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+        });
+        assert_eq!(claude(zero.clone()).unwrap().output, Some(0));
+        let mut thinking = zero;
+        thinking["output_tokens_details"] = json!({ "thinking_tokens": 5 });
+        thinking["input_tokens"] = json!(1);
+        assert_eq!(
+            claude(thinking),
+            Err("reasoning subset exceeds output".into())
+        );
     }
 
     #[test]

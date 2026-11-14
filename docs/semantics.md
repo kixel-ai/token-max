@@ -1228,13 +1228,18 @@ Sources, checked 2026-11-11: the Claude Code 2.1.322 binary and
 ## Fable weekly use
 
 `Report.fable` gives each Claude profile without a cloud provider one entry:
-its Fable requests, the requests that recorded no model, and the spend of each
-span. Spans are 7 days, counted back from the report's time to the window's
-start (the analysis bound, else `--since`, else the earliest request read; earlier requests are left out), so the oldest may be shorter;
-a request on a span's boundary belongs to the later span. A request is Fable
-when its recorded model ID contains `fable`, and it is priced whole with every
-part, like the historical totals. A request shared by several profiles counts
-in each, since each line describes one profile's sessions.
+its Fable requests, the requests that recorded no model, the Fable requests
+it shares with another such profile, and the spend of each span. Spans are 7
+days, counted back from the report's time to the window's start (the analysis
+bound, else `--since`, else the earliest request read; earlier requests, and
+any after the report's time, are left out), so the oldest may be shorter; a
+request on a span's boundary belongs to the later span. Spans older than the
+profile's first Fable request are dropped, so a long history adds no empty
+weeks. A request is Fable when its recorded model ID contains `fable`, and it
+is priced whole with every part, like the historical totals. A request shared
+by several profiles, as when two profiles read the same transcripts, counts in
+each, since each line describes one profile's sessions; the line says how many
+were shared, since whose they were is unknown.
 
 The line is Official evidence with no verdict. Anthropic documents the cap as
 a share of a weekly limit it publishes in neither tokens nor dollars, and says
@@ -1242,4 +1247,7 @@ Fable draws that limit faster than other models without a rate, so neither the
 share of the cap used nor whether it was reached can be derived. Requests made
 after the cap, paid with usage credits, are not marked in transcripts and stay
 in the figures. token-max never reads which plan a profile is signed in to, so
-the rule is stated for each plan.
+the rule is an `Official:` sentence stated for each plan, as
+[Plans and API prices](reference.md#plans-and-api-prices) describes.
+`--details` gives each profile's spans with their unknown costs, the caveats
+and the sources.

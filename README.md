@@ -135,7 +135,7 @@ No prompt, reply, tool argument or tool output text is kept or printed.
 | Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
 | Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model, beside Anthropic's model guide |
-| Fable weekly use | Each week's Fable spend beside the plan rule that caps Fable at half the weekly limit |
+| Fable weekly use | Each week's Fable spend beside Anthropic's rule that, on Max and Ultra plans, Fable can use up to half the weekly limit |
 
 ## Reading the report
 

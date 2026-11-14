@@ -14,9 +14,9 @@ use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EstimateEvidence,
-    Evidence, FableUse, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource, PeriodStatus,
-    Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck,
-    T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
+    Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource,
+    PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost,
+    T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{Sum, TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -1057,6 +1057,28 @@ fn details(report: &Report, out: &mut Out<'_>) {
         }
     }
 
+    if !report.fable.is_empty() {
+        out.section("Fable weekly use");
+        for u in &report.fable {
+            out.blank();
+            out.line(&out.profile_name(&u.profile), 0, BOLD);
+            out.field("Requests", &requests_of(u.requests, "Fable request"));
+            for w in &u.weeks {
+                out.cost(&fable_span(w), &w.cost);
+            }
+            if u.requests > 0 {
+                out.field("Coverage", FABLE_PARTIAL);
+            }
+            let caveats = fable_caveats(u);
+            if !caveats.is_empty() {
+                out.field("Attribution", caveats.trim_start());
+            }
+            out.field("Official", FABLE_RULE);
+            out.field("Model setting", "/model, or model in settings.json");
+            out.field("Sources", &format!("{CLAUDE_PRICING} {FABLE_PLANS}"));
+        }
+    }
+
     out.section("Recorded usage and coverage");
     out.field(
         "Attribution",
@@ -1329,22 +1351,63 @@ const FABLE_PLANS: &str =
 /// The settings that choose Fable, ending its line.
 const FABLE_SETTING: &str = "Model setting: /model, or model in settings.json.";
 
+/// Anthropic's Fable rule for each plan, stated conditionally since the plan is never read.
+const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team standard seat, they run on usage credits.";
+
+/// Why a profile's Fable figures fall short of what the plan's cap counts.
+const FABLE_PARTIAL: &str = "These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown.";
+
+/// How many requests, with the noun in the right number.
+fn requests_of(n: u64, noun: &str) -> String {
+    format!("{} {noun}{}", count(n), if n == 1 { "" } else { "s" })
+}
+
+/// Caveats on whose a profile's Fable requests were and which model ran, each a sentence.
+fn fable_caveats(u: &FableUse) -> String {
+    let mut text = String::new();
+    if u.shared > 0 {
+        let _ = write!(
+            text,
+            " {} also attributed to another profile that reads the same transcripts, so whose they were is unknown.",
+            match u.shared {
+                1 => "1 of them is".into(),
+                n => format!("{} of them are", count(n)),
+            }
+        );
+    }
+    if u.unrecorded > 0 {
+        let _ = write!(
+            text,
+            " {} recorded no model and may have run on Fable.",
+            requests_of(u.unrecorded, "request")
+        );
+    }
+    text
+}
+
+/// One span's label, such as `to 2026-11-14` or `3 days to 2026-11-07`.
+fn fable_span(w: &FableWeek) -> String {
+    let days = js_round((w.end - w.start) as f64 / DAY).max(1.0);
+    let span = if days >= 7.0 {
+        String::new()
+    } else {
+        format!(
+            "{} day{} ",
+            js_number(days),
+            if days == 1.0 { "" } else { "s" }
+        )
+    };
+    format!("{span}to {}", date(&iso(w.end)))
+}
+
 /// A profile's weekly Fable spend beside the plan rule, with no share of a limit and no verdict.
 fn fable_row(u: &FableUse) -> Row {
     let mut row = Row::new(Claim::Official, Mark::Info, "Fable weekly use".into());
     row.sources = vec![CLAUDE_PRICING, FABLE_PLANS];
-    let rule = "On Max, Ultra and Team premium seats, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro and Team standard seats, they run on usage credits. No limit is published in tokens or dollars, so no share of it is shown.";
-    let unrecorded = match u.unrecorded {
-        0 => String::new(),
-        n => format!(
-            " {} request{} recorded no model and may have run on Fable.",
-            count(n),
-            if n == 1 { "" } else { "s" }
-        ),
-    };
+    let caveats = fable_caveats(u);
+    let official = format!("Official: {FABLE_RULE} {FABLE_SETTING}");
     if u.requests == 0 {
-        row.evidence =
-            format!("No Fable requests recorded in the window. {rule}{unrecorded} {FABLE_SETTING}");
+        row.evidence = format!("No Fable requests recorded in the window.{caveats} {official}");
         return row;
     }
     let mut total = Sum::new();
@@ -1353,28 +1416,13 @@ fn fable_row(u: &FableUse) -> Row {
         .iter()
         .map(|w| {
             total.add(&w.cost);
-            let days = js_round((w.end - w.start) as f64 / DAY).max(1.0);
-            let span = if days >= 7.0 {
-                String::new()
-            } else {
-                format!(
-                    "{} day{} ",
-                    js_number(days),
-                    if days == 1.0 { "" } else { "s" }
-                )
-            };
-            format!(
-                "{} ({span}to {})",
-                scaled(&w.cost, &about),
-                date(&iso(w.end))
-            )
+            format!("{} ({})", scaled(&w.cost, &about), fable_span(w))
         })
         .collect();
     row.amount = Some(("costs", scaled(&total.cost(), &about)));
     row.evidence = format!(
-        "{} Fable request{} at API prices, per 7 days back from this report: {}. {rule} These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded.{unrecorded} {FABLE_SETTING}",
-        count(u.requests),
-        if u.requests == 1 { "" } else { "s" },
+        "{} at API prices, per 7 days back from this report: {}. {FABLE_PARTIAL}{caveats} {official}",
+        requests_of(u.requests, "Fable request"),
         weeks.join(", ")
     );
     row
@@ -6152,6 +6200,7 @@ mod tests {
             profile: "profile".into(),
             requests: 5,
             unrecorded: 2,
+            shared: 1,
             weeks: vec![
                 FableWeek {
                     start: end - 7 * day,
@@ -6185,19 +6234,42 @@ mod tests {
             "no share of it is shown",
             "they cover only this profile's recorded sessions",
             "paid with usage credits after the cap was reached",
+            "1 of them is also attributed to another profile that reads the same transcripts, so whose they were is unknown.",
             "2 requests recorded no model and may have run on Fable.",
-            "Model setting: /model",
         ] {
             assert!(row.evidence.contains(part), "{part} in {}", row.evidence);
         }
+        // The plan rule is an Official sentence before the setting, which ends the line.
+        assert!(
+            row.evidence.ends_with(
+                " Official: on a Claude Max or Ultra plan or a Team premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team standard seat, they run on usage credits. Model setting: /model, or model in settings.json."
+            ),
+            "{}",
+            row.evidence
+        );
         assert!(summary.contains(FABLE_PLANS), "{summary}");
+        // --details keeps each span's cost with its unknowns, the caveats and the sources.
+        let details = text(&report, None, true);
+        for part in [
+            "Fable weekly use",
+            "to 2026-12-01",
+            "3 days to 2026-11-24",
+            "they cover only this profile's recorded sessions",
+            "1 of them is also attributed to another profile",
+            FABLE_RULE,
+            FABLE_PLANS,
+        ] {
+            assert!(details.contains(part), "{part} in {details}");
+        }
         report.fable[0].requests = 0;
         report.fable[0].unrecorded = 0;
+        report.fable[0].shared = 0;
+        report.fable[0].weeks.clear();
         let row = report_line(&text(&report, None, false), "Fable weekly use");
         assert_eq!(row.head, "Fable weekly use");
         assert!(
             row.evidence
-                .starts_with("No Fable requests recorded in the window. On Max, Ultra"),
+                .starts_with("No Fable requests recorded in the window. Official: on a Claude Max"),
             "{}",
             row.evidence
         );

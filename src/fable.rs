@@ -29,15 +29,24 @@ pub fn fable_use(
         spans.push((start.max(end - WEEK), end));
         end -= WEEK;
     }
-    scan.profiles
+    // Bedrock, Vertex and Foundry bill per token; no plan limit applies there.
+    let eligible: Vec<&str> = scan
+        .profiles
         .iter()
-        // Bedrock, Vertex and Foundry bill per token; no plan limit applies there.
         .filter(|p| p.harness == Harness::Claude && p.provider.is_none())
-        .map(|p| {
+        .map(|p| p.id.as_str())
+        .collect();
+    eligible
+        .iter()
+        .map(|&id| {
             let mut sums: Vec<(u64, Sum)> = spans.iter().map(|_| (0, Sum::new())).collect();
             let mut unrecorded = 0;
+            let mut shared = 0;
             for r in scan.requests.iter().filter(|r| {
-                r.harness == Harness::Claude && r.time >= start && r.profiles.contains(&p.id)
+                r.harness == Harness::Claude
+                    && r.time >= start
+                    && r.time <= now
+                    && r.profiles.iter().any(|p| p == id)
             }) {
                 match r.model.as_deref() {
                     None => unrecorded += 1,
@@ -50,11 +59,17 @@ pub fn fable_use(
                             sums[i].0 += 1;
                             sums[i].1.add(&price_request(catalog, r));
                         }
+                        if r.profiles
+                            .iter()
+                            .any(|p| p != id && eligible.contains(&p.as_str()))
+                        {
+                            shared += 1;
+                        }
                     }
                     Some(_) => {}
                 }
             }
-            let weeks: Vec<FableWeek> = spans
+            let mut weeks: Vec<FableWeek> = spans
                 .iter()
                 .zip(sums)
                 .map(|(&(start, end), (requests, sum))| FableWeek {
@@ -64,10 +79,15 @@ pub fn fable_use(
                     cost: sum.cost(),
                 })
                 .collect();
+            // Weeks before the first Fable request say nothing, and a long history has many.
+            while weeks.last().is_some_and(|w| w.requests == 0) {
+                weeks.pop();
+            }
             FableUse {
-                profile: p.id.clone(),
+                profile: id.to_string(),
                 requests: weeks.iter().map(|w| w.requests).sum(),
                 unrecorded,
+                shared,
                 weeks,
             }
         })
@@ -164,8 +184,53 @@ mod tests {
             .iter()
             .map(|w| (w.start, w.end, w.requests))
             .collect();
-        assert_eq!(spans, [(13 * DAY, 20 * DAY, 1), (12 * DAY, 13 * DAY, 0)]);
+        // The oldest span, with no Fable request, is left out.
+        assert_eq!(spans, [(13 * DAY, 20 * DAY, 1)]);
         assert_eq!((later[0].requests, later[0].unrecorded), (1, 0));
+    }
+
+    #[test]
+    fn weeks_start_at_the_first_fable_request_and_skip_later_requests() {
+        let now = 100 * DAY;
+        let fable = Some("claude-fable-5-2");
+        let requests = vec![
+            // Opus long before Fable sets the window's start, but adds no weeks.
+            request(DAY, Some("claude-opus-5-5"), "profile"),
+            request(now - 9 * DAY, fable, "profile"),
+            // After the report's time, as from a skewed clock: never counted.
+            request(now + DAY, fable, "profile"),
+            request(now + DAY, None, "profile"),
+        ];
+        let uses = fable_use(&scan(requests, None), &prices(), None, now);
+        let spans: Vec<(Millis, Millis, u64)> = uses[0]
+            .weeks
+            .iter()
+            .map(|w| (w.start, w.end, w.requests))
+            .collect();
+        assert_eq!(
+            spans,
+            [(now - 7 * DAY, now, 0), (now - 14 * DAY, now - 7 * DAY, 1)]
+        );
+        assert_eq!((uses[0].requests, uses[0].unrecorded), (1, 0));
+    }
+
+    #[test]
+    fn requests_shared_with_another_eligible_profile_are_counted_as_shared() {
+        let now = 10 * DAY;
+        let fable = Some("claude-fable-5-2");
+        let mut both = request(DAY, fable, "profile");
+        both.profiles = vec!["profile".into(), "second".into()].into();
+        let mut cloud = request(2 * DAY, fable, "profile");
+        cloud.profiles = vec!["profile".into(), "cloud".into()].into();
+        let mut s = scan(vec![both, cloud, request(3 * DAY, fable, "profile")], None);
+        s.profiles.push(make_profile("second", "/synthetic/second"));
+        let uses = fable_use(&s, &prices(), None, now);
+        let counts: Vec<(&str, u64, u64)> = uses
+            .iter()
+            .map(|u| (u.profile.as_str(), u.requests, u.shared))
+            .collect();
+        // A cloud profile has no plan limit, so sharing with it leaves the owner known.
+        assert_eq!(counts, [("profile", 3, 1), ("second", 1, 1)]);
     }
 
     #[test]

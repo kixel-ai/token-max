@@ -2726,7 +2726,10 @@ pub struct FableUse {
     pub requests: u64,
     /// Requests whose model was not recorded, which may have run on Fable.
     pub unrecorded: u64,
-    /// The spans, most recent first; the oldest may be shorter than 7 days.
+    /// Fable requests also attributed to another eligible profile, so whose they were is unknown.
+    pub shared: u64,
+    /// The spans, most recent first, from the first with a Fable request; the oldest may be
+    /// shorter than 7 days.
     pub weeks: Vec<FableWeek>,
 }
 

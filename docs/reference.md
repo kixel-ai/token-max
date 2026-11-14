@@ -130,6 +130,7 @@ section ends with the source:
 | Claude fast mode | A Claude plan [pays fast mode only from usage credits](https://code.claude.com/docs/en/fast-mode#requirements), at its API rates, even with plan usage left. |
 | Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is 2x for Fast on GPT-6 and GPT-5.6 and 6x for Ultrafast, so included usage can draw faster than it shows. |
 | Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
+| Fable weekly use | Anthropic [caps Fable models](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan) at up to half the weekly usage limit on Max, Ultra and Team premium seats, drawing it faster than other models, and runs them on usage credits on Pro and Team standard seats. The line shows weekly API-price spend and no share of the cap, as [Fable weekly use](#fable-weekly-use) explains. |
 | Codex compaction window and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
 
 Every other line's dollars are API prices with no documented plan rule beside
@@ -678,10 +679,13 @@ The Official section gives every Claude profile that signs in to Anthropic its
 own Fable line: what its Fable requests cost at API prices in each 7-day span
 of the window, counted back from the report, beside the plan rule Anthropic
 documents on its [pricing](https://claude.com/pricing) page and in
-[Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
-On Max, Ultra and Team premium seats, Fable models can use up to half the
-weekly usage limit and use it faster than other models; on Pro and Team
-standard seats they run on usage credits.
+[Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan),
+given as an `Official:` sentence before the model setting, as
+[Plans and API prices](#plans-and-api-prices) describes: on a Claude Max or
+Ultra plan or a Team premium seat, Fable models can use up to half the weekly
+usage limit and use it faster than other models; on Pro or a Team standard
+seat they run on usage credits. Weeks before the profile's first Fable request
+are left out.
 
 No plan limit is published in tokens or dollars, so the line shows no share of
 the limit and gives no verdict: its dot is dim, and it never changes the exit
@@ -689,7 +693,9 @@ code or offers a change. The figures are partial evidence. The cap counts Fable
 use on every Claude surface, such as claude.ai and Claude Desktop, while the
 line covers only this profile's recorded sessions, and it may include requests
 paid with usage credits after the cap was reached. The plan's weekly reset time
-is not recorded, so spans end at the report rather than at a reset. A profile
+is not recorded, so spans end at the report rather than at a reset. When
+another profile reads the same transcripts, the line says how many Fable
+requests it shares, since whose they were is unknown. A profile
 with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
 `CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
 Change the model with `/model` or the `model` setting.

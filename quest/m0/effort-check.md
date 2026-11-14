@@ -14,10 +14,16 @@ files (the per-model level under `modelSettings`, then `effortLevel`, with
 the precedence across files the docs give, and a user-file `effortLevel`
 ignored on Opus 5.5 and later models), then the model's own default. Settings
 never accept `max`, so a `max` default comes only from the environment
-variable. A level the model does not support runs at the highest supported
-level below it, such as `xhigh` running as `high` on Opus 4.6 and Sonnet 4.6;
-the line shows that effective level. Codex's default is
-`model_reasoning_effort`.
+variable, and setting it to `auto` or `unset` sends no level at all: the
+line then says the API default applies, rather than naming a level. A level
+the model does not support runs at the highest supported level below it,
+such as `xhigh` running as `high` on Opus 4.6 and Sonnet 4.6, and a
+`maxEffortLevel` cap in managed settings lowers it further; the line shows
+that effective level, and says when an Enterprise per-role cap, which no
+local file records, could lower it again. Codex's default is
+`model_reasoning_effort`, or when that is unset the model's default from
+Codex's model catalog, reported as unknown when the catalog cannot be
+read.
 
 - A `max` default is a change: doctor offers to replace it with `xhigh`, or
   `high` on a model without `xhigh`, saying which, and the report exits

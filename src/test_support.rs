@@ -247,6 +247,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         idle: None,
         speed: None,
         bash: None,
+        effort: None,
         speed_directories: None,
         idle_directories: None,
         background: vec![],

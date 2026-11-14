@@ -10,6 +10,7 @@ pub mod context;
 pub mod controls;
 pub mod discovery;
 pub mod doctor;
+pub mod effort;
 pub mod estimates;
 pub mod exposure;
 pub mod fast;

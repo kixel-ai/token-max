@@ -290,6 +290,7 @@ fn check_profile(result: &CheckResult) -> &str {
         CheckResult::BashCap(c) => &c.base.profile,
         CheckResult::Keepalive(c) => &c.base.profile,
         CheckResult::Memory(c) => &c.base.profile,
+        CheckResult::Effort(c) => &c.base.profile,
     }
 }
 
@@ -554,6 +555,49 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
             )
         }
         CheckResult::Keepalive(k) => unknown(&k.base.owner),
+        CheckResult::Effort(e) => {
+            let Some(level) = e.base.recommended.as_deref() else {
+                return unknown(&e.base.owner);
+            };
+            let owner = &e.base.owner;
+            let step = format!("set {owner} to {level}");
+            if profile.harness == Harness::Codex {
+                let key = "model_reasoning_effort";
+                return owned(
+                    owner,
+                    profile,
+                    vec![(key.into(), vec![Edit::set(key, level)])],
+                    step,
+                );
+            }
+            let variable = "CLAUDE_CODE_EFFORT_LEVEL";
+            let mut candidates = vec![(format!("env.{variable}"), vec![env(variable, level)])];
+            // A level in the user's file is saved per model, which outranks its top-level
+            // level there; model IDs hold no dots.
+            if let Some(model) = &e.control.model {
+                let edit = vec![Edit {
+                    path: vec!["modelSettings".into(), model.clone(), "effortLevel".into()],
+                    value: level.into(),
+                    append: false,
+                }];
+                candidates.push(("effortLevel".into(), edit.clone()));
+                candidates.push((format!("modelSettings.{model}.effortLevel"), edit));
+            }
+            let row = owner
+                .strip_prefix(&format!("{file}:modelSettings."))
+                .and_then(|rest| rest.strip_suffix(".effortLevel"));
+            if let Some(key) = row {
+                candidates.push((
+                    format!("modelSettings.{key}.effortLevel"),
+                    vec![Edit {
+                        path: vec!["modelSettings".into(), key.into(), "effortLevel".into()],
+                        value: level.into(),
+                        append: false,
+                    }],
+                ));
+            }
+            owned(owner, profile, candidates, step)
+        }
     }
 }
 

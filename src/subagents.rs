@@ -1212,6 +1212,7 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             profiles,
             kind: kind.to_string(),
             native,
+            fork,
             runs: runs.len() as u64,
             requests: requests.len() as u64,
             priced,

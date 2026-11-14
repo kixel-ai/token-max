@@ -52,7 +52,7 @@ model guide and Theo Browne's
 - Scope? ✅ the main session's default effort (rejected: none). This amends
   m0's 2026-11-06 exclusion of model and effort selection for the default
   effort only; recommending a model stays out, and the
-  [subagent lines](/quest/m0/subagent-guidance.md) stay evidence.
+  [subagent lines](/docs/reference.md#subagent-models) stay evidence.
 - `max`? ✅ a change to `xhigh`. Anthropic's guide never recommends it, and
   Theo finds `max` forces long thinking on simple tasks and Fable 5.2
   scores worse at `max` than at `xhigh`.
@@ -75,7 +75,6 @@ Agent's choices, for the implementer to revisit:
   the user file, listed to change by hand. Check the resolution order and
   the supported-levels table against the docs again when implementing.
 
-## Related
-
-- [Subscription framing](/quest/m0/subscriptions.md) - the wording this
-  line's evidence follows
+Wording: follow the subscription framing in `docs/reference.md`'s "Plans and
+API prices": dollars are API prices, and a provider's rule for a plan is an
+`Official:` sentence before the setting, with its source.

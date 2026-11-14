@@ -86,7 +86,10 @@ GPT-5.6 and later GPT families, recorded writes replace ordinary input at total
 rates of 1.25x for 30m and 2.5x for Responses-only 12h. Missing write counters stay
 unknown. An unsplit recorded write count uses an explicit default-30m assumption;
 12h attribution is unknown, not derived from the catalog's single write field.
-Earlier GPT models have no additional write charge. The
+Earlier GPT models have no additional write charge. ChatGPT credits charge no
+separate cache write ([Codex pricing](https://learn.chatgpt.com/docs/pricing),
+checked 2026-11-14); replays keep the API write rate, and Codex compaction and
+keepalive lines say so. The
 [OpenAI caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
 checked 2026-11-07, documents the subset and lifetime rules. For catalog entries
 with the legacy `context_over_200k` field, supported GPT-5.4/5.5/5.6 and GPT-6 models
@@ -208,9 +211,10 @@ excluded or assigned observed zero billing.
 
 Current TTL resolution follows force-5m, bucket environment, bucket setting,
 enable-1h, then defaults. Shell overrides apply only to the active config root;
-each profile's settings environment is read separately. Main subscription billing
-within plan versus credits is not inferred from credential files, so its unset
-default can be unknown. An API key in the environment does not prove that Claude
+each profile's settings environment is read separately. Whether a main request
+is within a Claude plan's included usage or paid by usage credits is not
+inferred from credential files, so its unset default is unknown, and the line
+names both defaults. An API key in the environment does not prove that Claude
 Code accepted API billing. User settings and the platform's system managed JSON
 file retain the supplying file as owner, including settings-provided environment
 variables. Other managed delivery mechanisms are not inspected; this is a
@@ -369,7 +373,7 @@ applicable TTL/window changes. Each owning idle toggle gets an aggregate delta,
 on cost minus off cost, across request gaps and final observation periods.
 Negative favors on, positive favors off, and exact zero retains the current
 value. Only the latter configuration decides the toggle. Independent savings
-are not additive. API-price equivalents do not compare subscription bills.
+are not additive. Dollars are API-price equivalents, not invoices.
 
 Current idle controls resolve user, project, local and managed settings, with
 the active profile's environment applied to environment controls. Project files
@@ -1033,8 +1037,12 @@ The [OpenAI API price table](https://developers.openai.com/api/docs/pricing),
 checked 2026-11-07, gives supported GPT-6 and GPT-5.6 fast rates at 2x standard,
 GPT-5.5 at 2.5x and GPT-5.4 at 2x below/equal 272K input. Verified ultrafast rates
 for GPT-6 Astra and GPT-6.1 Sol are 6x across their context tiers. Older or
-unsupported combinations remain unknown. These API rates are unrelated to
-subscription/credit multipliers. The existing same-model pricing path preserves
+unsupported combinations remain unknown. These API rates differ from
+a ChatGPT plan's multipliers, Fast at 2.5x and Ultrafast at 8x standard against
+included usage and 2x and 6x on credits
+([Codex pricing](https://learn.chatgpt.com/docs/pricing), checked 2026-11-14),
+which the report states beside the priced API premium. The existing same-model
+pricing path preserves
 reads, writes, write lifetimes, context tiers and Claude geography, with unchanged
 server fees excluded from the difference. Unverified usage and missing prices
 cannot supply a complete premium. Claude's fast and standard caches are separate;
@@ -1140,7 +1148,9 @@ recorded tokens on the provider's cheapest current model. The lines are
 evidence only. They never recommend a model, offer no change
 and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
-its own requests, where transcripts cannot attribute it. When runs in
+its own requests, where transcripts cannot attribute it. Each Claude type's
+Official line, citing Anthropic's model guide (checked 2026-11-14), is equally
+verdict-free. When runs in
 different projects are set by different files, the model and effort settings
 name each.
 

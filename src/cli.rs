@@ -24,7 +24,8 @@ use crate::ssh::{self, Reply};
 use crate::terminal::{WrapOptions, wrap_text};
 use crate::wire::{Format, Job, Request};
 
-const HELP: &str = "token-max: cheaper agent settings from local usage
+const HELP: &str =
+    "token-max: agent settings that use less of a Claude or ChatGPT plan, measured at API prices
 
 Usage: token-max <command> [options]
 
@@ -38,7 +39,7 @@ Commands:
 Run token-max <command> --help for a command's options.
 ";
 
-const DOCTOR_HELP: &str = "token-max doctor: cheaper agent settings from local usage
+const DOCTOR_HELP: &str = "token-max doctor: agent settings that use less of a Claude or ChatGPT plan, measured at API prices
 
 Usage: token-max doctor [options]
 
@@ -78,7 +79,10 @@ Examples:
   token-max doctor --offline --plain
   token-max doctor --ssh devbox --ssh user@laptop --include-local
 
-Public API-price estimates, not subscription bills. Never retains or prints prompt, reply
+Dollars are public API prices, not an invoice: the closest public measure of what a request
+uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. A
+line notes where a provider documents that a plan counts something differently, such as fast
+mode. Which plan a profile is signed in to is never read. Never retains or prints prompt, reply
 or component text. Color is automatic on terminals; NO_COLOR disables it. Progress goes to
 stderr only on interactive terminals, never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
@@ -127,7 +131,7 @@ destination exports its own sessions with this host's prices, and only its sessi
 cross SSH. A session found on several hosts is printed once per host. Any failed host fails
 the whole run.
 
-Public API-price estimates, not subscription bills. Reads transcripts and Git config only
+Costs are public API prices, not an invoice. Reads transcripts and Git config only
 and prints no prompt or reply text. Errors go to stderr as JSON.
 Exit 0: printed. Exit 2: scan, pricing, argument or cancellation failure.
 ";

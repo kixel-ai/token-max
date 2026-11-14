@@ -2602,6 +2602,8 @@ pub struct SubagentCost {
     pub kind: String,
     /// Whether `kind` is a Codex subagent source, such as `review`, rather than an agent role.
     pub native: bool,
+    /// Whether every run was a Claude fork, which always runs on the main model.
+    pub fork: bool,
     /// Subagent transcripts of this type in the window.
     pub runs: u64,
     pub requests: u64,

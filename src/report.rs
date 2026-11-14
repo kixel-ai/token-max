@@ -455,7 +455,11 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
             "A Claude Enterprise per-role cap, which no local file records, could lower it.".into(),
         );
     }
-    parts.push(format!("Set in {}.", out.home(&e.base.owner)));
+    let owners: Vec<String> = std::iter::once(&e.base.owner)
+        .chain(&e.also)
+        .map(|o| out.home(o))
+        .collect();
+    parts.push(format!("Set in {}.", owners.join(" and ")));
     parts.join(" ")
 }
 
@@ -5478,29 +5482,48 @@ mod tests {
         );
         assert_eq!(fix.unwrap().how, set(&["maxEffortLevel"], "medium"));
         // Every cap in the way, and a default below the target, is changed by hand together.
-        let managed = "/etc/claude-code/managed-settings.json:maxEffortLevel";
-        let (_, fix) = line(
+        // Model-specific owners are never read as one model key.
+        let user_cap = format!("{file}:modelSettings.claude-opus-5-5.maxEffortLevel");
+        let managed =
+            "/etc/claude-code/managed-settings.json:modelSettings.claude-opus-5-5.maxEffortLevel";
+        let (row, fix) = line(
             Harness::Claude,
             capped(vec![
-                cap("low", format!("{file}:maxEffortLevel")),
+                cap("low", user_cap.clone()),
                 cap("low", managed.into()),
             ]),
         );
+        assert!(
+            row.evidence
+                .ends_with(&format!("Set in {user_cap} and {managed}.")),
+            "{}",
+            row.evidence
+        );
         match fix.unwrap().how {
-            How::Manual { step, .. } => assert!(step.contains(managed), "{step}"),
+            How::Manual { step, reason } => {
+                assert_eq!(step, format!("set {user_cap} and {managed} to medium"));
+                assert_eq!(
+                    reason,
+                    "2 settings keep it below medium, so they change together"
+                );
+            }
             how => panic!("expected a step by hand, got {how:?}"),
         }
         let (_, fix) = line(
             Harness::Claude,
             EffortControl {
                 level: Some("low".into()),
-                ..capped(vec![cap("low", format!("{file}:maxEffortLevel"))])
+                owner: format!("{file}:modelSettings.claude-opus-5-5.effortLevel"),
+                ..capped(vec![cap("low", user_cap.clone())])
             },
         );
         match fix.unwrap().how {
-            How::Manual { step, .. } => {
-                assert!(step.contains("effortLevel and"), "{step}")
-            }
+            How::Manual { step, .. } => assert_eq!(
+                step,
+                format!(
+                    "set {file}:modelSettings.claude-opus-5-5.effortLevel and {user_cap} to medium"
+                )
+            ),
             how => panic!("expected a step by hand, got {how:?}"),
         }
 

@@ -573,10 +573,12 @@ fn check(input: &EffortInput<'_>, profile: &Profile, control: &EffortControl) ->
                 .map(|c| c.owner.as_str()),
         );
     }
-    let owner = if owners.is_empty() {
-        control.owner.clone()
-    } else {
-        owners.join(" and ")
+    let (owner, also) = match owners.split_first() {
+        None => (control.owner.clone(), vec![]),
+        Some((first, rest)) => (
+            first.to_string(),
+            rest.iter().map(|o| o.to_string()).collect(),
+        ),
     };
     // Unknown stays advisory without a value; a known level other than max or low has no verdict.
     let action = if control.unresolved.is_some() {
@@ -628,6 +630,7 @@ fn check(input: &EffortInput<'_>, profile: &Profile, control: &EffortControl) ->
         control: control.clone(),
         enterprise,
         runs,
+        also,
     }
 }
 

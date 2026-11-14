@@ -1636,6 +1636,9 @@ pub struct EffortCheck {
     pub enterprise: bool,
     /// Main-session requests by model and recorded effort, most first.
     pub runs: Vec<EffortRun>,
+    /// Settings beside `base.owner`, such as caps below the recommended level, that must
+    /// change with it.
+    pub also: Vec<String>,
 }
 
 /// What a background feature cost, estimated from the turns where it would have run.

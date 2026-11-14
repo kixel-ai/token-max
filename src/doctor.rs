@@ -560,6 +560,20 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 return unknown(&e.base.owner);
             };
             let owner = &e.base.owner;
+            // Several settings that must all change, such as two caps, are one step by hand.
+            if !e.also.is_empty() {
+                let all = std::iter::once(owner).chain(&e.also);
+                return How::Manual {
+                    step: format!(
+                        "set {} to {level}",
+                        all.cloned().collect::<Vec<_>>().join(" and ")
+                    ),
+                    reason: format!(
+                        "{} settings keep it below {level}, so they change together",
+                        e.also.len() + 1
+                    ),
+                };
+            }
             let step = format!("set {owner} to {level}");
             if profile.harness == Harness::Codex {
                 let key = "model_reasoning_effort";
@@ -591,7 +605,10 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
             ));
             let row = owner.strip_prefix(&format!("{file}:modelSettings."));
             for field in ["effortLevel", "maxEffortLevel"] {
-                if let Some(key) = row.and_then(|rest| rest.strip_suffix(&format!(".{field}"))) {
+                if let Some(key) = row
+                    .and_then(|rest| rest.strip_suffix(&format!(".{field}")))
+                    .filter(|key| !key.contains(' '))
+                {
                     candidates.push((
                         format!("modelSettings.{key}.{field}"),
                         vec![Edit {

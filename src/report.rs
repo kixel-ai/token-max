@@ -1162,7 +1162,7 @@ fn subagent_guidance(c: &SubagentCost) -> Option<String> {
     let mut text = "Anthropic's model guide starts subagents that search files, read logs or summarize on Haiku or Sonnet at the model's default effort, and keeps code edits and judgment calls on the main model.".to_string();
     let on_haiku = c.models.iter().all(|m| m.name.contains("haiku"));
     if c.kind == "Explore" && !on_haiku {
-        text.push_str(" Since the built-in Explore runs on the session's model, it suggests a user agent named Explore with model: haiku to keep exploration cheap.");
+        text.push_str(" It notes that the built-in Explore runs on the session's model in current Claude Code, and suggests a user agent named Explore with model: haiku to keep exploration cheap.");
     }
     Some(text)
 }

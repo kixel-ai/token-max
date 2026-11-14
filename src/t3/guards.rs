@@ -987,6 +987,9 @@ impl<'a> Log<'a> {
             }
             None => events.iter().take_while(|e| e.at.is_none()).count(),
         };
+        // Trackers whose gap a later run ended, and each batch's placement.
+        let mut retired: Vec<usize> = Vec::new();
+        let mut placed: Vec<Millis> = Vec::new();
         let mut last = None;
         let mut i = 0;
         while i < end {
@@ -1013,11 +1016,14 @@ impl<'a> Log<'a> {
                     let _ = trackers[t].record(self, candidates[t].1, wake);
                 }
             }
-            if dated < at {
-                for &t in &live {
-                    trackers[t].doubt(dated, at);
-                }
-            }
+            // An event dated before the ones ahead of it was applied after them, so either
+            // its date is early or theirs are late: every arm and guard from the batch placed
+            // before the earliest of them through `at` is unknown.
+            let disputed = (dated < at).then(|| {
+                let k = placed.partition_point(|t| *t <= dated);
+                k.checked_sub(1).map_or(dated, |k| placed[k])
+            });
+            placed.push(at);
             last = Some(at);
             // Events committed together are read together.
             let mut armed = false;
@@ -1044,8 +1050,22 @@ impl<'a> Log<'a> {
                         started: true,
                         ..Tracker::default()
                     };
+                    retired.retain(|&r| r != t);
                     if !live.contains(&t) {
                         live.push(t);
+                    }
+                }
+            }
+            if let Some(from) = disputed {
+                for &t in &live {
+                    trackers[t].doubt(from, at);
+                }
+                // A gap a later run ended inside the span may have ended at any time in it.
+                for &t in &retired {
+                    let ended = trackers[t].guards.spans.last().map(|(t, _)| *t);
+                    if ended.is_some_and(|e| e > from) {
+                        trackers[t].doubt(from, at);
+                        trackers[t].span(at, Ok(false));
                     }
                 }
             }
@@ -1053,10 +1073,16 @@ impl<'a> Log<'a> {
                 let (_, c) = candidates[t];
                 let guard = trackers[t].record(self, c, at);
                 if armed {
-                    trackers[t].guards.arms.push((at, guard));
+                    // The arm itself falls somewhere in a disputed span.
+                    let arm = disputed.map_or((at, guard), |from| (from, Err(REORDERED)));
+                    let arms = &mut trackers[t].guards.arms;
+                    if arms.last() != Some(&arm) {
+                        arms.push(arm);
+                    }
                 }
                 if self.superseded(c.run) {
                     trackers[t].span(at, Ok(false));
+                    retired.push(t);
                     return false;
                 }
                 true
@@ -1112,12 +1138,15 @@ impl Tracker {
         guard
     }
 
-    /// Leave the arms and guards from `from` through `to` unknown, where an event dated
-    /// `from` was applied after events dated up to `to`.
+    /// Leave the guards from `from`, the last undisputed batch, until `to` unknown, and
+    /// replace the arms after `from` with one unknown arm, since their order is disputed.
     fn doubt(&mut self, from: Millis, to: Millis) {
-        let arms = self.guards.arms.iter_mut();
-        for (_, guard) in arms.filter(|(a, _)| (from..=to).contains(a)) {
-            *guard = Err(REORDERED);
+        debug_assert!(from <= to);
+        let arms = &mut self.guards.arms;
+        let k = arms.partition_point(|(a, _)| *a <= from);
+        if k < arms.len() {
+            arms.truncate(k);
+            arms.push((from, Err(REORDERED)));
         }
         let spans = &mut self.guards.spans;
         spans.truncate(spans.partition_point(|(t, _)| *t < from));
@@ -1752,20 +1781,20 @@ mod tests {
     fn events_dated_out_of_order_apply_in_sequence_and_leave_the_disputed_span_unknown() {
         let settled = || thread(json!({"settledAt":iso(60)}));
         // A merge-back keeps its client's time, so it can be dated before the event ahead.
+        // Either it is early or that event is late, so the guards are unknown from the
+        // last batch before both, the completion, until the later date.
         let mut f = Fixture::new();
         f.complete().event(60, "thread.settled", settled()).event(
             40,
             "thread.unsettled",
             thread(json!({})),
         );
+        let reordered = Err(REORDERED);
         assert_eq!(
             f.run1(),
-            expect(
-                &[(10, Ok(true))],
-                &[(10, Ok(true)), (40, Err(REORDERED)), (60, Ok(true))]
-            )
+            expect(&[(10, Ok(true))], &[(10, reordered), (60, Ok(true))])
         );
-        // An arm inside the disputed span may fall on either side of the later event.
+        // An arm after that batch may fall on either side of the later event.
         let mut f = Fixture::new();
         f.complete().event(20, "thread.settled", settled()).event(
             5,
@@ -1774,10 +1803,7 @@ mod tests {
         );
         assert_eq!(
             f.run1(),
-            expect(
-                &[(10, Err(REORDERED))],
-                &[(5, Err(REORDERED)), (20, Ok(true))]
-            )
+            expect(&[(4, reordered)], &[(4, reordered), (20, Ok(true))])
         );
         // An event dated past the bound is still read when a later one is dated within it.
         let mut f = Fixture::new();
@@ -1787,10 +1813,31 @@ mod tests {
             .event(5000, "thread.settled", settled());
         assert_eq!(
             f.run1(),
-            expect(
-                &[(10, Ok(true))],
-                &[(10, Ok(true)), (100, Err(REORDERED)), (3600, Ok(true))]
+            expect(&[(10, Ok(true))], &[(10, reordered), (3600, Ok(true))])
+        );
+        // So is a completion after one, and its arm is unknown rather than missing.
+        let mut f = Fixture::new();
+        let fork = json!({"id":"fork","type":"fork","targetThreadId":"th","status":"pending",
+            "createdAt":iso(5000)});
+        f.event(5000, "context-transfer.created", fork).complete();
+        assert_eq!(
+            f.run1(),
+            expect(&[(4, reordered)], &[(4, reordered), (3600, Ok(true))])
+        );
+        // A gap a later run ended is disputed too.
+        let mut f = Fixture::new();
+        let merge = json!({"id":"merge","type":"merge_back","targetThreadId":"th",
+            "status":"pending","createdAt":iso(200)});
+        f.complete()
+            .event(
+                400,
+                "run.updated",
+                run("run2", 2, json!({"status":"running","startedAt":iso(400)})),
             )
+            .event(200, "context-transfer.created", merge);
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Ok(true))], &[(10, reordered), (400, Ok(false))])
         );
     }
 

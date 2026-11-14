@@ -2716,6 +2716,27 @@ pub struct ExposureSummary {
     pub assumptions: Vec<String>,
 }
 
+/// One Claude profile's Fable spend at API prices, in 7-day spans that end at the report.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FableUse {
+    pub profile: String,
+    /// Fable requests in the window.
+    pub requests: u64,
+    /// Requests whose model was not recorded, which may have run on Fable.
+    pub unrecorded: u64,
+    /// The spans, most recent first; the oldest may be shorter than 7 days.
+    pub weeks: Vec<FableWeek>,
+}
+
+/// Fable spend in one span of at most 7 days.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FableWeek {
+    pub start: Millis,
+    pub end: Millis,
+    pub requests: u64,
+    pub cost: Cost,
+}
+
 /// One host's analysis, which the text report presents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
@@ -2731,6 +2752,8 @@ pub struct Report {
     pub max_cost_per_use_usd: f64,
     /// What each subagent type or agent role cost and ran on, as evidence only.
     pub subagents: Vec<SubagentCost>,
+    /// Each subscription-eligible Claude profile's weekly Fable spend, as evidence only.
+    pub fable: Vec<FableUse>,
     pub checks: Vec<CheckResult>,
     pub assumptions: Vec<String>,
 }

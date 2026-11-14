@@ -133,8 +133,8 @@ rests on:
   compaction window or idle summary loses, or what checking on a backgrounded
   Bash command costs.
 - **Official**: the provider's own guidance beside what the transcripts show:
-  CLAUDE.md length and the AGENTS.md byte budget, and MCP tool loading. The
-  section ends with its sources.
+  CLAUDE.md length and the AGENTS.md byte budget, MCP tool loading, and
+  Fable's weekly use beside the plan rule. The section ends with its sources.
 - **Opinion**: the maintainer's preference, beside whatever was measured: fast
   mode off and auto memory off.
 
@@ -615,3 +615,26 @@ attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent
 files do not explain the recorded model, for example after a file changed.
 See [subagent models](semantics.md#subagent-models).
+
+## Fable weekly use
+
+The Official section gives every Claude profile that signs in to Anthropic its
+own Fable line: what its Fable requests cost at API prices in each 7-day span
+of the window, counted back from the report, beside the plan rule Anthropic
+documents on its [pricing](https://claude.com/pricing) page and in
+[Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+On Max, Ultra and Team premium seats, Fable models can use up to half the
+weekly usage limit and use it faster than other models; on Pro and Team
+standard seats they run on usage credits.
+
+No plan limit is published in tokens or dollars, so the line shows no share of
+the limit and gives no verdict: its dot is dim, and it never changes the exit
+code or offers a change. The figures are partial evidence. The cap counts Fable
+use on every Claude surface, such as claude.ai and Claude Desktop, while the
+line covers only this profile's recorded sessions, and it may include requests
+paid with usage credits after the cap was reached. The plan's weekly reset time
+is not recorded, so spans end at the report rather than at a reset. A profile
+with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or
+`CLAUDE_CODE_USE_FOUNDRY` is billed by its cloud provider and gets no line.
+Change the model with `/model` or the `model` setting.
+See [Fable weekly use](semantics.md#fable-weekly-use).

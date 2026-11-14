@@ -1214,3 +1214,22 @@ Sources, checked 2026-11-11: the Claude Code 2.1.322 binary and
 (2.1.198, 2.1.284), and Codex
 [0.167](https://github.com/openai/codex/tree/rust-v0.167.0/codex-rs/core/src/agent)
 `child_config.rs` and `role.rs`.
+
+## Fable weekly use
+
+`Report.fable` gives each Claude profile without a cloud provider one entry:
+its Fable requests, the requests that recorded no model, and the spend of each
+span. Spans are 7 days, counted back from the report's time to the window's
+start (`--since`, or the earliest request read), so the oldest may be shorter;
+a request on a span's boundary belongs to the later span. A request is Fable
+when its recorded model ID contains `fable`, and it is priced whole with every
+part, like the historical totals. A request shared by several profiles counts
+in each, since each line describes one profile's sessions.
+
+The line is Official evidence with no verdict. Anthropic documents the cap as
+a share of a weekly limit it publishes in neither tokens nor dollars, and says
+Fable draws that limit faster than other models without a rate, so neither the
+share of the cap used nor whether it was reached can be derived. Requests made
+after the cap, paid with usage credits, are not marked in transcripts and stay
+in the figures. token-max never reads which plan a profile is signed in to, so
+the rule is stated for each plan.

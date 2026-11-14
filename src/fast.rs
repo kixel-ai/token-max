@@ -308,7 +308,7 @@ fn check(
             break_even: None,
             assumptions: [
                 "maintainer cost preference: fast and ultrafast off; setting warning does not require historical billing metadata",
-                "rate-only API-price equivalent at present public prices, not an invoice, subscription bill, purchased-credit or rate-limit multiplier",
+                "rate-only premium at present public API prices, not an invoice; a Claude plan pays fast mode from usage credits at these rates, and a ChatGPT plan counts Fast at 2.5x and Ultrafast at 8x standard against included usage, or 2x and 6x on credits",
                 "recorded cache categories and context tiers held constant; Claude fast/standard have separate caches, so switching cold-cache effects are excluded",
                 "fixed behavior and work; latency value is not modeled; no summed per-check savings",
                 "current local files and active-profile environment supply defaults; historical session overrides never establish current session state",

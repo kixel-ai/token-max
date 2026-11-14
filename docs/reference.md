@@ -96,6 +96,45 @@ Use `--offline` for that cache, `--price-cache FILE` to choose its location, or
 Network failures fail the run; offline use is explicit. Cached prices include
 their file timestamp, so an old catalog remains visible.
 
+## Plans and API prices
+
+token-max is written for people on a Claude or ChatGPT plan. No provider
+publishes a plan's limits in tokens or dollars, so it measures with public API
+prices, the closest public measure of what a request uses of those limits, and
+the report's first line says so. It never reads which plan a profile is signed
+in to, so a fact that differs by plan is stated conditionally, as in "on a
+Claude plan".
+
+What the providers document, checked 2026-11-14:
+
+- Claude Code's [costs page](https://code.claude.com/docs/en/costs#why-usage-climbs-in-a-long-session)
+  says a cached re-read draws plan usage at the cached token rate, and that
+  cache misses, compaction, subagents and background requests all draw on it.
+  OpenAI's [Codex pricing](https://learn.chatgpt.com/docs/pricing) says model,
+  context, reasoning, tool use and caching all affect usage, and prices its
+  credits per token with the API's split of input, cached input and output.
+  Neither says how much of a limit a token is.
+- Past a Claude plan's limits, [usage credits](https://support.claude.com/en/articles/11145838-use-claude-code-with-your-pro-or-max-plan)
+  are billed at standard API rates, so there the dollars are the charge.
+- Claude Code's `/usage` shows a Claude plan's own usage bars and a breakdown
+  of what counted against them on this machine. token-max adds what other
+  settings would have cost, replayed over the same sessions.
+
+Where a provider documents a rule that API prices alone don't show, the line
+adds an `Official:` sentence before the setting that changes it, and the
+section ends with the source:
+
+| Line | On a plan |
+| --- | --- |
+| Main-agent prompt cache TTL, while unset | Claude Code [requests 1h](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets) for the main conversation on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Since token-max can't tell which applies, the current value is unknown and the line names both. |
+| Claude fast mode | A Claude plan [pays fast mode only from usage credits](https://code.claude.com/docs/en/fast-mode#requirements), at its API rates, even with plan usage left. |
+| Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits, so included usage draws faster than the API premium priced. |
+| Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
+| Codex compaction window and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
+
+Every other line's dollars are API prices with no documented plan rule beside
+them.
+
 ## Window
 
 `--since YYYY-MM-DD` means midnight UTC; ISO instants must include a timezone.
@@ -530,8 +569,9 @@ speed, usage or exact pricing stays unknown. Dollar comparisons use the same
 model and standard API rates, preserving recorded cache reads, write lifetimes,
 geography and context tiers. These are **rate-only API-price equivalents**:
 Claude's separate fast/standard caches mean cache-switch effects are excluded.
-They hold work constant, do not value latency, and make no subscription-bill,
-credit-multiplier or combined savings claim. Fast mode compares with the current
+They hold work constant, do not value latency, and make no combined savings
+claim. A plan counts fast mode its own way; see
+[Plans and API prices](#plans-and-api-prices). Fast mode compares with the current
 profile, independently of the TTL/window/idle recommendations.
 
 Measured Codex usage without a billed tier receives a **conditional API equivalent**

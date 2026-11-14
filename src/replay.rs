@@ -1078,7 +1078,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         checks,
         assumptions: [
             "host-local read-only analysis; network access is only for public prices",
-            "measured usage is replayed at present public API rates, not historical invoices or subscription savings",
+            "measured usage is replayed at present public API rates, the closest public measure of a plan's usage, not historical invoices",
             "compaction summary proxies are separate from recorded request charges",
             "unlogged or unresumed summary generation is unknown; a missing final boundary does not establish zero cost",
             "Claude prompt suggestions and session recaps, and Codex automatic recaps, are not logged; every other check's recorded baseline omits them and their cache refreshes",

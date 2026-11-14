@@ -1856,6 +1856,7 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     const NOW: Millis = 18_000_000;
+    const HOUR: Millis = 3_600_000;
 
     #[test]
     fn equal_usage_with_unknown_cache_on_one_side_still_pairs() {
@@ -1893,7 +1894,6 @@ mod tests {
         assert_eq!((savings.total, savings.priced), (1, 0));
         assert_eq!(alternative.unknown, vec!["no anchor".to_string()]);
     }
-    const HOUR: Millis = 3_600_000;
 
     fn controls(harness: Harness, user: Value, env: &Env, file: &str) -> CompactionControls {
         let user = user.as_object().cloned().unwrap_or_default();

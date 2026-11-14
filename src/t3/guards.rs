@@ -22,6 +22,8 @@ const PRUNED: &str = "T3 pruned the event holding a lifecycle guard's state duri
 const OVERSIZED: &str = "a T3 event holding a lifecycle guard exceeds the 1 MiB read bound";
 const UNSUPPORTED: &str =
     "T3 recorded an event this adapter does not support before or during this gap";
+const STALE_USAGE: &str =
+    "T3 had not yet recorded this run's last usage, so its timer would have used an earlier one";
 const REORDERED: &str =
     "T3 dated an event before an earlier one, so their order around this gap's guards is unknown";
 
@@ -379,6 +381,15 @@ fn classify(event_type: &str) -> Option<Option<Kind>> {
     } else {
         IGNORED.contains(&event_type).then_some(None)
     }
+}
+
+/// The run an event records as completed, which arms T3's timer.
+fn completed_run(e: &Event) -> Option<&str> {
+    e.snapshot
+        .as_ref()
+        .filter(|_| e.kind == Some(Some(Kind::Run)))
+        .filter(|s| s.status.as_deref() == Some("completed"))
+        .and_then(|s| s.id.as_deref())
 }
 
 /// One retained event.
@@ -937,22 +948,32 @@ impl<'a> Log<'a> {
             );
         }
         out = or(out, and(running.map(|r| !r), or(tasks, items)));
-        // This run's last usage must be its provider thread's latest.
+        // T3 times the window from its provider thread's latest usage, which must be this
+        // run's last: a newer one belongs to another turn, and without any there is no
+        // window. An older one times a window this check does not price.
         if let Some(usage) = c.usage_at {
-            out = or(out, self.poison(Kind::Turn));
+            let mut newest: Option<Millis> = None;
+            let mut unknown = self.poison(Kind::Turn).err();
             for (_, e) in self.of(Kind::Turn) {
                 if e.first.provider_thread.as_deref() != Some(active) {
                     continue;
                 }
-                out = or(
-                    out,
-                    match &e.state {
-                        State::Known(s) => Ok(s.usage_at.is_some_and(|u| u > usage)),
-                        State::Absent => Ok(false),
-                        State::Unknown(r) => Err(r),
-                    },
-                );
+                match &e.state {
+                    State::Known(s) => newest = newest.max(s.usage_at),
+                    State::Absent => {}
+                    State::Unknown(r) => unknown = unknown.or(Some(*r)),
+                }
             }
+            out = or(
+                out,
+                match (newest, unknown) {
+                    (Some(n), _) if n > usage => Ok(true),
+                    (_, Some(r)) => Err(r),
+                    (None, None) => Ok(true),
+                    (Some(n), None) if n < usage => Err(STALE_USAGE),
+                    _ => Ok(false),
+                },
+            );
         }
         out
     }
@@ -987,24 +1008,40 @@ impl<'a> Log<'a> {
             }
             None => events.iter().take_while(|e| e.at.is_none()).count(),
         };
-        // Trackers whose gap a later run ended, and each batch's placement.
-        let mut retired: Vec<usize> = Vec::new();
+        // Trackers whose gap a later run ended, with when it ended, and each batch's placement.
+        let mut retired: Vec<(usize, Millis)> = Vec::new();
         let mut placed: Vec<Millis> = Vec::new();
         let mut last = None;
         let mut i = 0;
         while i < end {
             let Some(dated) = events[i].at else {
                 // An event with no time cannot be placed, so nothing after the last dated
-                // one is known.
+                // one is known. A run it completes still arms the timer, at an unknown time.
                 self.unsupported = true;
-                if let Some(last) = last {
-                    for &t in &live {
-                        let arms = trackers[t].guards.arms.iter_mut();
-                        for (_, guard) in arms.filter(|(a, _)| *a >= last) {
-                            *guard = Err(UNSUPPORTED);
+                let from = last.or(self.boundary.since).unwrap_or(0);
+                let run = completed_run(&events[i]);
+                if let Some(run) = run.filter(|r| !self.completed(r)) {
+                    for &t in by_run.get(run).into_iter().flatten() {
+                        trackers[t] = Tracker {
+                            started: true,
+                            ..Tracker::default()
+                        };
+                        retired.retain(|&(r, _)| r != t);
+                        if !live.contains(&t) {
+                            live.push(t);
                         }
-                        trackers[t].span(last, Err(UNSUPPORTED));
                     }
+                }
+                self.apply(&events[i]);
+                for &t in &live {
+                    let arms = &mut trackers[t].guards.arms;
+                    for (_, guard) in arms.iter_mut().filter(|(a, _)| *a >= from) {
+                        *guard = Err(UNSUPPORTED);
+                    }
+                    if run.is_some() && arms.last() != Some(&(from, Err(UNSUPPORTED))) {
+                        arms.push((from, Err(UNSUPPORTED)));
+                    }
+                    trackers[t].span(from, Err(UNSUPPORTED));
                 }
                 i += 1;
                 continue;
@@ -1029,13 +1066,7 @@ impl<'a> Log<'a> {
             let mut armed = false;
             let mut completed = Vec::new();
             while let Some(e) = events[..end].get(i).filter(|e| e.at == Some(dated)) {
-                let run = e
-                    .snapshot
-                    .as_ref()
-                    .filter(|_| e.kind == Some(Some(Kind::Run)))
-                    .filter(|s| s.status.as_deref() == Some("completed"))
-                    .and_then(|s| s.id.as_deref());
-                if let Some(run) = run {
+                if let Some(run) = completed_run(e) {
                     armed = true;
                     if !self.completed(run) {
                         completed.push(run);
@@ -1050,7 +1081,7 @@ impl<'a> Log<'a> {
                         started: true,
                         ..Tracker::default()
                     };
-                    retired.retain(|&r| r != t);
+                    retired.retain(|&(r, _)| r != t);
                     if !live.contains(&t) {
                         live.push(t);
                     }
@@ -1061,11 +1092,11 @@ impl<'a> Log<'a> {
                     trackers[t].doubt(from, at);
                 }
                 // A gap a later run ended inside the span may have ended at any time in it.
-                for &t in &retired {
-                    let ended = trackers[t].guards.spans.last().map(|(t, _)| *t);
-                    if ended.is_some_and(|e| e > from) {
-                        trackers[t].doubt(from, at);
-                        trackers[t].span(at, Ok(false));
+                for (t, ended) in &mut retired {
+                    if *ended > from {
+                        trackers[*t].doubt(from, at);
+                        trackers[*t].span(at, Ok(false));
+                        *ended = at;
                     }
                 }
             }
@@ -1082,7 +1113,7 @@ impl<'a> Log<'a> {
                 }
                 if self.superseded(c.run) {
                     trackers[t].span(at, Ok(false));
-                    retired.push(t);
+                    retired.push((t, at));
                     return false;
                 }
                 true
@@ -1238,6 +1269,8 @@ mod tests {
     struct Fixture {
         db: Connection,
         sequence: i64,
+        /// When the projection last recorded the turn's usage, in seconds.
+        usage: i64,
     }
 
     impl Fixture {
@@ -1245,7 +1278,11 @@ mod tests {
             let db = Connection::open_in_memory().unwrap();
             db.execute_batch(include_str!("../../test/fixtures/t3-schema.sql"))
                 .unwrap();
-            let mut f = Self { db, sequence: 0 };
+            let mut f = Self {
+                db,
+                sequence: 0,
+                usage: 4,
+            };
             f.event(
                 0,
                 "thread.created",
@@ -1304,7 +1341,7 @@ mod tests {
                     let c = Candidate {
                         thread: "th",
                         run,
-                        usage_at: Some(at(4)),
+                        usage_at: Some(at(self.usage)),
                         compactable: true,
                     };
                     (*turn, c)
@@ -1775,6 +1812,37 @@ mod tests {
             };
             assert_eq!(f.run1(), expected, "{event_type}");
         }
+        // An undated completion still arms the timer, at an unknown time after the last
+        // dated event, rather than reading as a run that never completed.
+        let mut f = Fixture::new();
+        let completed = run(
+            "run1",
+            1,
+            json!({"status":"completed","startedAt":iso(3),"completedAt":iso(10)}),
+        );
+        f.raw("never", "run.updated", &completed.to_string()).event(
+            30,
+            "thread.visited",
+            thread(json!({})),
+        );
+        let unsupported = Err(UNSUPPORTED);
+        assert_eq!(f.run1(), expect(&[(4, unsupported)], &[(4, unsupported)]));
+    }
+
+    #[test]
+    fn the_timer_reads_the_provider_threads_latest_usage_when_it_checks() {
+        // T3 recorded the run's last usage only after it completed, so the arm timed an
+        // earlier usage's window, which the comparison does not price.
+        let mut f = Fixture::new();
+        f.usage = 20;
+        let usage = json!({"tokenUsage":{"updatedAt":iso(20),"usedTokens":300_000}});
+        f.complete()
+            .event(20, "provider-turn.updated", turn("turn1", usage));
+        let stale = Err(STALE_USAGE);
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, stale)], &[(10, stale), (20, Ok(true))])
+        );
     }
 
     #[test]
@@ -1838,6 +1906,23 @@ mod tests {
         assert_eq!(
             f.run1(),
             expect(&[(10, Ok(true))], &[(10, reordered), (400, Ok(false))])
+        );
+        // Even when the guards already held it before the later run started.
+        let mut f = Fixture::new();
+        f.complete()
+            .event(60, "thread.settled", settled())
+            .event(
+                400,
+                "run.updated",
+                run("run2", 2, json!({"status":"running","startedAt":iso(400)})),
+            )
+            .event(200, "thread.unsettled", thread(json!({})));
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[(10, Ok(true)), (60, reordered), (400, Ok(false))]
+            )
         );
     }
 

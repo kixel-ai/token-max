@@ -800,6 +800,21 @@ pub(crate) fn discover(
                 speed.reason = "T3 passes a selected serviceTier (legacy fastMode=true maps to fast); omission can inherit native service_tier; current selection is unavailable".into();
             }
             speed.resolved = false;
+            let owner = format!("T3 instance {id}: thread model selection");
+            profile.effort = Some(crate::model::EffortControl {
+                model: None,
+                model_owner: owner.clone(),
+                level: None,
+                owner,
+                effective: None,
+                lowered: None,
+                caps: vec![],
+                supported: vec![],
+                unresolved: Some(
+                    "T3 picks the model and effort for each thread, and its current selection is unavailable"
+                        .into(),
+                ),
+            });
             // These terminal-client features do not run in T3's SDK/app-server client.
             profile.background.clear();
             profile.idle = None;

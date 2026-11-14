@@ -1139,6 +1139,60 @@ Sources, checked 2026-11-08:
 [tools reference](https://code.claude.com/docs/en/tools-reference) and
 [prompt caching](https://code.claude.com/docs/en/prompt-caching).
 
+## Main-session effort
+
+The `main-effort` check resolves each profile's main-session default effort
+from today's settings, read where auto memory's are: at the latest main-session
+request's working directory, or from the user and managed files when none is
+recorded. The model is `ANTHROPIC_MODEL` or the highest settings file's
+`model` for Claude, or the highest config layer's `model` for Codex, else the
+model the latest main session ran most. A Claude alias such as `opus` resolves
+to that session's model when it is in the alias's family, else the line is
+unknown.
+
+Claude follows its
+[model configuration docs](https://code.claude.com/docs/en/model-config#adjust-effort-level),
+checked 2026-11-14, first match winning:
+
+1. `CLAUDE_CODE_EFFORT_LEVEL`, from the shell or a settings file's `env`, the
+   only source that can name `max`. `auto` or `unset` sends no level, so the
+   API's default applies.
+2. A level picked in a session or passed with `--effort`, which history does
+   not record; the recorded efforts show what ran.
+3. The highest-precedence settings file (user, project, local, managed) that
+   sets the model's `modelSettings.<model>.effortLevel` or a top-level
+   `effortLevel` that applies to it. Within a file the model's own level wins.
+   A user-file top-level `effortLevel` is the older form, which Opus 5.5,
+   Sonnet 5.5, Haiku 5.5 and Fable 5.2 ignore. Settings accept `low` to
+   `xhigh`; any other value is an error.
+4. The model's default: `medium` for Fable 5.2, Opus 5.5, Sonnet 5.5 and
+   Haiku 5.5, `xhigh` for Opus 4.7, `high` for the other models in the docs'
+   effort table. A model outside the table takes no level; an unknown model
+   leaves the line unknown.
+
+The level then runs at the highest level the model supports at or below it
+(`xhigh` runs as `high` on Opus 4.6 and Sonnet 4.6), lowered to the lowest
+`maxEffortLevel` any settings file sets for the model, where a model's own
+`modelSettings` entry replaces its file's top-level cap and `max` sets none.
+With `auto` and a cap below `max`, Claude Code sends the model's default
+lowered to the cap. A Claude Enterprise per-role cap is recorded in no local
+file, so first-party lines say it could lower the level further.
+
+Codex takes `model_reasoning_effort` from the highest config layer Codex reads
+(system, user, then trusted project layers), else the model's
+`default_reasoning_level` in its cached model catalog, `models_cache.json` in
+the Codex home; the default is unknown when the catalog cannot be read or does
+not list the model. A named profile file or legacy `[profiles.NAME]` table
+that sets `model` or `model_reasoning_effort`, a project layer of unrecorded
+trust that does, or, when a named profile can change project roots or trust,
+any `.codex/config.toml` above the directory that does, makes the line
+unknown, since history does not record which applied. T3 picks the model and effort for each thread, so its lines are
+unknown.
+
+The recorded pairs come from main-session requests in the window: Claude's
+per-record `effort` or its request's `output_config.effort`, and Codex's turn
+context, priced like any request.
+
 ## Subagent models
 
 `Report.subagents` gives each Claude subagent type and Codex agent role one

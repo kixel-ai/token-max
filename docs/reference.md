@@ -635,6 +635,38 @@ own processes are unaffected by the cap. Codex's
 `background_terminal_max_timeout` bounds one poll of a background terminal,
 and each poll reads the cache, so it is not checked.
 
+## Main-session effort
+
+Each profile gets one `Main-session effort` line: the reasoning effort its main
+session defaults to, the level it runs at, what each recorded model and effort
+pair cost over the window and how many requests it ran, and the setting that
+changes the default. A different effort changes the output tokens, so no cost
+is repriced and no saving is claimed.
+
+- `max` is a recommended change to `xhigh`, or to `high` on a model without
+  `xhigh`, and exits 1. For Claude it is Official, citing Anthropic's
+  [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
+  (past `high`, test the next model up at a lower effort) and the
+  [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level)
+  (`max` is prone to overthinking; test it before adopting it broadly). For
+  Codex the same advice is Opinion, beside OpenAI's
+  [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
+- `low` is worth considering raising to `medium`, as Opinion.
+- `xhigh` cites the same guidance under Official, with no verdict; so do
+  `medium` and `high`, with the guidance for those levels.
+- A default token-max cannot resolve, such as a T3 thread's selection, is
+  unknown and never a change.
+
+On a terminal, `doctor` offers the change in the profile's own file: for Claude
+the `env.CLAUDE_CODE_EFFORT_LEVEL` that sets it, or else the model's
+`modelSettings.<model>.effortLevel`, or the `maxEffortLevel` that holds a `low`
+level down; for Codex `model_reasoning_effort`. The target is the next level
+the model accepts, by Claude Code's effort table or Codex's model catalog. A
+shell variable, a project or managed file, or a named Codex profile that sets
+it is listed to change by hand. See
+[default effort](semantics.md#main-session-effort) for how the default
+resolves.
+
 ## Subagent models
 
 The Measured section gives every Claude Code subagent

@@ -13,10 +13,10 @@ use crate::discovery::TTL_BILLING_UNKNOWN;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EstimateEvidence,
-    Evidence, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile,
-    Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck,
-    T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
+    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
+    EstimateEvidence, Evidence, Harness, KeepaliveCheck, MemoryCheck, Millis, ModelSource,
+    PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share, SubagentCost,
+    T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -195,6 +195,7 @@ enum Setting<'a> {
     Toggle(bool),
     Cap(Millis),
     Keepalive(&'a str),
+    Effort(&'a str),
 }
 
 /// The fields every check shares, whatever its value type.
@@ -305,6 +306,9 @@ fn common(result: &CheckResult) -> Common<'_> {
         CheckResult::Memory(c) => base("auto-memory", "memory", &c.base, &[], |b| {
             Setting::Toggle(*b)
         }),
+        CheckResult::Effort(c) => base("main-effort", "main", &c.base, &[], |s: &String| {
+            Setting::Effort(s)
+        }),
     }
 }
 
@@ -330,6 +334,137 @@ fn codex_unmeasured(c: &MemoryCheck) -> bool {
 
 /// Why auto memory is not recommended, whatever it cost.
 const MEMORY_ADVICE: &str = "Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md";
+
+/// Whether an effort line rests on the maintainer's opinion: a `low` level, or Anthropic's
+/// guidance against `max` applied to an OpenAI model.
+fn effort_opinion(e: &EffortCheck) -> bool {
+    match e.base.current.as_deref() {
+        Some("low") => true,
+        Some("max") => e.harness == Harness::Codex,
+        _ => false,
+    }
+}
+
+/// Anthropic's guidance on raising effort past `high`.
+const PAST_HIGH: &str = "Anthropic's model guide says that past high, one more level can cost as much as a bigger model, so test the next model up at a lower effort";
+
+/// The guidance an effort line cites, labeled by the kind of claim each part is.
+fn effort_guidance(e: &EffortCheck) -> String {
+    let codex = e.harness == Harness::Codex;
+    let level = e.base.current.as_deref();
+    match (level, codex) {
+        (Some("max"), false) => format!(
+            "Official: {PAST_HIGH}, and Claude Code's docs call max prone to overthinking and say to test it before adopting it broadly"
+        ),
+        (Some("max"), true) => format!(
+            "Opinion: Anthropic's guidance against max, applied to an OpenAI model: {}. Official: OpenAI's reasoning guide keeps max for your most complex tasks, evaluated against xhigh",
+            decapitalize(PAST_HIGH)
+        ),
+        (Some("low"), _) => {
+            let mut text = "Opinion: worth considering raising, since low trades capability for cost; Anthropic measured Opus 5.5 at low about 8 points below high on SWE-bench Pro, for about a third of the cost".to_string();
+            if codex {
+                text += ". Official: OpenAI's reasoning guide calls low ideal for execution-oriented coding and medium the default for most workloads";
+            }
+            text
+        }
+        (Some("xhigh"), false) => format!(
+            "Official: {PAST_HIGH}; on SWE-bench Pro, Opus 5.5 at xhigh scored about 1.4 points above high for 2.5 times the cost"
+        ),
+        (Some("xhigh"), true) => "Official: OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost".into(),
+        (Some("auto"), _) => "Claude Code sends no effort level, so the API's default applies".into(),
+        (Some("medium" | "high"), false) => "Official: Claude Code's docs fit medium to day-to-day engineering with a clear scope, and high to work where verification matters".into(),
+        (Some("medium" | "high"), true) => "Official: OpenAI's reasoning guide calls medium the default for most workloads and recommends high for complex workflows and agentic tasks".into(),
+        // Codex levels the guide gives no advice for, such as ultra; Claude has none left.
+        (Some(level), _) => format!("OpenAI's reasoning guide gives no advice for {level}, so there is no verdict"),
+        (None, _) => match (&e.control.lowered, &e.control.unresolved) {
+            (Some(why), None) => capitalize(why),
+            _ => "The current level is unknown".into(),
+        },
+    }
+}
+
+/// A model and effort pair as a line names it, such as `claude-opus-5-5 at high`.
+fn effort_pair(run: &EffortRun) -> String {
+    format!(
+        "{} at {}",
+        run.model.as_deref().unwrap_or("an unrecorded model"),
+        run.effort.as_deref().unwrap_or("an unrecorded effort")
+    )
+}
+
+/// The pairs shown on a summary line before the rest are counted.
+const EFFORT_PAIRS: usize = 3;
+
+/// An effort line's evidence: its guidance, the default and the level it runs at, what each
+/// model and effort pair cost, and the setting that changes it.
+fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
+    let c = &e.control;
+    let mut parts = vec![];
+    if mark == Mark::Unknown {
+        parts.push(not_enough(&e.control.unresolved.clone().unwrap_or_default()) + ".");
+    } else {
+        parts.push(effort_guidance(e) + ".");
+    }
+    if let (Some(model), Some(level)) = (&c.model, &c.level) {
+        let mut text = if level == "auto" {
+            format!("No level is sent to {model}")
+        } else if c.owner.ends_with("(the model's default)") {
+            format!("{model} defaults to {level}")
+        } else {
+            format!("The default is set to {level} on {model}")
+        };
+        if c.model_owner == "the latest recorded main-session model" {
+            text += ", the model the latest session ran";
+        }
+        if let Some(why) = &c.lowered {
+            let effective = c.effective.as_deref().unwrap_or("unknown");
+            let _ = write!(text, ", and runs at {effective}: {}", out.home_in(why));
+        }
+        parts.push(text + ".");
+    }
+    if e.runs.is_empty() {
+        parts.push("No main-session requests in the window.".into());
+    } else {
+        let mut runs: Vec<String> = e
+            .runs
+            .iter()
+            .take(EFFORT_PAIRS)
+            .map(|run| {
+                let cost = match run.cost.total_usd {
+                    Some(usd) => about(usd.to_f64()),
+                    None if run.cost.known_usd == Usd::ZERO => "unpriced".into(),
+                    None => format!("at least {}", about(run.cost.known_usd.to_f64())),
+                };
+                format!(
+                    "{} {} time{}, {cost}",
+                    effort_pair(run),
+                    count(run.requests),
+                    if run.requests == 1 { "" } else { "s" }
+                )
+            })
+            .collect();
+        if e.runs.len() > EFFORT_PAIRS {
+            let more = e.runs.len() - EFFORT_PAIRS;
+            runs.push(format!(
+                "{more} more pair{}",
+                if more == 1 { "" } else { "s" }
+            ));
+        }
+        parts.push(format!("Ran {}.", runs.join("; ")));
+    }
+    parts.push("A different effort changes the output tokens, so its cost is not repriced.".into());
+    if e.enterprise && c.level.is_some() {
+        parts.push(
+            "A Claude Enterprise per-role cap, which no local file records, could lower it.".into(),
+        );
+    }
+    let owners: Vec<String> = std::iter::once(&e.base.owner)
+        .chain(&e.also)
+        .map(|o| out.home(o))
+        .collect();
+    parts.push(format!("Set in {}.", owners.join(" and ")));
+    parts.join(" ")
+}
 
 /// Why fast mode is recommended off, whatever it cost.
 const FAST_ADVICE: &str =
@@ -457,7 +592,7 @@ fn setting(value: Option<Setting<'_>>) -> String {
         Some(Setting::Speed(s)) => s.into(),
         Some(Setting::Toggle(b)) => if b { "on" } else { "off" }.into(),
         Some(Setting::Cap(ms)) => format!("{ms} ms"),
-        Some(Setting::Keepalive(s)) => s.into(),
+        Some(Setting::Keepalive(s) | Setting::Effort(s)) => s.into(),
     }
 }
 
@@ -472,7 +607,7 @@ fn setting_value(value: Option<Setting<'_>>) -> String {
         Some(Setting::Window(n)) => format!("{} tokens", count(n)),
         Some(Setting::Ttl(t)) => t.as_str().into(),
         Some(Setting::Cap(ms)) => duration(ms),
-        Some(Setting::Keepalive(s)) => s.into(),
+        Some(Setting::Keepalive(s) | Setting::Effort(s)) => s.into(),
     }
 }
 
@@ -1370,6 +1505,33 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         ),
     );
     match result {
+        CheckResult::Effort(e) => {
+            let c = &e.control;
+            out.field(
+                "Model",
+                &format!(
+                    "{} ({})",
+                    or_unknown(c.model.as_deref()),
+                    out.home_in(&c.model_owner)
+                ),
+            );
+            out.field("Default", &or_unknown(c.level.as_deref()));
+            out.field("Runs at", &or_unknown(c.effective.as_deref()));
+            if let Some(why) = &c.lowered {
+                out.field("Lowered", &out.home_in(why));
+            }
+            for run in &e.runs {
+                out.field(
+                    "Recorded",
+                    &format!(
+                        "{}, {} requests, {}",
+                        effort_pair(run),
+                        count(run.requests),
+                        money(&run.cost)
+                    ),
+                );
+            }
+        }
         CheckResult::Memory(m) => {
             out.field("Turn off", &memory_off(m, out));
             out.field("Loaded memory and reads", &estimate(m.context_usd));
@@ -1682,7 +1844,7 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         out.field("History profile", &out.profile_name(id));
     }
     match result {
-        CheckResult::Background(_) | CheckResult::Memory(_) => {}
+        CheckResult::Background(_) | CheckResult::Memory(_) | CheckResult::Effort(_) => {}
         CheckResult::Ttl(t) => {
             for ttl in Ttl::ALL {
                 let name = ttl.as_str();
@@ -1943,7 +2105,8 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
         | CheckResult::Keepalive(_)
-        | CheckResult::Memory(_) => {}
+        | CheckResult::Memory(_)
+        | CheckResult::Effort(_) => {}
     }
     out.notes("Assumption", r.assumptions);
     out.notes("Uncertainty", r.uncertainty);
@@ -1953,6 +2116,7 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
 fn reason(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return s.reason.clone(),
+        CheckResult::Effort(e) => return effort_guidance(e),
         CheckResult::Memory(m)
             if r.action == Action::Keep && memory_free(m) && !codex_unmeasured(m) =>
         {
@@ -2059,6 +2223,7 @@ fn setting_name(result: &CheckResult) -> String {
             Harness::Codex => CODEX_MEMORY.into(),
             Harness::Claude => CLAUDE_MEMORY.into(),
         },
+        CheckResult::Effort(_) => "Main-session effort".into(),
         CheckResult::Background(b) => match b.feature {
             BackgroundFeature::PromptSuggestions => "Prompt suggestions".into(),
             BackgroundFeature::SessionRecaps => "Session recaps".into(),
@@ -2185,6 +2350,12 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     match result {
         CheckResult::Speed(s) => return capitalize(&s.reason) + ".",
         CheckResult::Background(b) => return background_unknown(b).into(),
+        CheckResult::Effort(e) => {
+            return e.control.unresolved.as_deref().map_or_else(
+                || "The current level is unknown.".into(),
+                |why| capitalize(why) + ".",
+            );
+        }
         _ => {}
     }
     if let CheckResult::BashCap(b) = result {
@@ -2268,7 +2439,8 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
         | CheckResult::Keepalive(_)
-        | CheckResult::Memory(_) => {
+        | CheckResult::Memory(_)
+        | CheckResult::Effort(_) => {
             unreachable!("handled above")
         }
     }
@@ -2756,6 +2928,8 @@ impl Claim {
     fn of(result: &CheckResult) -> Claim {
         match result {
             CheckResult::Speed(_) | CheckResult::Memory(_) => Claim::Opinion,
+            CheckResult::Effort(e) if effort_opinion(e) => Claim::Opinion,
+            CheckResult::Effort(_) => Claim::Official,
             _ => Claim::Measured,
         }
     }
@@ -3085,8 +3259,11 @@ fn check_action(result: &CheckResult, r: &Common<'_>) -> Action {
 fn check_mark(result: &CheckResult, r: &Common<'_>) -> Mark {
     match check_action(result, r) {
         Action::Change => Mark::Change,
+        // An effort with no verdict is evidence beside its guidance.
+        Action::Keep if matches!(result, CheckResult::Effort(_)) => Mark::Info,
         Action::Keep => Mark::Keep,
         Action::Advisory => match result {
+            CheckResult::Effort(_) if r.recommended.is_some() => Mark::Consider,
             CheckResult::Background(_) if r.savings_usd.is_some() => Mark::Consider,
             CheckResult::Memory(_) => Mark::Consider,
             _ => Mark::Unknown,
@@ -3135,9 +3312,9 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             Some(Setting::Window(n)) => tokens(n),
             other => setting_value(other),
         };
-        // A suggestion is always to turn a feature off.
-        let target = match mark {
-            Mark::Change => value(r.recommended),
+        // A suggestion is to turn a feature off, or to raise an effort.
+        let target = match (mark, result) {
+            (Mark::Change, _) | (_, CheckResult::Effort(_)) => value(r.recommended),
             _ => "off".into(),
         };
         let mut current = value(r.current);
@@ -3454,6 +3631,18 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             )
         };
         row.evidence = match result {
+            CheckResult::Effort(e) => {
+                let total = add_costs(e.runs.iter().map(|run| &run.cost));
+                row.amount = match total.total_usd {
+                    _ if e.runs.is_empty() => None,
+                    Some(usd) => Some(("costs", about(usd.to_f64()))),
+                    None => Some((
+                        "costs",
+                        format!("at least {}", about(total.known_usd.to_f64())),
+                    )),
+                };
+                effort_evidence(e, mark, out)
+            }
             CheckResult::Ttl(t) => match mark {
                 Mark::Unknown => unknown(),
                 Mark::Keep if t.one_hour_savings_usd == 0.0 => {
@@ -5343,6 +5532,240 @@ mod tests {
         );
         let deny = all.iter().find(|f| edits(f) == "permissions.deny");
         assert!(matches!(deny.expect("a deny fix").how, How::Edit(_)));
+    }
+
+    #[test]
+    fn effort_lines_carry_their_claim_and_change_the_owning_setting() {
+        use crate::doctor::{Edit, How, Patch, fixes};
+        use crate::effort::{EffortInput, effort_checks};
+        let file = format!("{ROOT}/settings.json");
+        // One profile's line for a control, beside the recorded pairs, and its fix if any.
+        let line = |harness: Harness, control: EffortControl| {
+            let mut report = synthetic();
+            report.checks.clear();
+            report.context.clear();
+            report.scan.profiles[0].harness = harness;
+            report.scan.profiles[0].effort = Some(control);
+            let checks = effort_checks(&EffortInput {
+                scan: &report.scan,
+                catalog: &prices(),
+                since: None,
+                now: NOV1 + DAY_MS,
+            });
+            report.checks = checks.into_iter().map(CheckResult::Effort).collect();
+            let line = report_line(&text(&report, None, false), "Main-session effort");
+            let fix = fixes(&report, false).into_iter().next();
+            (line, fix)
+        };
+        let control = |model: &str, level: &str, owner: &str| EffortControl {
+            model: Some(model.into()),
+            model_owner: format!("{file}:model"),
+            level: Some(level.into()),
+            owner: owner.into(),
+            effective: Some(level.into()),
+            lowered: None,
+            caps: vec![],
+            supported: vec![],
+            unresolved: None,
+        };
+        let set = |path: &[&str], value: &str| {
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: vec![Edit {
+                    path: path.iter().map(|p| p.to_string()).collect(),
+                    value: value.into(),
+                    append: false,
+                }],
+            })
+        };
+
+        // max is a change to xhigh, or high where the model has no xhigh, in the user file's env.
+        let owner = format!("{file}:env.CLAUDE_CODE_EFFORT_LEVEL");
+        let (row, fix) = line(Harness::Claude, control("claude-opus-5-5", "max", &owner));
+        assert_eq!(
+            (row.claim.as_str(), row.mark.as_str()),
+            ("OFFICIAL", "change")
+        );
+        assert!(row.head.contains("max -> xhigh"), "{}", row.head);
+        assert!(row.evidence.contains("prone to overthinking"));
+        assert!(
+            row.evidence
+                .contains("claude-opus-5-5 at an unrecorded effort 4 times")
+        );
+        assert!(row.evidence.contains("so its cost is not repriced"));
+        assert!(row.evidence.contains("Enterprise per-role cap"));
+        let fix = fix.unwrap();
+        assert_eq!(fix.how, set(&["env", "CLAUDE_CODE_EFFORT_LEVEL"], "xhigh"));
+        assert!(!fix.suggested);
+        let (row, fix) = line(
+            Harness::Claude,
+            EffortControl {
+                supported: ["low", "medium", "high", "max"].map(String::from).into(),
+                ..control("claude-opus-4-6", "max", "CLAUDE_CODE_EFFORT_LEVEL")
+            },
+        );
+        assert!(row.head.contains("max -> high"), "{}", row.head);
+        assert!(
+            matches!(fix.unwrap().how, How::Manual { reason, .. } if reason.contains("environment variable"))
+        );
+
+        // low is worth considering raising, saved for the model in the user file.
+        let (row, fix) = line(
+            Harness::Claude,
+            control("claude-opus-5", "low", &format!("{file}:effortLevel")),
+        );
+        assert_eq!(
+            (row.claim.as_str(), row.mark.as_str()),
+            ("OPINION", "consider")
+        );
+        let fix = fix.unwrap();
+        assert!(fix.suggested && fix.value == "low -> medium", "{fix:?}");
+        assert_eq!(
+            fix.how,
+            set(&["modelSettings", "claude-opus-5", "effortLevel"], "medium")
+        );
+
+        // xhigh cites the guidance without a verdict, as do the levels between.
+        let (row, fix) = line(Harness::Claude, control("claude-opus-5-5", "xhigh", &owner));
+        assert_eq!(
+            (row.claim.as_str(), row.mark.as_str()),
+            ("OFFICIAL", "info")
+        );
+        assert!(row.evidence.contains("test the next model up"));
+        assert!(fix.is_none());
+        let (row, _) = line(
+            Harness::Claude,
+            control("claude-opus-5-5", "medium", &owner),
+        );
+        assert_eq!(row.mark, "info");
+
+        // A Codex max rests on Anthropic's guidance, so it is an opinion beside OpenAI's.
+        let toml = "/synthetic/home/.codex/config.toml";
+        let (row, _) = line(
+            Harness::Codex,
+            control(
+                "gpt-6.1-sol",
+                "max",
+                &format!("{toml}:model_reasoning_effort"),
+            ),
+        );
+        assert_eq!(
+            (row.claim.as_str(), row.mark.as_str()),
+            ("OPINION", "change")
+        );
+        assert!(row.evidence.contains("Official: OpenAI's reasoning guide"));
+        assert!(!row.evidence.contains("Enterprise"));
+        let (row, _) = line(Harness::Codex, control("gpt-6.1-sol", "xhigh", toml));
+        assert_eq!(
+            (row.claim.as_str(), row.mark.as_str()),
+            ("OFFICIAL", "info")
+        );
+        // A level the guide does not cover says so instead of borrowing another level's advice.
+        let (row, fix) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
+        assert_eq!(row.mark, "info");
+        assert!(
+            row.evidence
+                .starts_with("OpenAI's reasoning guide gives no advice for ultra"),
+            "{}",
+            row.evidence
+        );
+        assert!(fix.is_none());
+
+        // A level a cap lowered is raised by raising the cap, not the default.
+        let cap = |value: &str, owner: String| Owned {
+            value: value.into(),
+            owner,
+        };
+        let capped = |caps: Vec<Owned>| EffortControl {
+            level: Some("high".into()),
+            effective: Some("low".into()),
+            caps,
+            ..control("claude-opus-5-5", "low", &format!("{file}:effortLevel"))
+        };
+        let (row, fix) = line(
+            Harness::Claude,
+            capped(vec![cap("low", format!("{file}:maxEffortLevel"))]),
+        );
+        assert!(
+            row.evidence
+                .ends_with(&format!("Set in {file}:maxEffortLevel.")),
+            "{}",
+            row.evidence
+        );
+        assert_eq!(fix.unwrap().how, set(&["maxEffortLevel"], "medium"));
+        // Every cap in the way, and a default below the target, is changed by hand together.
+        // Model-specific owners are never read as one model key.
+        let user_cap = format!("{file}:modelSettings.claude-opus-5-5.maxEffortLevel");
+        let managed =
+            "/etc/claude-code/managed-settings.json:modelSettings.claude-opus-5-5.maxEffortLevel";
+        let (row, fix) = line(
+            Harness::Claude,
+            capped(vec![
+                cap("low", user_cap.clone()),
+                cap("low", managed.into()),
+            ]),
+        );
+        assert!(
+            row.evidence
+                .ends_with(&format!("Set in {user_cap} and {managed}.")),
+            "{}",
+            row.evidence
+        );
+        match fix.unwrap().how {
+            How::Manual { step, reason } => {
+                assert_eq!(step, format!("set {user_cap} and {managed} to medium"));
+                assert_eq!(
+                    reason,
+                    "2 settings keep it below medium, so they change together"
+                );
+            }
+            how => panic!("expected a step by hand, got {how:?}"),
+        }
+        let (_, fix) = line(
+            Harness::Claude,
+            EffortControl {
+                level: Some("low".into()),
+                owner: format!("{file}:modelSettings.claude-opus-5-5.effortLevel"),
+                ..capped(vec![cap("low", user_cap.clone())])
+            },
+        );
+        match fix.unwrap().how {
+            How::Manual { step, .. } => assert_eq!(
+                step,
+                format!(
+                    "set {file}:modelSettings.claude-opus-5-5.effortLevel and {user_cap} to medium"
+                )
+            ),
+            how => panic!("expected a step by hand, got {how:?}"),
+        }
+
+        // A target the model does not accept is skipped for the next one down.
+        let (row, _) = line(
+            Harness::Codex,
+            EffortControl {
+                supported: ["low", "medium", "high", "max"].map(String::from).into(),
+                ..control("gpt-6-luna", "max", toml)
+            },
+        );
+        assert!(row.head.contains("max -> high"), "{}", row.head);
+
+        // An unresolved default is unknown, and never a change.
+        let (row, fix) = line(
+            Harness::Claude,
+            EffortControl {
+                effective: None,
+                unresolved: Some("T3 picks the model and effort for each thread".into()),
+                ..control("claude-opus-5-5", "max", &owner)
+            },
+        );
+        assert_eq!(row.mark, "unknown");
+        assert!(
+            row.evidence.starts_with("Not enough evidence: T3 picks"),
+            "{}",
+            row.evidence
+        );
+        assert!(fix.is_none());
     }
 
     #[test]

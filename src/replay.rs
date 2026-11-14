@@ -1036,6 +1036,12 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let effort = crate::effort::effort_checks(&crate::effort::EffortInput {
+        scan: &scan,
+        catalog,
+        since,
+        now,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
@@ -1047,6 +1053,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .chain(background.into_iter().map(CheckResult::Background))
         .chain(bash.into_iter().map(CheckResult::BashCap))
         .chain(memory.into_iter().map(CheckResult::Memory))
+        .chain(effort.into_iter().map(CheckResult::Effort))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),

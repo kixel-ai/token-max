@@ -455,7 +455,7 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
             "A Claude Enterprise per-role cap, which no local file records, could lower it.".into(),
         );
     }
-    parts.push(format!("Set in {}.", out.home(&c.owner)));
+    parts.push(format!("Set in {}.", out.home(&e.base.owner)));
     parts.join(" ")
 }
 
@@ -5357,6 +5357,8 @@ mod tests {
             owner: owner.into(),
             effective: Some(level.into()),
             lowered: None,
+            cap: None,
+            supported: vec![],
             unresolved: None,
         };
         let set = |path: &[&str], value: &str| {
@@ -5391,7 +5393,10 @@ mod tests {
         assert!(!fix.suggested);
         let (row, fix) = line(
             Harness::Claude,
-            control("claude-opus-4-6", "max", "CLAUDE_CODE_EFFORT_LEVEL"),
+            EffortControl {
+                supported: ["low", "medium", "high", "max"].map(String::from).into(),
+                ..control("claude-opus-4-6", "max", "CLAUDE_CODE_EFFORT_LEVEL")
+            },
         );
         assert!(row.head.contains("max -> high"), "{}", row.head);
         assert!(
@@ -5449,6 +5454,35 @@ mod tests {
             (row.claim.as_str(), row.mark.as_str()),
             ("OFFICIAL", "info")
         );
+
+        // A level a cap lowered is raised by raising the cap, not the default.
+        let (row, fix) = line(
+            Harness::Claude,
+            EffortControl {
+                cap: Some(format!("{file}:maxEffortLevel")),
+                ..control("claude-opus-5-5", "low", &owner)
+            },
+        );
+        assert!(
+            row.evidence
+                .ends_with("Set in ~/.claude/settings.json:maxEffortLevel.")
+                || row
+                    .evidence
+                    .ends_with(&format!("Set in {file}:maxEffortLevel.")),
+            "{}",
+            row.evidence
+        );
+        assert_eq!(fix.unwrap().how, set(&["maxEffortLevel"], "medium"));
+
+        // A target the model does not accept is skipped for the next one down.
+        let (row, _) = line(
+            Harness::Codex,
+            EffortControl {
+                supported: ["low", "medium", "high", "max"].map(String::from).into(),
+                ..control("gpt-6-luna", "max", toml)
+            },
+        );
+        assert!(row.head.contains("max -> high"), "{}", row.head);
 
         // An unresolved default is unknown, and never a change.
         let (row, fix) = line(

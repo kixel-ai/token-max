@@ -1264,6 +1264,20 @@ pub fn discover_codex_controls(
                         .filter(|(_, config)| trust.is_none() && sets_codex_effort(config))
                         .map(|(file, _)| file.clone()),
                 );
+                // A named profile's project_root_markers or projects can change which
+                // project layers apply, as for memories.
+                if marker_selection {
+                    for file in ancestor_codex_configs(
+                        cwd,
+                        &profile.settings_file,
+                        &options.home,
+                        sets_codex_effort,
+                    )? {
+                        if !effort_files.iter().any(|f| same_file(f, &file)) {
+                            effort_files.push(file);
+                        }
+                    }
+                }
                 effort_unresolved(&mut effort, &effort_files);
                 profile.effort = Some(effort);
                 let untrusted_layer = !untrusted.is_empty();

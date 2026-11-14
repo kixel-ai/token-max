@@ -583,18 +583,24 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 candidates.push(("effortLevel".into(), edit.clone()));
                 candidates.push((format!("modelSettings.{model}.effortLevel"), edit));
             }
-            let row = owner
-                .strip_prefix(&format!("{file}:modelSettings."))
-                .and_then(|rest| rest.strip_suffix(".effortLevel"));
-            if let Some(key) = row {
-                candidates.push((
-                    format!("modelSettings.{key}.effortLevel"),
-                    vec![Edit {
-                        path: vec!["modelSettings".into(), key.into(), "effortLevel".into()],
-                        value: level.into(),
-                        append: false,
-                    }],
-                ));
+            // A model's own level or cap, as the owner names its key; a cap that kept the
+            // level down is raised to the level.
+            candidates.push((
+                "maxEffortLevel".into(),
+                vec![Edit::set("maxEffortLevel", level)],
+            ));
+            let row = owner.strip_prefix(&format!("{file}:modelSettings."));
+            for field in ["effortLevel", "maxEffortLevel"] {
+                if let Some(key) = row.and_then(|rest| rest.strip_suffix(&format!(".{field}"))) {
+                    candidates.push((
+                        format!("modelSettings.{key}.{field}"),
+                        vec![Edit {
+                            path: vec!["modelSettings".into(), key.into(), field.into()],
+                            value: level.into(),
+                            append: false,
+                        }],
+                    ));
+                }
             }
             owned(owner, profile, candidates, step)
         }

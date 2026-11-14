@@ -1175,9 +1175,10 @@ Codex takes `model_reasoning_effort` from the highest config layer Codex reads
 `default_reasoning_level` in its cached model catalog, `models_cache.json` in
 the Codex home; the default is unknown when the catalog cannot be read or does
 not list the model. A named profile file or legacy `[profiles.NAME]` table
-that sets `model` or `model_reasoning_effort`, or a project layer of unrecorded
-trust that does, makes the line unknown, since history does not record which
-applied. T3 picks the model and effort for each thread, so its lines are
+that sets `model` or `model_reasoning_effort`, a project layer of unrecorded
+trust that does, or, when a named profile can change project roots or trust,
+any `.codex/config.toml` above the directory that does, makes the line
+unknown, since history does not record which applied. T3 picks the model and effort for each thread, so its lines are
 unknown.
 
 The recorded pairs come from main-session requests in the window: Claude's

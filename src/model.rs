@@ -890,6 +890,10 @@ pub struct EffortControl {
     pub effective: Option<String>,
     /// Why `effective` differs from `level`, such as a cap or a model without that level.
     pub lowered: Option<String>,
+    /// The `maxEffortLevel` setting that lowered `effective`, which a higher level must raise.
+    pub cap: Option<String>,
+    /// The levels the model accepts; empty when unknown.
+    pub supported: Vec<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
 }

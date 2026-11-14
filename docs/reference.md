@@ -618,7 +618,9 @@ is repriced and no saving is claimed.
 
 On a terminal, `doctor` offers the change in the profile's own file: for Claude
 the `env.CLAUDE_CODE_EFFORT_LEVEL` that sets it, or else the model's
-`modelSettings.<model>.effortLevel`; for Codex `model_reasoning_effort`. A
+`modelSettings.<model>.effortLevel`, or the `maxEffortLevel` that holds a `low`
+level down; for Codex `model_reasoning_effort`. The target is the next level
+the model accepts, by Claude Code's effort table or Codex's model catalog. A
 shell variable, a project or managed file, or a named Codex profile that sets
 it is listed to change by hand. See
 [default effort](semantics.md#main-session-effort) for how the default

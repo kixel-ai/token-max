@@ -372,8 +372,10 @@ fn effort_guidance(e: &EffortCheck) -> String {
         ),
         (Some("xhigh"), true) => "Official: OpenAI's reasoning guide says to use xhigh only when your evals show a clear benefit that justifies the extra latency and cost".into(),
         (Some("auto"), _) => "Claude Code sends no effort level, so the API's default applies".into(),
-        (Some(_), false) => "Official: Claude Code's docs fit medium to day-to-day engineering with a clear scope, and high to work where verification matters".into(),
-        (Some(_), true) => "Official: OpenAI's reasoning guide calls medium the default for most workloads and recommends high for complex workflows and agentic tasks".into(),
+        (Some("medium" | "high"), false) => "Official: Claude Code's docs fit medium to day-to-day engineering with a clear scope, and high to work where verification matters".into(),
+        (Some("medium" | "high"), true) => "Official: OpenAI's reasoning guide calls medium the default for most workloads and recommends high for complex workflows and agentic tasks".into(),
+        // Codex levels the guide gives no advice for, such as ultra; Claude has none left.
+        (Some(level), _) => format!("OpenAI's reasoning guide gives no advice for {level}, so there is no verdict"),
         (None, _) => match (&e.control.lowered, &e.control.unresolved) {
             (Some(why), None) => capitalize(why),
             _ => "The current level is unknown".into(),
@@ -5659,6 +5661,16 @@ mod tests {
             (row.claim.as_str(), row.mark.as_str()),
             ("OFFICIAL", "info")
         );
+        // A level the guide does not cover says so instead of borrowing another level's advice.
+        let (row, fix) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
+        assert_eq!(row.mark, "info");
+        assert!(
+            row.evidence
+                .starts_with("OpenAI's reasoning guide gives no advice for ultra"),
+            "{}",
+            row.evidence
+        );
+        assert!(fix.is_none());
 
         // A level a cap lowered is raised by raising the cap, not the default.
         let cap = |value: &str, owner: String| Owned {

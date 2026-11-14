@@ -2,9 +2,9 @@
 //! `token-max doctor --ssh-scan`.
 //!
 //! The destination writes a [`Header`] and starts scanning. This host answers with one
-//! [`Request`] on the destination's stdin, carrying the price catalog and report format, and
-//! the destination analyzes its own scan and writes one [`Outcome`]: its finished report or a
-//! diagnostic, never the scan. Each value is one JSON line.
+//! [`Request`] on the destination's stdin, carrying the price catalog and the [`Job`], and the
+//! destination analyzes its own scan and writes one [`Outcome`]: its finished report, its
+//! priced session lines, or a diagnostic, never the scan. Each value is one JSON line.
 
 use std::io::{Read, Write};
 
@@ -13,9 +13,10 @@ use sha2::{Digest, Sha256};
 
 use crate::model::{Location, Millis};
 use crate::prices::Catalog;
+use crate::sessions::Session;
 
 /// This build's identity: the package version and a fingerprint of the types a stream carries,
-/// the price catalog and report included.
+/// the price catalog, report and session lines included.
 ///
 /// Unpublished builds share a version, so the fingerprint keeps two different builds of the
 /// same version from misreading each other's streams.
@@ -25,6 +26,8 @@ pub fn build() -> String {
             include_str!("wire.rs"),
             include_str!("prices.rs"),
             include_str!("model.rs"),
+            include_str!("sessions.rs"),
+            include_str!("repository.rs"),
         ]
         .concat(),
     );
@@ -45,8 +48,21 @@ pub struct Header {
 #[serde(rename_all = "camelCase")]
 pub struct Request {
     pub catalog: Catalog,
-    pub max_cost_per_use_usd: f64,
-    pub format: Format,
+    pub job: Job,
+}
+
+/// What the destination makes of its scan.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Job {
+    /// `token-max doctor`'s report.
+    #[serde(rename_all = "camelCase")]
+    Report {
+        max_cost_per_use_usd: f64,
+        format: Format,
+    },
+    /// `token-max sessions`' lines.
+    Sessions,
 }
 
 /// How a host's report is printed for this host's terminal, under the host's name when the
@@ -61,7 +77,7 @@ pub struct Format {
     pub host: Option<String>,
 }
 
-/// How the destination's audit ended: its report, or a diagnostic as safe as a local one.
+/// How the destination's audit ended: what its job made, or a diagnostic as safe as a local one.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Outcome {
@@ -73,6 +89,13 @@ pub enum Outcome {
         text: String,
         /// Whether the report recommends a change, which sets the exit code.
         change: bool,
+    },
+    #[serde(rename_all = "camelCase")]
+    Sessions {
+        /// The window the destination scanned, which must be the one requested.
+        since: Option<Millis>,
+        /// Its sessions, ordered by first request, each without a host.
+        sessions: Vec<Session>,
     },
     Error {
         message: String,
@@ -124,13 +147,15 @@ mod tests {
     fn request() -> Request {
         Request {
             catalog: prices(),
-            max_cost_per_use_usd: 0.5,
-            format: Format {
-                width: Some(80),
-                color: true,
-                unicode: false,
-                details: true,
-                host: Some("devbox".into()),
+            job: Job::Report {
+                max_cost_per_use_usd: 0.5,
+                format: Format {
+                    width: Some(80),
+                    color: true,
+                    unicode: false,
+                    details: true,
+                    host: Some("devbox".into()),
+                },
             },
         }
     }
@@ -141,10 +166,12 @@ mod tests {
         write(&mut bytes, &request()).unwrap();
         let decoded = Stream::new(&bytes[..]).request().unwrap();
         assert_eq!(decoded.catalog, prices());
-        assert_eq!(decoded.max_cost_per_use_usd, 0.5);
         assert!(matches!(
-            decoded.format,
-            Format { host: Some(host), width: Some(80), .. } if host == "devbox"
+            decoded.job,
+            Job::Report {
+                max_cost_per_use_usd: 0.5,
+                format: Format { host: Some(host), width: Some(80), .. },
+            } if host == "devbox"
         ));
     }
 

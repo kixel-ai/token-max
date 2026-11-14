@@ -3735,15 +3735,19 @@ mod tests {
         }
         /// A request linked to the record on `line`, optionally by its wire reference.
         fn request(&self, id: &str, line: u64, reference: Option<&str>) -> Request {
-            Request {
-                id: id.into(),
-                reference: reference.map(|r| identity(r).into()),
-                locations: vec![Location {
-                    file: self.file.clone(),
-                    line,
-                }],
-                profiles: self.snapshot.profiles.clone().into(),
-                ..make_request()
+            {
+                let mut built = Request {
+                    id: id.into(),
+                    reference: reference.map(|r| identity(r).into()),
+                    locations: vec![Location {
+                        file: self.file.clone(),
+                        line,
+                    }]
+                    .into(),
+                    ..make_request()
+                };
+                built.profiles = self.snapshot.profiles.clone().into();
+                built
             }
         }
     }
@@ -4150,10 +4154,11 @@ mod tests {
         );
         feed("/q/b.jsonl", &["native"], vec![call("c1", "s2", 2)]);
         feed("/p/c.jsonl", &["home", "native"], vec![call("c2", "s3", 3)]);
-        let owned = |session: &str, owner: &str| Request {
-            session: identity(session).into(),
-            profiles: vec![owner.to_string()].into(),
-            ..make_request()
+        let owned = |session: &str, owner: &str| {
+            let mut built = Request { ..make_request() };
+            built.session = identity(session).into();
+            built.profiles = vec![owner.to_string()].into();
+            built
         };
         // s1's requests all precede the window, s2 recorded none, and s3 has its own owner.
         let scan = c.finish(

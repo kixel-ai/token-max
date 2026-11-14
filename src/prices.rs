@@ -713,27 +713,51 @@ pub fn paired_savings<'a>(
     pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
     unknown: u64,
 ) -> PairedSavings {
-    let mut usd = Usd::ZERO;
-    let mut priced = 0;
-    let mut count = 0;
-    let mut largest = Usd::ZERO;
+    let mut sum = Pairs::default();
     for (baseline, alternative) in pairs {
-        count += 1;
+        sum.add(baseline, alternative);
+    }
+    sum.savings(unknown)
+}
+
+/// [`paired_savings`] taken one pair at a time, so a whole history's pairs need not be kept.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Pairs {
+    usd: Usd,
+    priced: u64,
+    count: u64,
+    largest: Usd,
+}
+
+impl Pairs {
+    /// Add one (baseline, alternative) pair.
+    pub fn add(&mut self, baseline: &Cost, alternative: &Cost) {
+        self.count += 1;
         let (Some(baseline), Some(alternative)) = (baseline.total_usd, alternative.total_usd)
         else {
-            continue;
+            return;
         };
         let delta = baseline - alternative;
-        usd += delta;
-        priced += 1;
-        largest = largest.max(delta.abs());
+        self.usd += delta;
+        self.priced += 1;
+        self.largest = self.largest.max(delta.abs());
     }
-    let unpriced = count - priced + unknown;
-    PairedSavings {
-        usd,
-        priced,
-        total: count + unknown,
-        decided: unpriced == 0 || (priced > 0 && usd.abs() > largest.saturating_mul(unpriced)),
+
+    /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
+    pub fn savings(&self, unknown: u64) -> PairedSavings {
+        let Self {
+            usd,
+            priced,
+            count,
+            largest,
+        } = *self;
+        let unpriced = count - priced + unknown;
+        PairedSavings {
+            usd,
+            priced,
+            total: count + unknown,
+            decided: unpriced == 0 || (priced > 0 && usd.abs() > largest.saturating_mul(unpriced)),
+        }
     }
 }
 
@@ -1375,11 +1399,12 @@ mod tests {
     }
 
     fn codex_request() -> Request {
-        Request {
-            harness: Harness::Codex,
-            provider: Some("openai".into()),
-            api: Api::Responses,
-            ..make_request()
+        {
+            let mut built = Request { ..make_request() };
+            built.harness = Harness::Codex;
+            built.provider = Some("openai".into());
+            built.api = Api::Responses;
+            built
         }
     }
 
@@ -1584,9 +1609,10 @@ mod tests {
         );
         assert_eq!(missing.total_usd, None);
         assert!(missing.unknown.join(" ").contains("cache writes missing"));
-        let unknown_api = Request {
-            api: Api::Unknown,
-            ..r.clone()
+        let unknown_api = {
+            let mut built = Request { ..r.clone() };
+            built.api = Api::Unknown;
+            built
         };
         assert_eq!(price_part(&catalog, &unknown_api, &p).total_usd, None);
     }
@@ -1693,14 +1719,16 @@ mod tests {
             ..p.clone()
         };
         assert_eq!(price_part(&c, &r, &priority).total_usd, None);
-        let custom = Request {
-            provider: Some("custom".into()),
-            ..r.clone()
+        let custom = {
+            let mut built = Request { ..r.clone() };
+            built.provider = Some("custom".into());
+            built
         };
         assert_eq!(price_part(&c, &custom, &p).total_usd, None);
-        let tools = |entries: &[(&str, i64)]| Request {
-            server_tools: Some(entries.iter().map(|&(k, v)| (k.to_string(), v)).collect()),
-            ..r.clone()
+        let tools = |entries: &[(&str, i64)]| {
+            let mut built = Request { ..r.clone() };
+            built.server_tools = Some(entries.iter().map(|&(k, v)| (k.to_string(), v)).collect());
+            built
         };
         assert_eq!(
             server_cost(&tools(&[
@@ -1715,10 +1743,13 @@ mod tests {
             server_cost(&tools(&[("code_execution_requests", 1)])).total_usd,
             None
         );
-        let unrecorded = Request {
-            parts: vec![p],
-            server_tools: None,
-            ..r
+        let unrecorded = {
+            let mut built = Request {
+                parts: vec![p],
+                ..r
+            };
+            built.server_tools = None;
+            built
         };
         assert_eq!(price_request(&c, &unrecorded).total_usd, None);
     }

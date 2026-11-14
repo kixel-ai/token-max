@@ -7,7 +7,7 @@ use crate::model::{
     Action, BillingPart, CheckBase, Cost, CurrentPremium, Evidence, Harness, Millis,
     ObservedPremium, PartKind, Request, RequestEvidence, Scan, SpeedCheck, SpeedControl, Text, Usd,
 };
-use crate::prices::{Catalog, add_costs, price_components, unknown_cost, zero_cost};
+use crate::prices::{Catalog, Sum, add_costs, price_components, unknown_cost, zero_cost};
 
 const SOURCES: [&str; 9] = [
     "https://code.claude.com/docs/en/fast-mode (2026-11-07)",
@@ -165,6 +165,11 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
     result
 }
 
+/// Add `cost` to a running total that starts at the first cost.
+fn add(total: &mut Option<Sum>, cost: Cost) {
+    total.get_or_insert_with(Sum::new).add(&cost);
+}
+
 fn check(
     catalog: &Catalog,
     profile: &str,
@@ -175,56 +180,66 @@ fn check(
 ) -> SpeedCheck {
     let (mut premium_parts, mut standard_parts, mut unknown_parts) = (0, 0, 0);
     let (mut priced_parts, mut estimate_unknown) = (0, 0);
-    let mut observed: Vec<Cost> = vec![];
-    let mut estimated: Vec<Cost> = vec![];
+    // Running totals, so a part's cost need not be kept; None until a part adds one.
+    let mut observed: Option<Sum> = None;
+    let mut estimated: Option<Sum> = None;
     for &r in requests {
         if r.parts.is_empty() {
             unknown_parts += 1;
-            observed.push(unknown_cost("request parts are absent"));
+            add(&mut observed, unknown_cost("request parts are absent"));
             estimate_unknown += 1;
-            estimated.push(unknown_cost("request parts are absent"));
+            add(&mut estimated, unknown_cost("request parts are absent"));
         }
         for p in &r.parts {
             match premium(r, p) {
                 Some(true) => {
                     premium_parts += 1;
-                    observed.push(difference(catalog, r, p));
+                    add(&mut observed, difference(catalog, r, p));
                 }
                 Some(false) => {
                     standard_parts += 1;
-                    observed.push(zero_cost());
+                    add(&mut observed, zero_cost());
                 }
                 None => {
                     unknown_parts += 1;
-                    observed.push(unknown_cost(
-                        "billed response speed/tier is unknown; requested controls are not billing evidence",
-                    ));
+                    add(
+                        &mut observed,
+                        unknown_cost(
+                            "billed response speed/tier is unknown; requested controls are not billing evidence",
+                        ),
+                    );
                 }
             }
             let value = match control.value.as_deref() {
                 Some(value) if control.resolved => value,
                 _ => {
                     estimate_unknown += 1;
-                    estimated.push(unknown_cost("current speed ownership is unresolved"));
+                    add(
+                        &mut estimated,
+                        unknown_cost("current speed ownership is unresolved"),
+                    );
                     continue;
                 }
             };
             if value == "standard" {
-                estimated.push(zero_cost());
+                add(&mut estimated, zero_cost());
                 continue;
             }
             // Claude only enables fast mode on supported Opus; other models stay standard.
             if r.harness == Harness::Claude
                 && claude_fast_support(p.model.as_deref()) == Some(false)
             {
-                estimated.push(zero_cost());
+                add(&mut estimated, zero_cost());
                 continue;
             }
             if matches!(p.kind, PartKind::Advisor | PartKind::Unknown) {
                 estimate_unknown += 1;
-                estimated.push(unknown_cost(
-                    "current speed ownership of advisor/unknown iteration is not established",
-                ));
+                add(
+                    &mut estimated,
+                    unknown_cost(
+                        "current speed ownership of advisor/unknown iteration is not established",
+                    ),
+                );
                 continue;
             }
             let current = if r.harness == Harness::Claude {
@@ -238,7 +253,7 @@ fn check(
             } else {
                 priced_parts += 1;
             }
-            estimated.push(delta);
+            add(&mut estimated, delta);
         }
     }
     let start = since.or(requests.first().map(|r| r.time));
@@ -246,16 +261,12 @@ fn check(
         (Some(v), Some(start)) if now > start => Some((v * 30.0 * DAY) / (now - start) as f64),
         _ => None,
     };
-    let observed_cost = if observed.is_empty() {
-        unknown_cost("no selected billed usage")
-    } else {
-        add_costs(&observed)
-    };
-    let current_cost = if estimated.is_empty() {
-        unknown_cost("no selected usage for current-setting estimate")
-    } else {
-        add_costs(&estimated)
-    };
+    let observed_cost =
+        observed.map_or_else(|| unknown_cost("no selected billed usage"), Sum::cost);
+    let current_cost = estimated.map_or_else(
+        || unknown_cost("no selected usage for current-setting estimate"),
+        Sum::cost,
+    );
     let action = match control.value.as_deref() {
         Some(_) if !control.resolved => Action::Advisory,
         None => Action::Advisory,
@@ -643,9 +654,10 @@ mod tests {
         }
 
         fn request(profile: &Profile) -> Request {
-            Request {
-                profiles: vec![profile.id.clone()].into(),
-                ..make_request()
+            {
+                let mut built = Request { ..make_request() };
+                built.profiles = vec![profile.id.clone()].into();
+                built
             }
         }
 
@@ -666,29 +678,32 @@ mod tests {
                 ..ClaudeUsage::default()
             };
             let base = make_request().parts[0].clone();
-            let r = Request {
-                parts: vec![
-                    BillingPart {
-                        speed: Some("fast".into()),
-                        geo: Some("us".into()),
-                        usage: claude_usage(usage),
-                        ..base.clone()
-                    },
-                    BillingPart {
-                        speed: Some("standard".into()),
-                        usage: claude_usage(ClaudeUsage {
-                            ttl: Ttl::OneHour,
-                            ..usage
-                        }),
-                        ..base
-                    },
-                ],
-                server_tools: Some(
+            let r = {
+                let mut built = Request {
+                    parts: vec![
+                        BillingPart {
+                            speed: Some("fast".into()),
+                            geo: Some("us".into()),
+                            usage: claude_usage(usage),
+                            ..base.clone()
+                        },
+                        BillingPart {
+                            speed: Some("standard".into()),
+                            usage: claude_usage(ClaudeUsage {
+                                ttl: Ttl::OneHour,
+                                ..usage
+                            }),
+                            ..base
+                        },
+                    ],
+                    ..request(claude(&s))
+                };
+                built.server_tools = Some(
                     [("web_search_requests".to_string(), 999)]
                         .into_iter()
                         .collect(),
-                ),
-                ..request(claude(&s))
+                );
+                built
             };
             s.requests = vec![r.clone()];
             let report = analyze(AnalyzeOptions {
@@ -1048,15 +1063,21 @@ mod tests {
             );
             let p = p.clone();
             s.requests = vec![
-                Request {
-                    id: "a".into(),
-                    cwd: Some("a".into()),
-                    ..request(&p)
+                {
+                    let mut built = Request {
+                        id: "a".into(),
+                        ..request(&p)
+                    };
+                    built.cwd = Some("a".into());
+                    built
                 },
-                Request {
-                    id: "b".into(),
-                    cwd: Some("b".into()),
-                    ..request(&p)
+                {
+                    let mut built = Request {
+                        id: "b".into(),
+                        ..request(&p)
+                    };
+                    built.cwd = Some("b".into());
+                    built
                 },
             ];
             let cards: Vec<_> = checks(&s, &c, None, 100)

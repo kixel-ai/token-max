@@ -535,17 +535,31 @@ pub(crate) fn project_directories(cwd: &str, markers: &[String]) -> Result<Vec<S
     }
 }
 
-/// The main checkout of a linked worktree, reading only Git's path metadata.
-#[cfg(unix)]
-fn main_checkout(root: &str) -> Result<String, ScanError> {
+/// Where a checkout's Git metadata lives, read from Git's path metadata alone.
+#[derive(Debug, PartialEq)]
+pub(crate) struct GitDir {
+    /// The directory holding the repository's shared `config`.
+    pub common: String,
+    /// Whether the checkout is a linked worktree, whose common directory belongs to another.
+    pub linked: bool,
+}
+
+/// The Git directory of the checkout rooted at `root`, or None when it has no `.git`.
+pub(crate) fn git_dir(root: &str) -> Result<Option<GitDir>, ScanError> {
     let dotgit = join(&[root, ".git"]);
     let meta = match fs::metadata(&dotgit) {
         Ok(meta) => meta,
-        Err(e) if absent(e.kind()) => return Ok(root.into()),
+        Err(e) if absent(e.kind()) => return Ok(None),
         Err(_) => return Err(error("cannot inspect git directory", &dotgit, 0)),
     };
+    let own = |common: String| {
+        Ok(Some(GitDir {
+            common,
+            linked: false,
+        }))
+    };
     if meta.is_dir() {
-        return Ok(root.into());
+        return own(dotgit);
     }
     if !meta.is_file() {
         return Err(error("unsupported git directory pointer", &dotgit, 0));
@@ -561,7 +575,8 @@ fn main_checkout(root: &str) -> Result<String, ScanError> {
     let common_file = gitdir.join("commondir");
     let common = match fs::read_to_string(&common_file) {
         Ok(text) => text,
-        Err(e) if absent(e.kind()) => return Ok(root.into()),
+        // A submodule's own directory, not a linked worktree.
+        Err(e) if absent(e.kind()) => return own(gitdir.to_string_lossy().into_owned()),
         Err(_) => {
             return Err(error(
                 "cannot read git common directory",
@@ -585,6 +600,22 @@ fn main_checkout(root: &str) -> Result<String, ScanError> {
             0,
         )
     })?;
+    Ok(Some(GitDir {
+        common,
+        linked: true,
+    }))
+}
+
+/// The main checkout of a linked worktree, reading only Git's path metadata.
+#[cfg(unix)]
+fn main_checkout(root: &str) -> Result<String, ScanError> {
+    let Some(GitDir {
+        common,
+        linked: true,
+    }) = git_dir(root)?
+    else {
+        return Ok(root.into());
+    };
     // Like Claude Code, a common directory outside a checkout (a bare repository, or a
     // submodule under .git/modules) is itself the root; lacking .git, it owns no local file.
     if std::path::Path::new(&common)
@@ -791,6 +822,7 @@ pub fn discover_claude_controls(
                     .zip(local_env.get(*key))
                     .is_some_and(|(setting, inherited)| js_string(Some(setting)) != *inherited)
             });
+            let mut conflicted = None;
             for request in requests.iter().filter(|r| {
                 launch_conflict
                     && r.agent == Agent::Main
@@ -798,14 +830,17 @@ pub fn discover_claude_controls(
                     && r.cwd.as_deref() == Some(cwd)
                     && r.client.as_deref() != Some("cli")
             }) {
-                let mut controls = background.clone();
-                unresolved_background(
-                    &mut controls,
-                    "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
-                );
+                let controls = conflicted.get_or_insert_with(|| {
+                    let mut controls = background.clone();
+                    unresolved_background(
+                        &mut controls,
+                        "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
+                    );
+                    std::sync::Arc::<[BackgroundControl]>::from(controls)
+                });
                 profile
                     .background_requests
-                    .insert(request.id.to_string(), controls);
+                    .insert(request.id.clone(), controls.clone());
             }
             let config = merged(&[&user, &project, &legacy, &local, &managed]);
             idle.ttl = Some(ttl_controls(&TtlSources {
@@ -836,6 +871,9 @@ pub fn discover_claude_controls(
         profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
+        // Every request whose session changed directory shares its directory's unresolved list.
+        let mut carried: crate::collections::HashMap<&str, std::sync::Arc<[BackgroundControl]>> =
+            crate::collections::HashMap::default();
         for request in requests
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
@@ -845,19 +883,19 @@ pub fn discover_claude_controls(
                 .or_insert((request.cwd.as_deref(), false));
             *changed |= *previous != request.cwd.as_deref();
             *previous = request.cwd.as_deref();
-            if *changed
-                && let Some(controls) = profile
-                    .background_directories
-                    .get(request.cwd.as_deref().unwrap_or_default())
-            {
-                let mut controls = controls.clone();
-                unresolved_background(
-                    &mut controls,
-                    "session working directory changed; /cd environment carry-over and launch selection are not recorded",
-                );
+            let cwd = request.cwd.as_deref().unwrap_or_default();
+            if *changed && let Some(controls) = profile.background_directories.get(cwd) {
+                let controls = carried.entry(cwd).or_insert_with(|| {
+                    let mut controls = controls.clone();
+                    unresolved_background(
+                        &mut controls,
+                        "session working directory changed; /cd environment carry-over and launch selection are not recorded",
+                    );
+                    controls.into()
+                });
                 profile
                     .background_requests
-                    .insert(request.id.to_string(), controls);
+                    .insert(request.id.clone(), controls.clone());
             }
         }
     }
@@ -2000,10 +2038,11 @@ mod tests {
     }
 
     fn request(profile: &Profile, cwd: Option<&Path>) -> Request {
-        Request {
-            profiles: vec![profile.id.clone()].into(),
-            cwd: cwd.map(|c| text(c).into()),
-            ..make_request()
+        {
+            let mut built = Request { ..make_request() };
+            built.profiles = vec![profile.id.clone()].into();
+            built.cwd = cwd.map(|c| text(c).into());
+            built
         }
     }
 
@@ -2500,9 +2539,12 @@ mod tests {
         let mut data = discover(&options).unwrap();
         let profile = data.profiles[0].clone();
         let requests = [
-            Request {
-                harness: Harness::Codex,
-                ..request(&profile, Some(&nested))
+            {
+                let mut built = Request {
+                    ..request(&profile, Some(&nested))
+                };
+                built.harness = Harness::Codex;
+                built
             },
             request(&profile, None),
         ];
@@ -2574,20 +2616,21 @@ mod tests {
         o.env
             .insert("CLAUDE_CODE_GOAL_CHECKIN_MINUTES".into(), "9".into());
         let mut d = discover(&o).unwrap();
-        let r = Request {
-            client: Some("cli".into()),
-            ..request(claude(&d), Some(&nested))
+        let r = {
+            let mut built = Request {
+                ..request(claude(&d), Some(&nested))
+            };
+            built.client = Some("cli".into());
+            built
         };
         discover_claude_controls(
             &o,
             &mut d.profiles,
-            &[
-                r.clone(),
-                Request {
-                    cwd: None,
-                    ..r.clone()
-                },
-            ],
+            &[r.clone(), {
+                let mut built = Request { ..r.clone() };
+                built.cwd = None;
+                built
+            }],
         )
         .unwrap();
         let p = claude(&d);
@@ -2631,9 +2674,10 @@ mod tests {
             c[2].off_file.as_deref(),
             Some(text(&w.managed_settings_file()).as_str())
         );
-        let hosted = Request {
-            client: Some("desktop".into()),
-            ..r.clone()
+        let hosted = {
+            let mut built = Request { ..r.clone() };
+            built.client = Some("desktop".into());
+            built
         };
         discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&hosted)).unwrap();
         let c = &claude(&d).background_requests[&*hosted.id];
@@ -2668,12 +2712,15 @@ mod tests {
         ]
         .into_iter()
         .enumerate()
-        .map(|(i, (session, cwd, client))| Request {
-            id: format!("r{i}").into(),
-            session: session.into(),
-            time: i as i64,
-            client: client.map(crate::model::Text::from),
-            ..request(p, Some(cwd))
+        .map(|(i, (session, cwd, client))| {
+            let mut built = Request {
+                id: format!("r{i}").into(),
+                time: i as i64,
+                ..request(p, Some(cwd))
+            };
+            built.session = session.into();
+            built.client = client.map(crate::model::Text::from);
+            built
         })
         .collect();
         discover_claude_controls(&o, &mut d.profiles, &requests).unwrap();
@@ -2682,7 +2729,10 @@ mod tests {
         assert!(!p.background_requests.contains_key("r0"));
         assert!(!p.background_requests.contains_key("r1"));
         for i in 2..7 {
-            assert_eq!(p.background_requests[&format!("r{i}")][1].value, None);
+            assert_eq!(
+                p.background_requests[format!("r{i}").as_str()][1].value,
+                None
+            );
         }
         assert!(p.background_requests["r4"][1].reason.contains("carry-over"));
         assert!(
@@ -2822,9 +2872,12 @@ mod tests {
             .iter()
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
-        let r = Request {
-            harness: Harness::Codex,
-            ..request(p, Some(&cwd))
+        let r = {
+            let mut built = Request {
+                ..request(p, Some(&cwd))
+            };
+            built.harness = Harness::Codex;
+            built
         };
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let p = d
@@ -2926,9 +2979,10 @@ mod tests {
             let p = d.profiles.iter().find(|p| p.harness == harness).unwrap();
             let requests: Vec<Request> = [&repo, &w.home]
                 .into_iter()
-                .map(|cwd| Request {
-                    harness,
-                    ..request(p, Some(cwd.as_path()))
+                .map(|cwd| {
+                    let mut r = request(p, Some(cwd.as_path()));
+                    r.harness = harness;
+                    r
                 })
                 .collect();
             discover_claude_controls(&options(&w), &mut d.profiles, &requests).unwrap();
@@ -2998,11 +3052,12 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let req = Request {
-            harness: Harness::Codex,
-            profiles: vec![id].into(),
-            cwd: Some(text(&root).into()),
-            ..make_request()
+        let req = {
+            let mut built = Request { ..make_request() };
+            built.harness = Harness::Codex;
+            built.profiles = vec![id].into();
+            built.cwd = Some(text(&root).into());
+            built
         };
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(budget(&d).1, None);
@@ -3053,11 +3108,12 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let req = Request {
-            harness: Harness::Codex,
-            profiles: vec![id.clone()].into(),
-            cwd: Some(text(&cwd).into()),
-            ..make_request()
+        let req = {
+            let mut built = Request { ..make_request() };
+            built.harness = Harness::Codex;
+            built.profiles = vec![id.clone()].into();
+            built.cwd = Some(text(&cwd).into());
+            built
         };
         let recap = |d: &Discovery| {
             d.profiles
@@ -3096,11 +3152,16 @@ mod tests {
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, None);
         assert!(recap(&d).reason.contains("--profile"));
-        let gone = Request {
-            cwd: Some(text(&w.home.join("gone")).into()),
-            ..req.clone()
+        let gone = {
+            let mut built = Request { ..req.clone() };
+            built.cwd = Some(text(&w.home.join("gone")).into());
+            built
         };
-        let absent = Request { cwd: None, ..req };
+        let absent = {
+            let mut built = Request { ..req };
+            built.cwd = None;
+            built
+        };
         discover_codex_controls(&options(&w), &mut d.profiles, &[gone.clone(), absent]).unwrap();
         let p = d.profiles.iter().find(|p| p.id == id).unwrap();
         assert!(
@@ -3109,7 +3170,7 @@ mod tests {
                 .all(|c| c.value.is_none())
         );
         assert!(
-            p.background_directories[&*gone.cwd.unwrap()][0]
+            p.background_directories[&*gone.cwd.clone().unwrap()][0]
                 .value
                 .is_none()
         );
@@ -3141,9 +3202,12 @@ mod tests {
         let requests = [
             request(&profile, Some(&project.join("nested"))),
             request(&profile, Some(&gone)),
-            Request {
-                agent: crate::model::Agent::Subagent,
-                ..request(&profile, None)
+            {
+                let mut built = Request {
+                    ..request(&profile, None)
+                };
+                built.agent = crate::model::Agent::Subagent;
+                built
             },
         ];
         discover_claude_controls(&options(&w), &mut data.profiles, &requests).unwrap();

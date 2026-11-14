@@ -6,6 +6,22 @@ at public API prices, and shows which of your settings cost more than they
 return, with the evidence for each one. Then it offers to change them, one at a
 time.
 
+Run it once without installing anything, or install it:
+
+```sh
+curl -LsSf https://max.kixel.ai/run.sh | sh
+curl -LsSf https://max.kixel.ai/install.sh | sh
+```
+
+On Windows, in PowerShell:
+
+```powershell
+irm https://max.kixel.ai/run.ps1 | iex
+irm https://max.kixel.ai/install.ps1 | iex
+```
+
+These work from the first release on; until then, see [Install](#install).
+
 ```text
 $ token-max doctor
 token-max
@@ -57,16 +73,12 @@ That excerpt is from synthetic usage with synthetic prices, not a real host.
 
 From the first release on, each GitHub release has prebuilt binaries for
 Linux (x86_64 and arm64, statically linked), macOS (Apple silicon and Intel)
-and Windows (x86_64), and installers that put `token-max` in `~/.local/bin`
-by default:
-
-```sh
-curl -LsSf https://github.com/kixel-ai/token-max/releases/latest/download/token-max-installer.sh | sh
-```
-
-```powershell
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/kixel-ai/token-max/releases/latest/download/token-max-installer.ps1 | iex"
-```
+and Windows (x86_64). `install.sh` and `install.ps1` above are the release's
+installers, which put `token-max` in `~/.local/bin` by default. `run.sh` and
+`run.ps1` download the binary to a cache instead, check it against the
+release's checksum, and run `token-max doctor`; the
+[reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#running-it)
+says how to pass it options.
 
 `cargo binstall token-max` downloads the same binary, and
 `cargo install --locked token-max` builds it. On Linux and Apple silicon,
@@ -155,7 +167,8 @@ a word replaces the dot. Red lines come first in each section.
 
 - [Reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md):
   every flag, report section and check, including `--ssh`, T3 Code
-  and the `token-max sessions` export.
+  and the `token-max sessions` export of each session's cost, branches and
+  repositories, from this host or over SSH.
 - [Replay semantics](https://github.com/kixel-ai/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.
 - [First-release plan](https://github.com/kixel-ai/token-max/blob/main/quest/m0/README.md):

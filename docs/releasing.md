@@ -45,6 +45,20 @@ but skips the check, saying so, on a system without `sha256sum`.
 cargo-dist's PowerShell installer checks nothing. Where either applies,
 verify the archive against `sha256.sum` or with `gh attestation verify`.
 
+## max.kixel.ai
+
+`site/` is a Cloudflare Worker with only static assets and no code:
+`_redirects` sends `/install.sh` and `/install.ps1` to the latest release's
+installers, and `run.sh` and `run.ps1` are served as they are, so a release
+needs no deploy. `tests/run_script.rs` runs the run script for the host
+(`run.ps1` on the Windows CI job) against fixture releases on a local server.
+After changing `site/`, deploy by hand from that directory with a wrangler
+login for the kixel.ai account:
+
+```sh
+nix shell nixpkgs#wrangler -c wrangler deploy
+```
+
 The flake's default package builds from source and needs no release:
 `nix run github:kixel-ai/token-max -- doctor`.
 
@@ -110,7 +124,8 @@ branch with `dry-run` and the branch's `Cargo.toml` version (0.0.0 is
 allowed). It builds every archive and installer and uploads them as workflow
 artifacts; the jobs that publish only run on `main` without `dry-run`.
 
-After publication, run both installers from a clean home without a Rust
+After publication, run both installers through max.kixel.ai, and both run
+scripts, from a clean home without a Rust
 toolchain, and `cargo binstall token-max` and `cargo install --locked
 token-max` from a clean `CARGO_HOME`; verify help, version and a synthetic
 priced analysis for each. Then clear m0's publication wait and Quest's

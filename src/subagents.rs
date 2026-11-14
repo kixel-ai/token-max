@@ -1547,19 +1547,25 @@ mod tests {
 
     #[test]
     fn each_type_reports_its_cost_models_efforts_and_a_cheapest_model_reprice() {
-        let main = Request {
-            id: "main".into(),
-            session: "parent".into(),
-            ..make_request()
+        let main = {
+            let mut built = Request {
+                id: "main".into(),
+                ..make_request()
+            };
+            built.session = "parent".into();
+            built
         };
         let child = |id: &str, session: &str, model: &str, effort: Option<&str>| {
-            let mut r = Request {
-                id: id.into(),
-                session: session.into(),
-                agent: Agent::Subagent,
-                time: 10,
-                effort: effort.map(Into::into),
-                ..make_request()
+            let mut r = {
+                let mut built = Request {
+                    id: id.into(),
+                    time: 10,
+                    ..make_request()
+                };
+                built.session = session.into();
+                built.agent = Agent::Subagent;
+                built.effort = effort.map(Into::into);
+                built
             };
             r.model = Some(model.into());
             r.parts[0].model = Some(model.into());
@@ -1709,12 +1715,13 @@ mod tests {
             .clone();
         let requests: Vec<Request> = cwds
             .iter()
-            .map(|cwd| Request {
-                harness,
-                agent: Agent::Subagent,
-                cwd: Some(path(cwd).into()),
-                profiles: vec![id.clone()].into(),
-                ..make_request()
+            .map(|cwd| {
+                let mut built = Request { ..make_request() };
+                built.harness = harness;
+                built.agent = Agent::Subagent;
+                built.cwd = Some(path(cwd).into());
+                built.profiles = vec![id.clone()].into();
+                built
             })
             .collect();
         discover(&options.discovery, &mut data.profiles, &requests, &[]).unwrap();
@@ -1872,12 +1879,15 @@ mod tests {
     #[test]
     fn a_run_keeps_its_start_and_its_parent_from_before_the_window() {
         let request = |id: &str, session: &str, time: Millis, model: &str| {
-            let mut r = Request {
-                id: id.into(),
-                session: session.into(),
-                agent: Agent::Subagent,
-                time,
-                ..make_request()
+            let mut r = {
+                let mut built = Request {
+                    id: id.into(),
+                    time,
+                    ..make_request()
+                };
+                built.session = session.into();
+                built.agent = Agent::Subagent;
+                built
             };
             r.model = Some(model.into());
             r.parts[0].model = Some(model.into());

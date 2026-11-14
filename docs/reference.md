@@ -133,8 +133,9 @@ rests on:
   compaction window or idle summary loses, or what checking on a backgrounded
   Bash command costs.
 - **Official**: the provider's own guidance beside what the transcripts show:
-  CLAUDE.md length and the AGENTS.md byte budget, and MCP tool loading. The
-  section ends with its sources.
+  CLAUDE.md length and the AGENTS.md byte budget, MCP tool loading, and
+  Anthropic's model guide beside each Claude subagent type. The section ends
+  with its sources.
 - **Opinion**: the maintainer's preference, beside whatever was measured: fast
   mode off and auto memory off.
 
@@ -614,4 +615,19 @@ capability, and the main agent's extra work after a weaker subagent cannot be
 attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent
 files do not explain the recorded model, for example after a file changed.
+
+Each Claude subagent type also gets an Official line, equally without a
+verdict, citing Anthropic's
+[model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
+subagents that search files, read logs or summarize can start on Haiku or
+Sonnet at the model's default effort, and code edits and judgment calls stay
+on the main model. Explore's line adds the guide's tip, a user agent named
+`Explore` with `model: haiku`, unless every request already ran on Haiku. The
+transcripts don't record whether a type searched or edited, so the line cannot
+say which half applies. The guide also measured an Opus 5.5 lead over Sonnet 5.5
+workers at about a third less cost than Opus 5.5 alone at its default effort,
+scoring about the same, on one internal benchmark; the report doesn't quote it,
+since that pattern splits work too big for one context window rather than
+side tasks. Codex roles get no such line, nor do forks, which always run on
+the main model.
 See [subagent models](semantics.md#subagent-models).

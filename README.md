@@ -128,7 +128,7 @@ No prompt, reply, tool argument or tool output text is kept or printed.
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
 | Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
-| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
+| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model, beside Anthropic's model guide |
 
 ## Reading the report
 

@@ -52,7 +52,7 @@ model guide and Theo Browne's
 - Scope? ✅ the main session's default effort (rejected: none). This amends
   m0's 2026-11-06 exclusion of model and effort selection for the default
   effort only; recommending a model stays out, and the
-  [subagent lines](/quest/m0/subagent-guidance.md) stay evidence.
+  [subagent lines](/docs/reference.md#subagent-models) stay evidence.
 - `max`? ✅ a change to `xhigh`. Anthropic's guide never recommends it, and
   Theo finds `max` forces long thinking on simple tasks and Fable 5.2
   scores worse at `max` than at `xhigh`.

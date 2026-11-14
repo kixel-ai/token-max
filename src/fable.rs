@@ -11,14 +11,16 @@ fn is_fable(model: &str) -> bool {
 }
 
 /// Fable spend for every Claude profile that signs in to Anthropic rather than a cloud
-/// provider, in 7-day spans counted back from `now` to the window's start.
+/// provider, in 7-day spans counted back from `now` to `since`, or else the earliest request.
 ///
 /// A plan's weekly reset time is not recorded, so spans end at the report instead.
-pub fn fable_use(scan: &Scan, catalog: &Catalog, now: Millis) -> Vec<FableUse> {
-    let Some(start) = scan
-        .since
-        .or_else(|| scan.requests.iter().map(|r| r.time).min())
-    else {
+pub fn fable_use(
+    scan: &Scan,
+    catalog: &Catalog,
+    since: Option<Millis>,
+    now: Millis,
+) -> Vec<FableUse> {
+    let Some(start) = since.or_else(|| scan.requests.iter().map(|r| r.time).min()) else {
         return vec![];
     };
     let mut spans = vec![];
@@ -34,11 +36,9 @@ pub fn fable_use(scan: &Scan, catalog: &Catalog, now: Millis) -> Vec<FableUse> {
         .map(|p| {
             let mut sums: Vec<(u64, Sum)> = spans.iter().map(|_| (0, Sum::new())).collect();
             let mut unrecorded = 0;
-            for r in scan
-                .requests
-                .iter()
-                .filter(|r| r.harness == Harness::Claude && r.profiles.contains(&p.id))
-            {
+            for r in scan.requests.iter().filter(|r| {
+                r.harness == Harness::Claude && r.time >= start && r.profiles.contains(&p.id)
+            }) {
                 match r.model.as_deref() {
                     None => unrecorded += 1,
                     Some(m) if is_fable(m) => {
@@ -128,7 +128,7 @@ mod tests {
             request(12 * DAY, fable, "cloud"),
         ];
         let catalog = prices();
-        let uses = fable_use(&scan(requests, Some(3 * DAY)), &catalog, now);
+        let uses = fable_use(&scan(requests.clone(), None), &catalog, Some(3 * DAY), now);
         assert_eq!(uses.len(), 1, "the cloud profile has no plan limit");
         let u = &uses[0];
         assert_eq!(
@@ -152,10 +152,24 @@ mod tests {
         let opus = price_request(&catalog, &request(0, Some("claude-opus-5-5"), "profile"));
         let week = u.weeks[0].cost.total_usd.expect("priced");
         assert!(week > opus.total_usd.unwrap(), "{week:?}");
+        // A later analysis bound drops earlier requests, unrecorded ones included.
+        let later = fable_use(
+            &scan(requests, Some(3 * DAY)),
+            &catalog,
+            Some(12 * DAY),
+            now,
+        );
+        let spans: Vec<(Millis, Millis, u64)> = later[0]
+            .weeks
+            .iter()
+            .map(|w| (w.start, w.end, w.requests))
+            .collect();
+        assert_eq!(spans, [(13 * DAY, 20 * DAY, 1), (12 * DAY, 13 * DAY, 0)]);
+        assert_eq!((later[0].requests, later[0].unrecorded), (1, 0));
     }
 
     #[test]
     fn no_requests_and_no_bound_leave_nothing_to_show() {
-        assert_eq!(fable_use(&scan(vec![], None), &prices(), DAY), vec![]);
+        assert_eq!(fable_use(&scan(vec![], None), &prices(), None, DAY), vec![]);
     }
 }

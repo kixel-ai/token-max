@@ -1220,7 +1220,7 @@ Sources, checked 2026-11-11: the Claude Code 2.1.322 binary and
 `Report.fable` gives each Claude profile without a cloud provider one entry:
 its Fable requests, the requests that recorded no model, and the spend of each
 span. Spans are 7 days, counted back from the report's time to the window's
-start (`--since`, or the earliest request read), so the oldest may be shorter;
+start (the analysis bound, else `--since`, else the earliest request read; earlier requests are left out), so the oldest may be shorter;
 a request on a span's boundary belongs to the later span. A request is Fable
 when its recorded model ID contains `fable`, and it is priced whole with every
 part, like the historical totals. A request shared by several profiles counts

@@ -430,7 +430,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
             value = Some(Ttl::FiveMinutes);
             reason = "explicit cloud-provider billing default";
         } else {
-            reason = "billing state is unknown; main default can change from included subscription usage to credits";
+            reason = TTL_BILLING_UNKNOWN;
         }
         TtlControl {
             value,
@@ -443,6 +443,9 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         subagent: bucket(true),
     }
 }
+
+/// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
+pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
 
 /// Codex's byte budget for the AGENTS.md chain it loads.
 const AGENTS_BUDGET: &str = "project_doc_max_bytes";

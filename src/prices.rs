@@ -955,7 +955,7 @@ pub fn tier_sensitivity(catalog: &Catalog, requests: &[&Request]) -> Vec<TierSce
         }
     }
     for scenario in &mut scenarios {
-        scenario.cost.assumptions.push("tier sensitivity only: assign this served tier to conditionally priced parts; recorded tiers remain authoritative; these scenarios do not bound actual costs or subscription charges".into());
+        scenario.cost.assumptions.push("tier sensitivity only: assign this served tier to conditionally priced parts; recorded tiers remain authoritative; these scenarios do not bound actual costs or a plan's usage".into());
     }
     scenarios.into()
 }
@@ -1022,7 +1022,7 @@ fn selected_rates(
     let tier = service_tier(r, p)?;
     if conditional_tier(r, p) {
         assumptions.push(format!(
-            "conditional {tier}-rate OpenAI API equivalent: effective service tier is unrecorded; requested tier/speed is a scenario, not billing evidence; omitted/auto can inherit nonstandard project defaults; current config is not historical evidence; not a subscription bill"
+            "conditional {tier}-rate OpenAI API equivalent: effective service tier is unrecorded; requested tier/speed is a scenario, not billing evidence; omitted/auto can inherit nonstandard project defaults; current config is not historical evidence; not an invoice"
         ));
         assumptions.push(TIER_SENSITIVITY.into());
         if p.geo.is_none() {

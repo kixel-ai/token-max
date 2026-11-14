@@ -9,6 +9,7 @@ use crate::context::{
     typed_only,
 };
 use crate::controls::CAPPED_SHARED;
+use crate::discovery::TTL_BILLING_UNKNOWN;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
@@ -333,6 +334,60 @@ const MEMORY_ADVICE: &str = "Opinion: notes the agent writes for itself skip rev
 /// Why fast mode is recommended off, whatever it cost.
 const FAST_ADVICE: &str =
     "Opinion: standard speed is enough, and fast mode bills a premium for the same work";
+
+/// What the report's dollars mean, for a reader on a Claude or ChatGPT plan or paying for API use.
+const PRICES_MEAN: &str = "Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them.";
+
+/// What a check's line means on a Claude or ChatGPT plan, where the provider documents a
+/// rule that API prices alone don't show, as an "Official:" sentence and the page that
+/// documents it. A plan is stated conditionally: token-max never reads a profile's plan.
+fn plan_note(
+    result: &CheckResult,
+    r: &Common<'_>,
+    out: &Out<'_>,
+) -> Option<(&'static str, &'static str)> {
+    let profile = out.profiles.get(r.profile);
+    let harness = profile.map(|p| p.harness);
+    match result {
+        CheckResult::Ttl(t)
+            if t.bucket == crate::model::Bucket::Main
+                && profile.is_some_and(|p| {
+                    p.ttl.main.value.is_none() && p.ttl.main.reason == TTL_BILLING_UNKNOWN
+                }) =>
+        {
+            Some((
+                "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
+                "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets",
+            ))
+        }
+        CheckResult::Speed(_) if harness == Some(Harness::Claude) => Some((
+            "on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left.",
+            "https://code.claude.com/docs/en/fast-mode#requirements",
+        )),
+        CheckResult::Speed(_) if harness == Some(Harness::Codex) => Some((
+            "on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here.",
+            "https://learn.chatgpt.com/docs/pricing",
+        )),
+        CheckResult::Background(b)
+            if b.feature == BackgroundFeature::PromptSuggestions
+                && r.current == Some(Setting::Toggle(true)) =>
+        {
+            Some((
+                "Claude Code skips suggestions while a plan is near its usage limit, which this estimate cannot see.",
+                "https://code.claude.com/docs/en/costs#background-token-usage",
+            ))
+        }
+        CheckResult::Compaction(_) | CheckResult::Keepalive(_)
+            if harness == Some(Harness::Codex) =>
+        {
+            Some((
+                "ChatGPT credits charge cache writes as ordinary input, below the API write rate priced here on GPT-5.6 and later.",
+                "https://learn.chatgpt.com/docs/pricing",
+            ))
+        }
+        _ => None,
+    }
+}
 
 /// Why auto memory's state is unknown, as a sentence without its period.
 fn memory_unresolved(c: &MemoryCheck) -> String {
@@ -816,11 +871,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
     out.title();
     t3_coverage(report, out);
-    out.line(
-        "Public API-price estimates, not subscription bills.",
-        0,
-        PLAIN,
-    );
+    out.line(PRICES_MEAN, 0, PLAIN);
     let requests = &report.scan.requests;
     let earliest = requests.first().map(|r| r.time);
     out.field(
@@ -1291,6 +1342,9 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
     out.field("Current", &setting(r.current));
     out.field("Suggested", &setting(r.recommended));
     out.field("Reason", &reason(result, &r));
+    if let Some((note, source)) = plan_note(result, &r, out) {
+        out.field("Official", &format!("{note} {source}"));
+    }
     out.field("Baseline", r.baseline);
     out.field(
         "Window",
@@ -1525,7 +1579,7 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
             );
             out.field(
                 "Speed limits",
-                "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price equivalents, not subscription savings. Work held constant; latency value excluded.",
+                "Recorded cache categories held constant; Claude cache-switch effects excluded. API-price premium, which a plan can count differently (see Official). Work held constant; latency value excluded.",
             );
         }
         CheckResult::Compaction(c) => {
@@ -3142,11 +3196,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     let many = report.scan.profiles.len() > 1;
     out.title();
     t3_coverage(report, out);
-    out.line(
-        "Estimated with public API prices, not your subscription bill. Nothing was changed.",
-        0,
-        PLAIN,
-    );
+    out.line(&format!("{PRICES_MEAN} Nothing was changed."), 0, PLAIN);
     out.blank();
     out.line(
         &match since {
@@ -3387,7 +3437,14 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         if mark == Mark::Change {
             row.amount = r.savings_usd.and_then(saves);
         }
-        let set_in = format!("Set in {}.", out.home(r.owner));
+        let official = match plan_note(result, r, out) {
+            Some((note, source)) => {
+                row.sources.push(source);
+                format!("Official: {note} ")
+            }
+            None => String::new(),
+        };
+        let set_in = format!("{official}Set in {}.", out.home(r.owner));
         let unknown = || {
             format!(
                 "{}{}{} {set_in}",
@@ -3549,7 +3606,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         .filter(|usd| *usd > 0.0)
                         .and_then(|usd| cost_amount(Some(usd)));
                 }
-                let off = background_off(b, out);
+                let off = format!("{official}{}", background_off(b, out));
                 text += &match mark {
                     Mark::Change => format!(
                         "Estimated where it would have run{}; its uses are not recorded. {off}.",
@@ -3572,10 +3629,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                         about(report.max_cost_per_use_usd)
                     ),
                     _ if r.current.is_none() => format!(
-                        "{} {} Candidate owner: {}. Verify ownership before using: {off}.",
+                        "{} {} Candidate owner: {}. {official}Verify ownership before using: {}.",
                         not_enough(background_unknown(b)),
                         b.reason,
-                        out.home(r.owner)
+                        out.home(r.owner),
+                        background_off(b, out)
                     ),
                     _ => format!(
                         "{} {off} to turn it off.",
@@ -3648,6 +3706,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     .join(" ")
             }
         };
+        // A line ends with the setting that changes it, so the plan's rule goes before that
+        // where the line names one.
+        if !official.is_empty() && !row.evidence.contains(&official) {
+            let _ = write!(row.evidence, " {}", official.trim_end());
+        }
         row
     };
     let piece_row = |c: &ContextCost, out: &Out<'_>| {
@@ -5018,7 +5081,10 @@ mod tests {
             "Fast mode off",
             "keep",
             "OPINION",
-            "Opinion: standard speed is enough, and fast mode bills a premium for the same work. Set in /synthetic/home/.claude/settings.json:fastMode.",
+            "Opinion: standard speed is enough, and fast mode bills a premium for the same work. Official: on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in /synthetic/home/.claude/settings.json:fastMode.",
+        );
+        assert!(
+            text.contains("\nSources: https://code.claude.com/docs/en/fast-mode#requirements\n")
         );
         // Pieces no longer sent and those without a verdict get no line of their own.
         assert!(!text.contains("Retired") && !text.contains("Skill list framing"));
@@ -5042,6 +5108,111 @@ mod tests {
             ],
             "{listed}"
         );
+    }
+
+    #[test]
+    fn plan_rules_are_official_and_precede_the_setting() {
+        let mut report = two_profiles();
+        // An unset main TTL, which Claude Code resolves by how the request is paid for.
+        report.scan.profiles[0].ttl.main = TtlControl {
+            value: None,
+            owner: format!("{ROOT}/settings.json:promptCacheTtl"),
+            reason: TTL_BILLING_UNKNOWN.into(),
+        };
+        let ttl = ttl_mut(&mut report);
+        ttl.base.current = None;
+        ttl.base.action = Action::Advisory;
+        let background = |feature, on: bool, profile: &str| {
+            let mut base = check_base(Action::Keep, Some(on), Some(on));
+            base.profile = profile.into();
+            base.owner = format!("{ROOT}/settings.json:promptSuggestionEnabled");
+            CheckResult::Background(BackgroundCheck {
+                base,
+                feature,
+                directories: vec![],
+                reason: "user setting".into(),
+                off: "\"promptSuggestionEnabled\": false".into(),
+                off_file: Some(format!("{ROOT}/settings.json")),
+                generations: Some(0),
+                cost: cost(Some(0.0), 0.0),
+                lost_warming: cost(Some(0.0), 0.0),
+            })
+        };
+        report.checks.extend([
+            background(BackgroundFeature::PromptSuggestions, true, "profile"),
+            background(BackgroundFeature::SessionRecaps, true, "profile"),
+            {
+                let mut window = check_base(Action::Keep, Some(1_000_000), Some(1_000_000));
+                window.profile = "another-profile".into();
+                window.owner =
+                    "/synthetic/second-profile/config.toml:model_auto_compact_token_limit".into();
+                compaction_check(window)
+            },
+        ]);
+        let summary = text(&report, None, false);
+        assert!(summary.contains("\nDollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.\n"), "{summary}");
+        let rows = report_lines(&summary);
+        let evidence = |head: &str| {
+            let rows: Vec<&str> = rows
+                .iter()
+                .filter(|r| r.head.starts_with(head))
+                .map(|r| r.evidence.as_str())
+                .collect();
+            assert_eq!(rows.len(), 1, "{head}: {summary}");
+            rows[0].to_string()
+        };
+        // Each rule sits before the setting that changes the line, so the line still ends with it.
+        assert!(evidence("Main-agent prompt cache TTL").ends_with(
+            " Official: while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Set in /synthetic/home/.claude/settings.json:promptCacheTtl."
+        ));
+        // A set TTL is the same on any plan.
+        assert!(!evidence("Subagent prompt cache TTL").contains("Official"));
+        assert!(evidence("Fast mode fast -> off").contains(
+            " Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. Set in /synthetic/second-profile/config.toml:service_tier."
+        ));
+        assert!(
+            evidence("Fast mode off")
+                .contains(" Official: on a Claude plan, fast mode is paid only from usage credits")
+        );
+        assert!(evidence("Prompt suggestions").ends_with(
+            " Official: Claude Code skips suggestions while a plan is near its usage limit, which this estimate cannot see. Set \"promptSuggestionEnabled\": false in /synthetic/home/.claude/settings.json to turn it off."
+        ));
+        assert!(!evidence("Session recaps").contains("Official"));
+        let codex_window: Vec<&str> = rows
+            .iter()
+            .filter(|r| {
+                r.head.starts_with("Auto-compact window") && r.evidence.contains("second-profile")
+            })
+            .map(|r| r.evidence.as_str())
+            .collect();
+        assert_eq!(codex_window.len(), 1, "{summary}");
+        assert!(codex_window[0].contains(" Official: ChatGPT credits charge cache writes as ordinary input, below the API write rate priced here on GPT-5.6 and later. Set in "));
+        // No Claude window carries the ChatGPT rule.
+        assert_eq!(
+            summary
+                .matches("ChatGPT credits charge cache writes")
+                .count(),
+            1
+        );
+        for source in [
+            "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets",
+            "https://code.claude.com/docs/en/costs#background-token-usage",
+            "https://learn.chatgpt.com/docs/pricing",
+            "https://code.claude.com/docs/en/fast-mode#requirements",
+        ] {
+            assert!(
+                summary
+                    .lines()
+                    .any(|l| l.starts_with("Sources: ") && l.contains(source)),
+                "{source}: {summary}"
+            );
+        }
+        // Details give each rule its own field, with its source.
+        let details = text(&report, None, true);
+        assert!(details.contains(&format!("\n{PRICES_MEAN}\n")), "{details}");
+        assert!(details.contains("\n  Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
+        assert!(!details.contains("subscription"));
+        assert!(!summary.contains("subscription"));
     }
 
     #[test]

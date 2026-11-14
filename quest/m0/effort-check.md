@@ -75,7 +75,6 @@ Agent's choices, for the implementer to revisit:
   the user file, listed to change by hand. Check the resolution order and
   the supported-levels table against the docs again when implementing.
 
-## Related
-
-- [Subscription framing](/quest/m0/subscriptions.md) - the wording this
-  line's evidence follows
+Wording: follow the subscription framing in `docs/reference.md`'s "Plans and
+API prices": dollars are API prices, and a provider's rule for a plan is an
+`Official:` sentence before the setting, with its source.

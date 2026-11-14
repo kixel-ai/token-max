@@ -1,13 +1,32 @@
 //! Each Claude profile's Fable spend per week, for comparing with a plan's documented Fable cap.
 
-use crate::model::{FableUse, FableWeek, Harness, Millis, Scan};
-use crate::prices::{Catalog, Sum, price_request};
+use crate::model::{FableUse, FableWeek, Harness, Millis, Request, Scan};
+use crate::prices::{Catalog, Sum, add_costs, price_part, request_evidence, server_cost};
 
 const WEEK: Millis = 7 * 24 * 60 * 60 * 1000;
 
 /// Whether a recorded model ID is a Fable model, such as `claude-fable-5-2[1m]`.
 fn is_fable(model: &str) -> bool {
     model.contains("fable")
+}
+
+/// What a request's Fable parts cost, or `None` when no part ran on Fable.
+///
+/// An advisor iteration records its own model, so a request can mix Fable with another model;
+/// only the Fable parts count toward the cap. Server-tool fees go with the request's own model.
+fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
+    let fable = |m: Option<&str>| m.is_some_and(is_fable);
+    let parts: Vec<_> = r
+        .parts
+        .iter()
+        .filter(|p| fable(p.model.as_deref()))
+        .map(|p| price_part(catalog, r, p))
+        .collect();
+    if parts.is_empty() {
+        return None;
+    }
+    let server = fable(r.model.as_deref()).then(|| server_cost(r));
+    Some(request_evidence(r, add_costs(parts.iter().chain(&server))))
 }
 
 /// Fable spend for every Claude profile that signs in to Anthropic rather than a cloud
@@ -49,25 +68,25 @@ pub fn fable_use(
                     && r.time <= now
                     && r.profiles.iter().any(|p| p == id)
             }) {
-                match r.model.as_deref() {
-                    None => unrecorded += 1,
-                    Some(m) if is_fable(m) => {
-                        // Spans are most recent first and end exclusive, except the latest.
-                        let i = spans
-                            .iter()
-                            .position(|&(s, e)| r.time >= s && (r.time < e || e == now));
-                        if let Some(i) = i {
-                            sums[i].0 += 1;
-                            sums[i].1.add(&price_request(catalog, r));
-                        }
-                        if r.profiles
-                            .iter()
-                            .any(|p| p != id && eligible.contains(&p.as_str()))
-                        {
-                            shared += 1;
-                        }
+                let Some(cost) = fable_cost(catalog, r) else {
+                    if r.model.is_none() {
+                        unrecorded += 1;
                     }
-                    Some(_) => {}
+                    continue;
+                };
+                // Spans are most recent first and end exclusive, except the latest.
+                let i = spans
+                    .iter()
+                    .position(|&(s, e)| r.time >= s && (r.time < e || e == now));
+                if let Some(i) = i {
+                    sums[i].0 += 1;
+                    sums[i].1.add(&cost);
+                }
+                if r.profiles
+                    .iter()
+                    .any(|p| p != id && eligible.contains(&p.as_str()))
+                {
+                    shared += 1;
                 }
             }
             let mut weeks: Vec<FableWeek> = spans
@@ -99,6 +118,7 @@ pub fn fable_use(
 mod tests {
     use super::*;
     use crate::model::{CacheContext, ExposureScan, ScanCoverage};
+    use crate::prices::price_request;
     use crate::test_support::{make_profile, make_request, prices};
 
     const DAY: Millis = 24 * 60 * 60 * 1000;
@@ -247,6 +267,32 @@ mod tests {
                 .collect();
             assert_eq!(spans, [(now, now, 1)], "{since:?}");
         }
+    }
+
+    #[test]
+    fn only_fable_parts_count_and_are_priced() {
+        let now = 10 * DAY;
+        let catalog = prices();
+        let opus = request(DAY, Some("claude-opus-5-5"), "profile");
+        let fable = request(DAY, Some("claude-fable-5-2"), "profile");
+        // An Opus request whose advisor iteration ran on Fable, and the reverse.
+        let mut advised = opus.clone();
+        let mut advisor = fable.parts[0].clone();
+        advisor.kind = crate::model::PartKind::Advisor;
+        advised.parts.push(advisor);
+        let mut reverse = fable.clone();
+        let mut part = opus.parts[0].clone();
+        part.kind = crate::model::PartKind::Advisor;
+        reverse.parts.push(part);
+        let uses = fable_use(&scan(vec![advised, reverse], None), &catalog, None, now);
+        assert_eq!((uses[0].requests, uses[0].unrecorded), (2, 0));
+        let fable_part = price_part(&catalog, &fable, &fable.parts[0])
+            .total_usd
+            .unwrap();
+        let fees = server_cost(&fable).total_usd.unwrap();
+        let total = uses[0].weeks.last().unwrap().cost.total_usd.unwrap();
+        // Two Fable parts and one request's fees; neither Opus part.
+        assert_eq!(total, fable_part + fable_part + fees);
     }
 
     #[test]

@@ -1201,7 +1201,10 @@ fn details(report: &Report, out: &mut Out<'_>) {
             out.line(&out.profile_name(&u.profile), 0, BOLD);
             out.field("Requests", &requests_of(u.requests, "Fable request"));
             for w in &u.weeks {
-                out.cost(&fable_span(w), &w.cost);
+                out.cost(
+                    &format!("{}, {}", fable_span(w), requests_of(w.requests, "request")),
+                    &w.cost,
+                );
             }
             if u.requests > 0 {
                 out.field("Coverage", FABLE_PARTIAL);
@@ -1553,7 +1556,12 @@ fn fable_row(u: &FableUse) -> Row {
         .iter()
         .map(|w| {
             total.add(&w.cost);
-            format!("{} ({})", scaled(&w.cost, &about), fable_span(w))
+            format!(
+                "{} ({}, {})",
+                scaled(&w.cost, &about),
+                requests_of(w.requests, "request"),
+                fable_span(w)
+            )
         })
         .collect();
     row.amount = Some(("costs", scaled(&total.cost(), &about)));
@@ -6669,7 +6677,7 @@ mod tests {
             ("OFFICIAL", "info", "Fable weekly use costs at least $415")
         );
         for part in [
-            "5 Fable requests at API prices, per 7 days back from this report: $412 (to 2026-12-01), at least $3 (3 days to 2026-11-24).",
+            "5 Fable requests at API prices, per 7 days back from this report: $412 (4 requests, to 2026-12-01), at least $3 (1 request, 3 days to 2026-11-24).",
             "can use up to half the weekly usage limit",
             "no share of it is shown",
             "they cover only this profile's recorded sessions",
@@ -6692,8 +6700,8 @@ mod tests {
         let details = text(&report, None, true);
         for part in [
             "Fable weekly use",
-            "to 2026-12-01",
-            "3 days to 2026-11-24",
+            "to 2026-12-01, 4 requests",
+            "3 days to 2026-11-24, 1 request",
             "they cover only this profile's recorded sessions",
             "1 of them is also attributed to another Claude profile",
             FABLE_RULE,

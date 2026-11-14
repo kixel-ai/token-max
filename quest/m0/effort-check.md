@@ -14,8 +14,10 @@ files (the per-model level under `modelSettings`, then `effortLevel`, with
 the precedence across files the docs give, and a user-file `effortLevel`
 ignored on Opus 5.5 and later models), then the model's own default. Settings
 never accept `max`, so a `max` default comes only from the environment
-variable, and setting it to `auto` or `unset` sends no level at all: the
-line then says the API default applies, rather than naming a level. A level
+variable. Setting it to `auto` or `unset` sends no level, and the line
+says the API default applies rather than naming a level, unless a managed
+`maxEffortLevel` below `max` applies: Claude Code then sends the model's
+default lowered to that cap, and the line shows that level. A level
 the model does not support runs at the highest supported level below it,
 such as `xhigh` running as `high` on Opus 4.6 and Sonnet 4.6, and a
 `maxEffortLevel` cap in managed settings lowers it further; the line shows

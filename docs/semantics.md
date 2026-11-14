@@ -1140,7 +1140,9 @@ recorded tokens on the provider's cheapest current model. The lines are
 evidence only. They never recommend a model, offer no change
 and never change the exit code: a cheaper model or lower effort trades
 capability, and the main agent's extra work after a weaker subagent lands in
-its own requests, where transcripts cannot attribute it. When runs in
+its own requests, where transcripts cannot attribute it. Each Claude type's
+Official line, citing Anthropic's model guide (checked 2026-11-14), is equally
+verdict-free. When runs in
 different projects are set by different files, the model and effort settings
 name each.
 

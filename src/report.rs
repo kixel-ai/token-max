@@ -999,6 +999,10 @@ fn details(report: &Report, out: &mut Out<'_>) {
             }
             out.field("Model setting", &out.home_in(&c.model_setting));
             out.field("Effort setting", &out.home_in(&c.effort_setting));
+            if let Some(text) = subagent_guidance(c) {
+                out.field("Official", &text);
+                out.field("Source", CLAUDE_MODEL_GUIDE);
+            }
         }
     }
 
@@ -1143,6 +1147,25 @@ fn details(report: &Report, out: &mut Out<'_>) {
 
 /// Why the subagent lines never recommend a change.
 const SUBAGENT_EVIDENCE: &str = "Subagent lines are evidence, not recommendations: a cheaper model or lower effort trades capability, and the main agent's extra work after a weaker subagent cannot be attributed, so no saving is claimed. A lower effort changes the output tokens, so its cost cannot be measured.";
+
+/// Anthropic's guide to picking a model, which covers subagents.
+const CLAUDE_MODEL_GUIDE: &str =
+    "https://claude.dev/blog/which-claude-model-should-you-build-with/";
+
+/// What Anthropic's model guide says about a Claude subagent type, or None for Codex and
+/// forks, whose model no setting changes. It is guidance only: whether a type searches or
+/// edits is not recorded, so no verdict is given.
+fn subagent_guidance(c: &SubagentCost) -> Option<String> {
+    if c.harness != Harness::Claude || c.fork {
+        return None;
+    }
+    let mut text = "Anthropic's model guide starts subagents that search files, read logs or summarize on Haiku or Sonnet at the model's default effort, and keeps code edits and judgment calls on the main model.".to_string();
+    let on_haiku = c.models.iter().all(|m| m.name.contains("haiku"));
+    if c.kind == "Explore" && !on_haiku {
+        text.push_str(" Since the built-in Explore runs on the session's model, it suggests a user agent named Explore with model: haiku to keep exploration cheap.");
+    }
+    Some(text)
+}
 
 /// A subagent type by harness: a Claude agent type, a Codex role or other Codex subagent.
 fn subagent_name(c: &SubagentCost) -> String {
@@ -3869,6 +3892,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         row.amount = Some(("costs", scaled(&c.cost, &about)));
         row.evidence = subagent_line(c, &about, out);
         rows.push(row);
+        if let Some(text) = subagent_guidance(c) {
+            let mut row = Row::new(Claim::Official, Mark::Info, subagent_name(c));
+            row.profile = tag(&c.profiles[0], out);
+            row.evidence = text;
+            row.sources = vec![CLAUDE_MODEL_GUIDE];
+            rows.push(row);
+        }
     }
     // Context with no switch: worth seeing, but not a setting to change.
     let fixed: Vec<&ContextCost> = report
@@ -5780,6 +5810,7 @@ mod tests {
             profiles: vec!["profile".into()],
             kind: "Explore".into(),
             native: false,
+            fork: false,
             runs: 3,
             requests: 10,
             priced: 9,
@@ -5834,7 +5865,29 @@ mod tests {
             assert!(line.contains(part), "{part} in {line}");
         }
         assert!(summary.contains(SUBAGENT_EVIDENCE));
+        let official = report_lines(&summary)
+            .into_iter()
+            .find(|r| r.claim == "OFFICIAL" && r.head.starts_with("Explore subagent"))
+            .expect("an Official Explore line");
+        assert_eq!(official.mark, "info");
+        assert!(official.evidence.contains(
+            "search files, read logs or summarize on Haiku or Sonnet at the model's default effort"
+        ));
+        assert!(
+            official
+                .evidence
+                .contains("user agent named Explore with model: haiku")
+        );
+        assert!(
+            summary
+                .lines()
+                .any(|l| l.starts_with("Sources: ") && l.contains(CLAUDE_MODEL_GUIDE))
+        );
         let details = text(&report, None, true);
+        assert!(
+            details.contains(&format!("Source: {CLAUDE_MODEL_GUIDE}")),
+            "{details}"
+        );
         assert!(
             details.contains("Same tokens on claude-haiku-5-5: $0.50"),
             "{details}"
@@ -5843,6 +5896,51 @@ mod tests {
             details.contains(
                 "Model source: unknown: the Claude Code version is not recorded (3 runs)"
             )
+        );
+    }
+
+    #[test]
+    fn subagent_guidance_covers_claude_types_and_explore_off_haiku() {
+        let line = |harness, kind: &str, model: &str| SubagentCost {
+            harness,
+            profiles: vec!["profile".into()],
+            kind: kind.into(),
+            native: false,
+            fork: kind == "fork",
+            runs: 1,
+            requests: 1,
+            priced: 1,
+            cost: Cost::default(),
+            models: vec![Share {
+                name: model.into(),
+                count: 1,
+            }],
+            efforts: vec![],
+            sources: vec![],
+            cheapest: None,
+            reprice: None,
+            model_setting: String::new(),
+            effort_setting: String::new(),
+        };
+        let tip = "user agent named Explore";
+        assert_eq!(
+            subagent_guidance(&line(Harness::Codex, "explorer", "gpt-5")),
+            None
+        );
+        let general =
+            subagent_guidance(&line(Harness::Claude, "log-reader", "claude-opus-5-5")).unwrap();
+        assert!(general.contains("keeps code edits and judgment calls on the main model"));
+        assert!(!general.contains(tip));
+        let explore =
+            subagent_guidance(&line(Harness::Claude, "Explore", "claude-opus-5-5")).unwrap();
+        assert!(explore.contains(tip));
+        let cheap =
+            subagent_guidance(&line(Harness::Claude, "Explore", "claude-haiku-5-5")).unwrap();
+        assert!(!cheap.contains(tip));
+        // A fork always runs on the main model, so no setting can act on the guide.
+        assert_eq!(
+            subagent_guidance(&line(Harness::Claude, "fork", "claude-opus-5-5")),
+            None
         );
     }
 

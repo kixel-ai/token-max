@@ -7,6 +7,7 @@ use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
+use crate::discovery::TTL_BILLING_UNKNOWN;
 use crate::estimates::estimate_usage;
 use crate::exposure::calibrate;
 use crate::fast::{SpeedInput, speed_checks};
@@ -700,8 +701,9 @@ fn ttl_check(
         .and_then(|r| r.version.as_deref())
         .or_else(|| requests.last().and_then(|r| r.version.as_deref()));
     let supported = version_supported(recent_version);
-    let applies =
-        supported && current.value.is_some() && current.reason != "prompt caching is disabled";
+    // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
+    let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
+    let applies = supported && (current.value.is_some() || pinnable);
     let action = match recommended {
         Some(recommended) if applies => {
             if Some(recommended) != current.value {
@@ -1036,6 +1038,12 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
+    let effort = crate::effort::effort_checks(&crate::effort::EffortInput {
+        scan: &scan,
+        catalog,
+        since,
+        now,
+    });
     let checks = ttls
         .into_iter()
         .map(CheckResult::Ttl)
@@ -1047,6 +1055,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .chain(background.into_iter().map(CheckResult::Background))
         .chain(bash.into_iter().map(CheckResult::BashCap))
         .chain(memory.into_iter().map(CheckResult::Memory))
+        .chain(effort.into_iter().map(CheckResult::Effort))
         .collect();
     let exposure = ExposureSummary {
         calibration: calibrate(&scan.exposure, &scan.requests),
@@ -1414,9 +1423,15 @@ mod tests {
     }
 
     #[test]
-    fn unknown_billing_or_version_stays_advisory() {
+    fn unknown_billing_pins_the_winner_and_disabled_caching_or_version_stays_advisory() {
         let mut s = data(vec![make_request()], vec![]);
         s.profiles[0].ttl.main.value = None;
+        s.profiles[0].ttl.main.reason = crate::discovery::TTL_BILLING_UNKNOWN.into();
+        let pinned = check(&s, None, 100);
+        assert_eq!(pinned.base.action, Action::Change);
+        assert!(pinned.base.recommended.is_some());
+        assert_eq!(pinned.base.savings_usd, None);
+        s.profiles[0].ttl.main.reason = "prompt caching is disabled".into();
         assert_eq!(check(&s, None, 100).base.action, Action::Advisory);
         s.profiles[0].ttl.main.value = Some(H1);
         s.requests[0].version = Some("2.1.100".into());

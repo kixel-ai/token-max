@@ -12,6 +12,7 @@ use crate::controls::{
     claude_background, claude_memory, codex_background, codex_memory, compaction_controls,
     idle_controls, js_string, members, scoped_environment, speed_controls,
 };
+use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
     Agent, BackgroundControl, Harness, IdleControl, Location, MemoryControl, PerBucket, Profile,
     Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
@@ -728,8 +729,25 @@ pub fn discover_claude_controls(
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
             .collect();
-        // Auto memory's setting is read at the latest main-agent request's directory.
+        // Auto memory's and effort's settings are read at the latest main-agent request's
+        // directory; without one, the user and managed files decide.
         let latest = crate::memory::deciding_request(&relevant).and_then(|r| r.cwd.clone());
+        let recorded = latest_model(&relevant);
+        profile.effort = Some(claude_effort(
+            &[
+                SettingsScope {
+                    config: &user,
+                    file: &profile.settings_file,
+                },
+                SettingsScope {
+                    config: &managed,
+                    file: managed_file,
+                },
+            ],
+            &profile.settings_file,
+            local_env,
+            recorded,
+        )?);
         if relevant
             .iter()
             .any(|r| r.cwd.as_deref().is_none_or(str::is_empty))
@@ -816,6 +834,12 @@ pub fn discover_claude_controls(
                     directory: Some(cwd.into()),
                     ..claude_memory(&scopes, local_env)?
                 });
+                profile.effort = Some(claude_effort(
+                    &scopes,
+                    &profile.settings_file,
+                    local_env,
+                    recorded,
+                )?);
             }
             let settings_env = scoped_environment(&scopes, &empty);
             let launch_conflict = CLAUDE_BACKGROUND_ENV.iter().any(|key| {
@@ -1064,6 +1088,8 @@ pub fn discover_codex_controls(
             .into_iter()
             .collect();
         let mut outranking: Vec<String> = vec![];
+        // Named profile files that set the model or its effort, which a --profile selection could apply.
+        let mut effort_profile_files: Vec<String> = vec![];
         for name in named_profile_files(&profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = settings(&file, Harness::Codex)?;
@@ -1072,6 +1098,9 @@ pub fn discover_codex_controls(
             }
             if sets_codex_memory(&config) {
                 memory_profiles.push(file.clone());
+            }
+            if sets_codex_effort(&config) {
+                effort_profile_files.push(file.clone());
             }
             if config.contains_key(AGENTS_BUDGET) {
                 budget_overrides.push(file.clone());
@@ -1119,6 +1148,31 @@ pub fn discover_codex_controls(
         // Memories' setting is read at the latest main-agent request's directory, as
         // for Claude.
         let latest = crate::memory::deciding_request(&mine).and_then(|r| r.cwd.clone());
+        // Effort is read where memories are, from the layers Codex trusts there.
+        let catalog = codex_catalog(&profile.root);
+        let recorded = latest_model(&mine);
+        let effort_profiles: Vec<String> = members(user.get("profiles"))
+            .iter()
+            .filter(|(_, p)| sets_codex_effort(members(Some(p))))
+            .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
+            .chain(effort_profile_files.iter().cloned())
+            .collect();
+        let effort_unresolved = |control: &mut crate::model::EffortControl, files: &[String]| {
+            if !files.is_empty() && control.unresolved.is_none() {
+                control.unresolved = Some(format!(
+                    "{} can set the model or model_reasoning_effort for some runs, and which applied is not recorded",
+                    files.join(", ")
+                ));
+            }
+        };
+        let mut effort = codex_effort(
+            &base_scopes,
+            &profile.settings_file,
+            catalog.as_ref(),
+            recorded,
+        )?;
+        effort_unresolved(&mut effort, &effort_profiles);
+        profile.effort = Some(effort);
         let cwds = directories(mine.iter().copied());
         for cwd in cwds {
             if !existing_directory(cwd)? {
@@ -1204,6 +1258,31 @@ pub fn discover_codex_controls(
                     .filter(|(_, config)| trust.is_none() && sets_codex_memory(config))
                     .map(|(file, _)| file.clone())
                     .collect();
+                let mut effort =
+                    codex_effort(trusted, &profile.settings_file, catalog.as_ref(), recorded)?;
+                let mut effort_files = effort_profiles.clone();
+                effort_files.extend(
+                    layers
+                        .iter()
+                        .filter(|(_, config)| trust.is_none() && sets_codex_effort(config))
+                        .map(|(file, _)| file.clone()),
+                );
+                // A named profile's project_root_markers or projects can change which
+                // project layers apply, as for memories.
+                if marker_selection {
+                    for file in ancestor_codex_configs(
+                        cwd,
+                        &profile.settings_file,
+                        &options.home,
+                        sets_codex_effort,
+                    )? {
+                        if !effort_files.iter().any(|f| same_file(f, &file)) {
+                            effort_files.push(file);
+                        }
+                    }
+                }
+                effort_unresolved(&mut effort, &effort_files);
+                profile.effort = Some(effort);
                 let untrusted_layer = !untrusted.is_empty();
                 // A named profile's project_root_markers or projects can change which
                 // project layers apply, which matters only where one sets memories.
@@ -1286,6 +1365,11 @@ pub fn discover_codex_controls(
         });
     }
     Ok(())
+}
+
+/// Whether a Codex config sets the model or its reasoning effort.
+fn sets_codex_effort(config: &Map<String, Value>) -> bool {
+    config.contains_key("model") || config.contains_key("model_reasoning_effort")
 }
 
 /// Whether a Codex config sets whether memories are on, used or generated.
@@ -1842,6 +1926,7 @@ pub(crate) fn profile(
         idle,
         speed: Some(speed),
         bash,
+        effort: None,
         speed_directories: None,
         idle_directories: None,
         background,

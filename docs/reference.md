@@ -126,7 +126,7 @@ section ends with the source:
 
 | Line | On a plan |
 | --- | --- |
-| Main-agent prompt cache TTL, while unset | Claude Code [requests 1h](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets) for the main conversation on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Since token-max can't tell which applies, the current value is unknown and the line names both. |
+| Main-agent prompt cache TTL, while unset | Claude Code [requests 1h](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets) for the main conversation on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Since token-max can't tell which applies, the line shows `unset` and names both. When the replay picks a winner, setting it is the cheaper choice either way, so the line recommends `unset -> 1h` (or `5m`) and `doctor` offers to set it; it shows the replay's gap as "saves up to", saved only while the other default would apply. |
 | Claude fast mode | A Claude plan [pays fast mode only from usage credits](https://code.claude.com/docs/en/fast-mode#requirements), at its API rates, even with plan usage left. |
 | Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is 2x for Fast on GPT-6 and GPT-5.6 and 6x for Ultrafast, so included usage can draw faster than it shows. |
 | Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
@@ -488,10 +488,13 @@ and the user accepts it; the adapter does not infer an unrecorded acceptance.
 It needs no T3 lifecycle guard. `off` also suppresses that dialog. Summaries
 pay warm or cold input plus output; later requests pay their full changed
 prefixes, and final proactive summaries have no invented return benefit.
-Missing lifecycle or compatible full-prefix calibration stays unpriced, and
-the report names the first missing input. Current lifecycle guards do not
-reconstruct prior guard states. See [T3 evidence and sources](t3.md) for
-supported schema and limits.
+The lifecycle guards for each gap are rebuilt from T3's event log at every
+completed-run event and when the timer would fire. T3 keeps about one day of
+that log, so the check's window starts where the log is complete, and gaps
+that open earlier stay as recorded in every mode. Unknown lifecycle or missing
+compatible full-prefix calibration stays unpriced, and the report names the
+first missing input. See [T3 evidence and sources](t3.md) for supported schema
+and limits.
 
 ## Other hosts over SSH
 
@@ -635,6 +638,38 @@ read, at the write rate minus the read rate. Background commands and the user's
 own processes are unaffected by the cap. Codex's
 `background_terminal_max_timeout` bounds one poll of a background terminal,
 and each poll reads the cache, so it is not checked.
+
+## Main-session effort
+
+Each profile gets one `Main-session effort` line: the reasoning effort its main
+session defaults to, the level it runs at, what each recorded model and effort
+pair cost over the window and how many requests it ran, and the setting that
+changes the default. A different effort changes the output tokens, so no cost
+is repriced and no saving is claimed.
+
+- `max` is a recommended change to `xhigh`, or to `high` on a model without
+  `xhigh`, and exits 1. For Claude it is Official, citing Anthropic's
+  [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
+  (past `high`, test the next model up at a lower effort) and the
+  [model configuration docs](https://code.claude.com/docs/en/model-config#choose-an-effort-level)
+  (`max` is prone to overthinking; test it before adopting it broadly). For
+  Codex the same advice is Opinion, beside OpenAI's
+  [reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
+- `low` is worth considering raising to `medium`, as Opinion.
+- `xhigh` cites the same guidance under Official, with no verdict; so do
+  `medium` and `high`, with the guidance for those levels.
+- A default token-max cannot resolve, such as a T3 thread's selection, is
+  unknown and never a change.
+
+On a terminal, `doctor` offers the change in the profile's own file: for Claude
+the `env.CLAUDE_CODE_EFFORT_LEVEL` that sets it, or else the model's
+`modelSettings.<model>.effortLevel`, or the `maxEffortLevel` that holds a `low`
+level down; for Codex `model_reasoning_effort`. The target is the next level
+the model accepts, by Claude Code's effort table or Codex's model catalog. A
+shell variable, a project or managed file, or a named Codex profile that sets
+it is listed to change by hand. See
+[default effort](semantics.md#main-session-effort) for how the default
+resolves.
 
 ## Subagent models
 

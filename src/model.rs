@@ -872,6 +872,33 @@ pub struct SpeedControl {
     pub reason: String,
 }
 
+/// A profile's main-session default reasoning effort, the setting that decides it and the
+/// level its session runs at.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EffortControl {
+    /// The model the default is resolved for; None when it cannot be named.
+    pub model: Option<String>,
+    /// The setting that names the model, or the recorded session it was taken from.
+    pub model_owner: String,
+    /// The default level, `auto` when Claude Code sends none; None when unknown or the
+    /// model takes no effort.
+    pub level: Option<String>,
+    /// The setting or variable that decides `level`, or the file to set it in.
+    pub owner: String,
+    /// The level the session runs at after an unsupported level falls back and caps apply.
+    pub effective: Option<String>,
+    /// Why `effective` differs from `level`, such as a cap or a model without that level.
+    pub lowered: Option<String>,
+    /// Every `maxEffortLevel` below `max` that applies to the model, each of which a higher
+    /// level must clear.
+    pub caps: Vec<Owned>,
+    /// The levels the model accepts; empty when unknown.
+    pub supported: Vec<String>,
+    /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
+    pub unresolved: Option<String>,
+}
+
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -907,6 +934,9 @@ pub struct Profile {
     pub speed: Option<SpeedControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bash: Option<BashCapControl>,
+    /// The main session's default reasoning effort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effort: Option<EffortControl>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
@@ -1031,6 +1061,9 @@ pub struct T3Instance {
     /// discovery resolves at each recorded project like a native profile's.
     #[serde(skip)]
     pub inherited_window: Option<crate::controls::Env>,
+    /// When T3's pruned event log becomes complete, which starts its idle check's window;
+    /// None when it never pruned or was not read.
+    pub retained_since: Option<Millis>,
 }
 
 /// Coverage of one selected T3 state, without aggregate usage or connection credentials.
@@ -1093,8 +1126,21 @@ pub struct T3Request {
     pub used_tokens: Option<i64>,
     pub cache_expires_at: Option<Millis>,
     pub idle_mode: Option<T3IdleMode>,
-    /// Current lifecycle guards, not proof that a lost in-memory timer fired.
-    pub lifecycle_eligible: Option<bool>,
+    /// The idle-timer guards after this turn's run, rebuilt from T3's event log; None when
+    /// T3 pruned the run's completion. They are not proof that a lost in-memory timer fired.
+    pub guards: Option<std::sync::Arc<T3Guards>>,
+}
+
+/// Whether T3's lifecycle guards let its idle timer run, or why that is unknown.
+pub type T3Guard = Result<bool, &'static str>;
+
+/// T3's idle-timer guards after one completed run, from its completion until a later run starts.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+pub struct T3Guards {
+    /// Each completed-run event that re-armed the thread's timer, and the guards just after it.
+    pub arms: Vec<(Millis, T3Guard)>,
+    /// The guards from each time until the next entry.
+    pub spans: Vec<(Millis, T3Guard)>,
 }
 
 /// A model request the client makes on its own, outside the turns the user drives.
@@ -1584,6 +1630,33 @@ pub struct SpeedCheck {
     pub usage_estimates: Vec<UsageEstimate>,
 }
 
+/// What one model and effort pair cost in the main session over the window.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffortRun {
+    pub model: Option<String>,
+    /// The recorded effort; None when the request recorded none.
+    pub effort: Option<String>,
+    pub requests: u64,
+    pub cost: Cost,
+}
+
+/// A profile's main-session default effort beside what each model and effort pair cost.
+/// A different effort changes the output tokens, so nothing is repriced.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EffortCheck {
+    /// The effective level as current, and `xhigh`, `high` or `medium` as recommended.
+    pub base: CheckBase<String>,
+    pub harness: Harness,
+    pub control: EffortControl,
+    /// Whether a Claude Enterprise per-role cap, which no local file records, could apply.
+    pub enterprise: bool,
+    /// Main-session requests by model and recorded effort, most first.
+    pub runs: Vec<EffortRun>,
+    /// Settings beside `base.owner`, such as caps below the recommended level, that must
+    /// change with it.
+    pub also: Vec<String>,
+}
+
 /// What a background feature cost, estimated from the turns where it would have run.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BackgroundCheck {
@@ -1889,6 +1962,7 @@ pub enum CheckResult {
     BashCap(BashCapCheck),
     Keepalive(KeepaliveCheck),
     Memory(MemoryCheck),
+    Effort(EffortCheck),
 }
 
 impl CheckResult {
@@ -1904,6 +1978,7 @@ impl CheckResult {
             CheckResult::BashCap(c) => c.base.action,
             CheckResult::Keepalive(c) => c.base.action,
             CheckResult::Memory(c) => c.base.action,
+            CheckResult::Effort(c) => c.base.action,
         }
     }
 }

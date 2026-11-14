@@ -198,3 +198,16 @@ cargo-dist, with `install.sh` and `run.sh` at
 sectioned by kind of claim, Measured, Official and Opinion
 ([kixelated/token-max#82](https://github.com/kixelated/token-max/pull/82)). The epic's end-to-end validation also runs both curl lines
 against the published release.
+
+Decided 2026-11-13 (maintainer, /quest-plan after Anthropic's
+[model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
+and Theo Browne's
+[Opus against Fable video](https://www.youtube.com/watch?v=XtykeVoSmP8)):
+✅ token-max advises subscription users, showing API prices as the measure
+(rejected: both audiences equally), and never reads the signed-in plan;
+✅ the main session's default effort joins m0's checks, while model choice
+stays evidence only; ✅ all of it in m0 (rejected: the framing in m0 and
+the checks in m1; all in m1). The quests record the reasons. Where this
+entry and an older one disagree, such as "API-price equivalents are not a
+claim about subscription bills" or "Model and review effort selection
+remain outside this expansion", this one holds.

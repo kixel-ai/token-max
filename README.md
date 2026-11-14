@@ -159,10 +159,11 @@ a word replaces the dot. Red lines come first in each section.
   plan's limits weigh tokens, so on a Claude or ChatGPT plan they are the
   closest public measure of what a request uses of them, and past a Claude
   plan's limits, usage credits bill these same prices. Where a provider
-  documents that a plan counts something differently, such as fast mode, which
-  a Claude plan pays only from usage credits, the line says so under
-  "Official:". token-max never reads which plan you are on, so these notes say
-  "on a Claude plan" rather than naming yours.
+  documents that a plan counts something differently, the line says so under
+  "Official:", as the
+  [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#plans-and-api-prices)
+  lists. token-max never reads which plan you are on, so these notes say "on a
+  Claude plan" rather than naming yours.
 - Comparisons between setting values are per 30 days; what a feature cost,
   and how often it was used, are totals over the whole window.
 - A **saves** figure comes from replaying your own sessions under the other

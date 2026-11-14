@@ -22,6 +22,8 @@ const PRUNED: &str = "T3 pruned the event holding a lifecycle guard's state duri
 const OVERSIZED: &str = "a T3 event holding a lifecycle guard exceeds the 1 MiB read bound";
 const UNSUPPORTED: &str =
     "T3 recorded an event this adapter does not support before or during this gap";
+const REORDERED: &str =
+    "T3 dated an event before an earlier one, so their order around this gap's guards is unknown";
 
 /// Event types whose payload is a whole thread.
 const THREAD: [&str; 23] = [
@@ -610,7 +612,25 @@ impl<'a> Log<'a> {
             }
             rows.push(((kind, id), snapshot));
         }
+        let pruned = self.boundary.since;
+        // An unreadable event may describe an entity that existed before the boundary, so
+        // after pruning, the state its kind held before it is unknown.
+        let (mut thread_unread, mut active_unread) = (false, false);
         for e in events {
+            if pruned.is_some()
+                && let (Some(Some(kind)), None) = (e.kind, &e.snapshot)
+            {
+                match kind {
+                    Kind::Thread => thread_unread = true,
+                    Kind::ProviderThread => {
+                        active_unread = true;
+                        self.poisoned.insert(kind, OVERSIZED);
+                    }
+                    _ => {
+                        self.poisoned.insert(kind, OVERSIZED);
+                    }
+                }
+            }
             let (Some(Some(kind)), Some(s)) = (e.kind, &e.snapshot) else {
                 continue;
             };
@@ -638,6 +658,27 @@ impl<'a> Log<'a> {
                         } else {
                             State::Unknown(PRUNED)
                         },
+                    });
+            }
+        }
+        if pruned.is_some_and(|b| thread_created.is_none_or(|c| c < b)) {
+            let unread = [
+                (Kind::Thread, thread_unread),
+                (Kind::Active, thread_unread || active_unread),
+            ];
+            for (kind, _) in unread.into_iter().filter(|(_, u)| *u) {
+                let first = rows
+                    .iter()
+                    .find(|((k, _), _)| *k == kind)
+                    .and_then(|(_, s)| s.clone())
+                    .unwrap_or_default();
+                self.entities
+                    .entry(kind)
+                    .or_default()
+                    .entry(self.thread.to_string())
+                    .or_insert(Entity {
+                        first,
+                        state: State::Unknown(OVERSIZED),
                     });
             }
         }
@@ -930,10 +971,26 @@ impl<'a> Log<'a> {
             by_run.entry(c.run).or_default().push(i);
         }
         let mut live: Vec<usize> = Vec::new();
+        // T3 applies events in sequence order, but a few carry a client's time, so one can be
+        // dated before an earlier event or past the bound with a later event within it. Read
+        // through the last event dated within the bound, and the undated ones after it.
+        let end = match events
+            .iter()
+            .rposition(|e| e.at.is_some_and(|t| t <= bound))
+        {
+            Some(k) => {
+                k + 1
+                    + events[k + 1..]
+                        .iter()
+                        .take_while(|e| e.at.is_none())
+                        .count()
+            }
+            None => events.iter().take_while(|e| e.at.is_none()).count(),
+        };
         let mut last = None;
         let mut i = 0;
-        while i < events.len() {
-            let Some(at) = events[i].at else {
+        while i < end {
+            let Some(dated) = events[i].at else {
                 // An event with no time cannot be placed, so nothing after the last dated
                 // one is known.
                 self.unsupported = true;
@@ -949,19 +1006,23 @@ impl<'a> Log<'a> {
                 i += 1;
                 continue;
             };
-            if at > bound {
-                break;
-            }
-            last = Some(at);
+            // Each event takes effect no earlier than the one before it, nor after the bound.
+            let at = last.map_or(dated, |l: Millis| l.max(dated)).min(bound);
             for &t in &live {
                 if let Some(wake) = trackers[t].wake.filter(|w| *w < at) {
                     let _ = trackers[t].record(self, candidates[t].1, wake);
                 }
             }
+            if dated < at {
+                for &t in &live {
+                    trackers[t].doubt(dated, at);
+                }
+            }
+            last = Some(at);
             // Events committed together are read together.
             let mut armed = false;
             let mut completed = Vec::new();
-            while let Some(e) = events.get(i).filter(|e| e.at == Some(at)) {
+            while let Some(e) = events[..end].get(i).filter(|e| e.at == Some(dated)) {
                 let run = e
                     .snapshot
                     .as_ref()
@@ -1049,6 +1110,18 @@ impl Tracker {
         self.span(at, guard);
         self.wake = log.wake(at);
         guard
+    }
+
+    /// Leave the arms and guards from `from` through `to` unknown, where an event dated
+    /// `from` was applied after events dated up to `to`.
+    fn doubt(&mut self, from: Millis, to: Millis) {
+        let arms = self.guards.arms.iter_mut();
+        for (_, guard) in arms.filter(|(a, _)| (from..=to).contains(a)) {
+            *guard = Err(REORDERED);
+        }
+        let spans = &mut self.guards.spans;
+        spans.truncate(spans.partition_point(|(t, _)| *t < from));
+        self.span(from, Err(REORDERED));
     }
 
     fn span(&mut self, at: Millis, guard: T3Guard) {
@@ -1673,6 +1746,98 @@ mod tests {
             };
             assert_eq!(f.run1(), expected, "{event_type}");
         }
+    }
+
+    #[test]
+    fn events_dated_out_of_order_apply_in_sequence_and_leave_the_disputed_span_unknown() {
+        let settled = || thread(json!({"settledAt":iso(60)}));
+        // A merge-back keeps its client's time, so it can be dated before the event ahead.
+        let mut f = Fixture::new();
+        f.complete().event(60, "thread.settled", settled()).event(
+            40,
+            "thread.unsettled",
+            thread(json!({})),
+        );
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[(10, Ok(true)), (40, Err(REORDERED)), (60, Ok(true))]
+            )
+        );
+        // An arm inside the disputed span may fall on either side of the later event.
+        let mut f = Fixture::new();
+        f.complete().event(20, "thread.settled", settled()).event(
+            5,
+            "thread.unsettled",
+            thread(json!({})),
+        );
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Err(REORDERED))],
+                &[(5, Err(REORDERED)), (20, Ok(true))]
+            )
+        );
+        // An event dated past the bound is still read when a later one is dated within it.
+        let mut f = Fixture::new();
+        f.complete()
+            .event(5000, "thread.settled", settled())
+            .event(100, "thread.unsettled", thread(json!({})))
+            .event(5000, "thread.settled", settled());
+        assert_eq!(
+            f.run1(),
+            expect(
+                &[(10, Ok(true))],
+                &[(10, Ok(true)), (100, Err(REORDERED)), (3600, Ok(true))]
+            )
+        );
+    }
+
+    #[test]
+    fn an_unreadable_retained_event_leaves_its_kind_unknown_from_the_boundary() {
+        // Everything before the run's completion is pruned, and the projection fills it in.
+        let pruned = || {
+            let mut f = Fixture::new();
+            f.db.execute(
+            "INSERT INTO orchestration_v2_projection_metadata VALUES('event-log-pruned-through',1,?1,?2)",
+            rusqlite::params![f.sequence, crate::safe::iso(at(5) + RETAINED)],
+        )
+        .unwrap();
+            let rows = [
+                (
+                    "INSERT INTO orchestration_v2_projection_threads VALUES('th','claude','pt',NULL,NULL,NULL,?1)",
+                    thread(json!({})),
+                ),
+                (
+                    "INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt','th','claudeAgent','claude',NULL,?1)",
+                    provider_thread(json!({})),
+                ),
+                (
+                    "INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn1','th','pt',NULL,'completed',NULL,NULL,?1)",
+                    turn("turn1", json!({})),
+                ),
+            ];
+            for (sql, payload) in rows {
+                f.db.execute(sql, [payload.to_string()]).unwrap();
+            }
+            f.complete();
+            f
+        };
+        assert_eq!(
+            pruned().run1(),
+            expect(&[(10, Ok(true))], &[(10, Ok(true))])
+        );
+        let mut f = pruned();
+        // A background item that started before the boundary may be running until this
+        // unreadable completion, which the projection no longer lists.
+        let mut huge = item("bg", "subagent", "completed", json!({}));
+        huge["output"] = json!("PRIVATE".repeat(200_000));
+        f.raw(&iso(20), "turn-item.updated", &huge.to_string());
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Err(OVERSIZED))], &[(10, Err(OVERSIZED))])
+        );
     }
 
     #[test]

@@ -4,17 +4,33 @@
 
 `token-max doctor` gives each profile's main-session reasoning effort its
 own line: what each model and effort pair cost over the window, how often
-it ran, the current default (Claude Code's `effortLevel` or
-`CLAUDE_CODE_EFFORT_LEVEL`, Codex's `model_reasoning_effort`), and the
-setting that changes it.
+it ran, the current default and the level the session actually runs at,
+and the setting that changes it.
 
-- A `max` default is a change: doctor offers to set it to `xhigh`, and the
-  report exits nonzero. Its evidence cites Anthropic's
-  [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
-  past `high`, test the next model up at a lower effort.
+Claude Code's default resolves as its
+[model configuration docs](https://code.claude.com/docs/en/model-config)
+state, first match winning: `CLAUDE_CODE_EFFORT_LEVEL`, then the settings
+files (the per-model level under `modelSettings`, then `effortLevel`, with
+the precedence across files the docs give, and a user-file `effortLevel`
+ignored on Opus 5.5 and later models), then the model's own default. Settings
+never accept `max`, so a `max` default comes only from the environment
+variable. A level the model does not support runs at the highest supported
+level below it, such as `xhigh` running as `high` on Opus 4.6 and Sonnet 4.6;
+the line shows that effective level. Codex's default is
+`model_reasoning_effort`.
+
+- A `max` default is a change: doctor offers to replace it with `xhigh`, or
+  `high` on a model without `xhigh`, saying which, and the report exits
+  nonzero. Its evidence cites Anthropic's
+  [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/)
+  (past `high`, test the next model up at a lower effort) and the model
+  configuration docs (`max` is prone to overthinking; test before adopting
+  it broadly).
 - A `low` default is worth considering raising, under Opinion.
 - An `xhigh` default cites the same guidance under Official, with no
   verdict.
+- Codex profiles cite OpenAI's own guidance under Official where it exists;
+  Anthropic's guidance applied to an OpenAI model is labeled Opinion.
 
 The effort's cost effect is never repriced, since a different effort
 changes the output tokens; the line says so.
@@ -44,10 +60,12 @@ Agent's choices, for the implementer to revisit:
 
 - Read each request's recorded effort (`output_config.effort` for Claude,
   already parsed in `src/sessions.rs`) and Codex's turn context. Apply the
-  same rules to Codex where it offers `max`.
+  same verdicts to Codex where it offers `max`, under the labels the Goal
+  gives.
 - Resolve the current default per profile the way the other checks do,
   including a project setting or environment variable that would override
-  the user file, listed to change by hand.
+  the user file, listed to change by hand. Check the resolution order and
+  the supported-levels table against the docs again when implementing.
 
 ## Related
 

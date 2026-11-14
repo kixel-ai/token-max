@@ -9,6 +9,11 @@ the weekly limit, and use that limit faster than other models; on Pro,
 they run on usage credits. No percentage of the limit and no verdict, since
 no limit is published in tokens or dollars.
 
+The line states beside the figures that they are partial evidence: the cap
+counts Fable use on every Claude surface, while the figures cover only this
+profile's recorded sessions, and they may include requests paid with usage
+credits after the cap was reached.
+
 ## Plan
 
 Decided 2026-11-13 (maintainer, /quest-plan after Theo Browne's

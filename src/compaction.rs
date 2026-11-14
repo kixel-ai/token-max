@@ -1118,7 +1118,8 @@ impl Candidate<'_, '_, '_> {
             pair(&unknown_cost(reason), &unknown_cost(reason));
             return;
         }
-        if original.p == item.p {
+        // Equal usage still pairs when either cache charge is unknown, or its uncertainty is lost.
+        if original.p == item.p && original.cache_unknown == item.cache_unknown {
             return;
         }
         let prices = &original.components;
@@ -1855,6 +1856,43 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     const NOW: Millis = 18_000_000;
+
+    #[test]
+    fn equal_usage_with_unknown_cache_on_one_side_still_pairs() {
+        let catalog = prices();
+        let request = make_request();
+        let p = request.parts[0].clone();
+        let part = |cache_unknown| ReplayedPart {
+            request: &request,
+            part: 0,
+            p: p.clone(),
+            selected: true,
+            components: crate::scenarios::replayed_components(
+                &catalog,
+                &request,
+                &p,
+                cache_unknown,
+            ),
+            cache_unknown,
+            evidence: None,
+        };
+        let compare = |original: &ReplayedPart, item: &ReplayedPart| {
+            let mut candidate = Candidate {
+                stream: None,
+                baseline: Sum::new(),
+                alternative: Sum::new(),
+                pairs: Pairs::default(),
+                cache_evidence: vec![],
+            };
+            candidate.compare(&catalog, original, item, false, false);
+            (candidate.pairs.savings(0), candidate.alternative.cost())
+        };
+        let (known, unknown) = (part(None), part(Some("no anchor")));
+        assert_eq!(compare(&known, &known).0.total, 0);
+        let (savings, alternative) = compare(&known, &unknown);
+        assert_eq!((savings.total, savings.priced), (1, 0));
+        assert_eq!(alternative.unknown, vec!["no anchor".to_string()]);
+    }
     const HOUR: Millis = 3_600_000;
 
     fn controls(harness: Harness, user: Value, env: &Env, file: &str) -> CompactionControls {

@@ -558,7 +558,7 @@ fn arguments_follow_strict_parse_args() {
     let top = |args: &[&str]| run(&mut command(&w, args));
     let (status, stdout, _) = top(&["-hv"]);
     assert_eq!(
-        (status, stdout.starts_with("token-max: cheaper")),
+        (status, stdout.starts_with("token-max: agent settings")),
         (0, true)
     );
     let (status, stdout, _) = top(&["-v", "--"]);
@@ -572,7 +572,7 @@ fn arguments_follow_strict_parse_args() {
     );
     let (status, stdout, stderr) = top(&[]);
     assert_eq!((status, &*stdout), (2, ""));
-    assert!(stderr.starts_with("token-max: cheaper") && stderr.contains("\n  doctor "));
+    assert!(stderr.starts_with("token-max: agent settings") && stderr.contains("\n  doctor "));
     let (status, _, stderr) = top(&["--since", "2026-11-01"]);
     assert_eq!(status, 2);
     assert_eq!(

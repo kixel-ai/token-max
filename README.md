@@ -1,10 +1,15 @@
 # token-max
 
 Most advice about configuring coding agents is asserted, not measured.
-token-max reads this machine's Claude Code and Codex transcripts, replays them
-at public API prices, and shows which of your settings cost more than they
+token-max reads this machine's Claude Code and Codex transcripts and shows which
+of your settings use up more of your Claude or ChatGPT plan's limits than they
 return, with the evidence for each one. Then it offers to change them, one at a
 time.
+
+No provider publishes a plan's limits in tokens or dollars, so token-max
+replays your sessions at public API prices, the closest public measure of what
+a request uses of those limits. On an API key, the same dollars are close to
+your bill.
 
 Run it once without installing anything, or install it:
 
@@ -25,7 +30,7 @@ These work from the first release on; until then, see [Install](#install).
 ```text
 $ token-max doctor
 token-max
-Estimated with public API prices, not your subscription bill. Nothing was changed.
+Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.
 
 Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
   claude ~/.claude
@@ -56,7 +61,8 @@ OPINION  the maintainer's preference
 consider Auto memory  on   costs $12
          Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md. Measured: used 3 times (1 read, 2 writes). Set "autoMemoryEnabled": false in ~/.claude/settings.json.
 keep     Fast mode    off
-         Opinion: standard speed is enough, and fast mode bills a premium for the same work. Set in ~/.claude/settings.json:fastMode.
+         Opinion: standard speed is enough, and fast mode bills a premium for the same work. Official: on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in ~/.claude/settings.json:fastMode.
+Sources: https://code.claude.com/docs/en/fast-mode#requirements
 
 token-max doctor: 4 changes to review. Each is written only after a yes.
 
@@ -129,7 +135,7 @@ No prompt, reply, tool argument or tool output text is kept or printed.
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
 | Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
-| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
+| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model, beside Anthropic's model guide |
 
 ## Reading the report
 
@@ -150,9 +156,17 @@ already at its recommended value, and a dim hollow dot where there is no
 verdict. Without color (`--plain`, `NO_COLOR` or redirected output), as above,
 a word replaces the dot. Red lines come first in each section.
 
-- Dollars are at public API prices, not your subscription bill. Comparisons
-  between setting values are per 30 days; what a feature cost, and how often
-  it was used, are totals over the whole window.
+- Dollars are public API prices, not an invoice. No provider says how a
+  plan's limits weigh tokens, so on a Claude or ChatGPT plan they are the
+  closest public measure of what a request uses of them, and past a Claude
+  plan's limits, usage credits bill these same prices. Where a provider
+  documents that a plan counts something differently, the line says so under
+  "Official:", as the
+  [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#plans-and-api-prices)
+  lists. token-max never reads which plan you are on, so these notes say "on a
+  Claude plan" rather than naming yours.
+- Comparisons between setting values are per 30 days; what a feature cost,
+  and how often it was used, are totals over the whole window.
 - A **saves** figure comes from replaying your own sessions under the other
   value, assuming the sessions would otherwise have gone the same way. A
   smaller compaction window, for example, can also lose detail the replay

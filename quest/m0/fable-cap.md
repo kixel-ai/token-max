@@ -21,8 +21,10 @@ Decided 2026-11-13 (maintainer, /quest-plan after Theo Browne's
 which estimates about $3k a month of Fable against $14k of Opus on the
 $200 plan):
 
-- Show it? ✅ yes, in m0 (rejected: m1), as part of the
-  [subscription framing](/quest/m0/subscriptions.md).
+- Show it? ✅ yes, in m0 (rejected: m1), as part of the subscription
+  framing, whose wording `docs/reference.md`'s "Plans and API prices"
+  gives: dollars are API prices, and a provider's rule for a plan is an
+  `Official:` sentence with its source.
 - Shape? ✅ weekly API-price spend beside the documented cap (rejected:
   Fable's share of weekly spend, which understates its share of the limit
   because Fable draws faster; detecting the plan, which the maintainer
@@ -32,8 +34,3 @@ Sources, read 2026-11-13: Anthropic's [pricing](https://claude.com/pricing)
 and the help center's
 [Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
 Check both again when implementing, since plan terms change.
-
-## Related
-
-- [Subscription framing](/quest/m0/subscriptions.md) - the wording this
-  line follows

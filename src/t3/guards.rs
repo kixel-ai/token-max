@@ -1042,6 +1042,9 @@ impl<'a> Log<'a> {
                         arms.push((from, Err(UNSUPPORTED)));
                     }
                     trackers[t].span(from, Err(UNSUPPORTED));
+                    // A snooze may end before or after the undated event, so its end is
+                    // unknown too, until the next dated event.
+                    trackers[t].wake = None;
                 }
                 i += 1;
                 continue;
@@ -1827,6 +1830,20 @@ mod tests {
         );
         let unsupported = Err(UNSUPPORTED);
         assert_eq!(f.run1(), expect(&[(4, unsupported)], &[(4, unsupported)]));
+        // A snooze may end before or after an undated settle, so its end is not known clear.
+        let mut f = Fixture::new();
+        let settled = thread(json!({"settledAt":iso(250),"snoozedUntil":iso(100)}));
+        f.complete()
+            .event(
+                20,
+                "thread.snoozed",
+                thread(json!({"snoozedUntil":iso(100)})),
+            )
+            .raw("never", "thread.settled", &settled.to_string());
+        assert_eq!(
+            f.run1(),
+            expect(&[(10, Ok(true))], &[(10, Ok(true)), (20, unsupported)])
+        );
     }
 
     #[test]

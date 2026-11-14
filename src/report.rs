@@ -1352,7 +1352,7 @@ const FABLE_PLANS: &str =
 const FABLE_SETTING: &str = "Model setting: /model, or model in settings.json.";
 
 /// Anthropic's Fable rule for each plan, stated conditionally since the plan is never read.
-const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team standard seat, they run on usage credits.";
+const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates.";
 
 /// Why a profile's Fable figures fall short of what the plan's cap counts.
 const FABLE_PARTIAL: &str = "These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown.";
@@ -1368,7 +1368,7 @@ fn fable_caveats(u: &FableUse) -> String {
     if u.shared > 0 {
         let _ = write!(
             text,
-            " {} also attributed to another profile that reads the same transcripts, so whose they were is unknown.",
+            " {} also attributed to another Claude profile that signs in to Anthropic and reads the same transcripts, so whose they were is unknown.",
             match u.shared {
                 1 => "1 of them is".into(),
                 n => format!("{} of them are", count(n)),
@@ -6234,7 +6234,7 @@ mod tests {
             "no share of it is shown",
             "they cover only this profile's recorded sessions",
             "paid with usage credits after the cap was reached",
-            "1 of them is also attributed to another profile that reads the same transcripts, so whose they were is unknown.",
+            "1 of them is also attributed to another Claude profile that signs in to Anthropic and reads the same transcripts, so whose they were is unknown.",
             "2 requests recorded no model and may have run on Fable.",
         ] {
             assert!(row.evidence.contains(part), "{part} in {}", row.evidence);
@@ -6242,7 +6242,7 @@ mod tests {
         // The plan rule is an Official sentence before the setting, which ends the line.
         assert!(
             row.evidence.ends_with(
-                " Official: on a Claude Max or Ultra plan or a Team premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team standard seat, they run on usage credits. Model setting: /model, or model in settings.json."
+                " Official: on a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates. Model setting: /model, or model in settings.json."
             ),
             "{}",
             row.evidence
@@ -6255,7 +6255,7 @@ mod tests {
             "to 2026-12-01",
             "3 days to 2026-11-24",
             "they cover only this profile's recorded sessions",
-            "1 of them is also attributed to another profile",
+            "1 of them is also attributed to another Claude profile",
             FABLE_RULE,
             FABLE_PLANS,
         ] {

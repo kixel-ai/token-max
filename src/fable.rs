@@ -23,8 +23,9 @@ pub fn fable_use(
     let Some(start) = since.or_else(|| scan.requests.iter().map(|r| r.time).min()) else {
         return vec![];
     };
-    let mut spans = vec![];
-    let mut end = now;
+    // At least one span, so a request at `now` counts even when the window starts there.
+    let mut spans = vec![(start.max(now - WEEK), now)];
+    let mut end = now - WEEK;
     while end > start {
         spans.push((start.max(end - WEEK), end));
         end -= WEEK;
@@ -231,6 +232,21 @@ mod tests {
             .collect();
         // A cloud profile has no plan limit, so sharing with it leaves the owner known.
         assert_eq!(counts, [("profile", 3, 1), ("second", 1, 1)]);
+    }
+
+    #[test]
+    fn a_request_at_the_report_time_counts_when_the_window_starts_there() {
+        let now = 10 * DAY;
+        let only = vec![request(now, Some("claude-fable-5-2"), "profile")];
+        for since in [None, Some(now)] {
+            let uses = fable_use(&scan(only.clone(), since), &prices(), since, now);
+            let spans: Vec<(Millis, Millis, u64)> = uses[0]
+                .weeks
+                .iter()
+                .map(|w| (w.start, w.end, w.requests))
+                .collect();
+            assert_eq!(spans, [(now, now, 1)], "{since:?}");
+        }
     }
 
     #[test]

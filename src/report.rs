@@ -365,7 +365,7 @@ fn plan_note(
             "https://code.claude.com/docs/en/fast-mode#requirements",
         )),
         CheckResult::Speed(_) if harness == Some(Harness::Codex) => Some((
-            "on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, more than the API premium priced here.",
+            "on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here.",
             "https://learn.chatgpt.com/docs/pricing",
         )),
         CheckResult::Background(b)
@@ -5138,7 +5138,7 @@ mod tests {
         // A set TTL is the same on any plan.
         assert!(!evidence("Subagent prompt cache TTL").contains("Official"));
         assert!(evidence("Fast mode fast -> off").contains(
-            " Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, more than the API premium priced here. Set in /synthetic/second-profile/config.toml:service_tier."
+            " Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. Set in /synthetic/second-profile/config.toml:service_tier."
         ));
         assert!(
             evidence("Fast mode off")
@@ -5180,7 +5180,7 @@ mod tests {
         // Details give each rule its own field, with its source.
         let details = text(&report, None, true);
         assert!(details.contains(&format!("\n{PRICES_MEAN}\n")), "{details}");
-        assert!(details.contains("\n  Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, more than the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
+        assert!(details.contains("\n  Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
         assert!(!details.contains("subscription"));
         assert!(!summary.contains("subscription"));
     }

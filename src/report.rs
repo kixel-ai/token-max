@@ -484,17 +484,10 @@ fn plan_note(
     let profile = out.profiles.get(r.profile);
     let harness = profile.map(|p| p.harness);
     match result {
-        CheckResult::Ttl(t)
-            if t.bucket == crate::model::Bucket::Main
-                && profile.is_some_and(|p| {
-                    p.ttl.main.value.is_none() && p.ttl.main.reason == TTL_BILLING_UNKNOWN
-                }) =>
-        {
-            Some((
-                "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
-                "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets",
-            ))
-        }
+        CheckResult::Ttl(_) if unset_main_ttl(result, r, out) => Some((
+            "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
+            "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets",
+        )),
         CheckResult::Speed(_) if harness == Some(Harness::Claude) => Some((
             "on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left.",
             "https://code.claude.com/docs/en/fast-mode#requirements",
@@ -522,6 +515,15 @@ fn plan_note(
         }
         _ => None,
     }
+}
+
+/// Whether a check is the main TTL left unset, which Claude Code picks by how the request is paid for.
+fn unset_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> bool {
+    matches!(result, CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main)
+        && out
+            .profiles
+            .get(r.profile)
+            .is_some_and(|p| p.ttl.main.value.is_none() && p.ttl.main.reason == TTL_BILLING_UNKNOWN)
 }
 
 /// Why auto memory's state is unknown, as a sentence without its period.
@@ -3317,7 +3319,11 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             (Mark::Change, _) | (_, CheckResult::Effort(_)) => value(r.recommended),
             _ => "off".into(),
         };
-        let mut current = value(r.current);
+        let mut current = if unset_main_ttl(result, &r, &out) {
+            "unset".into()
+        } else {
+            value(r.current)
+        };
         if let CheckResult::Compaction(c) = result
             && c.unset
         {
@@ -3585,7 +3591,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         let mark = mark(c);
         let mut row = Row::new(Claim::of(result), mark, setting_name(result));
         row.profile = tag(r.profile, out);
+        let unset = unset_main_ttl(result, r, out);
         let current = match r.current {
+            None if unset => "unset".into(),
             Some(Setting::Window(n)) => tokens(n),
             other => setting_value(other),
         };
@@ -3662,6 +3670,15 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     };
                     let better = if mark == Mark::Keep {
                         format!("{} costs less than {other}", setting_value(r.current))
+                    } else if unset {
+                        // Either default may be in force, so the saving is the whole gap or nothing.
+                        let gap = per_month(t.one_hour_savings_usd.abs(), r.since, r.until);
+                        row.amount = Some(("saves up to", gap.clone()));
+                        let winner = setting_value(r.recommended);
+                        format!(
+                            "{winner} costs {gap} less, saved whenever the unset default would be {}, and setting it keeps {winner} however usage is paid",
+                            if winner == "1h" { "5m" } else { "1h" }
+                        )
                     } else {
                         format!("{} costs less", setting_value(r.recommended))
                     };
@@ -6557,19 +6574,86 @@ mod tests {
 
     /// The report the CLI builds from the synthetic Claude fixture with an explicit 5m TTL.
     fn synthetic_report() -> Report {
+        synthetic_report_with(r#"{"promptCacheTtl":"5m"}"#).0
+    }
+
+    /// The report the CLI builds from the synthetic Claude fixture with these settings,
+    /// and the settings file's path.
+    fn synthetic_report_with(settings: &str) -> (Report, String) {
         let w = Workspace::new();
         w.fixture(w.claude.join("projects/project/main.jsonl"), "claude.jsonl");
-        std::fs::write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
+        let file = w.claude.join("settings.json");
+        std::fs::write(&file, settings).unwrap();
         let mut options = w.scan_options();
         options.discovery.claude_dirs = vec![w.claude.to_string_lossy().into_owned()];
-        analyze(AnalyzeOptions {
+        let report = analyze(AnalyzeOptions {
             scan: scan(&options).unwrap(),
             catalog: &prices(),
             since: None,
             now: instant("2026-11-02T00:00:00Z"),
             max_cost_per_use_usd: 1.0,
         })
-        .unwrap()
+        .unwrap();
+        (report, file.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn an_unset_main_ttl_is_pinned_to_the_replay_winner() {
+        use crate::doctor::{Edit, How, Patch, fixes};
+        let (report, file) = synthetic_report_with("{}");
+        let ttl = report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((ttl.base.action, ttl.base.current), (Action::Change, None));
+        // Either billing default may be in force, so no single saving is claimed.
+        assert_eq!(ttl.base.savings_usd, None);
+        let winner = ttl.base.recommended.unwrap();
+        let other = if winner == Ttl::OneHour { "5m" } else { "1h" };
+        let winner = winner.as_str();
+        let gap = per_month(
+            ttl.one_hour_savings_usd.abs(),
+            ttl.base.since,
+            ttl.base.until,
+        );
+        let summary = text(&report, None, false);
+        let line = report_line(&summary, "Main-agent prompt cache TTL");
+        assert_eq!(line.mark, "change");
+        assert!(
+            line.head.starts_with(&format!(
+                "Main-agent prompt cache TTL unset -> {winner} saves up to {gap}"
+            )),
+            "{summary}"
+        );
+        assert!(
+            line.evidence.contains(&format!(
+                "; {winner} costs {gap} less, saved whenever the unset default would be {other}, and setting it keeps {winner} however usage is paid. Official: while it is unset,"
+            )),
+            "{summary}"
+        );
+        assert!(recommendations(&report, false).iter().any(|l| {
+            l.name == "Main-agent prompt cache TTL" && l.value == format!("unset -> {winner}")
+        }));
+        let fix = fixes(&report, false)
+            .into_iter()
+            .find(|f| f.name.starts_with("Main-agent prompt cache TTL"))
+            .unwrap();
+        assert_eq!(
+            fix.how,
+            How::Edit(Patch {
+                file,
+                harness: Harness::Claude,
+                edits: vec![Edit {
+                    path: vec!["promptCacheTtl".into()],
+                    value: serde_json::json!(winner),
+                    append: false,
+                }],
+            })
+        );
     }
 
     fn instant(text: &str) -> Millis {

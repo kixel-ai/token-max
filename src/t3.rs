@@ -808,7 +808,7 @@ pub(crate) fn discover(
                 owner,
                 effective: None,
                 lowered: None,
-                cap: None,
+                caps: vec![],
                 supported: vec![],
                 unresolved: Some(
                     "T3 picks the model and effort for each thread, and its current selection is unavailable"

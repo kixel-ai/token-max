@@ -11,7 +11,7 @@ use crate::collections::IndexMap;
 use crate::controls::{Env, SettingsScope, members, scoped_environment};
 use crate::model::{
     Action, Agent, CheckBase, EffortCheck, EffortControl, EffortRun, Evidence, Harness, Location,
-    Millis, Profile, Request, Scan,
+    Millis, Owned, Profile, Request, Scan,
 };
 use crate::prices::{Catalog, Sum, price_request};
 use crate::safe::ScanError;
@@ -190,7 +190,7 @@ pub fn claude_effort(
             owner,
             effective: None,
             lowered: None,
-            cap: None,
+            caps: vec![],
             supported: vec![],
             unresolved: Some(why),
         };
@@ -305,7 +305,9 @@ pub fn claude_effort(
             found.unwrap_or((support.default, default_owner(&model)))
         }
     };
-    // The lowest cap any scope sets for this model; a model's own entry replaces its file's.
+    // Every cap a scope sets for this model, where a model's own entry replaces its file's;
+    // the lowest applies.
+    let mut caps: Vec<Owned> = vec![];
     let mut cap: Option<(&str, String)> = None;
     for scope in scopes {
         let entry = model_entry(scope.config, &model);
@@ -318,9 +320,17 @@ pub fn claude_effort(
                 },
             };
         let value = claude_level(value, "maxEffortLevel", scope.file, true)?;
-        if value != "max" && cap.as_ref().is_none_or(|(c, _)| rank(value) < rank(c)) {
-            cap = Some((value, format!("{}:{key}", scope.file)));
+        if value == "max" {
+            continue;
         }
+        let owner = format!("{}:{key}", scope.file);
+        if cap.as_ref().is_none_or(|(c, _)| rank(value) < rank(c)) {
+            cap = Some((value, owner.clone()));
+        }
+        caps.push(Owned {
+            value: value.into(),
+            owner,
+        });
     }
     let supported = |level: &'static str| -> &'static str {
         if level == "xhigh" && !support.xhigh {
@@ -330,35 +340,35 @@ pub fn claude_effort(
         }
     };
     let as_static = |level: &str| LEVELS[rank(level).expect("validated level")];
-    let (effective, lowered, capped) = if level == "auto" {
+    let (effective, lowered) = if level == "auto" {
         match &cap {
             // Below a cap, Claude Code still sends its own default, lowered to the cap.
             Some((c, owner)) => {
                 let default = supported(support.default);
-                let lower = rank(c) < rank(default);
                 (
-                    if lower { as_static(c) } else { default },
+                    if rank(c) < rank(default) {
+                        as_static(c)
+                    } else {
+                        default
+                    },
                     Some(format!(
                         "{owner} applies, so Claude Code sends the model's default lowered to that cap"
                     )),
-                    lower.then(|| owner.clone()),
                 )
             }
-            None => ("auto", None, None),
+            None => ("auto", None),
         }
     } else {
         let mut effective = supported(as_static(level));
         let mut lowered = (effective != level)
             .then(|| format!("{model} has no {level}, so it runs at {effective}"));
-        let mut capped = None;
         if let Some((c, owner)) = &cap
             && rank(c) < rank(effective)
         {
             effective = as_static(c);
             lowered = Some(format!("{owner} caps it at {c}"));
-            capped = Some(owner.clone());
         }
-        (effective, lowered, capped)
+        (effective, lowered)
     };
     Ok(EffortControl {
         model: Some(model),
@@ -367,7 +377,7 @@ pub fn claude_effort(
         owner,
         effective: Some(effective.into()),
         lowered,
-        cap: capped,
+        caps,
         supported: LEVELS
             .iter()
             .filter(|l| **l != "xhigh" || support.xhigh)
@@ -459,7 +469,7 @@ pub fn codex_effort(
         level,
         owner,
         lowered: None,
-        cap: None,
+        caps: vec![],
         supported,
         unresolved,
     })
@@ -546,10 +556,27 @@ fn check(input: &EffortInput<'_>, profile: &Profile, control: &EffortControl) ->
         },
         Some(_) => (Action::Keep, None),
     };
-    // A level a cap lowered rises only once the cap does, so the cap is what to change.
-    let owner = match (&control.cap, &recommended) {
-        (Some(cap), Some(_)) => cap.clone(),
-        _ => control.owner.clone(),
+    // Reaching the target takes raising every cap below it, and the default too when it is
+    // below; more than one owner is a change by hand.
+    let below =
+        |level: &str, target: &str| rank(level).zip(rank(target)).is_some_and(|(l, t)| l < t);
+    let mut owners: Vec<&str> = vec![];
+    if let Some(target) = recommended.as_deref() {
+        if control.level.as_deref().is_some_and(|l| below(l, target)) {
+            owners.push(&control.owner);
+        }
+        owners.extend(
+            control
+                .caps
+                .iter()
+                .filter(|c| below(&c.value, target))
+                .map(|c| c.owner.as_str()),
+        );
+    }
+    let owner = if owners.is_empty() {
+        control.owner.clone()
+    } else {
+        owners.join(" and ")
     };
     // Unknown stays advisory without a value; a known level other than max or low has no verdict.
     let action = if control.unresolved.is_some() {
@@ -843,7 +870,7 @@ mod tests {
         assert_eq!(level(&c).1, Some("high"));
         assert!(c.lowered.unwrap().contains("has no xhigh"));
         assert_eq!(c.supported, ["low", "medium", "high", "max"]);
-        assert_eq!(c.cap, None);
+        assert!(c.caps.is_empty());
         // The lowest cap across files applies, and a model's own entry replaces its file's.
         let c = resolve(
             json!({"maxEffortLevel": "medium", "modelSettings": {"claude-opus-5-5": {"maxEffortLevel": "max"}}}),
@@ -861,9 +888,15 @@ mod tests {
             c.lowered.as_deref(),
             Some("/work/.claude/settings.json:maxEffortLevel caps it at high")
         );
+        // Every cap below max is kept, so a higher target can name each one in its way.
+        let caps: Vec<(&str, &str)> = c
+            .caps
+            .iter()
+            .map(|c| (c.value.as_str(), c.owner.as_str()))
+            .collect();
         assert_eq!(
-            c.cap.as_deref(),
-            Some("/work/.claude/settings.json:maxEffortLevel")
+            caps,
+            [("high", "/work/.claude/settings.json:maxEffortLevel")]
         );
         // auto sends nothing, unless a cap below max makes Claude Code send its default lowered to it.
         let c = resolve(

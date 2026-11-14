@@ -5357,7 +5357,7 @@ mod tests {
             owner: owner.into(),
             effective: Some(level.into()),
             lowered: None,
-            cap: None,
+            caps: vec![],
             supported: vec![],
             unresolved: None,
         };
@@ -5456,23 +5456,53 @@ mod tests {
         );
 
         // A level a cap lowered is raised by raising the cap, not the default.
+        let cap = |value: &str, owner: String| Owned {
+            value: value.into(),
+            owner,
+        };
+        let capped = |caps: Vec<Owned>| EffortControl {
+            level: Some("high".into()),
+            effective: Some("low".into()),
+            caps,
+            ..control("claude-opus-5-5", "low", &format!("{file}:effortLevel"))
+        };
         let (row, fix) = line(
             Harness::Claude,
-            EffortControl {
-                cap: Some(format!("{file}:maxEffortLevel")),
-                ..control("claude-opus-5-5", "low", &owner)
-            },
+            capped(vec![cap("low", format!("{file}:maxEffortLevel"))]),
         );
         assert!(
             row.evidence
-                .ends_with("Set in ~/.claude/settings.json:maxEffortLevel.")
-                || row
-                    .evidence
-                    .ends_with(&format!("Set in {file}:maxEffortLevel.")),
+                .ends_with(&format!("Set in {file}:maxEffortLevel.")),
             "{}",
             row.evidence
         );
         assert_eq!(fix.unwrap().how, set(&["maxEffortLevel"], "medium"));
+        // Every cap in the way, and a default below the target, is changed by hand together.
+        let managed = "/etc/claude-code/managed-settings.json:maxEffortLevel";
+        let (_, fix) = line(
+            Harness::Claude,
+            capped(vec![
+                cap("low", format!("{file}:maxEffortLevel")),
+                cap("low", managed.into()),
+            ]),
+        );
+        match fix.unwrap().how {
+            How::Manual { step, .. } => assert!(step.contains(managed), "{step}"),
+            how => panic!("expected a step by hand, got {how:?}"),
+        }
+        let (_, fix) = line(
+            Harness::Claude,
+            EffortControl {
+                level: Some("low".into()),
+                ..capped(vec![cap("low", format!("{file}:maxEffortLevel"))])
+            },
+        );
+        match fix.unwrap().how {
+            How::Manual { step, .. } => {
+                assert!(step.contains("effortLevel and"), "{step}")
+            }
+            how => panic!("expected a step by hand, got {how:?}"),
+        }
 
         // A target the model does not accept is skipped for the next one down.
         let (row, _) = line(

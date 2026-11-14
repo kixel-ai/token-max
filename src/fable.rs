@@ -1,7 +1,9 @@
 //! Each Claude profile's Fable spend per week, for comparing with a plan's documented Fable cap.
 
-use crate::model::{FableUse, FableWeek, Harness, Millis, Request, Scan};
-use crate::prices::{Catalog, Sum, add_costs, price_part, request_evidence, server_cost};
+use crate::model::{FableUse, FableWeek, Harness, Millis, Request, Scan, Usd};
+use crate::prices::{
+    Catalog, Sum, add_costs, price_part, request_evidence, server_cost, unknown_cost,
+};
 
 const WEEK: Millis = 7 * 24 * 60 * 60 * 1000;
 
@@ -13,7 +15,8 @@ fn is_fable(model: &str) -> bool {
 /// What a request's Fable parts cost, or `None` when no part ran on Fable.
 ///
 /// An advisor iteration records its own model, so a request can mix Fable with another model;
-/// only the Fable parts count toward the cap. Server-tool fees go with the request's own model.
+/// only the Fable parts count toward the cap. Server-tool fees go with the request's own model,
+/// and are unknown when it recorded none.
 fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
     let fable = |m: Option<&str>| m.is_some_and(is_fable);
     let parts: Vec<_> = r
@@ -25,7 +28,16 @@ fn fable_cost(catalog: &Catalog, r: &Request) -> Option<crate::model::Cost> {
     if parts.is_empty() {
         return None;
     }
-    let server = fable(r.model.as_deref()).then(|| server_cost(r));
+    let server = match r.model.as_deref() {
+        Some(m) if is_fable(m) => Some(server_cost(r)),
+        Some(_) => None,
+        None => {
+            let fees = server_cost(r);
+            (fees.total_usd != Some(Usd::ZERO)).then(|| {
+                unknown_cost("server-tool fees of a request with no recorded model may be Fable's")
+            })
+        }
+    };
     Some(request_evidence(r, add_costs(parts.iter().chain(&server))))
 }
 
@@ -293,6 +305,23 @@ mod tests {
         let total = uses[0].weeks.last().unwrap().cost.total_usd.unwrap();
         // Two Fable parts and one request's fees; neither Opus part.
         assert_eq!(total, fable_part + fable_part + fees);
+    }
+
+    #[test]
+    fn server_fees_without_a_recorded_model_stay_unknown() {
+        let catalog = prices();
+        let mut r = request(DAY, Some("claude-fable-5-2"), "profile");
+        r.model = None;
+        r.server_tools = Some(crate::model::ServerTools::default());
+        assert!(fable_cost(&catalog, &r).unwrap().total_usd.is_some());
+        r.server_tools = None;
+        let cost = fable_cost(&catalog, &r).unwrap();
+        assert_eq!(cost.total_usd, None);
+        assert!(
+            cost.unknown.iter().any(|u| u.contains("no recorded model")),
+            "{:?}",
+            cost.unknown
+        );
     }
 
     #[test]

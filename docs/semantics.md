@@ -1294,7 +1294,7 @@ profile's first Fable request are dropped, so a long history adds no empty
 weeks. A model is Fable when its recorded ID contains `fable`. A request counts
 when any of its parts ran on Fable, such as an advisor iteration under another
 main model, and only those parts are priced; server-tool fees go with the
-request's own model. A request that recorded no model is counted apart, as
+request's own model, and are unknown when it recorded none. A request that recorded no model is counted apart, as
 possibly Fable. A request shared
 by several profiles, as when two profiles read the same transcripts, counts in
 each, since each line describes one profile's sessions; the line says how many

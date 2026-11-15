@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text};
 use crate::model::{
     BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report,
@@ -171,12 +172,22 @@ fn identity(path: &Path) -> PathBuf {
 }
 
 fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
-    let profile_id = match line.source {
-        Source::Check(result) => check_profile(result),
-        Source::Piece(c) => c.profiles.first().map_or("", String::as_str),
+    // Every profile on the line, the one whose controls it reports first.
+    let ids: Vec<&str> = match line.source {
+        Source::Check(result) => {
+            let (lead, all) = check_profiles(result);
+            std::iter::once(lead)
+                .chain(all.iter().map(String::as_str).filter(|id| *id != lead))
+                .collect()
+        }
+        Source::Piece(c) => c.profiles.iter().map(String::as_str).collect(),
     };
-    let profile = report.scan.profiles.iter().find(|p| p.id == profile_id);
-    let how = match (profile, line.source) {
+    let profile_id = ids.first().copied().unwrap_or_default();
+    let members: Vec<&Profile> = ids
+        .iter()
+        .filter_map(|id| report.scan.profiles.iter().find(|p| p.id == *id))
+        .collect();
+    let how = match (members.first(), line.source) {
         (None, _) => How::Manual {
             step: format!("change it where {profile_id} is configured"),
             reason: "its profile is no longer selected".into(),
@@ -189,8 +200,8 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
             ),
             reason: "no setting shortens a file".into(),
         },
-        (Some(profile), Source::Piece(c)) => match &c.control {
-            Some(control) => switch(profile, control.into()),
+        (Some(_), Source::Piece(c)) => match &c.control {
+            Some(control) => switch(&members, control.into()),
             None => How::Manual {
                 step: "disable it in config.toml with [[skills.config]]".into(),
                 reason: "the recorded catalog does not give its SKILL.md path".into(),
@@ -207,16 +218,52 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
     }
 }
 
-/// A tool, skill or MCP switch in the profile's file, unless a file that outranks it for
-/// some sessions sets the same switch, which would keep it on there.
-fn switch(profile: &Profile, edit: Edit) -> How {
+/// A tool, skill or MCP switch in the line's settings file, unless a file that outranks it
+/// for some of its profiles' sessions sets the same switch, which would keep it on there. A
+/// line whose shared history spans several settings files is switched off in each by hand.
+fn switch(members: &[&Profile], edit: Edit) -> How {
+    let profile = members[0];
     let file = &profile.settings_file;
+    // Two names a symlink makes one file are one file.
+    let mut files: IndexMap<String, &str> = IndexMap::default();
+    for m in members {
+        files
+            .entry(
+                crate::discovery::realpath(&m.settings_file)
+                    .unwrap_or_else(|_| m.settings_file.clone()),
+            )
+            .or_insert(m.settings_file.as_str());
+    }
     let patch = Patch {
         file: file.clone(),
         harness: profile.harness,
         edits: vec![edit],
     };
-    match outranking(profile, &patch.edits[0]) {
+    let owners = members
+        .iter()
+        .map(|m| outranking(m, &patch.edits[0]))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|all| all.into_iter().flatten().collect::<IndexSet<String>>());
+    if files.len() > 1 {
+        let all: Vec<&str> = files.into_values().collect();
+        let also = match &owners {
+            Ok(o) if o.is_empty() => String::new(),
+            Ok(o) => format!(
+                ", and in {} where it is set",
+                o.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+            ),
+            Err(_) => ", and in any file that outranks them".into(),
+        };
+        return How::Manual {
+            step: format!(
+                "in {}{also}, set {}",
+                all.join(" and "),
+                patch.edits[0].text(profile.harness)
+            ),
+            reason: "its requests were copied into the histories of several profiles, so which one made them is unknown".into(),
+        };
+    }
+    match owners.map(|o| o.into_iter().collect::<Vec<_>>()) {
         Ok(owners) if owners.is_empty() => How::Edit(patch),
         Ok(owners) => {
             let text = patch.edits[0].text(profile.harness);
@@ -291,18 +338,19 @@ fn sets(config: &Map<String, Value>, edit: &Edit) -> bool {
     }
 }
 
-fn check_profile(result: &CheckResult) -> &str {
+/// The profile whose controls a check reports, and every profile its line covers.
+fn check_profiles(result: &CheckResult) -> (&str, &[String]) {
     match result {
-        CheckResult::Ttl(c) => &c.base.profile,
-        CheckResult::Compaction(c) => &c.base.profile,
-        CheckResult::Idle(c) => &c.base.profile,
-        CheckResult::T3Idle(c) => &c.base.profile,
-        CheckResult::Speed(c) => &c.base.profile,
-        CheckResult::Background(c) => &c.base.profile,
-        CheckResult::BashCap(c) => &c.base.profile,
-        CheckResult::Keepalive(c) => &c.base.profile,
-        CheckResult::Memory(c) => &c.base.profile,
-        CheckResult::Effort(c) => &c.base.profile,
+        CheckResult::Ttl(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Compaction(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Idle(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::T3Idle(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Speed(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Background(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::BashCap(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Keepalive(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Memory(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Effort(c) => (&c.base.profile, &c.base.profiles),
     }
 }
 
@@ -1402,6 +1450,63 @@ mod tests {
             value: value.into(),
             append,
         }
+    }
+
+    #[test]
+    fn a_switch_is_one_edit_per_settings_file_its_line_covers() {
+        use crate::test_support::{make_profile, make_t3_profile};
+        let native = make_profile("native", "/synthetic/.claude");
+        let t3 = make_t3_profile("agent", "/synthetic/.claude");
+        let work = make_profile("work", "/synthetic/.claude-work");
+        let deny = || edit("permissions.deny", "Agent", true);
+        // Native Claude Code and a T3 instance sharing ~/.claude get one edit there.
+        let How::Edit(patch) = switch(&[&native, &t3], deny()) else {
+            panic!("one shared settings file is one edit")
+        };
+        assert_eq!(patch.file, "/synthetic/.claude/settings.json");
+        // Requests copied into two homes' histories could have come from either.
+        let How::Manual { step, reason } = switch(&[&native, &work], deny()) else {
+            panic!("two settings files are a step by hand")
+        };
+        assert!(
+            step.starts_with(
+                "in /synthetic/.claude/settings.json and /synthetic/.claude-work/settings.json, set "
+            ),
+            "{step}"
+        );
+        assert!(reason.contains("several profiles"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_switch_across_homes_names_outranking_files_and_one_linked_file_is_one_edit() {
+        use crate::test_support::make_profile;
+        let w = Workspace::new();
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let project = w.home.join("repo/.claude/settings.json");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, r#"{"enableArtifact": true}"#).unwrap();
+        let mut native = make_profile("native", &text(&w.claude));
+        native.outranking_files = vec![text(&project)];
+        let work = make_profile("work", &text(&w.home.join(".claude-work")));
+        let off = || edit("enableArtifact", false, false);
+        // A project that turns it back on is named, since the homes' edits would not hold.
+        let How::Manual { step, .. } = switch(&[&native, &work], off()) else {
+            panic!("two homes are a step by hand")
+        };
+        assert!(
+            step.contains(&format!("and in {} where it is set", text(&project))),
+            "{step}"
+        );
+        // Two homes whose settings.json links one dotfile take one edit to it.
+        std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+        let alias = w.home.join(".claude-alias");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(w.claude.join("settings.json"), alias.join("settings.json"))
+            .unwrap();
+        let linked = make_profile("linked", &text(&alias));
+        native.outranking_files.clear();
+        assert!(matches!(switch(&[&native, &linked], off()), How::Edit(_)));
     }
 
     fn change(name: &str, file: &Path, harness: Harness, edits: Vec<Edit>) -> Fix {

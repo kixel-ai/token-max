@@ -280,6 +280,25 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
     }
 }
 
+/// One synthetic enabled T3 Claude instance rooted at `root`, with resolved settings and
+/// ownership, so its lines join the native profile's that share its settings files.
+pub fn make_t3_profile(id: &str, root: &str) -> Profile {
+    let mut p = make_profile(id, root);
+    p.t3 = Some(T3Instance {
+        state: "/state".into(),
+        instance: id.into(),
+        enabled: true,
+        idle_mode: T3IdleMode::OnReturn,
+        idle_owner: "/state/settings.json:idleCompaction".into(),
+        ownership_resolved: true,
+        settings_unresolved: false,
+        limitations: vec![],
+        inherited_window: None,
+        retained_since: None,
+    });
+    p
+}
+
 /// One setting's line in a plain-text report, with its evidence under details.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReportLine {

@@ -17,14 +17,15 @@ use crate::memory::{MemoryInput, memory_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
-    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
-    RequestEvidence, RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
-    UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
+    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Report, Request, RequestEvidence,
+    RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity, UnlinkedSensitivity,
+    Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
     price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
+use crate::rows::Group;
 use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{
     AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
@@ -548,13 +549,14 @@ impl Replayer<'_, '_> {
     }
 }
 
-/// Compare 5m and 1h cache lifetimes for one profile bucket over its time-ordered requests.
+/// Compare 5m and 1h cache lifetimes for one line's bucket over its time-ordered requests.
 fn ttl_check(
     input: &TtlInput,
-    profile: &Profile,
+    group: &Group<'_>,
     requests: &[&Request],
     bucket: Bucket,
 ) -> Option<TtlCheck> {
+    let profile = group.lead;
     let TtlInput {
         scan,
         summaries,
@@ -573,7 +575,7 @@ fn ttl_check(
             .filter(|e| {
                 e.harness == Harness::Claude
                     && e.kind == EventKind::Compaction
-                    && e.profiles.contains(&profile.id)
+                    && group.covers(&e.profiles)
             })
             .collect()
     } else {
@@ -627,7 +629,7 @@ fn ttl_check(
     };
     let replay = |ttl, attempt| replayer.run(ttl, false, attempt);
     // Positive savings when 1h is cheaper than 5m on the parts both replays price.
-    let (short, long, paired) = replayer.compare(skipped_lines(scan, &profile.id));
+    let (short, long, paired) = replayer.compare(skipped_lines(scan, &group.ids));
     let comparison_cost = PerTtl {
         five_minutes: short.comparison.clone(),
         one_hour: long.comparison.clone(),
@@ -696,11 +698,20 @@ fn ttl_check(
     } else {
         current.value
     };
-    let recent_version = relevant
-        .last()
-        .and_then(|r| r.version.as_deref())
-        .or_else(|| requests.last().and_then(|r| r.version.as_deref()));
-    let supported = version_supported(recent_version);
+    // Each source's current client must honor the setting, since one file sets it for all.
+    fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
+        list.iter()
+            .rev()
+            .find(|r| r.profiles.contains(id))
+            .and_then(|r| r.version.as_deref())
+    }
+    let versions: Vec<Option<&str>> = group
+        .ids
+        .iter()
+        .filter(|id| requests.iter().any(|r| r.profiles.contains(id)))
+        .map(|id| latest(&relevant, id).or_else(|| latest(requests, id)))
+        .collect();
+    let supported = !versions.is_empty() && versions.into_iter().all(version_supported);
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
     let applies = supported && (current.value.is_some() || pinnable);
@@ -743,7 +754,7 @@ fn ttl_check(
     if current.value.is_none() {
         uncertainty.insert(&current.reason);
     }
-    if profiles.len() > 1 {
+    if profiles.iter().any(|p| !group.ids.iter().any(|id| id == p)) {
         uncertainty.insert(
             "shared history has ambiguous profile provenance; this is a conditional replay for the named current profile, not assigned historical spend",
         );
@@ -768,6 +779,7 @@ fn ttl_check(
     Some(TtlCheck {
         base: CheckBase {
             profile: profile.id.clone(),
+            profiles: group.ids.clone(),
             history_profiles: profiles.into_iter().map(String::from).collect(),
             evidence: if recommended.is_some() {
                 Evidence::Estimated
@@ -933,21 +945,22 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         now,
     };
     let mut ttls = vec![];
-    for profile in scan
-        .profiles
-        .iter()
-        .filter(|p| p.harness == Harness::Claude)
-    {
-        let mut requests: Vec<&Request> = scan
-            .cache_context
-            .requests
+    let claude = || {
+        scan.profiles
             .iter()
-            .chain(&scan.requests)
-            .filter(|r| r.harness == Harness::Claude && r.profiles.contains(&profile.id))
-            .collect();
-        requests.sort_by_key(|r| r.time);
-        for bucket in Bucket::ALL {
-            ttls.extend(ttl_check(&input, profile, &requests, bucket));
+            .filter(|p| p.harness == Harness::Claude)
+    };
+    for bucket in Bucket::ALL {
+        for group in crate::rows::groups(claude(), |p| crate::rows::ttl_owner(p, bucket)) {
+            let mut requests: Vec<&Request> = scan
+                .cache_context
+                .requests
+                .iter()
+                .chain(&scan.requests)
+                .filter(|r| r.harness == Harness::Claude && group.covers(&r.profiles))
+                .collect();
+            requests.sort_by_key(|r| r.time);
+            ttls.extend(ttl_check(&input, &group, &requests, bucket));
         }
     }
     for check in &mut ttls {
@@ -1305,6 +1318,68 @@ mod tests {
 
     fn jsonl(records: &[Value]) -> String {
         records.iter().map(|r| format!("{r}\n")).collect()
+    }
+
+    #[test]
+    fn sources_sharing_a_settings_file_get_one_ttl_line() {
+        let session = |prefix: &str, session: &str, profile: &str| {
+            [
+                (format!("{prefix}-first"), 0, u(1000, 0, M5)),
+                (format!("{prefix}-next"), 600_000, u(1100, 0, M5)),
+            ]
+            .map(|(id, time, usage)| {
+                let mut r = with(at(&id, time), usage);
+                r.session = session.into();
+                r.profiles = vec![profile.into()].into();
+                r
+            })
+        };
+        let rooted = |p: &mut crate::model::Profile| {
+            for (bucket, key) in [
+                (Bucket::Main, "promptCacheTtl"),
+                (Bucket::Subagent, "subagentPromptCacheTtl"),
+            ] {
+                p.ttl.get_mut(bucket).owner = format!("/synthetic/.claude/settings.json:{key}");
+            }
+        };
+        let main = |s: &Scan| -> Vec<TtlCheck> {
+            ttls(&report_at(s, None, 1_200_000))
+                .into_iter()
+                .filter(|c| c.bucket == Bucket::Main)
+                .cloned()
+                .collect()
+        };
+        let mut alone = data(session("native", "native", "profile").to_vec(), vec![]);
+        rooted(&mut alone.profiles[0]);
+        let alone = main(&alone);
+        let mut both = data(
+            [
+                session("native", "native", "profile"),
+                session("t3", "t3", "agent"),
+            ]
+            .concat(),
+            vec![],
+        );
+        rooted(&mut both.profiles[0]);
+        let mut agent = crate::test_support::make_t3_profile("agent", "/synthetic/.claude");
+        rooted(&mut agent);
+        both.profiles.push(agent);
+        let shared = main(&both);
+        assert_eq!(shared.len(), 1);
+        let line = &shared[0];
+        assert_eq!(line.base.profiles, ["profile", "agent"]);
+        assert_eq!(line.base.action, Action::Change);
+        // Each source's history replays on its own, then the line sums them.
+        let one = total(&alone[0].cost.one_hour).unwrap();
+        assert!((total(&line.cost.one_hour).unwrap() - 2.0 * one).abs() < 1e-10);
+        // An instance whose TTL another owner sets keeps a line of its own.
+        both.profiles[1].ttl.main.owner = "T3 instance agent: launch environment".into();
+        let split = main(&both);
+        let lines: Vec<&[String]> = split.iter().map(|c| c.base.profiles.as_slice()).collect();
+        assert_eq!(
+            lines,
+            [&["profile".to_string()][..], &["agent".to_string()][..]]
+        );
     }
 
     #[test]

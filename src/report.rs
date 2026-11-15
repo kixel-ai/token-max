@@ -208,6 +208,7 @@ struct Common<'a> {
     check: &'static str,
     bucket: &'static str,
     profile: &'a str,
+    profiles: &'a [String],
     history_profiles: &'a [String],
     evidence: Evidence,
     action: Action,
@@ -240,6 +241,7 @@ fn base<'a, V>(
         check,
         bucket,
         profile: &b.profile,
+        profiles: &b.profiles,
         history_profiles: &b.history_profiles,
         evidence: b.evidence,
         action: b.action,
@@ -914,6 +916,29 @@ impl<'a> Out<'a> {
             None => self.removed_name(id).unwrap_or_else(|| display(id)),
         }
     }
+    /// Every profile on a line, for evidence cards.
+    fn profile_names(&self, ids: &[String]) -> String {
+        ids.iter()
+            .map(|id| self.profile_name(id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    /// The settings files a piece of context's line covers, or its profiles when a file
+    /// cannot be resolved for each of them.
+    fn switch_files(&self, ids: &[String]) -> String {
+        let files: Option<IndexSet<String>> = ids
+            .iter()
+            .map(|id| {
+                let p = self.profiles.get(id.as_str())?;
+                let owner = format!("{}:", p.settings_file);
+                crate::rows::owner_file(p, &owner).map(|file| self.home(file))
+            })
+            .collect();
+        match files.filter(|f| !f.is_empty()) {
+            Some(files) => files.into_iter().collect::<Vec<_>>().join(", "),
+            None => self.profile_names(ids),
+        }
+    }
     /// A profile by harness and home-relative root, for the summary.
     fn short_profile(&self, id: &str) -> String {
         match self.profiles.get(id) {
@@ -1220,7 +1245,8 @@ fn details(report: &Report, out: &mut Out<'_>) {
         out.section("Fable weekly use");
         for u in &report.fable {
             out.blank();
-            out.line(&out.profile_name(&u.profile), 0, BOLD);
+            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
+            out.line(&names.join(", "), 0, BOLD);
             out.field("Requests", &requests_of(u.requests, "Fable request"));
             for w in &u.weeks {
                 out.cost(
@@ -1616,7 +1642,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         tier(action),
     );
     out.field("Claim", Claim::of(result).name());
-    out.field("Profile", &out.profile_name(r.profile));
+    if r.profiles.len() > 1 {
+        out.field("Profiles", &out.profile_names(r.profiles));
+    } else {
+        out.field("Profile", &out.profile_name(r.profile));
+    }
     out.field("Owner", &display(r.owner));
     out.field("Current", &setting(r.current));
     out.field("Suggested", &setting(r.recommended));
@@ -3341,6 +3371,22 @@ fn rows_section(mut rows: Vec<Row>, out: &mut Out<'_>) {
             row.name = format!("{} ({location})", row.name);
         }
     }
+    // A tag that names one settings file leaves the setting to name only what changes in it.
+    for row in &mut rows {
+        let Some(file) = row
+            .profile
+            .strip_prefix('[')
+            .and_then(|t| t.strip_suffix(']'))
+            .filter(|f| !f.contains(", ") && !f.contains(": "))
+        else {
+            continue;
+        };
+        if let Some(edit) = row.setting.strip_suffix(&format!(" in {file}")) {
+            row.setting = edit.to_string();
+        } else if let Some(key) = row.setting.strip_prefix(&format!("{file}:")) {
+            row.setting = key.to_string();
+        }
+    }
     // A stable sort keeps the verdict order among lines with the same figure.
     rows.sort_by_key(|r| r.mark);
     rows.sort_by(by_share);
@@ -3910,16 +3956,31 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             *tag = out.short_profile(id);
         }
     }
-    let tag = |profile: &str, out: &Out<'_>| {
+    // A line names the settings file that owns it, or its profiles when no file does.
+    let tag = |ids: &[String], owner: &dyn Fn(&Profile) -> String, out: &Out<'_>| {
         if !many {
             return String::new();
         }
-        let tag = tags
-            .get(profile)
-            .cloned()
-            .unwrap_or_else(|| out.short_profile(profile));
-        format!("[{tag}]")
+        let files: Option<IndexSet<String>> = ids
+            .iter()
+            .map(|id| {
+                let p = out.profiles.get(id.as_str())?;
+                crate::rows::owner_file(p, &owner(p)).map(|file| out.home(file))
+            })
+            .collect();
+        let names = files.filter(|f| !f.is_empty()).unwrap_or_else(|| {
+            ids.iter()
+                .map(|id| {
+                    tags.get(id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| out.short_profile(id))
+                })
+                .collect()
+        });
+        format!("[{}]", names.into_iter().collect::<Vec<_>>().join(", "))
     };
+    // A tool, skill or MCP switch lives in each profile's own settings file.
+    let switch = |p: &Profile| format!("{}:", p.settings_file);
     // The edit or step `doctor` offers for a line, which names its setting.
     let offer = |origin: Origin, out: &Out<'_>| {
         fixes
@@ -3967,7 +4028,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         let (index, result, r) = c;
         let mark = check_mark(result, r);
         let mut row = Row::new(Claim::of(result), mark, setting_name(result));
-        row.profile = tag(r.profile, out);
+        row.profile = tag(r.profiles, &|_| r.owner.to_string(), out);
         let unset = unset_main_ttl(result, r, out);
         let current = match r.current {
             None if unset => "unset".into(),
@@ -4321,7 +4382,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             Verdict::Keep => Mark::Keep,
         };
         let mut row = Row::new(Claim::Measured, mark, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.value = match verdict {
             Verdict::Off | Verdict::Consider if typed => format!("on {arrow} typed only"),
@@ -4348,7 +4409,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         text.push('.');
         // What leaves nonuse unproven outside the Codex catalog.
         if verdict == Verdict::Consider && c.skill.is_none() && c.calls == Some(0) {
-            text += match hidden_use(c, &report.scan.snapshots, &report.scan.exposure) {
+            text += match hidden_use(
+                c,
+                &report.scan.snapshots,
+                &report.scan.exposure,
+                &report.scan.profiles,
+            ) {
                 Some(Hidden::Named) => {
                     " An unreadable transcript line names it, so it may have been used."
                 }
@@ -4387,6 +4453,36 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
+    // Lines of one setting that split only because the controls they replay differ name the
+    // same file; name their profiles as well, so no two read alike.
+    let clashing: Vec<usize> = (0..rows.len())
+        .filter(|&i| {
+            !rows[i].profile.is_empty()
+                && (0..rows.len()).any(|j| {
+                    rows[i].name == rows[j].name
+                        && rows[i].profile == rows[j].profile
+                        && checks[i].2.profiles != checks[j].2.profiles
+                })
+        })
+        .collect();
+    for i in clashing {
+        let names: Vec<String> = checks[i]
+            .2
+            .profiles
+            .iter()
+            .map(|id| {
+                tags.get(id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| out.short_profile(id))
+            })
+            .collect();
+        let row = &mut rows[i];
+        row.profile = format!(
+            "{}: {}]",
+            row.profile.trim_end_matches(']'),
+            names.join(", ")
+        );
+    }
     rows.extend(pieces.iter().map(|c| piece_row(c, out)));
     // Switchable context still sent today without enough pricing or use evidence for a
     // verdict. Auto memory has its own line. A tool its server's switch covers, or one with
@@ -4398,7 +4494,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             && !matches!(c.kind, ContextKind::Memory | ContextKind::McpDiscovery)
     }) {
         let mut row = Row::new(Claim::Measured, Mark::Unknown, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.value = "on".into();
         if c.estimated_usd.is_some() {
@@ -4471,7 +4567,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         .filter(|(_, c)| c.current && c.kind == ContextKind::Instructions);
     for (index, c) in instructions {
         let mut row = instruction_row(c, &report.scan.profiles, out);
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         if row.offered() {
             row.value = format!("{} {arrow} shorter", row.value);
             // Shortening a file saves an unknown part of what it cost.
@@ -4499,14 +4595,14 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         rows.push(row);
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
-    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::default();
+    let mut outputs: IndexMap<(&[String], Option<Cap>), Vec<&ContextCost>> = IndexMap::default();
     for c in report
         .context
         .iter()
         .filter(|c| c.kind == ContextKind::ToolOutput)
     {
         outputs
-            .entry((first_profile(c), output_cap(report, c)))
+            .entry((c.profiles.as_slice(), output_cap(report, c)))
             .or_default()
             .push(c);
     }
@@ -4563,13 +4659,13 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             known.len() < usd.len(),
             &spend,
         );
-        row.profile = tag(key.0, out);
+        row.profile = tag(key.0, &switch, out);
         rows.push(row);
     }
     // One line for each subagent type, whose guidance is evidence beside its cost.
     for c in &report.subagents {
         let mut row = Row::new(Claim::Measured, Mark::Info, subagent_name(c));
-        row.profile = tag(&c.profiles[0], out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.cost(&c.cost, &spend);
         row.evidence = subagent_line(c, &about, out);
         if let Some(text) = subagent_guidance(c) {
@@ -4587,7 +4683,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     }
     for u in &report.fable {
         let mut row = fable_row(u);
-        row.profile = tag(&u.profile, out);
+        row.profile = tag(&u.profiles, &switch, out);
         if u.requests > 0 {
             row.cost(&add_costs(u.weeks.iter().map(|w| &w.cost)), &spend);
         }
@@ -4610,7 +4706,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         .filter(|c| matches!(c.kind, ContextKind::Skill | ContextKind::McpServer))
     {
         let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.costs(c.estimated_usd, false, &spend);
         row.setting = piece_setting(c, out);
@@ -4832,19 +4928,42 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             ),
         };
         let profile = if many {
-            format!(" [{}]", out.profile_name(first))
+            format!(" [{}]", out.switch_files(&c.profiles))
         } else {
             String::new()
         };
         let text = format!("{}{profile}: {cost}{used}", piece_label(c, out));
         out.line(&text, 2, feature_tier(c, covered));
+        // A line several sources share is broken down by the profiles that recorded it.
+        if c.shares.len() > 1 {
+            for share in &c.shares {
+                let priced = if share.priced == 0 {
+                    "none priced".to_string()
+                } else {
+                    format!(
+                        "{} over {} priced",
+                        about(share.cost_usd.to_f64()),
+                        count(share.priced)
+                    )
+                };
+                out.line(
+                    &format!(
+                        "{}: {} requests, {priced}",
+                        out.profile_names(&share.profiles),
+                        count(share.requests)
+                    ),
+                    6,
+                    PLAIN,
+                );
+            }
+        }
         for note in context_guidance(c, &report.scan.profiles, &out.home(&c.name)) {
             out.line(&note, 6, PLAIN);
         }
         out.notes("Pricing assumption", &c.assumptions);
         // A red verdict accepts one way its nonuse stays unproven beside unreadable lines.
         if !covered && c.verdict == Some(Verdict::Off) && c.skill.is_none() && c.calls == Some(0) {
-            let lines = unreadable_lines(c, &report.scan.snapshots);
+            let lines = unreadable_lines(c, &report.scan.snapshots, &report.scan.profiles);
             if lines > 0 {
                 let (noun, verb) = if lines == 1 {
                     ("line", "does not")
@@ -4968,6 +5087,7 @@ mod tests {
     fn check_base<V>(action: Action, current: Option<V>, recommended: Option<V>) -> CheckBase<V> {
         CheckBase {
             profile: "profile".into(),
+            profiles: vec!["profile".into()],
             history_profiles: vec!["profile".into()],
             evidence: Evidence::Measured,
             action,
@@ -5230,6 +5350,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            shares: vec![],
             profiles: vec!["profile".into()],
             kind,
             name: name.into(),
@@ -5862,6 +5983,7 @@ mod tests {
         let background = |feature, on: bool, profile: &str| {
             let mut base = check_base(Action::Keep, Some(on), Some(on));
             base.profile = profile.into();
+            base.profiles = vec![profile.into()];
             base.owner = format!("{ROOT}/settings.json:promptSuggestionEnabled");
             CheckResult::Background(BackgroundCheck {
                 base,
@@ -6774,9 +6896,7 @@ mod tests {
             "ChatGPT apps on -> off saves $30/mo 2%"
         );
         assert!(
-            line("ChatGPT apps")
-                .setting
-                .starts_with("[/synthetic/.codex] features.apps = false in "),
+            line("ChatGPT apps").setting == "[/synthetic/.codex/config.toml] features.apps = false",
             "{text}"
         );
         assert!(
@@ -6826,7 +6946,7 @@ mod tests {
         // Each cap line names its setting.
         assert_eq!(
             report_line(&text, "Bash output").setting,
-            "[/synthetic/home/.claude] bashOutputMaxChars"
+            "[/synthetic/home/.claude/settings.json] bashOutputMaxChars"
         );
 
         // Codex switches go to config.toml as TOML.
@@ -7097,7 +7217,7 @@ mod tests {
         let day = 86_400_000;
         let end = NOV1 + 30 * day;
         report.fable.push(FableUse {
-            profile: "profile".into(),
+            profiles: vec!["profile".into()],
             requests: 5,
             unrecorded: 2,
             shared: 1,
@@ -7472,6 +7592,7 @@ mod tests {
         };
         report.scan.profiles.push(other.clone());
         advisory.base.profile = other.id.clone();
+        advisory.base.profiles = vec![other.id.clone()];
         let values = [
             root,
             change.base.owner.clone(),
@@ -7764,6 +7885,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            shares: vec![],
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
             name: name.into(),

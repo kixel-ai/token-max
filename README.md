@@ -43,31 +43,31 @@ Background estimates apply current files to history; historical settings and unr
 Some feature costs are scaled from their priced requests; --details shows each line's coverage.
 
 CHANGES  biggest saving first
-change   Main-agent prompt cache TTL            unset -> 5m       saves up to  $146/mo  15%  Measured  [~/.claude]  "promptCacheTtl": "5m" in ~/.claude/settings.json
-change   MCP server docs                        on -> off         saves         $17/mo   2%  Measured  [~/.claude]  "permissions": {"deny": ["mcp__docs"]} (added to the list) in ~/.claude/settings.json
-change   EnterWorktree tool                     on -> off         saves       $3.99/mo  <1%  Measured  [~/.claude]  "permissions": {"deny": ["EnterWorktree"]} (added to the list) in ~/.claude/settings.json
-change   NotebookEdit tool                      on -> off         saves       $3.99/mo  <1%  Measured  [~/.claude]  "permissions": {"deny": ["NotebookEdit"]} (added to the list) in ~/.claude/settings.json
+change   Main-agent prompt cache TTL            unset -> 5m       saves up to  $145/mo  15%  Measured  [~/.claude/settings.json]  "promptCacheTtl": "5m"
+change   MCP server docs                        on -> off         saves         $17/mo   2%  Measured  [~/.claude/settings.json]  "permissions": {"deny": ["mcp__docs"]} (added to the list)
+change   EnterWorktree tool                     on -> off         saves       $3.98/mo  <1%  Measured  [~/.claude/settings.json]  "permissions": {"deny": ["EnterWorktree"]} (added to the list)
+change   NotebookEdit tool                      on -> off         saves       $3.98/mo  <1%  Measured  [~/.claude/settings.json]  "permissions": {"deny": ["NotebookEdit"]} (added to the list)
 ...
-change   Bash timeout cap                       55m -> 4m         saving      not measured       Measured  [~/.claude]  "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json
+change   Bash timeout cap                       55m -> 4m         saving      not measured       Measured  [~/.claude/settings.json]  "env": {"BASH_MAX_TIMEOUT_MS": "240000"}
 
 EVERYTHING ELSE  biggest cost first
-info     Main-session effort                    medium            costs           $363  78%  Official  [~/.claude]  ~/.claude/settings.json:modelSettings.claude-opus-5-5.effortLevel (the model's default)
-info     Main-session effort                    xhigh             costs           $103  22%  Official  [~/.codex]   ~/.codex/config.toml:model_reasoning_effort
-keep     MCP server t3-code                     on                costs            $50  11%  Measured  [~/.claude]  ~/.claude/settings.json:permissions.deny
-info     System prompt and core tools                             costs            $25   5%  Measured               no setting
-keep     WebSearch tool                         on                costs          $1.91  <1%  Measured  [~/.claude]  ~/.claude/settings.json:permissions.deny
-keep     WebFetch tool                          on                costs          $1.91  <1%  Measured  [~/.claude]  ~/.claude/settings.json:permissions.deny
+info     Main-session effort                    medium            costs           $363  78%  Official  [~/.claude/settings.json]  modelSettings.claude-opus-5-5.effortLevel (the model's default)
+info     Main-session effort                    xhigh             costs           $103  22%  Official  [~/.codex/config.toml]    model_reasoning_effort
+keep     MCP server t3-code                     on                costs            $50  11%  Measured  [~/.claude/settings.json]  permissions.deny
+info     System prompt and core tools                             costs            $25   5%  Measured                            no setting
+keep     WebSearch tool                         on                costs          $1.91  <1%  Measured  [~/.claude/settings.json]  permissions.deny
+keep     WebFetch tool                          on                costs          $1.91  <1%  Measured  [~/.claude/settings.json]  permissions.deny
 ...
-keep     Skill skill-00                         on                costs          $0.03  <1%  Measured  [~/.claude]  ~/.claude/settings.json:skillOverrides.skill-00
+keep     Skill skill-00                         on                costs          $0.03  <1%  Measured  [~/.claude/settings.json]  skillOverrides.skill-00
 ...
-keep     Fast mode                              off                                          Opinion   [~/.codex]   /etc/codex/config.toml:service_tier (documented default)
-keep     Auto memory                            off                                          Opinion   [~/.claude]  ~/.claude/settings.json:autoMemoryEnabled
+keep     Fast mode                              off                                          Opinion   [/etc/codex/config.toml]  service_tier (documented default)
+keep     Auto memory                            off                                          Opinion   [~/.claude/settings.json]  autoMemoryEnabled
 ...
-unknown  Idle compaction                        on                                           Measured  [~/.claude]  ~/.claude/settings.json:idleCompaction
+unknown  Idle compaction                        on                                           Measured  [~/.claude/settings.json]  idleCompaction
 ...
-unknown  Session recaps                         unknown                                      Measured  [~/.claude]  ~/.claude/settings.json:awaySummaryEnabled (default)
+unknown  Session recaps                         unknown                                      Measured  [~/.claude/settings.json]  awaySummaryEnabled (default)
 ...
-info     Fable weekly use                                                                    Official  [~/.claude]  /model, or model in settings.json
+info     Fable weekly use                                                                    Official  [~/.claude/settings.json]  /model, or model in settings.json
 A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.
 
 Prices: cached from test/fixtures/prices.json (2026-11-15).

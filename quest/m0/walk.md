@@ -70,7 +70,3 @@ without a confirm:
 
 Update `docs/reference.md`'s "Applying changes" and the README's walk
 excerpt and the paragraph on what `doctor` writes to match.
-
-## Required
-
-- [Give each setting one row per settings file](/quest/m0/file-rows.md) - the walk must never offer a change another row shows in use

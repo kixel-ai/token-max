@@ -1,5 +1,21 @@
 # Replay semantics
 
+Checks and context rows resolve per line, not per profile: a line is every
+selected profile whose setting the same settings file owns, after symlinks
+resolve. Each check replays the union of its line's requests, keeping each
+session's history separate, under the controls of the line's first profile,
+and lists every covered profile in `profiles`. A profile whose setting a shell
+variable, a project, local or managed file, or T3's thread selection decides,
+and every setting of a disabled or unresolved T3 instance, is a line of its
+own. A check that replays other controls, such as the cache TTL under the
+compaction, idle, keepalive and Bash checks, also needs the line's profiles to
+share those controls' owners and values, so a source with caching off or its
+own TTL is a line of its own. A request with profiles on several lines counts on each of them, as each
+profile's check counted it before; ambiguous provenance outside a line keeps
+its uncertainty. One window serves the whole line: its default start is the
+latest change among the line's sources. A piece of context sent by several
+sources proves nonuse only when each sent it from its first request.
+
 The reader freezes every selected file's length during discovery before parsing
 any transcript. It streams one newline-terminated JSON record at a time. Raw
 objects live only through that line's normalization; retained data contains
@@ -620,10 +636,14 @@ credit both their server and their own schema row. Details and server totals
 must not be added together. A discovery listing and a subsequently surfaced
 schema remain distinct even when their names match.
 One-off attachments and skill bodies are excluded because no setting removes
-them up front. Rows group by the profiles that own each request, and recorded uses
-(tool calls, results and skill invocations) follow the owners of each session
-that recorded them, or the profiles of its transcripts when that session has no
-request. A request no selected profile owns, such as one of a T3 instance removed from
+them up front. Rows group by the settings files of the profiles that own each
+request, so a request native Claude Code and a T3 instance share, or that T3
+could not settle between instances of one home, lands on that file's row once.
+`shares` breaks a row down by the profile sets that recorded its requests.
+Recorded uses (tool calls, results and skill invocations) follow the owners of
+each session that recorded them, or the profiles of its transcripts when that
+session has no request, and count on every row that shares a settings file with
+them. A request no selected profile owns, such as one of a T3 instance removed from
 settings, has no setting to change and prices no row; it stays in the bill.
 
 Tool results are `tool-output` rows, one per tool and one per MCP server. A
@@ -707,6 +727,8 @@ with `tool_use_id`; Codex pairs `*_call` and `*_call_output` response items by
 `call_id`. The id evidence
 cannot name the cut call's feature, so a file with unreadable lines and any
 unmatched result holds back every never-used piece of the profiles it records.
+A row covers the transcripts of every profile whose switches live in its
+settings files, including one that recorded none of its requests.
 A call that never ran leaves no result and is no use. The method accepts one
 miss: a call cut off inside its name whose client died before writing its result
 counts as unused, though it may have run.
@@ -855,7 +877,9 @@ documents provided tool definitions. All guidance was checked on 2026-11-07.
 
 ## Auto memory
 
-`auto-memory` checks each profile once. It is advisory while memory is on and
+`auto-memory` checks each line once, over the memory context its own
+profiles' requests carried, even when the context row is shared with
+profiles whose memory switch differs. It is advisory while memory is on and
 keep once it is off, and never exits 1: notes the agent writes for itself skip
 the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
 slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not
@@ -1167,7 +1191,7 @@ Sources, checked 2026-11-08:
 
 ## Main-session effort
 
-The `main-effort` check resolves each profile's main-session default effort
+The `main-effort` check resolves each line's main-session default effort
 from today's settings, read where auto memory's are: at the latest main-session
 request's working directory, or from the user and managed files when none is
 recorded. The model is `ANTHROPIC_MODEL` or the highest settings file's
@@ -1307,9 +1331,10 @@ Sources, checked 2026-11-11: the Claude Code 2.1.322 binary and
 
 ## Fable weekly use
 
-`Report.fable` gives each Claude profile without a cloud provider one entry:
-its Fable requests, the requests that recorded no model, the Fable requests
-it shares with another such profile, and the request count and spend of each span. Spans are 7
+`Report.fable` gives each settings file of Claude profiles without a cloud
+provider one entry, listing those profiles: its Fable requests, the requests
+that recorded no model, the Fable requests it shares with a profile of another
+file, and the request count and spend of each span. Spans are 7
 days, counted back from the report's time to the window's start (the analysis
 bound, else `--since`, else the earliest request read; earlier requests, and
 any after the report's time, are left out), so the oldest may be shorter; a
@@ -1320,9 +1345,9 @@ when any of its parts ran on Fable, such as an advisor iteration under another
 main model, and only those parts are priced; server-tool fees go with the
 request's own model, and are unknown when it recorded none. A request that recorded no model is counted apart, as
 possibly Fable. A request shared
-by several profiles, as when two profiles read the same transcripts, counts in
-each, since each line describes one profile's sessions; the line says how many
-were shared, since whose they were is unknown.
+by profiles of several files, as when two homes read the same transcripts,
+counts in each, since each line describes one file's sessions; the line says
+how many were shared, since whose they were is unknown.
 
 The line is Official evidence with no verdict. Anthropic documents the cap as
 a share of a weekly limit it publishes in neither tokens nor dollars, and says
@@ -1332,5 +1357,5 @@ after the cap, paid with usage credits, are not marked in transcripts and stay
 in the figures. token-max never reads which plan a profile is signed in to, so
 the rule is an `Official:` sentence stated for each plan, as
 [Plans and API prices](reference.md#plans-and-api-prices) describes.
-`--details` gives each profile's spans with their unknown costs, the caveats
+`--details` gives each line's spans with their unknown costs, the caveats
 and the sources.

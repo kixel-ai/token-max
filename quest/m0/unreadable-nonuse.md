@@ -30,20 +30,20 @@ The search proves nonuse only in bytes that were written. A crash can cut a
 record off, and the reader skips it as unreadable once a later write ends
 its line, often with the next record joined on. Its missing bytes could
 hold any call, and a cut inside a name, such as `"name":"Age`, leaves a
-prefix that does not contain `Agent`. So the rule to implement is: read
-each unparseable line, and a deferred unterminated final line, as the
-records it holds; it makes a feature's verdict yellow when its bytes
-contain the feature's name as a call records it, after decoding JSON string
-escapes such as `\u0041gent`, or when it holds a record cut off before its
-JSON closes, unless the cut record's surviving bytes show a record type
-that cannot hold a call. A complete or cut call name in a cut record rules
-nothing out, since one record can hold several calls and the next could be
-in the missing bytes. Otherwise the feature stays red. This applies the
-decision above to cut records (found in review of the planning PR, listed
-in its body for the maintainer's pick). Cover an escaped name, a joined
-pair, a cut record of a type that cannot hold a call, and cut records that
-hold a complete `Read` call alone or followed by a cut `Agent` call, which
-both stay yellow for `Agent`, with synthetic tests.
+prefix that does not contain `Agent`; one record can also hold several
+calls. Decode JSON string escapes such as `\u0041gent` before matching.
+
+Decided 2026-11-14 (maintainer, at the pick of the planning PR): ✅ a cut
+record counts as a possible use only when its session has a tool result
+whose id matches no parsed call, Claude's `tool_use_id` or Codex's
+`call_id`, since every call that ran leaves a result (rejected: any cut
+record that could hold a call makes every never-used feature yellow, which
+could leave the maintainer's host as it is; searching only the surviving
+bytes, which can call a used tool unused). A call that never ran is no use.
+Report in the PR how many of the maintainer's host's unparseable lines are
+cut records and how many sessions have an unmatched result. Cover an escaped
+name, a joined pair, and a cut record with and without an unmatched result
+with synthetic tests.
 
 ## Related
 

@@ -4,8 +4,8 @@
 
 On a real host, `token-max doctor`'s default report fits on a few screens
 and leads with what matters: every setting and feature on one line naming
-its verdict, value, cost and the setting that changes it, the offered
-changes first, with the evidence under `--details`. Its headline matches the
+its verdict, value, cost in dollars and percent, and the setting that
+changes it, the offered changes first, with the evidence under `--details`. Its headline matches the
 changes it offers, and every reason reads as a whole sentence.
 
 ## Plan
@@ -18,14 +18,20 @@ show only rows that offer a change plus counts, which breaks AGENTS.md's
 "every setting and feature on its own line"). This carries out the
 2026-11-08 decision of one plain verdict per setting.
 
-Decided 2026-11-14 (maintainer): ✅ rank and page (rejected: a full-screen
-TUI such as ratatui, a new dependency and an L/XL quest that would delay
-0.0.1; ranking now plus an m1 TUI quest). Noise drowned out the important
-suggestions, such as the cache TTL. Within the one-line-per-row default,
-show the offered changes first, ordered by dollars saved, then every other
-row ordered by its cost, cheapest last. On a terminal, long output goes
-through `$PAGER` the way git does, while piped output stays plain. The y/n
-walk offers changes in the same order.
+Decided 2026-11-14 (maintainer, after mockup videos of a ranked report in
+a pager, a full-screen TUI and a ranked y/n walk): ✅ the walk to decide, then the ranked list
+to confirm, in [Walk the changes biggest saving first](/quest/m0/walk.md)
+(rejected: rank and page through `$PAGER` alone, which this replaces; a
+full-screen TUI, a new dependency that would delay 0.0.1). The walk
+explains why each change makes sense, so it leads on a terminal. ✅ the rows the walk does not offer are
+listed after it, one line each (rejected: behind `--all`, which breaks
+AGENTS.md's "every setting and feature on its own line"). This quest owns
+that list and the report printed without a terminal: the offered changes
+first, ordered by dollars saved, then every other row by its cost, cheapest
+last. ✅ every dollar figure comes with a percent of its profile's spend
+over the window at API prices, such as "$8,830/mo, 12% of T3 claudeAgent"
+(rejected: of the whole host's spend, which makes a big profile's changes
+look small; of the setting's own cost).
 
 That run printed 558 lines, 121 KB, by default:
 
@@ -53,3 +59,4 @@ widest line in the PR's Validation. Update the README's sample report.
 ## Related
 
 - [Give each profile one row per tool](/quest/m0/profile-rows.md) - also changes these rows
+- [Walk the changes biggest saving first](/quest/m0/walk.md) - the terminal walk printed before this list

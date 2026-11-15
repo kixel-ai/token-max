@@ -190,6 +190,10 @@ and for the JSON removal in
 [kixelated/token-max#74](https://github.com/kixelated/token-max/pull/74). Where this entry and an older one
 disagree, such as "never edits settings", "both text and JSON" or
 "Repository: ✅ kixelated", this one holds.
+✅ doctor's terminal walk shows a running total of the accepted changes'
+savings, summed and labeled as possibly overlapping (rejected: a joint
+replay; no total). This amends "no summed or joint savings total" for that
+total only, in [the walk quest](/quest/m0/walk.md).
 
 Decided 2026-11-11 (maintainer, /quest-plan for that audit's follow-ups):
 ✅ 0.1.0 ships prebuilt binaries built by
@@ -211,6 +215,10 @@ the checks in m1; all in m1). The quests record the reasons. Where this
 entry and an older one disagree, such as "API-price equivalents are not a
 claim about subscription bills" or "Model and review effort selection
 remain outside this expansion", this one holds.
+✅ doctor's terminal walk shows a running total of the accepted changes'
+savings, summed and labeled as possibly overlapping (rejected: a joint
+replay; no total). This amends "no summed or joint savings total" for that
+total only, in [the walk quest](/quest/m0/walk.md).
 
 Decided 2026-11-14 (maintainer, /quest-complete after a local `token-max
 doctor` run on the maintainer's host, 99,739 requests over 4 days): ✅ fix
@@ -221,3 +229,7 @@ through that profile, and printed 558 lines. ✅ the first release is 0.0.1
 (rejected: 0.1.0), published once the report quests merge and a rerun on
 the maintainer's host reads well. Where an older entry names 0.1.0, this one
 holds.
+✅ doctor's terminal walk shows a running total of the accepted changes'
+savings, summed and labeled as possibly overlapping (rejected: a joint
+replay; no total). This amends "no summed or joint savings total" for that
+total only, in [the walk quest](/quest/m0/walk.md).

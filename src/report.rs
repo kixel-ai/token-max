@@ -8228,7 +8228,23 @@ mod tests {
             cost_per_use_usd: None,
             verdict: Some(verdict),
         };
+        // A redundant catalog copy is off however often it was used.
+        let copy = ContextCost {
+            skill: Some(crate::model::CatalogSkill {
+                path: Some("/synthetic/b/SKILL.md".into()),
+                retained_path: Some("/synthetic/kept/SKILL.md".into()),
+                ..Default::default()
+            }),
+            ..piece(
+                ContextKind::Skill,
+                "b",
+                vec!["skills", "b"],
+                4,
+                Verdict::Off,
+            )
+        };
         report.context = vec![
+            copy,
             piece(
                 ContextKind::Skill,
                 "a",
@@ -8270,6 +8286,11 @@ mod tests {
                 "Skills the model never used: on -> typed only",
                 Reason::Unused,
                 "a",
+            ),
+            (
+                "Duplicate copies of skills: on -> off",
+                Reason::Duplicate,
+                "b",
             ),
             ("Never-used MCP servers: on -> off", Reason::Unused, "docs"),
             (

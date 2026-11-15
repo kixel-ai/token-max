@@ -79,6 +79,8 @@ pub enum Reason {
     Unrecorded,
     /// Used, but it cost more than `--max-cost-per-use` per use.
     Costly,
+    /// A redundant copy of a catalog skill whose most-used copy stays, used or not.
+    Duplicate,
 }
 
 /// Whether the doctor can make a change, and what it is.
@@ -287,7 +289,12 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         | ContextKind::Memory
         | ContextKind::Other => return None,
     };
+    let duplicate = c
+        .skill
+        .as_ref()
+        .is_some_and(|s| s.retained_path.is_some() && s.path != s.retained_path);
     let reason = match (c.verdict?, c.calls) {
+        (Verdict::Off, _) if duplicate => Reason::Duplicate,
         (Verdict::Off, _) => Reason::Unused,
         (Verdict::Consider, Some(0)) => Reason::Unrecorded,
         (Verdict::Consider, Some(_)) => Reason::Costly,
@@ -305,6 +312,7 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
             capital(kind),
             about(report.max_cost_per_use_usd)
         ),
+        Reason::Duplicate => format!("Duplicate copies of {kind}"),
     };
     Some(Group {
         kind: c.kind,
@@ -1615,7 +1623,10 @@ pub fn ask(
             }
         }
     }
-    // Left unanswered, so the list shows them among the changes not accepted.
+    // Not accepted, so the list shows them with the changes answered no.
+    for (index, fix) in skipped.iter().flat_map(|q| &q.members) {
+        selection.choose(*index, fix, false);
+    }
     let left: usize = skipped.iter().map(|q| q.members.len()).sum();
     if left > 0 {
         let more = if count > 0 { " more" } else { "" };
@@ -2415,9 +2426,9 @@ mod tests {
             ("U", Some(Choice::Declined)),
             ("K", Some(Choice::Accepted)),
             ("L", Some(Choice::Declined)),
-            // Never asked, so the list shows them among those not accepted.
-            ("P", None),
-            ("C", None),
+            // Never asked, so not accepted.
+            ("P", Some(Choice::Declined)),
+            ("C", Some(Choice::Declined)),
         ] {
             let origin = Origin::Check(usize::from(name.as_bytes()[0]));
             let got = plan
@@ -2443,7 +2454,11 @@ mod tests {
             printed,
             "\n1 change in groups saving under $1/mo was not asked; it's in the list below.\n"
         );
-        assert!(plan.choices.is_empty());
+        assert_eq!(choice(&plan, "C"), &Choice::Declined);
+        assert_eq!(
+            finish(&plan, &[], &style(&w)),
+            "\nNothing was accepted, so nothing was written.\n"
+        );
     }
 
     #[test]

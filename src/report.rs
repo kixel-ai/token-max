@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 use crate::collections::{IndexMap, IndexSet};
 
 use crate::context::{
-    CLAUDE_MEMORY, CODEX_MEMORY, SYNCED_SKILLS, control_text, incomplete_profiles, setting_rows,
-    typed_only,
+    CLAUDE_MEMORY, CODEX_MEMORY, Hidden, SYNCED_SKILLS, control_text, hidden_use, setting_rows,
+    typed_only, unreadable_lines,
 };
 use crate::controls::CAPPED_SHARED;
 use crate::discovery::TTL_BILLING_UNKNOWN;
@@ -3834,7 +3834,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     if coverage.skipped_lines > 0 {
         out.line(
             &format!(
-                "{} unreadable transcript lines in {} files were skipped.",
+                "{} unreadable transcript lines in {} files were skipped. One holds back a recommendation only when it names the feature or a tool result in its file has no call; a call cut off before its result was written would not show.",
                 count(coverage.skipped_lines),
                 count(coverage.skipped_files)
             ),
@@ -3931,7 +3931,6 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         .enumerate()
         .filter(|(_, c)| c.verdict.is_some())
         .collect();
-    let incomplete = incomplete_profiles(&report.scan.snapshots);
     // A server's own loading and exposure controls, after its line's evidence.
     let server_notes = |c: &ContextCost| {
         if c.kind != ContextKind::McpServer {
@@ -4347,12 +4346,21 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             let _ = write!(text, "; {}", catalog_evidence(c));
         }
         text.push('.');
-        // The two reasons context verdicts leave nonuse unproven outside the Codex catalog.
+        // What leaves nonuse unproven outside the Codex catalog.
         if verdict == Verdict::Consider && c.skill.is_none() && c.calls == Some(0) {
-            text += if c.profiles.iter().any(|p| incomplete.contains(p)) {
-                " An unreadable transcript line could hold a use."
-            } else {
-                " It was first sent during the window, so the window cannot rule out a use."
+            text += match hidden_use(c, &report.scan.snapshots, &report.scan.exposure) {
+                Some(Hidden::Named) => {
+                    " An unreadable transcript line names it, so it may have been used."
+                }
+                Some(Hidden::Cut) => {
+                    " A cut transcript record could hold a use: a tool result there has no recorded call."
+                }
+                Some(Hidden::Unfinished) => {
+                    " A transcript's unfinished last line could hold a use."
+                }
+                None => {
+                    " It was first sent during the window, so the window cannot rule out a use."
+                }
             };
         }
         if c.kind == ContextKind::McpTool {
@@ -4834,6 +4842,25 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             out.line(&note, 6, PLAIN);
         }
         out.notes("Pricing assumption", &c.assumptions);
+        // A red verdict accepts one way its nonuse stays unproven beside unreadable lines.
+        if !covered && c.verdict == Some(Verdict::Off) && c.skill.is_none() && c.calls == Some(0) {
+            let lines = unreadable_lines(c, &report.scan.snapshots);
+            if lines > 0 {
+                let (noun, verb) = if lines == 1 {
+                    ("line", "does not")
+                } else {
+                    ("lines", "do not")
+                };
+                out.line(
+                    &format!(
+                        "{} unreadable transcript {noun} {verb} name it or leave a tool result without a call; a call cut off before its result was written would not show.",
+                        count(lines)
+                    ),
+                    6,
+                    PLAIN,
+                );
+            }
+        }
         let size = c.tokens.map_or_else(String::new, |tokens| {
             format!("{} tokens in {} requests", count(tokens), count(c.requests))
         });
@@ -5430,6 +5457,7 @@ mod tests {
                     inode: 2,
                     deferred_bytes: 0,
                     skipped_lines: 2,
+                    unreadable: Default::default(),
                     lines: 10,
                 }],
                 requests,
@@ -7790,8 +7818,24 @@ mod tests {
         ));
         late.scan.snapshots[0].skipped_lines = 1;
         late.scan.snapshots[0].profiles = late.context[0].profiles.clone();
+        // An unreadable line that names it, or sits beside a result with no call.
+        late.scan.snapshots[0]
+            .unreadable
+            .observe(format!(r#"{{"skill":"{name}"}}"#).as_bytes());
         assert!(text(&late, None, true).contains(
-            "The model never used it; it cost $5 over the window. An unreadable transcript line could hold a use. Hide it from the model:"
+            "The model never used it; it cost $5 over the window. An unreadable transcript line names it, so it may have been used. Hide it from the model:"
+        ));
+        late.scan.snapshots[0].unreadable = Default::default();
+        late.scan.snapshots[0].unreadable.unmatched_results = 1;
+        assert!(text(&late, None, true).contains(
+            "The model never used it; it cost $5 over the window. A cut transcript record could hold a use: a tool result there has no recorded call. Hide it from the model:"
+        ));
+        // A red row beside an unreadable line states the one miss it accepts, in `--details`.
+        let mut red = late.clone();
+        red.context[0].verdict = Some(Verdict::Off);
+        red.scan.snapshots[0].unreadable = Default::default();
+        assert!(text(&red, None, true).contains(
+            "1 unreadable transcript line does not name it or leave a tool result without a call; a call cut off before its result was written would not show."
         ));
         report.scan.since = Some(instant(&report.generated_at) - 3_600_000);
         report.context.push(ContextCost {

@@ -9,7 +9,7 @@ use crate::exposure::{MEMORY_OUTPUT, calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
-    Text, Usd, Verdict, Via,
+    Snapshot, Text, Usd, Verdict, Via,
 };
 use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
@@ -107,19 +107,71 @@ pub struct ContextInput<'a> {
     pub profiles: &'a [Profile],
     /// Public prices.
     pub catalog: &'a Catalog,
-    /// Profiles whose transcripts have unreadable or deferred lines, which could hold a use.
-    pub incomplete: &'a HashSet<String>,
+    /// The transcripts read, whose unreadable or unfinished lines could hold a use.
+    pub snapshots: &'a [Snapshot],
     /// Suggest turning a used piece off when it cost more than this per use.
     pub max_cost_per_use_usd: f64,
 }
 
-/// Profiles whose transcripts have unreadable or deferred lines, which could hold a use.
-pub fn incomplete_profiles(snapshots: &[crate::model::Snapshot]) -> HashSet<String> {
+/// Why a row's transcripts could hold a use of it that no parsed record shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Hidden {
+    /// A transcript was still being written, and its unfinished last line could hold a call.
+    Unfinished,
+    /// An unreadable line may be a record a crash cut off, since a tool result in its
+    /// transcript matches no parsed call; the cut could hide the call's name.
+    Cut,
+    /// An unreadable line mentions the feature by name.
+    Named,
+}
+
+/// The strongest reason the transcripts a row covers could hide a use of it, if any.
+///
+/// A line that cannot name the feature hides no use of it, so unreadable lines that
+/// neither mention it nor sit beside a result with no call leave its nonuse proven. The
+/// one accepted miss is a call cut inside its name whose client died before writing its
+/// result: it counts as unused, though it may have run.
+pub fn hidden_use(c: &ContextCost, snapshots: &[Snapshot], scan: &ExposureScan) -> Option<Hidden> {
+    // The synced-skills row stands for many skills, which calls name by namespace or as
+    // `/pdf`, never by the row's label.
+    let synced: Vec<&str> = if c.kind == ContextKind::Skill && c.name == SYNCED_SKILLS {
+        std::iter::once(SYNCED_NAMESPACE)
+            .chain(scan.components.iter().filter_map(|m| synced_short(&m.name)))
+            .collect()
+    } else {
+        vec![]
+    };
+    covering(c, snapshots)
+        .filter_map(|s| {
+            let named = if synced.is_empty() {
+                s.unreadable.mentions(c.kind, &c.name)
+            } else {
+                synced.iter().any(|n| s.unreadable.mentions(c.kind, n))
+            };
+            if s.skipped_lines > 0 && named {
+                Some(Hidden::Named)
+            } else if s.skipped_lines > 0 && s.unreadable.unmatched_results > 0 {
+                Some(Hidden::Cut)
+            } else {
+                (s.deferred_bytes > 0).then_some(Hidden::Unfinished)
+            }
+        })
+        .max()
+}
+
+/// The unreadable lines in the transcripts a row covers, whatever they could hold.
+pub fn unreadable_lines(c: &ContextCost, snapshots: &[Snapshot]) -> u64 {
+    covering(c, snapshots).map(|s| s.skipped_lines).sum()
+}
+
+/// The transcripts that record a row's requests.
+fn covering<'a>(
+    c: &'a ContextCost,
+    snapshots: &'a [Snapshot],
+) -> impl Iterator<Item = &'a Snapshot> {
     snapshots
         .iter()
-        .filter(|s| s.skipped_lines > 0 || s.deferred_bytes > 0)
-        .flat_map(|s| s.profiles.iter().cloned())
-        .collect()
+        .filter(|s| s.harness == c.harness && s.profiles.iter().any(|p| c.profiles.contains(p)))
 }
 
 /// Context setting rows whose controls are not covered by a server recommendation.
@@ -1313,11 +1365,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 && c.tier_unknown_requests == 0
                 && c.kind != ContextKind::Memory
             {
-                // Codex catalog skill uses are only partly recorded, and an unreadable or
-                // deferred line could hold a call, so their nonuse is unproven.
+                // Codex catalog skill uses are only partly recorded, and a line that could
+                // hold a call leaves nonuse unproven.
                 let visible = row.from_start
                     && c.skill.is_none()
-                    && !c.profiles.iter().any(|p| input.incomplete.contains(p));
+                    && hidden_use(&c, input.snapshots, input.scan).is_none();
                 c.verdict = Some(match calls {
                     _ if usd <= 0.0 => Verdict::Keep,
                     0 if visible => Verdict::Off,
@@ -1405,7 +1457,7 @@ mod tests {
         Exposure, ExposureView, IdentityBasis, Ids, Invocation, Owner, Scope, Size, TextCoverage,
         ToolCalls, ToolResults, Usage, Via,
     };
-    use crate::test_support::{make_request, prices};
+    use crate::test_support::{make_request, make_snapshot, prices};
 
     fn ids(values: &[&str]) -> Ids {
         values.iter().map(|v| Text::from(*v)).collect()
@@ -1497,7 +1549,7 @@ mod tests {
             requests,
             profiles: &profiles,
             catalog: &prices(),
-            incomplete: &HashSet::default(),
+            snapshots: &[],
             max_cost_per_use_usd: limit,
         })
     }
@@ -1622,17 +1674,45 @@ mod tests {
         // Used, but above the limit per use: advisory.
         let rows = costs(&scan, &requests, docs / 2.0);
         assert_eq!(row(&rows, "docs").verdict, Some(Verdict::Consider));
-        // An unreadable or deferred line in the profile's transcripts could hold a call.
+        // Unreadable lines that cannot hold a call leave nonuse proven; any that could,
+        // or an unfinished line, make it advisory.
         let profiles = [crate::test_support::make_profile("profile", "/synthetic")];
-        let rows = context_costs(&ContextInput {
-            scan: &scan,
-            requests: &requests,
-            profiles: &profiles,
-            catalog: &prices(),
-            incomplete: &HashSet::from_iter(["profile".to_string()]),
-            max_cost_per_use_usd: 1.0,
-        });
-        assert_eq!(row(&rows, "Artifact").verdict, Some(Verdict::Consider));
+        let artifact_with = |snapshots: &[Snapshot]| {
+            let rows = context_costs(&ContextInput {
+                scan: &scan,
+                requests: &requests,
+                profiles: &profiles,
+                catalog: &prices(),
+                snapshots,
+                max_cost_per_use_usd: 1.0,
+            });
+            row(&rows, "Artifact").verdict
+        };
+        let plain = make_snapshot("profile", &[r#"{"type":"text","text":"x"#], 0);
+        assert_eq!(artifact_with(&[plain]), Some(Verdict::Off));
+        // A line that names it, as the call records it, even escaped.
+        let named = make_snapshot("profile", &[r#"{"name":"\u0041rtifactData"}"#], 0);
+        assert_eq!(
+            artifact_with(std::slice::from_ref(&named)),
+            Some(Verdict::Consider)
+        );
+        assert_eq!(
+            hidden_use(
+                &row(&costs(&scan, &requests, 1.0), "Artifact").clone(),
+                &[named],
+                &scan
+            ),
+            Some(Hidden::Named)
+        );
+        // A cut record could hold its call only where a result has no parsed call.
+        let cut = make_snapshot("profile", &[r#"{"name":"Artif"#], 1);
+        assert_eq!(artifact_with(&[cut]), Some(Verdict::Consider));
+        // Another profile's transcripts say nothing about it.
+        let other = make_snapshot("other", &[r#"{"name":"Artifact"}"#], 1);
+        assert_eq!(artifact_with(&[other]), Some(Verdict::Off));
+        let mut unfinished = make_snapshot("profile", &[], 0);
+        unfinished.deferred_bytes = 9;
+        assert_eq!(artifact_with(&[unfinished]), Some(Verdict::Consider));
         // First sent after the window's first request, so the window cannot rule out a use.
         scan.requests.insert(
             0,
@@ -1710,7 +1790,7 @@ mod tests {
             requests: &requests,
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
-            incomplete: &HashSet::default(),
+            snapshots: &[],
             max_cost_per_use_usd: 1.0,
         });
         assert_eq!(row(&rows, "/repo/CLAUDE.md").requests, 2);
@@ -1991,7 +2071,7 @@ mod tests {
                     requests: std::slice::from_ref(&r),
                     profiles: std::slice::from_ref(&profile),
                     catalog: &prices(),
-                    incomplete: &HashSet::default(),
+                    snapshots: &[],
                     max_cost_per_use_usd: 1.0,
                 });
                 let server = &costs[0];
@@ -2234,7 +2314,7 @@ mod tests {
             requests: &requests,
             profiles: std::slice::from_ref(&profile),
             catalog: &prices(),
-            incomplete: &HashSet::default(),
+            snapshots: &[],
             max_cost_per_use_usd: 1.0,
         });
         // A quarter token per character. The first request read nothing from cache;
@@ -2296,7 +2376,7 @@ mod tests {
                 requests: &requests,
                 profiles: std::slice::from_ref(&profile),
                 catalog: &prices(),
-                incomplete: &HashSet::default(),
+                snapshots: &[],
                 max_cost_per_use_usd: 1.0,
             });
             let apps = row(&rows, "codex_apps");
@@ -2387,7 +2467,7 @@ mod tests {
             ],
             profiles: &[profile("a", "docs-server"), profile("b", "docs_server")],
             catalog: &prices(),
-            incomplete: &HashSet::default(),
+            snapshots: &[],
             max_cost_per_use_usd: 1.0,
         });
         let of = |name: &str, profile: &str| {
@@ -2507,6 +2587,16 @@ mod tests {
         let plugin = row(&rows, "tools:deploy");
         assert_eq!(plugin.control, None);
         assert_eq!((plugin.calls, plugin.verdict), (Some(1), None));
+        // An unreadable line names the group by its namespace or a member's short name,
+        // never by the row's label.
+        let hidden =
+            |line: &str| hidden_use(synced, &[make_snapshot("profile", &[line], 0)], &scan);
+        assert_eq!(
+            hidden(r#"{"skill":"anthropic-skills:slides"}"#),
+            Some(Hidden::Named)
+        );
+        assert_eq!(hidden(r#"{"text":"/xlsx"}"#), Some(Hidden::Named));
+        assert_eq!(hidden(r#"{"skill":"review"}"#), None);
     }
 
     #[test]

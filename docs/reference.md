@@ -159,6 +159,23 @@ their usage counts as missing, and each one counts as an unpriced request in
 that profile's comparisons. Unterminated final lines are deferred, and
 `--details` counts the files that had one.
 
+An unreadable line does not by itself keep an unused tool, skill or MCP server
+from being recommended off. It holds the recommendation back, as an advisory,
+in two cases. Its bytes name the feature as a call records it, such as
+`mcp__server__tool` or a skill's name (any case), or a Codex completion's
+`"server"`, after decoding JSON escapes like `\u0041gent`; a mention in prose
+counts too. Or its transcript has a tool
+result whose id matches no parsed call, in the parsed records or in the
+unreadable lines: a crash can cut a record off, leaving no name to search, and
+every call that ran leaves a result, so such a result shows a call is missing.
+That second case cannot say which feature the call used, so it holds back every
+never-used feature that transcript's profile carries. One miss is accepted: a call cut
+off inside its name whose client died before writing its result counts as
+unused, though it may have run; the default report's skipped-lines line says so,
+and `--details` repeats it on each red row beside unreadable lines. A deferred line always holds back the
+recommendation. Only hashes of the names and ids are kept in memory, never the
+text.
+
 ## Reading the report
 
 The default report says what was read and what it cost at API prices, then
@@ -218,8 +235,10 @@ they cost and how often they were used. One never used is recommended off,
 whatever it cost. One that cost more than `--max-cost-per-use` (default $1) per
 use is worth considering off, an advisory that exits 0; the rest are kept. An
 unused one stays an advisory when the window cannot rule out a use: it was first
-sent after the window began, an unreadable transcript line could hold a call,
-or, for a Codex skill, its uses are only partly recorded. A Claude skill's uses count only the model's own calls, because hiding it
+sent after the window began, an unreadable transcript line names it or may be
+a cut-off call (see [Exit codes and unreadable lines](#exit-codes-and-unreadable-lines)),
+a transcript was still being written, or, for a Codex skill, its uses are only
+partly recorded. A Claude skill's uses count only the model's own calls, because hiding it
 with `skillOverrides` set to `user-invocable-only` still lets you type `/name`.
 Skills synced from claude.ai share one line, since only `syncClaudeAiSkills`
 turns them off in settings, and that also removes typed uses, so those count.

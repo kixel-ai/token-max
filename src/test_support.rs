@@ -202,6 +202,28 @@ impl Drop for Workspace {
     }
 }
 
+/// One synthetic Claude transcript of `profile` with `skipped` unreadable lines, which hold
+/// `lines` and leave `unmatched` tool results without a parsed call.
+pub fn make_snapshot(profile: &str, lines: &[&str], unmatched: u64) -> Snapshot {
+    let mut unreadable = crate::unreadable::Unreadable::default();
+    for line in lines {
+        unreadable.observe(line.as_bytes());
+    }
+    unreadable.unmatched_results = unmatched;
+    Snapshot {
+        file: "synthetic".into(),
+        harness: Harness::Claude,
+        profiles: vec![profile.into()],
+        bytes: 0,
+        device: 0,
+        inode: 0,
+        deferred_bytes: 0,
+        skipped_lines: lines.len() as u64,
+        unreadable,
+        lines: 0,
+    }
+}
+
 /// One synthetic Claude profile rooted at `root`, with explicit 5m TTLs and no speed or idle controls.
 pub fn make_profile(id: &str, root: &str) -> Profile {
     let ttl = || TtlControl {

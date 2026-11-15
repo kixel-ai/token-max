@@ -32,6 +32,7 @@ pub mod ssh;
 mod subagents;
 pub mod t3;
 pub mod terminal;
+pub mod unreadable;
 pub mod wire;
 
 #[cfg(test)]

@@ -58,5 +58,4 @@ settings and recommendations per profile".
 
 ## Related
 
-- [Prove nonuse through unparseable lines](/quest/m0/unreadable-nonuse.md) - also decides never-used rows
 - [Walk the changes biggest saving first](/quest/m0/walk.md) - needs this, since it must never offer a change another row shows in use

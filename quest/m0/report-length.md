@@ -2,11 +2,11 @@
 
 ## Goal
 
-On a real host, `token-max doctor`'s default report fits on a few screens:
-every setting and feature on one line naming its verdict, value, cost and
-the setting that changes it, with the evidence under `--details`. Its
-headline matches the changes it offers, and every reason reads as a whole
-sentence.
+On a real host, `token-max doctor`'s default report fits on a few screens
+and leads with what matters: every setting and feature on one line naming
+its verdict, value, cost and the setting that changes it, the offered
+changes first, with the evidence under `--details`. Its headline matches the
+changes it offers, and every reason reads as a whole sentence.
 
 ## Plan
 
@@ -17,6 +17,15 @@ same verdict across profiles merged into one row naming them (rejected:
 show only rows that offer a change plus counts, which breaks AGENTS.md's
 "every setting and feature on its own line"). This carries out the
 2026-11-08 decision of one plain verdict per setting.
+
+Decided 2026-11-14 (maintainer): ✅ rank and page (rejected: a full-screen
+TUI such as ratatui, a new dependency and an L/XL quest that would delay
+0.0.1; ranking now plus an m1 TUI quest). Noise drowned out the important
+suggestions, such as the cache TTL. Within the one-line-per-row default,
+show the offered changes first, ordered by dollars saved, then every other
+row ordered by its cost, cheapest last. On a terminal, long output goes
+through `$PAGER` the way git does, while piped output stays plain. The y/n
+walk offers changes in the same order.
 
 That run printed 558 lines, 121 KB, by default:
 

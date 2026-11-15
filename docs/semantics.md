@@ -7,10 +7,14 @@ session's history separate, under the controls of the line's first profile,
 and lists every covered profile in `profiles`. A profile whose setting a shell
 variable, a project, local or managed file, or T3's thread selection decides,
 and every setting of a disabled or unresolved T3 instance, is a line of its
-own. A request with profiles on several lines counts on each of them, as each
+own. A check that replays other controls, such as the cache TTL under the
+compaction, idle, keepalive and Bash checks, also needs the line's profiles to
+share those controls' owners and values, so a source with caching off or its
+own TTL is a line of its own. A request with profiles on several lines counts on each of them, as each
 profile's check counted it before; ambiguous provenance outside a line keeps
 its uncertainty. One window serves the whole line: its default start is the
-latest change among the line's sources.
+latest change among the line's sources. A piece of context sent by several
+sources proves nonuse only when each sent it from its first request.
 
 The reader freezes every selected file's length during discovery before parsing
 any transcript. It streams one newline-terminated JSON record at a time. Raw
@@ -847,7 +851,9 @@ documents provided tool definitions. All guidance was checked on 2026-11-07.
 
 ## Auto memory
 
-`auto-memory` checks each line once. It is advisory while memory is on and
+`auto-memory` checks each line once, over the memory context its own
+profiles' requests carried, even when the context row is shared with
+profiles whose memory switch differs. It is advisory while memory is on and
 keep once it is off, and never exits 1: notes the agent writes for itself skip
 the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
 slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not

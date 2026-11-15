@@ -1143,9 +1143,8 @@ impl Total {
         self.measured.changes + self.up_to.changes + self.unmeasured
     }
 
-    /// Such as "Accepted so far: about $40/mo, 9% of this host's spend; overlapping changes
-    /// may save less."
-    fn text(&self, label: &str) -> String {
+    /// Such as "about $40/mo, 9% of this host's spend; overlapping changes may save less".
+    fn amount(&self) -> String {
         let mut parts = vec![];
         if self.measured.changes > 0 {
             let usd = self.measured.text();
@@ -1178,16 +1177,22 @@ impl Total {
             };
             parts.push(format!("{} {whose} not measured", changes(self.unmeasured)));
         }
-        if parts.is_empty() {
-            return String::new();
-        }
         // Each saving holds every other setting constant, so two may count the same requests.
         let overlap = if self.measured.changes + self.up_to.changes > 1 {
             "; overlapping changes may save less"
         } else {
             ""
         };
-        format!("{label}: {}{overlap}.", parts.join(", plus "))
+        format!("{}{overlap}", parts.join(", plus "))
+    }
+
+    /// The amount after `label`, as a sentence; empty when nothing was added.
+    fn text(&self, label: &str) -> String {
+        let amount = self.amount();
+        if amount.is_empty() {
+            return amount;
+        }
+        format!("{label}: {amount}.")
     }
 }
 
@@ -1400,15 +1405,17 @@ pub fn ask(
     }
     if !small.is_empty() {
         let batch = if going {
-            let usd: f64 = small.iter().filter_map(|(_, f)| f.saving).sum();
-            let share: Option<f64> = small.iter().map(|(_, f)| f.share).sum();
+            // Summed as the running total is, so a saving that depends on a default stays apart.
+            let mut together = Total::default();
+            for (_, fix) in &small {
+                together.add(fix);
+            }
             let mut text = style.bold(
                 &format!(
-                    "[{questions}/{questions}] {} smaller changes, each saving under {}/mo: {}/mo together{}.",
+                    "[{questions}/{questions}] {} smaller changes, each saving under {}/mo, together: {}.",
                     small.len(),
                     about(SMALL_USD),
-                    about(usd),
-                    share_of_host(share)
+                    together.amount()
                 ),
                 0,
             );
@@ -2186,7 +2193,7 @@ mod tests {
                 "[1/4] A: on -> off",
                 "[2/4] B: on -> off",
                 "[3/4] U: on -> off",
-                "[4/4] 3 smaller changes, each saving under $5/mo: $5.50/mo together, 6% of this host's spend.",
+                "[4/4] 3 smaller changes, each saving under $5/mo, together: about $5.50/mo, 6% of this host's spend; overlapping changes may save less.",
             ]
         );
         assert!(printed.contains(
@@ -2288,6 +2295,23 @@ mod tests {
             "Accepted: 2 changes whose savings were not measured."
         );
         assert_eq!(total(&[]), "");
+        // The small changes' heading sums them the same way.
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let small = |name: &str, verb, usd| Fix {
+            verb,
+            saving: Some(usd),
+            share: Some(usd / 100.0),
+            ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
+        };
+        let (_, printed) = walk(
+            vec![small("A", "saves", 1.0), small("B", UP_TO, 3.0)],
+            &w,
+            "n\n",
+        );
+        assert!(printed.contains(
+            "[1/1] 2 smaller changes, each saving under $5/mo, together: about $1/mo, 1% of this host's spend, plus up to $3/mo, 3% of this host's spend, from 1 change whose saving depends on the default it replaces; overlapping changes may save less.\n"
+        ), "{printed}");
     }
 
     #[test]

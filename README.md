@@ -55,7 +55,7 @@ Accept? [y]es, [n]o, [q]uit: n
 Accept? [y]es, [n]o, [q]uit: y
   Accepted so far: about $206/mo, 39% of this host's spend, plus 1 change whose saving was not measured.
 
-[4/4] 4 smaller changes, each saving under $5/mo: $9.41/mo together, 2% of this host's spend.
+[4/4] 4 smaller changes, each saving under $5/mo, together: about $9.41/mo, 2% of this host's spend; overlapping changes may save less.
   NotebookEdit tool: on -> off, saves $3.57/mo, 1% of this host's spend (recommended, Measured)
   EnterWorktree tool: on -> off, saves $3.17/mo, 1% of this host's spend (recommended, Measured)
   CronCreate tool: on -> off, saves $2.66/mo, <1% of this host's spend (recommended, Measured)

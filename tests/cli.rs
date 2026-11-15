@@ -1196,7 +1196,17 @@ mod unix {
             "\n[1/2] Auto memory: on -> off\n  Worth considering (Opinion): its saving was not measured.\n",
         );
         let ttl = at(
-            "\n[2/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves <$0.01/mo, 13% of this host's spend.\n  Measured on 2 requests over 15 days. Replayed at 5m and 1h, assuming the same\n  sessions; 1h costs less.\n  In ~/.claude/settings.json:\n    \"promptCacheTtl\": \"1h\"\nAccept? [y]es, [n]o, [q]uit:   Accepted so far: <$0.01/mo, 13% of this host's spend.\n",
+            "\n[2/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves <$0.01/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
+        );
+        // The window ends now, so its day count and the wrapping after it follow the clock.
+        let entry = &stdout[ttl..];
+        let entry = entry[..entry.find("\ntoken-max\n").unwrap_or(entry.len())]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: <$0.01/mo, 13% of this host's spend."),
+            "{entry}"
         );
         // Then the report, its accepted change first, and one question to write it.
         let report = at("\n1 change recommended and 1 worth considering.\n");

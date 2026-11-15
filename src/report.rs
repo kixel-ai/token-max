@@ -968,13 +968,23 @@ pub fn format_report<'a>(
     report: &'a Report,
     fixes: &[crate::doctor::Fix],
     options: ReportOptions<'a>,
-) -> String {
+) -> Listing {
     let mut out = Out::new(report, options);
-    summary(report, fixes, &mut out);
+    let (head, rows) = summary(report, fixes, &mut out);
     if options.details {
         details(report, &mut out);
     }
-    out.text
+    Listing {
+        head,
+        rows,
+        tail: out.text,
+        options: ReportOptions {
+            host: None,
+            ..options
+        },
+        home: out.home,
+        spend: out.spend,
+    }
 }
 
 /// The report as `token-max doctor` prints it, naming the edits it would offer.
@@ -985,6 +995,81 @@ pub(crate) fn rendered(report: &Report, options: ReportOptions<'_>) -> String {
         &crate::doctor::fixes(report, options.unicode),
         options,
     )
+    .text()
+}
+
+/// A rendered report whose list of lines can be printed again once `doctor`'s walk has
+/// sorted its changes into those accepted, declined and left by hand.
+pub struct Listing {
+    /// Everything before the list.
+    head: String,
+    rows: Vec<Row>,
+    /// Everything after the list.
+    tail: String,
+    options: ReportOptions<'static>,
+    home: Option<String>,
+    spend: Spend,
+}
+
+/// What became of a change in `doctor`'s walk, for the list printed after it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Choice {
+    /// Accepted, to be written once the person confirms.
+    Accepted,
+    /// Answered no, or left when the walk ended early.
+    Declined,
+    /// A step to take by hand, as the line's setting column reads.
+    Manual(String),
+}
+
+impl Listing {
+    /// The report as printed without a terminal.
+    pub fn text(&self) -> String {
+        self.with_list(None)
+    }
+
+    /// The report with its changes grouped by `choices`: the accepted first, ending with
+    /// `total`, then the declined, then the steps by hand, then every other line.
+    pub fn review(&self, choices: &[(Origin, Choice)], total: &str) -> String {
+        self.with_list(Some(Review { choices, total }))
+    }
+
+    fn with_list(&self, review: Option<Review<'_>>) -> String {
+        let mut out = Out {
+            text: String::new(),
+            options: self.options,
+            arrow: if self.options.unicode { "→" } else { "->" },
+            home: self.home.clone(),
+            profiles: IndexMap::default(),
+            removed: crate::collections::HashMap::default(),
+            spend: self.spend,
+        };
+        rows_section(&self.rows, review, &mut out);
+        format!("{}{}{}", self.head, out.text, self.tail)
+    }
+
+    /// The evidence behind a report line, as one paragraph: what was measured, then why.
+    pub fn evidence(&self, origin: Origin) -> String {
+        self.rows
+            .iter()
+            .find(|r| r.origin == Some(origin))
+            .map(|r| {
+                [r.stats.as_str(), r.evidence.as_str()]
+                    .into_iter()
+                    .filter(|t| !t.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// How the list groups changes after `doctor`'s walk.
+#[derive(Clone, Copy)]
+struct Review<'a> {
+    choices: &'a [(Origin, Choice)],
+    /// The accepted changes' summed saving, labeled, printed after them.
+    total: &'a str,
 }
 
 fn generated_at(report: &Report) -> Millis {
@@ -2438,7 +2523,7 @@ fn monthly(usd: f64, since: Option<Millis>, until: Option<Millis>) -> f64 {
 }
 
 /// A share of this host's spend as a whole percent, or under 1% when it rounds to none.
-fn share_text(share: f64) -> String {
+pub(crate) fn share_text(share: f64) -> String {
     let percent = share * 100.0;
     if percent > 0.0 && percent < 0.5 {
         "<1%".into()
@@ -3223,6 +3308,7 @@ const FIGURE_CELLS: usize = 10;
 
 /// One setting or feature: one line naming its verdict, value, figure and setting, with
 /// its evidence on a second line under `--details`.
+#[derive(Clone)]
 struct Row {
     claim: Claim,
     mark: Mark,
@@ -3242,6 +3328,12 @@ struct Row {
     sources: Vec<&'static str>,
     /// Where it was found, shown only when another line would read the same.
     location: Option<String>,
+    /// The report line it is, for a line `doctor` may offer.
+    origin: Option<Origin>,
+    /// What it saves every 30 days, when measured.
+    saving: Option<f64>,
+    /// How much was measured, such as the requests a replay covered, ahead of the evidence.
+    stats: String,
 }
 
 impl Row {
@@ -3258,6 +3350,9 @@ impl Row {
             evidence: String::new(),
             sources: vec![],
             location: None,
+            origin: None,
+            saving: None,
+            stats: String::new(),
         }
     }
 
@@ -3292,6 +3387,7 @@ impl Row {
 
     /// What it saves every 30 days, `verb` such as "saves up to"; unmeasured when None.
     fn saves(&mut self, verb: &'static str, usd: Option<f64>, spend: &Spend) {
+        self.saving = usd;
         match usd {
             Some(usd) => {
                 self.amount = Some((verb, format!("{}/mo", about(usd))));
@@ -3365,7 +3461,20 @@ fn by_share(a: &Row, b: &Row) -> std::cmp::Ordering {
 }
 
 /// Every row, ranked: the changes by what they save, then everything else by what it costs.
-fn rows_section(mut rows: Vec<Row>, out: &mut Out<'_>) {
+/// After `doctor`'s walk, the changes split into those accepted, declined and by hand.
+fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
+    let mut rows = rows.to_vec();
+    let choice = |row: &Row| {
+        let choices = review?.choices;
+        let origin = row.origin?;
+        choices.iter().find(|(o, _)| *o == origin).map(|(_, c)| c)
+    };
+    // A change the walk could not make reads as the step it became.
+    for row in &mut rows {
+        if let Some(Choice::Manual(setting)) = choice(row) {
+            row.setting = setting.clone();
+        }
+    }
     // Name where a line was found only when two lines of one profile would read the same.
     let mut seen = crate::collections::HashMap::<(String, String), usize>::default();
     for row in &rows {
@@ -3408,7 +3517,7 @@ fn rows_section(mut rows: Vec<Row>, out: &mut Out<'_>) {
         ("*", "o")
     };
     let indent = if color { 2 } else { WORD_CELLS };
-    // Columns line up across both groups.
+    // Columns line up across the groups.
     let value_cells = column(all().map(|r| cells(&terminal_text(&r.value))), VALUE_CELLS);
     let figure_cells = column(
         all().filter_map(|r| r.amount.as_ref().map(|(_, f)| cells(f))),
@@ -3437,11 +3546,31 @@ fn rows_section(mut rows: Vec<Row>, out: &mut Out<'_>) {
         let rest = indent + value_cells + amount_cells + share_cells + claim_cells + tag_cells + 10;
         name_cells = name_cells.min(width.saturating_sub(rest));
     }
-    let groups = [
-        (changes.as_slice(), "CHANGES  biggest saving first"),
-        (rest.as_slice(), "EVERYTHING ELSE  biggest cost first"),
-    ];
-    for (section, heading) in groups {
+    let mut groups: Vec<(Vec<&Row>, &str)> = match review {
+        None => vec![(changes.iter().collect(), "CHANGES  biggest saving first")],
+        Some(_) => {
+            let group = |want: fn(Option<&Choice>) -> bool| {
+                changes
+                    .iter()
+                    .filter(|r| want(choice(r)))
+                    .collect::<Vec<_>>()
+            };
+            vec![
+                (
+                    group(|c| c == Some(&Choice::Accepted)),
+                    "ACCEPTED  biggest saving first",
+                ),
+                (
+                    // A change the walk did not reach is unaccepted too.
+                    group(|c| matches!(c, None | Some(Choice::Declined))),
+                    "NOT ACCEPTED",
+                ),
+                (group(|c| matches!(c, Some(Choice::Manual(_)))), "BY HAND"),
+            ]
+        }
+    };
+    groups.push((rest.iter().collect(), "EVERYTHING ELSE  biggest cost first"));
+    for (index, (section, heading)) in groups.into_iter().enumerate() {
         if section.is_empty() {
             continue;
         }
@@ -3468,6 +3597,9 @@ fn rows_section(mut rows: Vec<Row>, out: &mut Out<'_>) {
             if out.options.details {
                 out.line(&row.evidence, indent, PLAIN);
             }
+        }
+        if let (0, Some(review)) = (index, review) {
+            out.line(review.total, indent, PLAIN);
         }
     }
     // Sources cite the guidance the evidence quotes, so they come with it.
@@ -3639,6 +3771,12 @@ pub(crate) struct Recommendation<'a> {
     pub name: String,
     /// The current value and the one to change to, such as "5m -> 1h".
     pub value: String,
+    /// What it saves every 30 days, when measured.
+    pub saving: Option<f64>,
+    /// How the saving reads, such as "saves up to".
+    pub verb: &'static str,
+    /// The saving's share of this host's spend every 30 days.
+    pub share: Option<f64>,
     pub source: Source<'a>,
     pub origin: Origin,
 }
@@ -3702,17 +3840,18 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         {
             current += " (default)";
         }
-        lines.push((
-            check_saving(result, &r, &out),
-            Recommendation {
-                claim: Claim::of(result).name(),
-                suggested: mark == Mark::Consider,
-                name: setting_name(result),
-                value: format!("{current} {arrow} {target}"),
-                source: Source::Check(result),
-                origin: Origin::Check(index),
-            },
-        ));
+        let saving = check_saving(result, &r, &out);
+        lines.push(Recommendation {
+            claim: Claim::of(result).name(),
+            suggested: mark == Mark::Consider,
+            name: setting_name(result),
+            value: format!("{current} {arrow} {target}"),
+            saving,
+            verb: check_verb(result, &r, &out),
+            share: saving.and_then(|usd| out.spend.of_month(usd)),
+            source: Source::Check(result),
+            origin: Origin::Check(index),
+        });
     }
     for (index, c) in setting_rows(&report.context).enumerate() {
         if c.kind == ContextKind::Instructions {
@@ -3722,17 +3861,17 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             }
             let row = instruction_row(c, &report.scan.profiles, &out);
             if row.mark == Mark::Consider {
-                lines.push((
-                    None,
-                    Recommendation {
-                        claim: row.claim.name(),
-                        suggested: true,
-                        name: row.name,
-                        value: format!("{} {arrow} shorter", row.value),
-                        source: Source::Piece(c),
-                        origin: Origin::Context(index),
-                    },
-                ));
+                lines.push(Recommendation {
+                    claim: row.claim.name(),
+                    suggested: true,
+                    name: row.name,
+                    value: format!("{} {arrow} shorter", row.value),
+                    saving: None,
+                    verb: "saves",
+                    share: None,
+                    source: Source::Piece(c),
+                    origin: Origin::Context(index),
+                });
             }
             continue;
         }
@@ -3746,26 +3885,27 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
         } else {
             "off"
         };
-        lines.push((
-            piece_saving(c, &out.spend),
-            Recommendation {
-                claim: Claim::Measured.name(),
-                suggested: mark == Mark::Consider,
-                name: short_label(c, &out),
-                value: format!("on {arrow} {target}"),
-                source: Source::Piece(c),
-                origin: Origin::Context(index),
-            },
-        ));
+        let saving = piece_saving(c, &out.spend);
+        lines.push(Recommendation {
+            claim: Claim::Measured.name(),
+            suggested: mark == Mark::Consider,
+            name: short_label(c, &out),
+            value: format!("on {arrow} {target}"),
+            saving,
+            verb: "saves",
+            share: saving.and_then(|usd| out.spend.of_month(usd)),
+            source: Source::Piece(c),
+            origin: Origin::Context(index),
+        });
     }
     // A stable sort keeps the report's order among equal savings.
-    lines.sort_by(|(a, _), (b, _)| match (a, b) {
-        (Some(a), Some(b)) => b.total_cmp(a),
+    lines.sort_by(|a, b| match (a.saving, b.saving) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
-    lines.into_iter().map(|(_, line)| line).collect()
+    lines
 }
 
 /// The headline: how many changes the report recommends and how many are worth considering.
@@ -3776,6 +3916,22 @@ fn headline(changes: usize, considered: usize) -> String {
         (0, c) => format!("No changes recommended; {c} worth considering."),
         (r, 0) => format!("{r} change{s} recommended."),
         (r, c) => format!("{r} change{s} recommended and {c} worth considering."),
+    }
+}
+
+/// The verb of a saving that holds only when a default would otherwise be the other value.
+pub(crate) const UP_TO: &str = "saves up to";
+/// The verb of a saving priced from only part of what it would save.
+pub(crate) const AT_LEAST: &str = "saves at least";
+
+/// How a recommended or suggested check's saving reads, such as "saves up to".
+fn check_verb(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> &'static str {
+    match result {
+        _ if unset_main_ttl(result, r, out) => UP_TO,
+        // Memory priced from only part of the requests, or with unmeasured generation,
+        // saves at least what was priced.
+        CheckResult::Memory(m) if r.coverage.is_some() || codex_unmeasured(m) => AT_LEAST,
+        _ => "saves",
     }
 }
 
@@ -3827,7 +3983,8 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
 
 /// The report: what was read, then every setting and feature on one line, the changes
 /// first, with each line's evidence under `--details`.
-fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
+/// Returns the text before the list and the list's rows; what follows them stays in `out`.
+fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> (String, Vec<Row>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
@@ -3998,7 +4155,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     let offer = |origin: Origin, out: &Out<'_>| {
         fixes
             .iter()
-            .find(|f| f.origin == origin)
+            .find(|f| f.origins.contains(&origin))
             .map(|f| crate::doctor::setting(f, out.home.as_deref()))
     };
     let pieces: Vec<(usize, &ContextCost)> = setting_rows(&report.context)
@@ -4041,6 +4198,15 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         let (index, result, r) = c;
         let mark = check_mark(result, r);
         let mut row = Row::new(Claim::of(result), mark, setting_name(result));
+        row.origin = Some(Origin::Check(*index));
+        if r.requests > 0 {
+            row.stats = format!(
+                "Measured on {} request{} over {}.",
+                count(r.requests),
+                if r.requests == 1 { "" } else { "s" },
+                days(r.since, r.until)
+            );
+        }
         row.profile = tag(r.profiles, &|_| r.owner.to_string(), out);
         let unset = unset_main_ttl(result, r, out);
         let current = match r.current {
@@ -4341,16 +4507,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         }
         // The figure: what a change saves, else what the setting cost or saves as it is.
         if row.offered() {
-            let verb = match result {
-                _ if unset => "saves up to",
-                // Memory priced from only part of the requests, or with unmeasured
-                // generation, saves at least what was priced.
-                CheckResult::Memory(m) if r.coverage.is_some() || codex_unmeasured(m) => {
-                    "saves at least"
-                }
-                _ => "saves",
-            };
-            row.saves(verb, check_saving(result, r, out), &spend);
+            row.saves(
+                check_verb(result, r, out),
+                check_saving(result, r, out),
+                &spend,
+            );
         } else {
             match result {
                 CheckResult::Effort(e) if !e.runs.is_empty() => {
@@ -4397,6 +4558,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             Verdict::Keep => Mark::Keep,
         };
         let mut row = Row::new(Claim::Measured, mark, short_label(c, out));
+        row.origin = Some(Origin::Context(*index));
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.value = match verdict {
@@ -4582,6 +4744,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         .filter(|(_, c)| c.current && c.kind == ContextKind::Instructions);
     for (index, c) in instructions {
         let mut row = instruction_row(c, &report.scan.profiles, out);
+        row.origin = Some(Origin::Context(index));
         row.profile = tag(&c.profiles, &switch, out);
         if row.offered() {
             row.value = format!("{} {arrow} shorter", row.value);
@@ -4813,7 +4976,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     if out.options.color {
         out.legend();
     }
-    rows_section(rows, out);
+    let head = std::mem::take(&mut out.text);
     if out.options.details {
         if !report.subagents.is_empty() {
             out.blank();
@@ -4860,6 +5023,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             PLAIN,
         );
     }
+    (head, rows)
 }
 
 /// What every piece of context cost, including pieces no longer sent.

@@ -29,58 +29,72 @@ These work from the first release on; until then, see [Install](#install).
 
 ```text
 $ token-max doctor
+
+token-max doctor: 7 changes to review, biggest saving first. Nothing is written until you confirm the list at the end.
+
+[1/4] WebSearch tool: on -> off
+  Recommended (Measured): saves $206/mo, 39% of this host's spend.
+  Never used; it cost $99 over the window.
+  In ~/.claude/settings.json:
+    "permissions": {"deny": ["WebSearch"]} (added to the list)
+Accept? [y]es, [n]o, [q]uit: y
+  Accepted so far: about $206/mo, 39% of this host's spend.
+
+[2/4] WebFetch tool: on -> off
+  Recommended (Measured): saves $52/mo, 10% of this host's spend.
+  Never used; it cost $25 over the window.
+  In ~/.claude/settings.json:
+    "permissions": {"deny": ["WebFetch"]} (added to the list)
+Accept? [y]es, [n]o, [q]uit: n
+
+[3/4] Bash timeout cap: 10m -> 4m
+  Recommended (Measured): its saving was not measured.
+  Measured on 504 requests over 14 days. A wait that long outlasts the 5m cache. No foreground Bash wait outlasted the cache. Commands past the cap keep running in the background; what checking on them costs is not measured.
+  In ~/.claude/settings.json:
+    "env": {"BASH_MAX_TIMEOUT_MS": "240000"}
+Accept? [y]es, [n]o, [q]uit: y
+  Accepted so far: about $206/mo, 39% of this host's spend, plus 1 change whose saving was not measured.
+
+[4/4] 4 smaller changes, each saving under $5/mo, together: about $9.41/mo, 2% of this host's spend; overlapping changes may save less.
+  NotebookEdit tool: on -> off, saves $3.57/mo, 1% of this host's spend (recommended, Measured)
+  EnterWorktree tool: on -> off, saves $3.17/mo, 1% of this host's spend (recommended, Measured)
+  CronCreate tool: on -> off, saves $2.66/mo, <1% of this host's spend (recommended, Measured)
+  Auto memory: on -> off, saves $0/mo, 0% of this host's spend (worth considering, Opinion)
+Accept all 4? [y]es, [n]o, [o]ne by one, [q]uit: y
+  Accepted so far: about $215/mo, 40% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less.
+
 token-max
 Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.
 
-Read 10,800 requests from 2026-11-01 to 2026-11-15 (14 days), $466 at API prices:
+Read 504 requests from 2026-11-01 to 2026-11-15 (14 days), at least $256 at API prices:
   claude ~/.claude
-  codex ~/.codex
-3,600 Codex requests are priced at an assumed service tier, which their records leave unclear; --details shows each tier's cost.
 
-82 changes recommended.
-Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of this host's spend over the window, $466. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
-Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.
-Some feature costs are scaled from their priced requests; --details shows each line's coverage.
-
-CHANGES  biggest saving first
-change   Main-agent prompt cache TTL            unset -> 5m       saves up to  $145/mo  15%  Measured  [~/.claude/settings.json]  "promptCacheTtl": "5m"
-change   MCP server docs                        on -> off         saves         $17/mo   2%  Measured  [~/.claude/settings.json]  "permissions": {"deny": ["mcp__docs"]} (added to the list)
-change   EnterWorktree tool                     on -> off         saves       $3.98/mo  <1%  Measured  [~/.claude/settings.json]  "permissions": {"deny": ["EnterWorktree"]} (added to the list)
-change   NotebookEdit tool                      on -> off         saves       $3.98/mo  <1%  Measured  [~/.claude/settings.json]  "permissions": {"deny": ["NotebookEdit"]} (added to the list)
+6 changes recommended and 1 worth considering.
 ...
-change   Bash timeout cap                       55m -> 4m         saving      not measured       Measured  [~/.claude/settings.json]  "env": {"BASH_MAX_TIMEOUT_MS": "240000"}
+
+ACCEPTED  biggest saving first
+change   WebSearch tool                         on -> off       saves   $206/mo   39%  Measured  "permissions": {"deny": ["WebSearch"]} (added to the list) in ~/.claude/settings.json
+change   NotebookEdit tool                      on -> off       saves  $3.57/mo    1%  Measured  "permissions": {"deny": ["NotebookEdit"]} (added to the list) in ~/.claude/settings.json
+change   EnterWorktree tool                     on -> off       saves  $3.17/mo    1%  Measured  "permissions": {"deny": ["EnterWorktree"]} (added to the list) in ~/.claude/settings.json
+change   CronCreate tool                        on -> off       saves  $2.66/mo   <1%  Measured  "permissions": {"deny": ["CronCreate"]} (added to the list) in ~/.claude/settings.json
+consider Auto memory                            on -> off       saves     $0/mo    0%  Opinion   "autoMemoryEnabled": false in ~/.claude/settings.json
+change   Bash timeout cap                       10m -> 4m       saving not measured        Measured  "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json
+         Accepted: about $215/mo, 40% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less.
+
+NOT ACCEPTED
+change   WebFetch tool                          on -> off       saves    $52/mo   10%  Measured  "permissions": {"deny": ["WebFetch"]} (added to the list) in ~/.claude/settings.json
 
 EVERYTHING ELSE  biggest cost first
-info     Main-session effort                    medium            costs           $363  78%  Official  [~/.claude/settings.json]  modelSettings.claude-opus-5-5.effortLevel (the model's default)
-info     Main-session effort                    xhigh             costs           $103  22%  Official  [~/.codex/config.toml]    model_reasoning_effort
-keep     MCP server t3-code                     on                costs            $50  11%  Measured  [~/.claude/settings.json]  permissions.deny
-info     System prompt and core tools                             costs            $25   5%  Measured                            no setting
-keep     WebSearch tool                         on                costs          $1.91  <1%  Measured  [~/.claude/settings.json]  permissions.deny
-keep     WebFetch tool                          on                costs          $1.91  <1%  Measured  [~/.claude/settings.json]  permissions.deny
+info     Main-session effort                    medium          costs  at least $256  100%  Official  ~/.claude/settings.json:modelSettings.claude-opus-5-5.effortLevel (the model's default)
+info     System prompt and core tools                           costs     $6.89    3%  Measured  no setting
+keep     Main-agent prompt cache TTL            5m              saves   $139/mo   26%  Measured  ~/.claude/settings.json:promptCacheTtl
 ...
-keep     Skill skill-00                         on                costs          $0.03  <1%  Measured  [~/.claude/settings.json]  skillOverrides.skill-00
+info     Fable weekly use                                                              Official  /model, or model in settings.json
 ...
-keep     Fast mode                              off                                          Opinion   [/etc/codex/config.toml]  service_tier (documented default)
-keep     Auto memory                            off                                          Opinion   [~/.claude/settings.json]  autoMemoryEnabled
-...
-unknown  Idle compaction                        on                                           Measured  [~/.claude/settings.json]  idleCompaction
-...
-unknown  Session recaps                         unknown                                      Measured  [~/.claude/settings.json]  awaySummaryEnabled (default)
-...
-info     Fable weekly use                                                                    Official  [~/.claude/settings.json]  /model, or model in settings.json
-A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.
 
-Prices: cached from test/fixtures/prices.json (2026-11-15).
-Each line compares one setting with everything else unchanged; savings do not add up.
---details shows the evidence, assumptions and sources behind each line.
+Write the 6 accepted changes to ~/.claude/settings.json? [y]es, [n]o: y
 
-token-max doctor: 82 changes to review. Each is written only after a yes.
-
-[1/82] Main-agent prompt cache TTL: unset -> 5m (Measured)
-  In ~/.claude/settings.json:
-    "promptCacheTtl": "5m"
-Apply? [y]es, [n]o, [q]uit: y
-...
+Wrote 6 edits to ~/.claude/settings.json.
 ```
 
 That excerpt is from synthetic usage with synthetic prices, not a real host.
@@ -123,10 +137,12 @@ The first run downloads public prices from `https://models.dev/api.json` and
 caches them; `--offline` reuses the cache. That is the only network request,
 unless you name other machines with `--ssh`.
 
-Transcripts are only read. On a terminal, `doctor` shows each change it can
-make as the exact edit to your own `settings.json` or `config.toml`, and writes
-the file only after you answer yes. A change something else would override,
-such as a shell variable or a project's settings, is listed to make by hand.
+Transcripts are only read. On a terminal, `doctor` walks through each change it
+can make, biggest saving first, with why it makes sense and the exact edit to
+your own `settings.json` or `config.toml`. Your answers only select: it then
+lists the accepted changes and writes them only after one more yes. A change
+something else would override, such as a shell variable or a project's
+settings, is listed to make by hand.
 Piped or redirected, it prints the report, each change naming its edit, and
 edits nothing.
 No prompt, reply, tool argument or tool output text is kept or printed.
@@ -196,7 +212,9 @@ a word replaces the dot.
   You know what a use was worth; the report only knows what it cost.
 - A line without enough evidence for a verdict says why in its evidence. A
   cost that cannot be measured is shown as unknown, never as zero.
-- Savings on different lines do not add up.
+- Savings on different lines do not add up, except in the walk's running
+  total of the changes you accept, which says that overlapping changes may save
+  less.
 
 ## More
 

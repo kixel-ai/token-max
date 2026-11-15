@@ -214,8 +214,6 @@ struct Kind {
     name: String,
     control: Option<Control>,
     parent: Option<usize>,
-    /// The description its latest recorded revision ships.
-    description: Option<String>,
 }
 
 /// Where a piece's history says it sits in the request.
@@ -256,6 +254,11 @@ struct Pieces<'a> {
     skills: HashMap<String, usize>,
     /// Codex members are keyed by path, with name-only members left unswitchable.
     catalog: HashMap<usize, Option<String>>,
+    /// The descriptions a component ships, by component and owning profile set, for the
+    /// pieces it describes.
+    described: HashMap<(&'a str, usize), Vec<(usize, String)>>,
+    /// Descriptions found while splitting the component being interned.
+    pending: Vec<(usize, String)>,
 }
 
 /// One component's share of a piece: its characters, or None when only its
@@ -263,10 +266,10 @@ struct Pieces<'a> {
 type Split = (usize, Option<i64>);
 
 impl Pieces<'_> {
-    /// Keep the description a piece's newer revision ships, unless it ships none.
+    /// Note the description a component ships for one of its pieces.
     fn describe(&mut self, key: usize, component: &Component) {
-        if component.description.is_some() {
-            self.kinds[key].description = component.description.clone();
+        if let Some(description) = &component.description {
+            self.pending.push((key, description.clone()));
         }
     }
 
@@ -284,7 +287,6 @@ impl Pieces<'_> {
                 name,
                 control,
                 parent: None,
-                description: None,
             });
             next
         })
@@ -887,6 +889,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     };
                     interned.describe(key, component);
                 }
+                let described = std::mem::take(&mut interned.pending);
+                interned.described.insert((id, owner), described);
                 interned.of.insert((id, owner), split);
             }
             let prefix = !codex && index < view.prefix;
@@ -1023,6 +1027,15 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     .expect("piece has a row")
                     .cost
                     .instruction_size = component(revision).instruction_size;
+            }
+        }
+        // Each request's revisions describe this owner's lines, so the latest one sent wins.
+        for id in &shown {
+            let described = interned.described.get(&(&***id, owner));
+            for (key, description) in described.into_iter().flatten() {
+                if let Some(row) = rows.get_mut(&(owner, *key)) {
+                    row.cost.description = Some(description.clone());
+                }
             }
         }
         // The leading tools and system prompt by revision, and the tokenizer that
@@ -1433,7 +1446,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .enumerate()
         .filter_map(|(index, row)| {
             let mut c = row.cost;
-            c.description = interned.kinds[row.key].description.clone();
             c.assumptions = row.assumptions.into_iter().collect();
             c.shares = row
                 .shares
@@ -2378,6 +2390,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn descriptions_follow_each_owners_latest_revision() {
+        let tool = |id: &str, description: &str| {
+            let mut c = component(id, Category::ToolSchema, "Mystery", 1000, &[]);
+            c.description = Some(description.into());
+            c
+        };
+        let scan = ExposureScan {
+            components: vec![tool("a", "First."), tool("b", "Second.")],
+            // Native sends A, then B, then A again; the other home sends only B.
+            requests: [("n1", "a"), ("n2", "b"), ("n3", "a"), ("w1", "b")]
+                .iter()
+                .map(|(r, c)| exposure(r, &[c], 1, 1000))
+                .collect(),
+            ..ExposureScan::default()
+        };
+        let requests: Vec<Request> = [
+            ("n1", "native"),
+            ("n2", "native"),
+            ("n3", "native"),
+            ("w1", "work"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, profile))| {
+            let mut r = request(id, i as Millis + 1, 0, 600, 0);
+            r.profiles = vec![profile.to_string()].into();
+            r
+        })
+        .collect();
+        let profiles = [
+            crate::test_support::make_profile("native", "/synthetic/.claude"),
+            crate::test_support::make_profile("work", "/synthetic/.claude-work"),
+        ];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            snapshots: &[],
+            max_cost_per_use_usd: 1.0,
+        });
+        let described: Vec<(&[String], Option<&str>)> = rows
+            .iter()
+            .filter(|c| c.name == "Mystery")
+            .map(|c| (c.profiles.as_slice(), c.description.as_deref()))
+            .collect();
+        assert_eq!(
+            described,
+            [
+                (&["native".to_string()][..], Some("First.")),
+                (&["work".to_string()][..], Some("Second.")),
+            ]
+        );
     }
 
     #[test]

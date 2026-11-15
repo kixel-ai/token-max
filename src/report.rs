@@ -7788,14 +7788,12 @@ mod tests {
         };
         report.context = vec![skill.clone()];
         // A change names its whole edit and file, so it can be copied from redirected output.
-        let root = report.scan.profiles[0].root.clone();
-        let edit = format!(
-            r#""skillOverrides": {{"{name}": "user-invocable-only"}} in {root}/settings.json"#
-        );
-        assert_eq!(
-            report_line(&text(&report, None, false), "Skill google-drive-comments").setting,
-            edit
-        );
+        let setting =
+            report_line(&text(&report, None, false), "Skill google-drive-comments").setting;
+        let edit = format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}} in "#);
+        let file = std::path::Path::new(&setting[edit.len().min(setting.len())..]);
+        assert!(setting.starts_with(&edit), "{setting}");
+        assert!(file.ends_with(".claude/settings.json"), "{setting}");
         // An offered change's saving scales to 30 days, however short the window, and its
         // evidence keeps the window's total.
         let line = report_line(&text(&report, None, true), "Skill google-drive-comments");

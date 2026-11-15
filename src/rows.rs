@@ -165,7 +165,10 @@ mod tests {
         assert_eq!(settings_key(&a), settings_key(&b));
         assert_ne!(
             settings_key(&a),
-            settings_key(&make_profile("c", &w.home.join(".claude-other").to_string_lossy()))
+            settings_key(&make_profile(
+                "c",
+                &w.home.join(".claude-other").to_string_lossy()
+            ))
         );
     }
 }

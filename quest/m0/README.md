@@ -240,5 +240,5 @@ the whole host's spend at API prices, and the walk keeps one running total
 [the report quest](/quest/m0/report-length.md); the combined spend of the
 profiles a row covers). This amends "Resolve settings and recommendations
 per profile" above: settings and recommendations resolve per settings file,
-in [Give each setting one row per settings file](/quest/m0/file-rows.md).
+as [#114](https://github.com/kixel-ai/token-max/pull/114) delivered.
 Profiles are still discovered and deduplicated as before.

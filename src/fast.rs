@@ -132,7 +132,11 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
         now,
     } = *input;
     let mut result = vec![];
-    let owner = |p: &crate::model::Profile| p.speed.as_ref().map_or_else(String::new, |s| s.owner.clone());
+    let owner = |p: &crate::model::Profile| {
+        p.speed
+            .as_ref()
+            .map_or_else(String::new, |s| s.owner.clone())
+    };
     for line in crate::rows::groups(scan.profiles.iter().filter(|p| p.speed.is_some()), owner) {
         let profile = line.lead;
         let speed = profile.speed.as_ref().expect("filtered on speed controls");

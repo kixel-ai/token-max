@@ -15,10 +15,10 @@ use crate::model::{
     Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
     Scan, Text, Ttl, Usage, Usd,
 };
-use crate::rows::Group;
 use crate::prices::{
     Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
 };
+use crate::rows::Group;
 
 const SOURCES: [&str; 8] = [
     "https://code.claude.com/docs/en/costs#background-token-usage (2026-11-08)",

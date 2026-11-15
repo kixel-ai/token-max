@@ -1110,7 +1110,10 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             .collect();
         keys.sort();
         keys.dedup();
-        groups.entry((r.harness, keys, kind, native)).or_default().push(r);
+        groups
+            .entry((r.harness, keys, kind, native))
+            .or_default()
+            .push(r);
     }
     let mut lines = vec![];
     for ((harness, _, kind, native), requests) in groups {

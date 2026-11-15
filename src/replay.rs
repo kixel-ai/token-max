@@ -17,9 +17,9 @@ use crate::memory::{MemoryInput, memory_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
-    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Report, Request,
-    RequestEvidence, RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
-    UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
+    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Report, Request, RequestEvidence,
+    RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity, UnlinkedSensitivity,
+    Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
@@ -1368,7 +1368,10 @@ mod tests {
         both.profiles[1].ttl.main.owner = "T3 instance agent: launch environment".into();
         let split = main(&both);
         let lines: Vec<&[String]> = split.iter().map(|c| c.base.profiles.as_slice()).collect();
-        assert_eq!(lines, [&["profile".to_string()][..], &["agent".to_string()][..]]);
+        assert_eq!(
+            lines,
+            [&["profile".to_string()][..], &["agent".to_string()][..]]
+        );
     }
 
     #[test]

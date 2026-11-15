@@ -46,9 +46,7 @@ reason line and the docs say so.
 A result does not name its tool, so an unmatched result makes every
 never-used feature whose row covers the line's transcript yellow, while a
 name found in a line's bytes makes just that feature yellow. Rows are one
-per settings file, combining every source it controls, as
-[Give each setting one row per settings file](/quest/m0/file-rows.md)
-decides. Take results from the same transcript file, from its unparseable lines' bytes as well as parsed records, since the
+per settings file, combining every source it controls. Take results from the same transcript file, from its unparseable lines' bytes as well as parsed records, since the
 record joined onto a cut call is often that call's own result. Match ids
 across the whole file, not only the `--since` window, so a call just before
 the window does not leave its result unmatched.
@@ -56,7 +54,3 @@ Report in the PR how many of the maintainer's host's unparseable lines are
 cut records and how many sessions have an unmatched result. Cover an escaped
 name, a joined pair, and a cut record with and without an unmatched result
 with synthetic tests.
-
-## Related
-
-- [Give each setting one row per settings file](/quest/m0/file-rows.md) - decides which transcripts a never-used row covers

@@ -141,9 +141,7 @@ fn check(
     let mut requests: Vec<&Request> = scan
         .requests
         .iter()
-        .filter(|r| {
-            r.harness == Harness::Claude && line.covers(&r.profiles) && selected(r.time)
-        })
+        .filter(|r| r.harness == Harness::Claude && line.covers(&r.profiles) && selected(r.time))
         .collect();
     requests.sort_by_key(|r| r.time);
     let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, *r)).collect();

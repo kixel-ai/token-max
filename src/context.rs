@@ -694,9 +694,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::default();
     // Each line's latest and first shaped request from each set of profiles, since profiles
     // sharing a file can still send different pieces, such as a T3-only MCP server.
-    let mut latest: HashMap<(usize, Vec<&str>), (Millis, Vec<usize>)> = HashMap::default();
+    let mut latest: HashMap<(usize, usize), (Millis, Vec<usize>)> = HashMap::default();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
-    let mut first_shaped: HashMap<(usize, Vec<&str>), &str> = HashMap::default();
+    let mut first_shaped: HashMap<(usize, usize), &str> = HashMap::default();
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -727,7 +727,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             }
         };
         owner_profiles[owner].extend(source.iter().copied());
-        let share = sources.insert_full(source.clone()).0;
+        let share = sources.insert_full(source).0;
         let view = &exposure.view;
         let codex = r.harness == Harness::Codex;
         // Claude's recorded request shapes are exact. Codex records each change to
@@ -739,11 +739,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             _ => (vec![], false),
         };
         if shaped {
-            first_shaped
-                .entry((owner, source.clone()))
-                .or_insert(&*r.id);
+            first_shaped.entry((owner, share)).or_insert(&*r.id);
         }
-        let first = first_shaped.get(&(owner, source.clone())) == Some(&&*r.id);
+        let first = first_shaped.get(&(owner, share)) == Some(&&*r.id);
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
             .profiles
@@ -1073,14 +1071,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
             }
         }
-        match latest.get(&(owner, source.clone())) {
+        match latest.get(&(owner, share)) {
             _ if !shaped => {}
             Some((time, _)) if r.time < *time => {}
             _ => {
                 if codex {
                     latest_catalogs.insert(owner, shown);
                 }
-                latest.insert((owner, source), (r.time, unique));
+                latest.insert((owner, share), (r.time, unique));
             }
         }
     }
@@ -1095,15 +1093,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for row in rows.values_mut() {
         row.cost.profiles = owner_profiles[row.owner].clone();
     }
-    // A use counts on each line whose files the profiles that recorded it all own: a copy
-    // cannot say which of several profiles made a call, but a line none of its own profiles
-    // reach could not have made it.
+    // A use counts on each line that shares a settings file with the profiles that recorded
+    // it: a copy cannot say which of several profiles made a call, and a line's switch goes
+    // in each of its files, so no line offers to turn off what one of its files used. A line
+    // none of whose files they reach could not have made it.
     let reaches = |owner: usize, profiles: &[String]| {
         let theirs: HashSet<&str> = profiles
             .iter()
             .filter_map(|p| files.get(p.as_str()).map(String::as_str))
             .collect();
-        owner_files[owner].iter().all(|f| theirs.contains(f))
+        owner_files[owner].iter().any(|f| theirs.contains(f))
     };
     // Copied histories can leave a call and the requests around it with different
     // profile sets, and a copy cannot say which profile made the call, so it
@@ -1337,12 +1336,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.shares = row
                 .shares
                 .into_iter()
-                .map(|(index, (requests, priced, cost_usd))| crate::model::ProfileShare {
-                    profiles: sources[index].iter().map(|p| p.to_string()).collect(),
-                    requests,
-                    priced,
-                    cost_usd,
-                })
+                .map(
+                    |(index, (requests, priced, cost_usd))| crate::model::ProfileShare {
+                        profiles: sources[index].iter().map(|p| p.to_string()).collect(),
+                        requests,
+                        priced,
+                        cost_usd,
+                    },
+                )
                 .collect();
             c.current = current
                 .get(&row.owner)
@@ -1772,7 +1773,7 @@ mod tests {
                 component("agent", Category::ToolSchema, "Agent", 1000, &[]),
                 component("system", Category::Other, "wire-system", 1000, &[]),
             ],
-            requests: ["native", "t3", "work"]
+            requests: ["native", "t3", "work", "copy"]
                 .iter()
                 .map(|r| exposure(r, &["agent", "system"], 2, 2000))
                 .collect(),
@@ -1785,15 +1786,21 @@ mod tests {
             }],
             ..ExposureScan::default()
         };
-        let requests: Vec<Request> = [("native", "native"), ("t3", "agent"), ("work", "work")]
-            .into_iter()
-            .enumerate()
-            .map(|(i, (id, profile))| {
-                let mut r = request(id, i as Millis + 1, 0, 600, 0);
-                r.profiles = vec![profile.into()].into();
-                r
-            })
-            .collect();
+        let requests: Vec<Request> = [
+            ("native", &["native"][..]),
+            ("t3", &["agent"]),
+            ("work", &["work"]),
+            // Copied into both homes' histories, so either could have made it.
+            ("copy", &["native", "work"]),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, profiles))| {
+            let mut r = request(id, i as Millis + 1, 0, 600, 0);
+            r.profiles = profiles.iter().map(|p| p.to_string()).collect();
+            r
+        })
+        .collect();
         let profiles = [
             crate::test_support::make_profile("native", "/synthetic/.claude"),
             crate::test_support::make_t3_profile("agent", "/synthetic/.claude"),
@@ -1808,7 +1815,7 @@ mod tests {
             max_cost_per_use_usd: 1.0,
         });
         let agent: Vec<&ContextCost> = rows.iter().filter(|c| c.name == "Agent").collect();
-        assert_eq!(agent.len(), 2);
+        assert_eq!(agent.len(), 3);
         // Native Claude Code and T3 share ~/.claude's row, so the T3 calls keep it on.
         let shared = agent[0];
         assert_eq!(shared.profiles, ["agent", "native"]);
@@ -1838,6 +1845,11 @@ mod tests {
         assert_eq!(work.profiles, ["work"]);
         assert_eq!((work.requests, work.calls), (1, Some(0)));
         assert_eq!(work.verdict, Some(Verdict::Off));
+        // A copy either home could have made shares ~/.claude, whose calls keep it on too.
+        let copy = agent[2];
+        assert_eq!(copy.profiles, ["native", "work"]);
+        assert_eq!((copy.requests, copy.calls), (1, Some(3)));
+        assert_ne!(copy.verdict, Some(Verdict::Off));
     }
 
     #[test]

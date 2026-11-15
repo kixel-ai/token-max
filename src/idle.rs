@@ -2100,7 +2100,11 @@ fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<
         .profiles
         .iter()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none());
-    let owner = |p: &Profile| p.idle.as_ref().map_or_else(String::new, |i| i.owner.clone());
+    let owner = |p: &Profile| {
+        p.idle
+            .as_ref()
+            .map_or_else(String::new, |i| i.owner.clone())
+    };
     for group in crate::rows::groups(native, owner) {
         profile_checks(options, &group, detail, &mut checks);
     }

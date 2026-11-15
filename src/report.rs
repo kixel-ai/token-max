@@ -4256,8 +4256,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         rows.push(row);
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
-    let mut outputs: IndexMap<(&[String], Option<Cap>), Vec<&ContextCost>> =
-        IndexMap::default();
+    let mut outputs: IndexMap<(&[String], Option<Cap>), Vec<&ContextCost>> = IndexMap::default();
     for c in report
         .context
         .iter()
@@ -6425,14 +6424,16 @@ mod tests {
             [
                 (
                     "unknown".to_string(),
-                    "Bash output unset costs $20 [/synthetic/home/.claude/settings.json]".to_string(),
+                    "Bash output unset costs $20 [/synthetic/home/.claude/settings.json]"
+                        .to_string(),
                     format!(
                         "{cap} Its largest result was 30,500 characters. bashOutputMaxChars is unset, so about 30,000 characters."
                     )
                 ),
                 (
                     "unknown".into(),
-                    "MCP output 50,000 tokens costs $6 [/synthetic/home/.claude/settings.json]".into(),
+                    "MCP output 50,000 tokens costs $6 [/synthetic/home/.claude/settings.json]"
+                        .into(),
                     format!(
                         "{cap} Its largest result was 900 characters. MAX_MCP_OUTPUT_TOKENS is 50,000 tokens."
                     )

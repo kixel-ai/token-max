@@ -5242,7 +5242,11 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             String::new()
         };
         let text = format!("{}{profile}: {cost}{used}", piece_label(c, out));
-        out.line(&text, 2, feature_tier(c, covered));
+        let tier = match crate::defaults::applied(report, c) {
+            Some(_) => PLAIN,
+            None => feature_tier(c, covered),
+        };
+        out.line(&text, 2, tier);
         // A line several sources share is broken down by the profiles that recorded it.
         if c.shares.len() > 1 {
             for share in &c.shares {
@@ -5318,6 +5322,10 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             .and_then(|p| p.memory.as_ref())
             .filter(|_| c.kind == ContextKind::Memory);
         let text = match &c.control {
+            _ if crate::defaults::applied(report, c).is_some() => {
+                "Already off in its settings file, since the latest request that carried it"
+                    .into()
+            }
             _ if covered => "Covered by the server-off recommendation".into(),
             Some(_) if memory.is_some() => {
                 let m = memory.expect("checked above");
@@ -6088,6 +6096,9 @@ mod tests {
                 .iter()
                 .any(|f| f.name.starts_with("Artifact"))
         );
+        let detailed = super::tests::text(&report, None, true);
+        assert!(detailed.contains("Already off in its settings file"));
+        assert!(!detailed.contains("Recommended off: \"enableArtifact\": false"));
         // A file that outranks the profile's and sets the switch keeps the feature's own line.
         let project = Workspace::new();
         let outranking = project.home.join("settings.json");

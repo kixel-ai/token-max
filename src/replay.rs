@@ -1122,7 +1122,7 @@ mod tests {
         Location, Origin, PrefixEvidence, ReplayOutcome, ScanCoverage, Snapshot,
     };
     use crate::reader::{ScanOptions, scan, usage};
-    use crate::report::{ReportOptions, format_report};
+    use crate::report::{ReportOptions, rendered as format_report};
     use crate::test_support::{
         ClaudeUsage, Workspace, claude_usage, make_profile, make_request, prices,
     };

@@ -88,16 +88,30 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
     command
 }
 
-/// A plain report's line whose heading starts with `head`: its verdict word,
-/// heading with padding collapsed, and evidence.
+/// A plain report's line whose heading starts with `head`: its verdict word, heading
+/// (name, value, figure and percent) with padding collapsed, and the evidence under it,
+/// which only details show. The evidence cards after the lines are not searched.
 fn report_line(text: &str, head: &str) -> (String, String, String) {
-    let lines: Vec<&str> = text.lines().collect();
+    let lines: Vec<&str> = text.lines().take_while(|l| *l != "EVIDENCE").collect();
     lines
-        .windows(2)
-        .find_map(|pair| {
-            let (word, rest) = pair[0].split_once(' ')?;
-            let heading = rest.split_whitespace().collect::<Vec<_>>().join(" ");
-            let evidence = pair[1].strip_prefix("         ")?;
+        .iter()
+        .enumerate()
+        .find_map(|(i, line)| {
+            let (word, _) = line.split_once(' ')?;
+            if !["change", "consider", "keep", "unknown", "info"].contains(&word) {
+                return None;
+            }
+            let rest = line.get(9..)?;
+            // The heading ends at the claim column.
+            let end = ["Measured", "Official", "Opinion"]
+                .iter()
+                .filter_map(|claim| rest.find(&format!("  {claim}")))
+                .min()?;
+            let heading = rest[..end].split_whitespace().collect::<Vec<_>>().join(" ");
+            let evidence = lines
+                .get(i + 1)
+                .and_then(|l| l.strip_prefix("         "))
+                .unwrap_or_default();
             heading
                 .starts_with(head)
                 .then(|| (word.to_string(), heading, evidence.to_string()))
@@ -234,9 +248,21 @@ fn conditional_codex_prices_keep_assumptions_in_the_analysis_and_text() {
                     .any(|s| s.tier == "flex" && s.cost.total_usd.is_none())
             );
         }
+        // The default report points to details, which show the assumption.
         let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &[])));
         assert!((0..=1).contains(&status), "{stderr}");
-        assert!(stdout.contains("Conditional Codex pricing"), "{stdout}");
+        if expected.is_some() {
+            assert!(
+                stdout.contains("--details shows each tier's cost"),
+                "{stdout}"
+            );
+        }
+        let (status, stdout, stderr) = run(&mut command(&w, &args(&base, &["--details"])));
+        assert!((0..=1).contains(&status), "{stderr}");
+        assert!(
+            stdout.contains("Served-tier scenario: flex: unknown"),
+            "{stdout}"
+        );
         assert!(stdout.contains("tier sensitivity"), "{stdout}");
     }
 }
@@ -454,7 +480,7 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     w.settings(r#"{"promptCacheTtl":"1h"}"#);
     let (status, stdout, stderr) = invoke(&["--plain"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.contains("No setting changes recommended"));
+    assert!(stdout.contains("\nNo changes recommended"));
     assert!(stdout.lines().any(|l| l.starts_with("keep     ")));
     assert!(!stdout.contains('\x1b') && !stdout.contains('→'));
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -809,6 +835,7 @@ fn explicit_windows_match_the_library_replay() {
         };
         let library = format_report(
             &report,
+            &token_max::doctor::fixes(&report, false),
             ReportOptions {
                 details: true,
                 ..ReportOptions::default()
@@ -901,7 +928,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     std::fs::write(&settings, r#"{"promptCacheTtl":"1h"}"#).unwrap();
     let (status, clear, stderr) = invoke(&with("--plain"));
     assert_eq!(status, 0, "{stderr}");
-    assert!(clear.contains("No setting changes recommended"), "{clear}");
+    assert!(clear.contains("\nNo changes recommended"), "{clear}");
 
     let (status, stdout, stderr) = invoke(&["--bogus"]);
     assert_eq!(status, 2, "{stderr}");
@@ -1103,7 +1130,8 @@ mod unix {
         let both = format!("{stdout}{stderr}");
         assert!(!both.contains('\x1b') && !both.contains('→'));
         assert!(stdout.contains("Uncertainty:"));
-        let (_, stdout, stderr) = run(&mut command(&w, &args(&base, &[])));
+        // Piped evidence is not wrapped, so the path in it stays whole.
+        let (_, stdout, stderr) = run(&mut command(&w, &args(&base, &["--details"])));
         assert_eq!(stderr, "");
         assert!(!stdout.contains('\x1b') && !stdout.contains('→'));
         assert!(
@@ -1151,7 +1179,10 @@ mod unix {
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
-        assert!(stdout.contains("1 setting change recommended."), "{stdout}");
+        assert!(
+            stdout.contains("\n1 change recommended and 1 worth considering.\n"),
+            "{stdout}"
+        );
         assert!(!stdout.contains("Changes to make"), "{stdout}");
         assert!(
             stdout.contains(
@@ -1313,7 +1344,7 @@ fn background_reports_keep_project_overrides_and_unresolved_history_separate() {
     assert!(!format!("{report:?}").contains("SYNTHETIC_PRIVATE"));
     let mut args = vec!["doctor".to_string()];
     args.extend(prices_args(&w));
-    args.extend(["--max-cost-per-use".into(), "0".into()]);
+    args.extend(["--max-cost-per-use".into(), "0".into(), "--details".into()]);
     let (_, stdout, stderr) = run(&mut command(
         &w,
         &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1381,11 +1412,13 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
         &["doctor", "--t3-dir", &state, "--prices-file", &prices],
     ));
     assert!(stderr.is_empty());
-    let (mark, head, unmeasured) = report_line(&summary, "T3 text generation");
+    let (mark, head, _) = report_line(&summary, "T3 text generation");
     assert_eq!(
         (mark.as_str(), head.as_str()),
         ("unknown", "T3 text generation codex gpt-6-luna")
     );
+    // Why it is unmeasured is evidence, which only details show.
+    let (_, _, unmeasured) = report_line(&details, "T3 text generation");
     assert!(
         unmeasured.contains("ephemeral sessions that keep no native records (T3 default).")
             && unmeasured.contains(&format!(

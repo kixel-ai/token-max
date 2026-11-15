@@ -292,7 +292,7 @@ mod tests {
     use crate::prices::unit_rates;
     use crate::reader::scan;
     use crate::replay::{AnalyzeOptions, analyze};
-    use crate::report::{ReportOptions, format_report};
+    use crate::report::{ReportOptions, rendered as format_report};
     use crate::test_support::{Workspace, prices};
     use serde_json::{Value, json};
 
@@ -487,7 +487,13 @@ mod tests {
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
         assert!((w.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
-        let text = format_report(&report, ReportOptions::default());
+        let text = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
         let line = crate::test_support::report_line(&text, "Bash timeout cap 10m -> 4m");
         assert_eq!(line.mark, "change");
         assert!(
@@ -566,5 +572,32 @@ mod tests {
         let check = bash(&report);
         assert_eq!(check.ttl, Some(Ttl::FiveMinutes));
         assert_ne!(check.base.action, Action::Advisory);
+    }
+
+    #[test]
+    fn an_unresolved_ttl_gives_the_cap_a_whole_reason() {
+        let mut report = report("{}");
+        for check in &mut report.checks {
+            if let CheckResult::BashCap(c) = check {
+                c.ttl = None;
+                c.base.action = Action::Advisory;
+                c.base.recommended = None;
+            }
+        }
+        let text = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
+        let line = crate::test_support::report_line(&text, "Bash timeout cap");
+        assert_eq!(line.mark, "unknown", "{text}");
+        assert!(
+            line.evidence.starts_with(
+                "Not enough evidence: the main-agent cache TTL is unresolved, so the cap has nothing to compare with."
+            ),
+            "{text}"
+        );
     }
 }

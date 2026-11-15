@@ -3603,7 +3603,7 @@ mod tests {
         use crate::model::*;
         use crate::reader::{ScanOptions, scan};
         use crate::replay::{AnalyzeOptions, analyze};
-        use crate::report::{ReportOptions, format_report};
+        use crate::report::{ReportOptions, rendered as format_report};
         use crate::test_support::{Workspace, make_request, prices};
         use serde_json::{Map, Value, json};
 
@@ -3745,7 +3745,7 @@ mod tests {
             }
             assert!(compact.contains("Current:400000tokens"));
             assert!(compact.contains("Suggested:100000tokens"));
-            assert!(text(&report, None, false).contains("degrade as context grows (context rot)"));
+            assert!(text(&report, None, true).contains("degrade as context grows (context rot)"));
             assert!(compact.contains("ConditionalTTLbaseline:main5m;subagent5m"));
             for scenario in &check.scenarios {
                 assert!(compact.contains(&format!("Candidatewindow:{}tokens", scenario.window)));

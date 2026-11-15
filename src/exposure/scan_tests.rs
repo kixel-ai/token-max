@@ -9,7 +9,7 @@ use crate::discovery::DiscoveryOptions;
 use crate::model::{ContextCost, ContextKind, MemoryAccess, Report, Scan, Verdict};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{ReportOptions, format_report};
+use crate::report::{ReportOptions, rendered as format_report};
 use crate::test_support::{Workspace, prices, report_line};
 
 /// A fixed report time; none of these assertions depend on it.
@@ -164,6 +164,7 @@ fn report(data: &Scan, max_cost_per_use_usd: f64) -> Report {
     .unwrap()
 }
 
+/// The report with details, the only view that shows each line's evidence.
 fn text(report: &Report) -> String {
     format_report(
         report,
@@ -171,7 +172,7 @@ fn text(report: &Report) -> String {
             width: None,
             color: false,
             unicode: false,
-            details: false,
+            details: true,
             host: None,
         },
     )
@@ -483,10 +484,8 @@ fn image_inputs_and_unlinked_requests_never_calibrate_from_partial_text() {
     assert!(report.context.iter().all(|c| c.estimated_usd.is_none()));
     let text = text(&report);
     let artifact = report_line(&text, "Artifact tool");
-    assert!(
-        artifact.head.starts_with("Artifact tool on ["),
-        "{artifact:?}"
-    );
+    // No figure at all rather than $0.
+    assert_eq!(artifact.head, "Artifact tool on", "{artifact:?}");
     assert!(
         artifact
             .evidence
@@ -840,18 +839,22 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert!(
         line("Artifact tool")
             .head
-            .starts_with("Artifact tool on -> off costs ")
+            .starts_with("Artifact tool on -> off saves ")
     );
-    assert!(line("Artifact tool").evidence.starts_with("Never used."));
+    assert!(
+        line("Artifact tool")
+            .evidence
+            .starts_with("Never used; it cost ")
+    );
     assert!(
         line("Skill review")
             .head
-            .starts_with("Skill review on -> typed only costs ")
+            .starts_with("Skill review on -> typed only saves ")
     );
     assert!(
         line("Skill review")
             .evidence
-            .starts_with("The model never used it.")
+            .starts_with("The model never used it; it cost ")
     );
     assert_eq!(line("MCP server docs").mark, "consider");
     assert!(
@@ -859,15 +862,16 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
             .evidence
             .contains(r#"Turn off: "permissions": {"deny": ["mcp__docs"]}."#)
     );
-    let fixes = crate::doctor::fixes(&strict, false);
-    let snippet = crate::report::format_changes(&strict, &fixes, ReportOptions::default());
-    let off = &snippet[..snippet.find("worth considering").unwrap()];
-    assert!(off.contains(r#""enableArtifact": false"#), "{snippet}");
-    assert!(
-        off.contains(r#""review": "user-invocable-only""#),
-        "{snippet}"
-    );
-    assert!(!off.contains("mcp__docs"), "{snippet}");
+    // The recommended changes carry the edits; the server is only worth considering.
+    let off: Vec<String> = crate::doctor::fixes(&strict, false)
+        .iter()
+        .filter(|f| !f.suggested)
+        .map(|f| crate::doctor::setting(f, None))
+        .collect();
+    let off = off.join("\n");
+    assert!(off.contains(r#""enableArtifact": false"#), "{off}");
+    assert!(off.contains(r#""review": "user-invocable-only""#), "{off}");
+    assert!(!off.contains("mcp__docs"), "{off}");
 }
 
 #[test]
@@ -1696,10 +1700,11 @@ fn codex_catalog_conditional_prices_preserve_evidence_and_duplicate_controls() {
         &split,
         ReportOptions {
             width: None,
+            details: true,
             ..Default::default()
         },
     );
-    let line = report_line(&output, "Skill same (/skills/a/SKILL.md)");
+    let line = report_line(&output, "Skill same (/skills/a)");
     assert!(line.head.contains(" costs <$0.01"), "{output}");
     let unresolved = line.evidence;
     assert!(unresolved.contains("tier sensitivity could reverse keep or off"));
@@ -1815,6 +1820,7 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
             &report,
             ReportOptions {
                 width: None,
+                details: true,
                 ..Default::default()
             },
         );
@@ -1954,9 +1960,9 @@ fn codex_duplicates_are_actionable_without_prices_and_same_path_repeats_keep_one
     );
     let output = text(&r);
     assert!(
-        report_line(&output, "Skill same (/skills/b/SKILL.md)")
+        report_line(&output, "Skill same (/skills/b)")
             .head
-            .starts_with("Skill same (/skills/b/SKILL.md) on -> off costs unknown"),
+            .starts_with("Skill same (/skills/b) on -> off costs unknown"),
         "{output}"
     );
     assert!(output.contains("does not resolve an absolute SKILL.md path"));
@@ -2351,14 +2357,14 @@ fn claude_auto_memory_is_priced_apart_from_the_system_prompt_and_advised_off() {
             width: None,
             color: false,
             unicode: false,
-            details: false,
+            details: true,
             host: None,
         },
     );
     assert!(shows(
         &text,
         "consider",
-        "Auto memory on costs $",
+        "Auto memory on -> off saves ",
         &[
             "Opinion: ",
             "used 2 times (1 read, 1 write). Set \"autoMemoryEnabled\": false in "
@@ -2410,9 +2416,14 @@ fn claude_auto_memory_turned_off_is_kept_off() {
     assert!(shows(
         &rendered,
         "keep",
-        "Auto memory off [",
+        "Auto memory off",
         &["Measured: costs nothing."]
     ));
+    // Nothing to price, so the line carries no figure.
+    assert_eq!(
+        report_line(&rendered, "Auto memory").head,
+        "Auto memory off"
+    );
 
     // Turned off after an earlier session used it: still kept off, but what it cost
     // in the window shows, and the earlier session is noted.
@@ -2643,7 +2654,7 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     assert!(shows(
         &both,
         "consider",
-        "Auto memory on costs at least $0.",
+        "Auto memory on -> off saves at least ",
         &["; from the 66.6% of requests that recorded their context."]
     ));
 }
@@ -2797,24 +2808,34 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
     );
     std::fs::write(&file, jsonl(&[codex_meta(), turn(), context, billed(5)])).unwrap();
     let data = scan(&options(&w, None)).unwrap();
+    let rendered = text(&report(&data, 1.0));
     assert!(shows(
-        &text(&report(&data, 1.0)),
+        &rendered,
         "keep",
-        "Codex memories off [",
+        "Codex memories off",
         &["Measured: costs nothing."]
     ));
+    assert_eq!(
+        report_line(&rendered, "Codex memories").head,
+        "Codex memories off"
+    );
     // A memory store shows Codex generated memories at some point, in requests it
     // records only in telemetry, so the line cannot say they cost nothing.
     std::fs::create_dir_all(w.codex.join("memories")).unwrap();
     let data = scan(&options(&w, None)).unwrap();
+    let rendered = text(&report(&data, 1.0));
     assert!(shows(
-        &text(&report(&data, 1.0)),
+        &rendered,
         "keep",
-        "Codex memories off [",
+        "Codex memories off",
         &[
             "Measured: never read back or written; no measured cost, but extraction and consolidation are not measured."
         ]
     ));
+    assert_eq!(
+        report_line(&rendered, "Codex memories").head,
+        "Codex memories off"
+    );
     std::fs::remove_dir(w.codex.join("memories")).unwrap();
     // A request that recorded no context may have loaded memories while they were
     // on, so turning them off does not make its cost zero.
@@ -2861,7 +2882,7 @@ fn codex_memory_summary_and_memory_tools_count_though_memories_are_off_by_defaul
             width: None,
             color: false,
             unicode: false,
-            details: false,
+            details: true,
             host: None,
         };
         (check, format_report(&r, wide))

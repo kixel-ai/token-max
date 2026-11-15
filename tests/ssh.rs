@@ -225,6 +225,22 @@ fn section<'a>(text: &'a str, host: &str) -> &'a str {
 /// dollar amounts, since a per-30-day rate divides by the window that ends at that clock.
 fn timeless(text: &str) -> String {
     let text = text.strip_prefix("token-max\n").unwrap_or(text);
+    // A section names its own host as the base of its percents; run there, it is "this host".
+    let named;
+    // The name is the word before the first "'s", as in "of devbox's spend" or, when part
+    // of the spend is unpriced, "of the $5 devbox's priced requests".
+    let text = match text.find("each percent is of ").and_then(|at| {
+        let from = at + "each percent is of ".len();
+        let end = from + text[from..].find("'s ")?;
+        let start = text[..end].rfind(' ').map_or(0, |space| space + 1);
+        (!text[..end].ends_with("this host")).then_some((start, end))
+    }) {
+        Some((from, to)) => {
+            named = format!("{}this host{}", &text[..from], &text[to..]);
+            named.as_str()
+        }
+        None => text,
+    };
     let b = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0;
@@ -293,6 +309,9 @@ fn a_remote_report_matches_running_there() {
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     for host in ["this host", "devbox"] {
         assert!(section(&stdout, host).contains("; 2 requests;"), "{host}");
+        // Each section's percents are of its own host's spend, which it names.
+        let base = format!("each percent is of {host}'s spend");
+        assert!(section(&stdout, host).contains(&base), "{host}");
     }
     let (_, there, _) = run(hosts
         .command(&["--details", since[0], since[1]])
@@ -317,7 +336,7 @@ fn a_remote_report_matches_running_there() {
     assert!(text.contains("don't add amounts across hosts"), "{text}");
     let (_, alone, _) = hosts.run(&["--ssh", "devbox"]);
     assert!(alone.starts_with("token-max: devbox\n"), "{alone}");
-    assert!(!alone.contains("this host") && !alone.contains("across hosts"));
+    assert!(!alone.contains("token-max: this host") && !alone.contains("across hosts"));
     assert_eq!(
         timeless(section(&alone, "devbox")),
         timeless(section(&text, "devbox"))
@@ -462,11 +481,15 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
         section(&stdout, "devbox").contains("BASH_MAX_TIMEOUT_MS"),
         "{stdout}"
     );
-    // The destination's change is listed as an edit to make there, in its own home.
+    // The destination's change names the edit to make there, in its own home.
     assert!(
-        section(&stdout, "devbox").contains(
-            "  Bash timeout cap: 2h -> 55m (Measured)\n    In ~/.claude/settings.json:\n      \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"}\n"
-        ),
+        section(&stdout, "devbox").lines().any(|l| {
+            l.starts_with("change   Bash timeout cap ")
+                && l.contains(" 2h -> 55m ")
+                && l.ends_with(
+                    "  Measured  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json",
+                )
+        }),
         "{stdout}"
     );
     let (status, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));
@@ -583,10 +606,11 @@ fn codex_context_and_output_keep_their_remote_controls() {
         assert_eq!(stderr, "");
         assert_eq!(timeless(section(&alone, "devbox")), timeless(&there));
 
-        let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
+        // The tier assumptions and the output cap are evidence, which only details show.
+        let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
         assert_eq!(stderr, "");
         assert!(!text.contains("SYNTHETIC_PRIVATE"));
-        assert!(text.contains("Conditional Codex pricing"), "{text}");
+        assert!(text.contains("Served-tier scenario:"), "{text}");
         if priceable {
             assert!(
                 text.contains("tier sensitivity could reverse keep or off"),
@@ -776,7 +800,8 @@ fn background_controls_and_estimates_keep_their_remote_history() {
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));
-    let (_, text, stderr) = hosts.run(&["--ssh", "devbox"]);
+    // Why a cost is unknown is evidence, which only details show.
+    let (_, text, stderr) = hosts.run(&["--ssh", "devbox", "--details"]);
     assert_eq!(stderr, "");
     assert!(!text.contains("SYNTHETIC_PRIVATE"));
     for label in [

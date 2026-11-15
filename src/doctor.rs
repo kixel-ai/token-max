@@ -14,8 +14,10 @@ use serde_json::{Map, Value};
 
 use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text};
-use crate::model::{BackgroundFeature, Bucket, CheckResult, Control, Harness, Profile, Report};
-use crate::report::{Recommendation, Source, recommendations};
+use crate::model::{
+    BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report,
+};
+use crate::report::{Origin, Recommendation, Source, recommendations};
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
 
@@ -31,6 +33,8 @@ pub struct Fix {
     /// Worth considering, rather than a recommended change.
     pub suggested: bool,
     pub how: How,
+    /// The report line it comes from.
+    pub origin: Origin,
 }
 
 /// Whether the doctor can make a change, and what it is.
@@ -89,8 +93,8 @@ impl Edit {
     }
 }
 
-/// Every change the report recommends or suggests, in report order, each with its edit
-/// or the step to take by hand. An edit another line already makes is listed once.
+/// Every change the report recommends or suggests, biggest saving first, each with its
+/// edit or the step to take by hand. An edit another line already makes is listed once.
 pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
     fixes_from(
         recommendations(report, unicode)
@@ -189,6 +193,13 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
             reason: "its profile is no longer selected".into(),
         },
         (Some(profile), Source::Check(result)) => check_how(result, profile),
+        (Some(_), Source::Piece(c)) if c.kind == ContextKind::Instructions => How::Manual {
+            step: format!(
+                "shorten {}, or move parts into path-scoped rules or skills",
+                c.name
+            ),
+            reason: "no setting shortens a file".into(),
+        },
         (Some(_), Source::Piece(c)) => match &c.control {
             Some(control) => switch(&members, control.into()),
             None => How::Manual {
@@ -203,6 +214,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         claim: line.claim,
         suggested: line.suggested,
         how,
+        origin: line.origin,
     }
 }
 
@@ -737,6 +749,29 @@ pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
         }
     };
     Described { head, body }
+}
+
+/// A fix on one line, for the report's list: its edits and file, or its step by hand.
+pub fn setting(fix: &Fix, home: Option<&str>) -> String {
+    match &fix.how {
+        How::Edit(patch) => {
+            let edits: Vec<String> = patch.edits.iter().map(|e| e.text(patch.harness)).collect();
+            format!(
+                "{} in {}",
+                edits.join(" and "),
+                crate::report::home_path(home, &patch.file)
+            )
+        }
+        How::Manual { step, .. } => {
+            let step = match home {
+                Some(dir) => step
+                    .replace(&format!("{dir}/"), "~/")
+                    .replace(&format!("{dir}\\"), "~\\"),
+                None => step.clone(),
+            };
+            format!("by hand: {step}")
+        }
+    }
 }
 
 /// How the walk prints.
@@ -1480,6 +1515,7 @@ mod tests {
             value: "on -> off".into(),
             claim: "Measured",
             suggested: false,
+            origin: Origin::Check(0),
             how: How::Edit(Patch {
                 file: file.to_string_lossy().into_owned(),
                 harness,

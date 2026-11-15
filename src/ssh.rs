@@ -375,8 +375,6 @@ pub fn serve(since: Option<Millis>) -> u8 {
                 max_cost_per_use_usd,
                 format,
                 home: home.as_deref(),
-                // Its changes are made there, so its report lists them.
-                changes: true,
             },
         )?;
         Ok(Outcome::Report {

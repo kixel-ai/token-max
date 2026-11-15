@@ -134,9 +134,14 @@ pub(crate) fn about(value: f64) -> String {
         value
     };
     let text = usd(rounded);
-    match text.strip_suffix(".00") {
-        Some(whole) => whole.to_string(),
-        None => text,
+    let text = text.strip_suffix(".00").unwrap_or(&text);
+    // Group thousands, so "$1,177" doesn't read as a larger number than it is.
+    match text.split_once('$') {
+        Some((sign, digits)) if digits.len() > 3 => match digits.parse::<i128>() {
+            Ok(n) => format!("{sign}${}", count(n)),
+            Err(_) => text.to_string(),
+        },
+        _ => text.to_string(),
     }
 }
 
@@ -679,6 +684,49 @@ struct Out<'a> {
     profiles: IndexMap<&'a str, &'a Profile>,
     /// Instances removed from T3's settings, by the profile key their history keeps.
     removed: crate::collections::HashMap<String, &'a str>,
+    /// What every request this host recorded in the window cost at API prices.
+    spend: Spend,
+}
+
+/// This host's spend over the report's window, the base of every percent.
+#[derive(Clone, Copy, Debug)]
+struct Spend {
+    /// The priced total; a lower bound when `complete` is false.
+    usd: f64,
+    complete: bool,
+    since: Option<Millis>,
+    until: Millis,
+}
+
+impl Spend {
+    fn new(report: &Report) -> Self {
+        let cost = add_costs(report.historical.iter().map(|g| &g.cost));
+        Spend {
+            usd: cost
+                .total_usd
+                .map_or(cost.known_usd.to_f64(), |usd| usd.to_f64()),
+            complete: cost.total_usd.is_some(),
+            since: report
+                .scan
+                .since
+                .or(report.scan.requests.first().map(|r| r.time)),
+            until: generated_at(report),
+        }
+    }
+
+    /// The share of this host's spend that `usd`, spent within the window, makes.
+    ///
+    /// A line's own window lies inside the host's, since a profile's history starts no
+    /// earlier than the host's first request, so its total divides the host's directly.
+    fn share(&self, usd: f64) -> Option<f64> {
+        (self.usd > 0.0).then(|| usd / self.usd)
+    }
+
+    /// The share of this host's spend that `usd` every 30 days makes, at the window's rate.
+    fn of_month(&self, usd: f64) -> Option<f64> {
+        let host = monthly(self.usd, self.since, Some(self.until));
+        (host > 0.0).then(|| usd / host)
+    }
 }
 
 impl<'a> Out<'a> {
@@ -688,6 +736,7 @@ impl<'a> Out<'a> {
             profiles.insert(p.id.as_str(), p);
         }
         Out {
+            spend: Spend::new(report),
             text: String::new(),
             options,
             arrow: if options.unicode { "→" } else { "->" },
@@ -762,11 +811,6 @@ impl<'a> Out<'a> {
             let _ = write!(self.text, "\x1b[{}m{text}\x1b[0m", mark.style());
             used += cells;
         }
-        self.text.push('\n');
-    }
-    /// A line kept whole at any width, such as a JSON snippet.
-    fn raw(&mut self, text: &str) {
-        self.text.push_str(&terminal_text(text));
         self.text.push('\n');
     }
     fn section(&mut self, title: &str) {
@@ -917,43 +961,30 @@ impl<'a> Out<'a> {
     }
 }
 
-/// Render all findings in a wrapping flow, with grouped evidence in details.
-pub fn format_report<'a>(report: &'a Report, options: ReportOptions<'a>) -> String {
-    let mut out = Out::new(report, options);
-    if options.details {
-        details(report, &mut out);
-    } else {
-        summary(report, &mut out);
-    }
-    out.text
-}
-
-/// The changes the report recommends or suggests, each with its settings edit or the
-/// step to take by hand, for output that `token-max doctor` does not walk through.
-/// `fixes` are `doctor::fixes` of the same report, so the list and a walk agree.
-pub fn format_changes<'a>(
+/// Render every setting and feature on one line, the changes first, with each line's
+/// evidence and the evidence cards under details. `fixes` are `doctor::fixes` of the same
+/// report, so each change names the edit or step `doctor` offers for it.
+pub fn format_report<'a>(
     report: &'a Report,
     fixes: &[crate::doctor::Fix],
     options: ReportOptions<'a>,
 ) -> String {
     let mut out = Out::new(report, options);
-    if fixes.is_empty() {
-        return out.text;
-    }
-    out.blank();
-    out.line("Changes to make:", 0, BOLD);
-    for fix in fixes {
-        let lines = crate::doctor::describe(fix, out.home.as_deref());
-        out.hang(&format!("  {}", lines.head), 4, PLAIN);
-        for (text, raw) in lines.body {
-            if raw {
-                out.raw(&format!("    {text}"));
-            } else {
-                out.line(&text, 4, PLAIN);
-            }
-        }
+    summary(report, fixes, &mut out);
+    if options.details {
+        details(report, &mut out);
     }
     out.text
+}
+
+/// The report as `token-max doctor` prints it, naming the edits it would offer.
+#[cfg(test)]
+pub(crate) fn rendered(report: &Report, options: ReportOptions<'_>) -> String {
+    format_report(
+        report,
+        &crate::doctor::fixes(report, options.unicode),
+        options,
+    )
 }
 
 fn generated_at(report: &Report) -> Millis {
@@ -1029,11 +1060,10 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
     }
 }
 
+/// The evidence cards after the lines: every check, piece of context and request group.
 fn details(report: &Report, out: &mut Out<'_>) {
     let arrow = out.arrow;
-    out.title();
-    t3_coverage(report, out);
-    out.line(PRICES_MEAN, 0, PLAIN);
+    out.section("EVIDENCE");
     let requests = &report.scan.requests;
     let earliest = requests.first().map(|r| r.time);
     out.field(
@@ -1109,14 +1139,6 @@ fn details(report: &Report, out: &mut Out<'_>) {
         + setting_rows(&report.context)
             .filter(|c| c.verdict == Some(Verdict::Off))
             .count();
-    out.section(&if changes > 0 {
-        format!(
-            "{changes} recommended change{}",
-            if changes == 1 { "" } else { "s" }
-        )
-    } else {
-        "No applicable setting changes".into()
-    });
     if report.scan.snapshots.is_empty() {
         out.line("No transcript histories found. Select an existing profile with --claude-dir or --codex-dir; run after using that agent.", 0, PLAIN);
     } else if coverage.requests == 0 {
@@ -1240,7 +1262,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
                 out.field("Attribution", caveats.trim_start());
             }
             out.field("Official", FABLE_RULE);
-            out.field("Model setting", "/model, or model in settings.json");
+            out.field("Model setting", FABLE_MODEL);
             out.field("Sources", &format!("{CLAUDE_PRICING} {FABLE_PLANS}"));
         }
     }
@@ -1516,6 +1538,10 @@ const FABLE_PLANS: &str =
 
 /// The settings that choose Fable, ending its line.
 const FABLE_SETTING: &str = "Model setting: /model, or model in settings.json.";
+/// Where the model is chosen, which decides whether Fable runs.
+const FABLE_MODEL: &str = "/model, or model in settings.json";
+/// How many of a background feature's directories its evidence names.
+const BACKGROUND_DIRECTORIES: usize = 3;
 
 /// Anthropic's Fable rule for each plan, stated conditionally since the plan is never read.
 const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team or seat-based Enterprise premium seat, Fable models can use up to half the weekly usage limit, and use it faster than other models; on Pro or a Team or seat-based Enterprise standard seat, they run on usage credits; on usage-based Enterprise, they bill at API rates.";
@@ -2356,10 +2382,13 @@ fn setting_name(result: &CheckResult) -> String {
         },
         CheckResult::Compaction(c) => {
             let models: Vec<&str> = c.models.iter().flatten().map(|m| &**m).collect();
-            if models.is_empty() {
-                "Auto-compact window".into()
-            } else {
-                format!("Auto-compact window ({})", models.join(", "))
+            // The evidence lists every model; the name keeps to one line.
+            match models.as_slice() {
+                [] => "Auto-compact window".into(),
+                [model] => format!("Auto-compact window ({model})"),
+                [model, rest @ ..] => {
+                    format!("Auto-compact window ({model} and {} more)", rest.len())
+                }
             }
         }
         CheckResult::T3Idle(_) => "T3 idle compaction".into(),
@@ -2397,9 +2426,24 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
 
 /// A dollar amount per 30 days at the window's rate.
 fn per_month(usd: f64, since: Option<Millis>, until: Option<Millis>) -> String {
+    about(monthly(usd, since, until))
+}
+
+/// `usd` over `since..until` scaled to 30 days at the same rate; as is when the window is unknown.
+fn monthly(usd: f64, since: Option<Millis>, until: Option<Millis>) -> f64 {
     match (since, until) {
-        (Some(from), Some(to)) if to > from => about((usd * 30.0 * DAY) / (to - from) as f64),
-        _ => about(usd),
+        (Some(from), Some(to)) if to > from => (usd * 30.0 * DAY) / (to - from) as f64,
+        _ => usd,
+    }
+}
+
+/// A share of this host's spend as a whole percent, or under 1% when it rounds to none.
+fn share_text(share: f64) -> String {
+    let percent = share * 100.0;
+    if percent > 0.0 && percent < 0.5 {
+        "<1%".into()
+    } else {
+        format!("{}%", js_number(js_round(percent)))
     }
 }
 
@@ -2506,11 +2550,15 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         }
         _ => {}
     }
-    if let CheckResult::BashCap(b) = result {
-        return format!(
-            "{}, so the cap has nothing to compare with.",
-            capitalize(&b.ttl_basis)
-        );
+    // Whatever its replay found, a T3 instance whose owner is unresolved has no setting to change.
+    if r.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
+        return "The T3 instance is disabled or the file that owns this setting for it is unresolved, so its past costs do not establish a setting to change.".into();
+    }
+    if let CheckResult::BashCap(b) = result
+        && b.ttl.is_none()
+    {
+        return "The main-agent cache TTL is unresolved, so the cap has nothing to compare with."
+            .into();
     }
     if let CheckResult::Keepalive(k) = result {
         return keepalive_unresolved(k, r);
@@ -2533,10 +2581,31 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             if r.coverage.is_none_or(|c| c.priced == 0) {
                 return "No requests with measured cache usage to compare.".into();
             }
+            // Relative to what the requests cost, so a large total doesn't read as a large gap.
+            let (cheaper, dearer, cost) = if t.one_hour_savings_usd > 0.0 {
+                ("1h", "5m", &t.cost.five_minutes)
+            } else {
+                ("5m", "1h", &t.cost.one_hour)
+            };
+            let gap = t.one_hour_savings_usd.abs();
+            let whole = cost.known_usd.to_f64();
+            let relative = if whole > 0.0 {
+                let tenths = js_round(gap / whole * 1000.0);
+                if tenths < 1.0 {
+                    "under 0.1%".to_string()
+                } else {
+                    format!("{}%", js_number(tenths / 10.0))
+                }
+            } else {
+                "an unknown share".into()
+            };
+            let (priced, total) = r.coverage.map_or((0, 0), |c| (c.priced, c.total));
             format!(
-                "5m and 1h differ by only {} over {} on measured requests, too close to call.",
-                about(t.one_hour_savings_usd.abs()),
-                days(r.since, r.until)
+                "{cheaper} cost {relative} less than {dearer} ({} over {}) on the {}% of requests that could be priced, too little to rule out the {} that could not.",
+                about(gap),
+                days(r.since, r.until),
+                percent(priced, total),
+                count(total - priced)
             )
         }
         CheckResult::Compaction(c) => {
@@ -2674,11 +2743,22 @@ fn piece_label(c: &ContextCost, out: &Out<'_>) -> String {
 }
 
 /// A piece's name for a report line, whose evidence says when it is part of a server's cost.
+/// A skill's file is its location, named only when two lines would otherwise read the same.
 fn short_label(c: &ContextCost, out: &Out<'_>) -> String {
     match c.kind {
         ContextKind::McpTool => format!("MCP tool {}", c.name),
+        ContextKind::Skill if c.name != SYNCED_SKILLS => format!("Skill {}", c.name),
         _ => piece_label(c, out),
     }
+}
+
+/// The directory a skill was found in, which tells apart two skills with one name.
+fn skill_location(c: &ContextCost, out: &Out<'_>) -> Option<String> {
+    let path = c.skill.as_ref()?.path.as_ref()?;
+    let dir = path
+        .rsplit_once(['/', '\\'])
+        .map_or(path.as_str(), |(dir, _)| dir);
+    Some(out.home(dir))
 }
 
 /// How often a feature was used over the window. Only the model's calls count for a
@@ -2750,6 +2830,8 @@ fn catalog_guidance(report: &Report, out: &mut Out<'_>) {
 struct Loading {
     notes: Vec<&'static str>,
     source: Option<&'static str>,
+    /// The settings that change how its tools load.
+    setting: Option<&'static str>,
 }
 
 /// The MCP loading guidance for each harness with a server in `costs`.
@@ -2775,6 +2857,7 @@ fn mcp_guidance<'a>(costs: impl Iterator<Item = &'a ContextCost>) -> Vec<Loading
                 unmeasured,
             ],
             source: Some("https://code.claude.com/docs/en/mcp#configure-tool-search"),
+            setting: Some("env.ENABLE_TOOL_SEARCH, or a server's alwaysLoad"),
         });
     }
     if codex {
@@ -2784,6 +2867,7 @@ fn mcp_guidance<'a>(costs: impl Iterator<Item = &'a ContextCost>) -> Vec<Loading
                 unmeasured,
             ],
             source: Some("https://learn.chatgpt.com/docs/config-file/config-reference"),
+            setting: Some("mcp_servers.<id>.omit_tools_from"),
         });
     }
     // ChatGPT apps alone have no loading switch, only what the report cannot measure.
@@ -2791,6 +2875,7 @@ fn mcp_guidance<'a>(costs: impl Iterator<Item = &'a ContextCost>) -> Vec<Loading
         guidance.push(Loading {
             notes: vec![unmeasured],
             source: None,
+            setting: None,
         });
     }
     guidance
@@ -2891,6 +2976,8 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Cap {
     label: &'static str,
+    /// The setting's name.
+    key: &'static str,
     /// Its current value, briefly.
     value: String,
     /// A sentence naming the setting and its value.
@@ -2908,7 +2995,12 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         Some(Scalar::Number(n)) => Some(count(*n as i64)),
         _ => None,
     };
-    let cap = |label, value: String, text: String| Cap { label, value, text };
+    let cap = |label, key, value: String, text: String| Cap {
+        label,
+        key,
+        value,
+        text,
+    };
     Some(match c.harness {
         Harness::Claude if c.name == "Bash" => match (
             number("bashOutputMaxChars"),
@@ -2916,16 +3008,19 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         ) {
             (Some(n), _) => cap(
                 "Bash output",
+                "bashOutputMaxChars",
                 format!("{n} chars"),
                 format!("bashOutputMaxChars is {n} characters"),
             ),
             (None, Some(n)) => cap(
                 "Bash output",
+                "env.BASH_MAX_OUTPUT_LENGTH",
                 format!("{n} chars"),
                 format!("BASH_MAX_OUTPUT_LENGTH is {n} characters"),
             ),
             (None, None) => cap(
                 "Bash output",
+                "bashOutputMaxChars",
                 "unset".into(),
                 "bashOutputMaxChars is unset, so about 30,000 characters".into(),
             ),
@@ -2933,11 +3028,13 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         Harness::Claude if c.name.starts_with("mcp__") => match number("MAX_MCP_OUTPUT_TOKENS") {
             Some(n) => cap(
                 "MCP output",
+                "env.MAX_MCP_OUTPUT_TOKENS",
                 format!("{n} tokens"),
                 format!("MAX_MCP_OUTPUT_TOKENS is {n} tokens"),
             ),
             None => cap(
                 "MCP output",
+                "env.MAX_MCP_OUTPUT_TOKENS",
                 "unset".into(),
                 "MAX_MCP_OUTPUT_TOKENS is unset, so 25,000 tokens".into(),
             ),
@@ -2945,11 +3042,13 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         Harness::Codex => match number("tool_output_token_limit") {
             Some(n) => cap(
                 "Tool output",
+                "tool_output_token_limit",
                 format!("{n} tokens"),
                 format!("tool_output_token_limit is {n} tokens"),
             ),
             None => cap(
                 "Tool output",
+                "tool_output_token_limit",
                 "unset".into(),
                 "tool_output_token_limit is unset".into(),
             ),
@@ -3054,21 +3153,11 @@ enum Claim {
 }
 
 impl Claim {
-    const ALL: [Claim; 3] = [Claim::Measured, Claim::Official, Claim::Opinion];
-
     fn name(self) -> &'static str {
         match self {
             Claim::Measured => "Measured",
             Claim::Official => "Official",
             Claim::Opinion => "Opinion",
-        }
-    }
-
-    fn heading(self) -> &'static str {
-        match self {
-            Claim::Measured => "MEASURED  replayed from your own sessions",
-            Claim::Official => "OFFICIAL  the provider's own guidance",
-            Claim::Opinion => "OPINION  the maintainer's preference",
         }
     }
 
@@ -3128,10 +3217,12 @@ const WORD_CELLS: usize = 9;
 /// Names and values wider than this are not padded, so one long name doesn't widen every line.
 const NAME_CELLS: usize = 40;
 const VALUE_CELLS: usize = 18;
+const TAG_CELLS: usize = 24;
 /// Dollar figures wider than this, such as "at least $1.41", are not right-aligned.
-const FIGURE_CELLS: usize = 8;
+const FIGURE_CELLS: usize = 10;
 
-/// One setting or feature in the default report: a heading line and a line of evidence.
+/// One setting or feature: one line naming its verdict, value, figure and setting, with
+/// its evidence on a second line under `--details`.
 struct Row {
     claim: Claim,
     mark: Mark,
@@ -3140,11 +3231,17 @@ struct Row {
     value: String,
     /// What it saves per 30 days or costs over the window, as a verb and a figure.
     amount: Option<(&'static str, String)>,
+    /// That figure's share of this host's spend, which ranks the line.
+    share: Option<f64>,
     /// The profile it belongs to, when the report covers several.
     profile: String,
+    /// The setting that changes it, or the edit `doctor` offers for a change.
+    setting: String,
     evidence: String,
     /// The provider guidance an Official line cites.
     sources: Vec<&'static str>,
+    /// Where it was found, shown only when another line would read the same.
+    location: Option<String>,
 }
 
 impl Row {
@@ -3155,9 +3252,55 @@ impl Row {
             name,
             value: String::new(),
             amount: None,
+            share: None,
             profile: String::new(),
+            setting: String::new(),
             evidence: String::new(),
             sources: vec![],
+            location: None,
+        }
+    }
+
+    /// A change the report recommends or suggests, which leads the list.
+    fn offered(&self) -> bool {
+        matches!(self.mark, Mark::Change | Mark::Consider)
+    }
+
+    /// What it cost over the window, a lower bound when `at_least`.
+    fn costs(&mut self, usd: Option<f64>, at_least: bool, spend: &Spend) {
+        self.amount = Some((
+            "costs",
+            match usd {
+                None => "unknown".into(),
+                Some(usd) if at_least => format!("at least {}", about(usd)),
+                Some(usd) => about(usd),
+            },
+        ));
+        self.share = usd.and_then(|usd| spend.share(usd));
+    }
+
+    /// What `cost` came to over the window: its known part as a lower bound when partly unpriced.
+    fn cost(&mut self, cost: &Cost, spend: &Spend) {
+        match cost.total_usd {
+            Some(usd) => self.costs(Some(usd.to_f64()), false, spend),
+            None if cost.known_usd > Usd::ZERO => {
+                self.costs(Some(cost.known_usd.to_f64()), true, spend);
+            }
+            None => self.costs(None, false, spend),
+        }
+    }
+
+    /// What it saves every 30 days, `verb` such as "saves up to"; unmeasured when None.
+    fn saves(&mut self, verb: &'static str, usd: Option<f64>, spend: &Spend) {
+        match usd {
+            Some(usd) => {
+                self.amount = Some((verb, format!("{}/mo", about(usd))));
+                self.share = spend.of_month(usd);
+            }
+            None => {
+                self.amount = Some(("saving", "not measured".into()));
+                self.share = None;
+            }
         }
     }
 }
@@ -3166,6 +3309,11 @@ impl Row {
 fn pad(text: &str, width: usize) -> String {
     let cells = cells(text);
     format!("{text}{}", " ".repeat(width.saturating_sub(cells)))
+}
+
+/// `text` right-aligned in `width` cells.
+fn pad_left(text: &str, width: usize) -> String {
+    format!("{}{text}", " ".repeat(width.saturating_sub(cells(text))))
 }
 
 /// The widest of `values` that fits in `cap` cells.
@@ -3197,8 +3345,62 @@ fn not_enough(reason: &str) -> String {
     format!("Not enough evidence: {}", decapitalize(reason.trim()))
 }
 
-/// Every row, one section per kind of claim, red lines first.
-fn rows_section(rows: &[Row], out: &mut Out<'_>) {
+/// Larger shares first, and lines without one after. A change ranks by what it saves and
+/// everything else by what it costs, so a kept setting's comparison saving or a change shown
+/// only by its cost ranks with the lines whose figure is unknown.
+fn by_share(a: &Row, b: &Row) -> std::cmp::Ordering {
+    let rank = |r: &Row| {
+        let saving = r
+            .amount
+            .as_ref()
+            .is_some_and(|(verb, _)| verb.starts_with("saves"));
+        r.share.filter(|_| r.offered() == saving)
+    };
+    match (rank(a), rank(b)) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Every row, ranked: the changes by what they save, then everything else by what it costs.
+fn rows_section(mut rows: Vec<Row>, out: &mut Out<'_>) {
+    // Name where a line was found only when two lines of one profile would read the same.
+    let mut seen = crate::collections::HashMap::<(String, String), usize>::default();
+    for row in &rows {
+        *seen
+            .entry((row.name.clone(), row.profile.clone()))
+            .or_default() += 1;
+    }
+    for row in &mut rows {
+        if let Some(location) = row.location.take()
+            && seen[&(row.name.clone(), row.profile.clone())] > 1
+        {
+            row.name = format!("{} ({location})", row.name);
+        }
+    }
+    // A tag that names one settings file leaves the setting to name only what changes in it.
+    for row in &mut rows {
+        let Some(file) = row
+            .profile
+            .strip_prefix('[')
+            .and_then(|t| t.strip_suffix(']'))
+            .filter(|f| !f.contains(", ") && !f.contains(": "))
+        else {
+            continue;
+        };
+        if let Some(edit) = row.setting.strip_suffix(&format!(" in {file}")) {
+            row.setting = edit.to_string();
+        } else if let Some(key) = row.setting.strip_prefix(&format!("{file}:")) {
+            row.setting = key.to_string();
+        }
+    }
+    // A stable sort keeps the verdict order among lines with the same figure.
+    rows.sort_by_key(|r| r.mark);
+    rows.sort_by(by_share);
+    let (changes, rest): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(Row::offered);
+    let all = || changes.iter().chain(&rest);
     let color = out.options.color;
     let (dot, hollow) = if out.options.unicode {
         ("●", "○")
@@ -3206,66 +3408,74 @@ fn rows_section(rows: &[Row], out: &mut Out<'_>) {
         ("*", "o")
     };
     let indent = if color { 2 } else { WORD_CELLS };
-    for claim in Claim::ALL {
-        let mut section: Vec<&Row> = rows.iter().filter(|r| r.claim == claim).collect();
+    // Columns line up across both groups.
+    let value_cells = column(all().map(|r| cells(&terminal_text(&r.value))), VALUE_CELLS);
+    let figure_cells = column(
+        all().filter_map(|r| r.amount.as_ref().map(|(_, f)| cells(f))),
+        FIGURE_CELLS,
+    );
+    let verb_cells = all()
+        .filter_map(|r| r.amount.as_ref().map(|(v, _)| cells(v)))
+        .max()
+        .unwrap_or(0);
+    let amount = |r: &Row| {
+        r.amount.as_ref().map_or_else(String::new, |(verb, f)| {
+            format!("{} {}", pad(verb, verb_cells), pad_left(f, figure_cells))
+        })
+    };
+    let amount_cells = column(
+        all().map(|r| cells(&amount(r))),
+        verb_cells + 1 + FIGURE_CELLS,
+    );
+    let shares = |r: &Row| r.share.map_or_else(String::new, share_text);
+    let share_cells = all().map(|r| cells(&shares(r))).max().unwrap_or(0);
+    let claim_cells = all().map(|r| cells(r.claim.name())).max().unwrap_or(0);
+    let tag_cells = column(all().map(|r| cells(&r.profile)), TAG_CELLS);
+    let mut name_cells = column(all().map(|r| cells(&terminal_text(&r.name))), NAME_CELLS);
+    // On a narrow terminal, the name column gives way so the others still fit on one row.
+    if let Some(width) = out.options.width {
+        let rest = indent + value_cells + amount_cells + share_cells + claim_cells + tag_cells + 10;
+        name_cells = name_cells.min(width.saturating_sub(rest));
+    }
+    let groups = [
+        (changes.as_slice(), "CHANGES  biggest saving first"),
+        (rest.as_slice(), "EVERYTHING ELSE  biggest cost first"),
+    ];
+    for (section, heading) in groups {
         if section.is_empty() {
             continue;
         }
-        section.sort_by_key(|r| r.mark);
-        let names: Vec<String> = section.iter().map(|r| terminal_text(&r.name)).collect();
-        let values: Vec<String> = section.iter().map(|r| terminal_text(&r.value)).collect();
-        let value_cells = column(values.iter().map(|v| cells(v)), VALUE_CELLS);
-        let figure_cells = column(
-            section
-                .iter()
-                .filter_map(|r| r.amount.as_ref().map(|(_, f)| cells(f))),
-            FIGURE_CELLS,
-        );
-        let amounts: Vec<String> = section
-            .iter()
-            .map(|r| {
-                r.amount.as_ref().map_or_else(String::new, |(verb, f)| {
-                    format!(
-                        "{verb} {}{f}",
-                        " ".repeat(figure_cells.saturating_sub(cells(f)))
-                    )
-                })
-            })
-            .collect();
-        let amount_cells = column(amounts.iter().map(|a| cells(a)), FIGURE_CELLS + 6);
-        let tag_cells = section.iter().map(|r| cells(&r.profile)).max().unwrap_or(0);
-        // On a narrow terminal, the name column gives way so the others still fit on one row.
-        let mut name_cells = column(names.iter().map(|n| cells(n)), NAME_CELLS);
-        if let Some(width) = out.options.width {
-            let rest = indent + value_cells + amount_cells + tag_cells + 6;
-            name_cells = name_cells.min(width.saturating_sub(rest));
-        }
-        out.section(claim.heading());
-        for (i, row) in section.iter().enumerate() {
+        out.section(heading);
+        for row in section {
             let marker = match (color, row.mark) {
                 (true, Mark::Unknown | Mark::Info) => format!("{hollow} "),
                 (true, _) => format!("{dot} "),
                 (false, mark) => pad(mark.word(), WORD_CELLS),
             };
-            let mut columns = vec![pad(&names[i], name_cells)];
-            if values.iter().any(|v| !v.is_empty()) {
-                columns.push(pad(&values[i], value_cells));
+            let mut columns = vec![
+                pad(&terminal_text(&row.name), name_cells),
+                pad(&terminal_text(&row.value), value_cells),
+                pad(&amount(row), amount_cells),
+                pad_left(&shares(row), share_cells),
+                pad(row.claim.name(), claim_cells),
+            ];
+            if all().any(|r| !r.profile.is_empty()) {
+                columns.push(pad(&row.profile, tag_cells));
             }
-            if amounts.iter().any(|a| !a.is_empty()) {
-                columns.push(pad(&amounts[i], amount_cells));
-            }
-            if tag_cells > 0 {
-                columns.push(row.profile.clone());
-            }
+            columns.push(row.setting.clone());
             let head = format!("{marker}{}", columns.join("  ").trim_end());
             out.hang(&head, indent, row.mark.style());
-            out.line(&row.evidence, indent, PLAIN);
+            if out.options.details {
+                out.line(&row.evidence, indent, PLAIN);
+            }
         }
-        let sources: IndexSet<&str> = section.iter().flat_map(|r| r.sources.clone()).collect();
-        if !sources.is_empty() {
-            let sources: Vec<&str> = sources.into_iter().collect();
-            out.line(&format!("Sources: {}", sources.join(", ")), 0, PLAIN);
-        }
+    }
+    // Sources cite the guidance the evidence quotes, so they come with it.
+    let sources: IndexSet<&str> = all().flat_map(|r| r.sources.clone()).collect();
+    if out.options.details && !sources.is_empty() {
+        let sources: Vec<&str> = sources.into_iter().collect();
+        out.blank();
+        out.line(&format!("Sources: {}", sources.join(", ")), 0, PLAIN);
     }
 }
 
@@ -3430,6 +3640,7 @@ pub(crate) struct Recommendation<'a> {
     /// The current value and the one to change to, such as "5m -> 1h".
     pub value: String,
     pub source: Source<'a>,
+    pub origin: Origin,
 }
 
 /// What a recommendation's line reports on.
@@ -3438,8 +3649,29 @@ pub(crate) enum Source<'a> {
     Piece(&'a ContextCost),
 }
 
-/// Every change the summary recommends or suggests, in its order: by kind of claim,
-/// recommended changes before suggestions.
+/// The value a recommended or suggested check changes to: a suggestion turns a feature
+/// off, or raises an effort.
+fn check_target(result: &CheckResult, r: &Common<'_>, mark: Mark) -> String {
+    match (mark, result) {
+        (Mark::Change, _) | (_, CheckResult::Effort(_)) => match r.recommended {
+            Some(Setting::Window(n)) => tokens(n),
+            other => setting_value(other),
+        },
+        _ => "off".into(),
+    }
+}
+
+/// Which line of a report a change comes from, so the list can name the edit offered for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// A check, by its index in the report's checks.
+    Check(usize),
+    /// A piece of context, by its index among `setting_rows` of the report's context.
+    Context(usize),
+}
+
+/// Every change the report recommends or suggests, in its order: biggest monthly saving
+/// first, and those whose saving was not measured after the rest.
 pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendation<'_>> {
     let out = Out::new(
         report,
@@ -3450,25 +3682,20 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
     );
     let arrow = out.arrow;
     let mut lines = vec![];
-    for result in &report.checks {
+    for (index, result) in report.checks.iter().enumerate() {
         let r = common(result);
         let mark = check_mark(result, &r);
         if !matches!(mark, Mark::Change | Mark::Consider) {
             continue;
         }
-        let value = |s: Option<Setting<'_>>| match s {
-            Some(Setting::Window(n)) => tokens(n),
-            other => setting_value(other),
-        };
-        // A suggestion is to turn a feature off, or to raise an effort.
-        let target = match (mark, result) {
-            (Mark::Change, _) | (_, CheckResult::Effort(_)) => value(r.recommended),
-            _ => "off".into(),
-        };
+        let target = check_target(result, &r, mark);
         let mut current = if unset_main_ttl(result, &r, &out) {
             "unset".into()
         } else {
-            value(r.current)
+            match r.current {
+                Some(Setting::Window(n)) => tokens(n),
+                other => setting_value(other),
+            }
         };
         if let CheckResult::Compaction(c) = result
             && c.unset
@@ -3476,18 +3703,39 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             current += " (default)";
         }
         lines.push((
-            Claim::of(result),
-            mark,
+            check_saving(result, &r, &out),
             Recommendation {
                 claim: Claim::of(result).name(),
                 suggested: mark == Mark::Consider,
                 name: setting_name(result),
                 value: format!("{current} {arrow} {target}"),
                 source: Source::Check(result),
+                origin: Origin::Check(index),
             },
         ));
     }
-    for c in setting_rows(&report.context) {
+    for (index, c) in setting_rows(&report.context).enumerate() {
+        if c.kind == ContextKind::Instructions {
+            // A file over the provider's size guidance is worth shortening by hand.
+            if !c.current {
+                continue;
+            }
+            let row = instruction_row(c, &report.scan.profiles, &out);
+            if row.mark == Mark::Consider {
+                lines.push((
+                    None,
+                    Recommendation {
+                        claim: row.claim.name(),
+                        suggested: true,
+                        name: row.name,
+                        value: format!("{} {arrow} shorter", row.value),
+                        source: Source::Piece(c),
+                        origin: Origin::Context(index),
+                    },
+                ));
+            }
+            continue;
+        }
         let mark = match c.verdict {
             Some(Verdict::Off) => Mark::Change,
             Some(Verdict::Consider) => Mark::Consider,
@@ -3499,42 +3747,108 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             "off"
         };
         lines.push((
-            Claim::Measured,
-            mark,
+            piece_saving(c, &out.spend),
             Recommendation {
                 claim: Claim::Measured.name(),
                 suggested: mark == Mark::Consider,
                 name: short_label(c, &out),
                 value: format!("on {arrow} {target}"),
                 source: Source::Piece(c),
+                origin: Origin::Context(index),
             },
         ));
     }
-    // A stable sort keeps the report's order within each claim and mark.
-    lines.sort_by_key(|(claim, mark, _)| (Claim::ALL.iter().position(|c| c == claim), *mark));
-    lines.into_iter().map(|(_, _, line)| line).collect()
+    // A stable sort keeps the report's order among equal savings.
+    lines.sort_by(|(a, _), (b, _)| match (a, b) {
+        (Some(a), Some(b)) => b.total_cmp(a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    lines.into_iter().map(|(_, line)| line).collect()
 }
 
-/// The default report: every setting and feature under the kind of claim it rests on.
-fn summary(report: &Report, out: &mut Out<'_>) {
+/// The headline: how many changes the report recommends and how many are worth considering.
+fn headline(changes: usize, considered: usize) -> String {
+    let s = if changes == 1 { "" } else { "s" };
+    match (changes, considered) {
+        (0, 0) => "No changes recommended or worth considering.".into(),
+        (0, c) => format!("No changes recommended; {c} worth considering."),
+        (r, 0) => format!("{r} change{s} recommended."),
+        (r, c) => format!("{r} change{s} recommended and {c} worth considering."),
+    }
+}
+
+/// What a recommended or suggested check saves every 30 days, when it was measured.
+fn check_saving(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<f64> {
+    match result {
+        // A lower or higher effort changes the output, which the transcripts cannot price.
+        CheckResult::Effort(_) => None,
+        // Either default may be in force, so the saving is the whole gap or nothing.
+        CheckResult::Ttl(t) if unset_main_ttl(result, r, out) => {
+            Some(monthly(t.one_hour_savings_usd.abs(), r.since, r.until))
+        }
+        _ => r
+            .monthly_savings_usd
+            .or_else(|| r.savings_usd.map(|usd| monthly(usd, r.since, r.until))),
+    }
+}
+
+/// What turning a piece of context off saves every 30 days: what it cost, all else equal.
+///
+/// A Codex catalog skill's listing cost is no such saving, since removing it can backfill the
+/// catalog or expand the other descriptions.
+fn piece_saving(c: &ContextCost, spend: &Spend) -> Option<f64> {
+    c.estimated_usd
+        .filter(|_| c.skill.is_none())
+        .map(|usd| monthly(usd, spend.since, Some(spend.until)))
+}
+
+/// The settings file a piece's switch lives in: its first profile's.
+fn piece_file(c: &ContextCost, out: &Out<'_>) -> String {
+    out.profiles
+        .get(first_profile(c))
+        .map_or_else(|| "settings.json".into(), |p| out.home(&p.settings_file))
+}
+
+/// The setting that turns a piece of context off, such as `~/.claude/settings.json:permissions.deny`.
+fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
+    match (&c.control, &c.skill) {
+        (_, Some(s)) if s.path.is_none() => "no setting resolved".into(),
+        (Some(control), _) => format!("{}:{}", piece_file(c, out), control.path.join(".")),
+        (None, Some(_)) => format!("{}:skills.config", piece_file(c, out)),
+        (None, None) if c.kind == ContextKind::Skill => "its plugin, with /plugin".into(),
+        (None, None) if c.kind == ContextKind::McpServer => {
+            "the plugin or launcher that supplies it".into()
+        }
+        (None, None) => "no setting".into(),
+    }
+}
+
+/// The report: what was read, then every setting and feature on one line, the changes
+/// first, with each line's evidence under `--details`.
+fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
-    let requests = &report.scan.requests;
-    let since = report.scan.since.or(requests.first().map(|r| r.time));
-    let until = generated_at(report);
+    let spend = out.spend;
     let many = report.scan.profiles.len() > 1;
     out.title();
     t3_coverage(report, out);
     out.line(&format!("{PRICES_MEAN} Nothing was changed."), 0, PLAIN);
     out.blank();
+    let spent = format!(
+        "{}{}",
+        if spend.complete { "" } else { "at least " },
+        about(spend.usd)
+    );
     out.line(
-        &match since {
+        &match spend.since {
             Some(since) if coverage.requests > 0 => format!(
-                "Read {} requests from {} to {} ({}):",
+                "Read {} requests from {} to {} ({}), {spent} at API prices:",
                 count(coverage.requests),
                 date(&iso(since)),
                 date(&report.generated_at),
-                days(Some(since), Some(until))
+                days(Some(since), Some(spend.until))
             ),
             _ => format!(
                 "No requests found{} in:",
@@ -3550,14 +3864,21 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     for p in &report.scan.profiles {
         out.line(&out.short_profile(&p.id), 2, PLAIN);
     }
-    for group in &report.historical {
-        if !group.tier_sensitivity.is_empty() {
-            out.line(&format!(
-                "Conditional Codex pricing [{}]: {} of {} requests priced; {} use assumed service tiers (supported historical requests, otherwise standard for omitted/auto). {}",
-                group.profiles.iter().map(|p| out.short_profile(p)).collect::<Vec<_>>().join(", "),
-                group.priced_requests, group.requests, group.conditional_requests, TIER_SENSITIVITY
-            ), 0, PLAIN);
-        }
+    let conditional: u64 = report
+        .historical
+        .iter()
+        .filter(|g| !g.tier_sensitivity.is_empty())
+        .map(|g| g.conditional_requests)
+        .sum();
+    if conditional > 0 {
+        out.line(
+            &format!(
+                "{} Codex requests are priced at an assumed service tier, which their records leave unclear; --details shows each tier's cost.",
+                count(conditional)
+            ),
+            0,
+            PLAIN,
+        );
     }
     if coverage.missing_usage > 0 {
         out.line(
@@ -3590,11 +3911,15 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         );
     }
 
-    let checks: Vec<(&CheckResult, Common<'_>)> =
-        report.checks.iter().map(|c| (c, common(c))).collect();
+    let checks: Vec<(usize, &CheckResult, Common<'_>)> = report
+        .checks
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (i, c, common(c)))
+        .collect();
     // A check for a working directory that no longer exists has no setting left
     // to change; show it only when it is the sole result for its setting.
-    let key = |(result, r): &(&CheckResult, Common<'_>)| {
+    let key = |(_, result, r): &(usize, &CheckResult, Common<'_>)| {
         let models = match result {
             CheckResult::Compaction(c) => c
                 .models
@@ -3606,7 +3931,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         };
         format!("{}:{}:{}:{models}", r.check, r.bucket, r.profile)
     };
-    let action = |(result, r): &(&CheckResult, Common<'_>)| check_action(result, r);
+    let action = |(_, result, r): &(usize, &CheckResult, Common<'_>)| check_action(result, r);
     let decided: crate::collections::HashSet<String> = checks
         .iter()
         .filter(|c| action(c) != Action::Advisory)
@@ -3614,15 +3939,14 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .collect();
     // Only a vanished directory is proven irrelevant; any other unresolved owner,
     // such as a project override, stays visible beside the resolved verdict.
-    let checks: Vec<(&CheckResult, Common<'_>)> = checks
+    let checks: Vec<(usize, &CheckResult, Common<'_>)> = checks
         .into_iter()
         .filter(|c| {
             !(action(c) == Action::Advisory
-                && matches!(c.0, CheckResult::Speed(s) if s.reason.contains("working directory no longer exists"))
+                && matches!(c.1, CheckResult::Speed(s) if s.reason.contains("working directory no longer exists"))
                 && decided.contains(&key(c)))
         })
         .collect();
-    let mark = |(result, r): &(&CheckResult, Common<'_>)| check_mark(result, r);
     // Lines name a profile briefly, by T3 instance or root, unless two would read the same.
     let mut tags: IndexMap<&str, String> = report
         .scan
@@ -3670,50 +3994,17 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     };
     // A tool, skill or MCP switch lives in each profile's own settings file.
     let switch = |p: &Profile| format!("{}:", p.settings_file);
-    let pieces: Vec<&ContextCost> = setting_rows(&report.context)
-        .filter(|c| c.verdict.is_some())
+    // The edit or step `doctor` offers for a line, which names its setting.
+    let offer = |origin: Origin, out: &Out<'_>| {
+        fixes
+            .iter()
+            .find(|f| f.origin == origin)
+            .map(|f| crate::doctor::setting(f, out.home.as_deref()))
+    };
+    let pieces: Vec<(usize, &ContextCost)> = setting_rows(&report.context)
+        .enumerate()
+        .filter(|(_, c)| c.verdict.is_some())
         .collect();
-    let off: Vec<&ContextCost> = pieces
-        .iter()
-        .copied()
-        .filter(|c| c.verdict == Some(Verdict::Off))
-        .collect();
-    let total = checks.iter().filter(|c| mark(c) == Mark::Change).count() + off.len();
-    out.blank();
-    out.line(
-        &if total > 0 {
-            format!(
-                "{total} setting change{} recommended.",
-                if total == 1 { "" } else { "s" }
-            )
-        } else {
-            "No setting changes recommended.".into()
-        },
-        0,
-        BOLD,
-    );
-    out.line(
-        &format!(
-            "Savings are per 30 days at this window's rate; costs and uses are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
-            about(report.max_cost_per_use_usd)
-        ),
-        0,
-        PLAIN,
-    );
-    if report
-        .checks
-        .iter()
-        .any(|c| matches!(c, CheckResult::Background(_)))
-    {
-        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, PLAIN);
-    }
-    // Parent and detail coverage overlap; do not combine them into a percentage.
-    if pieces.iter().any(|c| c.priced < c.requests) {
-        out.line("Some feature costs are scaled from their priced requests; --details shows each row's coverage.", 0, PLAIN);
-    }
-    if out.options.color {
-        out.legend();
-    }
     // A server's own loading and exposure controls, after its line's evidence.
     let server_notes = |c: &ContextCost| {
         if c.kind != ContextKind::McpServer {
@@ -3746,9 +4037,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             count(w.polling)
         )
     };
-    let check_row = |c: &(&CheckResult, Common<'_>), out: &Out<'_>| {
-        let (result, r) = c;
-        let mark = mark(c);
+    let check_row = |c: &(usize, &CheckResult, Common<'_>), out: &Out<'_>| {
+        let (index, result, r) = c;
+        let mark = check_mark(result, r);
         let mut row = Row::new(Claim::of(result), mark, setting_name(result));
         row.profile = tag(r.profiles, &|_| r.owner.to_string(), out);
         let unset = unset_main_ttl(result, r, out);
@@ -3762,25 +4053,6 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             && c.unset
         {
             row.value += " (default)";
-        }
-        if mark == Mark::Change {
-            let recommended = match r.recommended {
-                Some(Setting::Window(n)) => tokens(n),
-                other => setting_value(other),
-            };
-            row.value = format!("{} {arrow} {recommended}", row.value);
-        }
-        let saves = |usd: f64| {
-            Some((
-                "saves",
-                match r.monthly_savings_usd {
-                    None => per_month(usd, r.since, r.until),
-                    Some(m) => about(m),
-                },
-            ))
-        };
-        if mark == Mark::Change {
-            row.amount = r.savings_usd.and_then(saves);
         }
         let official = match plan_note(result, r, out) {
             Some((note, source)) => {
@@ -3799,30 +4071,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             )
         };
         row.evidence = match result {
-            CheckResult::Effort(e) => {
-                let total = add_costs(e.runs.iter().map(|run| &run.cost));
-                row.amount = match total.total_usd {
-                    _ if e.runs.is_empty() => None,
-                    Some(usd) => Some(("costs", about(usd.to_f64()))),
-                    None => Some((
-                        "costs",
-                        format!("at least {}", about(total.known_usd.to_f64())),
-                    )),
-                };
-                effort_evidence(e, mark, out)
-            }
+            CheckResult::Effort(e) => effort_evidence(e, mark, out),
             CheckResult::Ttl(t) => match mark {
                 Mark::Unknown => unknown(),
                 Mark::Keep if t.one_hour_savings_usd == 0.0 => {
                     format!("5m and 1h cost the same on replay. {set_in}")
                 }
                 _ => {
-                    if mark == Mark::Keep {
-                        row.amount = Some((
-                            "saves",
-                            per_month(t.one_hour_savings_usd.abs(), r.since, r.until),
-                        ));
-                    }
                     let other = if r.current == Some(Setting::Ttl(Ttl::OneHour)) {
                         "5m"
                     } else {
@@ -3831,12 +4086,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     let better = if mark == Mark::Keep {
                         format!("{} costs less than {other}", setting_value(r.current))
                     } else if unset {
-                        // Either default may be in force, so the saving is the whole gap or nothing.
                         let gap = per_month(t.one_hour_savings_usd.abs(), r.since, r.until);
-                        row.amount = Some(("saves up to", gap.clone()));
                         let winner = setting_value(r.recommended);
                         format!(
-                            "{winner} costs {gap} less, saved whenever the unset default would be {}, and setting it keeps {winner} however usage is paid",
+                            "{winner} costs {gap} less every 30 days, saved whenever the unset default would be {}, and setting it keeps {winner} however usage is paid",
                             if winner == "1h" { "5m" } else { "1h" }
                         )
                     } else {
@@ -3856,6 +4109,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     ),
                     None => String::new(),
                 };
+                if c.models.iter().flatten().count() > 1 {
+                    let models: Vec<&str> = c.models.iter().flatten().map(|m| &**m).collect();
+                    let _ = write!(text, "Covers {}. ", models.join(", "));
+                }
                 text += &match mark {
                     Mark::Change => {
                         let added = c
@@ -3953,25 +4210,31 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 _ => not_enough(&keepalive_unresolved(k, r)),
             },
             CheckResult::Background(b) => {
-                let directories: Vec<String> = b
-                    .directories
-                    .iter()
-                    .map(|d| {
-                        d.as_ref()
-                            .map_or_else(|| "directory absent".into(), |d| out.home(d))
-                    })
-                    .collect();
-                let mut text = if directories.is_empty() {
-                    String::new()
-                } else {
-                    format!("In {}. ", directories.join(", "))
+                let mut text = match b.directories.len() {
+                    0 => String::new(),
+                    n => {
+                        // A feature that ran in many directories names a few, not every worktree.
+                        let shown: Vec<String> = b
+                            .directories
+                            .iter()
+                            .take(BACKGROUND_DIRECTORIES)
+                            .map(|d| {
+                                d.as_ref()
+                                    .map_or_else(|| "directory absent".into(), |d| out.home(d))
+                            })
+                            .collect();
+                        let more = n - shown.len();
+                        if more > 0 {
+                            format!(
+                                "In {} directories, such as {}. ",
+                                count(n as u64),
+                                shown.join(", ")
+                            )
+                        } else {
+                            format!("In {}. ", shown.join(", "))
+                        }
+                    }
                 };
-                if r.current == Some(Setting::Toggle(true)) {
-                    row.amount = r
-                        .savings_usd
-                        .filter(|usd| *usd > 0.0)
-                        .and_then(|usd| cost_amount(Some(usd)));
-                }
                 let off = format!("{official}{}", background_off(b, out));
                 text += &match mark {
                     Mark::Change => format!(
@@ -4012,16 +4275,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 // Codex extraction and consolidation are never measured, so a total from
                 // a window where memories may have run is a lower bound.
                 let unmeasured = codex_unmeasured(m);
-                let at_least = r.coverage.is_some() || unmeasured;
                 let mut notes = vec![];
-                row.amount = match r.savings_usd {
-                    Some(0.0) => None,
-                    Some(usd) => Some((
-                        "costs",
-                        format!("{}{}", if at_least { "at least " } else { "" }, about(usd)),
-                    )),
-                    None => cost_amount(None),
-                };
                 match r.coverage {
                     Some(c) if r.savings_usd.is_some() && c.priced == 0 => notes.push(
                         "from memory's reads and writes alone; no request recorded its context"
@@ -4077,9 +4331,64 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         if !official.is_empty() && !row.evidence.contains(&official) {
             let _ = write!(row.evidence, " {}", official.trim_end());
         }
+        // A change shows the value it changes to, as `doctor` offers it.
+        if row.offered() {
+            row.value = format!(
+                "{} {arrow} {}",
+                row.value,
+                check_target(result, r, row.mark)
+            );
+        }
+        // The figure: what a change saves, else what the setting cost or saves as it is.
+        if row.offered() {
+            let verb = match result {
+                _ if unset => "saves up to",
+                // Memory priced from only part of the requests, or with unmeasured
+                // generation, saves at least what was priced.
+                CheckResult::Memory(m) if r.coverage.is_some() || codex_unmeasured(m) => {
+                    "saves at least"
+                }
+                _ => "saves",
+            };
+            row.saves(verb, check_saving(result, r, out), &spend);
+        } else {
+            match result {
+                CheckResult::Effort(e) if !e.runs.is_empty() => {
+                    row.cost(&add_costs(e.runs.iter().map(|run| &run.cost)), &spend);
+                }
+                CheckResult::Ttl(t) if mark == Mark::Keep && t.one_hour_savings_usd != 0.0 => {
+                    row.saves(
+                        "saves",
+                        Some(monthly(t.one_hour_savings_usd.abs(), r.since, r.until)),
+                        &spend,
+                    );
+                }
+                CheckResult::Background(_) if r.current == Some(Setting::Toggle(true)) => {
+                    // A feature that is on says plainly when its cost could not be measured.
+                    match r.savings_usd {
+                        Some(usd) if usd <= 0.0 => {}
+                        usd => row.costs(usd, false, &spend),
+                    }
+                }
+                CheckResult::Memory(m) => match r.savings_usd {
+                    Some(0.0) => {}
+                    usd => {
+                        let at_least = r.coverage.is_some() || codex_unmeasured(m);
+                        row.costs(usd, at_least, &spend);
+                    }
+                },
+                _ => {}
+            }
+        }
+        row.setting = match offer(Origin::Check(*index), out) {
+            Some(setting) if row.offered() => setting,
+            // Why nothing can be set is evidence, under details.
+            _ if r.owner.starts_with("no setting") => "no setting".into(),
+            _ => out.home(r.owner),
+        };
         row
     };
-    let piece_row = |c: &ContextCost, out: &Out<'_>| {
+    let piece_row = |(index, c): &(usize, &ContextCost), out: &Out<'_>| {
         let typed = typed_only(c.control.as_ref());
         let verdict = c.verdict.expect("pieces have verdicts");
         let mark = match verdict {
@@ -4089,16 +4398,26 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         };
         let mut row = Row::new(Claim::Measured, mark, short_label(c, out));
         row.profile = tag(&c.profiles, &switch, out);
-        row.amount = cost_amount(c.estimated_usd);
+        row.location = skill_location(c, out);
         row.value = match verdict {
-            Verdict::Off if typed => format!("on {arrow} typed only"),
-            Verdict::Off => format!("on {arrow} off"),
-            _ => "on".into(),
+            Verdict::Off | Verdict::Consider if typed => format!("on {arrow} typed only"),
+            Verdict::Off | Verdict::Consider => format!("on {arrow} off"),
+            Verdict::Keep => "on".into(),
         };
+        if row.offered() && c.skill.is_none() {
+            row.saves("saves", piece_saving(c, &spend), &spend);
+        } else {
+            row.costs(c.estimated_usd, false, &spend);
+        }
         let each = c
             .cost_per_use_usd
             .map_or_else(String::new, |usd| format!(", {} each", about(usd)));
-        let mut text = format!("{}{each}", capitalize(&uses(c)));
+        let mut text = format!(
+            "{}{each}; it cost {} over the window",
+            capitalize(&uses(c)),
+            c.estimated_usd
+                .map_or_else(|| "an unknown amount".into(), about)
+        );
         if c.skill.is_some() {
             let _ = write!(text, "; {}", catalog_evidence(c));
         }
@@ -4142,6 +4461,10 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         text += &server_notes(c);
         row.evidence = text;
+        row.setting = match offer(Origin::Context(*index), out) {
+            Some(setting) if row.offered() => setting,
+            _ => piece_setting(c, out),
+        };
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
@@ -4153,13 +4476,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 && (0..rows.len()).any(|j| {
                     rows[i].name == rows[j].name
                         && rows[i].profile == rows[j].profile
-                        && checks[i].1.profiles != checks[j].1.profiles
+                        && checks[i].2.profiles != checks[j].2.profiles
                 })
         })
         .collect();
     for i in clashing {
         let names: Vec<String> = checks[i]
-            .1
+            .2
             .profiles
             .iter()
             .map(|id| {
@@ -4177,14 +4500,21 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     }
     rows.extend(pieces.iter().map(|c| piece_row(c, out)));
     // Switchable context still sent today without enough pricing or use evidence for a
-    // verdict. Auto memory has its own line.
+    // verdict. Auto memory has its own line. A tool its server's switch covers, or one with
+    // no switch of its own, is part of its server's line.
     for c in setting_rows(&report.context).filter(|c| {
-        c.current && c.control.is_some() && c.verdict.is_none() && c.kind != ContextKind::Memory
+        c.current
+            && c.control.is_some()
+            && c.verdict.is_none()
+            && !matches!(c.kind, ContextKind::Memory | ContextKind::McpDiscovery)
     }) {
         let mut row = Row::new(Claim::Measured, Mark::Unknown, short_label(c, out));
         row.profile = tag(&c.profiles, &switch, out);
+        row.location = skill_location(c, out);
         row.value = "on".into();
-        row.amount = c.estimated_usd.and_then(|usd| cost_amount(Some(usd)));
+        if c.estimated_usd.is_some() {
+            row.costs(c.estimated_usd, false, &spend);
+        }
         let uses = uses(c);
         let mut text = not_enough(&match c.estimated_usd {
             None => format!("None of its requests could be priced; {uses}."),
@@ -4213,42 +4543,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         }
         text += &server_notes(c);
         row.evidence = text;
-        rows.push(row);
-    }
-    // Tools inside a server that the lines above leave out: those its server's off
-    // covers, and those without a switch of their own.
-    for (server, c) in report
-        .context
-        .iter()
-        .filter(|c| c.current)
-        .flat_map(|server| {
-            server
-                .details
-                .iter()
-                .filter(|d| d.current)
-                .map(move |d| (server, d))
-        })
-    {
-        let covered = server.verdict == Some(Verdict::Off);
-        if !covered && (c.verdict.is_some() || c.control.is_some()) {
-            continue;
-        }
-        let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
-        row.profile = tag(&c.profiles, &switch, out);
-        row.amount = cost_amount(c.estimated_usd);
-        let reason = if covered {
-            " Turning off its server covers it."
-        } else if server.harness == Harness::Codex && server.name == "codex_apps" {
-            " The app id mapping is unavailable, so no per-app tool switch is generated."
-        } else if c.harness == Harness::Codex && c.kind == ContextKind::McpTool {
-            " Its raw tool identity or owning server is unresolved, so no per-tool switch is generated."
-        } else {
-            ""
-        };
-        row.evidence = format!(
-            "{}. Included in its server's cost.{reason}",
-            capitalize(&uses(c))
-        );
+        row.setting = piece_setting(c, out);
         rows.push(row);
     }
     for g in report
@@ -4279,15 +4574,26 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             );
         }
         row.evidence = text;
+        row.setting = out.home(&g.owner);
         rows.push(row);
     }
-    for c in report
-        .context
-        .iter()
-        .filter(|c| c.current && c.kind == ContextKind::Instructions)
-    {
+    let instructions = setting_rows(&report.context)
+        .enumerate()
+        .filter(|(_, c)| c.current && c.kind == ContextKind::Instructions);
+    for (index, c) in instructions {
         let mut row = instruction_row(c, &report.scan.profiles, out);
         row.profile = tag(&c.profiles, &switch, out);
+        if row.offered() {
+            row.value = format!("{} {arrow} shorter", row.value);
+            // Shortening a file saves an unknown part of what it cost.
+            row.saves("saves", None, &spend);
+        } else {
+            row.costs(c.estimated_usd, false, &spend);
+        }
+        row.setting = match offer(Origin::Context(index), out) {
+            Some(setting) if row.offered() => setting,
+            _ => "the file itself".into(),
+        };
         rows.push(row);
     }
     let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
@@ -4296,6 +4602,11 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         let notes: IndexSet<&str> = loading.iter().flat_map(|g| g.notes.clone()).collect();
         row.evidence = notes.into_iter().collect::<Vec<_>>().join(" ");
         row.sources = loading.iter().filter_map(|g| g.source).collect();
+        row.setting = loading
+            .iter()
+            .filter_map(|g| g.setting)
+            .collect::<Vec<_>>()
+            .join("; ");
         rows.push(row);
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
@@ -4320,7 +4631,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     for key in order {
         let group = &outputs[&key];
         let usd: Vec<Option<f64>> = group.iter().map(|c| c.estimated_usd).collect();
-        let (figure, unpriced) = known_figure(&usd);
+        let (_, unpriced) = known_figure(&usd);
         let largest = group.iter().filter_map(|c| c.largest_characters).max();
         let largest = largest.map_or_else(String::new, |n| {
             format!("Its largest result was {} characters. ", count(n))
@@ -4330,6 +4641,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             Some(cap) => {
                 let mut row = Row::new(Claim::Measured, Mark::Unknown, cap.label.into());
                 row.value = cap.value.clone();
+                row.setting = cap.key.into();
                 row.evidence = format!(
                     "{} {largest}{unpriced}{}.",
                     not_enough(
@@ -4348,6 +4660,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                     String::new()
                 };
                 let mut row = Row::new(Claim::Measured, Mark::Info, "Other tool output".into());
+                row.setting = "no cap is checked".into();
                 row.evidence = format!(
                     "From {}{more}. {largest}{unpriced}No cap is checked for it.",
                     names.join(", ")
@@ -4355,27 +4668,41 @@ fn summary(report: &Report, out: &mut Out<'_>) {
                 row
             }
         };
-        row.amount = Some(("costs", figure));
+        let known: Vec<f64> = usd.iter().flatten().copied().collect();
+        row.costs(
+            (!known.is_empty()).then(|| known.iter().sum()),
+            known.len() < usd.len(),
+            &spend,
+        );
         row.profile = tag(key.0, &switch, out);
         rows.push(row);
     }
+    // One line for each subagent type, whose guidance is evidence beside its cost.
     for c in &report.subagents {
         let mut row = Row::new(Claim::Measured, Mark::Info, subagent_name(c));
         row.profile = tag(&c.profiles, &switch, out);
-        row.amount = Some(("costs", scaled(&c.cost, &about)));
+        row.cost(&c.cost, &spend);
         row.evidence = subagent_line(c, &about, out);
-        rows.push(row);
         if let Some(text) = subagent_guidance(c) {
-            let mut row = Row::new(Claim::Official, Mark::Info, subagent_name(c));
-            row.profile = tag(&c.profiles, &switch, out);
-            row.evidence = text;
+            let _ = write!(row.evidence, " Official: {text}");
             row.sources = vec![CLAUDE_MODEL_GUIDE];
-            rows.push(row);
         }
+        // The setting, without why it is the one.
+        row.setting = out
+            .home_in(&c.model_setting)
+            .split("; ")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        rows.push(row);
     }
     for u in &report.fable {
         let mut row = fable_row(u);
         row.profile = tag(&u.profiles, &switch, out);
+        if u.requests > 0 {
+            row.cost(&add_costs(u.weeks.iter().map(|w| &w.cost)), &spend);
+        }
+        row.setting = FABLE_MODEL.into();
         rows.push(row);
     }
     // Context with no switch: worth seeing, but not a setting to change.
@@ -4395,7 +4722,9 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     {
         let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
         row.profile = tag(&c.profiles, &switch, out);
-        row.amount = cost_amount(c.estimated_usd);
+        row.location = skill_location(c, out);
+        row.costs(c.estimated_usd, false, &spend);
+        row.setting = piece_setting(c, out);
         row.evidence = match c.kind {
             ContextKind::Skill if c.skill.is_some() => {
                 format!(
@@ -4425,27 +4754,76 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .map(|c| c.estimated_usd)
         .collect();
     if !core.is_empty() {
-        let (figure, unpriced) = known_figure(&core);
+        let (_, unpriced) = known_figure(&core);
         let mut row = Row::new(
             Claim::Measured,
             Mark::Info,
             "System prompt and core tools".into(),
         );
-        row.amount = Some(("costs", figure));
+        let known: Vec<f64> = core.iter().flatten().copied().collect();
+        row.costs(
+            (!known.is_empty()).then(|| known.iter().sum()),
+            known.len() < core.len(),
+            &spend,
+        );
+        row.setting = "no setting".into();
         row.evidence = format!(
             "{unpriced}Includes core tools such as Bash and Read, and the skill and subagent lists. No setting turns these off."
         );
         rows.push(row);
     }
-    rows_section(&rows, out);
-    if !report.subagents.is_empty() {
-        out.blank();
-        out.line(SUBAGENT_EVIDENCE, 0, PLAIN);
+
+    out.blank();
+    let changes = rows.iter().filter(|r| r.mark == Mark::Change).count();
+    let considered = rows.iter().filter(|r| r.mark == Mark::Consider).count();
+    out.line(&headline(changes, considered), 0, BOLD);
+    // In a report of several hosts, each section's percents are of its own host's spend.
+    let host = match out.options.host {
+        Some(host) if host.name != "this host" => format!("{}'s", host.name),
+        _ => "this host's".into(),
+    };
+    // With some requests unpriced, the base is only what could be priced, so a share can read high.
+    let base = if spend.complete {
+        format!("{host} spend over the window, {spent}")
+    } else {
+        format!(
+            "the {} {host} priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller",
+            about(spend.usd)
+        )
+    };
+    out.line(
+        &format!(
+            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}. A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+            about(report.max_cost_per_use_usd)
+        ),
+        0,
+        PLAIN,
+    );
+    if report
+        .checks
+        .iter()
+        .any(|c| matches!(c, CheckResult::Background(_)))
+    {
+        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, PLAIN);
     }
-    catalog_guidance(report, out);
-    if since.is_some_and(|s| until > s) && !pieces.is_empty() {
+    // Parent and detail coverage overlap; do not combine them into a percentage.
+    if pieces.iter().any(|(_, c)| c.priced < c.requests) {
+        out.line("Some feature costs are scaled from their priced requests; --details shows each line's coverage.", 0, PLAIN);
+    }
+    if out.options.color {
+        out.legend();
+    }
+    rows_section(rows, out);
+    if out.options.details {
+        if !report.subagents.is_empty() {
+            out.blank();
+            out.line(SUBAGENT_EVIDENCE, 0, PLAIN);
+        }
+        catalog_guidance(report, out);
+    }
+    if spend.since.is_some_and(|s| spend.until > s) && !pieces.is_empty() {
         out.line(
-            "Context costs assume nothing else changes when a piece is removed; cache writes and compaction can shift.",
+            "A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.",
             0,
             PLAIN,
         );
@@ -4475,11 +4853,13 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         0,
         PLAIN,
     );
-    out.line(
-        "--details shows the evidence and assumptions behind each line.",
-        0,
-        PLAIN,
-    );
+    if !out.options.details {
+        out.line(
+            "--details shows the evidence, assumptions and sources behind each line.",
+            0,
+            PLAIN,
+        );
+    }
 }
 
 /// What every piece of context cost, including pieces no longer sent.
@@ -5288,19 +5668,21 @@ mod tests {
         report
     }
 
-    fn changes(report: &Report, width: Option<usize>) -> String {
-        format_changes(
-            report,
-            &crate::doctor::fixes(report, false),
-            ReportOptions {
-                width,
-                ..Default::default()
-            },
-        )
+    /// Each change `doctor` offers, as the walk describes it: a heading, then its edits.
+    fn changes(report: &Report) -> String {
+        let mut text = String::new();
+        for fix in crate::doctor::fixes(report, false) {
+            let described = crate::doctor::describe(&fix, None);
+            let _ = writeln!(text, "  {}", described.head);
+            for (line, _) in described.body {
+                let _ = writeln!(text, "    {line}");
+            }
+        }
+        text
     }
 
     fn text(report: &Report, width: Option<usize>, details: bool) -> String {
-        format_report(
+        rendered(
             report,
             ReportOptions {
                 width,
@@ -5363,7 +5745,7 @@ mod tests {
             c.setting = Some(400_000);
         }
         report.checks = vec![check];
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         let line = report_line(&summary, "Auto-compact window");
         assert_eq!(line.head, "Auto-compact window (claude-opus-5-5) 200k");
         assert!(
@@ -5386,7 +5768,7 @@ mod tests {
             c.setting = Some(400_000);
         }
         report.checks = vec![check];
-        let line = report_line(&text(&report, None, false), "Auto-compact window");
+        let line = report_line(&text(&report, None, true), "Auto-compact window");
         assert!(line.head.contains("200k -> 100k"), "{line:?}");
         assert!(
             line.evidence.starts_with(
@@ -5424,27 +5806,47 @@ mod tests {
     #[test]
     fn the_summary_gives_one_line_per_setting() {
         let report = synthetic();
-        let text = text(&report, None, false);
+        let plain = text(&report, None, false);
+        let text = text(&report, None, true);
+        // By default each setting is one line; details add its evidence under it.
+        assert!(report_lines(&plain).iter().all(|r| r.evidence.is_empty()));
+        assert_eq!(report_lines(&plain).len(), report_lines(&text).len());
         let rows = report_lines(&text);
         let line = |head: &str| report_line(&text, head);
-        // Sections follow the kind of claim, and red lines lead each section.
-        let claims: Vec<&str> = rows.iter().map(|r| r.claim.as_str()).collect();
-        let mut sorted = claims.clone();
-        sorted.dedup();
-        assert_eq!(sorted, ["MEASURED", "OFFICIAL", "OPINION"]);
-        for claim in ["MEASURED", "OFFICIAL", "OPINION"] {
-            let marks: Vec<&str> = rows
-                .iter()
-                .filter(|r| r.claim == claim)
-                .map(|r| r.mark.as_str())
-                .collect();
-            let order = |m: &&str| {
-                ["change", "consider", "keep", "unknown", "info"]
-                    .iter()
-                    .position(|w| w == m)
-            };
-            assert!(marks.is_sorted_by_key(order), "{claim}: {marks:?}");
+        // The changes lead, biggest saving first; everything else follows by cost, and
+        // lines without a figure come last in verdict order.
+        let order: Vec<(bool, &str)> = rows
+            .iter()
+            .map(|r| (r.change, r.head.split(" on").next().unwrap()))
+            .collect();
+        let names: Vec<&str> = order.iter().map(|(_, n)| *n).collect();
+        let starts = |n: &str, prefix: &str| n.starts_with(prefix);
+        let expected = [
+            "Auto memory",
+            "Artifact tool",
+            "Skills synced from claude.ai",
+            "Main-agent prompt cache TTL",
+            "Skill example",
+            "MCP server docs",
+            "System prompt and core tools",
+            "Agent tool",
+            "Skill tools:deploy",
+            "/synthetic/home/.claude/CLAUDE.md",
+            "Subagent prompt cache TTL",
+            "Auto-compact window (claude-opus-5-5) 1M",
+            "Fast mode",
+            "Auto-compact window (claude-opus-5-5) 200k",
+            "Idle compaction",
+            "Workflow tool",
+            "/repo/CLAUDE.md",
+            "MCP tool loading",
+        ];
+        assert_eq!(names.len(), expected.len(), "{names:#?}");
+        for (name, prefix) in names.iter().zip(expected) {
+            assert!(starts(name, prefix), "{name} vs {prefix}: {names:#?}");
         }
+        assert!(order[..6].iter().all(|(change, _)| *change));
+        assert!(order[6..].iter().all(|(change, _)| !*change));
         let has = |head: &str, mark: &str, claim: &str, evidence: &str| {
             let row = line(head);
             assert_eq!(
@@ -5457,61 +5859,71 @@ mod tests {
                 (head, mark, claim, evidence)
             );
         };
-        assert!(text.contains("\n2 setting changes recommended.\n"));
+        assert!(text.contains("\n2 changes recommended and 4 worth considering.\n"));
         has(
-            "Main-agent prompt cache TTL 5m -> 1h saves $25",
+            "Main-agent prompt cache TTL 5m -> 1h saves $25/mo 2%",
             "change",
-            "MEASURED",
+            "Measured",
             "Replayed at 5m and 1h, assuming the same sessions, using the 99.5% of requests with measured usage; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
+        // A change names the edit `doctor` offers for it.
+        assert_eq!(
+            line("Main-agent prompt cache TTL").setting,
+            r#""promptCacheTtl": "1h" in /synthetic/home/.claude/settings.json"#
+        );
         has(
-            "Artifact tool on -> off costs $90",
+            "Artifact tool on -> off saves $90/mo 6%",
             "change",
-            "MEASURED",
-            "Never used. Turn off: \"enableArtifact\": false.",
+            "Measured",
+            "Never used; it cost $90 over the window. Turn off: \"enableArtifact\": false.",
         );
         // Used, but above the limit per use: worth considering off, with the setting inline.
         has(
-            "Skill example on costs $12",
+            "Skill example on -> typed only saves $12/mo 1%",
             "consider",
-            "MEASURED",
-            "The model used it 2 times, $6 each. Hide it from the model: \"skillOverrides\": {\"example\": \"user-invocable-only\"}.",
+            "Measured",
+            "The model used it 2 times, $6 each; it cost $12 over the window. Hide it from the model: \"skillOverrides\": {\"example\": \"user-invocable-only\"}.",
         );
         // Turning syncing off removes typed uses too, so every use counts.
         has(
-            "Skills synced from claude.ai on costs $30",
+            "Skills synced from claude.ai on -> off saves $30/mo 2%",
             "consider",
-            "MEASURED",
-            "Used 2 times, $15 each. Turn off: \"syncClaudeAiSkills\": false.",
+            "Measured",
+            "Used 2 times, $15 each; it cost $30 over the window. Turn off: \"syncClaudeAiSkills\": false.",
         );
         has(
-            "Skill tools:deploy costs $6",
+            "Skill tools:deploy costs $6 <1%",
             "info",
-            "MEASURED",
+            "Measured",
             "Never used. No setting turns it off: turn off its plugin with /plugin, or remove the skill from the added directory.",
         );
         has(
-            "Agent tool on costs $40",
+            "Agent tool on costs $40 3%",
             "keep",
-            "MEASURED",
-            "Used 310 times, $0.13 each. Turn off: \"permissions\": {\"deny\": [\"Agent\"]}.",
+            "Measured",
+            "Used 310 times, $0.13 each; it cost $40 over the window. Turn off: \"permissions\": {\"deny\": [\"Agent\"]}.",
+        );
+        // A setting that is not changed names where it is set.
+        assert_eq!(
+            line("Agent tool").setting,
+            "/synthetic/home/.claude/settings.json:permissions.deny"
         );
         has(
-            "Subagent prompt cache TTL 1h saves $4.20",
+            "Subagent prompt cache TTL 1h saves $4.20/mo <1%",
             "keep",
-            "MEASURED",
+            "Measured",
             "Replayed at 5m and 1h, assuming the same sessions; 1h costs less than 5m. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
         has(
             "Workflow tool on",
             "unknown",
-            "MEASURED",
+            "Measured",
             "Not enough evidence: none of its requests could be priced; never used. Turn off: \"enableWorkflows\": false.",
         );
         has(
             "Idle compaction on",
             "unknown",
-            "MEASURED",
+            "Measured",
             "Not enough evidence: on and off cost the same on recorded idle gaps, so neither is cheaper. Set in /synthetic/home/.claude/settings.json:idleCompaction.",
         );
         assert!(text.contains(
@@ -5520,37 +5932,37 @@ mod tests {
         has(
             "/repo/CLAUDE.md costs unknown",
             "unknown",
-            "OFFICIAL",
+            "Official",
             "Not enough evidence: this record has no rendered instruction text to measure against the provider's guidance.",
         );
         // A zero-cost fixed piece is hidden; the system prompt and Bash are summed.
         has(
-            "System prompt and core tools costs $213",
+            "System prompt and core tools costs $213 14%",
             "info",
-            "MEASURED",
+            "Measured",
             "Includes core tools such as Bash and Read, and the skill and subagent lists. No setting turns these off.",
         );
         // Auto memory and fast mode rest on the maintainer's preference; memory is
         // advised off whatever it cost, without changing the exit code.
         has(
-            "Auto memory on costs $150",
+            "Auto memory on -> off saves $150/mo 10%",
             "consider",
-            "OPINION",
+            "Opinion",
             "Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md. Measured: used 3 times (1 read, 2 writes). Set \"autoMemoryEnabled\": false in /synthetic/home/.claude/settings.json.",
         );
         has(
             "Fast mode off",
             "keep",
-            "OPINION",
+            "Opinion",
             "Opinion: standard speed is enough, and fast mode bills a premium for the same work. Official: on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in /synthetic/home/.claude/settings.json:fastMode.",
         );
-        assert!(
-            text.contains("\nSources: https://code.claude.com/docs/en/fast-mode#requirements\n")
-        );
+        // Sources cite the guidance the evidence quotes, so only details list them.
+        assert!(text.contains("\nSources: https://code.claude.com/docs/en/fast-mode#requirements"));
+        assert!(!plain.contains("Sources:"));
         // Pieces no longer sent and those without a verdict get no line of their own.
-        assert!(!text.contains("Retired") && !text.contains("Skill list framing"));
-        // The changes list each edit after the report, in report order.
-        let listed = changes(&report, None);
+        assert!(!plain.contains("Retired") && !plain.contains("Skill list framing"));
+        // The walk offers the same changes in the list's order: biggest saving first.
+        let listed = changes(&report);
         assert!(!text.contains("Changes to make"));
         let edits: Vec<&str> = listed
             .lines()
@@ -5560,12 +5972,12 @@ mod tests {
         assert_eq!(
             edits,
             [
-                r#""promptCacheTtl": "1h""#,
-                r#""enableArtifact": false"#,
-                r#""skillOverrides": {"example": "user-invocable-only"}"#,
-                r#""syncClaudeAiSkills": false"#,
-                r#""permissions": {"deny": ["mcp__docs"]} (added to the list)"#,
                 r#""autoMemoryEnabled": false"#,
+                r#""enableArtifact": false"#,
+                r#""syncClaudeAiSkills": false"#,
+                r#""promptCacheTtl": "1h""#,
+                r#""skillOverrides": {"example": "user-invocable-only"}"#,
+                r#""permissions": {"deny": ["mcp__docs"]} (added to the list)"#,
             ],
             "{listed}"
         );
@@ -5611,7 +6023,7 @@ mod tests {
                 compaction_check(window)
             },
         ]);
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         assert!(summary.contains("\nDollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.\n"), "{summary}");
         let rows = report_lines(&summary);
         let evidence = |head: &str| {
@@ -5651,8 +6063,8 @@ mod tests {
         assert!(codex_window[0].contains(" Official: ChatGPT credits charge cache writes as ordinary input, below the API write rate priced here on GPT-5.6 and later. Set in "));
         // No Claude window carries the ChatGPT rule.
         assert_eq!(
-            summary
-                .matches("ChatGPT credits charge cache writes")
+            rows.iter()
+                .filter(|r| r.evidence.contains("ChatGPT credits charge cache writes"))
                 .count(),
             1
         );
@@ -5671,7 +6083,10 @@ mod tests {
         }
         // Details give each rule its own field, with its source.
         let details = text(&report, None, true);
-        assert!(details.contains(&format!("\n{PRICES_MEAN}\n")), "{details}");
+        assert!(
+            details.contains(&format!("\n{PRICES_MEAN} Nothing was changed.\n")),
+            "{details}"
+        );
         assert!(details.contains("\n  Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
         assert!(!details.contains("subscription"));
         assert!(!summary.contains("subscription"));
@@ -5826,7 +6241,7 @@ mod tests {
                 now: NOV1 + DAY_MS,
             });
             report.checks = checks.into_iter().map(CheckResult::Effort).collect();
-            let line = report_line(&text(&report, None, false), "Main-session effort");
+            let line = report_line(&text(&report, None, true), "Main-session effort");
             let fix = fixes(&report, false).into_iter().next();
             (line, fix)
         };
@@ -5858,7 +6273,7 @@ mod tests {
         let (row, fix) = line(Harness::Claude, control("claude-opus-5-5", "max", &owner));
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str()),
-            ("OFFICIAL", "change")
+            ("Official", "change")
         );
         assert!(row.head.contains("max -> xhigh"), "{}", row.head);
         assert!(row.evidence.contains("prone to overthinking"));
@@ -5890,7 +6305,7 @@ mod tests {
         );
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str()),
-            ("OPINION", "consider")
+            ("Opinion", "consider")
         );
         let fix = fix.unwrap();
         assert!(fix.suggested && fix.value == "low -> medium", "{fix:?}");
@@ -5903,7 +6318,7 @@ mod tests {
         let (row, fix) = line(Harness::Claude, control("claude-opus-5-5", "xhigh", &owner));
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str()),
-            ("OFFICIAL", "info")
+            ("Official", "info")
         );
         assert!(row.evidence.contains("test the next model up"));
         assert!(fix.is_none());
@@ -5925,14 +6340,14 @@ mod tests {
         );
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str()),
-            ("OPINION", "change")
+            ("Opinion", "change")
         );
         assert!(row.evidence.contains("Official: OpenAI's reasoning guide"));
         assert!(!row.evidence.contains("Enterprise"));
         let (row, _) = line(Harness::Codex, control("gpt-6.1-sol", "xhigh", toml));
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str()),
-            ("OFFICIAL", "info")
+            ("Official", "info")
         );
         // A level the guide does not cover says so instead of borrowing another level's advice.
         let (row, fix) = line(Harness::Codex, control("gpt-6.1-sol", "ultra", toml));
@@ -6042,7 +6457,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_blocks_are_covered_by_a_server_block() {
+    fn tool_blocks_are_covered_by_a_server_block_which_leaves_them_no_line() {
         let mut report = synthetic();
         report.checks.clear();
         report.scan.profiles[0].harness = Harness::Codex;
@@ -6082,28 +6497,34 @@ mod tests {
             Some(0),
         ));
         report.context = vec![server];
-        let rendered = text(&report, None, false);
+        let rendered = text(&report, None, true);
         let line = report_line(&rendered, "MCP tool mcp__docs__write");
         assert_eq!(
             (line.mark.as_str(), line.head.as_str()),
-            ("change", "MCP tool mcp__docs__write on -> off costs $5")
+            (
+                "change",
+                "MCP tool mcp__docs__write on -> off saves $5/mo <1%"
+            )
         );
         assert!(line.evidence.contains("Included in its server's cost."));
-        let patch = changes(&report, None);
+        assert_eq!(
+            line.setting,
+            r#"mcp_servers.docs.disabled_tools = ["write"] (added to the list) in /synthetic/.codex/config.toml"#
+        );
+        let patch = changes(&report);
         assert!(patch.contains("disabled_tools = [\"write\"]"));
         assert!(!patch.contains("enabled = false"));
-        for details in [false, true] {
-            let rendered = text(&report, None, details);
-            assert_eq!(rendered.matches("Exposure:").count(), 1);
-            if details {
-                assert!(rendered.contains("1 recommended change"));
-                assert!(!rendered.contains("Available checks favor current settings"));
-                assert!(
-                    rendered.find("MCP server docs:").unwrap()
-                        < rendered.find("Exposure:").unwrap()
-                );
-            }
-        }
+        // The server's exposure note is evidence: once in its line's evidence and once in
+        // its card under details, and not at all by default.
+        assert!(!text(&report, None, false).contains("Exposure:"));
+        let (lines, cards) = rendered
+            .split_once("\nEVIDENCE\n")
+            .expect("details have cards");
+        assert_eq!(lines.matches("Exposure:").count(), 1);
+        assert_eq!(cards.matches("Exposure:").count(), 1);
+        assert!(lines.contains("\n1 change recommended.\n"));
+        assert!(!rendered.contains("Available checks favor current settings"));
+        assert!(cards.find("MCP server docs:").unwrap() < cards.find("Exposure:").unwrap());
 
         let mut conditional = report.clone();
         let server = &mut conditional.context[0];
@@ -6117,18 +6538,21 @@ mod tests {
         for row in &mut server.details {
             mark_conditional(row);
         }
-        let rendered = text(&conditional, None, false);
+        let rendered = text(&conditional, None, true);
         let advisory: Vec<_> = report_lines(&rendered)
             .into_iter()
             .filter(|r| r.mark == "unknown")
             .collect();
-        assert_eq!(advisory[0].head, "MCP server docs on costs $20");
-        assert_eq!(advisory[1].head, "MCP tool mcp__docs__write on costs $5");
+        assert_eq!(advisory[0].head, "MCP server docs on costs $20 1%");
+        assert_eq!(
+            advisory[1].head,
+            "MCP tool mcp__docs__write on costs $5 <1%"
+        );
         assert!(advisory[..2].iter().all(|r| {
             r.evidence
                 .contains("tier sensitivity could reverse keep or off")
         }));
-        assert!(changes(&conditional, None).is_empty());
+        assert!(changes(&conditional).is_empty());
         let detailed = text(&conditional, None, true);
         assert_eq!(
             detailed.matches("conditional tool-tier estimate").count(),
@@ -6136,21 +6560,22 @@ mod tests {
         );
 
         report.context[0].verdict = Some(Verdict::Off);
-        let rendered = text(&report, None, false);
-        let patch = changes(&report, None);
+        let rendered = text(&report, None, true);
+        let patch = changes(&report);
         assert!(patch.contains("enabled = false"));
         assert!(!patch.contains("disabled_tools"));
-        // The server's off covers its tools, which stay listed without a verdict.
-        let covered = report_line(&rendered, "MCP tool mcp__docs__write");
-        assert_eq!(
-            (covered.mark.as_str(), covered.head.as_str()),
-            ("info", "MCP tool mcp__docs__write costs $5")
-        );
+        // The server's off covers its tools, so they have no line of their own; details
+        // still list each in the server's breakdown.
+        let (lines, cards) = rendered
+            .split_once("\nEVIDENCE\n")
+            .expect("details have cards");
         assert!(
-            covered
-                .evidence
-                .contains("Turning off its server covers it.")
+            report_lines(lines)
+                .iter()
+                .all(|r| !r.head.starts_with("MCP tool mcp__")),
+            "{lines}"
         );
+        assert!(cards.contains("MCP tool mcp__docs__write (included in server total)"));
         assert!(!rendered.contains("Not enough evidence"));
         assert!(rendered.contains("Some feature costs are scaled from their priced requests"));
         let detailed = text(&report, None, true);
@@ -6168,7 +6593,7 @@ mod tests {
     }
 
     #[test]
-    fn tools_without_their_own_switch_keep_a_line() {
+    fn tools_without_their_own_switch_are_part_of_their_servers_line() {
         let mut report = synthetic();
         report.checks.clear();
         let mut server = context_piece(
@@ -6205,17 +6630,20 @@ mod tests {
         conditional.harness = Harness::Codex;
         server.details.push(conditional);
         report.context = vec![server];
-        let rendered = text(&report, None, false);
-        let read = report_line(&rendered, "MCP tool mcp__docs__read");
-        assert_eq!(
-            (read.mark.as_str(), read.head.as_str()),
-            ("info", "MCP tool mcp__docs__read costs $5")
-        );
-        assert!(read.evidence.contains("Included in its server's cost."));
+        let rendered = text(&report, None, true);
+        // A tool with no switch of its own is counted in its server's line, and only the
+        // details' breakdown names it.
+        let (lines, cards) = rendered
+            .split_once("\nEVIDENCE\n")
+            .expect("details have cards");
         assert!(
-            read.evidence
-                .contains("raw tool identity or owning server is unresolved")
+            report_lines(lines)
+                .iter()
+                .all(|r| !r.head.starts_with("MCP tool mcp__docs__read")),
+            "{lines}"
         );
+        assert!(cards.contains("MCP tool mcp__docs__read (included in server total)"));
+        assert!(cards.contains("No per-tool block is generated"));
         let write = report_line(&rendered, "MCP tool mcp__docs__write");
         assert_eq!(write.mark, "unknown");
         assert!(write.evidence.contains("Included in its server's cost."));
@@ -6267,8 +6695,21 @@ mod tests {
             None,
             None,
         ));
-        for details in [false, true] {
-            let rendered = text(&report, None, details);
+        // Guidance is evidence: none by default, and once in the lines' evidence and once in
+        // the cards under details.
+        let plain = text(&report, None, false);
+        assert!(!plain.contains("Claude MCP loading:"));
+        assert!(!plain.contains("mcpServers.docs.alwaysLoad"));
+        let details = text(&report, None, true);
+        let (lines, cards) = details
+            .split_once("\nEVIDENCE\n")
+            .expect("details have cards");
+        assert!(
+            report_line(lines, "ChatGPT apps")
+                .evidence
+                .contains("These transcripts do not establish that id mapping")
+        );
+        for rendered in [lines, cards] {
             assert_eq!(rendered.matches("Claude MCP loading:").count(), 1);
             assert_eq!(rendered.matches("Claude tool search needs").count(), 1);
             assert_eq!(
@@ -6289,13 +6730,6 @@ mod tests {
             );
             assert!(!rendered.contains("Instruction budget unknown"));
             assert!(!rendered.contains("raw tool identity or owning server is unresolved"));
-            if !details {
-                assert!(
-                    report_line(&rendered, "ChatGPT apps")
-                        .evidence
-                        .contains("These transcripts do not establish that id mapping")
-                );
-            }
         }
     }
 
@@ -6308,6 +6742,12 @@ mod tests {
             home: None,
             profiles: IndexMap::default(),
             removed: Default::default(),
+            spend: Spend {
+                usd: 0.0,
+                complete: true,
+                since: None,
+                until: 0,
+            },
         };
         let file = |harness, name: &str, bytes, lines| {
             let mut c = context_piece(ContextKind::Instructions, name, None, Some(1.0), None);
@@ -6464,18 +6904,22 @@ mod tests {
             output(Harness::Codex, "codex", "exec", 50.0, 112_000),
             apps,
         ]);
-        let text = text(&report, None, false);
+        let text = text(&report, None, true);
         let line = |head: &str| report_line(&text, head);
         assert_eq!(
             line("ChatGPT apps").head,
-            "ChatGPT apps on -> off costs $30 [/synthetic/.codex/config.toml]"
+            "ChatGPT apps on -> off saves $30/mo 2%"
+        );
+        assert!(
+            line("ChatGPT apps").setting == "[/synthetic/.codex/config.toml] features.apps = false",
+            "{text}"
         );
         assert!(
             line("ChatGPT apps")
                 .evidence
-                .starts_with("Never used. Turn off: features.apps = false. Per-app controls:")
+                .starts_with("Never used; it cost $30 over the window. Turn off: features.apps = false. Per-app controls:")
         );
-        // One line per cap setting, capped ones first, then everything else together.
+        // One line per cap setting, with tools no cap governs together, ranked by cost.
         let outputs: Vec<(String, String, String)> = report_lines(&text)
             .into_iter()
             .filter(|r| r.head.contains(" output "))
@@ -6487,37 +6931,41 @@ mod tests {
             [
                 (
                     "unknown".to_string(),
-                    "Bash output unset costs $20 [/synthetic/home/.claude/settings.json]"
-                        .to_string(),
-                    format!(
-                        "{cap} Its largest result was 30,500 characters. bashOutputMaxChars is unset, so about 30,000 characters."
-                    )
-                ),
-                (
-                    "unknown".into(),
-                    "MCP output 50,000 tokens costs $6 [/synthetic/home/.claude/settings.json]"
-                        .into(),
-                    format!(
-                        "{cap} Its largest result was 900 characters. MAX_MCP_OUTPUT_TOKENS is 50,000 tokens."
-                    )
-                ),
-                (
-                    "unknown".into(),
-                    "Tool output unset costs $50 [/synthetic/.codex/config.toml]".into(),
+                    "Tool output unset costs $50 3%".to_string(),
                     format!(
                         "{cap} Its largest result was 112,000 characters. tool_output_token_limit is unset."
                     )
                 ),
                 (
+                    "unknown".into(),
+                    "Bash output unset costs $20 1%".into(),
+                    format!(
+                        "{cap} Its largest result was 30,500 characters. bashOutputMaxChars is unset, so about 30,000 characters."
+                    )
+                ),
+                (
                     "info".into(),
-                    "Other tool output costs $8 [/synthetic/home/.claude/settings.json]".into(),
+                    "Other tool output costs $8 1%".into(),
                     "From Read. Its largest result was 2,000 characters. No cap is checked for it."
                         .into()
                 ),
+                (
+                    "unknown".into(),
+                    "MCP output 50,000 tokens costs $6 <1%".into(),
+                    format!(
+                        "{cap} Its largest result was 900 characters. MAX_MCP_OUTPUT_TOKENS is 50,000 tokens."
+                    )
+                ),
             ]
         );
+        // Each cap line names its setting.
+        assert_eq!(
+            report_line(&text, "Bash output").setting,
+            "[/synthetic/home/.claude/settings.json] bashOutputMaxChars"
+        );
+
         // Codex switches go to config.toml as TOML.
-        let snippet = changes(&report, None);
+        let snippet = changes(&report);
         assert!(
             snippet.contains("In /synthetic/.codex/config.toml:\n      features.apps = false\n"),
             "{snippet}"
@@ -6583,9 +7031,31 @@ mod tests {
     #[test]
     fn color_carries_the_verdict_and_words_carry_it_without_color() {
         let report = synthetic();
-        // Details only add styles to the same words.
+        // The words lines carry, without a line's leading verdict word or dot. Color indents
+        // continuation lines less, so lines wrap differently and only the words compare.
+        let words = |text: &str| {
+            text.lines()
+                .filter(|l| !l.starts_with("Red: change."))
+                .flat_map(|l| {
+                    let l = l.replace('→', "->");
+                    let l = ["● ", "○ ", "* ", "o "]
+                        .iter()
+                        .find_map(|d| l.strip_prefix(d))
+                        .unwrap_or(&l);
+                    ["change", "consider", "keep", "unknown", "info"]
+                        .iter()
+                        .find_map(|w| l.strip_prefix(w).filter(|r| r.starts_with(' ')))
+                        .unwrap_or(l)
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        // Details color their lines as the summary does, and only add styles to the same
+        // words in the evidence cards.
         let plain = text(&report, Some(120), true);
-        let styled = format_report(
+        let styled = rendered(
             &report,
             ReportOptions {
                 width: Some(120),
@@ -6597,10 +7067,14 @@ mod tests {
         for style in ["1", "31", "33", "32"] {
             assert!(styled.contains(&format!("\x1b[{style}m")), "{style}");
         }
-        assert_eq!(strip_ansi(&styled), plain);
+        let styled = strip_ansi(&styled);
+        let (styled_lines, styled_cards) = styled.split_once("\nEVIDENCE\n").unwrap();
+        let (plain_lines, plain_cards) = plain.split_once("\nEVIDENCE\n").unwrap();
+        assert_eq!(styled_cards, plain_cards);
+        assert_eq!(words(styled_lines), words(plain_lines));
         // The summary's color replaces each verdict word with a dot in that color,
         // dim and hollow when there is no verdict, and adds a legend.
-        let styled = format_report(
+        let styled = rendered(
             &report,
             ReportOptions {
                 color: true,
@@ -6624,7 +7098,7 @@ mod tests {
         }
         assert!(styled.contains("\x1b[31mRed: change.\x1b[0m"));
         // The legend wraps between its parts on a narrow terminal.
-        let narrow = format_report(
+        let narrow = rendered(
             &report,
             ReportOptions {
                 width: Some(40),
@@ -6639,22 +7113,6 @@ mod tests {
             "{legend:?}"
         );
         assert!(legend[1].contains("Dim: no verdict."), "{legend:?}");
-        let words = |text: &str| {
-            text.lines()
-                .filter(|l| !l.starts_with("Red: change."))
-                .map(|l| {
-                    let l = l.replace('→', "->");
-                    let l = l.trim_start_matches(['●', '○']).trim_start();
-                    ["change", "consider", "keep", "unknown", "info"]
-                        .iter()
-                        .find_map(|w| l.strip_prefix(w).filter(|r| r.starts_with(' ')))
-                        .unwrap_or(l)
-                        .split_whitespace()
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                })
-                .collect::<Vec<_>>()
-        };
         assert_eq!(words(&strip_ansi(&styled)), words(&plain));
         assert_eq!(
             text(&report, None, true)
@@ -6711,7 +7169,7 @@ mod tests {
             model_setting: "model: in /synthetic/.claude/agents/Explore.md".into(),
             effort_setting: "effort: in /synthetic/.claude/agents/Explore.md".into(),
         });
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         let first = |text: &str| {
             text.lines()
                 .find(|l| l.contains("recommended"))
@@ -6721,7 +7179,7 @@ mod tests {
         let row = report_line(&summary, "Explore subagent");
         assert_eq!(
             (row.mark.as_str(), row.head.as_str()),
-            ("info", "Explore subagent costs at least $2")
+            ("info", "Explore subagent costs at least $2 <1%")
         );
         let line = row.evidence;
         for part in [
@@ -6734,19 +7192,12 @@ mod tests {
             assert!(line.contains(part), "{part} in {line}");
         }
         assert!(summary.contains(SUBAGENT_EVIDENCE));
-        let official = report_lines(&summary)
-            .into_iter()
-            .find(|r| r.claim == "OFFICIAL" && r.head.starts_with("Explore subagent"))
-            .expect("an Official Explore line");
-        assert_eq!(official.mark, "info");
-        assert!(official.evidence.contains(
+        // The model guide is Official evidence beside the measured cost, on the same line.
+        let (_, official) = line.split_once(" Official: ").expect("Official guidance");
+        assert!(official.contains(
             "search files, read logs or summarize on Haiku or Sonnet at the model's default effort"
         ));
-        assert!(
-            official
-                .evidence
-                .contains("user agent named Explore with model: haiku")
-        );
+        assert!(official.contains("user agent named Explore with model: haiku"));
         assert!(
             summary
                 .lines()
@@ -6800,7 +7251,7 @@ mod tests {
                 },
             ],
         });
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         let first = |text: &str| {
             text.lines()
                 .find(|l| l.contains("recommended"))
@@ -6810,7 +7261,11 @@ mod tests {
         let row = report_line(&summary, "Fable weekly use");
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str(), row.head.as_str()),
-            ("OFFICIAL", "info", "Fable weekly use costs at least $415")
+            (
+                "Official",
+                "info",
+                "Fable weekly use costs at least $415 28%"
+            )
         );
         for part in [
             "5 Fable requests at API prices, per 7 days back from this report: $412 (4 requests, to 2026-12-01), at least $3 (1 request, 3 days to 2026-11-24).",
@@ -6849,7 +7304,7 @@ mod tests {
         report.fable[0].unrecorded = 0;
         report.fable[0].shared = 0;
         report.fable[0].weeks.clear();
-        let row = report_line(&text(&report, None, false), "Fable weekly use");
+        let row = report_line(&text(&report, None, true), "Fable weekly use");
         assert_eq!(row.head, "Fable weekly use");
         assert!(
             row.evidence
@@ -6912,13 +7367,12 @@ mod tests {
         report.scan.coverage = ScanCoverage::default();
         report.checks.clear();
         report.context.clear();
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         assert!(summary.contains("No requests found since 2026-11-01 in:"));
         assert!(summary.contains("No transcript histories found."));
-        assert!(summary.contains("No setting changes recommended."));
-        let details = text(&report, None, true);
-        assert!(details.contains("No applicable setting changes"));
-        assert!(!details.contains("What each piece of context costs"));
+        assert!(summary.contains("No changes recommended or worth considering."));
+        assert!(!summary.contains("CHANGES") && !summary.contains("EVERYTHING ELSE"));
+        assert!(!summary.contains("What each piece of context costs"));
     }
 
     /// The report the CLI builds from the synthetic Claude fixture with an explicit 5m TTL.
@@ -6969,18 +7423,18 @@ mod tests {
             ttl.base.since,
             ttl.base.until,
         );
-        let summary = text(&report, None, false);
+        let summary = text(&report, None, true);
         let line = report_line(&summary, "Main-agent prompt cache TTL");
         assert_eq!(line.mark, "change");
         assert!(
             line.head.starts_with(&format!(
-                "Main-agent prompt cache TTL unset -> {winner} saves up to {gap}"
+                "Main-agent prompt cache TTL unset -> {winner} saves up to {gap}/mo"
             )),
             "{summary}"
         );
         assert!(
             line.evidence.contains(&format!(
-                "; {winner} costs {gap} less, saved whenever the unset default would be {other}, and setting it keeps {winner} however usage is paid. Official: while it is unset,"
+                "; {winner} costs {gap} less every 30 days, saved whenever the unset default would be {other}, and setting it keeps {winner} however usage is paid. Official: while it is unset,"
             )),
             "{summary}"
         );
@@ -7002,6 +7456,135 @@ mod tests {
                     append: false,
                 }],
             })
+        );
+    }
+
+    #[test]
+    fn an_undecided_ttl_gives_its_gap_relative_to_the_cost() {
+        let mut report = synthetic_report();
+        let ttl = ttl_mut(&mut report);
+        ttl.base.action = Action::Advisory;
+        ttl.base.recommended = None;
+        ttl.base.coverage = Some(Coverage {
+            priced: 93,
+            total: 100,
+        });
+        // A gap that reads as large in dollars but is small against what the requests cost.
+        ttl.one_hour_savings_usd = 1_177.0;
+        ttl.cost.five_minutes.known_usd = Usd::from_f64(294_250.0);
+        let summary = text(&report, None, true);
+        let line = report_line(&summary, "Main-agent prompt cache TTL");
+        assert_eq!(line.mark, "unknown", "{summary}");
+        assert!(
+            line.evidence.contains(
+                "Not enough evidence: 1h cost 0.4% less than 5m ($1,177 over 1 day) on the 93% of requests that could be priced, too little to rule out the 7 that could not."
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn an_unowned_t3_check_says_why_in_a_sentence() {
+        let mut report = synthetic_report();
+        let ttl = ttl_mut(&mut report);
+        ttl.base.action = Action::Advisory;
+        ttl.base.recommended = None;
+        ttl.base.uncertainty.push(crate::t3::UNOWNED.into());
+        let summary = text(&report, None, true);
+        let line = report_line(&summary, "Main-agent prompt cache TTL");
+        assert!(
+            line.evidence.starts_with(
+                "Not enough evidence: the T3 instance is disabled or the file that owns this setting for it is unresolved, so its past costs do not establish a setting to change."
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn a_cost_is_a_share_of_the_host_total_and_a_saving_of_its_monthly_rate() {
+        // $300 over a 30-day host window: a profile that spent $10 in one day of it is 3%,
+        // however short its own history, while $10 every 30 days is 3% of the rate.
+        let spend = Spend {
+            usd: 300.0,
+            complete: true,
+            since: Some(0),
+            until: 30 * DAY as Millis,
+        };
+        assert_eq!(spend.share(10.0), Some(10.0 / 300.0));
+        assert_eq!(spend.of_month(10.0), Some(10.0 / 300.0));
+        let week = Spend {
+            until: 15 * DAY as Millis,
+            ..spend
+        };
+        assert_eq!(week.share(10.0), Some(10.0 / 300.0));
+        assert_eq!(week.of_month(10.0), Some(10.0 / 600.0));
+        let none = Spend { usd: 0.0, ..spend };
+        assert_eq!((none.share(1.0), none.of_month(1.0)), (None, None));
+    }
+
+    #[test]
+    fn percents_of_partly_priced_spend_say_their_base_is_the_priced_part() {
+        let mut report = synthetic_report();
+        let priced = text(&report, None, false);
+        assert!(priced.contains("each percent is of this host's spend over the window, $"));
+        for group in &mut report.historical {
+            group.cost.total_usd = None;
+        }
+        let summary = text(&report, None, false);
+        assert!(
+            summary.contains(" this host's priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller."),
+            "{summary}"
+        );
+        assert!(!summary.contains("each percent is of this host's spend"));
+    }
+
+    #[test]
+    fn changes_rank_by_saving_and_the_rest_by_cost() {
+        let line = |name: &str, mark, verb: &'static str, share: f64| {
+            let mut row = Row::new(Claim::Measured, mark, name.into());
+            row.amount = Some((verb, String::new()));
+            row.share = Some(share);
+            row
+        };
+        let mut rows = [
+            // A kept TTL's comparison saving is not what it costs.
+            line("kept TTL", Mark::Keep, "saves", 0.9),
+            line("cheap feature", Mark::Keep, "costs", 0.1),
+            line("dear feature", Mark::Keep, "costs", 0.5),
+            // A change shown only by its cost has no measured saving.
+            line("catalog skill", Mark::Change, "costs", 0.8),
+            line("small change", Mark::Consider, "saves", 0.2),
+            line("big change", Mark::Change, "saves up to", 0.4),
+        ];
+        rows.sort_by(by_share);
+        let order: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "dear feature",
+                "big change",
+                "small change",
+                "cheap feature",
+                "kept TTL",
+                "catalog skill"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_headline_counts_both_kinds_of_change() {
+        assert_eq!(
+            headline(0, 0),
+            "No changes recommended or worth considering."
+        );
+        assert_eq!(
+            headline(0, 14),
+            "No changes recommended; 14 worth considering."
+        );
+        assert_eq!(headline(1, 0), "1 change recommended.");
+        assert_eq!(
+            headline(2, 1),
+            "2 changes recommended and 1 worth considering."
         );
     }
 
@@ -7229,8 +7812,8 @@ mod tests {
             text.matches("Identical fixed costs remain unknown").count(),
             unknown_fixed
         );
-        assert!(format_report(&report, ReportOptions::default()).contains("--details"));
-        let styled = format_report(
+        assert!(rendered(&report, ReportOptions::default()).contains("--details"));
+        let styled = rendered(
             &report,
             ReportOptions {
                 details: true,
@@ -7240,7 +7823,9 @@ mod tests {
             },
         );
         assert!(styled.contains("\x1b["));
-        assert_eq!(strip_ansi(&styled), text);
+        // Color swaps each line's verdict word for a dot; the cards keep every word.
+        let cards = |text: &str| text.split_once("\nEVIDENCE\n").unwrap().1.to_string();
+        assert_eq!(cards(&strip_ansi(&styled)), cards(&text));
     }
 
     #[test]
@@ -7293,7 +7878,7 @@ mod tests {
             "recorded working directory no longer exists; current ownership unresolved".into();
         report.checks.push(CheckResult::Speed(project));
         report.checks.push(CheckResult::Speed(vanished));
-        let text = text(&report, None, false);
+        let text = text(&report, None, true);
         let fast: Vec<(String, String)> = report_lines(&text)
             .into_iter()
             .filter(|r| r.head.starts_with("Fast mode"))
@@ -7312,7 +7897,12 @@ mod tests {
                 .contains("synthetic project override ownership is unresolved"),
             "{text}"
         );
-        assert!(!text.contains("working directory no longer exists"));
+        // The vanished directory has no line; only the details' cards keep every check.
+        let (lines, _) = text.split_once("\nEVIDENCE\n").expect("details have cards");
+        assert!(
+            !lines.contains("working directory no longer exists"),
+            "{lines}"
+        );
     }
 
     #[test]
@@ -7328,10 +7918,12 @@ mod tests {
         check.base.until = Some(since + 3_600_000);
         check.base.savings_usd = Some(1.0);
         check.base.monthly_savings_usd = Some(720.0);
-        assert_eq!(
-            report_line(&text(&report, None, false), "Main-agent prompt cache TTL").head,
-            "Main-agent prompt cache TTL 5m -> 1h saves $720"
-        );
+        // A percent of so short a window can be absurd; only its presence is checked.
+        let head = report_line(&text(&report, None, false), "Main-agent prompt cache TTL").head;
+        let percent = head
+            .strip_prefix("Main-agent prompt cache TTL 5m -> 1h saves $720/mo ")
+            .unwrap_or_else(|| panic!("{head}"));
+        assert!(percent.ends_with('%'), "{head}");
 
         let name = "google-drive-comments";
         report.checks.clear();
@@ -7365,27 +7957,32 @@ mod tests {
             verdict: Some(Verdict::Off),
         };
         report.context = vec![skill.clone()];
-        // An edit is never wrapped, so it can be copied at any width.
-        let narrow = changes(&report, Some(40));
+        // A change names its whole edit and file, so it can be copied from redirected output.
+        let setting =
+            report_line(&text(&report, None, false), "Skill google-drive-comments").setting;
+        let edit = format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}} in "#);
+        let file = std::path::Path::new(&setting[edit.len().min(setting.len())..]);
+        assert!(setting.starts_with(&edit), "{setting}");
+        assert!(file.ends_with(".claude/settings.json"), "{setting}");
+        // An offered change's saving scales to 30 days, however short the window, and its
+        // evidence keeps the window's total.
+        let line = report_line(&text(&report, None, true), "Skill google-drive-comments");
+        let percent = line
+            .head
+            .strip_prefix("Skill google-drive-comments on -> typed only saves $150/mo ")
+            .unwrap_or_else(|| panic!("{}", line.head));
+        assert!(percent.ends_with('%'), "{}", line.head);
+        assert!(line.evidence.starts_with("The model never used it"));
         assert!(
-            narrow
-                .lines()
-                .any(|l| l.trim()
-                    == format!(r#""skillOverrides": {{"{name}": "user-invocable-only"}}"#)),
-            "{narrow}"
+            line.evidence.contains("it cost $5 over the window"),
+            "{}",
+            line.evidence
         );
-        // Feature and context costs are totals over the window, however short.
-        let line = report_line(&text(&report, None, false), "Skill google-drive-comments");
-        assert_eq!(
-            line.head,
-            "Skill google-drive-comments on -> typed only costs $5"
-        );
-        assert!(line.evidence.starts_with("The model never used it."));
         // First sent during the window, so the window cannot rule out a use.
         let mut late = report.clone();
         late.context[0].verdict = Some(Verdict::Consider);
-        assert!(text(&late, None, false).contains(
-            "The model never used it. It was first sent during the window, so the window cannot rule out a use. Hide it from the model:"
+        assert!(text(&late, None, true).contains(
+            "The model never used it; it cost $5 over the window. It was first sent during the window, so the window cannot rule out a use. Hide it from the model:"
         ));
         late.scan.snapshots[0].skipped_lines = 1;
         late.scan.snapshots[0].profiles = late.context[0].profiles.clone();
@@ -7393,13 +7990,13 @@ mod tests {
         late.scan.snapshots[0]
             .unreadable
             .observe(format!(r#"{{"skill":"{name}"}}"#).as_bytes());
-        assert!(text(&late, None, false).contains(
-            "The model never used it. An unreadable transcript line names it, so it may have been used. Hide it from the model:"
+        assert!(text(&late, None, true).contains(
+            "The model never used it; it cost $5 over the window. An unreadable transcript line names it, so it may have been used. Hide it from the model:"
         ));
         late.scan.snapshots[0].unreadable = Default::default();
         late.scan.snapshots[0].unreadable.unmatched_results = 1;
-        assert!(text(&late, None, false).contains(
-            "The model never used it. A cut transcript record could hold a use: a tool result there has no recorded call. Hide it from the model:"
+        assert!(text(&late, None, true).contains(
+            "The model never used it; it cost $5 over the window. A cut transcript record could hold a use: a tool result there has no recorded call. Hide it from the model:"
         ));
         // A red row beside an unreadable line states the one miss it accepts, in `--details`.
         let mut red = late.clone();
@@ -7420,12 +8017,15 @@ mod tests {
             verdict: None,
             ..skill
         });
-        assert_eq!(
-            report_line(&text(&report, None, false), "System prompt").head,
-            "System prompt and core tools costs $1"
+        // A cost without a change stays the window's total.
+        let head = report_line(&text(&report, None, false), "System prompt").head;
+        assert!(
+            head.strip_prefix("System prompt and core tools costs $1 ")
+                .is_some_and(|p| p.ends_with('%')),
+            "{head}"
         );
         let details = text(&report, Some(200), true);
-        assert!(details.contains("1 recommended change"));
+        assert!(details.contains("\n1 change recommended.\n"), "{details}");
         assert!(!details.contains("No applicable"));
     }
 }

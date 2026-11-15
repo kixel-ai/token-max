@@ -236,8 +236,8 @@ and Codex's files, a T3 instance's own settings and each `--ssh` host's
 files stay separate rows (rejected: one row per feature across files, which
 would need two edits for one row). ✅ every dollar figure's percent is of
 the whole host's spend at API prices, and the walk keeps one running total
-(rejected: the profile's spend, the earlier pick in
-[the report quest](/quest/m0/report-length.md); the combined spend of the
+(rejected: the profile's spend, the earlier pick in the report quest,
+`quest/m0/report-length.md` in git history; the combined spend of the
 profiles a row covers). This amends "Resolve settings and recommendations
 per profile" above: settings and recommendations resolve per settings file,
 as [#114](https://github.com/kixel-ai/token-max/pull/114) delivered.

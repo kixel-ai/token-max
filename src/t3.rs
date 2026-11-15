@@ -88,9 +88,12 @@ pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
         base.recommended = None;
         base.savings_usd = None;
         base.monthly_savings_usd = None;
-        base.uncertainty.push("T3 instance is disabled or its effective control ownership is unresolved; retained historical costs do not establish an active setting to change".into());
+        base.uncertainty.push(UNOWNED.into());
     }
 }
+
+/// Why a check of a T3 instance gives no verdict when the instance's settings owner is unknown.
+pub(crate) const UNOWNED: &str = "T3 instance is disabled or its effective control ownership is unresolved; retained historical costs do not establish an active setting to change";
 
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

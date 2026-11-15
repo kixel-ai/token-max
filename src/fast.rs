@@ -629,7 +629,7 @@ mod tests {
         use crate::prices::Catalog;
         use crate::reader::{ScanOptions, scan};
         use crate::replay::{AnalyzeOptions, analyze};
-        use crate::report::{ReportOptions, format_report};
+        use crate::report::{ReportOptions, rendered as format_report};
         use crate::test_support::{ClaudeUsage, Workspace, claude_usage, make_request, prices};
         use serde_json::{Value, json};
         use std::path::Path;
@@ -828,7 +828,7 @@ mod tests {
             assert!(
                 crate::test_support::report_lines(&text)
                     .iter()
-                    .any(|l| l.claim == "OPINION" && l.head.starts_with("Fast mode "))
+                    .any(|l| l.claim == "Opinion" && l.head.starts_with("Fast mode "))
             );
             let details = format_report(
                 &report,

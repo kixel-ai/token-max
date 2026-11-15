@@ -299,43 +299,72 @@ pub fn make_t3_profile(id: &str, root: &str) -> Profile {
     p
 }
 
-/// One setting's two lines in a plain-text default report.
+/// One setting's line in a plain-text report, with its evidence under details.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReportLine {
-    /// The section's kind of claim: "MEASURED", "OFFICIAL" or "OPINION".
-    pub claim: String,
+    /// Whether it is listed among the changes, before everything else.
+    pub change: bool,
     /// The verdict word, such as "change".
     pub mark: String,
-    /// The heading line, with its column padding collapsed to single spaces.
+    /// The name, value, figure and percent, with column padding collapsed to single spaces.
     pub head: String,
+    /// The kind of claim: "Measured", "Official" or "Opinion".
+    pub claim: String,
+    /// The profile, when several were read, then the setting that changes it.
+    pub setting: String,
+    /// The line under it in a details report; empty otherwise.
     pub evidence: String,
 }
 
-/// The setting lines of a plain, unwrapped default report.
+/// Text with runs of spaces collapsed to one.
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The setting lines of a plain, unwrapped report, in order.
 pub fn report_lines(text: &str) -> Vec<ReportLine> {
-    let mut claim = String::new();
+    let mut group = None;
     let mut rows = vec![];
     let lines: Vec<&str> = text.lines().collect();
     for (i, line) in lines.iter().enumerate() {
-        if let Some((title, _)) = line.split_once("  ")
-            && ["MEASURED", "OFFICIAL", "OPINION"].contains(&title)
-        {
-            claim = title.into();
+        if line.starts_with("CHANGES  ") {
+            group = Some(true);
             continue;
+        }
+        if line.starts_with("EVERYTHING ELSE  ") {
+            group = Some(false);
+            continue;
+        }
+        // The evidence cards follow the lines.
+        if line.starts_with("EVIDENCE") {
+            break;
         }
         let word = line.split(' ').next().unwrap_or_default();
-        let evidence = lines.get(i + 1).and_then(|l| l.strip_prefix("         "));
-        if claim.is_empty()
-            || !["change", "consider", "keep", "unknown", "info"].contains(&word)
-            || line.len() < 9
-        {
+        let Some(change) = group else { continue };
+        if !["change", "consider", "keep", "unknown", "info"].contains(&word) || line.len() < 9 {
             continue;
         }
-        let Some(evidence) = evidence else { continue };
+        let rest = &line[9..];
+        let (head, claim, setting) = ["Measured", "Official", "Opinion"]
+            .iter()
+            .filter_map(|claim| {
+                let at = rest.find(&format!("  {claim}"))?;
+                let after = &rest[at + 2 + claim.len()..];
+                (after.is_empty() || after.starts_with("  ")).then_some((at, *claim, after))
+            })
+            .min_by_key(|(at, _, _)| *at)
+            .map(|(at, claim, after)| (&rest[..at], claim, after))
+            .unwrap_or_else(|| panic!("no claim in {line:?}"));
+        let evidence = lines
+            .get(i + 1)
+            .and_then(|l| l.strip_prefix("         "))
+            .unwrap_or_default();
         rows.push(ReportLine {
-            claim: claim.clone(),
+            change,
             mark: word.into(),
-            head: line[9..].split_whitespace().collect::<Vec<_>>().join(" "),
+            head: collapse(head),
+            claim: claim.into(),
+            setting: collapse(setting),
             evidence: evidence.into(),
         });
     }

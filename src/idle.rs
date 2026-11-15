@@ -3474,7 +3474,7 @@ mod tests {
     };
     use crate::reader::{ScanOptions, scan};
     use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
-    use crate::report::{ReportOptions, format_report};
+    use crate::report::{ReportOptions, rendered as format_report};
     use crate::test_support::{ClaudeUsage, Workspace, claude_usage, make_request, prices};
     use serde_json::json;
 
@@ -3883,7 +3883,13 @@ mod tests {
         );
         assert_eq!(c.base.recommended, None);
         assert_eq!(c.base.action, Action::Advisory);
-        let text = format_report(&report(s, 140.0), ReportOptions::default());
+        let text = format_report(
+            &report(s, 140.0),
+            ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
         assert!(
             !text.contains("Summarizing idle sessions cost less"),
             "{text}"
@@ -4306,7 +4312,13 @@ mod tests {
             let mut report = report(s, 201.0);
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
             report.checks[0] = CheckResult::Idle(c.check);
-            let text = format_report(&report, ReportOptions::default());
+            let text = format_report(
+                &report,
+                ReportOptions {
+                    details: true,
+                    ..Default::default()
+                },
+            );
             assert!(text.contains("on and off cost the same"), "{text}");
         }
     }
@@ -5051,7 +5063,13 @@ mod tests {
             .checks
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
         report.checks.push(CheckResult::T3Idle(check.check));
-        let text = format_report(&report, ReportOptions::default());
+        let text = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
         let line = crate::test_support::report_line(&text, "T3 idle compaction").evidence;
         assert!(
             line.contains("changed cost per month: off $0, onReturn ")

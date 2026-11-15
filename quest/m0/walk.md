@@ -17,12 +17,13 @@ the ranked list to confirm (rejected: rank and page through `$PAGER`; a
 full-screen TUI). The walk explains why each change makes sense, which a
 one-line row cannot.
 
-Today `doctor` prints the whole report, then asks
-`Apply? [y]es, [n]o, [q]uit` for each change it can make, recommended ones
-first and then suggested ones, in report order, and writes every accepted
-edit once the last answer is in (`ask` and `write` in `src/doctor.rs`). This
-quest replaces that order, the report printed before the questions, and the
-write without a confirm:
+Today `doctor` prints the whole report, the ranked list below, then asks
+`Apply? [y]es, [n]o, [q]uit` for each change it can make in the list's order,
+biggest saving first, and writes every accepted edit once the last answer is
+in (`ask` and `write` in `src/doctor.rs`; `recommendations` in
+`src/report.rs` ranks them, and each list line names its fix by `Origin`).
+This quest replaces the report printed before the questions and the write
+without a confirm:
 
 - On a terminal, the walk comes first, after a headline counting the
   changes; the report follows it as the list below, not before it.
@@ -34,7 +35,7 @@ write without a confirm:
   measured (rejected: in the small "take all?" batch).
 - Each change shows its current and offered value, its saving per month in
   dollars and as a percent of the host's spend over the window (the
-  percent base [the report quest](/quest/m0/report-length.md) records), its
+  percent base the report's list already uses), its
   claim kind, and the stats behind it, such as the requests replayed, uses
   and cost per use, or the resume gaps a cache TTL replay counted, then the
   edit it would make.
@@ -60,7 +61,7 @@ write without a confirm:
   what to change, then A with a confirm write these changes"): print the
   ranked one-line list, the accepted changes first with their savings and
   the labeled total, then the declined changes, unselected, the steps to
-  take by hand, and every other row, as the report quest describes, and ask
+  take by hand, and every other row, ranked as the report ranks them, and ask
   once whether to write the accepted changes, naming each file. The y/n
   answers in the walk only select; nothing is written before that yes, and
   a no says nothing was written. No pager, since a question follows the
@@ -69,7 +70,3 @@ write without a confirm:
 
 Update `docs/reference.md`'s "Applying changes" and the README's walk
 excerpt and the paragraph on what `doctor` writes to match.
-
-## Required
-
-- [Cut doctor's default report to one line each](/quest/m0/report-length.md) - the ranked rows, percents and the list printed after the walk

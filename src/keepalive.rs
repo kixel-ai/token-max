@@ -1242,7 +1242,7 @@ mod tests {
         );
     }
 
-    /// The default report's keepalive line.
+    /// The keepalive line and its evidence, which only details show.
     fn line(scan: Scan, now: Millis) -> String {
         let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
             scan,
@@ -1252,13 +1252,13 @@ mod tests {
             max_cost_per_use_usd: 1.0,
         })
         .unwrap();
-        let text = crate::report::format_report(
+        let text = crate::report::rendered(
             &report,
             crate::report::ReportOptions {
                 width: None,
                 color: false,
                 unicode: false,
-                details: false,
+                details: true,
                 host: None,
             },
         );

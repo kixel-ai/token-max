@@ -1396,6 +1396,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_switch_is_one_edit_per_settings_file_its_line_covers() {
+        use crate::test_support::{make_profile, make_t3_profile};
+        let native = make_profile("native", "/synthetic/.claude");
+        let t3 = make_t3_profile("agent", "/synthetic/.claude");
+        let work = make_profile("work", "/synthetic/.claude-work");
+        let deny = || edit("permissions.deny", "Agent", true);
+        // Native Claude Code and a T3 instance sharing ~/.claude get one edit there.
+        let How::Edit(patch) = switch(&[&native, &t3], deny()) else {
+            panic!("one shared settings file is one edit")
+        };
+        assert_eq!(patch.file, "/synthetic/.claude/settings.json");
+        // Requests copied into two homes' histories could have come from either.
+        let How::Manual { step, reason } = switch(&[&native, &work], deny()) else {
+            panic!("two settings files are a step by hand")
+        };
+        assert!(
+            step.starts_with(
+                "in /synthetic/.claude/settings.json and /synthetic/.claude-work/settings.json, set "
+            ),
+            "{step}"
+        );
+        assert!(reason.contains("several profiles"), "{reason}");
+    }
+
     fn change(name: &str, file: &Path, harness: Harness, edits: Vec<Edit>) -> Fix {
         Fix {
             name: name.into(),

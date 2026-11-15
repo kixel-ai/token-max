@@ -872,6 +872,29 @@ impl<'a> Out<'a> {
             None => self.removed_name(id).unwrap_or_else(|| display(id)),
         }
     }
+    /// Every profile on a line, for evidence cards.
+    fn profile_names(&self, ids: &[String]) -> String {
+        ids.iter()
+            .map(|id| self.profile_name(id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    /// The settings files a piece of context's line covers, or its profiles when a file
+    /// cannot be resolved for each of them.
+    fn switch_files(&self, ids: &[String]) -> String {
+        let files: Option<IndexSet<String>> = ids
+            .iter()
+            .map(|id| {
+                let p = self.profiles.get(id.as_str())?;
+                let owner = format!("{}:", p.settings_file);
+                crate::rows::owner_file(p, &owner).map(|file| self.home(file))
+            })
+            .collect();
+        match files.filter(|f| !f.is_empty()) {
+            Some(files) => files.into_iter().collect::<Vec<_>>().join(", "),
+            None => self.profile_names(ids),
+        }
+    }
     /// A profile by harness and home-relative root, for the summary.
     fn short_profile(&self, id: &str) -> String {
         match self.profiles.get(id) {
@@ -1593,7 +1616,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         tier(action),
     );
     out.field("Claim", Claim::of(result).name());
-    out.field("Profile", &out.profile_name(r.profile));
+    if r.profiles.len() > 1 {
+        out.field("Profiles", &out.profile_names(r.profiles));
+    } else {
+        out.field("Profile", &out.profile_name(r.profile));
+    }
     out.field("Owner", &display(r.owner));
     out.field("Current", &setting(r.current));
     out.field("Suggested", &setting(r.recommended));
@@ -4494,12 +4521,35 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             ),
         };
         let profile = if many {
-            format!(" [{}]", out.profile_name(first))
+            format!(" [{}]", out.switch_files(&c.profiles))
         } else {
             String::new()
         };
         let text = format!("{}{profile}: {cost}{used}", piece_label(c, out));
         out.line(&text, 2, feature_tier(c, covered));
+        // A line several sources share is broken down by the profiles that recorded it.
+        if c.shares.len() > 1 {
+            for share in &c.shares {
+                let priced = if share.priced == 0 {
+                    "none priced".to_string()
+                } else {
+                    format!(
+                        "{} over {} priced",
+                        about(share.cost_usd.to_f64()),
+                        count(share.priced)
+                    )
+                };
+                out.line(
+                    &format!(
+                        "{}: {} requests, {priced}",
+                        out.profile_names(&share.profiles),
+                        count(share.requests)
+                    ),
+                    6,
+                    PLAIN,
+                );
+            }
+        }
         for note in context_guidance(c, &report.scan.profiles, &out.home(&c.name)) {
             out.line(&note, 6, PLAIN);
         }
@@ -4874,6 +4924,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            shares: vec![],
             profiles: vec!["profile".into()],
             kind,
             name: name.into(),
@@ -7226,6 +7277,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            shares: vec![],
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
             name: name.into(),

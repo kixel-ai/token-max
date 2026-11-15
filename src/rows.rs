@@ -105,24 +105,7 @@ pub fn window_owner(profile: &Profile) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::make_profile;
-
-    fn t3(id: &str, root: &str) -> Profile {
-        let mut p = make_profile(id, root);
-        p.t3 = Some(crate::model::T3Instance {
-            state: "/state".into(),
-            instance: id.into(),
-            enabled: true,
-            idle_mode: crate::model::T3IdleMode::OnReturn,
-            idle_owner: "/state/settings.json:idleCompaction".into(),
-            ownership_resolved: true,
-            settings_unresolved: false,
-            limitations: vec![],
-            inherited_window: None,
-            retained_since: None,
-        });
-        p
-    }
+    use crate::test_support::{make_profile, make_t3_profile as t3};
 
     fn ids(groups: &[Group<'_>]) -> Vec<Vec<String>> {
         groups.iter().map(|g| g.ids.clone()).collect()

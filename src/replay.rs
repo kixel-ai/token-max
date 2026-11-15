@@ -1313,6 +1313,65 @@ mod tests {
     }
 
     #[test]
+    fn sources_sharing_a_settings_file_get_one_ttl_line() {
+        let session = |prefix: &str, session: &str, profile: &str| {
+            [
+                (format!("{prefix}-first"), 0, u(1000, 0, M5)),
+                (format!("{prefix}-next"), 600_000, u(1100, 0, M5)),
+            ]
+            .map(|(id, time, usage)| {
+                let mut r = with(at(&id, time), usage);
+                r.session = session.into();
+                r.profiles = vec![profile.into()].into();
+                r
+            })
+        };
+        let rooted = |p: &mut crate::model::Profile| {
+            for (bucket, key) in [
+                (Bucket::Main, "promptCacheTtl"),
+                (Bucket::Subagent, "subagentPromptCacheTtl"),
+            ] {
+                p.ttl.get_mut(bucket).owner = format!("/synthetic/.claude/settings.json:{key}");
+            }
+        };
+        let main = |s: &Scan| -> Vec<TtlCheck> {
+            ttls(&report_at(s, None, 1_200_000))
+                .into_iter()
+                .filter(|c| c.bucket == Bucket::Main)
+                .cloned()
+                .collect()
+        };
+        let mut alone = data(session("native", "native", "profile").to_vec(), vec![]);
+        rooted(&mut alone.profiles[0]);
+        let alone = main(&alone);
+        let mut both = data(
+            [
+                session("native", "native", "profile"),
+                session("t3", "t3", "agent"),
+            ]
+            .concat(),
+            vec![],
+        );
+        rooted(&mut both.profiles[0]);
+        let mut agent = crate::test_support::make_t3_profile("agent", "/synthetic/.claude");
+        rooted(&mut agent);
+        both.profiles.push(agent);
+        let shared = main(&both);
+        assert_eq!(shared.len(), 1);
+        let line = &shared[0];
+        assert_eq!(line.base.profiles, ["profile", "agent"]);
+        assert_eq!(line.base.action, Action::Change);
+        // Each source's history replays on its own, then the line sums them.
+        let one = total(&alone[0].cost.one_hour).unwrap();
+        assert!((total(&line.cost.one_hour).unwrap() - 2.0 * one).abs() < 1e-10);
+        // An instance whose TTL another owner sets keeps a line of its own.
+        both.profiles[1].ttl.main.owner = "T3 instance agent: launch environment".into();
+        let split = main(&both);
+        let lines: Vec<&[String]> = split.iter().map(|c| c.base.profiles.as_slice()).collect();
+        assert_eq!(lines, [&["profile".to_string()][..], &["agent".to_string()][..]]);
+    }
+
+    #[test]
     fn ttl_compares_aggregate_net_cost_in_either_direction() {
         let first = make_request();
         let next = with(at("next", 600_000), u(1100, 0, M5));

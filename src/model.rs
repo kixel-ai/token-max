@@ -2635,6 +2635,20 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
+    /// The line's requests and their cost by the profiles that recorded them.
+    pub shares: Vec<ProfileShare>,
+}
+
+/// The requests on a line that one set of profiles recorded, and what the piece cost in them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileShare {
+    /// More than one when a request was copied into several profiles' histories, or T3
+    /// could not settle which ran it.
+    pub profiles: Vec<String>,
+    pub requests: u64,
+    pub priced: u64,
+    /// API-price equivalent over the priced requests only.
+    pub cost_usd: Usd,
 }
 
 // ---------------------------------------------------------------------------

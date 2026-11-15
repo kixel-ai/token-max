@@ -517,6 +517,49 @@ mod tests {
     }
 
     #[test]
+    fn t3_owned_fast_mode_keeps_its_own_line_and_a_shared_owner_merges() {
+        let fast = |id: &str, profile: &str| {
+            let mut r = make_request();
+            r.id = id.into();
+            r.parts[0].speed = Some("fast".into());
+            r.profiles = vec![profile.into()].into();
+            r
+        };
+        let mut s = scan(
+            control(Some("fast"), true),
+            vec![fast("native", "profile"), fast("t3", "agent")],
+        );
+        let mut agent = crate::test_support::make_t3_profile("agent", "/synthetic/.claude");
+        agent.speed = Some(SpeedControl {
+            value: None,
+            owner: "T3 instance agent: thread modelSelection.options.fastMode".into(),
+            resolved: false,
+            ..control(None, false)
+        });
+        s.profiles.push(agent);
+        let lines = |s: &Scan| -> Vec<(Vec<String>, u64)> {
+            checks(s, None, DAY_MS)
+                .iter()
+                .map(|c| (c.base.profiles.clone(), c.base.requests))
+                .collect()
+        };
+        assert_eq!(
+            lines(&s),
+            [
+                (vec!["profile".to_string()], 1),
+                (vec!["agent".to_string()], 1)
+            ]
+        );
+        // An instance that leaves fastMode to the native file shares its line and both
+        // sources' requests.
+        s.profiles[1].speed = Some(control(Some("fast"), true));
+        assert_eq!(
+            lines(&s),
+            [(vec!["profile".to_string(), "agent".to_string()], 2)]
+        );
+    }
+
+    #[test]
     fn distinct_project_controls_get_separate_cards() {
         let cards = checks(&directories(), None, 100);
         let summary: Vec<_> = cards

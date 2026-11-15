@@ -641,6 +641,8 @@ struct Prior<'a> {
 
 struct Row {
     cost: ContextCost,
+    /// Requests, priced requests and their cost by the index of the profiles that recorded them.
+    shares: IndexMap<usize, (u64, u64, Usd)>,
     assumptions: IndexSet<String>,
     owner: usize,
     key: usize,
@@ -684,6 +686,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .iter()
         .map(|p| (p.id.as_str(), crate::rows::settings_key(p)))
         .collect();
+    let mut sources: IndexSet<Vec<&str>> = IndexSet::default();
     let mut owners: HashMap<Vec<&str>, usize> = HashMap::default();
     let mut owner_files: Vec<Vec<&str>> = vec![];
     let mut owner_profiles: Vec<IndexSet<&str>> = vec![];
@@ -724,6 +727,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             }
         };
         owner_profiles[owner].extend(source.iter().copied());
+        let share = sources.insert_full(source.clone()).0;
         let view = &exposure.view;
         let codex = r.harness == Harness::Codex;
         // Claude's recorded request shapes are exact. Codex records each change to
@@ -896,7 +900,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
+                        shares: vec![],
                     },
+                    shares: IndexMap::default(),
                     owner,
                     key,
                     time: Millis::MIN,
@@ -906,6 +912,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             });
             row.from_start |= first;
             row.cost.requests += 1;
+            row.shares.entry(share).or_default().0 += 1;
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
         }
@@ -1054,6 +1061,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let row = &mut rows[&(owner, key)];
                 row.cost.priced += 1;
                 row.cost.cost_usd += Usd::from_f64(cost);
+                let counts = row.shares.entry(share).or_default();
+                counts.1 += 1;
+                counts.2 += Usd::from_f64(cost);
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));
                 }
@@ -1324,6 +1334,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .filter_map(|(index, row)| {
             let mut c = row.cost;
             c.assumptions = row.assumptions.into_iter().collect();
+            c.shares = row
+                .shares
+                .into_iter()
+                .map(|(index, (requests, priced, cost_usd))| crate::model::ProfileShare {
+                    profiles: sources[index].iter().map(|p| p.to_string()).collect(),
+                    requests,
+                    priced,
+                    cost_usd,
+                })
+                .collect();
             c.current = current
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
@@ -1743,6 +1763,81 @@ mod tests {
         assert_eq!((new.requests, new.priced), (2, 1));
         assert!(close(new.cost_usd.to_f64(), 300.0 * WRITE1H));
         assert!(file.current && new.current);
+    }
+
+    #[test]
+    fn sources_sharing_a_settings_file_share_a_row_and_its_uses() {
+        let scan = ExposureScan {
+            components: vec![
+                component("agent", Category::ToolSchema, "Agent", 1000, &[]),
+                component("system", Category::Other, "wire-system", 1000, &[]),
+            ],
+            requests: ["native", "t3", "work"]
+                .iter()
+                .map(|r| exposure(r, &["agent", "system"], 2, 2000))
+                .collect(),
+            // Only the T3 instance called the tool.
+            tool_calls: vec![ToolCalls {
+                name: "Agent".into(),
+                profiles: vec!["agent".into()],
+                calls: 3,
+                last_used: 5,
+            }],
+            ..ExposureScan::default()
+        };
+        let requests: Vec<Request> = [("native", "native"), ("t3", "agent"), ("work", "work")]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (id, profile))| {
+                let mut r = request(id, i as Millis + 1, 0, 600, 0);
+                r.profiles = vec![profile.into()].into();
+                r
+            })
+            .collect();
+        let profiles = [
+            crate::test_support::make_profile("native", "/synthetic/.claude"),
+            crate::test_support::make_t3_profile("agent", "/synthetic/.claude"),
+            crate::test_support::make_profile("work", "/synthetic/.claude-work"),
+        ];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            incomplete: &HashSet::default(),
+            max_cost_per_use_usd: 1.0,
+        });
+        let agent: Vec<&ContextCost> = rows.iter().filter(|c| c.name == "Agent").collect();
+        assert_eq!(agent.len(), 2);
+        // Native Claude Code and T3 share ~/.claude's row, so the T3 calls keep it on.
+        let shared = agent[0];
+        assert_eq!(shared.profiles, ["agent", "native"]);
+        assert_eq!((shared.requests, shared.calls), (2, Some(3)));
+        assert!(!matches!(
+            shared.verdict,
+            Some(Verdict::Off | Verdict::Consider)
+        ));
+        let shares: Vec<(&[String], u64)> = shared
+            .shares
+            .iter()
+            .map(|s| (s.profiles.as_slice(), s.requests))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                (&["native".to_string()][..], 1),
+                (&["agent".to_string()][..], 1)
+            ]
+        );
+        assert_eq!(
+            shared.shares.iter().map(|s| s.cost_usd).sum::<Usd>(),
+            shared.cost_usd
+        );
+        // Another home's settings file keeps its own row, never credited with those calls.
+        let work = agent[1];
+        assert_eq!(work.profiles, ["work"]);
+        assert_eq!((work.requests, work.calls), (1, Some(0)));
+        assert_eq!(work.verdict, Some(Verdict::Off));
     }
 
     #[test]

@@ -40,6 +40,13 @@ whose id matches no parsed call, Claude's `tool_use_id` or Codex's
 record that could hold a call makes every never-used feature yellow, which
 could leave the maintainer's host as it is; searching only the surviving
 bytes, which can call a used tool unused). A call that never ran is no use.
+A result does not name its tool, so an unmatched result makes every
+never-used feature of the line's profile yellow, while a name found in a
+line's bytes makes just that feature yellow. Take results from the same transcript
+file, from its unparseable lines' bytes as well as parsed records, since the
+record joined onto a cut call is often that call's own result. Match ids
+across the whole file, not only the `--since` window, so a call just before
+the window does not leave its result unmatched.
 Report in the PR how many of the maintainer's host's unparseable lines are
 cut records and how many sessions have an unmatched result. Cover an escaped
 name, a joined pair, and a cut record with and without an unmatched result

@@ -27,11 +27,14 @@ explains why each change makes sense, so it leads on a terminal. ✅ the rows th
 listed after it, one line each (rejected: behind `--all`, which breaks
 AGENTS.md's "every setting and feature on its own line"). This quest owns
 that list and the report printed without a terminal: the offered changes
-first, ordered by dollars saved, then every other row by its cost, cheapest
-last. ✅ every dollar figure comes with a percent of its profile's spend
-over the window at API prices, such as "$8,830/mo, 12% of T3 claudeAgent"
-(rejected: of the whole host's spend, which makes a big profile's changes
-look small; of the setting's own cost).
+first, ordered by dollars saved, with those whose saving was not measured
+after the ones that were, then every other row by its cost, cheapest last
+and unknown costs after. ✅ every dollar figure comes with a percent of its
+profile's spend over the window at API prices, such as "$8,830/mo, 12% of
+T3 claudeAgent" (rejected: of the whole host's spend, which makes a big
+profile's changes look small; of the setting's own cost). A row merged
+across profiles, or a change to a file several profiles share, takes the
+combined spend of the profiles it names as its base.
 
 That run printed 558 lines, 121 KB, by default:
 

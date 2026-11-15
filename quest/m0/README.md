@@ -221,7 +221,9 @@ through that profile, and printed 558 lines. ✅ the first release is 0.0.1
 (rejected: 0.1.0), published once the report quests merge and a rerun on
 the maintainer's host reads well. Where an older entry names 0.1.0, this one
 holds.
-✅ doctor's terminal walk shows a running total of the accepted changes'
+
+Decided 2026-11-14 (maintainer, at the pick of the planning PR, after
+mockup videos): ✅ doctor's terminal walk shows a running total of the accepted changes'
 savings, summed and labeled as possibly overlapping (rejected: a joint
 replay; no total). This amends "no summed or joint savings total" for that
 total only, in [the walk quest](/quest/m0/walk.md).

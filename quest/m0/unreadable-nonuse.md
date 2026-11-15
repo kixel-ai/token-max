@@ -2,9 +2,9 @@
 
 ## Goal
 
-A tool, skill or MCP server with no recorded use stays red (exit 1) when a
-profile's transcripts have unparseable lines, unless one of those lines
-could hold a call to it.
+A tool, skill or MCP server with no recorded use stays red (exit 1) when
+the transcripts its row covers have unparseable lines, unless one of those
+lines could hold a call to it.
 
 ## Plan
 
@@ -44,9 +44,11 @@ This rule accepts one miss: a call cut inside its name whose client died
 before writing its result counts as unused, though it may have run. The
 reason line and the docs say so.
 A result does not name its tool, so an unmatched result makes every
-never-used feature of the line's profile yellow, while a name found in a
-line's bytes makes just that feature yellow. Take results from the same transcript
-file, from its unparseable lines' bytes as well as parsed records, since the
+never-used feature whose row covers the line's transcript yellow, while a
+name found in a line's bytes makes just that feature yellow. Rows are one
+per settings file, combining every source it controls, as
+[Give each setting one row per settings file](/quest/m0/file-rows.md)
+decides. Take results from the same transcript file, from its unparseable lines' bytes as well as parsed records, since the
 record joined onto a cut call is often that call's own result. Match ids
 across the whole file, not only the `--since` window, so a call just before
 the window does not leave its result unmatched.
@@ -57,4 +59,4 @@ with synthetic tests.
 
 ## Related
 
-- [Give each profile one row per tool](/quest/m0/profile-rows.md) - also decides never-used rows
+- [Give each setting one row per settings file](/quest/m0/file-rows.md) - decides which transcripts a never-used row covers

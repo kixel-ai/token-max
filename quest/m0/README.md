@@ -227,3 +227,18 @@ mockup videos): ✅ doctor's terminal walk shows a running total of the accepted
 savings, summed and labeled as possibly overlapping (rejected: a joint
 replay; no total). This amends "no summed or joint savings total" for that
 total only, in [the walk quest](/quest/m0/walk.md).
+
+Decided 2026-11-14 (maintainer, at the pick of the planning PR): ✅ stop
+splitting rows by profile: one row per setting in each settings file,
+combining every transcript source that file controls, so native Claude Code
+and T3's claudeAgent share `~/.claude/settings.json`'s rows, while Claude's
+and Codex's files, a T3 instance's own settings and each `--ssh` host's
+files stay separate rows (rejected: one row per feature across files, which
+would need two edits for one row). ✅ every dollar figure's percent is of
+the whole host's spend at API prices, and the walk keeps one running total
+(rejected: the profile's spend, the earlier pick in
+[the report quest](/quest/m0/report-length.md); the combined spend of the
+profiles a row covers). This amends "Resolve settings and recommendations
+per profile" above: settings and recommendations resolve per settings file,
+in [Give each setting one row per settings file](/quest/m0/file-rows.md).
+Profiles are still discovered and deduplicated as before.

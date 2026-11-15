@@ -12,11 +12,14 @@ changes it offers, and every reason reads as a whole sentence.
 
 Decided 2026-11-14 (maintainer, /quest-plan after a local doctor run on the
 maintainer's host): ✅ one line for each setting or feature, with the
-evidence line and per-item breakdowns under `--details`, and rows with the
-same verdict across profiles merged into one row naming them (rejected:
-show only rows that offer a change plus counts, which breaks AGENTS.md's
-"every setting and feature on its own line"). This carries out the
-2026-11-08 decision of one plain verdict per setting.
+evidence line and per-item breakdowns under `--details` (rejected: show
+only rows that offer a change plus counts, which breaks AGENTS.md's "every
+setting and feature on its own line"). This carries out the 2026-11-08
+decision of one plain verdict per setting. That pick also merged rows with
+the same verdict across profiles; the pick of the planning PR replaced it
+with one row per setting in each settings file, which
+[Give each setting one row per settings file](/quest/m0/file-rows.md)
+owns.
 
 Decided 2026-11-14 (maintainer, after mockup videos of a ranked report in
 a pager, a full-screen TUI and a ranked y/n walk): ✅ the walk to decide, then the ranked list
@@ -29,12 +32,15 @@ AGENTS.md's "every setting and feature on its own line"). This quest owns
 that list and the report printed without a terminal: the offered changes
 first, ordered by dollars saved, with those whose saving was not measured
 after the ones that were, then every other row by its cost, cheapest last
-and unknown costs after. ✅ every dollar figure comes with a percent of its
-profile's spend over the window at API prices, such as "$8,830/mo, 12% of
-T3 claudeAgent" (rejected: of the whole host's spend, which makes a big
-profile's changes look small; of the setting's own cost). A row merged
-across profiles, or a change to a file several profiles share, takes the
-combined spend of the profiles it names as its base.
+and unknown costs after. Recommended and worth-considering changes rank
+together, each marked with its verdict.
+
+Decided 2026-11-14 (maintainer, at the pick of the planning PR, amending
+the pick after the mockups of a percent of the profile's spend): ✅ every
+dollar figure comes with a percent of the whole host's spend over the
+window at API prices, such as "$8,830/mo, 12% of this host's spend"
+(rejected: the profile's spend; the combined spend of the profiles a row
+covers; the setting's own cost). Each `--ssh` host's rows take that host's spend.
 
 That run printed 558 lines, 121 KB, by default:
 
@@ -61,5 +67,5 @@ widest line in the PR's Validation. Update the README's sample report.
 
 ## Related
 
-- [Give each profile one row per tool](/quest/m0/profile-rows.md) - also changes these rows
+- [Give each setting one row per settings file](/quest/m0/file-rows.md) - decides which rows there are
 - [Walk the changes biggest saving first](/quest/m0/walk.md) - the terminal walk printed before this list

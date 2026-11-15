@@ -26,12 +26,14 @@ write without a confirm:
 
 - On a terminal, the walk comes first, after a headline counting the
   changes; the report follows it as the list below, not before it.
-- Order the changes by monthly saving, largest first, across every profile,
-  recommended and suggested alike, each marked with its verdict. A change
-  whose saving was not measured comes after those saving $5/mo or more, one
-  question each, saying its saving was not measured.
+- ✅ order the changes by monthly saving, largest first, across every
+  settings file, recommended and worth-considering alike, each marked with
+  its verdict (maintainer, at the pick of the planning PR; rejected:
+  recommended first). ✅ a change whose saving was not measured comes after
+  those saving $5/mo or more, one question each, saying its saving was not
+  measured (rejected: in the small "take all?" batch).
 - Each change shows its current and offered value, its saving per month in
-  dollars and as a percent of its profile's spend over the window (the
+  dollars and as a percent of the host's spend over the window (the
   percent base [the report quest](/quest/m0/report-length.md) records), its
   claim kind, and the stats behind it, such as the requests replayed, uses
   and cost per use, or the resume gaps a cache TTL replay counted, then the
@@ -39,11 +41,10 @@ write without a confirm:
 - ✅ a labeled running total after each yes: the sum of the accepted
   changes' own savings, in dollars and percent, saying that overlapping
   changes may save less, such as "accepted so far: about $11,400/mo, 31% of
-  T3 claudeAgent; overlapping changes may save less". Keep a subtotal and
-  percent for each profile, since each percent has its own profile's spend
-  as its base, and one for each set of profiles a shared file's change
-  covers; a combined dollar total names no percent (rejected: a joint
-  replay of the accepted set, which the replay cannot do yet; no total).
+  this host's spend; overlapping changes may save less". One total, with no
+  subtotal for each profile, since every percent shares the host's spend as
+  its base (rejected: a joint replay of the accepted set, which the replay
+  cannot do yet; no total).
   An accepted change whose saving was not measured is counted beside the
   total, not added to it, such as "plus 1 change whose saving was not
   measured". This amends m0's rule of "no summed or joint savings total",
@@ -72,4 +73,4 @@ excerpt and the paragraph on what `doctor` writes to match.
 ## Required
 
 - [Cut doctor's default report to one line each](/quest/m0/report-length.md) - the ranked rows, percents and the list printed after the walk
-- [Give each profile one row per tool](/quest/m0/profile-rows.md) - the walk must never offer a change another row shows in use
+- [Give each setting one row per settings file](/quest/m0/file-rows.md) - the walk must never offer a change another row shows in use

@@ -102,11 +102,13 @@ pub fn window_owner(profile: &Profile) -> String {
         .join("\n")
 }
 
-/// The owner and value of a profile's cache TTL for one bucket. A profile whose TTL
-/// another owner sets, or that caching is off for, replays its requests differently.
+/// The owner and value of a profile's cache TTL for one bucket, and whether an unset value
+/// is the billing default a change can pin rather than caching turned off. A profile whose
+/// TTL another owner sets, or that caching is off for, replays its requests differently.
 pub fn ttl_owner(profile: &Profile, bucket: Bucket) -> String {
     let ttl = profile.ttl.get(bucket);
-    format!("{}\n{:?}", ttl.owner, ttl.value)
+    let pinnable = ttl.value.is_none() && ttl.reason == crate::discovery::TTL_BILLING_UNKNOWN;
+    format!("{}\n{:?}\n{pinnable}", ttl.owner, ttl.value)
 }
 
 /// The owners of the compaction windows, then of both cache TTLs the window replay
@@ -169,6 +171,14 @@ mod tests {
         assert_eq!(
             ids(&groups(&profiles, compaction_owner)),
             [["native"], ["off"], ["env"]]
+        );
+        // An unset default whose billing is unknown can be pinned; caching off cannot.
+        let [mut native, off, _] = profiles;
+        native.ttl.main.value = None;
+        native.ttl.main.reason = crate::discovery::TTL_BILLING_UNKNOWN.into();
+        assert_eq!(
+            ids(&groups(&[native, off], |p| ttl_owner(p, Bucket::Main))),
+            [["native"], ["off"]]
         );
     }
 

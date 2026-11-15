@@ -585,7 +585,9 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         .checks
         .iter()
         .any(|c| c.action() == crate::model::Action::Change)
-        || crate::context::setting_rows(&report.context).any(|c| c.verdict == Some(Verdict::Off));
+        || crate::context::setting_rows(&report.context).any(|c| {
+            c.verdict == Some(Verdict::Off) && crate::defaults::applied(&report, c).is_none()
+        });
     let format = options.format;
     let report_options = ReportOptions {
         width: format.width,

@@ -337,6 +337,12 @@ fn outranking(profile: &Profile, edit: &Edit) -> Result<Vec<String>, ScanError> 
     Ok(owners)
 }
 
+/// Whether a file that outranks the profile's own sets the switch `control` flips, or
+/// whether that can't be read.
+pub(crate) fn outranked(profile: &Profile, control: &Control) -> bool {
+    outranking(profile, &control.into()).map_or(true, |files| !files.is_empty())
+}
+
 /// Whether `config` sets what `edit` sets: the same key, or for a list a Codex
 /// `[[skills.config]]` entry with the same `path`.
 fn sets(config: &Map<String, Value>, edit: &Edit) -> bool {

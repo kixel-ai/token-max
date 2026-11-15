@@ -344,7 +344,7 @@ its kind of claim: auto memory's note sits on an Opinion line.
 | Setting | Default | What the current value saves |
 | --- | --- | --- |
 | Subagent prompt cache TTL | 5m | The TTL replay's gap, when the line has a verdict; otherwise not measured. |
-| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value. |
+| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
 | Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
 | Idle compaction | On | The on and off replay under the current settings. |
 | T3 idle compaction | `onReturn` | The difference between the two modes' replays. |
@@ -352,22 +352,23 @@ its kind of claim: auto memory's note sits on an Opinion line.
 | Fast mode | Off | The measured premium, as a cost. |
 | Background generation | On | Not measured: its requests are estimated only where it runs. |
 | Auto memory | On for Claude Code, off for Codex | Codex memories on cost what the line measured; Claude Code's off is not measured. |
-| Main-session effort | The model's own level | Not measured: a different effort changes the output. |
-| Bash, MCP and Codex tool output caps | 30,000 characters, 25,000 tokens, Codex's built-in limit | Not measured, as their lines say. |
+| Main-session effort | The model's own level | Not measured: a different effort changes the output. A `maxEffortLevel` that lowers the default counts as a difference. |
+| Bash, MCP and Codex tool output caps | 30,000 characters, 25,000 tokens, Codex's built-in limit | Not measured, as their lines say. A cap set to its default counts as the default. |
 | A tool, skill or MCP server turned off in the profile's settings file | On | Estimated: what it cost per request while it was still sent, over every request its line made in the window. |
 
 A tool, skill or MCP server is off when the profile's own `settings.json` or
-`config.toml` turns it off: `"enableArtifact": false` or
-`"enableWorkflows": false`, a bare tool or `mcp__server` name in
+`config.toml` turns it off: `"enableArtifact": false`, `"enableWorkflows":
+false` or `"syncClaudeAiSkills": false`, a bare tool or `mcp__server` name in
 `permissions.deny`, a `skillOverrides` value other than `on`,
-`features.apps = false`, an MCP server's `enabled = false`, or a
-`[[skills.config]]` entry with `enabled = false`. No request records one once
-it is off, so it gets its own `info` line, showing `off` or `typed only`, and
-its saving is an estimate. When no request in the window carried it, the
-saving is unknown, never zero, and so is a Codex catalog skill's, since
-removing one can backfill the catalog. A switch the file sets while the
-feature is still sent, because another file outranks it, adds no line: the
-feature's own line says what it costs.
+`features.apps = false`, an MCP server's `enabled = false` or a tool in its
+`disabled_tools`, or a `[[skills.config]]` entry with `enabled = false`. It
+gets its own `info` line, showing `off` or `typed only`, and its saving is an
+estimate. When no request in the window carried it, the saving is unknown,
+never zero, and so is a Codex catalog skill's, since removing one can backfill
+the catalog. A switch set after the latest request, such as one the walk just
+wrote, counts as off too, so the next run neither offers it again nor drops
+its saving. A switch that a file outranking the profile's also sets adds no
+line: the feature's own line says what it costs.
 
 ## MCP servers and instruction budgets
 

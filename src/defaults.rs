@@ -2,9 +2,9 @@
 //! documented default, and what its current value saves against it, priced with the replay
 //! its own line already runs.
 
-use crate::discovery::TTL_CLOUD_DEFAULT;
 use crate::model::{
-    Action, Bucket, CheckResult, Control, ControlValue, Harness, Profile, T3IdleMode, Ttl,
+    Action, Bucket, CheckResult, ContextCost, Control, ControlValue, Harness, Profile, Report,
+    T3IdleMode, Ttl,
 };
 use crate::report::{about, duration, monthly, tokens};
 
@@ -74,28 +74,23 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
             };
             // The replay decided, and the current client honors the setting.
             let measured = b.recommended.is_some() && b.action != Action::Advisory;
-            let control = profile.map(|p| p.ttl.get(t.bucket));
-            let reason = control.map(|c| c.reason.as_str());
+            let saving = |exact: fn(f64) -> Saving| {
+                if measured {
+                    exact(gap)
+                } else {
+                    Saving::NotMeasured
+                }
+            };
+            // Bedrock, Vertex and Foundry default the main conversation to 5m too, whatever
+            // sets the current value.
+            let cloud = profile.is_some_and(|p| p.provider.is_some());
             match t.bucket {
-                Bucket::Subagent if current == Ttl::FiveMinutes => None,
-                Bucket::Subagent => baseline(
-                    "5m",
-                    if measured {
-                        Saving::Saves(gap)
-                    } else {
-                        Saving::NotMeasured
-                    },
-                ),
-                // Bedrock, Vertex and Foundry default to 5m.
-                Bucket::Main if reason == Some(TTL_CLOUD_DEFAULT) => None,
-                Bucket::Main => baseline(
+                Bucket::Main if !cloud => baseline(
                     "1h on a Claude plan, 5m on usage credits or an API key",
-                    if measured {
-                        Saving::UpTo(gap)
-                    } else {
-                        Saving::NotMeasured
-                    },
+                    saving(Saving::UpTo),
                 ),
+                _ if current == Ttl::FiveMinutes => None,
+                _ => baseline("5m", saving(Saving::Saves)),
             }
         }
         CheckResult::Compaction(c) => {
@@ -111,7 +106,8 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                 .iter()
                 .map(|m| {
                     let m = m.as_deref()?;
-                    profile.compaction.tuned.get(m)?.value
+                    let undated = crate::controls::strip_dated(m, 8).unwrap_or(m);
+                    profile.compaction.tuned.get(undated)?.value
                 })
                 .collect();
             let default = match tuned.first() {
@@ -198,13 +194,17 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
         // A different effort changes the output, which the transcripts cannot price.
         CheckResult::Effort(e) => {
             let c = &e.control;
-            let level = c.level.as_deref()?;
-            if c.unresolved.is_some() || c.owner.ends_with("(the model's default)") {
+            if c.unresolved.is_some() {
                 return None;
             }
+            // What the session runs at, after a level and any `maxEffortLevel` cap; `auto`
+            // sends none, so the model runs at its own default.
+            let effective = c.effective.as_deref()?;
+            let unset = c.owner.ends_with("(the model's default)") && c.caps.is_empty();
             match c.default.as_deref() {
-                Some(default) if default == level => None,
+                Some(default) if effective == default || effective == "auto" => None,
                 Some(default) => baseline(default, Saving::NotMeasured),
+                None if unset || effective == "auto" => None,
                 None => baseline("the model's own", Saving::NotMeasured),
             }
         }
@@ -241,6 +241,10 @@ pub fn switch_name(control: &Control) -> String {
     match (path.as_slice(), &control.value) {
         (["enableArtifact"], _) => "Artifact tool".into(),
         (["enableWorkflows"], _) => "Workflow tool".into(),
+        (["syncClaudeAiSkills"], _) => "Skills synced from claude.ai".into(),
+        (["mcp_servers", id, "disabled_tools"], ControlValue::Text(tool)) => {
+            format!("MCP tool {id}.{tool}")
+        }
         (["features", "apps"], _) => "ChatGPT apps".into(),
         (["mcp_servers", id, _], _) => format!("MCP server {id}"),
         (["skillOverrides", name], _) => format!("Skill {name}"),
@@ -256,6 +260,27 @@ pub fn switch_name(control: &Control) -> String {
         },
         _ => path.join("."),
     }
+}
+
+/// The switch that already turns a piece off: every selected profile on its line has its
+/// settings file set it, and no file that outranks theirs sets it too. The latest request may
+/// still carry the piece, when the change came after it.
+pub fn applied<'a>(report: &'a Report, c: &ContextCost) -> Option<&'a Control> {
+    let control = c.control.as_ref()?;
+    let mut found = None;
+    for p in report
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| c.profiles.contains(&p.id))
+    {
+        let switch = p.switched_off.iter().find(|k| same_switch(k, control))?;
+        if crate::doctor::outranked(p, switch) {
+            return None;
+        }
+        found = Some(switch);
+    }
+    found
 }
 
 /// What turning a feature off saved, estimated from what it cost while it was still sent:
@@ -339,8 +364,10 @@ pub fn headline<'a>(
             plural.to_string()
         }
     };
-    let (mut measured, mut up_to, mut estimated, mut unmeasured) =
-        (Sum::default(), Sum::default(), 0, 0);
+    // Each pinned main TTL's default can differ by profile, so "up to" savings and costs
+    // bound separately and never net.
+    let (mut measured, mut up_to, mut up_to_more, mut estimated, mut unmeasured) =
+        (Sum::default(), Sum::default(), Sum::default(), 0, 0);
     for b in baselines {
         match b.saving {
             Saving::Saves(usd) => measured.add(usd, share(usd)),
@@ -348,11 +375,12 @@ pub fn headline<'a>(
                 measured.add(usd, share(usd));
                 estimated += 1;
             }
+            Saving::UpTo(usd) if usd < 0.0 => up_to_more.add(usd, share(usd)),
             Saving::UpTo(usd) => up_to.add(usd, share(usd)),
             Saving::NotMeasured => unmeasured += 1,
         }
     }
-    if measured.settings + up_to.settings + unmeasured == 0 {
+    if measured.settings + up_to.settings + up_to_more.settings + unmeasured == 0 {
         return "Your settings match the Claude Code and Codex defaults.".into();
     }
     let mut sentences = vec![];
@@ -366,14 +394,15 @@ pub fn headline<'a>(
         }
         sentences.push(text);
     }
-    if up_to.settings > 0 {
-        let n = up_to.settings;
-        let action = verb(n, if up_to.usd < 0.0 { "cost" } else { "save" });
-        sentences.push(format!(
-            "{} whose default depends on how usage is paid {action} up to {}",
-            settings(n),
-            up_to.text("", false, host)
-        ));
+    for (sum, action) in [(&up_to, "save"), (&up_to_more, "cost")] {
+        if sum.settings > 0 {
+            sentences.push(format!(
+                "{} whose default depends on how usage is paid {} up to {}",
+                settings(sum.settings),
+                verb(sum.settings, action),
+                sum.text("", false, host)
+            ));
+        }
     }
     if unmeasured > 0 {
         let more = if sentences.is_empty() { "" } else { " more" };
@@ -383,7 +412,7 @@ pub fn headline<'a>(
         });
     }
     // Each saving holds every other setting constant, so two may count the same requests.
-    if measured.settings + up_to.settings > 1 {
+    if measured.settings + up_to.settings + up_to_more.settings > 1 {
         sentences.push("overlapping settings may save less".into());
     }
     let mut text = String::from("Compared with defaults, ");
@@ -456,6 +485,15 @@ mod tests {
                 "this host's"
             ),
             "Compared with defaults, your settings save about $100/mo. 1 setting whose default depends on how usage is paid saves up to $50/mo. 2 more settings differ by amounts not measured. Overlapping settings may save less."
+        );
+        // Conditional savings and costs bound apart, since each profile's default may differ.
+        assert_eq!(
+            headline(
+                &[b(Saving::UpTo(100.0)), b(Saving::UpTo(-90.0))],
+                |_| None,
+                "this host's"
+            ),
+            "Compared with defaults, 1 setting whose default depends on how usage is paid saves up to $100/mo. 1 setting whose default depends on how usage is paid costs up to $90/mo more. Overlapping settings may save less."
         );
         assert_eq!(
             headline(&[b(Saving::NotMeasured)], share, "this host's"),

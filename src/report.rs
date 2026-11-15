@@ -3087,12 +3087,13 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         Some(Scalar::Number(n)) => Some(count(*n as i64)),
         _ => None,
     };
-    let cap = |label, key, value: String, text: String, default| Cap {
+    // A setting at its default value differs from nothing.
+    let cap = |label, key, value: String, text: String, default: Option<&'static str>| Cap {
         label,
         key,
+        default: default.filter(|d| *d != value),
         value,
         text,
-        default,
     };
     Some(match c.harness {
         Harness::Claude if c.name == "Bash" => match (
@@ -3897,6 +3898,8 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             continue;
         }
         let mark = match c.verdict {
+            // A switch the file already sets is a change made before any request showed it.
+            _ if crate::defaults::applied(report, c).is_some() => continue,
             Some(Verdict::Off) => Mark::Change,
             Some(Verdict::Consider) => Mark::Consider,
             _ => continue,
@@ -4179,9 +4182,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             .find(|f| f.origins.contains(&origin))
             .map(|f| crate::doctor::setting(f, out.home.as_deref()))
     };
+    // A switch the settings file already sets shows as off below, even while the latest
+    // request, made before the change, still carried the feature.
+    let applied = |c: &ContextCost| crate::defaults::applied(report, c).is_some();
     let pieces: Vec<(usize, &ContextCost)> = setting_rows(&report.context)
         .enumerate()
-        .filter(|(_, c)| c.verdict.is_some())
+        .filter(|(_, c)| c.verdict.is_some() && !applied(c))
         .collect();
     // A server's own loading and exposure controls, after its line's evidence.
     let server_notes = |c: &ContextCost| {
@@ -4690,6 +4696,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         c.current
             && c.control.is_some()
             && c.verdict.is_none()
+            && !applied(c)
             && !matches!(c.kind, ContextKind::Memory | ContextKind::McpDiscovery)
     }) {
         let mut row = Row::new(Claim::Measured, Mark::Unknown, short_label(c, out));
@@ -4759,8 +4766,9 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                         .as_ref()
                         .is_some_and(|k| crate::defaults::same_switch(k, control))
             });
-            // Still sent, so something outranks the file, and its own line says what it costs.
-            if piece.is_some_and(|c| c.current) {
+            // Still sent though no request predates the change, so something outranks the
+            // file, and the feature's own line says what it costs.
+            if piece.is_some_and(|c| c.current && !applied(c)) {
                 continue;
             }
             let shown = out.home(&p.settings_file);
@@ -6050,15 +6058,46 @@ mod tests {
                 .evidence
                 .contains("No request in the window carried it")
         );
-        // A tool still sent despite its switch keeps only its own line.
-        report.scan.profiles[0].switched_off = deny("Agent").into_iter().collect();
+        // A switch the file sets before any request shows it reads as off, and doctor no
+        // longer offers it: Artifact was recommended off, Agent was kept.
+        report.scan.profiles[0].switched_off = [
+            switch(&["enableArtifact"], ControlValue::Bool(false)),
+            deny("Agent"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         let text = super::tests::text(&report, None, false);
-        assert_eq!(
-            report_lines(&text)
+        let lines = report_lines(&text);
+        for name in ["Artifact tool", "Agent tool"] {
+            let named: Vec<_> = lines.iter().filter(|l| l.head.starts_with(name)).collect();
+            assert_eq!(named.len(), 1, "{name}: {named:#?}");
+            assert!(
+                named[0].head.starts_with(&format!("{name} off")),
+                "{named:#?}"
+            );
+            assert!(
+                named[0]
+                    .default
+                    .starts_with("default on, saves an estimated $"),
+                "{named:#?}"
+            );
+        }
+        assert!(
+            !crate::doctor::fixes(&report, false)
                 .iter()
-                .filter(|l| l.head.starts_with("Agent tool"))
-                .count(),
-            1
+                .any(|f| f.name.starts_with("Artifact"))
+        );
+        // A file that outranks the profile's and sets the switch keeps the feature's own line.
+        let project = Workspace::new();
+        let outranking = project.home.join("settings.json");
+        std::fs::write(&outranking, r#"{"enableArtifact": true}"#).unwrap();
+        report.scan.profiles[0].outranking_files = vec![outranking.to_string_lossy().into()];
+        let text = super::tests::text(&report, None, false);
+        assert!(
+            report_line(&text, "Artifact tool on -> off")
+                .default
+                .is_empty()
         );
     }
 
@@ -6142,15 +6181,16 @@ mod tests {
         );
         // A different effort changes the output, so its saving is never measured.
         let effort = |level: &str, owner: &str| {
+            let (level, effective) = level.split_once('>').unwrap_or((level, level));
             CheckResult::Effort(EffortCheck {
-                base: check_base(Action::Keep, Some(level.to_string()), None),
+                base: check_base(Action::Keep, Some(effective.to_string()), None),
                 harness: Harness::Claude,
                 control: EffortControl {
                     model: Some("claude-opus-5-5".into()),
                     model_owner: "synthetic".into(),
                     level: Some(level.into()),
                     owner: owner.into(),
-                    effective: Some(level.into()),
+                    effective: Some(effective.into()),
                     lowered: None,
                     caps: vec![],
                     supported: vec![],
@@ -6169,6 +6209,11 @@ mod tests {
         );
         assert_eq!(saving(&effort("medium", &set)), None);
         assert_eq!(saving(&effort("medium", "x (the model's default)")), None);
+        // A cap that lowers the default runs below it, whatever names the level.
+        assert_eq!(
+            saving(&effort("medium>low", "x (the model's default)")),
+            Some(("medium".into(), Saving::NotMeasured))
+        );
     }
 
     #[test]

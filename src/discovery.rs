@@ -424,13 +424,13 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
             reason = "environment override; agent frontmatter may take precedence";
         } else if subagent {
             value = Some(Ttl::FiveMinutes);
-            reason = TTL_SUBAGENT_DEFAULT;
+            reason = "documented default; agent frontmatter and server helpers may override";
         } else if is("CLAUDE_CODE_USE_BEDROCK")
             || is("CLAUDE_CODE_USE_VERTEX")
             || is("CLAUDE_CODE_USE_FOUNDRY")
         {
             value = Some(Ttl::FiveMinutes);
-            reason = TTL_CLOUD_DEFAULT;
+            reason = "explicit cloud-provider billing default";
         } else {
             reason = TTL_BILLING_UNKNOWN;
         }
@@ -445,13 +445,6 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         subagent: bucket(true),
     }
 }
-
-/// Why an unset subagent TTL is 5m: Claude Code's documented default.
-pub const TTL_SUBAGENT_DEFAULT: &str =
-    "documented default; agent frontmatter and server helpers may override";
-
-/// Why an unset main-conversation TTL is 5m under Bedrock, Vertex or Foundry billing.
-pub const TTL_CLOUD_DEFAULT: &str = "explicit cloud-provider billing default";
 
 /// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
 pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
@@ -1962,7 +1955,7 @@ fn switched_off(harness: Harness, user: &Map<String, Value>) -> Vec<Control> {
     };
     let mut result = vec![];
     if harness == Harness::Claude {
-        for key in ["enableArtifact", "enableWorkflows"] {
+        for key in ["enableArtifact", "enableWorkflows", "syncClaudeAiSkills"] {
             if user.get(key) == Some(&Value::Bool(false)) {
                 result.push(off(&[key]));
             }
@@ -1994,6 +1987,15 @@ fn switched_off(harness: Harness, user: &Map<String, Value>) -> Vec<Control> {
     for (id, server) in members(user.get("mcp_servers")) {
         if server.get("enabled") == Some(&Value::Bool(false)) {
             result.push(off(&["mcp_servers", id, "enabled"]));
+            continue;
+        }
+        let tools = server.get("disabled_tools").and_then(Value::as_array);
+        for tool in tools.into_iter().flatten().filter_map(Value::as_str) {
+            result.push(Control {
+                path: vec!["mcp_servers".into(), id.clone(), "disabled_tools".into()],
+                value: ControlValue::Text(tool.into()),
+                append: true,
+            });
         }
     }
     let skills = user.get("skills").and_then(|s| s.get("config"));
@@ -2162,6 +2164,7 @@ mod tests {
         let claude = serde_json::json!({
             "enableArtifact": false,
             "enableWorkflows": true,
+            "syncClaudeAiSkills": false,
             "permissions": {"deny": ["Monitor", "Bash(rm:*)", "mcp__github", ""]},
             "skillOverrides": {"pdf": "user-invocable-only", "docx": "on"},
         });
@@ -2169,6 +2172,7 @@ mod tests {
             names(Harness::Claude, claude),
             [
                 "Artifact tool",
+                "Skills synced from claude.ai",
                 "Monitor tool",
                 "MCP server github",
                 "Skill pdf"
@@ -2176,7 +2180,10 @@ mod tests {
         );
         let codex = serde_json::json!({
             "features": {"apps": false},
-            "mcp_servers": {"docs": {"enabled": false}, "live": {"command": "x"}},
+            "mcp_servers": {
+                "docs": {"enabled": false, "disabled_tools": ["read"]},
+                "live": {"command": "x", "disabled_tools": ["write"]},
+            },
             "skills": {"config": [
                 {"path": "/s/imagegen/SKILL.md", "enabled": false},
                 {"path": "/s/other/SKILL.md", "enabled": true},
@@ -2184,7 +2191,12 @@ mod tests {
         });
         assert_eq!(
             names(Harness::Codex, codex),
-            ["ChatGPT apps", "MCP server docs", "Skill imagegen"]
+            [
+                "ChatGPT apps",
+                "MCP server docs",
+                "MCP tool live.write",
+                "Skill imagegen"
+            ]
         );
     }
 

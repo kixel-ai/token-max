@@ -17,9 +17,11 @@ off with `permissions.deny`, which leaves it configured and launching.
 - ✅ offer both: deny stays the change that saves the money, and the walk
   also asks whether to remove the configuration too (rejected: removal
   instead of deny; removal offered only for already-denied servers).
-  Recommended: ask once for each server group in
-  [the grouped walk](/quest/m0/launch/group-walk.md), naming the servers,
-  rather than once per server.
+  Recommended: ask once for each group of never-used servers the walk
+  offers (a `doctor::Group` of kind `McpServer` and reason `Unused`, whose
+  card names every server), right after its yes, rather than once per
+  server; a server saving $5/mo or more, or one taken one by one with `o`,
+  is asked on its own.
 - ✅ also offer to remove servers whose tools are all denied already, after
   the paid changes, as cleanup that saves no dollars (rejected: leave them).
 
@@ -29,7 +31,3 @@ in `~/.codex/config.toml`. Claude Code rewrites `~/.claude.json` while it
 runs, so check how an edit there survives a running session, or remove
 through `claude mcp remove`, before choosing. Never edit a managed settings
 file or T3's settings.
-
-## Related
-
-- [Group the walk's small changes by kind](/quest/m0/launch/group-walk.md) - the groups this asks about

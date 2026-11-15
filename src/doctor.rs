@@ -13,9 +13,9 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::collections::{IndexMap, IndexSet};
-use crate::context::{json_value, setting_text};
+use crate::context::{json_value, setting_text, typed_only};
 use crate::model::{
-    BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report,
+    BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, recommendations,
@@ -46,6 +46,39 @@ pub struct Fix {
     pub how: How,
     /// The report lines it comes from: the first, and any other line making the same edit.
     pub origins: Vec<Origin>,
+    /// The changes of its kind and reason it is offered with when it saves little; none
+    /// for a change that stands alone, such as a check.
+    pub group: Option<Group>,
+}
+
+/// Small changes the walk offers together: features of one kind changed for one reason,
+/// such as never-used MCP servers turned off.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Group {
+    pub kind: ContextKind,
+    pub reason: Reason,
+    /// The group's heading, such as "Never-used MCP servers: on -> off".
+    pub label: String,
+    /// This member's name in the group's list, such as the server's name.
+    pub member: String,
+}
+
+impl Group {
+    /// Whether two changes in these groups belong to one: the same kind, reason and change.
+    fn joins(&self, other: &Group) -> bool {
+        self.kind == other.kind && self.reason == other.reason && self.label == other.label
+    }
+}
+
+/// Why a feature is offered off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// Never used across a window that would have recorded a use.
+    Unused,
+    /// No use recorded, but the window cannot rule one out.
+    Unrecorded,
+    /// Used, but it cost more than `--max-cost-per-use` per use.
+    Costly,
 }
 
 /// Whether the doctor can make a change, and what it is.
@@ -200,6 +233,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         .iter()
         .filter_map(|id| report.scan.profiles.iter().find(|p| p.id == *id))
         .collect();
+    let group = group(report, &line);
     let how = match (members.first(), line.source) {
         (None, _) => How::Manual {
             step: format!("change it where {profile_id} is configured"),
@@ -232,7 +266,60 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         evidence: String::new(),
         how,
         origins: vec![line.origin],
+        group,
     }
+}
+
+/// The group a feature's change joins: its kind and why it is offered, as its verdict says.
+fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
+    let Source::Piece(c) = line.source else {
+        return None;
+    };
+    let kind = match c.kind {
+        ContextKind::Tool => "tools",
+        ContextKind::McpServer => "MCP servers",
+        ContextKind::McpTool => "MCP tools",
+        ContextKind::McpDiscovery => "MCP discovery listings",
+        ContextKind::Skill => "skills",
+        ContextKind::ToolOutput => "tool outputs",
+        ContextKind::Instructions
+        | ContextKind::System
+        | ContextKind::Memory
+        | ContextKind::Other => return None,
+    };
+    let reason = match (c.verdict?, c.calls) {
+        (Verdict::Off, _) => Reason::Unused,
+        (Verdict::Consider, Some(0)) => Reason::Unrecorded,
+        (Verdict::Consider, Some(_)) => Reason::Costly,
+        _ => return None,
+    };
+    let what = match reason {
+        // A skill left typeable counts only the model's uses.
+        Reason::Unused if typed_only(c.control.as_ref()) => {
+            format!("{} the model never used", capital(kind))
+        }
+        Reason::Unused => format!("Never-used {kind}"),
+        Reason::Unrecorded => format!("{} with no recorded use", capital(kind)),
+        Reason::Costly => format!(
+            "{} over {} per use",
+            capital(kind),
+            about(report.max_cost_per_use_usd)
+        ),
+    };
+    Some(Group {
+        kind: c.kind,
+        reason,
+        label: format!("{what}: {}", line.value),
+        member: c.name.clone(),
+    })
+}
+
+/// `text` with its first letter capitalized.
+fn capital(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// Fill each fix's evidence from the report lines it comes from.
@@ -809,12 +896,22 @@ impl Style {
     }
 
     fn bold(&self, text: &str, indent: usize) -> String {
+        self.styled("1", text, indent)
+    }
+
+    /// Secondary text, such as what the walk left out.
+    fn dim(&self, text: &str, indent: usize) -> String {
+        self.styled("2", text, indent)
+    }
+
+    /// `text` wrapped, each row in the SGR attribute `code` on a color terminal.
+    fn styled(&self, code: &str, text: &str, indent: usize) -> String {
         let text = self.line(text, indent);
         if self.color {
             text.split_inclusive('\n')
                 .map(|row| match row.strip_suffix('\n') {
-                    Some(row) => format!("\x1b[1m{row}\x1b[0m\n"),
-                    None => format!("\x1b[1m{row}\x1b[0m"),
+                    Some(row) => format!("\x1b[{code}m{row}\x1b[0m\n"),
+                    None => format!("\x1b[{code}m{row}\x1b[0m"),
                 })
                 .collect()
         } else {
@@ -1051,8 +1148,59 @@ fn writable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_dir() || !m.permissions().readonly())
 }
 
-/// Changes that each save less than this every 30 days are offered together, after the rest.
+/// A change saving less than this every 30 days is offered with the others of its group.
 const SMALL_USD: f64 = 5.0;
+
+/// A question saving less than this every 30 days in total is not asked.
+const ASKED_USD: f64 = 1.0;
+
+/// One question of the walk: a change, or a group of small ones, each with its target.
+struct Question {
+    members: Vec<(usize, Fix)>,
+}
+
+impl Question {
+    /// The members' savings summed as the running total sums them.
+    fn together(&self) -> Total {
+        let mut total = Total::default();
+        for (_, fix) in &self.members {
+            total.add(fix);
+        }
+        total
+    }
+
+    /// What the members save every 30 days, a saving that depends on a default included;
+    /// none when it was not measured.
+    fn usd(&self) -> Option<f64> {
+        let total = self.together();
+        (total.unmeasured == 0).then_some(total.measured.usd + total.up_to.usd)
+    }
+
+    /// A group as the walk offers it: its heading after `prefix`, its verdict and saving,
+    /// then every member's name.
+    fn card(&self, prefix: &str, style: &Style) -> String {
+        let first = &self.members[0].1;
+        let group = first.group.as_ref().expect("only groups share a question");
+        let mut text = style.bold(&format!("{prefix}{}", group.label), 0);
+        let verdict = if first.suggested {
+            "Worth considering"
+        } else {
+            "Recommended"
+        };
+        let saving = match self.usd() {
+            Some(_) => format!("together, {}", self.together().amount()),
+            None => "their savings were not measured".into(),
+        };
+        text += &style.line(&format!("{verdict} ({}): {saving}.", first.claim), 2);
+        let names: Vec<&str> = self
+            .members
+            .iter()
+            .filter_map(|(_, f)| f.group.as_ref().map(|g| g.member.as_str()))
+            .collect();
+        text += &style.line(&format!("{}.", names.join(", ")), 2);
+        text
+    }
+}
 
 /// What the person accepted in the walk, and the files to write once they confirm.
 #[derive(Debug)]
@@ -1291,8 +1439,9 @@ impl Selection {
 }
 
 /// Walk through each change the doctor can make, biggest saving first, and return what
-/// the person accepted. Changes saving under $5/mo each come last, offered together. Nothing
-/// is written here; end of input is a quit, which leaves the rest unaccepted.
+/// the person accepted. Changes saving under $5/mo each are offered in groups of one kind
+/// and reason, and a group saving under $1/mo in total is not asked. Nothing is written
+/// here; end of input is a quit, which leaves the rest unaccepted.
 pub fn ask(
     fixes: Vec<Fix>,
     style: &Style,
@@ -1363,107 +1512,124 @@ pub fn ask(
         }
         offers.push((index, fix));
     }
-    // Biggest saving first, then those whose saving was not measured, one question each;
-    // then the small ones together, unless there is only one.
-    let (measured, unmeasured): (Vec<_>, Vec<_>) =
-        offers.into_iter().partition(|(_, f)| f.saving.is_some());
-    let (mut singles, mut small): (Vec<_>, Vec<_>) = measured
-        .into_iter()
-        .partition(|(_, f)| f.saving.is_some_and(|usd| usd >= SMALL_USD));
-    singles.extend(unmeasured);
-    if small.len() == 1 {
-        singles.append(&mut small);
+    // A change saving $5/mo or more is asked alone; a smaller one joins the others of its
+    // kind and reason, measured apart from unmeasured.
+    let mut questions: Vec<Question> = vec![];
+    for (index, fix) in offers {
+        let small = |f: &Fix| f.group.is_some() && f.saving.is_none_or(|usd| usd < SMALL_USD);
+        let joins = |q: &Question| {
+            let first = &q.members[0].1;
+            small(&fix)
+                && small(first)
+                && first.saving.is_some() == fix.saving.is_some()
+                && first
+                    .group
+                    .as_ref()
+                    .zip(fix.group.as_ref())
+                    .is_some_and(|(a, b)| a.joins(b))
+        };
+        match questions.iter_mut().find(|q| joins(q)) {
+            Some(question) => question.members.push((index, fix)),
+            None => questions.push(Question {
+                members: vec![(index, fix)],
+            }),
+        }
     }
-    let questions = singles.len() + usize::from(!small.is_empty());
-    let changes = singles.len() + small.len();
-    if changes > 0 {
+    // Biggest saving first, then those whose saving was not measured, in the report's order.
+    questions.sort_by(|a, b| match (a.usd(), b.usd()) {
+        (Some(a), Some(b)) => b.total_cmp(&a),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    let changes = questions.iter().map(|q| q.members.len()).sum();
+    let (questions, skipped): (Vec<_>, Vec<_>) = questions
+        .into_iter()
+        .partition(|q| q.usd().is_none_or(|usd| usd >= ASKED_USD));
+    let count = questions.len();
+    if count > 0 {
+        let asked: usize = questions.iter().map(|q| q.members.len()).sum();
+        let about = if asked == count {
+            String::new()
+        } else {
+            format!(" about {}", self::changes(asked))
+        };
         write!(
             output,
             "\n{}",
             style.bold(
                 &format!(
-                    "token-max doctor: {changes} change{} to review, biggest saving first. Nothing is written until you confirm the list at the end.",
-                    if changes == 1 { "" } else { "s" }
+                    "token-max doctor: {count} question{}{about}, biggest saving first. Nothing is written until you confirm the list at the end.",
+                    if count == 1 { "" } else { "s" },
                 ),
                 0
             )
         )?;
     }
     let mut going = true;
-    for (n, (index, fix)) in singles.iter().enumerate() {
+    for (n, question) in questions.iter().enumerate() {
         if !going {
-            selection.choose(*index, fix, false);
+            for (index, fix) in &question.members {
+                selection.choose(*index, fix, false);
+            }
+            continue;
+        }
+        if let [(index, fix)] = question.members.as_slice() {
+            write!(
+                output,
+                "\n{}",
+                style.entry(fix, &format!("[{}/{count}] ", n + 1))
+            )?;
+            let answer = answer("Accept?", false, input, output)?;
+            going = selection.take(*index, fix, answer, style, output)?;
             continue;
         }
         write!(
             output,
             "\n{}",
-            style.entry(fix, &format!("[{}/{questions}] ", n + 1))
+            question.card(&format!("[{}/{count}] ", n + 1), style)
         )?;
-        let answer = answer("Accept?", false, input, output)?;
-        going = selection.take(*index, fix, answer, style, output)?;
-    }
-    if !small.is_empty() {
-        let batch = if going {
-            // Summed as the running total is, so a saving that depends on a default stays apart.
-            let mut together = Total::default();
-            for (_, fix) in &small {
-                together.add(fix);
-            }
-            let mut text = style.bold(
-                &format!(
-                    "[{questions}/{questions}] {} smaller changes, each saving under {}/mo, together: {}.",
-                    small.len(),
-                    about(SMALL_USD),
-                    together.amount()
-                ),
-                0,
-            );
-            for (_, fix) in &small {
-                let verdict = if fix.suggested {
-                    "worth considering"
-                } else {
-                    "recommended"
-                };
-                text += &style.line(
-                    &format!(
-                        "{}: {}, {} ({verdict}, {})",
-                        fix.name,
-                        fix.value,
-                        saving_text(fix),
-                        fix.claim
-                    ),
-                    2,
-                );
-            }
-            write!(output, "\n{text}")?;
-            answer(&format!("Accept all {}?", small.len()), true, input, output)?
-        } else {
-            Answer::No
-        };
-        match batch {
+        let size = question.members.len();
+        match answer(&format!("Accept all {size}?"), true, input, output)? {
             Answer::Each => {
-                for (n, (index, fix)) in small.iter().enumerate() {
+                for (i, (index, fix)) in question.members.iter().enumerate() {
                     if !going {
                         selection.choose(*index, fix, false);
                         continue;
                     }
-                    let prefix = format!("[{questions}/{questions}, {}/{}] ", n + 1, small.len());
+                    let prefix = format!("[{}/{count}, {}/{size}] ", n + 1, i + 1);
                     write!(output, "\n{}", style.entry(fix, &prefix))?;
                     let answer = answer("Accept?", false, input, output)?;
                     going = selection.take(*index, fix, answer, style, output)?;
                 }
             }
             batch => {
-                for (index, fix) in &small {
+                for (index, fix) in &question.members {
                     selection.choose(*index, fix, batch == Answer::Yes);
                 }
                 if batch == Answer::Yes {
                     let total = selection.total.text("Accepted so far");
                     write!(output, "{}", style.line(&total, 2))?;
                 }
+                going = batch != Answer::Quit;
             }
         }
+    }
+    // Left unanswered, so the list shows them among the changes not accepted.
+    let left: usize = skipped.iter().map(|q| q.members.len()).sum();
+    if left > 0 {
+        let more = if count > 0 { " more" } else { "" };
+        let (was, they) = if left == 1 {
+            ("was", "it's")
+        } else {
+            ("were", "they're")
+        };
+        let text = format!(
+            "{left}{more} change{} in groups saving under {}/mo {was} not asked; {they} in the list below.",
+            if left == 1 { "" } else { "s" },
+            about(ASKED_USD)
+        );
+        write!(output, "\n{}", style.dim(&text, 0))?;
     }
     let Selection {
         accepted,
@@ -1915,6 +2081,7 @@ mod tests {
             share: Some(0.1),
             evidence: String::new(),
             origins: vec![Origin::Check(usize::from(name.as_bytes()[0]))],
+            group: None,
             how: How::Edit(Patch {
                 file: file.to_string_lossy().into_owned(),
                 harness,
@@ -2078,7 +2245,7 @@ mod tests {
         // Anything but an answer asks again; a quit leaves the rest unaccepted.
         let (plan, printed) = walk(fixes, &w, "y\nmaybe\nn\nyes\nq\n");
         assert_eq!(printed.matches("Accept? [y]es, [n]o, [q]uit: ").count(), 5);
-        assert!(printed.starts_with("\ntoken-max doctor: 5 changes to review, biggest saving first. Nothing is written until you confirm the list at the end.\n"));
+        assert!(printed.starts_with("\ntoken-max doctor: 5 questions, biggest saving first. Nothing is written until you confirm the list at the end.\n"));
         let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
         assert!(printed.contains(&format!(
             "\n[1/5] A: on -> off\n  Recommended (Measured): saves $10/mo, 10% of this host's spend.\n  In {shown}:\n    \"a\": true\nAccept? [y]es, [n]o, [q]uit:   Accepted so far: about $10/mo, 10% of this host's spend.\n"
@@ -2162,7 +2329,7 @@ mod tests {
     }
 
     #[test]
-    fn the_walk_asks_big_savings_first_then_unmeasured_then_small_ones_together() {
+    fn the_walk_groups_small_changes_by_kind_and_reason_and_skips_groups_under_a_dollar() {
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");
         let fix = |name: &str, saving: Option<f64>| Fix {
@@ -2170,76 +2337,113 @@ mod tests {
             share: saving.map(|usd| usd / 100.0),
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };
+        let member = |name: &str, saving, reason, label: &str| Fix {
+            group: Some(Group {
+                kind: ContextKind::Skill,
+                reason,
+                label: label.into(),
+                member: name.to_lowercase(),
+            }),
+            ..fix(name, saving)
+        };
+        let unused = "Never-used skills: on -> off";
         // In the report's order: measured savings, largest first, then unmeasured.
         let fixes = || {
             vec![
                 fix("A", Some(50.0)),
-                fix("B", Some(5.0)),
-                fix("C", Some(4.0)),
-                fix("D", Some(1.0)),
-                fix("E", Some(0.5)),
+                member("B", Some(6.0), Reason::Unused, unused),
+                member("S", Some(3.0), Reason::Unused, unused),
+                member(
+                    "M",
+                    Some(2.0),
+                    Reason::Costly,
+                    "Skills over $1 per use: on -> off",
+                ),
+                member("T", Some(1.5), Reason::Unused, unused),
+                member(
+                    "P",
+                    Some(0.4),
+                    Reason::Unrecorded,
+                    "Skills with no recorded use: on -> off",
+                ),
+                fix("C", Some(0.3)),
                 Fix {
                     suggested: true,
                     claim: "Opinion",
                     ..fix("U", None)
                 },
+                member("K", None, Reason::Unused, unused),
+                member("L", None, Reason::Unused, unused),
             ]
         };
-        let (plan, printed) = walk(fixes(), &w, "y\nn\ny\ny\n");
+        let (plan, printed) = walk(fixes(), &w, "y\nn\ny\ny\nn\no\ny\nn\n");
         let heads: Vec<&str> = printed.lines().filter(|l| l.starts_with('[')).collect();
+        // A change of $5/mo or more stands alone even in a group, the groups rank by their
+        // sum, and the unmeasured come last, grouped apart from the measured.
         assert_eq!(
             heads,
             [
-                "[1/4] A: on -> off",
-                "[2/4] B: on -> off",
-                "[3/4] U: on -> off",
-                "[4/4] 3 smaller changes, each saving under $5/mo, together: about $5.50/mo, 6% of this host's spend; overlapping changes may save less.",
+                "[1/6] A: on -> off",
+                "[2/6] B: on -> off",
+                "[3/6] Never-used skills: on -> off",
+                "[4/6] M: on -> off",
+                "[5/6] U: on -> off",
+                "[6/6] Never-used skills: on -> off",
+                "[6/6, 1/2] K: on -> off",
+                "[6/6, 2/2] L: on -> off",
             ]
         );
+        assert!(
+            printed
+                .contains("token-max doctor: 6 questions about 8 changes, biggest saving first.")
+        );
         assert!(printed.contains(
-            "\n[3/4] U: on -> off\n  Worth considering (Opinion): its saving was not measured.\n"
-        ));
+            "\n[3/6] Never-used skills: on -> off\n  Recommended (Measured): together, about $4.50/mo, 5% of this host's spend; overlapping changes may save less.\n  s, t.\nAccept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
+        ), "{printed}");
         assert!(printed.contains(
-            "  C: on -> off, saves $4/mo, 4% of this host's spend (recommended, Measured)\n"
-        ));
-        assert!(printed.contains("Accept all 3? [y]es, [n]o, [o]ne by one, [q]uit: "));
-        // An unmeasured change is counted beside the total, not in it.
-        assert!(printed.contains(
-            "  Accepted so far: about $50/mo, 50% of this host's spend, plus 1 change whose saving was not measured.\n"
-        ));
+            "\n[6/6] Never-used skills: on -> off\n  Recommended (Measured): their savings were not measured.\n  k, l.\n"
+        ), "{printed}");
+        assert!(printed.ends_with(
+            "\n2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
+        ), "{printed}");
+        for (name, want) in [
+            ("A", Some(Choice::Accepted)),
+            ("B", Some(Choice::Declined)),
+            ("S", Some(Choice::Accepted)),
+            ("T", Some(Choice::Accepted)),
+            ("M", Some(Choice::Accepted)),
+            ("U", Some(Choice::Declined)),
+            ("K", Some(Choice::Accepted)),
+            ("L", Some(Choice::Declined)),
+            // Never asked, so the list shows them among those not accepted.
+            ("P", None),
+            ("C", None),
+        ] {
+            let origin = Origin::Check(usize::from(name.as_bytes()[0]));
+            let got = plan
+                .choices
+                .iter()
+                .find(|(o, _)| *o == origin)
+                .map(|c| &c.1);
+            assert_eq!(got, want.as_ref(), "{name}");
+        }
         assert_eq!(
             plan.total("Accepted"),
-            "Accepted: about $56/mo, 56% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less."
+            "Accepted: about $57/mo, 57% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less."
         );
-        for (name, want) in [
-            ("B", Choice::Declined),
-            ("C", Choice::Accepted),
-            ("E", Choice::Accepted),
-        ] {
-            assert_eq!(choice(&plan, name), &want, "{name}");
+        // A quit at a group leaves it and the rest unaccepted.
+        let (plan, printed) = walk(fixes(), &w, "n\nn\nq\n");
+        assert!(!printed.contains("[4/6]"));
+        for name in ["S", "T", "M", "K"] {
+            assert_eq!(choice(&plan, name), &Choice::Declined, "{name}");
         }
-        // One by one asks each small change in turn; a quit there leaves the rest.
-        let (plan, printed) = walk(fixes(), &w, "n\nn\nn\no\ny\nq\n");
-        assert!(printed.contains("\n[4/4, 1/3] C: on -> off\n"));
-        assert!(printed.contains("\n[4/4, 2/3] D: on -> off\n"));
-        assert!(!printed.contains("[4/4, 3/3]"));
-        for (name, want) in [
-            ("C", Choice::Accepted),
-            ("D", Choice::Declined),
-            ("E", Choice::Declined),
-        ] {
-            assert_eq!(choice(&plan, name), &want, "{name}");
-        }
-        // A quit before the batch leaves it unasked, and one small change is asked alone.
-        let (plan, printed) = walk(fixes(), &w, "q\n");
-        assert!(!printed.contains("smaller changes"));
-        assert_eq!(choice(&plan, "E"), &Choice::Declined);
-        let (_, printed) = walk(
-            vec![fix("A", Some(50.0)), fix("C", Some(4.0))],
-            &w,
-            "n\nn\n",
+        // With nothing worth asking, the walk only says what it left out.
+        let (plan, printed) = walk(vec![fix("C", Some(0.3))], &w, "");
+        assert_eq!(
+            printed,
+            "\n1 change in groups saving under $1/mo was not asked; it's in the list below.\n"
         );
-        assert!(printed.contains("\n[2/2] C: on -> off\n"));
+        assert!(plan.choices.is_empty());
     }
 
     #[test]
@@ -2295,13 +2499,19 @@ mod tests {
             "Accepted: 2 changes whose savings were not measured."
         );
         assert_eq!(total(&[]), "");
-        // The small changes' heading sums them the same way.
+        // A group's heading sums its members the same way.
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");
         let small = |name: &str, verb, usd| Fix {
             verb,
             saving: Some(usd),
             share: Some(usd / 100.0),
+            group: Some(Group {
+                kind: ContextKind::Tool,
+                reason: Reason::Unused,
+                label: "Never-used tools: on -> off".into(),
+                member: name.into(),
+            }),
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };
         let (_, printed) = walk(
@@ -2310,7 +2520,7 @@ mod tests {
             "n\n",
         );
         assert!(printed.contains(
-            "[1/1] 2 smaller changes, each saving under $5/mo, together: about $1/mo, 1% of this host's spend, plus up to $3/mo, 3% of this host's spend, from 1 change whose saving depends on the default it replaces; overlapping changes may save less.\n"
+            "  Recommended (Measured): together, about $1/mo, 1% of this host's spend, plus up to $3/mo, 3% of this host's spend, from 1 change whose saving depends on the default it replaces; overlapping changes may save less.\n"
         ), "{printed}");
     }
 

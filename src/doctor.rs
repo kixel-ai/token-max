@@ -17,7 +17,9 @@ use crate::context::{json_value, setting_text};
 use crate::model::{
     BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report,
 };
-use crate::report::{Origin, Recommendation, Source, recommendations};
+use crate::report::{
+    Choice, Listing, Origin, Recommendation, Source, about, recommendations, share_text,
+};
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
 
@@ -32,9 +34,17 @@ pub struct Fix {
     pub claim: &'static str,
     /// Worth considering, rather than a recommended change.
     pub suggested: bool,
+    /// What it saves every 30 days, when measured.
+    pub saving: Option<f64>,
+    /// How the saving reads, such as "saves up to".
+    pub verb: &'static str,
+    /// The saving's share of this host's spend every 30 days.
+    pub share: Option<f64>,
+    /// What was measured and why the change makes sense, from the report line's evidence.
+    pub evidence: String,
     pub how: How,
-    /// The report line it comes from.
-    pub origin: Origin,
+    /// The report lines it comes from: the first, and any other line making the same edit.
+    pub origins: Vec<Origin>,
 }
 
 /// Whether the doctor can make a change, and what it is.
@@ -94,7 +104,8 @@ impl Edit {
 }
 
 /// Every change the report recommends or suggests, biggest saving first, each with its
-/// edit or the step to take by hand. An edit another line already makes is listed once.
+/// edit or the step to take by hand. An edit another line already makes is listed once,
+/// naming both lines. Each fix's evidence is empty until `explain` fills it from the report.
 pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
     fixes_from(
         recommendations(report, unicode)
@@ -108,10 +119,11 @@ pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
 fn fixes_from(all: Vec<Fix>) -> Vec<Fix> {
     let mut fixes: Vec<Fix> = vec![];
     for mut fix in all {
-        if fixes
-            .iter()
-            .any(|f| matches!(f.how, How::Edit(_)) && f.how == fix.how)
+        if let Some(same) = fixes
+            .iter_mut()
+            .find(|f| matches!(f.how, How::Edit(_)) && f.how == fix.how)
         {
+            same.origins.extend(fix.origins);
             continue;
         }
         // Two lines that want one setting at different values, such as checks for two
@@ -213,8 +225,19 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         value: line.value,
         claim: line.claim,
         suggested: line.suggested,
+        saving: line.saving,
+        verb: line.verb,
+        share: line.share,
+        evidence: String::new(),
         how,
-        origin: line.origin,
+        origins: vec![line.origin],
+    }
+}
+
+/// Fill each fix's evidence from the report lines it comes from.
+pub fn explain(fixes: &mut [Fix], listing: &Listing) {
+    for fix in fixes {
+        fix.evidence = listing.evidence(fix.origins[0]);
     }
 }
 
@@ -718,12 +741,6 @@ pub struct Described {
 
 /// How a fix reads in a list or at a prompt, with paths under `home` shown from `~`.
 pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
-    let home_in = |text: &str| match home {
-        Some(dir) => text
-            .replace(&format!("{dir}/"), "~/")
-            .replace(&format!("{dir}\\"), "~\\"),
-        None => text.to_string(),
-    };
     let kind = if fix.suggested {
         format!("{}, worth considering", fix.claim)
     } else {
@@ -745,7 +762,10 @@ pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
             body
         }
         How::Manual { step, reason } => {
-            vec![(home_in(&format!("By hand, since {reason}: {step}.")), false)]
+            vec![(
+                home_in(&format!("By hand, since {reason}: {step}."), home),
+                false,
+            )]
         }
     };
     Described { head, body }
@@ -762,15 +782,7 @@ pub fn setting(fix: &Fix, home: Option<&str>) -> String {
                 crate::report::home_path(home, &patch.file)
             )
         }
-        How::Manual { step, .. } => {
-            let step = match home {
-                Some(dir) => step
-                    .replace(&format!("{dir}/"), "~/")
-                    .replace(&format!("{dir}\\"), "~\\"),
-                None => step.clone(),
-            };
-            format!("by hand: {step}")
-        }
+        How::Manual { step, .. } => format!("by hand: {}", home_in(step, home)),
     }
 }
 
@@ -809,21 +821,77 @@ impl Style {
         }
     }
 
-    /// A fix's heading after `prefix`, then its edit or step, `indent` cells in.
-    fn fix(&self, fix: &Fix, prefix: &str, indent: usize) -> String {
-        let described = describe(fix, self.home.as_deref());
-        let mut text = self.bold(&format!("{prefix}{}", described.head), indent);
-        for (row, raw) in described.body {
+    /// A change as the walk offers it: its heading after `prefix`, its verdict and saving,
+    /// the evidence behind it, then its edit.
+    fn entry(&self, fix: &Fix, prefix: &str) -> String {
+        let mut text = self.bold(&format!("{prefix}{}: {}", fix.name, fix.value), 0);
+        let verdict = if fix.suggested {
+            "Worth considering"
+        } else {
+            "Recommended"
+        };
+        text += &self.line(
+            &format!("{verdict} ({}): {}.", fix.claim, saving_text(fix)),
+            2,
+        );
+        let why = why(&fix.evidence);
+        if !why.is_empty() {
+            text += &self.line(&home_in(why, self.home.as_deref()), 2);
+        }
+        for (row, raw) in describe(fix, self.home.as_deref()).body {
             if raw {
                 // A settings fragment stays whole, so it can be copied at any width.
-                let pad = " ".repeat(indent + 2);
-                text += &format!("{pad}{}\n", terminal_text(&row));
+                text += &format!("  {}\n", terminal_text(&row));
             } else {
-                text += &self.line(&row, indent + 2);
+                text += &self.line(&row, 2);
             }
         }
         text
     }
+
+    /// A file as the person knows it, from `~`.
+    fn path(&self, path: &str) -> String {
+        crate::report::home_path(self.home.as_deref(), path)
+    }
+}
+
+/// Evidence without its closing sentence naming the setting, such as "Set in
+/// ~/.claude/settings.json:promptCacheTtl.", which the edit shown after it already names.
+fn why(evidence: &str) -> &str {
+    ["Set ", "Turn off: ", "Hide it from the model: "]
+        .iter()
+        .filter_map(|lead| evidence.rfind(&format!(" {lead}")))
+        .max()
+        .filter(|&at| {
+            let last = &evidence[at + 1..];
+            last.ends_with('.') && !last[..last.len() - 1].contains(". ")
+        })
+        .map_or(evidence, |at| &evidence[..at])
+}
+
+/// `text` with every path under `home` shown from `~`.
+fn home_in(text: &str, home: Option<&str>) -> String {
+    match home {
+        Some(dir) => text
+            .replace(&format!("{dir}/"), "~/")
+            .replace(&format!("{dir}\\"), "~\\"),
+        None => text.to_string(),
+    }
+}
+
+/// What a change saves, such as "saves $12/mo, 3% of this host's spend".
+fn saving_text(fix: &Fix) -> String {
+    match fix.saving {
+        Some(usd) => format!("{} {}/mo{}", fix.verb, about(usd), share_of_host(fix.share)),
+        None => "its saving was not measured".into(),
+    }
+}
+
+/// ", 3% of this host's spend", or nothing when the host's spend is unknown.
+fn share_of_host(share: Option<f64>) -> String {
+    share.map_or_else(String::new, |s| {
+        format!(", {} of this host's spend", share_text(s))
+    })
 }
 
 /// A settings file the walk may write.
@@ -982,15 +1050,94 @@ fn writable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_dir() || !m.permissions().readonly())
 }
 
-/// What the person accepted, declined, and must do by hand.
+/// Changes that each save less than this every 30 days are offered together, after the rest.
+const SMALL_USD: f64 = 5.0;
+
+/// What the person accepted in the walk, and the files to write once they confirm.
 #[derive(Debug)]
 pub struct Plan {
     /// Each file with accepted edits, in the order first accepted.
     files: Vec<(Target, Vec<Edit>)>,
-    /// Edits the person declined or left after quitting, to make by hand if they want.
-    declined: Vec<Fix>,
-    /// Changes only the person can make.
-    manual: Vec<Fix>,
+    /// What became of each change, by the report lines it came from.
+    choices: Vec<(Origin, Choice)>,
+    /// How many changes the walk offered.
+    offered: usize,
+    total: Total,
+}
+
+impl Plan {
+    /// What became of each change, by the report lines it came from.
+    pub fn choices(&self) -> &[(Origin, Choice)] {
+        &self.choices
+    }
+
+    /// The accepted changes' summed saving after `label`, such as "Accepted"; empty when
+    /// nothing was accepted.
+    pub fn total(&self, label: &str) -> String {
+        self.total.text(label)
+    }
+}
+
+/// The accepted changes' own savings, summed, and how many were not measured.
+#[derive(Clone, Copy, Debug, Default)]
+struct Total {
+    measured: usize,
+    usd: f64,
+    share: f64,
+    /// Whether some measured change's share of the host's spend is unknown.
+    unknown_share: bool,
+    unmeasured: usize,
+}
+
+impl Total {
+    fn add(&mut self, fix: &Fix) {
+        let Some(usd) = fix.saving else {
+            self.unmeasured += 1;
+            return;
+        };
+        self.measured += 1;
+        self.usd += usd;
+        match fix.share {
+            Some(share) => self.share += share,
+            None => self.unknown_share = true,
+        }
+    }
+
+    /// Such as "Accepted so far: about $40/mo, 9% of this host's spend; overlapping changes
+    /// may save less."
+    fn text(&self, label: &str) -> String {
+        let unmeasured = match self.unmeasured {
+            0 => String::new(),
+            1 => "1 change whose saving was not measured".into(),
+            n => format!("{n} changes whose saving was not measured"),
+        };
+        if self.measured == 0 {
+            return if unmeasured.is_empty() {
+                String::new()
+            } else {
+                format!("{label}: {unmeasured}.")
+            };
+        }
+        let usd = about(self.usd);
+        let usd = if usd.starts_with('<') {
+            usd
+        } else {
+            format!("about {usd}")
+        };
+        let share = share_of_host((!self.unknown_share).then_some(self.share));
+        let plus = if unmeasured.is_empty() {
+            String::new()
+        } else {
+            format!(", plus {unmeasured}")
+        };
+        // Each saving holds every other setting constant, so two may count the same requests.
+        let overlap = if self.measured > 1 {
+            "; overlapping changes may save less"
+        } else {
+            ""
+        };
+        format!("{label}: {usd}/mo{share}{plus}{overlap}.")
+    }
 }
 
 /// One person's answer at a prompt.
@@ -999,10 +1146,97 @@ enum Answer {
     Yes,
     No,
     Quit,
+    /// Go through a batch one change at a time.
+    Each,
 }
 
-/// Offer each fix the doctor can make, one prompt each, and return what to write.
-/// Nothing is written here; end of input is a quit.
+/// Ask `question` until it gets an answer it takes; end of input is a quit. `each` offers
+/// to go through a batch one change at a time.
+fn answer(
+    question: &str,
+    each: bool,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<Answer> {
+    let options = if each {
+        "[y]es, [n]o, [o]ne by one, [q]uit"
+    } else {
+        "[y]es, [n]o, [q]uit"
+    };
+    loop {
+        write!(output, "{question} {options}: ")?;
+        output.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            writeln!(output)?;
+            return Ok(Answer::Quit);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(Answer::Yes),
+            "n" | "no" => return Ok(Answer::No),
+            "q" | "quit" => return Ok(Answer::Quit),
+            "o" | "one by one" if each => return Ok(Answer::Each),
+            _ => {}
+        }
+    }
+}
+
+/// What the walk has accepted so far.
+#[derive(Default)]
+struct Selection {
+    /// Each target with accepted edits, by its index among the walk's targets.
+    accepted: Vec<(usize, Vec<Edit>)>,
+    choices: Vec<(Origin, Choice)>,
+    total: Total,
+}
+
+impl Selection {
+    fn choose(&mut self, target: usize, fix: &Fix, yes: bool) {
+        let choice = if yes {
+            Choice::Accepted
+        } else {
+            Choice::Declined
+        };
+        self.choices
+            .extend(fix.origins.iter().map(|o| (*o, choice.clone())));
+        if !yes {
+            return;
+        }
+        self.total.add(fix);
+        let How::Edit(patch) = &fix.how else {
+            unreachable!("offers are edits")
+        };
+        match self.accepted.iter_mut().find(|(i, _)| *i == target) {
+            Some((_, edits)) => edits.extend(patch.edits.iter().cloned()),
+            None => self.accepted.push((target, patch.edits.clone())),
+        }
+    }
+
+    /// Record `answer` to `fix`, printing the running total after a yes; whether the walk
+    /// goes on.
+    fn take(
+        &mut self,
+        target: usize,
+        fix: &Fix,
+        answer: Answer,
+        style: &Style,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
+        self.choose(target, fix, answer == Answer::Yes);
+        if answer == Answer::Yes {
+            write!(
+                output,
+                "{}",
+                style.line(&self.total.text("Accepted so far"), 2)
+            )?;
+        }
+        Ok(answer != Answer::Quit)
+    }
+}
+
+/// Walk through each change the doctor can make, biggest saving first, and return what
+/// the person accepted. Changes saving under $5/mo each come last, offered together. Nothing
+/// is written here; end of input is a quit, which leaves the rest unaccepted.
 pub fn ask(
     fixes: Vec<Fix>,
     style: &Style,
@@ -1015,10 +1249,24 @@ pub fn ask(
     // edit lands in the one text written.
     let mut files: Vec<(String, usize)> = vec![];
     let mut offers = vec![];
-    let mut manual = vec![];
+    let mut selection = Selection::default();
+    let manual = |fix: &Fix| {
+        let How::Manual { step, reason } = &fix.how else {
+            unreachable!("only steps by hand")
+        };
+        let step = Choice::Manual(home_in(
+            &format!("by hand, since {reason}: {step}"),
+            style.home.as_deref(),
+        ));
+        fix.origins
+            .iter()
+            .map(|o| (*o, step.clone()))
+            .collect::<Vec<_>>()
+    };
+    let mut steps = vec![];
     for mut fix in fixes {
         let How::Edit(patch) = &fix.how else {
-            manual.push(fix);
+            steps.extend(manual(&fix));
             continue;
         };
         let index = match files.iter().find(|(f, _)| *f == patch.file) {
@@ -1054,66 +1302,117 @@ pub fn ask(
                 step: steps_in(patch, &file),
                 reason,
             };
-            manual.push(fix);
+            steps.extend(manual(&fix));
             continue;
         }
         offers.push((index, fix));
     }
-    let mut accepted: Vec<(usize, Vec<Edit>)> = vec![];
-    let mut declined = vec![];
-    let total = offers.len();
-    if total > 0 {
+    // Biggest saving first, then those whose saving was not measured, one question each;
+    // then the small ones together, unless there is only one.
+    let (measured, unmeasured): (Vec<_>, Vec<_>) =
+        offers.into_iter().partition(|(_, f)| f.saving.is_some());
+    let (mut singles, mut small): (Vec<_>, Vec<_>) = measured
+        .into_iter()
+        .partition(|(_, f)| f.saving.is_some_and(|usd| usd >= SMALL_USD));
+    singles.extend(unmeasured);
+    if small.len() == 1 {
+        singles.append(&mut small);
+    }
+    let questions = singles.len() + usize::from(!small.is_empty());
+    let changes = singles.len() + small.len();
+    if changes > 0 {
         write!(
             output,
             "\n{}",
             style.bold(
                 &format!(
-                "token-max doctor: {total} change{} to review. Each is written only after a yes.",
-                if total == 1 { "" } else { "s" }
-            ), 0)
+                    "token-max doctor: {changes} change{} to review, biggest saving first. Nothing is written until you confirm the list at the end.",
+                    if changes == 1 { "" } else { "s" }
+                ),
+                0
+            )
         )?;
     }
-    let mut quit = false;
-    for (n, (index, fix)) in offers.into_iter().enumerate() {
-        if quit {
-            declined.push(fix);
+    let mut going = true;
+    for (n, (index, fix)) in singles.iter().enumerate() {
+        if !going {
+            selection.choose(*index, fix, false);
             continue;
         }
         write!(
             output,
             "\n{}",
-            style.fix(&fix, &format!("[{}/{total}] ", n + 1), 0)
+            style.entry(fix, &format!("[{}/{questions}] ", n + 1))
         )?;
-        let answer = loop {
-            write!(output, "Apply? [y]es, [n]o, [q]uit: ")?;
-            output.flush()?;
-            let mut line = String::new();
-            if input.read_line(&mut line)? == 0 {
-                writeln!(output)?;
-                break Answer::Quit;
+        let answer = answer("Accept?", false, input, output)?;
+        going = selection.take(*index, fix, answer, style, output)?;
+    }
+    if !small.is_empty() {
+        let batch = if going {
+            let usd: f64 = small.iter().filter_map(|(_, f)| f.saving).sum();
+            let share: Option<f64> = small.iter().map(|(_, f)| f.share).sum();
+            let mut text = style.bold(
+                &format!(
+                    "[{questions}/{questions}] {} smaller changes, each saving under {}/mo: {}/mo together{}.",
+                    small.len(),
+                    about(SMALL_USD),
+                    about(usd),
+                    share_of_host(share)
+                ),
+                0,
+            );
+            for (_, fix) in &small {
+                let verdict = if fix.suggested {
+                    "worth considering"
+                } else {
+                    "recommended"
+                };
+                text += &style.line(
+                    &format!(
+                        "{}: {}, {} ({verdict}, {})",
+                        fix.name,
+                        fix.value,
+                        saving_text(fix),
+                        fix.claim
+                    ),
+                    2,
+                );
             }
-            match line.trim().to_ascii_lowercase().as_str() {
-                "y" | "yes" => break Answer::Yes,
-                "n" | "no" => break Answer::No,
-                "q" | "quit" => break Answer::Quit,
-                _ => {}
+            write!(output, "\n{text}")?;
+            answer(&format!("Accept all {}?", small.len()), true, input, output)?
+        } else {
+            Answer::No
+        };
+        match batch {
+            Answer::Each => {
+                for (n, (index, fix)) in small.iter().enumerate() {
+                    if !going {
+                        selection.choose(*index, fix, false);
+                        continue;
+                    }
+                    let prefix = format!("[{questions}/{questions}, {}/{}] ", n + 1, small.len());
+                    write!(output, "\n{}", style.entry(fix, &prefix))?;
+                    let answer = answer("Accept?", false, input, output)?;
+                    going = selection.take(*index, fix, answer, style, output)?;
+                }
             }
-        };
-        let How::Edit(patch) = &fix.how else {
-            unreachable!("offers are edits")
-        };
-        match answer {
-            Answer::Yes => match accepted.iter_mut().find(|(i, _)| *i == index) {
-                Some((_, edits)) => edits.extend(patch.edits.iter().cloned()),
-                None => accepted.push((index, patch.edits.clone())),
-            },
-            Answer::No => declined.push(fix),
-            Answer::Quit => {
-                quit = true;
-                declined.push(fix);
+            batch => {
+                for (index, fix) in &small {
+                    selection.choose(*index, fix, batch == Answer::Yes);
+                }
+                if batch == Answer::Yes {
+                    let total = selection.total.text("Accepted so far");
+                    write!(output, "{}", style.line(&total, 2))?;
+                }
             }
         }
     }
+    let Selection {
+        accepted,
+        mut choices,
+        total,
+    } = selection;
+    choices.extend(steps);
     let mut targets: Vec<Option<Target>> = targets.into_iter().map(Result::ok).collect();
     let files = accepted
         .into_iter()
@@ -1124,9 +1423,51 @@ pub fn ask(
         .collect();
     Ok(Plan {
         files,
-        declined,
-        manual,
+        choices,
+        offered: changes,
+        total,
     })
+}
+
+/// Ask once whether to write the accepted changes, naming each file; end of input is a no.
+/// With nothing accepted, there is nothing to ask.
+pub fn confirm(
+    plan: &Plan,
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    if plan.files.is_empty() {
+        return Ok(false);
+    }
+    let names: Vec<String> = plan
+        .files
+        .iter()
+        .map(|(t, _)| style.path(&t.file))
+        .collect();
+    let files = match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => names.concat(),
+    };
+    let changes = plan.total.measured + plan.total.unmeasured;
+    let question = format!(
+        "Write the {changes} accepted change{} to {files}?",
+        if changes == 1 { "" } else { "s" }
+    );
+    loop {
+        write!(output, "\n{} [y]es, [n]o: ", terminal_text(&question))?;
+        output.flush()?;
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            writeln!(output)?;
+            return Ok(false);
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => {}
+        }
+    }
 }
 
 /// A file the doctor wrote.
@@ -1194,44 +1535,38 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
     Ok(written)
 }
 
-/// What the walk did: the files written, then what is left to do by hand.
+/// What the doctor did: the files it wrote, or that it wrote nothing.
 pub fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
-    let home = style.home.as_deref();
-    let shown = |path: &str| crate::report::home_path(home, path);
     let mut text = String::from("\n");
     for w in written {
         let landed = w.resolved.as_ref().map_or_else(String::new, |r| {
-            format!(", through its symlink to {}", shown(r))
+            format!(", through its symlink to {}", style.path(r))
         });
         text += &style.line(
             &format!(
                 "Wrote {} edit{} to {}{landed}.",
                 w.edits,
                 if w.edits == 1 { "" } else { "s" },
-                shown(&w.file)
+                style.path(&w.file)
             ),
             0,
         );
     }
-    if written.is_empty() && plan.declined.is_empty() && plan.manual.is_empty() {
-        text += &style.line("Nothing to change on this host.", 0);
-    } else if written.is_empty() {
-        text += &style.line("No settings were changed.", 0);
+    if !written.is_empty() {
+        return text;
     }
-    if !plan.declined.is_empty() {
-        text += "\n";
-        text += &style.bold("Not applied; to make these yourself:", 0);
-        for fix in &plan.declined {
-            text += &style.fix(fix, "", 2);
-        }
-    }
-    if !plan.manual.is_empty() {
-        text += "\n";
-        text += &style.bold("To change by hand:", 0);
-        for fix in &plan.manual {
-            text += &style.fix(fix, "", 2);
-        }
-    }
+    text += &style.line(
+        if plan.choices.is_empty() {
+            "Nothing to change on this host."
+        } else if plan.offered == 0 {
+            "token-max cannot make these changes; the steps by hand are listed above."
+        } else if plan.files.is_empty() {
+            "Nothing was accepted, so nothing was written."
+        } else {
+            "Nothing was written."
+        },
+        0,
+    );
     text
 }
 
@@ -1509,18 +1844,38 @@ mod tests {
         assert!(matches!(switch(&[&native, &linked], off()), How::Edit(_)));
     }
 
+    /// A change saving $10/mo, 10% of the host's spend; its report line is its name's
+    /// first byte.
     fn change(name: &str, file: &Path, harness: Harness, edits: Vec<Edit>) -> Fix {
         Fix {
             name: name.into(),
             value: "on -> off".into(),
             claim: "Measured",
             suggested: false,
-            origin: Origin::Check(0),
+            saving: Some(10.0),
+            verb: "saves",
+            share: Some(0.1),
+            evidence: String::new(),
+            origins: vec![Origin::Check(usize::from(name.as_bytes()[0]))],
             how: How::Edit(Patch {
                 file: file.to_string_lossy().into_owned(),
                 harness,
                 edits,
             }),
+        }
+    }
+
+    /// What became of the change named `name`.
+    fn choice<'a>(plan: &'a Plan, name: &str) -> &'a Choice {
+        let origin = Origin::Check(usize::from(name.as_bytes()[0]));
+        &plan.choices.iter().find(|(o, _)| *o == origin).unwrap().1
+    }
+
+    /// The step by hand the change named `name` became.
+    fn by_hand<'a>(plan: &'a Plan, name: &str) -> &'a str {
+        match choice(plan, name) {
+            Choice::Manual(step) => step,
+            other => panic!("{name} is {other:?}, not by hand"),
         }
     }
 
@@ -1662,46 +2017,209 @@ mod tests {
                 ..change("F", &config, Harness::Codex, vec![])
             },
         ];
-        // Anything but an answer asks again; a quit leaves the rest unapplied.
+        // Anything but an answer asks again; a quit leaves the rest unaccepted.
         let (plan, printed) = walk(fixes, &w, "y\nmaybe\nn\nyes\nq\n");
-        assert_eq!(printed.matches("Apply? [y]es, [n]o, [q]uit: ").count(), 5);
-        assert!(printed.starts_with("\ntoken-max doctor: 5 changes to review."));
+        assert_eq!(printed.matches("Accept? [y]es, [n]o, [q]uit: ").count(), 5);
+        assert!(printed.starts_with("\ntoken-max doctor: 5 changes to review, biggest saving first. Nothing is written until you confirm the list at the end.\n"));
         let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
         assert!(printed.contains(&format!(
-            "\n[1/5] A: on -> off (Measured)\n  In {shown}:\n    \"a\": true\n"
+            "\n[1/5] A: on -> off\n  Recommended (Measured): saves $10/mo, 10% of this host's spend.\n  In {shown}:\n    \"a\": true\nAccept? [y]es, [n]o, [q]uit:   Accepted so far: about $10/mo, 10% of this host's spend.\n"
         )));
+        assert!(printed.contains(
+            "  Accepted so far: about $20/mo, 20% of this host's spend; overlapping changes may save less.\n"
+        ));
+        for (name, want) in [
+            ("A", Choice::Accepted),
+            ("B", Choice::Declined),
+            ("C", Choice::Accepted),
+            ("D", Choice::Declined),
+            ("E", Choice::Declined),
+        ] {
+            assert_eq!(choice(&plan, name), &want, "{name}");
+        }
+        assert_eq!(
+            by_hand(&plan, "F"),
+            "by hand, since the X environment variable sets it: set X=1 where it is exported"
+        );
+        assert_eq!(
+            plan.total("Accepted"),
+            "Accepted: about $20/mo, 20% of this host's spend; overlapping changes may save less."
+        );
+        // The confirm names each file, and asks again until it gets an answer.
+        let mut printed = vec![];
+        assert!(confirm(&plan, &style(&w), &mut "sure\ny\n".as_bytes(), &mut printed).unwrap());
+        let printed = String::from_utf8(printed).unwrap();
+        assert_eq!(
+            printed
+                .matches(&format!(
+                    "\nWrite the 2 accepted changes to {shown}? [y]es, [n]o: "
+                ))
+                .count(),
+            2
+        );
         let written = write(&plan).unwrap();
         assert_eq!(
             std::fs::read_to_string(&settings).unwrap(),
             "{\n  \"keep\": 1,\n  \"a\": true,\n  \"c\": true\n}\n"
         );
         assert!(!config.exists());
-        let summary = finish(&plan, &written, &style(&w));
-        assert!(summary.starts_with(&format!("\nWrote 2 edits to {shown}.\n")));
-        let not_applied = &summary[summary.find("Not applied").unwrap()..];
-        for name in ["B:", "D:", "E:"] {
-            assert!(not_applied.contains(name), "{name} in {summary}");
-        }
-        assert!(summary.contains(
-            "To change by hand:\n  F: on -> off (Measured)\n    By hand, since the X environment variable sets it: set X=1 where it is exported.\n"
-        ));
-        // End of input is a quit, and nothing accepted writes nothing.
-        let (plan, _) = walk(
+        assert_eq!(
+            finish(&plan, &written, &style(&w)),
+            format!("\nWrote 2 edits to {shown}.\n")
+        );
+        // End of input is a quit in the walk and a no at the confirm.
+        let z = || {
             vec![change(
                 "A",
                 &settings,
                 Harness::Claude,
                 vec![edit("z", 1, false)],
-            )],
-            &w,
-            "",
+            )]
+        };
+        let (plan, _) = walk(z(), &w, "");
+        assert_eq!(choice(&plan, "A"), &Choice::Declined);
+        assert!(!confirm(&plan, &style(&w), &mut "".as_bytes(), &mut vec![]).unwrap());
+        assert_eq!(
+            finish(&plan, &[], &style(&w)),
+            "\nNothing was accepted, so nothing was written.\n"
         );
-        assert!(write(&plan).unwrap().is_empty());
+        let (plan, _) = walk(z(), &w, "y\n");
+        let mut printed = vec![];
+        assert!(!confirm(&plan, &style(&w), &mut "".as_bytes(), &mut printed).unwrap());
+        assert!(
+            String::from_utf8(printed)
+                .unwrap()
+                .ends_with("[y]es, [n]o: \n")
+        );
+        assert_eq!(finish(&plan, &[], &style(&w)), "\nNothing was written.\n");
         assert!(
             !std::fs::read_to_string(&settings)
                 .unwrap()
                 .contains("\"z\"")
         );
+        assert_eq!(
+            finish(&walk(vec![], &w, "").0, &[], &style(&w)),
+            "\nNothing to change on this host.\n"
+        );
+    }
+
+    #[test]
+    fn the_walk_asks_big_savings_first_then_unmeasured_then_small_ones_together() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let fix = |name: &str, saving: Option<f64>| Fix {
+            saving,
+            share: saving.map(|usd| usd / 100.0),
+            ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
+        };
+        // In the report's order: measured savings, largest first, then unmeasured.
+        let fixes = || {
+            vec![
+                fix("A", Some(50.0)),
+                fix("B", Some(5.0)),
+                fix("C", Some(4.0)),
+                fix("D", Some(1.0)),
+                fix("E", Some(0.5)),
+                Fix {
+                    suggested: true,
+                    claim: "Opinion",
+                    ..fix("U", None)
+                },
+            ]
+        };
+        let (plan, printed) = walk(fixes(), &w, "y\nn\ny\ny\n");
+        let heads: Vec<&str> = printed.lines().filter(|l| l.starts_with('[')).collect();
+        assert_eq!(
+            heads,
+            [
+                "[1/4] A: on -> off",
+                "[2/4] B: on -> off",
+                "[3/4] U: on -> off",
+                "[4/4] 3 smaller changes, each saving under $5/mo: $5.50/mo together, 6% of this host's spend.",
+            ]
+        );
+        assert!(printed.contains(
+            "\n[3/4] U: on -> off\n  Worth considering (Opinion): its saving was not measured.\n"
+        ));
+        assert!(printed.contains(
+            "  C: on -> off, saves $4/mo, 4% of this host's spend (recommended, Measured)\n"
+        ));
+        assert!(printed.contains("Accept all 3? [y]es, [n]o, [o]ne by one, [q]uit: "));
+        // An unmeasured change is counted beside the total, not in it.
+        assert!(printed.contains(
+            "  Accepted so far: about $50/mo, 50% of this host's spend, plus 1 change whose saving was not measured.\n"
+        ));
+        assert_eq!(
+            plan.total("Accepted"),
+            "Accepted: about $56/mo, 56% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less."
+        );
+        for (name, want) in [
+            ("B", Choice::Declined),
+            ("C", Choice::Accepted),
+            ("E", Choice::Accepted),
+        ] {
+            assert_eq!(choice(&plan, name), &want, "{name}");
+        }
+        // One by one asks each small change in turn; a quit there leaves the rest.
+        let (plan, printed) = walk(fixes(), &w, "n\nn\nn\no\ny\nq\n");
+        assert!(printed.contains("\n[4/4, 1/3] C: on -> off\n"));
+        assert!(printed.contains("\n[4/4, 2/3] D: on -> off\n"));
+        assert!(!printed.contains("[4/4, 3/3]"));
+        for (name, want) in [
+            ("C", Choice::Accepted),
+            ("D", Choice::Declined),
+            ("E", Choice::Declined),
+        ] {
+            assert_eq!(choice(&plan, name), &want, "{name}");
+        }
+        // A quit before the batch leaves it unasked, and one small change is asked alone.
+        let (plan, printed) = walk(fixes(), &w, "q\n");
+        assert!(!printed.contains("smaller changes"));
+        assert_eq!(choice(&plan, "E"), &Choice::Declined);
+        let (_, printed) = walk(
+            vec![fix("A", Some(50.0)), fix("C", Some(4.0))],
+            &w,
+            "n\nn\n",
+        );
+        assert!(printed.contains("\n[2/2] C: on -> off\n"));
+    }
+
+    #[test]
+    fn a_report_line_whose_edit_another_makes_is_offered_once_with_both_lines() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let same = || vec![edit("a", 1, false)];
+        let fixes = fixes_from(vec![
+            change("A", &settings, Harness::Claude, same()),
+            change("B", &settings, Harness::Claude, same()),
+        ]);
+        assert_eq!(fixes.len(), 1);
+        let (plan, _) = walk(fixes, &w, "y\n");
+        assert_eq!(choice(&plan, "A"), &Choice::Accepted);
+        assert_eq!(choice(&plan, "B"), &Choice::Accepted);
+        assert_eq!(
+            plan.total("Accepted"),
+            "Accepted: about $10/mo, 10% of this host's spend."
+        );
+    }
+
+    #[test]
+    fn the_walk_leaves_out_the_sentence_naming_the_setting_its_edit_shows() {
+        assert_eq!(
+            why(
+                "Replayed at 5m and 1h; 1h costs less. Set in ~/.claude/settings.json:promptCacheTtl."
+            ),
+            "Replayed at 5m and 1h; 1h costs less."
+        );
+        assert_eq!(
+            why(
+                "Never used; it cost $3 over the window. Turn off: \"permissions\": {\"deny\": [\"X\"]}."
+            ),
+            "Never used; it cost $3 over the window."
+        );
+        // A setting named mid-evidence stays.
+        let kept = "Set it lower. Commands past the cap keep running.";
+        assert_eq!(why(kept), kept);
     }
 
     #[test]
@@ -1717,12 +2235,16 @@ mod tests {
         );
         let (plan, printed) = walk(vec![deny.clone()], &w, "");
         assert!(!printed.contains("Apply?"));
-        let How::Manual { reason, .. } = &plan.manual[0].how else {
-            panic!("an edit that cannot apply is a step by hand")
-        };
+        let shown = home_in(&settings.display().to_string(), style(&w).home.as_deref());
         assert_eq!(
-            reason,
-            &format!("permissions is not an object in {}", settings.display())
+            by_hand(&plan, "A"),
+            format!(
+                "by hand, since permissions is not an object in {shown}: in {shown}, set \"permissions\": {{\"deny\": [\"Agent\"]}} (added to the list)"
+            )
+        );
+        assert_eq!(
+            finish(&plan, &[], &style(&w)),
+            "\ntoken-max cannot make these changes; the steps by hand are listed above.\n"
         );
         std::fs::write(&settings, "{}").unwrap();
         let (plan, _) = walk(vec![deny], &w, "y\n");
@@ -1774,11 +2296,11 @@ mod tests {
             std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
             let (plan, printed) = walk(vec![fix], &w, "");
             assert!(!printed.contains("Apply?"));
-            let How::Manual { step, reason } = &plan.manual[0].how else {
-                panic!("a read-only target is a step by hand")
-            };
-            assert_eq!(reason, &format!("{} is read-only", target.display()));
-            assert_eq!(step, &format!("in {}, set \"a\": 1", target.display()));
+            let shown = home_in(&target.display().to_string(), style(&w).home.as_deref());
+            assert_eq!(
+                by_hand(&plan, "A"),
+                format!("by hand, since {shown} is read-only: in {shown}, set \"a\": 1")
+            );
             std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
         }
         // Two profiles that link one dotfile write it once, with both accepted edits.
@@ -1835,12 +2357,7 @@ mod tests {
             &w,
             "",
         );
-        let How::Manual { reason, .. } = &plan.manual[0].how else {
-            panic!("a dangling symlink is a step by hand")
-        };
-        assert!(
-            reason.ends_with("is a symlink to a missing file"),
-            "{reason}"
-        );
+        let step = by_hand(&plan, "A");
+        assert!(step.contains("is a symlink to a missing file: "), "{step}");
     }
 }

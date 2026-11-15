@@ -12,12 +12,12 @@ use serde::Serialize;
 use serde_json::ser::Formatter;
 
 use crate::discovery::DiscoveryOptions;
-use crate::doctor::{Fix, Style, ask, finish, write};
+use crate::doctor::{Fix, Style, ask, confirm, finish, write};
 use crate::model::{Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Host, ReportOptions, format_report};
+use crate::report::{Host, Listing, ReportOptions, format_report};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply};
@@ -86,7 +86,7 @@ mode. Which plan a profile is signed in to is never read. Never retains or print
 or component text. Color is automatic on terminals; NO_COLOR disables it. Progress goes to
 stderr only on interactive terminals, never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
-the last answer.
+the list of accepted changes is confirmed.
 
 When it offers this host's changes on a terminal: exit 0, or 2 on failure or cancellation.
 Otherwise: exit 0 for no applicable change (advisory findings may remain), 1 for a
@@ -530,10 +530,12 @@ enum Output {
     Walk(Walk),
 }
 
-/// The doctor's report and the changes it offers.
+/// This host's report and the changes it offers, then any other hosts' reports.
 struct Walk {
-    text: String,
+    listing: Box<Listing>,
     fixes: Vec<Fix>,
+    /// What follows this host's report: other hosts' reports and the note on adding them.
+    rest: String,
     style: Style,
 }
 
@@ -566,6 +568,8 @@ pub struct Rendered {
     pub change: bool,
     /// Empty for a destination's report, whose changes are listed in its text.
     pub fixes: Vec<Fix>,
+    /// The report, to print again after the walk; None for a destination's.
+    pub listing: Option<Box<Listing>>,
 }
 
 /// Analyze one host's scan and print its report.
@@ -595,12 +599,14 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     };
     // Computed once, since each reads the files that may outrank a switch: the edits the
     // report names and the walk's offers are the same value.
-    let fixes = crate::doctor::fixes(&report, format.unicode);
-    let text = format_report(&report, &fixes, report_options);
+    let mut fixes = crate::doctor::fixes(&report, format.unicode);
+    let listing = format_report(&report, &fixes, report_options);
+    crate::doctor::explain(&mut fixes, &listing);
     Ok(Rendered {
-        text,
+        text: listing.text(),
         change,
         fixes,
+        listing: Some(Box::new(listing)),
     })
 }
 
@@ -1000,18 +1006,25 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let mut code = 0;
     let mut text = String::new();
     let mut fixes = vec![];
+    let mut listing = None;
     for (ssh, reply) in replies {
         let Reply::Report(Rendered {
             text: report,
             change,
             fixes: local,
+            listing: local_listing,
         }) = reply
         else {
             unreachable!("a report job gets reports");
         };
         code = code.max(u8::from(change));
         fixes.extend(local);
-        if !text.is_empty() {
+        // This host's report comes first; the walk prints it after the questions.
+        if walk && ssh.is_none() {
+            listing = local_listing;
+            continue;
+        }
+        if !text.is_empty() || listing.is_some() {
             text.push('\n');
         }
         // A destination's report is its own text, so escape all but our own styles.
@@ -1031,22 +1044,41 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             width: width(),
             home,
         };
-        return Ok((Output::Walk(Walk { text, fixes, style }), 0));
+        let listing = listing.expect("a walk has this host's report");
+        return Ok((
+            Output::Walk(Walk {
+                listing,
+                fixes,
+                rest: text,
+                style,
+            }),
+            0,
+        ));
     }
     Ok((Output::Text(text), code))
 }
 
-/// Print the report, offer each change, then write the accepted ones.
+/// Walk through the changes, print the report with the accepted ones first, then write
+/// them once the person confirms.
 fn walk(walk: Walk) -> Result<(), ScanError> {
-    let Walk { text, fixes, style } = walk;
+    let Walk {
+        listing,
+        fixes,
+        rest,
+        style,
+    } = walk;
     let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
     let mut stdout = io::stdout().lock();
-    stdout.write_all(text.as_bytes()).map_err(failed)?;
+    let mut stdin = io::stdin().lock();
+    let plan = ask(fixes, &style, &mut stdin, &mut stdout).map_err(failed)?;
+    let report = listing.review(plan.choices(), &plan.total("Accepted"));
+    // The report reads as its own section after the questions.
+    let gap = if plan.choices().is_empty() { "" } else { "\n" };
+    write!(stdout, "{gap}{report}{rest}").map_err(failed)?;
     stdout.flush().map_err(failed)?;
-    enter(Phase::Asking);
-    let plan = ask(fixes, &style, &mut io::stdin().lock(), &mut stdout).map_err(failed)?;
+    let yes = confirm(&plan, &style, &mut stdin, &mut stdout).map_err(failed)?;
     enter(Phase::Writing);
-    let written = write(&plan)?;
+    let written = if yes { write(&plan)? } else { vec![] };
     // The settings are written, so a failure to say so must not read as nothing changed.
     let _ = stdout.write_all(finish(&plan, &written, &style).as_bytes());
     let _ = stdout.flush();

@@ -226,7 +226,7 @@ Decided 2026-11-14 (maintainer, at the pick of the planning PR, after
 mockup videos): ✅ doctor's terminal walk shows a running total of the accepted changes'
 savings, summed and labeled as possibly overlapping (rejected: a joint
 replay; no total). This amends "no summed or joint savings total" for that
-total only, in [the walk quest](/quest/m0/walk.md).
+total only, in the walk quest (`quest/m0/walk.md` in git history).
 
 Decided 2026-11-14 (maintainer, at the pick of the planning PR): ✅ stop
 splitting rows by profile: one row per setting in each settings file,

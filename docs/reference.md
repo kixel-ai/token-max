@@ -29,18 +29,38 @@ in PowerShell,
 
 ## Applying changes
 
-After the report, `doctor` offers each change it can make, recommended and
-worth considering alike, biggest monthly saving first, as the report lists
-them. A change whose saving was not measured, such as raising an effort, comes
-after the rest. A line no setting changes, such as a CLAUDE.md over Claude
-Code's size guidance, is listed after the walk as a step by hand. Each prompt shows
-the line's name and values and the exact edit, such as `"promptCacheTtl":
-"1h"` in `~/.claude/settings.json`, and takes `y`, `n` or `q`; anything else
-asks again, and end of input is a `q`. A `q` leaves the rest unapplied.
-Nothing is written until the last answer: each file is then written once,
-with every edit accepted for it. A no or an unanswered change is listed after
-the walk with its edit, to make by hand, which also suits a file another tool
-rewrites, such as a dotfiles manager.
+On a terminal, `doctor` first walks through each change it can make, after a
+headline counting them, across every settings file, recommended and worth
+considering alike, biggest monthly saving first. Each one shows its current
+and offered value, whether it is recommended or worth considering, its kind of
+claim, its saving per 30 days in dollars and as a percent of this host's spend
+over the window (the base the report's percents use), what was measured, such
+as the requests a replay covered or a tool's uses and what each cost, why the
+change makes sense, and the exact edit, such as `"promptCacheTtl": "1h"` in
+`~/.claude/settings.json`. A change whose saving was not measured, such as
+raising an effort, comes after those saving $5/mo or more, one question each,
+and says so. Changes saving under $5/mo each come last as one question, which
+lists them with their savings and takes `y` for all, `n` for none or `o` to go
+through them one at a time; a single such change is asked on its own.
+
+Each question takes `y`, `n` or `q`; anything else asks again. An answer only
+selects: after each yes, a running total sums the accepted changes' own
+savings, in dollars and as a percent of this host's spend, and says that
+overlapping changes may save less, since each saving holds every other setting
+constant. An accepted change whose saving was not measured is counted beside
+the total, not in it. A `q`, or end of input, ends the walk and leaves the rest
+unaccepted.
+
+The report follows, its list grouped: the accepted changes first with the
+total, then the ones not accepted, then the steps to take by hand, such as a
+CLAUDE.md over Claude Code's size guidance or a change something else would
+override, each saying why, then every other line, each group ranked as the
+report ranks it. Then one question asks whether to write the accepted changes,
+naming each file; nothing is written before that yes, end of input is a no,
+and a no says nothing was written. Each file is then written once, with every
+edit accepted for it. A change not accepted keeps its edit in the list, to
+make by hand, which also suits a file another tool rewrites, such as a dotfiles
+manager. Either answer exits 0.
 
 Only a profile's own `settings.json` or Codex `config.toml` is edited,
 including Claude's `env` block. An edit sets the setting that decides the
@@ -74,8 +94,8 @@ is readable only by you. Other access controls, such as an ACL, are not copied.
 The file is checked once more just before it is replaced. A symlink is written through to its target, which the summary names, and
 profiles whose files resolve to one file share one write. A read-only target, or one
 that cannot take the edit, such as a `permissions` that is not an object, makes
-the change a step by hand naming the resolved path. Ctrl-C at a prompt exits 2
-with no settings changed.
+the change a step by hand naming the resolved path. Ctrl-C at any question,
+the last included, exits 2 with no settings changed.
 
 Without a terminal, `doctor` changes nothing: each change's line ends with its
 edit and file, or its step by hand. A destination of `--ssh`
@@ -392,7 +412,9 @@ as the session export below.
 
 IDs in the report are opaque hashes. Shared histories are read once, and a
 request whose profile is ambiguous counts once on the line its profiles share
-(see [Profiles](#profiles)). Independent check savings must not be summed.
+(see [Profiles](#profiles)). Independent check savings must not be summed; the
+walk's running total is the one sum, and it says that overlapping changes may
+save less.
 
 ## Session export
 

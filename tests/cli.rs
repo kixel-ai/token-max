@@ -840,7 +840,8 @@ fn explicit_windows_match_the_library_replay() {
                 details: true,
                 ..ReportOptions::default()
             },
-        );
+        )
+        .text();
         assert!(line(&library).is_some(), "{mode}: {library}");
         assert_eq!(line(&stdout), line(&library), "{mode}");
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -1175,27 +1176,39 @@ mod unix {
         // Answers wait in the terminal until each prompt reads one; the terminal stays
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
-        keyboard.write_all(b"y\nn\n").unwrap();
+        // No to auto memory, yes to the TTL, then yes to writing it.
+        keyboard.write_all(b"n\ny\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
+        // The walk comes first: a change whose saving was not measured before those
+        // saving under $5/mo.
+        let at = |text: &str| {
+            stdout
+                .find(text)
+                .unwrap_or_else(|| panic!("{text:?} in {stdout}"))
+        };
         assert!(
-            stdout.contains("\n1 change recommended and 1 worth considering.\n"),
+            stdout.starts_with("\ntoken-max doctor: 2 changes to review"),
             "{stdout}"
         );
-        assert!(!stdout.contains("Changes to make"), "{stdout}");
+        at(
+            "\n[1/2] Auto memory: on -> off\n  Worth considering (Opinion): its saving was not measured.\n",
+        );
+        let ttl = at(
+            "\n[2/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves <$0.01/mo, 13% of this host's spend.\n  Measured on 2 requests over 15 days. Replayed at 5m and 1h, assuming the same\n  sessions; 1h costs less.\n  In ~/.claude/settings.json:\n    \"promptCacheTtl\": \"1h\"\nAccept? [y]es, [n]o, [q]uit:   Accepted so far: <$0.01/mo, 13% of this host's spend.\n",
+        );
+        // Then the report, its accepted change first, and one question to write it.
+        let report = at("\n1 change recommended and 1 worth considering.\n");
+        let accepted = at("\nACCEPTED  biggest saving first\nchange   Main-agent prompt cache TTL");
+        let declined = at("\nNOT ACCEPTED\nconsider Auto memory");
+        let confirm = at("\nWrite the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: ");
+        let wrote = at("\nWrote 1 edit to ~/.claude/settings.json.\n");
         assert!(
-            stdout.contains(
-                "[1/2] Main-agent prompt cache TTL: 5m -> 1h (Measured)\n  In ~/.claude/settings.json:\n    \"promptCacheTtl\": \"1h\"\nApply? [y]es, [n]o, [q]uit: "
-            ),
+            ttl < report && report < accepted && accepted < declined,
             "{stdout}"
         );
-        assert!(stdout.contains("[2/2] Auto memory: on -> off (Opinion, worth considering)"));
-        assert!(
-            stdout.contains("Wrote 1 edit to ~/.claude/settings.json."),
-            "{stdout}"
-        );
-        assert!(stdout.contains("Not applied; to make these yourself:"));
+        assert!(declined < confirm && confirm < wrote, "{stdout}");
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
             "{\n  \"promptCacheTtl\": \"1h\"\n}\n"

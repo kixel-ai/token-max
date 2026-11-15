@@ -30,6 +30,20 @@ polished lines, boxed cards, and badges with bars): ✅ polished lines
 - The ranked list marks each row with a colored dot and the section headers
   with a rule; savings are green.
 
+Added 2026-11-16 (maintainer, after running the merged walk on macOS:
+"no coloring on my mac. Also maybe add some padding so it looks better"):
+the walk today prints only bold, while the list after it is colored.
+
+- ✅ color the walk like the report: the verdict in its color, savings
+  green, and secondary text dim, wherever the report colors (not only on
+  Linux terminals; macOS Terminal and iTerm2 handle the same escapes).
+- ✅ padding: indent the walk and the list by two spaces, and leave a blank
+  line around the headline and between cards. Replace the three
+  "token-max: Scanning..." progress lines with one line that clears itself.
+- The headline and the card counter disagree: that run said "73 changes to
+  review" and then "[1/2]", since 72 small changes share one question. Say
+  both, such as "73 changes: 1 to review, then 72 small ones together".
+
 ## Required
 
 - [Say what each setting does](/quest/m0/launch/descriptions.md) - the What line on each walk card

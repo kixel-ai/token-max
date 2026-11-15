@@ -26,6 +26,20 @@ prose counts as a possible use rather than none. Update the reason line,
 `docs/reference.md`'s "Exit codes and unreadable lines" and
 `docs/semantics.md` to match.
 
+The search proves nonuse only in bytes that were written. A crash can cut a
+record off, and the reader skips it as unreadable once a later write ends
+its line, often with the next record joined on. Its missing bytes could
+hold any call, and a cut inside a name, such as `"name":"Age`, leaves a
+prefix that does not contain `Agent`. Recommended (review of the planning
+PR, for the maintainer to confirm): read each unparseable line as the
+records it holds; a record cut off before its JSON closes counts as a
+possible use of every feature, unless its surviving bytes rule a call out,
+such as a record type that cannot hold one or a call name that survived
+whole, and a cut inside a call name counts for every feature whose name
+starts with what survived. Treat a deferred unterminated final line the
+same way. Cover a cut record, a cut name and a joined pair with synthetic
+tests.
+
 ## Related
 
 - [Give each profile one row per tool](/quest/m0/profile-rows.md) - also decides never-used rows

@@ -87,12 +87,9 @@ distribution in m0 (npm then; crates.io since the Rust rewrite). The crate
 and the command are both `token-max`. Keep the report
 usable in scripts and avoid a second analysis implementation.
 
-The epic's own remaining work is the end-to-end first-release validation,
-the 0.0.1 version change, publishing the crate after every child merges
-through the [protected release path](../../docs/releasing.md), verifying the
-README's install command against the published crate, and clearing Quest's
-release handoff. No crate has been published; `token-max` was unclaimed on
-crates.io on 2026-11-08, which does not prove it can be published.
+The end-to-end first-release validation, the 0.0.1 version change,
+publishing the crate and clearing Quest's release handoff are
+[their own quest](/quest/m0/release.md).
 
 Expanded 2026-11-07 (/quest-plan, then "afk spawn and merge whatever you want"):
 ✅ include T3-aware Claude/Codex profiles/settings and explicit SSH host audits
@@ -163,10 +160,6 @@ Recommendations for every check:
   selected SSH audit destinations; package-manager
   installation downloads are separate. Do not upload
   transcript, instruction, skill, or schema content to a counting service.
-
-## Waiting
-
-- Maintainer: publish the first crates.io release with a short-lived token, since crates.io creates trusted publishers only for an existing crate, then add the trusted publisher for later releases. Follow [release preparation](../../docs/releasing.md); the `crates-io` GitHub environment restricted to `main` exists (created 2026-11-10 by /quest-unblock). The maintainer offered browser control, so an agent drives Chrome through the token and trusted-publisher steps at release time. An agent can automate the protected workflow and drive Chrome through crates.io setup, but cannot sign in as the owner. No release was attempted.
 
 Decided 2026-11-08 (maintainer, after the first run on the maintainer's
 host): ✅ recommend from the measured requests when the missing ones cannot

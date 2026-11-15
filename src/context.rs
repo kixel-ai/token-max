@@ -256,20 +256,31 @@ struct Pieces<'a> {
     catalog: HashMap<usize, Option<String>>,
     /// The descriptions a component ships, by component and owning profile set, for the
     /// pieces it describes.
-    described: HashMap<(&'a str, usize), Vec<(usize, String)>>,
+    described: HashMap<(&'a str, usize), Vec<Described>>,
     /// Descriptions found while splitting the component being interned.
-    pending: Vec<(usize, String)>,
+    pending: Vec<Described>,
 }
+
+/// A piece, and the description a record ships for it, or None when it ships none.
+type Described = (usize, Option<String>);
 
 /// One component's share of a piece: its characters, or None when only its
 /// identity is recorded.
 type Split = (usize, Option<i64>);
 
 impl Pieces<'_> {
-    /// Note the description a component ships for one of its pieces.
+    /// Note the description a component ships for one of its pieces, or that it ships none.
+    /// Only a record that would carry one counts: a measured tool definition, a listed
+    /// skill or a Codex namespace, not an opaque identity or other context.
     fn describe(&mut self, key: usize, component: &Component) {
-        if let Some(description) = &component.description {
-            self.pending.push((key, description.clone()));
+        let carries = match component.category {
+            Category::ToolSchema | Category::McpSchema => component.size.characters.is_some(),
+            Category::SkillListing => component.scope == crate::model::Scope::Component,
+            Category::McpDiscovery => true,
+            _ => false,
+        };
+        if carries {
+            self.pending.push((key, component.description.clone()));
         }
     }
 
@@ -1029,13 +1040,19 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     .instruction_size = component(revision).instruction_size;
             }
         }
-        // Each request's revisions describe this owner's lines, so the latest one sent wins.
+        // Each request's records describe this owner's lines, so the latest request decides:
+        // a description any of its records ships, else none.
+        let mut described: IndexMap<usize, Option<&String>> = IndexMap::default();
         for id in &shown {
-            let described = interned.described.get(&(&***id, owner));
-            for (key, description) in described.into_iter().flatten() {
-                if let Some(row) = rows.get_mut(&(owner, *key)) {
-                    row.cost.description = Some(description.clone());
-                }
+            let records = interned.described.get(&(&***id, owner));
+            for (key, description) in records.into_iter().flatten() {
+                let latest = described.entry(*key).or_default();
+                *latest = description.as_ref().or(*latest);
+            }
+        }
+        for (key, description) in described {
+            if let Some(row) = rows.get_mut(&(owner, key)) {
+                row.cost.description = description.cloned();
             }
         }
         // The leading tools and system prompt by revision, and the tokenizer that
@@ -2394,38 +2411,61 @@ mod tests {
 
     #[test]
     fn descriptions_follow_each_owners_latest_revision() {
-        let tool = |id: &str, description: &str| {
+        let tool = |id: &str, description: Option<&str>| {
             let mut c = component(id, Category::ToolSchema, "Mystery", 1000, &[]);
-            c.description = Some(description.into());
+            c.description = description.map(str::to_string);
             c
         };
+        // An opaque identity of the same tool records no text, so it says nothing either way.
+        let mut opaque = tool("opaque", None);
+        opaque.size.characters = None;
         let scan = ExposureScan {
-            components: vec![tool("a", "First."), tool("b", "Second.")],
-            // Native sends A, then B, then A again; the other home sends only B.
-            requests: [("n1", "a"), ("n2", "b"), ("n3", "a"), ("w1", "b")]
-                .iter()
-                .map(|(r, c)| exposure(r, &[c], 1, 1000))
-                .collect(),
+            components: vec![
+                tool("a", Some("First.")),
+                tool("b", Some("Second.")),
+                tool("bare", None),
+                opaque,
+            ],
+            requests: [
+                // Native sends A, then B, then A again; work sends only B.
+                ("n1", "a"),
+                ("n2", "b"),
+                ("n3", "a"),
+                ("w1", "b"),
+                // A later revision that ships no description has none.
+                ("b1", "a"),
+                ("b2", "bare"),
+                ("o1", "a"),
+                ("o2", "opaque"),
+            ]
+            .iter()
+            .map(|(r, c)| exposure(r, &[c], 1, 1000))
+            .collect(),
             ..ExposureScan::default()
         };
-        let requests: Vec<Request> = [
-            ("n1", "native"),
-            ("n2", "native"),
-            ("n3", "native"),
-            ("w1", "work"),
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(i, (id, profile))| {
-            let mut r = request(id, i as Millis + 1, 0, 600, 0);
-            r.profiles = vec![profile.to_string()].into();
-            r
-        })
-        .collect();
-        let profiles = [
-            crate::test_support::make_profile("native", "/synthetic/.claude"),
-            crate::test_support::make_profile("work", "/synthetic/.claude-work"),
+        let homes = [
+            ("n", "native"),
+            ("w", "work"),
+            ("b", "bare"),
+            ("o", "opaque"),
         ];
+        let requests: Vec<Request> = scan
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let mut r = request(&e.request, i as Millis + 1, 0, 600, 0);
+                let home = homes
+                    .iter()
+                    .find(|(p, _)| e.request.starts_with(p))
+                    .unwrap();
+                r.profiles = vec![home.1.to_string()].into();
+                r
+            })
+            .collect();
+        let profiles = homes.map(|(_, home)| {
+            crate::test_support::make_profile(home, &format!("/synthetic/.claude-{home}"))
+        });
         let rows = context_costs(&ContextInput {
             scan: &scan,
             requests: &requests,
@@ -2434,16 +2474,19 @@ mod tests {
             snapshots: &[],
             max_cost_per_use_usd: 1.0,
         });
-        let described: Vec<(&[String], Option<&str>)> = rows
+        let mut described: Vec<(&str, Option<&str>)> = rows
             .iter()
             .filter(|c| c.name == "Mystery")
-            .map(|c| (c.profiles.as_slice(), c.description.as_deref()))
+            .map(|c| (c.profiles[0].as_str(), c.description.as_deref()))
             .collect();
+        described.sort_unstable();
         assert_eq!(
             described,
             [
-                (&["native".to_string()][..], Some("First.")),
-                (&["work".to_string()][..], Some("Second.")),
+                ("bare", None),
+                ("native", Some("First.")),
+                ("opaque", Some("First.")),
+                ("work", Some("Second.")),
             ]
         );
     }

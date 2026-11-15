@@ -3258,7 +3258,6 @@ fn group(value: &str) -> Option<String> {
     None
 }
 
-/// `/^- ([a-zA-Z0-9_.:-]+):[^\n]*$/gm`: each entry's name and whole line.
 /// The first sentence of a listed skill's description: its `- name: description` line
 /// after the name, without the `(file: ...)` a Codex catalog appends.
 fn listed_description(name: &str, span: &str) -> Option<String> {
@@ -3270,6 +3269,7 @@ fn listed_description(name: &str, span: &str) -> Option<String> {
     crate::descriptions::sentence(text)
 }
 
+/// `/^- ([a-zA-Z0-9_.:-]+):[^\n]*$/gm`: each entry's name and whole line.
 fn listing_entries(body: &str) -> Vec<(&str, &str)> {
     let mut out = vec![];
     let mut skip = 0;

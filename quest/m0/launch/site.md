@@ -20,4 +20,4 @@ it as `docs/releasing.md` describes for `site/`.
 
 ## Required
 
-- [Revamp the README](/quest/m0/launch/readme.md) - the results snapshot, recording and pitch it reuses
+- [Revamp the README](/quest/m0/launch/front-page.md) - the results snapshot, recording and pitch it reuses

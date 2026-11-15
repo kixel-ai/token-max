@@ -197,8 +197,10 @@ fn turn_ends<'a>(scan: &'a Scan, line: &Group<'_>) -> Vec<TurnEnd<'a>> {
         prompts.sort_unstable();
         let mut recap_turn = 0;
         for (i, &r) in main.iter().enumerate() {
+            // Each member holds only its own requests' directories and launch overrides.
+            let recorder = line.recorder(&r.profiles);
             let enabled = |feature| {
-                controls(profile, r)
+                controls(recorder, r)
                     .iter()
                     .any(|c| c.feature == feature && c.value == Some(true))
             };
@@ -241,7 +243,7 @@ fn turn_ends<'a>(scan: &'a Scan, line: &Group<'_>) -> Vec<TurnEnd<'a>> {
                     .and_then(observed_ttl)
                     .or_else(|| {
                         r.cwd.as_ref().and_then(|cwd| {
-                            profile
+                            recorder
                                 .idle_directories
                                 .as_ref()?
                                 .get(&**cwd)?
@@ -251,7 +253,7 @@ fn turn_ends<'a>(scan: &'a Scan, line: &Group<'_>) -> Vec<TurnEnd<'a>> {
                                 .value
                         })
                     })
-                    .or(profile.ttl.main.value)
+                    .or(recorder.ttl.main.value)
                     .unwrap_or(Ttl::FiveMinutes),
                 next,
             });

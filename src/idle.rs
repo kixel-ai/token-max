@@ -2211,9 +2211,12 @@ pub(crate) fn recommended_windows(
     let recommended_windows: Vec<ScenarioWindow> = current_windows
         .iter()
         .map(|w| {
-            let check = checks
-                .iter()
-                .find(|c| c.base.profiles.contains(&profile.id) && c.base.owner == w.owner);
+            // Two names for one settings file, such as a symlinked home's, are one owner.
+            let owner = crate::rows::canonical(&w.owner);
+            let check = checks.iter().find(|c| {
+                c.base.profiles.contains(&profile.id)
+                    && (c.base.owner == w.owner || crate::rows::canonical(&c.base.owner) == owner)
+            });
             ScenarioWindow {
                 value: match check {
                     Some(c) if c.base.action == Action::Change => c.base.recommended,

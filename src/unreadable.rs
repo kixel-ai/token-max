@@ -49,19 +49,41 @@ fn artifact_marker() -> u64 {
     hash("prefix:Artifact")
 }
 
+/// A token's case-folded key, for the names a call resolves without regard to case.
+fn skill_key(token: &str) -> u64 {
+    hash(&format!("skill:{}", token.to_ascii_lowercase()))
+}
+
 impl Unreadable {
     /// Take in one unreadable line: its names and the ids of the results it holds.
     pub fn observe(&mut self, line: &[u8]) {
-        // Claude names a result's call by `tool_use_id`. Codex names it by `call_id`, which
-        // its calls carry too, so only an output item's counts; its tag comes first.
-        for (key, tagged) in [(&b"\"tool_use_id\""[..], false), (b"\"call_id\"", true)] {
-            for at in memchr::memmem::find_iter(line, key) {
-                if tagged && !output_before(&line[..at]) {
-                    continue;
-                }
-                if let Some(id) = value_after(&line[at + key.len()..]) {
-                    self.results.insert(hash(id));
-                }
+        // Claude names a result's call by `tool_use_id`. Codex names it by `call_id`, or by
+        // `id` when an output has no `call_id`. Only an output item's counts, since its
+        // calls carry both too; its type tag comes first.
+        for at in memchr::memmem::find_iter(line, b"\"tool_use_id\"") {
+            self.result(&line[at + b"\"tool_use_id\"".len()..]);
+        }
+        let mut with_call_id = HashSet::default();
+        for at in memchr::memmem::find_iter(line, b"\"call_id\"") {
+            if let Some(tag) = output_before(&line[..at]) {
+                with_call_id.insert(tag);
+                self.result(&line[at + b"\"call_id\"".len()..]);
+            }
+        }
+        for at in memchr::memmem::find_iter(line, b"\"id\"") {
+            if let Some(tag) = output_before(&line[..at])
+                && !with_call_id.contains(&tag)
+            {
+                self.result(&line[at + b"\"id\"".len()..]);
+            }
+        }
+        // A native Codex completion names its server as written, which the model sees
+        // sanitized (`t3-code` as `t3_code`), as the row is named.
+        for at in memchr::memmem::find_iter(line, b"\"server\"") {
+            if let Some(server) = string_after(&line[at + b"\"server\"".len()..]) {
+                let server = crate::exposure::codex_server(&server);
+                self.names.insert(hash(&server));
+                self.names.insert(server_marker(&server));
             }
         }
         let text = unescape(line);
@@ -72,6 +94,7 @@ impl Unreadable {
             // Tokens are ASCII.
             let token = std::str::from_utf8(token).expect("ASCII tokens are UTF-8");
             self.names.insert(hash(token));
+            self.names.insert(skill_key(token));
             if let Some(rest) = token.strip_prefix("mcp__") {
                 self.names
                     .insert(server_marker(rest.split("__").next().unwrap_or(rest)));
@@ -79,6 +102,13 @@ impl Unreadable {
             if token.starts_with("Artifact") {
                 self.names.insert(artifact_marker());
             }
+        }
+    }
+
+    /// Record the result id a key's value names, unless the line ends inside it.
+    fn result(&mut self, after_key: &[u8]) {
+        if let Some(id) = string_after(after_key) {
+            self.results.insert(hash(&id));
         }
     }
 
@@ -101,24 +131,35 @@ impl Unreadable {
     /// Whether the lines mention the row's feature by the name a call records it under.
     pub fn mentions(&self, kind: ContextKind, name: &str) -> bool {
         let has = |text: &str| self.names.contains(&hash(text));
-        // A name made of several tokens, such as `plugin:skill`, needs every one.
-        let named = |name: &str| {
+        // A name made of several tokens, such as `plugin:skill`, needs every one. Skill
+        // names fold case, as a skill call resolves its name; the others do not.
+        let named = |name: &str, fold: bool| {
             let mut parts = name
                 .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
                 .filter(|p| !p.is_empty())
                 .peekable();
-            parts.peek().is_some() && parts.all(has)
+            parts.peek().is_some()
+                && parts.all(|p| {
+                    if fold {
+                        self.names.contains(&skill_key(p))
+                    } else {
+                        has(p)
+                    }
+                })
         };
         match kind {
             ContextKind::Tool if name == "Artifact" => self.names.contains(&artifact_marker()),
-            ContextKind::Tool | ContextKind::Skill => named(name),
-            // A call names `mcp__server__tool`; a native Codex completion names the raw server.
-            ContextKind::McpServer => self.names.contains(&server_marker(name)) || named(name),
+            ContextKind::Tool => named(name, false),
+            ContextKind::Skill => named(name, true),
+            // A call names `mcp__server__tool`; a native Codex completion names its server.
+            ContextKind::McpServer => {
+                self.names.contains(&server_marker(name)) || named(name, false)
+            }
             ContextKind::McpTool => {
                 let split = name.strip_prefix("mcp__").and_then(|n| n.split_once("__"));
-                named(name)
+                named(name, false)
                     || split.is_some_and(|(server, tool)| {
-                        !tool.is_empty() && named(tool) && named(server)
+                        !tool.is_empty() && named(tool, false) && named(server, false)
                     })
             }
             _ => false,
@@ -126,8 +167,8 @@ impl Unreadable {
     }
 }
 
-/// Whether the nearest `"type"` tag before this point names an output item.
-fn output_before(head: &[u8]) -> bool {
+/// Where the nearest `"type"` tag before this point sits, when it names an output item.
+fn output_before(head: &[u8]) -> Option<usize> {
     const KEY: &[u8] = b"\"type\"";
     let mut end = head.len();
     while let Some(at) = memchr::memmem::rfind(&head[..end], KEY) {
@@ -136,23 +177,28 @@ fn output_before(head: &[u8]) -> bool {
             && let Some(rest) = rest.trim_ascii_start().strip_prefix(b"\"")
         {
             let value = &rest[..memchr::memchr(b'"', rest).unwrap_or(rest.len())];
-            return value.ends_with(b"_output");
+            return value.ends_with(b"_output").then_some(at);
         }
         end = at;
     }
-    false
+    None
 }
 
-/// The text after a JSON key: `:`, optional space, then the string value's opening quote;
-/// the value's name characters, or None when it is not a string.
-fn value_after(rest: &[u8]) -> Option<&str> {
+/// The string value after a JSON key, decoded: `:`, optional space, then the whole
+/// string. None when it is not a string or the line ends inside it, since a cut-off
+/// value could be a prefix of another.
+fn string_after(rest: &[u8]) -> Option<String> {
     let rest = rest.trim_ascii_start().strip_prefix(b":")?;
     let rest = rest.trim_ascii_start().strip_prefix(b"\"")?;
-    let end = rest
-        .iter()
-        .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-'))
-        .unwrap_or(rest.len());
-    (end > 0).then(|| std::str::from_utf8(&rest[..end]).expect("ASCII ids are UTF-8"))
+    let mut end = 0;
+    loop {
+        match rest.get(end)? {
+            b'"' => break,
+            b'\\' => end += 2,
+            _ => end += 1,
+        }
+    }
+    Some(String::from_utf8_lossy(&unescape(&rest[..end])).into_owned())
 }
 
 /// Decode JSON string escapes, such as `\u0041gent` for `Agent`, wherever the bytes hold
@@ -285,6 +331,26 @@ mod tests {
     }
 
     #[test]
+    fn a_native_codex_completion_names_its_server_as_written_but_the_row_is_sanitized() {
+        let lines = seen(&[
+            r#"{"payload":{"type":"item_completed","item":{"type":"McpToolCall","id":"m1","server":"my.docs-server","tool":"read"}"#,
+        ]);
+        assert!(lines.mentions(ContextKind::McpServer, "my_docs_server"));
+        assert!(lines.mentions(ContextKind::McpTool, "mcp__my_docs_server__read"));
+        assert!(!lines.mentions(ContextKind::McpServer, "other_server"));
+        assert!(!lines.mentions(ContextKind::McpTool, "mcp__my_docs_server__write"));
+    }
+
+    #[test]
+    fn a_skill_name_folds_case_but_a_tool_name_does_not() {
+        let lines = seen(&[r#"{"skill":"REVIEW","name":"READ"}"#]);
+        assert!(lines.mentions(ContextKind::Skill, "review"));
+        assert!(!lines.mentions(ContextKind::Tool, "review"));
+        assert!(!lines.mentions(ContextKind::Tool, "Read"));
+        assert!(lines.mentions(ContextKind::Tool, "READ"));
+    }
+
+    #[test]
     fn artifact_helpers_and_plugin_skills_match_their_row() {
         let lines = seen(&[r#"{"name":"ArtifactData","skill":"plugin:review"}"#]);
         assert!(lines.mentions(ContextKind::Tool, "Artifact"));
@@ -329,7 +395,7 @@ mod tests {
         ]);
         result.finish(&claude, 1);
         assert_eq!(result.unmatched_results, 1);
-        let mut orphan = parsed(
+        let orphan = parsed(
             &[
                 serde_json::json!({"message": {"content": [{"type": "tool_result", "tool_use_id": "c"}]}}),
             ],
@@ -341,7 +407,6 @@ mod tests {
         // Without an unreadable line nothing can be missing.
         line.finish(&orphan, 0);
         assert_eq!(line.unmatched_results, 0);
-        orphan.calls.clear();
     }
 
     #[test]
@@ -362,8 +427,32 @@ mod tests {
             r#"{"payload":{"type":"function_call","name":"exec","call_id":"k5"}"#,
             // JSON may carry whitespace around the tag.
             r#"{"payload":{"type" : "custom_tool_call_output", "call_id": "k6"}"#,
+            // An output with no `call_id` names its call by `id`; with both, `call_id` rules.
+            r#"{"payload":{"type":"function_call_output","id":"k7","output":"x"}"#,
+            r#"{"payload":{"id":"o1","type":"function_call_output","call_id":"k8"}"#,
+            r#"{"payload":{"type":"function_call_output","id":"o2","call_id":"k9"}"#,
         ]);
         unreadable.finish(&ids, 1);
-        assert_eq!(unreadable.unmatched_results, 3);
+        assert_eq!(unreadable.unmatched_results, 6);
+    }
+
+    #[test]
+    fn a_result_id_is_read_whole_and_a_cut_one_is_not_read() {
+        let claude = parsed(
+            &[
+                serde_json::json!({"message": {"content": [{"type": "tool_use", "id": "a.b:c\"d", "name": "Bash"}]}}),
+            ],
+            Harness::Claude,
+        );
+        let mut whole = seen(&[r#"{"content":[{"tool_use_id":"a.b:c\"d","type":"tool_result"}"#]);
+        whole.finish(&claude, 1);
+        assert_eq!(whole.unmatched_results, 0);
+        // A prefix of the id is a different id; one cut inside its value is no id at all.
+        let mut prefix = seen(&[r#"{"content":[{"tool_use_id":"a","type":"tool_result"}"#]);
+        prefix.finish(&claude, 1);
+        assert_eq!(prefix.unmatched_results, 1);
+        let mut cut = seen(&[r#"{"content":[{"tool_use_id":"a.b:"#]);
+        cut.finish(&claude, 1);
+        assert_eq!(cut.unmatched_results, 0);
     }
 }

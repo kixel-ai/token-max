@@ -694,12 +694,17 @@ keeping its text. The reader decodes the line's JSON string escapes and keeps a
 hash of each token of letters, digits, `_` and `-`, plus one for the MCP server
 in each `mcp__server__tool` token and one for the `Artifact` family. A tool,
 skill or MCP server is named when its tokens are all there, so `Agent` matches
-`"name":"Agent"` and `\u0041gent` but not `Age`. Across the file, the reader
-also hashes every tool result id and call id in the parsed records and the
-`tool_use_id` and `call_id` values in unreadable lines; results whose id matches
-no parsed call, anywhere in the file and not only in the `--since` window, are
-`unmatchedResults`. Claude pairs `tool_use` blocks with `tool_use_id`; Codex
-pairs `*_call` and `*_call_output` response items by `call_id`. The id evidence
+`"name":"Agent"` and `\u0041gent` but not `Age`. Skill names match without
+regard to case, as a skill call resolves them; tool names do not. A native Codex
+completion names its MCP server as written (`t3-code`), so the `"server"` value
+is also hashed under the sanitized name the row carries (`t3_code`). Across the
+file, the reader also hashes every tool result id and call id in the parsed
+records and the whole `tool_use_id`, `call_id` and, for an output with no
+`call_id`, `id` values in unreadable lines; an id cut off inside its value is not
+read. Results whose id matches no parsed call, anywhere in the file and not only
+in the `--since` window, are `unmatchedResults`. Claude pairs `tool_use` blocks
+with `tool_use_id`; Codex pairs `*_call` and `*_call_output` response items by
+`call_id`. The id evidence
 cannot name the cut call's feature, so a file with unreadable lines and any
 unmatched result holds back every never-used piece of the profiles it records.
 A call that never ran leaves no result and is no use. The method accepts one

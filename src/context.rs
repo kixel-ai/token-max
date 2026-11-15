@@ -214,6 +214,8 @@ struct Kind {
     name: String,
     control: Option<Control>,
     parent: Option<usize>,
+    /// The description its latest recorded revision ships.
+    description: Option<String>,
 }
 
 /// Where a piece's history says it sits in the request.
@@ -261,6 +263,13 @@ struct Pieces<'a> {
 type Split = (usize, Option<i64>);
 
 impl Pieces<'_> {
+    /// Keep the description a piece's newer revision ships, unless it ships none.
+    fn describe(&mut self, key: usize, component: &Component) {
+        if component.description.is_some() {
+            self.kinds[key].description = component.description.clone();
+        }
+    }
+
     fn intern(
         &mut self,
         key: String,
@@ -275,6 +284,7 @@ impl Pieces<'_> {
                 name,
                 control,
                 parent: None,
+                description: None,
             });
             next
         })
@@ -452,22 +462,27 @@ fn pieces(
             one(key, kind, name, control)
         }
         Category::SkillListing => {
-            let members: Vec<(&str, i64)> = component
+            let members: Vec<(&Component, i64)> = component
                 .members
                 .iter()
                 .filter_map(|id| {
                     let m = components
                         .get(id.as_str())
                         .expect("listing members are recorded components");
-                    Some((m.name.as_str(), m.size.characters?))
+                    Some((*m, m.size.characters?))
                 })
                 .collect();
             let listed: i64 = members.iter().map(|(_, n)| n).sum();
             let mut result: Vec<(usize, i64)> = members
                 .into_iter()
-                .map(|(member, n)| {
+                .map(|(m, n)| {
+                    let member = m.name.as_str();
                     let (key, name, control) = skill(member);
                     let id = interned.intern(key, ContextKind::Skill, name, control);
+                    // Synced skills share one line, which no one skill's description fits.
+                    if synced_short(member).is_none() {
+                        interned.describe(id, m);
+                    }
                     interned
                         .skills
                         .insert(identity(&format!("skill:{member}")), id);
@@ -571,6 +586,7 @@ fn codex_pieces(
                     control,
                 );
                 interned.catalog.insert(key, path);
+                interned.describe(key, m);
                 result.push((key, Some(n)));
             }
             assert!(
@@ -863,6 +879,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 for (key, _) in &mut split {
                     *key = mcp_detail(component, *key, &mut interned);
                 }
+                // A tool's description is its own; a Codex namespace's describes its server.
+                if let [(key, _)] = split[..] {
+                    let key = match component.category {
+                        Category::McpDiscovery => interned.kinds[key].parent.unwrap_or(key),
+                        _ => key,
+                    };
+                    interned.describe(key, component);
+                }
                 interned.of.insert((id, owner), split);
             }
             let prefix = !codex && index < view.prefix;
@@ -974,6 +998,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
+                        description: None,
                         shares: vec![],
                     },
                     shares: IndexMap::default(),
@@ -1408,6 +1433,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .enumerate()
         .filter_map(|(index, row)| {
             let mut c = row.cost;
+            c.description = interned.kinds[row.key].description.clone();
             c.assumptions = row.assumptions.into_iter().collect();
             c.shares = row
                 .shares
@@ -1583,6 +1609,7 @@ mod tests {
             },
             members: members.iter().map(|m| m.to_string()).collect(),
             skill_path: None,
+            description: None,
             targets: vec![],
         }
     }

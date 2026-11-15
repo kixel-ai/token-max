@@ -41,6 +41,8 @@ pub struct Fix {
     pub verb: &'static str,
     /// The saving's share of this host's spend every 30 days.
     pub share: Option<f64>,
+    /// What the setting or feature does, from the report line.
+    pub what: String,
     /// What was measured and why the change makes sense, from the report line's evidence.
     pub evidence: String,
     pub how: How,
@@ -106,7 +108,8 @@ impl Edit {
 
 /// Every change the report recommends or suggests, biggest saving first, each with its
 /// edit or the step to take by hand. An edit another line already makes is listed once,
-/// naming both lines. Each fix's evidence is empty until `explain` fills it from the report.
+/// naming both lines. Each fix's description and evidence are empty until `explain` fills them
+/// from the report.
 pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
     fixes_from(
         recommendations(report, unicode)
@@ -229,15 +232,17 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         saving: line.saving,
         verb: line.verb,
         share: line.share,
+        what: String::new(),
         evidence: String::new(),
         how,
         origins: vec![line.origin],
     }
 }
 
-/// Fill each fix's evidence from the report lines it comes from.
+/// Fill each fix's description and evidence from the report lines it comes from.
 pub fn explain(fixes: &mut [Fix], listing: &Listing) {
     for fix in fixes {
+        fix.what = listing.what(fix.origins[0]);
         fix.evidence = listing.evidence(fix.origins[0]);
     }
 }
@@ -822,10 +827,13 @@ impl Style {
         }
     }
 
-    /// A change as the walk offers it: its heading after `prefix`, its verdict and saving,
-    /// the evidence behind it, then its edit.
+    /// A change as the walk offers it: its heading after `prefix`, what it does, its verdict
+    /// and saving, the evidence behind it, then its edit.
     fn entry(&self, fix: &Fix, prefix: &str) -> String {
         let mut text = self.bold(&format!("{prefix}{}: {}", fix.name, fix.value), 0);
+        if !fix.what.is_empty() {
+            text += &self.line(&format!("What: {}", fix.what), 2);
+        }
         let verdict = if fix.suggested {
             "Worth considering"
         } else {
@@ -1913,6 +1921,7 @@ mod tests {
             saving: Some(10.0),
             verb: "saves",
             share: Some(0.1),
+            what: String::new(),
             evidence: String::new(),
             origins: vec![Origin::Check(usize::from(name.as_bytes()[0]))],
             how: How::Edit(Patch {

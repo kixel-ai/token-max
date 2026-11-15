@@ -108,10 +108,17 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
                 .filter_map(|claim| rest.find(&format!("  {claim}")))
                 .min()?;
             let heading = rest[..end].split_whitespace().collect::<Vec<_>>().join(" ");
-            let evidence = lines
-                .get(i + 1)
-                .and_then(|l| l.strip_prefix("         "))
-                .unwrap_or_default();
+            let under = |n: usize| {
+                lines
+                    .get(i + n)
+                    .and_then(|l| l.strip_prefix("         "))
+                    .unwrap_or_default()
+            };
+            // Details open each line with what it does, then its evidence.
+            let evidence = match under(1).starts_with("What: ") {
+                true => under(2),
+                false => under(1),
+            };
             heading
                 .starts_with(head)
                 .then(|| (word.to_string(), heading, evidence.to_string()))
@@ -1192,18 +1199,21 @@ mod unix {
             stdout.starts_with("\ntoken-max doctor: 2 changes to review"),
             "{stdout}"
         );
+        // Each change opens with what its setting does.
         at(
-            "\n[1/2] Auto memory: on -> off\n  Worth considering (Opinion): its saving was not measured.\n",
+            "\n[1/2] Auto memory: on -> off\n  What: Auto memory lets Claude write notes for itself and loads them into every\n  session.\n  Worth considering (Opinion): its saving was not measured.\n",
         );
-        let ttl = at(
-            "\n[2/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves <$0.01/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
-        );
+        let ttl = at("\n[2/2] Main-agent prompt cache TTL: 5m -> 1h\n  What: ");
         // The window ends now, so its day count and the wrapping after it follow the clock.
         let entry = &stdout[ttl..];
         let entry = entry[..entry.find("\ntoken-max\n").unwrap_or(entry.len())]
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
+        assert!(
+            entry.starts_with("[2/2] Main-agent prompt cache TTL: 5m -> 1h What: How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Recommended (Measured): saves <$0.01/mo, 13% of this host's spend. Measured on 2 requests over "),
+            "{entry}"
+        );
         assert!(
             entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: <$0.01/mo, 13% of this host's spend."),
             "{entry}"

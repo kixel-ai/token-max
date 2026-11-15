@@ -224,7 +224,7 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
                 0,
                 json!({
                     "host_skills": { "body": "SYNTHETIC_PRIVATE_LISTING" },
-                    "tools": { "mcp__example": "SYNTHETIC_PRIVATE_DESCRIPTION" },
+                    "tools": { "mcp__example": "SYNTHETIC_SHIPPED_DESCRIPTION" },
                     "top_level_tools": { "functions": "0123456789012345678901234567890123456789" },
                 }),
                 true,
@@ -299,7 +299,7 @@ fn claude_attachment_deltas_track_deferred_definitions_and_listing_replacement_u
                     "type": "deferred_tools_record",
                     "entries": [{
                         "name": "mcp__example__search",
-                        "description": "SYNTHETIC_PRIVATE_SCHEMA",
+                        "description": "SYNTHETIC_SHIPPED_SCHEMA",
                         "defer_loading": true,
                         "input_schema": { "type": "object" },
                     }],
@@ -344,7 +344,7 @@ fn claude_attachment_deltas_track_deferred_definitions_and_listing_replacement_u
                         "name": "mcp__example__search",
                         "definition": {
                             "name": "mcp__example__search",
-                            "description": "SYNTHETIC_PRIVATE_EXPANDED",
+                            "description": "SYNTHETIC_SHIPPED_EXPANDED",
                             "input_schema": { "type": "object" },
                         },
                     }],
@@ -400,7 +400,7 @@ fn text_only_wire_requests_calibrate_matching_cohorts_and_keep_unknown_net_effec
                     "messages": [{ "role": "user", "content": "SYNTHETIC_PRIVATE_PROMPT" }],
                     "tools": [{
                         "name": "mcp__example__search",
-                        "description": "SYNTHETIC_PRIVATE_TOOL",
+                        "description": "SYNTHETIC_SHIPPED_TOOL",
                         "input_schema": { "type": "object" },
                     }],
                 },
@@ -717,7 +717,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
                 0,
                 json!({
                     "type": "skill_listing",
-                    "content": "- review: SYNTHETIC_PRIVATE_DESCRIPTION",
+                    "content": "- review: SYNTHETIC_SHIPPED_DESCRIPTION",
                     "names": ["review"],
                     "isInitial": true,
                 }),
@@ -792,6 +792,15 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     assert_eq!(data.exposure.requests[0].view.prefix, tools.len() + 1);
     let review = row(&report, "review");
     assert_eq!(review.kind, ContextKind::Skill);
+    // Each piece keeps the first sentence its listing or definition ships, bounded.
+    assert_eq!(
+        review.description.as_deref(),
+        Some("SYNTHETIC_SHIPPED_DESCRIPTION")
+    );
+    assert_eq!(
+        artifact.description.as_deref(),
+        Some(format!("{}...", "x".repeat(200)).as_str())
+    );
     assert_eq!(
         control_text(review.control.as_ref().unwrap(), Harness::Claude),
         r#""skillOverrides": {"review": "user-invocable-only"}"#
@@ -1085,7 +1094,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
             world(
                 0,
                 json!({ "host_skills": {
-                    "body": "Available skills\n- example:skill: SYNTHETIC_PRIVATE_DESCRIPTION\n\nHow to use skills\nSYNTHETIC_PRIVATE_GUIDANCE",
+                    "body": "Available skills\n- example:skill: SYNTHETIC_SHIPPED_DESCRIPTION\n\nHow to use skills\nSYNTHETIC_PRIVATE_GUIDANCE",
                 } }),
                 true,
             ),
@@ -1098,7 +1107,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
                     "tools": [{
                         "type": "function",
                         "name": "mcp__example__search",
-                        "description": "SYNTHETIC_PRIVATE_SCHEMA",
+                        "description": "SYNTHETIC_SHIPPED_SCHEMA",
                         "parameters": { "type": "object" },
                     }],
                 },
@@ -1169,7 +1178,7 @@ fn provided_schemas_listing_members_and_identified_command_file_reads_are_derive
         .unwrap();
     assert_eq!(
         member.size.characters,
-        Some("- example:skill: SYNTHETIC_PRIVATE_DESCRIPTION".len() as i64)
+        Some("- example:skill: SYNTHETIC_SHIPPED_DESCRIPTION".len() as i64)
     );
     assert!(!has(&e.requests[0].view.candidates, &member.id));
     let calls = kinds(e, InvocationKind::McpCall);
@@ -1563,7 +1572,7 @@ fn skill_row<'a>(report: &'a Report, path: &str) -> &'a ContextCost {
 
 #[test]
 fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
-    let body = "# Skills\n- `r0` = `/remote/skills`\n- one: SYNTHETIC_PRIVATE_DESCRIPTION (file: r0/one/SKILL.md)\n- plugin:two: x (file: r0/two/SKILL.md)\nUse skills when relevant.\n";
+    let body = "# Skills\n- `r0` = `/remote/skills`\n- one: SYNTHETIC_SHIPPED_DESCRIPTION (file: r0/one/SKILL.md)\n- plugin:two: x (file: r0/two/SKILL.md)\nUse skills when relevant.\n";
     let usage = |second, cached: i64| {
         let mut record = billed(second);
         record["payload"]["usage"]["cached_input_tokens"] = json!(cached);
@@ -1573,7 +1582,7 @@ fn codex_catalog_allocation_preserves_aggregate_charges_and_priceability() {
         codex_meta(), turn(), world(0, json!({"host_skills": {"body": body}}), true),
         // Mixed cache regions leave the whole first catalog unpriced.
         billed(1), usage(2, 1000),
-        world(3, json!({"host_skills": {"body": body.replace("SYNTHETIC_PRIVATE_DESCRIPTION", "expanded description with unicode λ")}}), false),
+        world(3, json!({"host_skills": {"body": body.replace("SYNTHETIC_SHIPPED_DESCRIPTION", "expanded description with unicode λ")}}), false),
         usage(4, 0), usage(5, 1000),
     ], None).unwrap();
     // Keep this allocation case independent of conditional tier pricing.
@@ -1725,10 +1734,10 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
     let mut data = transcript(Harness::Codex, &[
         codex_meta(), turn(),
         // MCP rows precede skills, so nesting their details changes the flat row indices.
-        world(0, json!({"tools":{"mcp__docs":"SYNTHETIC_PRIVATE_DISCOVERY"}}), true),
+        world(0, json!({"tools":{"mcp__docs":"SYNTHETIC_SHIPPED_DISCOVERY"}}), true),
         json!({"type":"response_item", "timestamp":at(0), "payload":{
             "type":"additional_tools", "role":"developer", "tools":[{
-                "type":"function", "name":"mcp__docs__read", "description":"SYNTHETIC_PRIVATE_SCHEMA",
+                "type":"function", "name":"mcp__docs__read", "description":"SYNTHETIC_SHIPPED_SCHEMA",
                 "parameters":{"type":"object"}
             }]
         }}),
@@ -1768,6 +1777,14 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
         );
         assert_eq!(redundant.verdict, Some(Verdict::Off));
         assert_eq!(retained.verdict, (!conditional).then_some(Verdict::Keep));
+        // Each skill keeps its own listed description, without the catalog's path.
+        assert_eq!(
+            (
+                retained.description.as_deref(),
+                redundant.description.as_deref()
+            ),
+            (Some("b"), Some("a"))
+        );
         let server = row(&report, "docs");
         assert_eq!(server.calls, Some(1));
         assert_eq!(server.details.len(), 2);
@@ -1777,6 +1794,15 @@ fn codex_skills_and_mcp_details_keep_independent_evidence_controls_and_prices() 
             .find(|c| c.kind == ContextKind::McpTool)
             .unwrap();
         assert_eq!(tool.calls, Some(1));
+        // A namespace's description is its server's; a tool's own is the tool's.
+        assert_eq!(
+            server.description.as_deref(),
+            Some("SYNTHETIC_SHIPPED_DISCOVERY")
+        );
+        assert_eq!(
+            tool.description.as_deref(),
+            Some("SYNTHETIC_SHIPPED_SCHEMA")
+        );
         assert!(
             (server.cost_usd.to_f64()
                 - server

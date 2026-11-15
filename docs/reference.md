@@ -31,8 +31,10 @@ in PowerShell,
 
 On a terminal, `doctor` first walks through each change it can make, after a
 headline counting them, across every settings file, recommended and worth
-considering alike, biggest monthly saving first. Each one shows its current
-and offered value, whether it is recommended or worth considering, its kind of
+considering alike, biggest monthly saving first. Each one opens with its name,
+its current and offered value, and one plain sentence saying what the setting
+or feature does (see [What each line does](#what-each-line-does)), then shows
+whether it is recommended or worth considering, its kind of
 claim, its saving per 30 days in dollars and as a percent of this host's spend
 over the window (the base the report's percents use), what was measured, such
 as the requests a replay covered or a tool's uses and what each cost, why the
@@ -380,9 +382,31 @@ usage are left out of both sides, and a recommendation is made only when they
 could not flip it, assuming none differs by more than the largest measured
 difference. The verdict then says what share of requests was measured.
 
+## What each line does
+
+Every line says in one sentence what its setting or feature does, such as
+"Lets Claude publish an HTML or Markdown file to claude.ai as an artifact: a
+private, interactive page you can share" for the Artifact tool that
+`enableArtifact` turns off. `--details` prints it under the line as `What:`,
+and the walk opens each change with it; the default report keeps each line to
+one line.
+
+Checked settings, built-in Claude Code tools, subagent types and the other
+fixed lines use a sentence written for token-max. The tools' follow Claude
+Code's [tools reference](https://code.claude.com/docs/en/tools-reference),
+checked 2026-11-15. A skill or MCP tool uses the first sentence of the
+description it ships, shortened to at most 200 characters: a skill's entry in
+the skill listing its transcripts record, and a tool's own definition where a
+transcript records one, as Claude Code's prompt and tool snapshots and Codex's
+provided tools do. A Codex MCP namespace's description describes its server.
+These descriptions are configuration, not conversation, so they are kept and
+printed; skills synced from claude.ai share one line and one sentence. A
+feature with neither says it has no recorded description, and an MCP server
+without one names its tools instead.
+
 ## Details and terminal layout
 
-Use `--details` for each line's evidence under it, the sources, then evidence
+Use `--details` for each line's What sentence and evidence under it, the sources, then evidence
 cards: every check's profiles, owner, baseline, assumptions, uncertainty, cost
 components, break-evens, sensitivity scenarios, cache witnesses and sources,
 and every piece of context, including MCP tools counted in their server's line

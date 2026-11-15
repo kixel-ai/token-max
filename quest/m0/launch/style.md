@@ -18,8 +18,8 @@ polished lines, boxed cards, and badges with bars): ✅ polished lines
   spend dimmed. The headline counts the changes in their verdict colors.
 - A walk card is the counter and the setting's name with its saving in
   dollars and percent at the right, then the current value → the offered
-  one with the colored verdict and the claim kind, then "What" (from
-  [Say what each setting does](/quest/m0/launch/descriptions.md)) and
+  one with the colored verdict and the claim kind, then "What" (the
+  `Fix::what` sentence each walk card already opens with) and
   "Why", the evidence. ✅ drop the Edit lines from the card, the file and
   JSON fragment, which repeat the value change (maintainer: "The text is
   too crowded"); ✅ keep Why (rejected: evidence under `--details` only).
@@ -44,7 +44,3 @@ the walk today prints only bold, while the list after it is colored.
   review" and then "[1/2]", since 72 small changes shared one question.
   [Group the walk's small changes by kind](/quest/m0/launch/group-walk.md)
   owns the fix.
-
-## Required
-
-- [Say what each setting does](/quest/m0/launch/descriptions.md) - the What line on each walk card

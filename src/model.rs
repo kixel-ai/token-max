@@ -2057,7 +2057,7 @@ pub enum Scope {
     Aggregate,
 }
 
-/// One revision of one historical component, with no retained content.
+/// One revision of one historical component, with no retained content but its shipped description.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Component {
@@ -2081,6 +2081,10 @@ pub struct Component {
     /// Absolute SKILL.md identity resolved from a rendered Codex catalog, without filesystem reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_path: Option<String>,
+    /// The first sentence of the description a skill or tool ships, which is configuration,
+    /// not conversation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// Recorded instruction text size, without retaining its content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_size: Option<InstructionSize>,
@@ -2637,6 +2641,8 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
+    /// The first sentence of the description it ships, from its latest recorded revision.
+    pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.
     pub shares: Vec<ProfileShare>,
 }

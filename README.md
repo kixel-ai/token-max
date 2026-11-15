@@ -138,7 +138,8 @@ caches them; `--offline` reuses the cache. That is the only network request,
 unless you name other machines with `--ssh`.
 
 Transcripts are only read. On a terminal, `doctor` walks through each change it
-can make, biggest saving first, with why it makes sense and the exact edit to
+can make, biggest saving first, with what the setting does, why the change makes
+sense and the exact edit to
 your own `settings.json` or `config.toml`. Your answers only select: it then
 lists the accepted changes and writes them only after one more yes. A change
 something else would override, such as a shell variable or a project's

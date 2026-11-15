@@ -1655,6 +1655,7 @@ impl Walk {
                             inode: key.1,
                             deferred_bytes: 0,
                             skipped_lines: 0,
+                            unreadable: Default::default(),
                             lines: 0,
                         };
                         self.files.insert(key, snapshot);

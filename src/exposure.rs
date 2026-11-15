@@ -3714,6 +3714,7 @@ mod tests {
                     inode: 0,
                     deferred_bytes: 0,
                     skipped_lines: 0,
+                    unreadable: Default::default(),
                     lines: 0,
                 },
                 file: file.into(),

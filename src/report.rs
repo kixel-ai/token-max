@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 use crate::collections::{IndexMap, IndexSet};
 
 use crate::context::{
-    CLAUDE_MEMORY, CODEX_MEMORY, SYNCED_SKILLS, control_text, incomplete_profiles, setting_rows,
-    typed_only,
+    CLAUDE_MEMORY, CODEX_MEMORY, Hidden, SYNCED_SKILLS, control_text, hidden_use, setting_rows,
+    typed_only, unreadable_lines,
 };
 use crate::controls::CAPPED_SHARED;
 use crate::discovery::TTL_BILLING_UNKNOWN;
@@ -3542,7 +3542,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     if coverage.skipped_lines > 0 {
         out.line(
             &format!(
-                "{} unreadable transcript lines in {} files were skipped.",
+                "{} unreadable transcript lines in {} files were skipped. One holds back a recommendation only when it names the feature or a tool result in its file has no call.",
                 count(coverage.skipped_lines),
                 count(coverage.skipped_files)
             ),
@@ -3669,7 +3669,6 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     if out.options.color {
         out.legend();
     }
-    let incomplete = incomplete_profiles(&report.scan.snapshots);
     // A server's own loading and exposure controls, after its line's evidence.
     let server_notes = |c: &ContextCost| {
         if c.kind != ContextKind::McpServer {
@@ -4059,13 +4058,41 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             let _ = write!(text, "; {}", catalog_evidence(c));
         }
         text.push('.');
-        // The two reasons context verdicts leave nonuse unproven outside the Codex catalog.
-        if verdict == Verdict::Consider && c.skill.is_none() && c.calls == Some(0) {
-            text += if c.profiles.iter().any(|p| incomplete.contains(p)) {
-                " An unreadable transcript line could hold a use."
-            } else {
-                " It was first sent during the window, so the window cannot rule out a use."
-            };
+        // What leaves nonuse unproven outside the Codex catalog, or unproven only in the
+        // one way a red verdict still accepts.
+        if c.skill.is_none() && c.calls == Some(0) {
+            let snapshots = &report.scan.snapshots;
+            match (verdict, hidden_use(c, snapshots)) {
+                (Verdict::Consider, Some(Hidden::Named)) => {
+                    text += " An unreadable transcript line names it, so it may have been used."
+                }
+                (Verdict::Consider, Some(Hidden::Cut)) => {
+                    text += " A cut transcript record could hold a use: a tool result there has no recorded call."
+                }
+                (Verdict::Consider, Some(Hidden::Unfinished)) => {
+                    text += " A transcript's unfinished last line could hold a use."
+                }
+                (Verdict::Consider, None) => {
+                    text +=
+                        " It was first sent during the window, so the window cannot rule out a use."
+                }
+                (Verdict::Off, _) if out.options.details => {
+                    let lines = unreadable_lines(c, snapshots);
+                    if lines > 0 {
+                        let (noun, verb) = if lines == 1 {
+                            ("line", "does not")
+                        } else {
+                            ("lines", "do not")
+                        };
+                        let _ = write!(
+                            text,
+                            " {} unreadable transcript {noun} {verb} name it or leave a tool result without a call; a call cut off before its result was written would not show.",
+                            count(lines),
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
         if c.kind == ContextKind::McpTool {
             text += " Included in its server's cost.";
@@ -5081,6 +5108,7 @@ mod tests {
                     inode: 2,
                     deferred_bytes: 0,
                     skipped_lines: 2,
+                    unreadable: Default::default(),
                     lines: 10,
                 }],
                 requests,
@@ -7251,8 +7279,17 @@ mod tests {
         ));
         late.scan.snapshots[0].skipped_lines = 1;
         late.scan.snapshots[0].profiles = late.context[0].profiles.clone();
+        // An unreadable line that names it, or sits beside a result with no call.
+        late.scan.snapshots[0]
+            .unreadable
+            .observe(format!(r#"{{"skill":"{name}"}}"#).as_bytes());
         assert!(text(&late, None, false).contains(
-            "The model never used it. An unreadable transcript line could hold a use. Hide it from the model:"
+            "The model never used it. An unreadable transcript line names it, so it may have been used. Hide it from the model:"
+        ));
+        late.scan.snapshots[0].unreadable = Default::default();
+        late.scan.snapshots[0].unreadable.unmatched_results = 1;
+        assert!(text(&late, None, false).contains(
+            "The model never used it. A cut transcript record could hold a use: a tool result there has no recorded call. Hide it from the model:"
         ));
         report.scan.since = Some(instant(&report.generated_at) - 3_600_000);
         report.context.push(ContextCost {

@@ -1962,7 +1962,7 @@ fn codex_duplicates_are_actionable_without_prices_and_same_path_repeats_keep_one
     assert!(
         report_line(&output, "Skill same (/skills/b)")
             .head
-            .starts_with("Skill same (/skills/b) on -> off saving not measured"),
+            .starts_with("Skill same (/skills/b) on -> off costs unknown"),
         "{output}"
     );
     assert!(output.contains("does not resolve an absolute SKILL.md path"));

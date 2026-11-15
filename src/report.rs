@@ -3345,9 +3345,18 @@ fn not_enough(reason: &str) -> String {
     format!("Not enough evidence: {}", decapitalize(reason.trim()))
 }
 
-/// Larger shares first, and lines without one after.
+/// Larger shares first, and lines without one after. A change ranks by what it saves and
+/// everything else by what it costs, so a kept setting's comparison saving or a change shown
+/// only by its cost ranks with the lines whose figure is unknown.
 fn by_share(a: &Row, b: &Row) -> std::cmp::Ordering {
-    match (a.share, b.share) {
+    let rank = |r: &Row| {
+        let saving = r
+            .amount
+            .as_ref()
+            .is_some_and(|(verb, _)| verb.starts_with("saves"));
+        r.share.filter(|_| r.offered() == saving)
+    };
+    match (rank(a), rank(b)) {
         (Some(a), Some(b)) => b.total_cmp(&a),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
@@ -3786,8 +3795,12 @@ fn check_saving(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<f
 }
 
 /// What turning a piece of context off saves every 30 days: what it cost, all else equal.
+///
+/// A Codex catalog skill's listing cost is no such saving, since removing it can backfill the
+/// catalog or expand the other descriptions.
 fn piece_saving(c: &ContextCost, spend: &Spend) -> Option<f64> {
     c.estimated_usd
+        .filter(|_| c.skill.is_none())
         .map(|usd| monthly(usd, spend.since, Some(spend.until)))
 }
 
@@ -4351,8 +4364,10 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
                     );
                 }
                 CheckResult::Background(_) if r.current == Some(Setting::Toggle(true)) => {
-                    if let Some(usd) = r.savings_usd.filter(|usd| *usd > 0.0) {
-                        row.costs(Some(usd), false, &spend);
+                    // A feature that is on says plainly when its cost could not be measured.
+                    match r.savings_usd {
+                        Some(usd) if usd <= 0.0 => {}
+                        usd => row.costs(usd, false, &spend),
                     }
                 }
                 CheckResult::Memory(m) => match r.savings_usd {
@@ -4389,7 +4404,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             Verdict::Off | Verdict::Consider => format!("on {arrow} off"),
             Verdict::Keep => "on".into(),
         };
-        if row.offered() {
+        if row.offered() && c.skill.is_none() {
             row.saves("saves", piece_saving(c, &spend), &spend);
         } else {
             row.costs(c.estimated_usd, false, &spend);
@@ -7521,6 +7536,39 @@ mod tests {
             "{summary}"
         );
         assert!(!summary.contains("each percent is of this host's spend"));
+    }
+
+    #[test]
+    fn changes_rank_by_saving_and_the_rest_by_cost() {
+        let line = |name: &str, mark, verb: &'static str, share: f64| {
+            let mut row = Row::new(Claim::Measured, mark, name.into());
+            row.amount = Some((verb, String::new()));
+            row.share = Some(share);
+            row
+        };
+        let mut rows = [
+            // A kept TTL's comparison saving is not what it costs.
+            line("kept TTL", Mark::Keep, "saves", 0.9),
+            line("cheap feature", Mark::Keep, "costs", 0.1),
+            line("dear feature", Mark::Keep, "costs", 0.5),
+            // A change shown only by its cost has no measured saving.
+            line("catalog skill", Mark::Change, "costs", 0.8),
+            line("small change", Mark::Consider, "saves", 0.2),
+            line("big change", Mark::Change, "saves up to", 0.4),
+        ];
+        rows.sort_by(by_share);
+        let order: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "dear feature",
+                "big change",
+                "small change",
+                "cheap feature",
+                "kept TTL",
+                "catalog skill"
+            ]
+        );
     }
 
     #[test]

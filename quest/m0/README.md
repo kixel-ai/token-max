@@ -2,7 +2,7 @@
 
 ## Goal
 
-`token-max` 0.1.0 is published on crates.io, and its README shows how to
+`token-max` 0.0.1 is published on crates.io, and its README shows how to
 install it with `cargo install`. It replays selected
 local and SSH-host Claude Code and Codex histories, including T3 provider instances,
 against public API prices and reports which agent settings should change.
@@ -88,7 +88,7 @@ and the command are both `token-max`. Keep the report
 usable in scripts and avoid a second analysis implementation.
 
 The epic's own remaining work is the end-to-end first-release validation,
-the 0.1.0 version change, publishing the crate after every child merges
+the 0.0.1 version change, publishing the crate after every child merges
 through the [protected release path](../../docs/releasing.md), verifying the
 README's install command against the published crate, and clearing Quest's
 release handoff. No crate has been published; `token-max` was unclaimed on
@@ -211,3 +211,13 @@ the checks in m1; all in m1). The quests record the reasons. Where this
 entry and an older one disagree, such as "API-price equivalents are not a
 claim about subscription bills" or "Model and review effort selection
 remain outside this expansion", this one holds.
+
+Decided 2026-11-14 (maintainer, /quest-complete after a local `token-max
+doctor` run on the maintainer's host, 99,739 requests over 4 days): ✅ fix
+the default report before publishing (rejected: fix only the contradictory
+rows, then publish; publish as is). That run offered to deny the Agent tool
+in `~/.claude/settings.json` although the same report showed 376 uses
+through that profile, and printed 558 lines. ✅ the first release is 0.0.1
+(rejected: 0.1.0), published once the report quests merge and a rerun on
+the maintainer's host reads well. Where an older entry names 0.1.0, this one
+holds.

@@ -2,7 +2,7 @@
 
 token-max ships as the `token-max` crate on crates.io and as prebuilt
 binaries on a GitHub Release with the same `v<version>` tag. Nothing is
-published by a PR, tag, or merge. m0 owns the 0.1.0 version change, full
+published by a PR, tag, or merge. m0 owns the 0.0.1 version change, full
 end-to-end validation, publication after every child merges, and
 verification of the published first-use commands. `Cargo.toml` is the only
 version source, `--version` reports it, and the development version stays
@@ -95,7 +95,7 @@ and crate ownership still belong to the owner. Do not send credentials in chat.
 
 ## Publish
 
-After all m0 children merge, m0 sets the version in `Cargo.toml` to 0.1.0
+After all m0 children merge, m0 sets the version in `Cargo.toml` to 0.0.1
 through the protected, reviewed squash path, validates the complete tool, and
 updates the README's pre-release notice in that change.
 

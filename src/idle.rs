@@ -56,7 +56,7 @@ pub struct IdleOptions<'a> {
 /// The main and sub-agent TTLs a scenario replays.
 type Ttls = PerBucket<Option<Ttl>>;
 
-/// A request's idle-control scope: an index into the profile's project directories, or None
+/// A request's idle-control scope: an index into the line's project directories, or None
 /// for the profile-wide control.
 type Scope = Option<usize>;
 
@@ -214,18 +214,42 @@ fn settings_control(profile: &Profile) -> IdleControl {
     control
 }
 
-/// One profile's idle controls by working directory, with window controls memoized per scope
-/// and model because every request of every replay asks for them.
+/// One line's idle controls by working directory, with window controls memoized per scope
+/// and model because every request of every replay asks for them. Each member holds only its
+/// own requests' directories, so a request reads the member that recorded it, then the lead.
 pub(crate) struct Scopes<'p> {
     profile: &'p Profile,
+    members: Vec<&'p Profile>,
+    /// Each member's directory controls, indexed by (member, directory), and their scopes.
+    index: HashMap<(usize, &'p str), usize>,
+    directories: Vec<Cow<'p, IdleControl>>,
     fallback: OnceCell<IdleControl>,
     windows: RefCell<HashMap<Scope, HashMap<String, Rc<WindowControl>>>>,
 }
 
 impl<'p> Scopes<'p> {
-    pub(crate) fn new(profile: &'p Profile) -> Self {
+    pub(crate) fn new(line: &crate::rows::Group<'p>) -> Self {
+        let profile = line.lead;
+        let mut index = HashMap::default();
+        let mut directories = vec![];
+        for (m, member) in line.members.iter().enumerate() {
+            // A member that names the lead's file another way has its owners spelled as the
+            // lead's, so comparisons with the lead's owners still match.
+            let alias = m > 0 && member.settings_file != profile.settings_file;
+            for (cwd, control) in member.idle_directories.iter().flatten() {
+                index.insert((m, cwd.as_str()), directories.len());
+                directories.push(if alias {
+                    Cow::Owned(respell(control, member, profile))
+                } else {
+                    Cow::Borrowed(control)
+                });
+            }
+        }
         Self {
             profile,
+            members: line.members.clone(),
+            index,
+            directories,
             fallback: OnceCell::new(),
             windows: RefCell::new(HashMap::default()),
         }
@@ -233,14 +257,19 @@ impl<'p> Scopes<'p> {
 
     pub(crate) fn scope(&self, r: &Request) -> Scope {
         let cwd = r.cwd.as_deref().filter(|c| !c.is_empty())?;
-        self.profile.idle_directories.as_ref()?.get_index_of(cwd)
+        let recorder = r
+            .profiles
+            .iter()
+            .find_map(|p| self.members.iter().position(|m| &m.id == p));
+        recorder
+            .and_then(|m| self.index.get(&(m, cwd)))
+            .or_else(|| self.index.get(&(0, cwd)))
+            .copied()
     }
 
     /// The project control at the recorded directory, else the profile's, else its settings'.
     fn control(&self, scope: Scope) -> &IdleControl {
-        if let Some((_, c)) =
-            scope.and_then(|i| self.profile.idle_directories.as_ref()?.get_index(i))
-        {
+        if let Some(c) = scope.and_then(|i| self.directories.get(i)) {
             return c;
         }
         self.profile
@@ -287,6 +316,37 @@ impl<'p> Scopes<'p> {
             .insert(key.to_string(), w.clone());
         w
     }
+}
+
+/// A member's directory control with its settings file spelled as the lead's, when both
+/// names resolve to one file.
+fn respell(control: &IdleControl, member: &Profile, lead: &Profile) -> IdleControl {
+    let mut control = control.clone();
+    let same = crate::rows::canonical(&format!("{}:", member.settings_file))
+        == crate::rows::canonical(&format!("{}:", lead.settings_file));
+    if !same {
+        return control;
+    }
+    let fix = |owner: &mut String| {
+        if owner.starts_with(&format!("{}:", member.settings_file)) {
+            *owner = format!(
+                "{}{}",
+                lead.settings_file,
+                &owner[member.settings_file.len()..]
+            );
+        }
+    };
+    fix(&mut control.owner);
+    fix(&mut control.threshold_owner);
+    if let Some(ttl) = &mut control.ttl {
+        fix(&mut ttl.main.owner);
+        fix(&mut ttl.subagent.owner);
+    }
+    if let Some(c) = &mut control.compaction {
+        fix(&mut c.default.owner);
+        c.models.values_mut().for_each(|w| fix(&mut w.owner));
+    }
+    control
 }
 
 /// A selected replayed part's charge, for T3 modes priced part by part.
@@ -2095,10 +2155,21 @@ pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
 /// `detail` asks for them.
 fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<IdlePeriod>; 2])> {
     let mut checks = Vec::new();
-    for profile in &options.scan.profiles {
-        if profile.harness == Harness::Claude && profile.t3.is_none() {
-            profile_checks(options, profile, detail, &mut checks);
-        }
+    let native = options
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_none());
+    // Profiles share a line when the TTLs and windows the idle replay applies match too.
+    let owner = |p: &Profile| {
+        format!(
+            "{}\n{}",
+            p.idle.as_ref().map_or("", |i| i.owner.as_str()),
+            crate::rows::compaction_owner(p)
+        )
+    };
+    for group in crate::rows::groups(native, owner) {
+        profile_checks(options, &group, detail, &mut checks);
     }
     checks
 }
@@ -2140,9 +2211,12 @@ pub(crate) fn recommended_windows(
     let recommended_windows: Vec<ScenarioWindow> = current_windows
         .iter()
         .map(|w| {
-            let check = checks
-                .iter()
-                .find(|c| c.base.profile == profile.id && c.base.owner == w.owner);
+            // Two names for one settings file, such as a symlinked home's, are one owner.
+            let owner = crate::rows::canonical(&w.owner);
+            let check = checks.iter().find(|c| {
+                c.base.profiles.contains(&profile.id)
+                    && (c.base.owner == w.owner || crate::rows::canonical(&c.base.owner) == owner)
+            });
             ScenarioWindow {
                 value: match check {
                     Some(c) if c.base.action == Action::Change => c.base.recommended,
@@ -2155,15 +2229,16 @@ pub(crate) fn recommended_windows(
     recommended_windows
 }
 
-/// Idle checks for each owning idle control of one Claude profile.
+/// Idle checks for each owning idle control of one line's native Claude profiles.
 fn profile_checks<'a>(
     options: &IdleOptions<'a>,
-    profile: &'a Profile,
+    group: &crate::rows::Group<'a>,
     detail: bool,
     checks: &mut Vec<(IdleCheck, [Vec<IdlePeriod>; 2])>,
 ) {
     let scan = options.scan;
-    let in_profile = |profiles: &[String]| profiles.contains(&profile.id);
+    let profile = group.lead;
+    let in_profile = |profiles: &[String]| group.covers(profiles);
     let mut requests: Vec<&Request> = scan
         .cache_context
         .requests
@@ -2215,7 +2290,7 @@ fn profile_checks<'a>(
         estimates: options.estimates,
         all_summaries: options.summaries,
         summaries,
-        scopes: Scopes::new(profile),
+        scopes: Scopes::new(group),
         since,
         now,
         groups,
@@ -2235,7 +2310,7 @@ fn profile_checks<'a>(
         let check = options
             .ttls
             .iter()
-            .find(|c| c.base.profile == profile.id && c.bucket == bucket);
+            .find(|c| c.base.profiles.contains(&profile.id) && c.bucket == bucket);
         if let Some(c) = check.filter(|c| c.base.action == Action::Change) {
             *after_ttls.get_mut(bucket) = c.base.recommended;
         }
@@ -2346,6 +2421,7 @@ fn profile_checks<'a>(
         let check = IdleCheck {
             base: CheckBase {
                 profile: profile.id.clone(),
+                profiles: group.ids.clone(),
                 history_profiles: history_profiles.iter().map(|p| p.to_string()).collect(),
                 evidence: if delta.is_none() {
                     Evidence::Unknown
@@ -2430,13 +2506,21 @@ fn detailed_t3_checks(
 ) -> Vec<(crate::model::T3IdleCheck, [Vec<IdlePeriod>; 2])> {
     use crate::model::T3IdleCheck;
     let mut checks = Vec::new();
-    for profile in &options.scan.profiles {
-        let Some(instance) = &profile.t3 else {
-            continue;
-        };
-        if profile.harness != Harness::Claude {
-            continue;
-        }
+    let instances = options
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_some());
+    // Instances that inherit T3's global policy share it, and share a line when the native
+    // TTLs and windows the replay applies are the same too.
+    let owner = |p: &Profile| {
+        let idle = &p.t3.as_ref().expect("a T3 instance").idle_owner;
+        let idle = idle.split(" (instance ").next().unwrap_or(idle);
+        format!("{idle}\n{}", crate::rows::compaction_owner(p))
+    };
+    for group in crate::rows::groups(instances, owner) {
+        let profile = group.lead;
+        let instance = profile.t3.as_ref().expect("a T3 instance");
         // T3 prunes its event log, so the proactive mode can be priced only after the
         // boundary; every mode is compared over that same window.
         let retained = instance.retained_since;
@@ -2450,7 +2534,7 @@ fn detailed_t3_checks(
             .requests
             .iter()
             .chain(&options.scan.requests)
-            .filter(|r| r.profiles.contains(&profile.id))
+            .filter(|r| group.covers(&r.profiles))
             .collect();
         let events: Vec<&StructuralEvent> = options
             .scan
@@ -2458,7 +2542,7 @@ fn detailed_t3_checks(
             .boundaries
             .iter()
             .chain(&options.scan.events)
-            .filter(|e| e.profiles.contains(&profile.id))
+            .filter(|e| group.covers(&e.profiles))
             .collect();
         let samples = compaction_samples(&requests, &events, options.summaries);
         let first = requests.iter().map(|r| r.time).min();
@@ -2475,7 +2559,7 @@ fn detailed_t3_checks(
                 by_event: HashMap::default(),
                 requests: HashSet::default(),
             },
-            scopes: Scopes::new(profile),
+            scopes: Scopes::new(&group),
             since: since.unwrap_or(options.now),
             now: options.now,
             groups,
@@ -2522,7 +2606,7 @@ fn detailed_t3_checks(
             .ttls
             .iter()
             .find(|c| {
-                c.base.profile == profile.id
+                c.base.profiles.contains(&profile.id)
                     && c.bucket == Bucket::Main
                     && c.base.action == Action::Change
             })
@@ -2534,7 +2618,7 @@ fn detailed_t3_checks(
                 .ttls
                 .iter()
                 .find(|c| {
-                    c.base.profile == profile.id
+                    c.base.profiles.contains(&profile.id)
                         && c.bucket == Bucket::Subagent
                         && c.base.action == Action::Change
                 })
@@ -2582,10 +2666,16 @@ fn detailed_t3_checks(
         let savings = baseline_cost
             .zip(best.and_then(|s| s.cost.total_usd))
             .map(|(a, b)| (a - b).to_f64());
-        let applicable = instance.enabled && instance.ownership_resolved;
+        let history: Vec<String> = requests
+            .iter()
+            .flat_map(|r| r.profiles.iter().cloned())
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect();
+        let applicable = crate::t3::settled(&options.scan.profiles, &group.ids, &history);
         let check = T3IdleCheck {
             base: CheckBase {
-                profile: profile.id.clone(), history_profiles: requests.iter().flat_map(|r|r.profiles.iter().cloned()).collect::<IndexSet<_>>().into_iter().collect(),
+                profile: profile.id.clone(), profiles: group.ids.clone(), history_profiles: history,
                 evidence: if all_priced { Evidence::Estimated } else { Evidence::Unknown },
                 action: if !applicable || winner.is_none() { Action::Advisory } else if winner==Some(instance.idle_mode) || savings==Some(0.0) { Action::Keep } else { Action::Change },
                 current: Some(instance.idle_mode), recommended: if applicable { winner } else { None },
@@ -3689,6 +3779,7 @@ mod tests {
     fn base<V>(action: Action, owner: &str, recommended: Option<V>) -> CheckBase<V> {
         CheckBase {
             profile: "profile".into(),
+            profiles: vec!["profile".into()],
             history_profiles: vec![],
             evidence: Evidence::Estimated,
             action,

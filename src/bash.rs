@@ -41,13 +41,22 @@ pub struct BashInput<'a> {
     pub now: Millis,
 }
 
-/// One check per Claude profile, comparing the current cap with the main-agent cache TTL.
+/// One check per line of Claude profiles that share the cap's owners, comparing the current
+/// cap with the main-agent cache TTL.
 pub fn bash_checks(input: &BashInput<'_>) -> Vec<BashCapCheck> {
-    input
-        .scan
-        .profiles
+    let owner = |p: &Profile| {
+        let bash = p.bash.as_ref().expect("filtered on a cap");
+        format!(
+            "{}\n{}\n{}",
+            bash.owner,
+            bash.default_owner,
+            crate::rows::ttl_owner(p, crate::model::Bucket::Main)
+        )
+    };
+    let capped = input.scan.profiles.iter().filter(|p| p.bash.is_some());
+    crate::rows::groups(capped, owner)
         .iter()
-        .filter_map(|profile| Some(check(input, profile, profile.bash.as_ref()?)))
+        .map(|line| check(input, line, line.lead.bash.as_ref().expect("a cap")))
         .collect()
 }
 
@@ -59,7 +68,7 @@ fn evaluation_ttl(
 ) -> (Option<Ttl>, &'static str) {
     let verdict = ttls
         .iter()
-        .find(|t| t.base.profile == profile.id && t.bucket == Bucket::Main)
+        .find(|t| t.base.profiles.contains(&profile.id) && t.bucket == Bucket::Main)
         .filter(|t| t.base.action != Action::Advisory)
         .and_then(|t| t.base.recommended);
     if let Some(ttl) = verdict {
@@ -117,7 +126,12 @@ fn miss(catalog: &Catalog, issuing: Option<&Request>, next: Option<&Request>) ->
     }
 }
 
-fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> BashCapCheck {
+fn check(
+    input: &BashInput<'_>,
+    line: &crate::rows::Group<'_>,
+    control: &BashCapControl,
+) -> BashCapCheck {
+    let profile = line.lead;
     let BashInput {
         scan,
         catalog,
@@ -129,9 +143,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     let mut requests: Vec<&Request> = scan
         .requests
         .iter()
-        .filter(|r| {
-            r.harness == Harness::Claude && r.profiles.contains(&profile.id) && selected(r.time)
-        })
+        .filter(|r| r.harness == Harness::Claude && line.covers(&r.profiles) && selected(r.time))
         .collect();
     requests.sort_by_key(|r| r.time);
     let by_id: HashMap<&str, &Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
@@ -141,7 +153,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     }
     let (ttl, ttl_basis) = evaluation_ttl(ttls, profile, &requests);
 
-    let mine = |e: &&StructuralEvent| e.profiles.contains(&profile.id) && selected(e.time);
+    let mine = |e: &&StructuralEvent| line.covers(&e.profiles) && selected(e.time);
     let mut ends: HashMap<(&str, &Id), &StructuralEvent> = HashMap::default();
     for e in scan
         .events
@@ -227,6 +239,7 @@ fn check(input: &BashInput<'_>, profile: &Profile, control: &BashCapControl) -> 
     BashCapCheck {
         base: CheckBase {
             profile: profile.id.clone(),
+            profiles: line.ids.clone(),
             history_profiles: history_profiles.into_iter().cloned().collect(),
             evidence: Evidence::Guidance,
             action,

@@ -24,6 +24,7 @@ pub mod reader;
 pub mod replay;
 pub mod report;
 pub mod repository;
+mod rows;
 pub mod safe;
 pub mod scenarios;
 pub mod sessions;

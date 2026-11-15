@@ -44,7 +44,12 @@ rewrites, such as a dotfiles manager.
 Only a profile's own `settings.json` or Codex `config.toml` is edited,
 including Claude's `env` block. An edit sets the setting that decides the
 current value, as its line's `Set in` names it, so a change is applied only
-when that owner is the profile's file, or the default no file sets. A shell
+when that owner is the profile's file, or the default no file sets. A line
+that covers several profiles, such as native Claude Code and a T3 instance
+sharing `~/.claude`, is one edit to the file they share. A tool, skill or MCP
+line whose requests were copied into the histories of profiles with different
+files, so any of them could have made them, is a step by hand naming each
+file. A shell
 variable, a project, local or managed settings file, or T3 that owns it makes
 the change a step by hand naming that owner, and so does a Codex skill whose
 `SKILL.md` path the catalog does not resolve. A tool, skill or MCP switch is
@@ -86,6 +91,29 @@ and `$T3CODE_HOME/userdata`. Repeatable `--claude-dir`, `--codex-dir` and
 `--t3-dir` flags select only those roots across both harnesses. `--t3-dir`
 takes a state directory containing `settings.json` and optionally `statev2.sqlite`. `--details` shows every discovered root's selection. A missing or
 inaccessible explicitly selected root fails the run. Missing default roots do not.
+
+The report gives each setting, tool, skill or MCP server one line per settings
+file that owns it, combining every profile that file controls. Native Claude
+Code and a T3 instance that read `~/.claude/settings.json` share its lines:
+their requests, costs and uses are added together, each source's history
+replayed on its own, and the line recommends the value with the lower total.
+Claude's and Codex's files, each other home, a T3 instance's own settings, and
+each `--ssh` host's files stay separate lines. Ownership is per setting: a T3
+instance whose own setting decides fast mode, effort or the compaction window
+gets its own line for that setting while sharing the native file's other
+lines. A setting a shell variable, a project, local or managed file decides,
+and every setting of a disabled T3 instance or one whose settings could not
+be resolved, keeps a line per profile naming it. Two paths that resolve to one
+file, such as a symlinked `settings.json`, are one file.
+
+A request is counted once on each line: one copied into several profiles'
+histories, or one T3 could not settle between instances, counts once on the
+line those profiles share. When those profiles have different settings files,
+each file's line for a setting counts it, and
+a piece of context gets one line naming every file. A tool, skill or MCP
+server's use counts on every line that shares a settings file with the
+profiles that recorded it, so no line offers to turn off what one of its
+files used.
 
 ## Prices
 
@@ -198,7 +226,9 @@ rests on:
 
 The first line names the setting or feature, its current value (and the
 recommended one after an arrow for a change), what it saves per 30 days or
-costs over the window, and the profile when several were read. The second line
+costs over the window, and, when several profiles were read, the settings file
+that owns it, or the profile when no file does (see [Profiles](#profiles)).
+The second line
 is the evidence, ending with the setting that changes it. A dot's color carries
 the verdict: red for a recommended change (exit 1), yellow for one worth
 considering (exit 0), green for a value already at its recommendation, and a
@@ -314,9 +344,11 @@ difference. The verdict then says what share of requests was measured.
 
 ## Details and terminal layout
 
-Use `--details` for evidence cards: every check's owner, baseline, assumptions,
-uncertainty, cost components, break-evens, sensitivity scenarios, cache witnesses
-and sources. Repeated idle periods, cache witnesses and attempt estimates are
+Use `--details` for evidence cards: every check's profiles, owner, baseline,
+assumptions, uncertainty, cost components, break-evens, sensitivity scenarios,
+cache witnesses and sources. A piece of context several sources share is broken
+down by the profiles that recorded its requests, with each one's requests and
+cost. Repeated idle periods, cache witnesses and attempt estimates are
 grouped by their recorded outcomes and reasons. Token ranges and combined costs
 summarize modeled compactions; geometry sources are listed once. Identifiers in
 grouped cache and attempt evidence are examples. No evidence is hidden behind
@@ -338,10 +370,9 @@ The report is for people and has no machine-readable form; `--json` was
 removed. Each machine output is its own sub-command with a named consumer, such
 as the session export below.
 
-IDs in the report are opaque hashes. Shared histories are read once and historical costs stay
-in a shared bucket when profile provenance is ambiguous. A replay for an alias
-names that profile and is conditional, not another copy of historical spend.
-Independent check savings must not be summed.
+IDs in the report are opaque hashes. Shared histories are read once, and a
+request whose profile is ambiguous counts once on the line its profiles share
+(see [Profiles](#profiles)). Independent check savings must not be summed.
 
 ## Session export
 
@@ -484,6 +515,16 @@ when omitted. Current browser/new-thread selections are unavailable and remain
 advisory. A uniquely joined historical requested tier never fills a billed tier.
 Disabled instances and unresolved environment, launch or machine-policy overrides
 keep historical cost but receive advisory current guidance.
+
+An instance that reads a native home's settings shares that file's lines with
+native Claude Code or Codex, such as the cache TTL, the Bash cap, auto memory
+and every tool, skill and MCP server (see [Profiles](#profiles)). The settings
+T3 itself decides, such as thread fast mode and effort and an instance's
+window override, are the instance's own lines. Instances whose idle compaction
+inherits the global `idleCompaction` share one idle line naming T3's
+`settings.json`. A line shared with an instance whose ownership T3 could not
+settle stays advisory unless the requests it could not settle all lie within
+that line.
 
 Optional SQLite metadata uses the bundled SQLite library; no system SQLite
 executable is needed. One read-only transaction supplies a consistent WAL view,
@@ -660,7 +701,8 @@ and each poll reads the cache, so it is not checked.
 
 ## Main-session effort
 
-Each profile gets one `Main-session effort` line: the reasoning effort its main
+Each settings file that decides it gets one `Main-session effort` line, and a
+T3 instance its own: the reasoning effort its main
 session defaults to, the level it runs at, what each recorded model and effort
 pair cost over the window and how many requests it ran, and the setting that
 changes the default. A different effort changes the output tokens, so no cost
@@ -729,8 +771,9 @@ See [subagent models](semantics.md#subagent-models).
 
 ## Fable weekly use
 
-The Official section gives every Claude profile that signs in to Anthropic its
-own Fable line: what its Fable requests cost at API prices in each 7-day span
+The Official section gives every Claude settings file whose profiles sign in
+to Anthropic its own Fable line, shared by native Claude Code and the T3
+instances that use it: what its Fable requests cost at API prices in each 7-day span
 of the window, counted back from the report, beside the plan rule Anthropic
 documents on its [pricing](https://claude.com/pricing) page and in
 [Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan),
@@ -746,10 +789,11 @@ No plan limit is published in tokens or dollars, so the line shows no share of
 the limit and gives no verdict: its dot is dim, and it never changes the exit
 code or offers a change. The figures are partial evidence. The cap counts Fable
 use on every Claude surface, such as claude.ai and Claude Desktop, while the
-line covers only this profile's recorded sessions, and it may include requests
+line covers only its profiles' recorded sessions, and it may include requests
 paid with usage credits after the cap was reached. The plan's weekly reset time
 is not recorded, so spans end at the report rather than at a reset. When
-another Claude profile that signs in to Anthropic reads the same transcripts,
+a Claude profile with another settings file that signs in to Anthropic reads
+the same transcripts,
 the line says how many Fable requests it shares, since whose they were is
 unknown; one on a cloud provider has no plan limit and is not counted. A profile
 with `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` or

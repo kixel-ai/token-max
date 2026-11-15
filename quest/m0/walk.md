@@ -73,4 +73,3 @@ excerpt and the paragraph on what `doctor` writes to match.
 ## Required
 
 - [Cut doctor's default report to one line each](/quest/m0/report-length.md) - the ranked rows, percents and the list printed after the walk
-- [Give each setting one row per settings file](/quest/m0/file-rows.md) - the walk must never offer a change another row shows in use

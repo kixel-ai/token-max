@@ -68,9 +68,17 @@ pub fn fable_use(
         .filter(|p| p.harness == Harness::Claude && p.provider.is_none())
         .map(|p| p.id.as_str())
         .collect();
-    eligible
+    // Profiles that share a home's settings file share its line.
+    let lines = crate::rows::groups(
+        scan.profiles
+            .iter()
+            .filter(|p| eligible.contains(&p.id.as_str())),
+        |p| format!("{}:", p.settings_file),
+    );
+    lines
         .iter()
-        .map(|&id| {
+        .map(|line| {
+            let mine = |p: &String| line.ids.contains(p);
             let mut sums: Vec<(u64, Sum)> = spans.iter().map(|_| (0, Sum::new())).collect();
             let mut unrecorded = 0;
             let mut shared = 0;
@@ -78,7 +86,7 @@ pub fn fable_use(
                 r.harness == Harness::Claude
                     && r.time >= start
                     && r.time <= now
-                    && r.profiles.iter().any(|p| p == id)
+                    && r.profiles.iter().any(mine)
             }) {
                 let Some(cost) = fable_cost(catalog, r) else {
                     if r.model.is_none() {
@@ -96,7 +104,7 @@ pub fn fable_use(
                 }
                 if r.profiles
                     .iter()
-                    .any(|p| p != id && eligible.contains(&p.as_str()))
+                    .any(|p| !mine(p) && eligible.contains(&p.as_str()))
                 {
                     shared += 1;
                 }
@@ -116,7 +124,7 @@ pub fn fable_use(
                 weeks.pop();
             }
             FableUse {
-                profile: id.to_string(),
+                profiles: line.ids.clone(),
                 requests: weeks.iter().map(|w| w.requests).sum(),
                 unrecorded,
                 shared,
@@ -185,7 +193,7 @@ mod tests {
         assert_eq!(uses.len(), 1, "the cloud profile has no plan limit");
         let u = &uses[0];
         assert_eq!(
-            (u.profile.as_str(), u.requests, u.unrecorded),
+            (u.profiles[0].as_str(), u.requests, u.unrecorded),
             ("profile", 3, 1)
         );
         let spans: Vec<(Millis, Millis, u64)> = u
@@ -260,7 +268,7 @@ mod tests {
         let uses = fable_use(&s, &prices(), None, now);
         let counts: Vec<(&str, u64, u64)> = uses
             .iter()
-            .map(|u| (u.profile.as_str(), u.requests, u.shared))
+            .map(|u| (u.profiles[0].as_str(), u.requests, u.shared))
             .collect();
         // A cloud profile has no plan limit, so sharing with it leaves the owner known.
         assert_eq!(counts, [("profile", 3, 1), ("second", 1, 1)]);

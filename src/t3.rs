@@ -69,14 +69,21 @@ pub(crate) fn profile_key(state: &str, instance: &str) -> String {
     format!("t3:{state}:{instance}")
 }
 
+/// Whether a line's T3 instances can take guidance: each is enabled with resolved settings,
+/// and T3 settled which profile ran each request, or left it open only between the line's
+/// own profiles, which share its owner.
+pub(crate) fn settled(profiles: &[Profile], line: &[String], history: &[String]) -> bool {
+    let confined = history.iter().all(|p| line.contains(p));
+    profiles
+        .iter()
+        .filter(|p| line.contains(&p.id))
+        .filter_map(|p| p.t3.as_ref())
+        .all(|t| t.enabled && !t.settings_unresolved && (t.ownership_resolved || confined))
+}
+
 /// Retained history is still priced when a current instance cannot receive guidance.
 pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
-    if let Some(instance) = profiles
-        .iter()
-        .find(|p| p.id == base.profile)
-        .and_then(|p| p.t3.as_ref())
-        && (!instance.enabled || !instance.ownership_resolved)
-    {
+    if !settled(profiles, &base.profiles, &base.history_profiles) {
         base.action = Action::Advisory;
         base.recommended = None;
         base.savings_usd = None;

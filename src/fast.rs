@@ -132,23 +132,33 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
         now,
     } = *input;
     let mut result = vec![];
-    for profile in &scan.profiles {
-        let Some(speed) = &profile.speed else {
-            continue;
-        };
+    let owner = |p: &crate::model::Profile| {
+        p.speed
+            .as_ref()
+            .map_or_else(String::new, |s| s.owner.clone())
+    };
+    for line in crate::rows::groups(scan.profiles.iter().filter(|p| p.speed.is_some()), owner) {
+        let profile = line.lead;
+        let speed = profile.speed.as_ref().expect("filtered on speed controls");
         let requests: Vec<&Request> = scan
             .requests
             .iter()
-            .filter(|r| r.profiles.contains(&profile.id) && since.is_none_or(|s| r.time >= s))
+            .filter(|r| line.covers(&r.profiles) && since.is_none_or(|s| r.time >= s))
             .collect();
         // Requests grouped by the control that applies at their working directory, in first-seen order.
         let mut groups: Vec<(&SpeedControl, Vec<&Request>)> = vec![];
         for &r in &requests {
+            // Each member holds only its own requests' directories.
             let control = r
                 .cwd
                 .as_deref()
                 .filter(|cwd| !cwd.is_empty())
-                .and_then(|cwd| profile.speed_directories.as_ref()?.get(cwd))
+                .and_then(|cwd| {
+                    let recorder = line.recorder(&r.profiles);
+                    [recorder, profile]
+                        .into_iter()
+                        .find_map(|p| p.speed_directories.as_ref()?.get(cwd))
+                })
                 .unwrap_or(speed);
             match groups.iter_mut().find(|(c, _)| *c == control) {
                 Some((_, group)) => group.push(r),
@@ -159,7 +169,7 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
             groups.push((speed, vec![]));
         }
         for (control, requests) in groups {
-            result.push(check(catalog, &profile.id, control, &requests, since, now));
+            result.push(check(catalog, &line, control, &requests, since, now));
         }
     }
     result
@@ -172,7 +182,7 @@ fn add(total: &mut Option<Sum>, cost: Cost) {
 
 fn check(
     catalog: &Catalog,
-    profile: &str,
+    line: &crate::rows::Group<'_>,
     control: &SpeedControl,
     requests: &[&Request],
     since: Option<Millis>,
@@ -285,7 +295,8 @@ fn check(
     uncertainty.extend(current_cost.unknown.iter().cloned());
     SpeedCheck {
         base: CheckBase {
-            profile: profile.to_string(),
+            profile: line.lead.id.clone(),
+            profiles: line.ids.clone(),
             history_profiles: history_profiles.into_iter().cloned().collect(),
             evidence: Evidence::Guidance,
             action,
@@ -516,6 +527,49 @@ mod tests {
     }
 
     #[test]
+    fn t3_owned_fast_mode_keeps_its_own_line_and_a_shared_owner_merges() {
+        let fast = |id: &str, profile: &str| {
+            let mut r = make_request();
+            r.id = id.into();
+            r.parts[0].speed = Some("fast".into());
+            r.profiles = vec![profile.into()].into();
+            r
+        };
+        let mut s = scan(
+            control(Some("fast"), true),
+            vec![fast("native", "profile"), fast("t3", "agent")],
+        );
+        let mut agent = crate::test_support::make_t3_profile("agent", "/synthetic/.claude");
+        agent.speed = Some(SpeedControl {
+            value: None,
+            owner: "T3 instance agent: thread modelSelection.options.fastMode".into(),
+            resolved: false,
+            ..control(None, false)
+        });
+        s.profiles.push(agent);
+        let lines = |s: &Scan| -> Vec<(Vec<String>, u64)> {
+            checks(s, None, DAY_MS)
+                .iter()
+                .map(|c| (c.base.profiles.clone(), c.base.requests))
+                .collect()
+        };
+        assert_eq!(
+            lines(&s),
+            [
+                (vec!["profile".to_string()], 1),
+                (vec!["agent".to_string()], 1)
+            ]
+        );
+        // An instance that leaves fastMode to the native file shares its line and both
+        // sources' requests.
+        s.profiles[1].speed = Some(control(Some("fast"), true));
+        assert_eq!(
+            lines(&s),
+            [(vec!["profile".to_string(), "agent".to_string()], 2)]
+        );
+    }
+
+    #[test]
     fn distinct_project_controls_get_separate_cards() {
         let cards = checks(&directories(), None, 100);
         let summary: Vec<_> = cards
@@ -532,6 +586,38 @@ mod tests {
             ]
         );
         assert!(cards[0].base.savings_usd.unwrap() > cards[2].base.savings_usd.unwrap());
+    }
+
+    #[test]
+    fn a_shared_line_reads_each_request_s_directory_from_the_profile_that_recorded_it() {
+        let mut s = directories();
+        // Another home on the same file holds the only record of directory `d`.
+        let mut other = s.profiles[0].clone();
+        other.id = "other".into();
+        other.speed_directories = Some(
+            [("d".to_string(), control(Some("standard"), true))]
+                .into_iter()
+                .collect(),
+        );
+        s.profiles.push(other);
+        let mut d = s.requests[0].clone();
+        d.id = "d".into();
+        d.cwd = Some("d".into());
+        d.profiles = vec!["other".into()].into();
+        s.requests.push(d);
+        let cards = checks(&s, None, 100);
+        let summary: Vec<_> = cards
+            .iter()
+            .map(|c| (c.base.current.as_deref(), c.base.requests))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Some("ultrafast"), 1),
+                (Some("standard"), 2),
+                (Some("fast"), 1)
+            ]
+        );
     }
 
     /// The TypeScript fast-mode tests that read real settings files through `scan`, then `speed_checks` or `analyze`.

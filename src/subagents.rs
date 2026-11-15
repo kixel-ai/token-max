@@ -1060,7 +1060,8 @@ fn reprice(catalog: &Catalog, r: &Request, model: &str) -> crate::model::Cost {
     sum.cost()
 }
 
-/// One line per subagent type or agent role and profile set, most expensive first.
+/// One line per subagent type or agent role and the settings files its profiles share, most
+/// expensive first.
 pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
     let spawns: HashMap<&str, &Subagent> =
         scan.subagents.iter().map(|s| (&*s.session, s)).collect();
@@ -1088,6 +1089,13 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         let at = models.partition_point(|(t, _)| *t <= time);
         models[..at].last().or(models.first()).map(|(_, m)| *m)
     };
+    // Profiles whose agent files and settings one home holds share its lines; a removed T3
+    // instance, which no current file controls, keeps its own.
+    let files: HashMap<&str, String> = scan
+        .profiles
+        .iter()
+        .map(|p| (p.id.as_str(), crate::rows::settings_key(p)))
+        .collect();
     // A Codex source such as `review` never shares a line with a role of the same name.
     let mut groups: IndexMap<(Harness, Vec<String>, &str, bool), Vec<&Request>> =
         IndexMap::default();
@@ -1095,15 +1103,27 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         let spawn = spawns.get(&*r.session);
         let kind = spawn.map_or(UNRECORDED, |s| s.kind.as_str());
         let native = spawn.is_some_and(|s| s.native);
-        let mut profiles = r.profiles.to_vec();
-        profiles.sort();
+        let mut keys: Vec<String> = r
+            .profiles
+            .iter()
+            .map(|p| files.get(p.as_str()).cloned().unwrap_or_else(|| p.clone()))
+            .collect();
+        keys.sort();
+        keys.dedup();
         groups
-            .entry((r.harness, profiles, kind, native))
+            .entry((r.harness, keys, kind, native))
             .or_default()
             .push(r);
     }
     let mut lines = vec![];
-    for ((harness, profiles, kind, native), requests) in groups {
+    for ((harness, _, kind, native), requests) in groups {
+        let mut profiles: Vec<String> = requests
+            .iter()
+            .flat_map(|r| r.profiles.iter().cloned())
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect();
+        profiles.sort();
         let owners: Vec<&Profile> = scan
             .profiles
             .iter()
@@ -1149,7 +1169,12 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 }
             };
             *sources.entry(source).or_default() += 1;
-            if let Some(profile) = owners.first() {
+            // Each run's own profile names its agent file; members can hold different ones.
+            let own = owners
+                .iter()
+                .find(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
+                .or(owners.first());
+            if let Some(profile) = own {
                 let (model, effort) = settings_text(
                     profile,
                     scoped(&profile.agents, run.cwd),

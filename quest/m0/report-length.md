@@ -18,8 +18,7 @@ setting and feature on its own line"). This carries out the 2026-11-08
 decision of one plain verdict per setting. That pick also merged rows with
 the same verdict across profiles; the pick of the planning PR replaced it
 with one row per setting in each settings file, which
-[Give each setting one row per settings file](/quest/m0/file-rows.md)
-owns.
+[#114](https://github.com/kixel-ai/token-max/pull/114) delivered.
 
 Decided 2026-11-14 (maintainer, after mockup videos of a ranked report in
 a pager, a full-screen TUI and a ranked y/n walk): ✅ the walk to decide, then the ranked list
@@ -67,5 +66,4 @@ widest line in the PR's Validation. Update the README's sample report.
 
 ## Related
 
-- [Give each setting one row per settings file](/quest/m0/file-rows.md) - decides which rows there are
 - [Walk the changes biggest saving first](/quest/m0/walk.md) - the terminal walk printed before this list

@@ -32,7 +32,8 @@ pub struct MemoryInput<'a> {
     pub now: Millis,
 }
 
-/// One check per profile: advisory while auto memory is on, keep once it is off.
+/// One check per line of profiles sharing the setting's owner: advisory while auto memory
+/// is on, keep once it is off.
 pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
     let scan = input.scan;
     let calibration: HashMap<String, f64> = calibrate(&scan.exposure, &scan.requests)
@@ -46,18 +47,16 @@ pub fn memory_checks(input: &MemoryInput<'_>) -> Vec<MemoryCheck> {
         .iter()
         .map(|c| (&*c.id, c))
         .collect();
-    scan.profiles
+    let owner = |p: &Profile| {
+        let m = p.memory.as_ref().expect("filtered on a memory control");
+        format!("{}\n{}", m.owner, m.off_file.as_deref().unwrap_or_default())
+    };
+    let controlled = scan.profiles.iter().filter(|p| p.memory.is_some());
+    crate::rows::groups(controlled, owner)
         .iter()
-        .filter_map(|profile| {
-            let control = profile.memory.as_ref()?;
-            Some(check(
-                input,
-                profile,
-                control,
-                &requests,
-                &components,
-                &calibration,
-            ))
+        .map(|line| {
+            let control = line.lead.memory.as_ref().expect("a memory control");
+            check(input, line, control, &requests, &components, &calibration)
         })
         .collect()
 }
@@ -74,17 +73,18 @@ pub(crate) fn deciding_request<'a>(requests: &[&'a Request]) -> Option<&'a Reque
 
 fn check(
     input: &MemoryInput<'_>,
-    profile: &Profile,
+    line: &crate::rows::Group<'_>,
     control: &crate::model::MemoryControl,
     requests: &HashMap<&str, &Request>,
     components: &HashMap<&str, &Component>,
     calibration: &HashMap<String, f64>,
 ) -> MemoryCheck {
     let scan = input.scan;
+    let profile = line.lead;
     let mine: Vec<&Request> = scan
         .requests
         .iter()
-        .filter(|r| r.harness == profile.harness && r.profiles.contains(&profile.id))
+        .filter(|r| r.harness == profile.harness && line.covers(&r.profiles))
         .collect();
     // Today's setting decides whether memory is on, as it does for every other check.
     // Each main-agent session's latest recorded request shows what that session
@@ -96,7 +96,7 @@ fn check(
         let Some(r) = requests.get(&*e.request) else {
             continue;
         };
-        if r.harness != profile.harness || !r.profiles.contains(&profile.id) {
+        if r.harness != profile.harness || !line.covers(&r.profiles) {
             continue;
         }
         let (ids, recorded) = match (r.harness, e.view.linkage) {
@@ -150,10 +150,14 @@ fn check(
             Harness::Codex => carried && !on,
         })
         .count();
-    let rows: Vec<&ContextCost> = input
+    // A memory row covers every profile of its settings file, while memory's own switch
+    // can differ by profile, such as a T3 instance's environment; this line takes only
+    // the requests its own profiles recorded.
+    let rows: Vec<crate::model::ProfileShare> = input
         .context
         .iter()
-        .filter(|c| c.kind == ContextKind::Memory && c.profiles.contains(&profile.id))
+        .filter(|c| c.kind == ContextKind::Memory)
+        .flat_map(|c| c.shares_within(|profiles| line.covers(profiles)))
         .collect();
     // Requests whose context went unrecorded may have carried memory too, whatever
     // today's setting says, since it may have been on when they ran.
@@ -165,11 +169,15 @@ fn check(
         .exposure
         .memory
         .iter()
-        .filter(|m| m.harness == profile.harness && m.profiles.contains(&profile.id))
+        .filter(|m| m.harness == profile.harness && line.covers(&m.profiles))
         .collect();
+    // Unpriced requests are scaled from the priced ones, as the context row does.
     let context_usd = rows
         .iter()
-        .map(|c| c.estimated_usd.map(Usd::from_f64))
+        .map(|c| {
+            (c.priced > 0)
+                .then(|| Usd::from_f64(c.cost_usd.to_f64() * c.requests as f64 / c.priced as f64))
+        })
         .sum::<Option<Usd>>()
         .filter(|_| !rows.is_empty() || unrecorded == 0);
     let reads = uses
@@ -270,6 +278,7 @@ fn check(
     MemoryCheck {
         base: CheckBase {
             profile: profile.id.clone(),
+            profiles: line.ids.clone(),
             history_profiles: rows
                 .iter()
                 .flat_map(|c| c.profiles.iter())

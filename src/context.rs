@@ -131,7 +131,12 @@ pub enum Hidden {
 /// neither mention it nor sit beside a result with no call leave its nonuse proven. The
 /// one accepted miss is a call cut inside its name whose client died before writing its
 /// result: it counts as unused, though it may have run.
-pub fn hidden_use(c: &ContextCost, snapshots: &[Snapshot], scan: &ExposureScan) -> Option<Hidden> {
+pub fn hidden_use(
+    c: &ContextCost,
+    snapshots: &[Snapshot],
+    scan: &ExposureScan,
+    profiles: &[Profile],
+) -> Option<Hidden> {
     // The synced-skills row stands for many skills, which calls name by namespace or as
     // `/pdf`, never by the row's label.
     let synced: Vec<&str> = if c.kind == ContextKind::Skill && c.name == SYNCED_SKILLS {
@@ -141,7 +146,7 @@ pub fn hidden_use(c: &ContextCost, snapshots: &[Snapshot], scan: &ExposureScan) 
     } else {
         vec![]
     };
-    covering(c, snapshots)
+    covering(c, snapshots, profiles)
         .filter_map(|s| {
             let named = if synced.is_empty() {
                 s.unreadable.mentions(c.kind, &c.name)
@@ -160,18 +165,35 @@ pub fn hidden_use(c: &ContextCost, snapshots: &[Snapshot], scan: &ExposureScan) 
 }
 
 /// The unreadable lines in the transcripts a row covers, whatever they could hold.
-pub fn unreadable_lines(c: &ContextCost, snapshots: &[Snapshot]) -> u64 {
-    covering(c, snapshots).map(|s| s.skipped_lines).sum()
+pub fn unreadable_lines(c: &ContextCost, snapshots: &[Snapshot], profiles: &[Profile]) -> u64 {
+    covering(c, snapshots, profiles)
+        .map(|s| s.skipped_lines)
+        .sum()
 }
 
-/// The transcripts that record a row's requests.
+/// The transcripts that could record a row's requests: those of its profiles, and of every
+/// other profile whose switches live in the row's settings files.
 fn covering<'a>(
     c: &'a ContextCost,
     snapshots: &'a [Snapshot],
+    profiles: &[Profile],
 ) -> impl Iterator<Item = &'a Snapshot> {
-    snapshots
+    let files: HashSet<String> = profiles
         .iter()
-        .filter(|s| s.harness == c.harness && s.profiles.iter().any(|p| c.profiles.contains(p)))
+        .filter(|p| c.profiles.contains(&p.id))
+        .map(crate::rows::settings_key)
+        .collect();
+    let row: HashSet<String> = profiles
+        .iter()
+        .filter(|p| files.contains(&crate::rows::settings_key(p)))
+        .map(|p| p.id.clone())
+        .collect();
+    snapshots.iter().filter(move |s| {
+        s.harness == c.harness
+            && s.profiles
+                .iter()
+                .any(|p| c.profiles.contains(p) || row.contains(p))
+    })
 }
 
 /// Context setting rows whose controls are not covered by a server recommendation.
@@ -693,13 +715,16 @@ struct Prior<'a> {
 
 struct Row {
     cost: ContextCost,
+    /// Requests, priced requests and their cost by the index of the profiles that recorded them.
+    shares: IndexMap<usize, (u64, u64, Usd)>,
     assumptions: IndexSet<String>,
     owner: usize,
     key: usize,
     time: Millis,
-    /// Whether its owner's first shaped request carried it, so the whole window
-    /// could have recorded a use. One first sent later stays advisory when unused.
-    from_start: bool,
+    /// By the index of the profiles that recorded it, whether their first shaped request
+    /// carried it, so the whole window could have recorded a use there. One that any
+    /// source first sent later stays advisory when unused.
+    from_start: IndexMap<usize, bool>,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -729,13 +754,24 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let components: HashMap<&str, &Component> =
         scan.components.iter().map(|c| (&*c.id, c)).collect();
     let mut interned = Pieces::default();
-    let mut owners: HashMap<Vec<String>, usize> = HashMap::default();
-    let mut owner_profiles: Vec<Vec<String>> = vec![];
+    // A line covers every request whose profiles' switches live in the same settings files,
+    // so profiles sharing a file share its lines, and each request counts on one line.
+    let files: HashMap<&str, String> = input
+        .profiles
+        .iter()
+        .map(|p| (p.id.as_str(), crate::rows::settings_key(p)))
+        .collect();
+    let mut sources: IndexSet<Vec<&str>> = IndexSet::default();
+    let mut owners: HashMap<Vec<&str>, usize> = HashMap::default();
+    let mut owner_files: Vec<Vec<&str>> = vec![];
+    let mut owner_profiles: Vec<IndexSet<&str>> = vec![];
     let mut rows: IndexMap<(usize, usize), Row> = IndexMap::default();
     let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::default();
-    let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::default();
+    // Each line's latest and first shaped request from each set of profiles, since profiles
+    // sharing a file can still send different pieces, such as a T3-only MCP server.
+    let mut latest: HashMap<(usize, usize), (Millis, Vec<usize>)> = HashMap::default();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
-    let mut first_shaped: HashMap<usize, &str> = HashMap::default();
+    let mut first_shaped: HashMap<(usize, usize), &str> = HashMap::default();
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -743,20 +779,30 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .collect();
     ordered.sort_by_key(|(_, r)| r.time);
     // A request no selected profile owns, such as a removed T3 instance's, has no setting to change.
-    let selected: HashSet<&str> = input.profiles.iter().map(|p| p.id.as_str()).collect();
-    ordered.retain(|(_, r)| r.profiles.iter().any(|p| selected.contains(p.as_str())));
+    ordered.retain(|(_, r)| r.profiles.iter().any(|p| files.contains_key(p.as_str())));
     for (exposure, r) in ordered {
-        let mut profiles = r.profiles.to_vec();
-        profiles.sort();
-        let owner = match owners.get(&profiles) {
+        let mut source: Vec<&str> = r
+            .profiles
+            .iter()
+            .map(String::as_str)
+            .filter(|p| files.contains_key(p))
+            .collect();
+        source.sort_unstable();
+        let mut keys: Vec<&str> = source.iter().map(|p| files[p].as_str()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let owner = match owners.get(&keys) {
             Some(&id) => id,
             None => {
-                let id = owner_profiles.len();
-                owners.insert(profiles.clone(), id);
-                owner_profiles.push(profiles);
+                let id = owner_files.len();
+                owners.insert(keys.clone(), id);
+                owner_files.push(keys);
+                owner_profiles.push(IndexSet::default());
                 id
             }
         };
+        owner_profiles[owner].extend(source.iter().copied());
+        let share = sources.insert_full(source).0;
         let view = &exposure.view;
         let codex = r.harness == Harness::Codex;
         // Claude's recorded request shapes are exact. Codex records each change to
@@ -768,8 +814,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             _ => (vec![], false),
         };
         if shaped {
-            first_shaped.entry(owner).or_insert(&*r.id);
+            first_shaped.entry((owner, share)).or_insert(&*r.id);
         }
+        let first = first_shaped.get(&(owner, share)) == Some(&&*r.id);
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
             .profiles
@@ -898,7 +945,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 Row {
                     cost: ContextCost {
                         harness: r.harness,
-                        profiles: owner_profiles[owner].clone(),
+                        profiles: vec![],
                         kind: kind.kind,
                         name: kind.name.clone(),
                         control: kind.control.clone(),
@@ -926,15 +973,19 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
+                        shares: vec![],
                     },
+                    shares: IndexMap::default(),
                     owner,
                     key,
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
-                    from_start: first_shaped.get(&owner) == Some(&&*r.id),
+                    from_start: IndexMap::default(),
                 }
             });
+            *row.from_start.entry(share).or_default() |= first;
             row.cost.requests += 1;
+            row.shares.entry(share).or_default().0 += 1;
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
         }
@@ -1083,6 +1134,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let row = &mut rows[&(owner, key)];
                 row.cost.priced += 1;
                 row.cost.cost_usd += Usd::from_f64(cost);
+                let counts = row.shares.entry(share).or_default();
+                counts.1 += 1;
+                counts.2 += Usd::from_f64(cost);
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));
                 }
@@ -1092,17 +1146,39 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
             }
         }
-        match latest.get(&owner) {
+        match latest.get(&(owner, share)) {
             _ if !shaped => {}
             Some((time, _)) if r.time < *time => {}
             _ => {
                 if codex {
                     latest_catalogs.insert(owner, shown);
                 }
-                latest.insert(owner, (r.time, unique));
+                latest.insert((owner, share), (r.time, unique));
             }
         }
     }
+    let owner_profiles: Vec<Vec<String>> = owner_profiles
+        .into_iter()
+        .map(|set| {
+            let mut ids: Vec<String> = set.into_iter().map(String::from).collect();
+            ids.sort();
+            ids
+        })
+        .collect();
+    for row in rows.values_mut() {
+        row.cost.profiles = owner_profiles[row.owner].clone();
+    }
+    // A use counts on each line that shares a settings file with the profiles that recorded
+    // it: a copy cannot say which of several profiles made a call, and a line's switch goes
+    // in each of its files, so no line offers to turn off what one of its files used. A line
+    // none of whose files they reach could not have made it.
+    let reaches = |owner: usize, profiles: &[String]| {
+        let theirs: HashSet<&str> = profiles
+            .iter()
+            .filter_map(|p| files.get(p.as_str()).map(String::as_str))
+            .collect();
+        owner_files[owner].iter().any(|f| theirs.contains(f))
+    };
     // Copied histories can leave a call and the requests around it with different
     // profile sets, and a copy cannot say which profile made the call, so it
     // counts for every row of its tool that shares a profile with it.
@@ -1165,21 +1241,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     .into_iter()
                     .flatten()
                     .filter_map(|&index| {
-                        let c = &rows[index].cost;
-                        observed
-                            .profiles
-                            .iter()
-                            .any(|p| c.profiles.contains(p))
-                            .then(|| c.skill.as_ref().unwrap().path.as_deref())
+                        let row = &rows[index];
+                        reaches(row.owner, observed.profiles)
+                            .then(|| row.cost.skill.as_ref().unwrap().path.as_deref())
                     })
                     .collect::<HashSet<_>>()
                     .len()
                     > 1);
         for &index in indices.into_iter().flatten() {
-            let c = &mut rows[index].cost;
-            if !observed.profiles.iter().any(|p| c.profiles.contains(p)) {
+            if !reaches(rows[index].owner, observed.profiles) {
                 continue;
             }
+            let c = &mut rows[index].cost;
             let mut calls = observed.calls;
             if let Some(i) = observed.invocation {
                 let skill = c.skill.as_mut().unwrap();
@@ -1298,19 +1371,20 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .into_iter()
             .flatten()
         {
-            let row = &mut rows[index].cost;
-            if !t.profiles.iter().any(|p| row.profiles.contains(p)) {
+            if !reaches(rows[index].owner, &t.profiles) {
                 continue;
             }
+            let row = &mut rows[index].cost;
             *row.calls.as_mut().expect("family rows count calls") += t.results;
             let entry = largest.entry(index).or_insert(0);
             *entry = (*entry).max(t.largest_characters);
         }
     }
-    let latest: HashMap<usize, HashSet<usize>> = latest
-        .into_iter()
-        .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
-        .collect();
+    // A piece is current while the latest request from any of its line's sources carried it.
+    let mut current: HashMap<usize, HashSet<usize>> = HashMap::default();
+    for ((owner, _), (_, keys)) in latest {
+        current.entry(owner).or_default().extend(keys);
+    }
     let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::default();
     // Native MCP completions name the raw server and tool. Model-facing names
     // can be sanitized or shortened and cannot safely supply a deny-list entry.
@@ -1334,7 +1408,19 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .filter_map(|(index, row)| {
             let mut c = row.cost;
             c.assumptions = row.assumptions.into_iter().collect();
-            c.current = latest
+            c.shares = row
+                .shares
+                .into_iter()
+                .map(
+                    |(index, (requests, priced, cost_usd))| crate::model::ProfileShare {
+                        profiles: sources[index].iter().map(|p| p.to_string()).collect(),
+                        requests,
+                        priced,
+                        cost_usd,
+                    },
+                )
+                .collect();
+            c.current = current
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
             c.estimated_usd =
@@ -1346,12 +1432,15 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 && let Some(control) = &c.control
                 && let ControlValue::Text(tool) = &control.value
             {
+                // Profiles that share a file read one declaration, so one proof serves them.
                 let raw = identity(&format!("mcp:mcp__{}__{tool}", control.path[1]));
-                if !c
-                    .profiles
-                    .iter()
-                    .all(|p| raw_tools.contains(&(raw.as_str(), p.as_str())))
-                {
+                let proven = |file: &&str| {
+                    c.profiles.iter().any(|p| {
+                        files.get(p.as_str()).map(String::as_str) == Some(*file)
+                            && raw_tools.contains(&(raw.as_str(), p.as_str()))
+                    })
+                };
+                if !owner_files[row.owner].iter().all(proven) {
                     c.control = None;
                 }
             }
@@ -1367,9 +1456,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             {
                 // Codex catalog skill uses are only partly recorded, and a line that could
                 // hold a call leaves nonuse unproven.
-                let visible = row.from_start
+                let visible = row.from_start.values().all(|&first| first)
                     && c.skill.is_none()
-                    && hidden_use(&c, input.snapshots, input.scan).is_none();
+                    && hidden_use(&c, input.snapshots, input.scan, input.profiles).is_none();
                 c.verdict = Some(match calls {
                     _ if usd <= 0.0 => Verdict::Keep,
                     0 if visible => Verdict::Off,
@@ -1700,7 +1789,8 @@ mod tests {
             hidden_use(
                 &row(&costs(&scan, &requests, 1.0), "Artifact").clone(),
                 &[named],
-                &scan
+                &scan,
+                &[]
             ),
             Some(Hidden::Named)
         );
@@ -1709,7 +1799,25 @@ mod tests {
         assert_eq!(artifact_with(&[cut]), Some(Verdict::Consider));
         // Another profile's transcripts say nothing about it.
         let other = make_snapshot("other", &[r#"{"name":"Artifact"}"#], 1);
-        assert_eq!(artifact_with(&[other]), Some(Verdict::Off));
+        assert_eq!(
+            artifact_with(std::slice::from_ref(&other)),
+            Some(Verdict::Off)
+        );
+        // Unless that profile's switches live in the row's settings file: then its
+        // transcripts could hold a use the row counts, though it recorded none of its requests.
+        let artifact_row = row(&costs(&scan, &requests, 1.0), "Artifact").clone();
+        let shared = [
+            crate::test_support::make_profile("profile", "/home/.claude"),
+            crate::test_support::make_profile("other", "/home/.claude"),
+        ];
+        assert_eq!(
+            hidden_use(&artifact_row, std::slice::from_ref(&other), &scan, &shared),
+            Some(Hidden::Named)
+        );
+        assert_eq!(
+            hidden_use(&artifact_row, &[other], &scan, &shared[..1]),
+            None
+        );
         let mut unfinished = make_snapshot("profile", &[], 0);
         unfinished.deferred_bytes = 9;
         assert_eq!(artifact_with(&[unfinished]), Some(Verdict::Consider));
@@ -1778,6 +1886,150 @@ mod tests {
         assert_eq!((new.requests, new.priced), (2, 1));
         assert!(close(new.cost_usd.to_f64(), 300.0 * WRITE1H));
         assert!(file.current && new.current);
+    }
+
+    #[test]
+    fn sources_sharing_a_settings_file_share_a_row_and_its_uses() {
+        let scan = ExposureScan {
+            components: vec![
+                component("agent", Category::ToolSchema, "Agent", 1000, &[]),
+                component("system", Category::Other, "wire-system", 1000, &[]),
+            ],
+            requests: ["native", "t3", "work", "copy"]
+                .iter()
+                .map(|r| exposure(r, &["agent", "system"], 2, 2000))
+                .collect(),
+            // Only the T3 instance called the tool.
+            tool_calls: vec![ToolCalls {
+                name: "Agent".into(),
+                profiles: vec!["agent".into()],
+                calls: 3,
+                last_used: 5,
+            }],
+            ..ExposureScan::default()
+        };
+        let requests: Vec<Request> = [
+            ("native", &["native"][..]),
+            ("t3", &["agent"]),
+            ("work", &["work"]),
+            // Copied into both homes' histories, so either could have made it.
+            ("copy", &["native", "work"]),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, profiles))| {
+            let mut r = request(id, i as Millis + 1, 0, 600, 0);
+            r.profiles = profiles.iter().map(|p| p.to_string()).collect();
+            r
+        })
+        .collect();
+        let profiles = [
+            crate::test_support::make_profile("native", "/synthetic/.claude"),
+            crate::test_support::make_t3_profile("agent", "/synthetic/.claude"),
+            crate::test_support::make_profile("work", "/synthetic/.claude-work"),
+        ];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            snapshots: &[],
+            max_cost_per_use_usd: 1.0,
+        });
+        let agent: Vec<&ContextCost> = rows.iter().filter(|c| c.name == "Agent").collect();
+        assert_eq!(agent.len(), 3);
+        // Native Claude Code and T3 share ~/.claude's row, so the T3 calls keep it on.
+        let shared = agent[0];
+        assert_eq!(shared.profiles, ["agent", "native"]);
+        assert_eq!((shared.requests, shared.calls), (2, Some(3)));
+        assert!(!matches!(
+            shared.verdict,
+            Some(Verdict::Off | Verdict::Consider)
+        ));
+        let shares: Vec<(&[String], u64)> = shared
+            .shares
+            .iter()
+            .map(|s| (s.profiles.as_slice(), s.requests))
+            .collect();
+        assert_eq!(
+            shares,
+            [
+                (&["native".to_string()][..], 1),
+                (&["agent".to_string()][..], 1)
+            ]
+        );
+        assert_eq!(
+            shared.shares.iter().map(|s| s.cost_usd).sum::<Usd>(),
+            shared.cost_usd
+        );
+        // A check whose own switch only the T3 instance shares takes only its requests.
+        let t3 = shared.shares_within(|p| p.iter().any(|p| p == "agent"));
+        assert_eq!(
+            t3.iter()
+                .map(|s| (s.profiles.clone(), s.requests))
+                .collect::<Vec<_>>(),
+            [(vec!["agent".to_string()], 1)]
+        );
+        let whole = shared.shares_within(|p| p.iter().any(|p| p == "agent" || p == "native"));
+        assert_eq!((whole.len(), whole[0].requests), (1, 2));
+        // Another home's settings file keeps its own row, never credited with those calls.
+        let work = agent[1];
+        assert_eq!(work.profiles, ["work"]);
+        assert_eq!((work.requests, work.calls), (1, Some(0)));
+        assert_eq!(work.verdict, Some(Verdict::Off));
+        // A copy either home could have made shares ~/.claude, whose calls keep it on too.
+        let copy = agent[2];
+        assert_eq!(copy.profiles, ["native", "work"]);
+        assert_eq!((copy.requests, copy.calls), (1, Some(3)));
+        assert_ne!(copy.verdict, Some(Verdict::Off));
+    }
+
+    #[test]
+    fn a_piece_one_source_sent_late_stays_advisory_when_unused() {
+        let scan = ExposureScan {
+            components: vec![
+                component("late", Category::ToolSchema, "Artifact", 1000, &[]),
+                component("system", Category::Other, "wire-system", 1000, &[]),
+            ],
+            requests: vec![
+                exposure("native-1", &["system"], 1, 1000),
+                exposure("t3-1", &["late", "system"], 2, 2000),
+                exposure("native-2", &["late", "system"], 2, 2000),
+            ],
+            ..ExposureScan::default()
+        };
+        // Each its own session, at the same 0.3 tokens per character.
+        let requests: Vec<Request> = [
+            ("native-1", "native", 300),
+            ("t3-1", "agent", 600),
+            ("native-2", "native", 600),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, profile, tokens))| {
+            let mut r = request(id, i as Millis + 1, 0, tokens, 0);
+            r.session = id.into();
+            r.profiles = vec![profile.into()].into();
+            r
+        })
+        .collect();
+        let profiles = [
+            crate::test_support::make_profile("native", "/synthetic/.claude"),
+            crate::test_support::make_t3_profile("agent", "/synthetic/.claude"),
+        ];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            snapshots: &[],
+            max_cost_per_use_usd: 1.0,
+        });
+        // T3 sent it from its first request, but native Claude Code only later, so its
+        // earlier native sessions could not have recorded a use.
+        let late = row(&rows, "Artifact");
+        assert_eq!((late.requests, late.calls), (2, Some(0)));
+        assert_eq!(late.verdict, Some(Verdict::Consider));
     }
 
     #[test]
@@ -2590,7 +2842,7 @@ mod tests {
         // An unreadable line names the group by its namespace or a member's short name,
         // never by the row's label.
         let hidden =
-            |line: &str| hidden_use(synced, &[make_snapshot("profile", &[line], 0)], &scan);
+            |line: &str| hidden_use(synced, &[make_snapshot("profile", &[line], 0)], &scan, &[]);
         assert_eq!(
             hidden(r#"{"skill":"anthropic-skills:slides"}"#),
             Some(Hidden::Named)

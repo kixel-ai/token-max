@@ -1479,7 +1479,10 @@ pub struct Coverage {
 /// Shared recommendation metadata; savings are relative to the named baseline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckBase<V> {
+    /// The profile whose controls the line reports, the first of `profiles`.
     pub profile: String,
+    /// Every profile the line covers, which share the setting's owner.
+    pub profiles: Vec<String>,
     pub history_profiles: Vec<String>,
     pub evidence: Evidence,
     pub action: Action,
@@ -2634,8 +2637,44 @@ pub struct ContextCost {
     pub details: Vec<ContextCost>,
     /// Size of the most recent recorded instruction revision.
     pub instruction_size: Option<InstructionSize>,
+    /// The line's requests and their cost by the profiles that recorded them.
+    pub shares: Vec<ProfileShare>,
 }
 
+/// The requests on a line that one set of profiles recorded, and what the piece cost in them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileShare {
+    /// More than one when a request was copied into several profiles' histories, or T3
+    /// could not settle which ran it.
+    pub profiles: Vec<String>,
+    pub requests: u64,
+    pub priced: u64,
+    /// API-price equivalent over the priced requests only.
+    pub cost_usd: Usd,
+}
+
+impl ContextCost {
+    /// The part of this line whose requests profiles `covers` recorded: the whole line when
+    /// it covers every source, else each source share it covers.
+    pub fn shares_within(&self, covers: impl Fn(&[String]) -> bool) -> Vec<ProfileShare> {
+        if self.shares.iter().all(|s| covers(&s.profiles)) {
+            return covers(&self.profiles)
+                .then(|| ProfileShare {
+                    profiles: self.profiles.clone(),
+                    requests: self.requests,
+                    priced: self.priced,
+                    cost_usd: self.cost_usd,
+                })
+                .into_iter()
+                .collect();
+        }
+        self.shares
+            .iter()
+            .filter(|s| covers(&s.profiles))
+            .cloned()
+            .collect()
+    }
+}
 // ---------------------------------------------------------------------------
 // Subagent costs.
 
@@ -2795,10 +2834,11 @@ pub struct ExposureSummary {
     pub assumptions: Vec<String>,
 }
 
-/// One Claude profile's Fable spend at API prices, in 7-day spans that end at the report.
+/// Fable spend at API prices of the Claude profiles one settings file controls, in 7-day
+/// spans that end at the report.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FableUse {
-    pub profile: String,
+    pub profiles: Vec<String>,
     /// Fable requests in the window.
     pub requests: u64,
     /// Requests whose model was not recorded, which may have run on Fable.

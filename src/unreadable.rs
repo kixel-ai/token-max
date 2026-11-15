@@ -128,13 +128,19 @@ impl Unreadable {
 
 /// Whether the nearest `"type"` tag before this point names an output item.
 fn output_before(head: &[u8]) -> bool {
-    const TAG: &[u8] = b"\"type\":\"";
-    let Some(at) = memchr::memmem::rfind(head, TAG) else {
-        return false;
-    };
-    let value = &head[at + TAG.len()..];
-    let end = value.iter().position(|&b| b == b'"').unwrap_or(value.len());
-    value[..end].ends_with(b"_output")
+    const KEY: &[u8] = b"\"type\"";
+    let mut end = head.len();
+    while let Some(at) = memchr::memmem::rfind(&head[..end], KEY) {
+        let rest = head[at + KEY.len()..].trim_ascii_start();
+        if let Some(rest) = rest.strip_prefix(b":")
+            && let Some(rest) = rest.trim_ascii_start().strip_prefix(b"\"")
+        {
+            let value = &rest[..memchr::memchr(b'"', rest).unwrap_or(rest.len())];
+            return value.ends_with(b"_output");
+        }
+        end = at;
+    }
+    false
 }
 
 /// The text after a JSON key: `:`, optional space, then the string value's opening quote;
@@ -354,8 +360,10 @@ mod tests {
         let mut unreadable = seen(&[
             r#"{"payload":{"type":"function_call_output","call_id":"k4"}"#,
             r#"{"payload":{"type":"function_call","name":"exec","call_id":"k5"}"#,
+            // JSON may carry whitespace around the tag.
+            r#"{"payload":{"type" : "custom_tool_call_output", "call_id": "k6"}"#,
         ]);
         unreadable.finish(&ids, 1);
-        assert_eq!(unreadable.unmatched_results, 2);
+        assert_eq!(unreadable.unmatched_results, 3);
     }
 }

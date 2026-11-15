@@ -26,7 +26,9 @@ each change makes sense, which a one-line row cannot.
 - ✅ a labeled running total after each yes: the sum of the accepted
   changes' own savings, in dollars and percent, saying that overlapping
   changes may save less, such as "accepted so far: about $11,400/mo, 31% of
-  T3 claudeAgent; overlapping changes may save less" (rejected: a joint
+  T3 claudeAgent; overlapping changes may save less". Keep a subtotal and
+  percent for each profile, since each percent has its own profile's spend
+  as its base; a combined dollar total names no percent (rejected: a joint
   replay of the accepted set, which the replay cannot do yet; no total).
   This amends m0's 2026-11-08 rule of no summed savings, for this total
   only; the report's rows still each hold everything else constant.
@@ -36,8 +38,8 @@ each change makes sense, which a one-line row cannot.
 - ✅ then review and confirm (maintainer, 2026-11-14: "C for deciding
   what to change, then A with a confirm write these changes"): print the
   ranked one-line list, the accepted changes first with their savings and
-  the labeled total, then the rows the walk did not offer, as the report
-  quest describes, and ask once whether to write the accepted changes,
+  the labeled total, then the declined changes, unselected, and every
+  other row, as the report quest describes, and ask once whether to write the accepted changes,
   naming each file. The y/n answers in the walk only select; nothing is
   written before that yes. No pager, since a question follows the list.
   Without a terminal, doctor prints that report and asks nothing, as today.

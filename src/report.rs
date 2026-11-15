@@ -7295,6 +7295,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_undecided_ttl_gives_its_gap_relative_to_the_cost() {
+        let mut report = synthetic_report();
+        let ttl = ttl_mut(&mut report);
+        ttl.base.action = Action::Advisory;
+        ttl.base.recommended = None;
+        ttl.base.coverage = Some(Coverage {
+            priced: 93,
+            total: 100,
+        });
+        // A gap that reads as large in dollars but is small against what the requests cost.
+        ttl.one_hour_savings_usd = 1_177.0;
+        ttl.cost.five_minutes.known_usd = Usd::from_f64(294_250.0);
+        let summary = text(&report, None, true);
+        let line = report_line(&summary, "Main-agent prompt cache TTL");
+        assert_eq!(line.mark, "unknown", "{summary}");
+        assert!(
+            line.evidence.contains(
+                "Not enough evidence: 1h cost 0.4% less than 5m ($1,177 over 1 day) on the 93% of requests that could be priced, too little to rule out the 7 that could not."
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn an_unowned_t3_check_says_why_in_a_sentence() {
+        let mut report = synthetic_report();
+        let ttl = ttl_mut(&mut report);
+        ttl.base.action = Action::Advisory;
+        ttl.base.recommended = None;
+        ttl.base.uncertainty.push(crate::t3::UNOWNED.into());
+        let summary = text(&report, None, true);
+        let line = report_line(&summary, "Main-agent prompt cache TTL");
+        assert!(
+            line.evidence.starts_with(
+                "Not enough evidence: the T3 instance is disabled or the file that owns this setting for it is unresolved, so its past costs do not establish a setting to change."
+            ),
+            "{summary}"
+        );
+    }
+
+    #[test]
+    fn the_headline_counts_both_kinds_of_change() {
+        assert_eq!(
+            headline(0, 0),
+            "No changes recommended or worth considering."
+        );
+        assert_eq!(
+            headline(0, 14),
+            "No changes recommended; 14 worth considering."
+        );
+        assert_eq!(headline(1, 0), "1 change recommended.");
+        assert_eq!(
+            headline(2, 1),
+            "2 changes recommended and 1 worth considering."
+        );
+    }
+
     fn instant(text: &str) -> Millis {
         text.parse::<jiff::Timestamp>().unwrap().as_millisecond()
     }

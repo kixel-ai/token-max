@@ -560,4 +560,31 @@ mod tests {
         assert_eq!(check.ttl, Some(Ttl::FiveMinutes));
         assert_ne!(check.base.action, Action::Advisory);
     }
+
+    #[test]
+    fn an_unresolved_ttl_gives_the_cap_a_whole_reason() {
+        let mut report = report("{}");
+        for check in &mut report.checks {
+            if let CheckResult::BashCap(c) = check {
+                c.ttl = None;
+                c.base.action = Action::Advisory;
+                c.base.recommended = None;
+            }
+        }
+        let text = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
+        let line = crate::test_support::report_line(&text, "Bash timeout cap");
+        assert_eq!(line.mark, "unknown", "{text}");
+        assert!(
+            line.evidence.starts_with(
+                "Not enough evidence: the main-agent cache TTL is unresolved, so the cap has nothing to compare with."
+            ),
+            "{text}"
+        );
+    }
 }

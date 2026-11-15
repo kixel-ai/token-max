@@ -489,7 +489,11 @@ pub struct EffortInput<'a> {
 pub fn effort_checks(input: &EffortInput<'_>) -> Vec<EffortCheck> {
     let owner = |p: &Profile| {
         let e = p.effort.as_ref().expect("filtered on an effort control");
-        format!("{}\n{}", e.owner, e.model_owner)
+        // One owner can resolve to different levels on different recorded models.
+        format!(
+            "{}\n{}\n{:?}\n{:?}\n{:?}\n{:?}",
+            e.owner, e.model_owner, e.model, e.level, e.effective, e.unresolved
+        )
     };
     let controlled = input.scan.profiles.iter().filter(|p| p.effort.is_some());
     crate::rows::groups(controlled, owner)

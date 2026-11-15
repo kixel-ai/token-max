@@ -83,13 +83,14 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             &BackgroundControl,
             (Vec<&Request>, Vec<&TurnEnd<'_>>),
         > = crate::collections::IndexMap::default();
+        // Each member holds only its own requests' directories and launch overrides.
         for &request in &requests {
-            for control in controls(profile, request) {
+            for control in controls(line.recorder(&request.profiles), request) {
                 groups.entry(control).or_default().0.push(request);
             }
         }
         for end in &ends {
-            for control in controls(profile, end.request) {
+            for control in controls(line.recorder(&end.request.profiles), end.request) {
                 groups.entry(control).or_default().1.push(end);
             }
         }
@@ -103,7 +104,7 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
                 .chain(&input.scan.requests)
                 .filter(|r| r.agent == crate::model::Agent::Main && line.covers(&r.profiles))
             {
-                for control in controls(profile, r) {
+                for control in controls(line.recorder(&r.profiles), r) {
                     groups.entry(control).or_default();
                 }
             }

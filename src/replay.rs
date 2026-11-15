@@ -698,11 +698,20 @@ fn ttl_check(
     } else {
         current.value
     };
-    let recent_version = relevant
-        .last()
-        .and_then(|r| r.version.as_deref())
-        .or_else(|| requests.last().and_then(|r| r.version.as_deref()));
-    let supported = version_supported(recent_version);
+    // Each source's current client must honor the setting, since one file sets it for all.
+    fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
+        list.iter()
+            .rev()
+            .find(|r| r.profiles.contains(id))
+            .and_then(|r| r.version.as_deref())
+    }
+    let versions: Vec<Option<&str>> = group
+        .ids
+        .iter()
+        .filter(|id| requests.iter().any(|r| r.profiles.contains(id)))
+        .map(|id| latest(&relevant, id).or_else(|| latest(requests, id)))
+        .collect();
+    let supported = !versions.is_empty() && versions.into_iter().all(version_supported);
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
     let applies = supported && (current.value.is_some() || pinnable);

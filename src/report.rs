@@ -4132,6 +4132,36 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         row
     };
     let mut rows: Vec<Row> = checks.iter().map(|c| check_row(c, out)).collect();
+    // Lines of one setting that split only because the controls they replay differ name the
+    // same file; name their profiles as well, so no two read alike.
+    let clashing: Vec<usize> = (0..rows.len())
+        .filter(|&i| {
+            !rows[i].profile.is_empty()
+                && (0..rows.len()).any(|j| {
+                    rows[i].name == rows[j].name
+                        && rows[i].profile == rows[j].profile
+                        && checks[i].1.profiles != checks[j].1.profiles
+                })
+        })
+        .collect();
+    for i in clashing {
+        let names: Vec<String> = checks[i]
+            .1
+            .profiles
+            .iter()
+            .map(|id| {
+                tags.get(id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| out.short_profile(id))
+            })
+            .collect();
+        let row = &mut rows[i];
+        row.profile = format!(
+            "{}: {}]",
+            row.profile.trim_end_matches(']'),
+            names.join(", ")
+        );
+    }
     rows.extend(pieces.iter().map(|c| piece_row(c, out)));
     // Switchable context still sent today without enough pricing or use evidence for a
     // verdict. Auto memory has its own line.

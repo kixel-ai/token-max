@@ -14,6 +14,8 @@ pub struct Group<'a> {
     pub lead: &'a Profile,
     /// Every member's id, the lead's first.
     pub ids: Vec<String>,
+    /// Every member, in the order of `ids`.
+    pub members: Vec<&'a Profile>,
 }
 
 impl<'a> Group<'a> {
@@ -23,11 +25,21 @@ impl<'a> Group<'a> {
         Group {
             lead: profile,
             ids: vec![profile.id.clone()],
+            members: vec![profile],
         }
     }
     /// Whether a record made under any of these profiles belongs to the line.
     pub fn covers(&self, profiles: &[String]) -> bool {
         profiles.iter().any(|p| self.ids.contains(p))
+    }
+    /// The member that recorded a record made under `profiles`, else the lead. Members share
+    /// the owning file, but each holds only its own requests' directories and overrides.
+    pub fn recorder(&self, profiles: &[String]) -> &'a Profile {
+        profiles
+            .iter()
+            .find_map(|p| self.members.iter().find(|m| &m.id == p))
+            .copied()
+            .unwrap_or(self.lead)
     }
 }
 
@@ -44,12 +56,16 @@ pub fn groups<'a>(
     for p in profiles {
         let key = key(p, &owner(p));
         match index.get(&key) {
-            Some(&i) => result[i].ids.push(p.id.clone()),
+            Some(&i) => {
+                result[i].ids.push(p.id.clone());
+                result[i].members.push(p);
+            }
             None => {
                 index.insert(key, result.len());
                 result.push(Group {
                     lead: p,
                     ids: vec![p.id.clone()],
+                    members: vec![p],
                 });
             }
         }
@@ -61,13 +77,35 @@ pub fn groups<'a>(
 /// the profile's settings are resolved, or else the profile itself.
 pub fn key(profile: &Profile, owner: &str) -> String {
     match owner_file(profile, owner) {
-        Some(file) => {
-            // Two names for one file, such as a symlink, are one line.
-            let real = crate::discovery::realpath(file).unwrap_or_else(|_| file.to_string());
-            format!("{:?}:{real}{}", profile.harness, &owner[file.len()..])
-        }
+        Some(_) => format!("{:?}:{}", profile.harness, canonical(owner)),
         None => format!("profile:{}", profile.id),
     }
+}
+
+/// An owner with each line's settings file resolved, so two names for one file, such as a
+/// symlink, are one owner, in a composite owner's later lines as well as its first.
+pub fn canonical(owner: &str) -> String {
+    owner
+        .split('\n')
+        .map(|line| match file_prefix(line) {
+            Some(file) => {
+                let real = crate::discovery::realpath(file).unwrap_or_else(|_| file.to_string());
+                format!("{real}{}", &line[file.len()..])
+            }
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The rooted settings file an owner names in `{file}:{key}`.
+fn file_prefix(owner: &str) -> Option<&str> {
+    let end = [".json:", ".toml:"]
+        .iter()
+        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len() - 1))
+        .min()?;
+    let file = &owner[..end];
+    Path::new(file).has_root().then_some(file)
 }
 
 /// The settings file whose line a profile's setting belongs to, as `owner` names it in
@@ -79,12 +117,7 @@ pub fn owner_file<'o>(profile: &Profile, owner: &'o str) -> Option<&'o str> {
         .t3
         .as_ref()
         .is_none_or(|t| t.enabled && !t.settings_unresolved);
-    let end = [".json:", ".toml:"]
-        .iter()
-        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len() - 1))
-        .min()?;
-    let file = &owner[..end];
-    (resolved && Path::new(file).has_root()).then_some(file)
+    file_prefix(owner).filter(|_| resolved)
 }
 
 /// The line for a profile's tool, skill and MCP switches, which live in its settings file.
@@ -211,6 +244,14 @@ mod tests {
         let a = make_profile("a", &real.to_string_lossy());
         let b = make_profile("b", &alias.to_string_lossy());
         assert_eq!(settings_key(&a), settings_key(&b));
+        // A composite owner resolves every file it names, not just its first.
+        assert_eq!(ids(&groups([&a, &b], compaction_owner)), [vec!["a", "b"]]);
+        assert_eq!(
+            groups([&a, &b], compaction_owner)[0]
+                .recorder(&["b".into()])
+                .id,
+            "b"
+        );
         assert_ne!(
             settings_key(&a),
             settings_key(&make_profile(

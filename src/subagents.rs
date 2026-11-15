@@ -1169,7 +1169,12 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
                 }
             };
             *sources.entry(source).or_default() += 1;
-            if let Some(profile) = owners.first() {
+            // Each run's own profile names its agent file; members can hold different ones.
+            let own = owners
+                .iter()
+                .find(|p| all.iter().any(|r| r.profiles.contains(&p.id)))
+                .or(owners.first());
+            if let Some(profile) = own {
                 let (model, effort) = settings_text(
                     profile,
                     scoped(&profile.agents, run.cwd),

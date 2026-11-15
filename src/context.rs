@@ -1384,7 +1384,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 // deferred line could hold a call, so their nonuse is unproven.
                 let visible = row.from_start.values().all(|&first| first)
                     && c.skill.is_none()
-                    && !c.profiles.iter().any(|p| input.incomplete.contains(p));
+                    && !c.profiles.iter().any(|p| input.incomplete.contains(p))
+                    && !input.incomplete.iter().any(|p| {
+                        files
+                            .get(p.as_str())
+                            .is_some_and(|f| owner_files[row.owner].contains(&f.as_str()))
+                    });
                 c.verdict = Some(match calls {
                     _ if usd <= 0.0 => Verdict::Keep,
                     0 if visible => Verdict::Off,

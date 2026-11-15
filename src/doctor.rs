@@ -216,7 +216,10 @@ fn switch(members: &[&Profile], edit: Edit) -> How {
     let mut files: IndexMap<String, &str> = IndexMap::default();
     for m in members {
         files
-            .entry(crate::rows::settings_key(m))
+            .entry(
+                crate::discovery::realpath(&m.settings_file)
+                    .unwrap_or_else(|_| m.settings_file.clone()),
+            )
             .or_insert(m.settings_file.as_str());
     }
     let patch = Patch {

@@ -56,7 +56,7 @@ pub struct IdleOptions<'a> {
 /// The main and sub-agent TTLs a scenario replays.
 type Ttls = PerBucket<Option<Ttl>>;
 
-/// A request's idle-control scope: an index into the profile's project directories, or None
+/// A request's idle-control scope: an index into the line's project directories, or None
 /// for the profile-wide control.
 type Scope = Option<usize>;
 
@@ -214,18 +214,42 @@ fn settings_control(profile: &Profile) -> IdleControl {
     control
 }
 
-/// One profile's idle controls by working directory, with window controls memoized per scope
-/// and model because every request of every replay asks for them.
+/// One line's idle controls by working directory, with window controls memoized per scope
+/// and model because every request of every replay asks for them. Each member holds only its
+/// own requests' directories, so a request reads the member that recorded it, then the lead.
 pub(crate) struct Scopes<'p> {
     profile: &'p Profile,
+    members: Vec<&'p Profile>,
+    /// Each member's directory controls, indexed by (member, directory), and their scopes.
+    index: HashMap<(usize, &'p str), usize>,
+    directories: Vec<Cow<'p, IdleControl>>,
     fallback: OnceCell<IdleControl>,
     windows: RefCell<HashMap<Scope, HashMap<String, Rc<WindowControl>>>>,
 }
 
 impl<'p> Scopes<'p> {
-    pub(crate) fn new(profile: &'p Profile) -> Self {
+    pub(crate) fn new(line: &crate::rows::Group<'p>) -> Self {
+        let profile = line.lead;
+        let mut index = HashMap::default();
+        let mut directories = vec![];
+        for (m, member) in line.members.iter().enumerate() {
+            // A member that names the lead's file another way has its owners spelled as the
+            // lead's, so comparisons with the lead's owners still match.
+            let alias = m > 0 && member.settings_file != profile.settings_file;
+            for (cwd, control) in member.idle_directories.iter().flatten() {
+                index.insert((m, cwd.as_str()), directories.len());
+                directories.push(if alias {
+                    Cow::Owned(respell(control, member, profile))
+                } else {
+                    Cow::Borrowed(control)
+                });
+            }
+        }
         Self {
             profile,
+            members: line.members.clone(),
+            index,
+            directories,
             fallback: OnceCell::new(),
             windows: RefCell::new(HashMap::default()),
         }
@@ -233,14 +257,19 @@ impl<'p> Scopes<'p> {
 
     pub(crate) fn scope(&self, r: &Request) -> Scope {
         let cwd = r.cwd.as_deref().filter(|c| !c.is_empty())?;
-        self.profile.idle_directories.as_ref()?.get_index_of(cwd)
+        let recorder = r
+            .profiles
+            .iter()
+            .find_map(|p| self.members.iter().position(|m| &m.id == p));
+        recorder
+            .and_then(|m| self.index.get(&(m, cwd)))
+            .or_else(|| self.index.get(&(0, cwd)))
+            .copied()
     }
 
     /// The project control at the recorded directory, else the profile's, else its settings'.
     fn control(&self, scope: Scope) -> &IdleControl {
-        if let Some((_, c)) =
-            scope.and_then(|i| self.profile.idle_directories.as_ref()?.get_index(i))
-        {
+        if let Some(c) = scope.and_then(|i| self.directories.get(i)) {
             return c;
         }
         self.profile
@@ -287,6 +316,37 @@ impl<'p> Scopes<'p> {
             .insert(key.to_string(), w.clone());
         w
     }
+}
+
+/// A member's directory control with its settings file spelled as the lead's, when both
+/// names resolve to one file.
+fn respell(control: &IdleControl, member: &Profile, lead: &Profile) -> IdleControl {
+    let mut control = control.clone();
+    let same = crate::rows::canonical(&format!("{}:", member.settings_file))
+        == crate::rows::canonical(&format!("{}:", lead.settings_file));
+    if !same {
+        return control;
+    }
+    let fix = |owner: &mut String| {
+        if owner.starts_with(&format!("{}:", member.settings_file)) {
+            *owner = format!(
+                "{}{}",
+                lead.settings_file,
+                &owner[member.settings_file.len()..]
+            );
+        }
+    };
+    fix(&mut control.owner);
+    fix(&mut control.threshold_owner);
+    if let Some(ttl) = &mut control.ttl {
+        fix(&mut ttl.main.owner);
+        fix(&mut ttl.subagent.owner);
+    }
+    if let Some(c) = &mut control.compaction {
+        fix(&mut c.default.owner);
+        c.models.values_mut().for_each(|w| fix(&mut w.owner));
+    }
+    control
 }
 
 /// A selected replayed part's charge, for T3 modes priced part by part.
@@ -2227,7 +2287,7 @@ fn profile_checks<'a>(
         estimates: options.estimates,
         all_summaries: options.summaries,
         summaries,
-        scopes: Scopes::new(profile),
+        scopes: Scopes::new(group),
         since,
         now,
         groups,
@@ -2496,7 +2556,7 @@ fn detailed_t3_checks(
                 by_event: HashMap::default(),
                 requests: HashSet::default(),
             },
-            scopes: Scopes::new(profile),
+            scopes: Scopes::new(&group),
             since: since.unwrap_or(options.now),
             now: options.now,
             groups,

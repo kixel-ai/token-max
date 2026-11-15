@@ -869,6 +869,86 @@ impl Sizing {
     }
 }
 
+/// The largest input of each model a line used, and the latest automatic compaction trigger
+/// on each model and sizing that ran under an unset window.
+#[allow(clippy::type_complexity)]
+fn observe(
+    profile: &crate::model::Profile,
+    line: &[String],
+    by_id: &HashMap<&str, &crate::model::Profile>,
+    requests: &[crate::model::Request],
+    events: &[crate::model::StructuralEvent],
+    cache_context: &crate::model::CacheContext,
+    undated: &dyn Fn(&str) -> String,
+) -> (
+    IndexMap<String, i64>,
+    IndexMap<(String, Sizing), (Millis, i64)>,
+) {
+    let mine = |profiles: &[String]| profiles.iter().any(|p| line.contains(p));
+    let mut largest: IndexMap<String, i64> = IndexMap::default();
+    for r in cache_context.requests.iter().chain(requests.iter()) {
+        if !mine(&r.profiles) {
+            continue;
+        }
+        for p in &r.parts {
+            if let Some(model) = &p.model {
+                let size = largest.entry(undated(model)).or_default();
+                *size = (*size).max(p.usage.input.unwrap_or(0));
+            }
+        }
+    }
+    // Idle and keepalive read a recorded directory's own controls, else the profile's;
+    // an event's are those of the line's profile that recorded it, which holds its cwd.
+    let scope = |profiles: &[String], cwd: Option<&str>| {
+        let origin = profiles
+            .iter()
+            .filter(|p| line.contains(p))
+            .find_map(|p| by_id.get(p.as_str()).copied())
+            .unwrap_or(profile);
+        cwd.filter(|c| !c.is_empty())
+            .and_then(|c| {
+                origin
+                    .idle_directories
+                    .as_ref()?
+                    .get(c)?
+                    .compaction
+                    .as_ref()
+            })
+            .unwrap_or(&origin.compaction)
+    };
+    let mut observed: IndexMap<(String, Sizing), (Millis, i64)> = IndexMap::default();
+    for e in cache_context.boundaries.iter().chain(events.iter()) {
+        if let (
+            EventKind::Compaction,
+            Some("auto"),
+            IdleAttribution::Unknown,
+            Some(model),
+            Some(tokens),
+        ) = (
+            e.kind,
+            e.trigger.as_deref(),
+            e.idle_attribution,
+            &e.model,
+            e.pre_tokens,
+        ) && mine(&e.profiles)
+            && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+        {
+            // A trigger under an explicit window does not show the default.
+            let at = scope(&e.profiles, e.cwd.as_deref());
+            if !window_control(at, Some(model)).unset {
+                continue;
+            }
+            let model = undated(model);
+            let sizing = Sizing::of(at, &model);
+            let latest = observed.entry((model, sizing)).or_insert((e.time, tokens));
+            if e.time >= latest.0 {
+                *latest = (e.time, tokens);
+            }
+        }
+    }
+    (largest, observed)
+}
+
 /// Fill the tuned window of every model a Claude profile used, in the profile's controls and in
 /// each recorded directory's, which idle and keepalive read: the trigger of the latest automatic
 /// compaction on that model under the same sizing, else Claude Code's documented default. Also
@@ -893,66 +973,30 @@ pub fn tune_windows(scan: &mut Scan) {
             })
             .collect()
     };
-    for (profile, line) in profiles.iter_mut().zip(lines) {
-        if profile.harness != Harness::Claude {
+    // Every observation is read before any profile's windows are filled.
+    let by_id: HashMap<&str, &crate::model::Profile> =
+        profiles.iter().map(|p| (p.id.as_str(), p)).collect();
+    let observations: Vec<_> = profiles
+        .iter()
+        .zip(&lines)
+        .map(|(profile, line)| {
+            (profile.harness == Harness::Claude).then(|| {
+                observe(
+                    profile,
+                    line,
+                    &by_id,
+                    requests,
+                    events,
+                    cache_context,
+                    &undated,
+                )
+            })
+        })
+        .collect();
+    for (profile, observation) in profiles.iter_mut().zip(observations) {
+        let Some((largest, observed)) = observation else {
             continue;
-        }
-        let mine = |profiles: &[String]| profiles.iter().any(|p| line.contains(p));
-        let mut largest: IndexMap<String, i64> = IndexMap::default();
-        for r in cache_context.requests.iter().chain(requests.iter()) {
-            if !mine(&r.profiles) {
-                continue;
-            }
-            for p in &r.parts {
-                if let Some(model) = &p.model {
-                    let size = largest.entry(undated(model)).or_default();
-                    *size = (*size).max(p.usage.input.unwrap_or(0));
-                }
-            }
-        }
-        // Idle and keepalive read a recorded directory's own controls, else the profile's.
-        let scope = |cwd: Option<&str>| {
-            cwd.filter(|c| !c.is_empty())
-                .and_then(|c| {
-                    profile
-                        .idle_directories
-                        .as_ref()?
-                        .get(c)?
-                        .compaction
-                        .as_ref()
-                })
-                .unwrap_or(&profile.compaction)
         };
-        let mut observed: IndexMap<(String, Sizing), (Millis, i64)> = IndexMap::default();
-        for e in cache_context.boundaries.iter().chain(events.iter()) {
-            if let (
-                EventKind::Compaction,
-                Some("auto"),
-                IdleAttribution::Unknown,
-                Some(model),
-                Some(tokens),
-            ) = (
-                e.kind,
-                e.trigger.as_deref(),
-                e.idle_attribution,
-                &e.model,
-                e.pre_tokens,
-            ) && mine(&e.profiles)
-                && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
-            {
-                // A trigger under an explicit window does not show the default.
-                let at = scope(e.cwd.as_deref());
-                if !window_control(at, Some(model)).unset {
-                    continue;
-                }
-                let model = undated(model);
-                let sizing = Sizing::of(at, &model);
-                let latest = observed.entry((model, sizing)).or_insert((e.time, tokens));
-                if e.time >= latest.0 {
-                    *latest = (e.time, tokens);
-                }
-            }
-        }
         let directories = profile.idle_directories.iter_mut().flatten();
         for compaction in std::iter::once(&mut profile.compaction)
             .chain(directories.filter_map(|(_, idle)| idle.compaction.as_mut()))

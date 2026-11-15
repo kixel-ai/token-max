@@ -148,11 +148,17 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
         // Requests grouped by the control that applies at their working directory, in first-seen order.
         let mut groups: Vec<(&SpeedControl, Vec<&Request>)> = vec![];
         for &r in &requests {
+            // Each member holds only its own requests' directories.
             let control = r
                 .cwd
                 .as_deref()
                 .filter(|cwd| !cwd.is_empty())
-                .and_then(|cwd| profile.speed_directories.as_ref()?.get(cwd))
+                .and_then(|cwd| {
+                    let recorder = line.recorder(&r.profiles);
+                    [recorder, profile]
+                        .into_iter()
+                        .find_map(|p| p.speed_directories.as_ref()?.get(cwd))
+                })
                 .unwrap_or(speed);
             match groups.iter_mut().find(|(c, _)| *c == control) {
                 Some((_, group)) => group.push(r),
@@ -580,6 +586,38 @@ mod tests {
             ]
         );
         assert!(cards[0].base.savings_usd.unwrap() > cards[2].base.savings_usd.unwrap());
+    }
+
+    #[test]
+    fn a_shared_line_reads_each_request_s_directory_from_the_profile_that_recorded_it() {
+        let mut s = directories();
+        // Another home on the same file holds the only record of directory `d`.
+        let mut other = s.profiles[0].clone();
+        other.id = "other".into();
+        other.speed_directories = Some(
+            [("d".to_string(), control(Some("standard"), true))]
+                .into_iter()
+                .collect(),
+        );
+        s.profiles.push(other);
+        let mut d = s.requests[0].clone();
+        d.id = "d".into();
+        d.cwd = Some("d".into());
+        d.profiles = vec!["other".into()].into();
+        s.requests.push(d);
+        let cards = checks(&s, None, 100);
+        let summary: Vec<_> = cards
+            .iter()
+            .map(|c| (c.base.current.as_deref(), c.base.requests))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (Some("ultrafast"), 1),
+                (Some("standard"), 2),
+                (Some("fast"), 1)
+            ]
+        );
     }
 
     /// The TypeScript fast-mode tests that read real settings files through `scan`, then `speed_checks` or `analyze`.

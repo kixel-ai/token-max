@@ -171,11 +171,11 @@ fn claude_lifetime(
 pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
     let native = options.scan.profiles.iter().filter(|p| p.t3.is_none());
     let owner = |p: &Profile| {
+        // Both TTLs and the windows the replay applies, compaction writes at the subagent TTL.
         format!(
-            "{}:keepalive\n{}\n{}",
+            "{}:keepalive\n{}",
             p.settings_file,
-            crate::rows::ttl_owner(p, crate::model::Bucket::Main),
-            crate::rows::window_owner(p)
+            crate::rows::compaction_owner(p)
         )
     };
     crate::rows::groups(native, owner)
@@ -703,7 +703,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             .filter_map(|r| message(r).next_back()?.usage.output)
             .collect(),
     );
-    let scopes = Scopes::new(profile);
+    let scopes = Scopes::new(line);
     let windows = recommended_windows(&scopes, &main, options.windows);
     let mut ttls = PerBucket {
         main: profile.ttl.main.value,
@@ -925,10 +925,14 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     let idle_checks: Vec<_> = options
         .idle
         .iter()
-        .filter(|c| c.base.profiles.contains(&profile.id))
+        .filter(|c| line.covers(&c.base.profiles))
         .collect();
+    // The idle alternative must cover the same profiles as the pings it is compared with.
+    let same_population = idle_checks
+        .iter()
+        .all(|c| c.base.profiles.iter().all(|p| line.ids.contains(p)));
     // A partial keepalive replay cannot be compared to an all-session idle aggregate.
-    let idle_savings = if profile.harness == Harness::Claude {
+    let idle_savings = if profile.harness == Harness::Claude && same_population {
         idle_checks.iter().try_fold(0.0_f64, |sum, c| {
             let scenario = &c.after_recommendations;
             if !scenario.applicable {

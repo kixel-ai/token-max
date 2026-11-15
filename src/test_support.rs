@@ -236,6 +236,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         instruction_budget_file: None,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        switched_off: vec![],
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),
@@ -312,7 +313,10 @@ pub struct ReportLine {
     pub claim: String,
     /// The profile, when several were read, then the setting that changes it.
     pub setting: String,
-    /// The line under it in a details report; empty otherwise.
+    /// The line under it naming its default and what the current value saves against it;
+    /// empty when the setting is at its default.
+    pub default: String,
+    /// The line under it, after any default, in a details report; empty otherwise.
     pub evidence: String,
 }
 
@@ -355,16 +359,16 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             .min_by_key(|(at, _, _)| *at)
             .map(|(at, claim, after)| (&rest[..at], claim, after))
             .unwrap_or_else(|| panic!("no claim in {line:?}"));
-        let evidence = lines
-            .get(i + 1)
-            .and_then(|l| l.strip_prefix("         "))
-            .unwrap_or_default();
+        let under = |i: usize| lines.get(i).and_then(|l| l.strip_prefix("         "));
+        let default = under(i + 1).filter(|l| l.starts_with("default "));
+        let evidence = under(i + 1 + usize::from(default.is_some())).unwrap_or_default();
         rows.push(ReportLine {
             change,
             mark: word.into(),
             head: collapse(head),
             claim: claim.into(),
             setting: collapse(setting),
+            default: default.unwrap_or_default().into(),
             evidence: evidence.into(),
         });
     }

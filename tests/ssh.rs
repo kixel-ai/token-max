@@ -233,10 +233,10 @@ fn timeless(text: &str) -> String {
         let from = at + "each percent is of ".len();
         let end = from + text[from..].find("'s ")?;
         let start = text[..end].rfind(' ').map_or(0, |space| space + 1);
-        (!text[..end].ends_with("this host")).then_some((start, end))
+        (!text[..end].ends_with("this host")).then_some(&text[start..end])
     }) {
-        Some((from, to)) => {
-            named = format!("{}this host{}", &text[..from], &text[to..]);
+        Some(name) => {
+            named = text.replace(&format!(" {name}'s "), " this host's ");
             named.as_str()
         }
         None => text,

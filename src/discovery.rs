@@ -14,8 +14,9 @@ use crate::controls::{
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Harness, IdleControl, Location, MemoryControl, PerBucket, Profile,
-    Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Control, ControlValue, Harness, IdleControl, Location, MemoryControl,
+    PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl,
+    Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -423,13 +424,13 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
             reason = "environment override; agent frontmatter may take precedence";
         } else if subagent {
             value = Some(Ttl::FiveMinutes);
-            reason = "documented default; agent frontmatter and server helpers may override";
+            reason = TTL_SUBAGENT_DEFAULT;
         } else if is("CLAUDE_CODE_USE_BEDROCK")
             || is("CLAUDE_CODE_USE_VERTEX")
             || is("CLAUDE_CODE_USE_FOUNDRY")
         {
             value = Some(Ttl::FiveMinutes);
-            reason = "explicit cloud-provider billing default";
+            reason = TTL_CLOUD_DEFAULT;
         } else {
             reason = TTL_BILLING_UNKNOWN;
         }
@@ -444,6 +445,13 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         subagent: bucket(true),
     }
 }
+
+/// Why an unset subagent TTL is 5m: Claude Code's documented default.
+pub const TTL_SUBAGENT_DEFAULT: &str =
+    "documented default; agent frontmatter and server helpers may override";
+
+/// Why an unset main-conversation TTL is 5m under Bedrock, Vertex or Foundry billing.
+pub const TTL_CLOUD_DEFAULT: &str = "explicit cloud-provider billing default";
 
 /// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
 pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
@@ -1939,7 +1947,71 @@ pub(crate) fn profile(
         instruction_budget_file,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        switched_off: switched_off(harness, &user),
     })
+}
+
+/// The tools, skills and MCP servers a profile's own settings file turns off, each as the
+/// control the report's lines name for it. A Claude `permissions.deny` rule turns a tool off
+/// only when it names the tool alone, without a pattern in parentheses.
+fn switched_off(harness: Harness, user: &Map<String, Value>) -> Vec<Control> {
+    let off = |path: &[&str]| Control {
+        path: path.iter().map(|p| p.to_string()).collect(),
+        value: ControlValue::Bool(false),
+        append: false,
+    };
+    let mut result = vec![];
+    if harness == Harness::Claude {
+        for key in ["enableArtifact", "enableWorkflows"] {
+            if user.get(key) == Some(&Value::Bool(false)) {
+                result.push(off(&[key]));
+            }
+        }
+        let rules = user.get("permissions").and_then(|p| p.get("deny"));
+        for rule in rules.and_then(Value::as_array).into_iter().flatten() {
+            if let Some(rule) = rule.as_str().filter(|r| !r.is_empty() && !r.contains('(')) {
+                result.push(Control {
+                    path: vec!["permissions".into(), "deny".into()],
+                    value: ControlValue::Text(rule.into()),
+                    append: true,
+                });
+            }
+        }
+        for (name, value) in members(user.get("skillOverrides")) {
+            if let Some(value) = value.as_str().filter(|v| *v != "on") {
+                result.push(Control {
+                    path: vec!["skillOverrides".into(), name.clone()],
+                    value: ControlValue::Text(value.into()),
+                    append: false,
+                });
+            }
+        }
+        return result;
+    }
+    if user.get("features").and_then(|f| f.get("apps")) == Some(&Value::Bool(false)) {
+        result.push(off(&["features", "apps"]));
+    }
+    for (id, server) in members(user.get("mcp_servers")) {
+        if server.get("enabled") == Some(&Value::Bool(false)) {
+            result.push(off(&["mcp_servers", id, "enabled"]));
+        }
+    }
+    let skills = user.get("skills").and_then(|s| s.get("config"));
+    for entry in skills.and_then(Value::as_array).into_iter().flatten() {
+        if entry.get("enabled") == Some(&Value::Bool(false))
+            && let Some(path) = entry.get("path").and_then(Value::as_str)
+        {
+            result.push(Control {
+                path: vec!["skills".into(), "config".into()],
+                value: ControlValue::Skill {
+                    path: path.into(),
+                    enabled: false,
+                },
+                append: true,
+            });
+        }
+    }
+    result
 }
 
 /// Discover configuration aliases and freeze every selected file's length before parsing.
@@ -2077,6 +2149,44 @@ mod tests {
     use super::*;
     use crate::test_support::{Workspace, make_request};
     use std::path::Path;
+
+    #[test]
+    fn a_settings_file_names_the_switches_it_turns_off() {
+        let map = |v: Value| v.as_object().unwrap().clone();
+        let names = |harness, v: Value| -> Vec<String> {
+            switched_off(harness, &map(v))
+                .iter()
+                .map(crate::defaults::switch_name)
+                .collect()
+        };
+        let claude = serde_json::json!({
+            "enableArtifact": false,
+            "enableWorkflows": true,
+            "permissions": {"deny": ["Monitor", "Bash(rm:*)", "mcp__github", ""]},
+            "skillOverrides": {"pdf": "user-invocable-only", "docx": "on"},
+        });
+        assert_eq!(
+            names(Harness::Claude, claude),
+            [
+                "Artifact tool",
+                "Monitor tool",
+                "MCP server github",
+                "Skill pdf"
+            ]
+        );
+        let codex = serde_json::json!({
+            "features": {"apps": false},
+            "mcp_servers": {"docs": {"enabled": false}, "live": {"command": "x"}},
+            "skills": {"config": [
+                {"path": "/s/imagegen/SKILL.md", "enabled": false},
+                {"path": "/s/other/SKILL.md", "enabled": true},
+            ]},
+        });
+        assert_eq!(
+            names(Harness::Codex, codex),
+            ["ChatGPT apps", "MCP server docs", "Skill imagegen"]
+        );
+    }
 
     fn text(path: &Path) -> String {
         // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.

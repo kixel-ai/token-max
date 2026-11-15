@@ -2366,6 +2366,7 @@ mod tests {
                     inode: 0,
                     deferred_bytes: 0,
                     skipped_lines: 10000,
+                    unreadable: Default::default(),
                     lines: 0,
                 }];
                 s
@@ -4367,6 +4368,7 @@ mod tests {
                 inode: 0,
                 deferred_bytes: 0,
                 skipped_lines,
+                unreadable: Default::default(),
                 lines: 0,
             };
             s.snapshots = vec![snapshot(1)];

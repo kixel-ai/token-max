@@ -694,10 +694,12 @@ model's Skill calls, since a hidden skill can still be typed, except where the
 switch removes the skill entirely, where typed requests count too. A piece still sent
 today with a positive cost and no recorded use is recommended off (`verdict:
 "off"`, exit 1), whatever the amount, when its profile's first shaped request in
-the window already carried it and none of that profile's transcripts has an
-unreadable or deferred line, which could hold a call. One first sent later, one
-whose profile's transcripts are incomplete, or a Codex catalog skill, whose
-uses are only partly recorded, gets `"consider"`, an advisory that exits
+the window already carried it and none of that profile's transcripts could
+hide a call to it. An unreadable line could if its bytes name the piece (see
+below), or if its transcript has a tool result whose id matches no parsed call,
+a sign that a record was cut off; so could a deferred line. One first sent
+later, one whose profile's transcripts could hide a call, or a Codex catalog
+skill, whose uses are only partly recorded, gets `"consider"`, an advisory that exits
 0, since the window cannot rule out a use. A used piece whose `estimatedUsd`
 divided by its uses (`costPerUseUsd`) exceeds `maxCostPerUseUsd` (default $1,
 `--max-cost-per-use`) also gets `"consider"`; otherwise it is kept. The ratio
@@ -706,6 +708,30 @@ unresolved service-tier evidence gets no verdict. Duplicate Codex copies can
 still receive a path-based recommendation without dollars. The cost is gross: removing a piece leaves later
 cache writes, compaction timing and replacement work unmodeled, and rows are not
 additive with the TTL or compaction checks.
+
+Whether an unreadable line could hold a call is settled while reading, without
+keeping its text. The reader decodes the line's JSON string escapes and keeps a
+hash of each token of letters, digits, `_` and `-`, plus one for the MCP server
+in each `mcp__server__tool` token and one for the `Artifact` family. A tool,
+skill or MCP server is named when its tokens are all there, so `Agent` matches
+`"name":"Agent"` and `\u0041gent` but not `Age`. Skill names match without
+regard to case, as a skill call resolves them; tool names do not. A native Codex
+completion names its MCP server as written (`t3-code`), so the `"server"` value
+is also hashed under the sanitized name the row carries (`t3_code`). Across the
+file, the reader also hashes every tool result id and call id in the parsed
+records and the whole `tool_use_id`, `call_id` and, for an output with no
+`call_id`, `id` values in unreadable lines; an id cut off inside its value is not
+read. Results whose id matches no parsed call, anywhere in the file and not only
+in the `--since` window, are `unmatchedResults`. Claude pairs `tool_use` blocks
+with `tool_use_id`; Codex pairs `*_call` and `*_call_output` response items by
+`call_id`. The id evidence
+cannot name the cut call's feature, so a file with unreadable lines and any
+unmatched result holds back every never-used piece of the profiles it records.
+A row covers the transcripts of every profile whose switches live in its
+settings files, including one that recorded none of its requests.
+A call that never ran leaves no result and is no use. The method accepts one
+miss: a call cut off inside its name whose client died before writing its result
+counts as unused, though it may have run.
 
 Codex skill controls and behavior were verified on 2026-11-08 against the
 [official skills documentation](https://learn.chatgpt.com/docs/build-skills) and

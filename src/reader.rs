@@ -27,6 +27,7 @@ use crate::model::{
 };
 use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
 use crate::sessions::{Record, Sessions};
+use crate::unreadable::ToolIds;
 
 /// Select a time window and local roots.
 #[derive(Clone, Debug)]
@@ -513,10 +514,17 @@ impl Iterator for Records<'_> {
                 };
                 let line = &rest[..index];
                 let record = if self.pending.is_empty() {
-                    parse(line)
+                    let record = parse(line);
+                    if record.is_none() {
+                        self.snapshot.unreadable.observe(line);
+                    }
+                    record
                 } else {
                     self.pending.extend_from_slice(line);
                     let record = parse(&self.pending);
+                    if record.is_none() {
+                        self.snapshot.unreadable.observe(&self.pending);
+                    }
                     self.pending.clear();
                     record
                 };
@@ -1955,15 +1963,18 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         // Records update the snapshot's counters while records are consumed against its metadata.
         let view = snapshot.clone();
         let mut file = FileState::new(&view, &mut reader.strings);
+        let mut ids = ToolIds::default();
         for record in read_snapshot(snapshot)? {
             let (raw, location) = record?;
             reader
                 .consume(&view, &mut file, &raw, &location)
                 .map_err(|error| ScanError::at(error.message, location))?;
+            ids.observe(&raw, view.harness);
             if has_t3 {
                 native_ids.observe(&raw, view.harness, &file.context.session);
             }
         }
+        snapshot.unreadable.finish(&ids, snapshot.skipped_lines);
     }
     let Reader {
         exposure,
@@ -3068,6 +3079,77 @@ mod tests {
         assert!(!data.requests.is_empty());
         let anthropic = |r: &Request| r.provider.as_deref() == Some("anthropic");
         assert!(data.requests.iter().all(anthropic));
+    }
+
+    #[test]
+    fn unreadable_lines_report_what_they_mention_and_the_results_missing_a_call() {
+        let w = Workspace::new();
+        let call = |id: &str, name: &str| {
+            json!({"type": "assistant", "sessionId": "s", "uuid": id, "timestamp": "2026-01-01T00:00:00Z", "message": {"id": id, "usage": {"input_tokens": 1, "output_tokens": 1}, "content": [{"type": "tool_use", "id": id, "name": name}]}}).to_string()
+        };
+        let result = |id: &str| {
+            json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": id}]}}).to_string()
+        };
+        let cut = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_cut","name":"Age"#;
+        let project = w.claude.join("projects/project");
+        // A cut call whose result was never written: nothing ran, so nothing is missing.
+        write(
+            project.join("never-ran.jsonl"),
+            format!(
+                "{}\n{}\n{cut}\n{}\n",
+                call("a", "Bash"),
+                result("a"),
+                result("a")
+            ),
+        );
+        // The same cut with the next record joined on, which is its own result.
+        write(
+            project.join("joined.jsonl"),
+            format!(
+                "{}\n{cut}{}\n{}\n",
+                call("a", "Bash"),
+                result("toolu_cut"),
+                result("a")
+            ),
+        );
+        // A result before the window's start still pairs with a call cut off elsewhere.
+        write(
+            project.join("orphan.jsonl"),
+            format!("{}\n{cut}\n{}\n", call("a", "Bash"), result("toolu_lost")),
+        );
+        // An escaped name in a line that cannot parse, and no results at all.
+        write(
+            project.join("escaped.jsonl"),
+            format!(
+                "{}\n{{\"name\":\"\\u0041gent\", broken\n",
+                call("a", "Bash")
+            ),
+        );
+        let data = scan(&options(&w)).unwrap();
+        let by = |name: &str| {
+            data.snapshots
+                .iter()
+                .find(|s| s.file.ends_with(name))
+                .unwrap()
+        };
+        let unmatched = |name: &str| {
+            (
+                by(name).skipped_lines,
+                by(name).unreadable.unmatched_results,
+            )
+        };
+        assert_eq!(unmatched("never-ran.jsonl"), (1, 0));
+        assert_eq!(unmatched("joined.jsonl"), (1, 1));
+        assert_eq!(unmatched("orphan.jsonl"), (1, 1));
+        assert_eq!(unmatched("escaped.jsonl"), (1, 0));
+        let mentions = |name: &str, tool: &str| {
+            by(name)
+                .unreadable
+                .mentions(crate::model::ContextKind::Tool, tool)
+        };
+        assert!(mentions("escaped.jsonl", "Agent"));
+        assert!(!mentions("never-ran.jsonl", "Agent"));
+        assert!(!mentions("escaped.jsonl", "Bash"));
     }
 
     #[test]

@@ -1035,13 +1035,12 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         since,
         now,
     });
-    let incomplete = crate::context::incomplete_profiles(&scan.snapshots);
     let context = context_costs(&ContextInput {
         scan: &scan.exposure,
         requests: &scan.requests,
         profiles: &scan.profiles,
         catalog,
-        incomplete: &incomplete,
+        snapshots: &scan.snapshots,
         max_cost_per_use_usd,
     });
     let memory = memory_checks(&MemoryInput {
@@ -1445,6 +1444,7 @@ mod tests {
             inode: 0,
             deferred_bytes: 0,
             skipped_lines: 10000,
+            unreadable: Default::default(),
             lines: 0,
         }];
         let c = check(&s, None, 1_200_000);

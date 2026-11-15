@@ -1242,6 +1242,8 @@ pub struct Snapshot {
     pub deferred_bytes: u64,
     /// Complete lines that were not valid JSON objects, such as truncated or interleaved writes.
     pub skipped_lines: u64,
+    /// What those lines could hide, found by searching them as they were read.
+    pub unreadable: crate::unreadable::Unreadable,
     pub lines: u64,
 }
 

@@ -162,6 +162,56 @@ def receipt(t):
     )
 
 
+def piggy(t):
+    # Savings, and pigs eat slop.
+    a, k = t["accent"], t["knock"]
+    return (
+        f'<circle cx="28.5" cy="12" r="7" fill="{t["green"]}"/>'
+        f'<path d="M35 24L41 12L47 24Z" fill="{a}" stroke="{a}" stroke-width="3" stroke-linejoin="round"/>'
+        f'<path d="M14 46V57M38 46V57" stroke="{a}" stroke-width="9" stroke-linecap="round"/>'
+        f'<ellipse cx="30" cy="38" rx="23" ry="17" fill="{a}"/>'
+        f'<rect x="49" y="31" width="12" height="14" rx="5" fill="{a}"/>'
+        f'<path d="M7 36Q2 34 4 30" fill="none" stroke="{a}" stroke-width="3.5" stroke-linecap="round"/>'
+        f'<rect x="21" y="25" width="15" height="4" rx="2" fill="{k}"/>'
+        f'<circle cx="43" cy="32" r="2.6" fill="{k}"/>'
+        f'<circle cx="55" cy="38" r="2" fill="{k}"/>'
+    )
+
+
+def drip(t):
+    # An agent's prompt overflowing with slop.
+    a, k = t["accent"], t["knock"]
+    return (
+        f'<rect x="4" y="5" width="56" height="36" rx="10" fill="{a}"/>'
+        f'<path d="M14 36V50M30 36V59M46 36V46" stroke="{a}" stroke-width="8" stroke-linecap="round"/>'
+        f'<path d="M14 15L21 21L14 27M26 27H38" fill="none" stroke="{k}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>'
+    )
+
+
+def cinch(t):
+    # A chat bubble on a token diet, a measuring tape round its waist.
+    a, k, g = t["accent"], t["knock"], t["green"]
+    ticks = "".join(f"M{x} 27V{29 if i % 2 else 31}" for i, x in enumerate(range(13, 52, 5)))
+    return (
+        f'<path d="M20 6H44Q58 6 58 18Q45 29 58 40Q58 50 44 50H28L16 60V50Q6 50 6 40Q19 29 6 18Q6 6 20 6Z" fill="{a}"/>'
+        f'<rect x="8" y="25" width="48" height="8" rx="2" fill="{g}"/>'
+        f'<path d="{ticks}" stroke="{k}" stroke-width="2" stroke-linecap="round"/>'
+    )
+
+
+def slots(t):
+    # Agentic coding as a slot machine: pull, pay, maybe get code.
+    a, k, g, i = t["accent"], t["knock"], t["green"], t["ink"]
+    return (
+        f'<path d="M50 34H56V12" fill="none" stroke="{i}" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>'
+        f'<circle cx="56" cy="10" r="5.5" fill="{g}"/>'
+        f'<rect x="3" y="12" width="47" height="46" rx="8" fill="{a}"/>'
+        f'<rect x="9" y="24" width="35" height="20" rx="3" fill="{k}"/>'
+        f'<path d="M20.7 24V44M32.3 24V44" stroke="{a}" stroke-width="3"/>'
+        f'<circle cx="14.8" cy="34" r="3.5" fill="{i}"/><circle cx="26.5" cy="34" r="3.5" fill="{i}"/><circle cx="38.2" cy="34" r="3.5" fill="{g}"/>'
+    )
+
+
 CONCEPTS = [
     ("stairs", "Stairs", "Tokens stacked to the max (today's T3 Code icon)", stairs),
     ("gauge", "Gauge", "A meter pinned at max", gauge),
@@ -169,6 +219,10 @@ CONCEPTS = [
     ("ceiling", "Ceiling", "A coin with a caret up to its cap", ceiling),
     ("slice", "Slice", "A coin with the saved slice pulled out", slice_),
     ("receipt", "Receipt", "A bill with a line struck off", receipt),
+    ("piggy", "Piggy", "A piggy bank: savings, and pigs eat slop", piggy),
+    ("drip", "Drip", "An agent prompt overflowing with slop", drip),
+    ("cinch", "Cinch", "A chat bubble on a token diet", cinch),
+    ("slots", "Slots", "Agentic coding as a slot machine", slots),
 ]
 
 

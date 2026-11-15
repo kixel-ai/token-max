@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod effort;
 pub mod estimates;
 pub mod exposure;
+mod fable;
 pub mod fast;
 pub mod idle;
 pub mod keepalive;

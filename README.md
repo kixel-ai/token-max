@@ -32,43 +32,53 @@ $ token-max doctor
 token-max
 Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.
 
-Read 2,000 requests from 2026-11-01 to 2026-12-01 (30 days):
+Read 10,800 requests from 2026-11-01 to 2026-11-15 (14 days), $466 at API prices:
   claude ~/.claude
+  codex ~/.codex
+3,600 Codex requests are priced at an assumed service tier, which their records leave unclear; --details shows each tier's cost.
 
-2 setting changes recommended.
-Savings are per 30 days at this window's rate; costs and uses are totals over the whole window. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
+82 changes recommended.
+Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of this host's spend over the window, $466. A tool, skill or MCP server that was never used is recommended off, and one that cost more than $1 per use (--max-cost-per-use) is worth considering off.
+Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.
+Some feature costs are scaled from their priced requests; --details shows each line's coverage.
 
-MEASURED  replayed from your own sessions
-change   Main-agent prompt cache TTL   5m -> 1h   saves $150
-         Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Set in ~/.claude/settings.json:promptCacheTtl.
-change   Artifact tool                 on -> off  costs  $90
-         Never used. Turn off: "enableArtifact": false.
-consider Skill example                 on         costs  $12
-         The model used it 2 times, $6 each. Hide it from the model: "skillOverrides": {"example": "user-invocable-only"}.
-keep     Agent tool                    on         costs  $40
-         Used 310 times, $0.13 each. Turn off: "permissions": {"deny": ["Agent"]}.
-unknown  Idle compaction               on
-         Not enough evidence: no idle gaps could be compared with it on and off. Set in ~/.claude/settings.json:idleCompaction.
-info     System prompt and core tools             costs $210
-         Includes core tools such as Bash and Read, and the skill and subagent lists. No setting turns these off.
+CHANGES  biggest saving first
+change   Main-agent prompt cache TTL            unset -> 5m       saves up to  $146/mo  15%  Measured  [~/.claude]  "promptCacheTtl": "5m" in ~/.claude/settings.json
+change   MCP server docs                        on -> off         saves         $17/mo   2%  Measured  [~/.claude]  "permissions": {"deny": ["mcp__docs"]} (added to the list) in ~/.claude/settings.json
+change   EnterWorktree tool                     on -> off         saves       $3.99/mo  <1%  Measured  [~/.claude]  "permissions": {"deny": ["EnterWorktree"]} (added to the list) in ~/.claude/settings.json
+change   NotebookEdit tool                      on -> off         saves       $3.99/mo  <1%  Measured  [~/.claude]  "permissions": {"deny": ["NotebookEdit"]} (added to the list) in ~/.claude/settings.json
+...
+change   Bash timeout cap                       55m -> 4m         saving      not measured       Measured  [~/.claude]  "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json
 
-OFFICIAL  the provider's own guidance
-consider ~/.claude/CLAUDE.md  412 lines  costs $5
-         Claude Code suggests under 200 lines per CLAUDE.md; length alone is not a quality score. Shorten it, or move parts into path-scoped rules or skills. Imports still load together.
-Sources: https://code.claude.com/docs/en/memory#write-effective-instructions
+EVERYTHING ELSE  biggest cost first
+info     Main-session effort                    medium            costs           $363  78%  Official  [~/.claude]  ~/.claude/settings.json:modelSettings.claude-opus-5-5.effortLevel (the model's default)
+info     Main-session effort                    xhigh             costs           $103  22%  Official  [~/.codex]   ~/.codex/config.toml:model_reasoning_effort
+keep     MCP server t3-code                     on                costs            $50  11%  Measured  [~/.claude]  ~/.claude/settings.json:permissions.deny
+info     System prompt and core tools                             costs            $25   5%  Measured               no setting
+keep     WebSearch tool                         on                costs          $1.91  <1%  Measured  [~/.claude]  ~/.claude/settings.json:permissions.deny
+keep     WebFetch tool                          on                costs          $1.91  <1%  Measured  [~/.claude]  ~/.claude/settings.json:permissions.deny
+...
+keep     Skill skill-00                         on                costs          $0.03  <1%  Measured  [~/.claude]  ~/.claude/settings.json:skillOverrides.skill-00
+...
+keep     Fast mode                              off                                          Opinion   [~/.codex]   /etc/codex/config.toml:service_tier (documented default)
+keep     Auto memory                            off                                          Opinion   [~/.claude]  ~/.claude/settings.json:autoMemoryEnabled
+...
+unknown  Idle compaction                        on                                           Measured  [~/.claude]  ~/.claude/settings.json:idleCompaction
+...
+unknown  Session recaps                         unknown                                      Measured  [~/.claude]  ~/.claude/settings.json:awaySummaryEnabled (default)
+...
+info     Fable weekly use                                                                    Official  [~/.claude]  /model, or model in settings.json
+A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.
 
-OPINION  the maintainer's preference
-consider Auto memory  on   costs $12
-         Opinion: notes the agent writes for itself skip review and encourage slop, so keep durable guidance in reviewed, checked-in CLAUDE.md or AGENTS.md. Measured: used 3 times (1 read, 2 writes). Set "autoMemoryEnabled": false in ~/.claude/settings.json.
-keep     Fast mode    off
-         Opinion: standard speed is enough, and fast mode bills a premium for the same work. Official: on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in ~/.claude/settings.json:fastMode.
-Sources: https://code.claude.com/docs/en/fast-mode#requirements
+Prices: cached from test/fixtures/prices.json (2026-11-15).
+Each line compares one setting with everything else unchanged; savings do not add up.
+--details shows the evidence, assumptions and sources behind each line.
 
-token-max doctor: 4 changes to review. Each is written only after a yes.
+token-max doctor: 82 changes to review. Each is written only after a yes.
 
-[1/4] Main-agent prompt cache TTL: 5m -> 1h (Measured)
+[1/82] Main-agent prompt cache TTL: unset -> 5m (Measured)
   In ~/.claude/settings.json:
-    "promptCacheTtl": "1h"
+    "promptCacheTtl": "5m"
 Apply? [y]es, [n]o, [q]uit: y
 ...
 ```
@@ -117,7 +127,8 @@ Transcripts are only read. On a terminal, `doctor` shows each change it can
 make as the exact edit to your own `settings.json` or `config.toml`, and writes
 the file only after you answer yes. A change something else would override,
 such as a shell variable or a project's settings, is listed to make by hand.
-Piped or redirected, it prints the report and the changes and edits nothing.
+Piped or redirected, it prints the report, each change naming its edit, and
+edits nothing.
 No prompt, reply, tool argument or tool output text is kept or printed.
 
 ## What it checks
@@ -140,43 +151,51 @@ No prompt, reply, tool argument or tool output text is kept or printed.
 
 ## Reading the report
 
-The report has one section for each kind of claim, so a preference never
-reads as a measurement:
+Every setting and feature gets one line: its verdict, name and value, what it
+saves or costs and that figure's share of your spend, the kind of claim it
+rests on, and the setting that changes it. The changes come first, biggest
+saving first; everything else follows, biggest cost first. `--details` adds
+each line's evidence under it.
 
-- **Measured**: replayed from your own sessions at public API prices. Each
-  line says what the replay held constant and what it could not measure.
+Each line names its kind of claim, so a preference never reads as a
+measurement:
+
+- **Measured**: replayed from your own sessions at public API prices. Its
+  evidence says what the replay held constant and what it could not measure.
 - **Official**: the provider's own guidance, such as Claude Code's suggestion
   to keep a CLAUDE.md under 200 lines, cited beside what the file cost.
 - **Opinion**: the maintainer's preference, such as fast mode and auto memory
   off, beside whatever was measured.
 
-Every setting and feature gets two lines: its name, value and cost, then its
-evidence. On a terminal a colored dot gives the verdict: red for a recommended
+On a terminal a colored dot gives the verdict: red for a recommended
 change, yellow for one worth considering, green for a setting
 already at its recommended value, and a dim hollow dot where there is no
 verdict. Without color (`--plain`, `NO_COLOR` or redirected output), as above,
-a word replaces the dot. Red lines come first in each section.
+a word replaces the dot.
 
 - Dollars are public API prices, not an invoice. No provider says how a
   plan's limits weigh tokens, so on a Claude or ChatGPT plan they are the
   closest public measure of what a request uses of them, and past a Claude
   plan's limits, usage credits bill these same prices. Where a provider
   documents that a plan counts something differently, the line says so under
-  "Official:", as the
+  "Official:" in its evidence, as the
   [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#plans-and-api-prices)
   lists. token-max never reads which plan you are on, so these notes say "on a
   Claude plan" rather than naming yours.
 - Comparisons between setting values are per 30 days; what a feature cost,
-  and how often it was used, are totals over the whole window.
+  and how often it was used, are totals over the whole window. Each percent
+  is of what every request on this host cost over the window.
+- Turning a feature off **saves** what it cost, assuming nothing else
+  changes.
 - A **saves** figure comes from replaying your own sessions under the other
   value, assuming the sessions would otherwise have gone the same way. A
   smaller compaction window, for example, can also lose detail the replay
-  cannot see, and its line says so.
+  cannot see, and its evidence says so.
 - A tool, skill or MCP server that was never used is recommended off. One that
   cost more than $1 per use (`--max-cost-per-use`) is worth considering off.
   You know what a use was worth; the report only knows what it cost.
-- A line without enough evidence for a verdict says why. A cost that cannot
-  be measured is shown as unknown, never as zero.
+- A line without enough evidence for a verdict says why in its evidence. A
+  cost that cannot be measured is shown as unknown, never as zero.
 - Savings on different lines do not add up.
 
 ## More

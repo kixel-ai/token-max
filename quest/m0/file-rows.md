@@ -48,8 +48,8 @@ settings and recommendations per profile".
   forming their own row or a second scan of one history, rather than
   hiding duplicates at render time.
 - Name the file on each row; `--details` breaks a row down by source.
-  Percents are of the whole host's spend, as
-  [the report quest](/quest/m0/report-length.md) records.
+  Percents are of the whole host's spend, as the report already computes
+  them (`Spend` in `src/report.rs`).
 - Cover with synthetic tests: native and T3 sharing `~/.claude`, one source
   using a tool the other never did (one row, no change offered), and T3
   owning `fastMode` (separate rows). Update `docs/reference.md`'s
@@ -58,6 +58,5 @@ settings and recommendations per profile".
 
 ## Related
 
-- [Cut doctor's default report to one line each](/quest/m0/report-length.md) - renders these rows
 - [Prove nonuse through unparseable lines](/quest/m0/unreadable-nonuse.md) - also decides never-used rows
 - [Walk the changes biggest saving first](/quest/m0/walk.md) - needs this, since it must never offer a change another row shows in use

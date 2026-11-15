@@ -29,10 +29,11 @@ in PowerShell,
 
 ## Applying changes
 
-After the report, `doctor` offers each recommended change it can make, then
-each setting the report suggests considering turning off, in report order. A
-line no setting changes, such as an instruction file's size, has nothing to
-offer. Each prompt shows
+After the report, `doctor` offers each change it can make, recommended and
+worth considering alike, biggest monthly saving first, as the report lists
+them. A change whose saving was not measured, such as raising an effort, comes
+after the rest. A line no setting changes, such as a CLAUDE.md over Claude
+Code's size guidance, is listed after the walk as a step by hand. Each prompt shows
 the line's name and values and the exact edit, such as `"promptCacheTtl":
 "1h"` in `~/.claude/settings.json`, and takes `y`, `n` or `q`; anything else
 asks again, and end of input is a `q`. A `q` leaves the rest unapplied.
@@ -71,8 +72,8 @@ that cannot take the edit, such as a `permissions` that is not an object, makes
 the change a step by hand naming the resolved path. Ctrl-C at a prompt exits 2
 with no settings changed.
 
-Without a terminal, `doctor` changes nothing: the report ends with every
-change as its edit and file, or its step by hand. A destination of `--ssh`
+Without a terminal, `doctor` changes nothing: each change's line ends with its
+edit and file, or its step by hand. A destination of `--ssh`
 lists its changes the same way, to make on that host, and a run of `--ssh`
 destinations alone only lists them.
 
@@ -120,9 +121,9 @@ What the providers document, checked 2026-11-14:
   of what counted against them on this machine. token-max adds what other
   settings would have cost, replayed over the same sessions.
 
-Where a provider documents a rule that API prices alone don't show, the line
-adds an `Official:` sentence before the setting that changes it, and the
-section ends with the source:
+Where a provider documents a rule that API prices alone don't show, the line's
+evidence under `--details` adds an `Official:` sentence before the setting that
+changes it, and the list ends with the source:
 
 | Line | On a plan |
 | --- | --- |
@@ -160,43 +161,54 @@ that profile's comparisons. Unterminated final lines are deferred, and
 
 ## Reading the report
 
-The default report says what was read, then gives every setting and feature
-two lines in one of three sections, by the kind of claim its recommendation
-rests on:
+The default report says what was read and what it cost at API prices, then
+gives every setting and feature one line. Each line names its verdict, the
+setting or feature, its current value (and the value to change to, for a
+change), what it saves per 30 days or costs over the window, that figure's
+share of this host's spend, the kind of claim it rests on, the profile when
+several were read, and the setting that changes it. For a change `doctor` offers,
+that last column is the exact edit and file, or the step to take by hand.
+
+The kinds of claim are:
 
 - **Measured**: replayed from your own transcripts at public API prices: the
   cache TTL, compaction window, idle compaction (native and T3), the Bash cap,
   keepalive pings, background generation, tool output caps, and every tool,
   skill and MCP server, with subagent types and context no setting turns off.
-  The evidence line says what the replay held constant, such as the same
-  sessions, and what it could not measure, such as the detail a smaller
-  compaction window or idle summary loses, or what checking on a backgrounded
-  Bash command costs.
 - **Official**: the provider's own guidance beside what the transcripts show:
   CLAUDE.md length and the AGENTS.md byte budget, MCP tool loading, and
-  Anthropic's model guide beside each Claude subagent type, and Fable's weekly
-  use beside the plan rule. The section ends with its sources.
+  Fable's weekly use beside the plan rule. A Claude
+  subagent type's evidence also cites Anthropic's model guide.
 - **Opinion**: the maintainer's preference, beside whatever was measured: fast
   mode off and auto memory off.
 
-The first line names the setting or feature, its current value (and the
-recommended one after an arrow for a change), what it saves per 30 days or
-costs over the window, and the profile when several were read. The second line
-is the evidence, ending with the setting that changes it. A dot's color carries
-the verdict: red for a recommended change (exit 1), yellow for one worth
-considering (exit 0), green for a value already at its recommendation, and a
-dim hollow dot for no verdict, either for lack of evidence, which the line
-explains, or because nothing can be set. Without color a word replaces the dot:
-`change`, `consider`, `keep`, `unknown` or `info`. Within a section, lines are
-ordered by that verdict, red first.
+The lines come in two groups. **Changes** come first: every line recommended
+(red, exit 1) or worth considering (yellow, exit 0), ranked together by what
+they save per 30 days, biggest first, with those whose saving was not
+measured after the rest. A feature turned off saves what it cost, assuming
+nothing else changes. **Everything else** follows, ranked by what it costs,
+biggest first, with lines whose cost is unknown or that have no figure after.
+The headline counts both kinds of change. A dot's color carries the verdict:
+red, yellow, green for a value already at its recommendation, and a dim hollow
+dot for no verdict, either for lack of evidence or because nothing can be set.
+Without color a word replaces the dot: `change`, `consider`, `keep`,
+`unknown` or `info`.
 
-Comparisons between setting values are per 30 days at the window's rate, so
-checks with different windows compare; what features, context and long Bash
-waits cost, and how often they were used, are totals over the whole window.
-Settings that don't change the experience, such as the cache TTL, name the
-current and suggested values, the savings, and the setting that owns them. A
-line without enough evidence says why, such as two options being too close to
-call. Unresolved current ownership stays there and does not cause exit 1.
+Every percent is of this host's spend over the window at API prices: every
+request it recorded, shared histories counted once. A saving's percent compares
+its monthly rate with the host's, so checks with different windows compare.
+Comparisons between setting values are per 30 days at the window's rate; what
+features, context and long Bash waits cost, and how often they were used, are
+totals over the whole window.
+
+`--details` puts each line's evidence under it: what the replay held constant,
+such as the same sessions, and what it could not measure, such as the detail a
+smaller compaction window or idle summary loses, or what checking on a
+backgrounded Bash command costs, then the setting that changes it. A line
+without enough evidence says why there, such as two options too close to call
+for the requests that could not be priced. Unresolved current ownership gives
+no verdict and does not cause exit 1. The list then cites its sources, and the
+evidence cards follow.
 
 Features sent with every request, such as a tool, MCP server or skill, show what
 they cost and how often they were used. One never used is recommended off,
@@ -247,7 +259,7 @@ surfaces. These exposure controls do not establish net savings: search turns,
 returned definitions, cache changes and repeated loading are not completely
 attributable. A small frequently used server can be cheaper to load upfront.
 An MCP tool with no switch of its own, or whose server's off already covers
-it, keeps an info line with its cost, which its server's line already includes.
+it, has no line: its server's line includes its cost, and `--details` lists it.
 App controls require the actual app id, which these transcripts do not map to
 the exposed app namespaces; the report names the supported controls without
 inventing per-app costs or a settings patch.
@@ -295,17 +307,22 @@ difference. The verdict then says what share of requests was measured.
 
 ## Details and terminal layout
 
-Use `--details` for evidence cards: every check's owner, baseline, assumptions,
-uncertainty, cost components, break-evens, sensitivity scenarios, cache witnesses
-and sources. Repeated idle periods, cache witnesses and attempt estimates are
+Use `--details` for each line's evidence under it, the sources, then evidence
+cards: every check's owner, baseline, assumptions, uncertainty, cost
+components, break-evens, sensitivity scenarios, cache witnesses and sources,
+and every piece of context, including MCP tools counted in their server's line
+and pieces no longer sent. A background feature's evidence names three of the
+directories it ran in and counts the rest. Repeated idle periods, cache witnesses and attempt estimates are
 grouped by their recorded outcomes and reasons. Token ranges and combined costs
 summarize modeled compactions; geometry sources are listed once. Identifiers in
 grouped cache and attempt evidence are examples. No evidence is hidden behind
 the walk's prompts or a top-N limit. The layout wraps long paths and
 names on narrow terminals, where the name column narrows first and a line too
-long for the width wraps under its name. Redirected output keeps each field on
-one line so paths remain copyable. On terminals, the default report's colored
-dot carries each line's verdict, with a legend above the sections; `NO_COLOR`
+long for the width wraps under its name. A name or profile too long for its
+column pushes the rest of its own line along rather than widening every line.
+Redirected output keeps each line whole so paths and edits remain copyable. On
+terminals, the report's colored dot carries each line's verdict, with a legend
+above the lines; `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode, and either
 puts the verdict word back in place of the dot. Evidence cards keep their
 verdict words and only add color, and each names its claim. Redirected output
@@ -527,7 +544,8 @@ destination, or `this host`. A history copied between hosts
 counts in each host's report, so don't add amounts across hosts. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination. A destination's changes are listed in its
-section to make there; `doctor` offers only this host's.
+section to make there; `doctor` offers only this host's. Each host's percents
+are of that host's own spend.
 
 ## Keepalive pings
 
@@ -673,7 +691,7 @@ resolves.
 
 ## Subagent models
 
-The Measured section gives every Claude Code subagent
+The report gives every Claude Code subagent
 type (Explore, Plan, general-purpose, forks and each custom agent) and every
 Codex agent role its own line: what it cost over how many runs, the models and
 reasoning efforts it ran on, where its model came from, and what the same
@@ -692,26 +710,26 @@ attributed. The reprice assumes the same turns, and a lower effort's cost
 cannot be measured. The source is unknown when today's settings and agent
 files do not explain the recorded model, for example after a file changed.
 
-Each Claude subagent type also gets an Official line, equally without a
-verdict, citing Anthropic's
+Each Claude subagent type's evidence also gives an `Official:` sentence citing
+Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
 subagents that search files, read logs or summarize can start on Haiku or
 Sonnet at the model's default effort, and code edits and judgment calls stay
 on the main model. Explore's line adds the guide's tip, a user agent named
 `Explore` with `model: haiku`, unless every request already ran on Haiku. The
-transcripts don't record whether a type searched or edited, so the line cannot
+transcripts don't record whether a type searched or edited, so the sentence cannot
 say which half applies. The guide also measured an Opus 5.5 lead over Sonnet 5.5
 workers at about a third less cost than Opus 5.5 alone at its default effort,
 scoring about the same, on one internal benchmark; the report doesn't quote it,
 since that pattern splits work too big for one context window rather than
-side tasks. Codex roles get no such line, nor do forks, which always run on
+side tasks. Codex roles get no such sentence, nor do forks, which always run on
 the main model.
 See [subagent models](semantics.md#subagent-models).
 
 ## Fable weekly use
 
-The Official section gives every Claude profile that signs in to Anthropic its
-own Fable line: what its Fable requests cost at API prices in each 7-day span
+The report gives every Claude profile that signs in to Anthropic its
+own Official Fable line: what its Fable requests cost at API prices in each 7-day span
 of the window, counted back from the report, beside the plan rule Anthropic
 documents on its [pricing](https://claude.com/pricing) page and in
 [Fable models on your plan](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan),

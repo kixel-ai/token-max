@@ -279,7 +279,7 @@ mod tests {
     use crate::prices::unit_rates;
     use crate::reader::scan;
     use crate::replay::{AnalyzeOptions, analyze};
-    use crate::report::{ReportOptions, format_report};
+    use crate::report::{ReportOptions, rendered as format_report};
     use crate::test_support::{Workspace, prices};
     use serde_json::{Value, json};
 
@@ -474,7 +474,13 @@ mod tests {
         let rates = unit_rates(&prices(), next, &next.parts[0]).unwrap();
         let expected = 100_000.0 * (rates.write5m - rates.read);
         assert!((w.miss_cost.total_usd.unwrap().to_f64() - expected).abs() < 1e-9);
-        let text = format_report(&report, ReportOptions::default());
+        let text = format_report(
+            &report,
+            ReportOptions {
+                details: true,
+                ..Default::default()
+            },
+        );
         let line = crate::test_support::report_line(&text, "Bash timeout cap 10m -> 4m");
         assert_eq!(line.mark, "change");
         assert!(

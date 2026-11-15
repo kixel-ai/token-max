@@ -17,7 +17,7 @@ use crate::model::{Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Host, ReportOptions, format_changes, format_report};
+use crate::report::{Host, ReportOptions, format_report};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply};
@@ -63,7 +63,7 @@ both a terminal, it then offers each change it can make, one at a time: it shows
 and writes the profile's own settings.json or config.toml only after a yes (y, n, or q to
 stop). A change another owner would override, such as a shell variable, a project or
 managed settings file or T3, is listed to make by hand. Without a terminal it prints the
-report and the changes, and edits nothing.
+report, each change naming its edit, and edits nothing.
 
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
@@ -558,8 +558,6 @@ pub struct Render<'a> {
     pub format: &'a Format,
     /// The host's home directory, which its report shows as `~`.
     pub home: Option<&'a str>,
-    /// List the changes after the report, for output no one walks through.
-    pub changes: bool,
 }
 
 /// One host's printed report, whether it recommends a change, and its changes.
@@ -595,13 +593,10 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
             home: options.home,
         }),
     };
-    let mut text = format_report(&report, report_options);
-    // Computed once, since each reads the files that may outrank a switch: the list
-    // printed here and the walk's offers are the same value.
+    // Computed once, since each reads the files that may outrank a switch: the edits the
+    // report names and the walk's offers are the same value.
     let fixes = crate::doctor::fixes(&report, format.unicode);
-    if options.changes {
-        text += &format_changes(&report, &fixes, report_options);
-    }
+    let text = format_report(&report, &fixes, report_options);
     Ok(Rendered {
         text,
         change,
@@ -674,7 +669,6 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
         destinations,
         prices: price_options(values.prices_file, values.price_cache, values.offline)?,
         job: Job::Sessions,
-        changes: false,
         home: None,
         progress: false,
     })?;
@@ -781,8 +775,6 @@ struct Gather {
     prices: PriceOptions,
     /// What every host makes of its scan; a report's host label is set per host.
     job: Job,
-    /// List this host's changes after its report, for output no one walks through.
-    changes: bool,
     /// This host's home directory, which its report shows as `~`.
     home: Option<String>,
     /// Print each phase to stderr.
@@ -800,7 +792,6 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         destinations,
         prices,
         job,
-        changes,
         home,
         progress,
     } = run;
@@ -917,7 +908,6 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                                 max_cost_per_use_usd: *max_cost_per_use_usd,
                                 format,
                                 home: home.as_deref(),
-                                changes,
                             },
                         )?),
                         Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
@@ -1003,7 +993,6 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             max_cost_per_use_usd,
             format,
         },
-        changes: !walk,
         home: home.clone(),
         progress: stdout && io::stderr().is_terminal() && !term_dumb,
     })?;

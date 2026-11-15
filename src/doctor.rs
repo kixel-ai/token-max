@@ -18,7 +18,8 @@ use crate::model::{
     BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report,
 };
 use crate::report::{
-    Choice, Listing, Origin, Recommendation, Source, about, recommendations, share_text,
+    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, recommendations,
+    share_text,
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, wrap_text};
@@ -1078,15 +1079,49 @@ impl Plan {
     }
 }
 
-/// The accepted changes' own savings, summed, and how many were not measured.
+/// The accepted changes' own savings: those measured, summed apart from those that hold only
+/// when a default would be the other value, and how many were not measured.
 #[derive(Clone, Copy, Debug, Default)]
 struct Total {
-    measured: usize,
+    /// Savings measured whatever the defaults, in full or as the part that was priced.
+    measured: Sum,
+    /// How many of `measured` were priced only in part, so save at least their figure.
+    partial: usize,
+    /// Savings that hold only when an unset default would otherwise be the other value.
+    up_to: Sum,
+    unmeasured: usize,
+}
+
+/// Monthly savings added up, with their share of this host's spend.
+#[derive(Clone, Copy, Debug, Default)]
+struct Sum {
+    changes: usize,
     usd: f64,
     share: f64,
-    /// Whether some measured change's share of the host's spend is unknown.
+    /// Whether some change's share of the host's spend is unknown.
     unknown_share: bool,
-    unmeasured: usize,
+}
+
+impl Sum {
+    fn add(&mut self, usd: f64, share: Option<f64>) {
+        self.changes += 1;
+        self.usd += usd;
+        match share {
+            Some(share) => self.share += share,
+            None => self.unknown_share = true,
+        }
+    }
+
+    /// Such as "$40/mo, 9% of this host's spend".
+    fn text(&self) -> String {
+        let share = share_of_host((!self.unknown_share).then_some(self.share));
+        format!("{}/mo{share}", about(self.usd))
+    }
+}
+
+/// "1 change" or "2 changes".
+fn changes(n: usize) -> String {
+    format!("{n} change{}", if n == 1 { "" } else { "s" })
 }
 
 impl Total {
@@ -1095,48 +1130,64 @@ impl Total {
             self.unmeasured += 1;
             return;
         };
-        self.measured += 1;
-        self.usd += usd;
-        match fix.share {
-            Some(share) => self.share += share,
-            None => self.unknown_share = true,
+        if fix.verb == UP_TO {
+            self.up_to.add(usd, fix.share);
+            return;
         }
+        self.measured.add(usd, fix.share);
+        self.partial += usize::from(fix.verb == AT_LEAST);
+    }
+
+    /// How many changes were accepted.
+    fn changes(&self) -> usize {
+        self.measured.changes + self.up_to.changes + self.unmeasured
     }
 
     /// Such as "Accepted so far: about $40/mo, 9% of this host's spend; overlapping changes
     /// may save less."
     fn text(&self, label: &str) -> String {
-        let unmeasured = match self.unmeasured {
-            0 => String::new(),
-            1 => "1 change whose saving was not measured".into(),
-            n => format!("{n} changes whose saving was not measured"),
-        };
-        if self.measured == 0 {
-            return if unmeasured.is_empty() {
-                String::new()
+        let mut parts = vec![];
+        if self.measured.changes > 0 {
+            let usd = self.measured.text();
+            let mut text = if usd.starts_with('<') {
+                usd
             } else {
-                format!("{label}: {unmeasured}.")
+                format!("about {usd}")
             };
+            if self.partial > 0 {
+                let was = if self.partial == 1 { "was" } else { "were" };
+                text += &format!(
+                    ", more where {} {was} priced only in part",
+                    changes(self.partial)
+                );
+            }
+            parts.push(text);
         }
-        let usd = about(self.usd);
-        let usd = if usd.starts_with('<') {
-            usd
-        } else {
-            format!("about {usd}")
-        };
-        let share = share_of_host((!self.unknown_share).then_some(self.share));
-        let plus = if unmeasured.is_empty() {
-            String::new()
-        } else {
-            format!(", plus {unmeasured}")
-        };
+        if self.up_to.changes > 0 {
+            parts.push(format!(
+                "up to {}, from {} whose saving depends on the default it replaces",
+                self.up_to.text(),
+                changes(self.up_to.changes)
+            ));
+        }
+        if self.unmeasured > 0 {
+            let whose = if self.unmeasured == 1 {
+                "whose saving was"
+            } else {
+                "whose savings were"
+            };
+            parts.push(format!("{} {whose} not measured", changes(self.unmeasured)));
+        }
+        if parts.is_empty() {
+            return String::new();
+        }
         // Each saving holds every other setting constant, so two may count the same requests.
-        let overlap = if self.measured > 1 {
+        let overlap = if self.measured.changes + self.up_to.changes > 1 {
             "; overlapping changes may save less"
         } else {
             ""
         };
-        format!("{label}: {usd}/mo{share}{plus}{overlap}.")
+        format!("{label}: {}{overlap}.", parts.join(", plus "))
     }
 }
 
@@ -1449,7 +1500,7 @@ pub fn confirm(
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => names.concat(),
     };
-    let changes = plan.total.measured + plan.total.unmeasured;
+    let changes = plan.total.changes();
     let question = format!(
         "Write the {changes} accepted change{} to {files}?",
         if changes == 1 { "" } else { "s" }
@@ -2201,6 +2252,42 @@ mod tests {
             plan.total("Accepted"),
             "Accepted: about $10/mo, 10% of this host's spend."
         );
+    }
+
+    #[test]
+    fn the_total_keeps_savings_that_depend_on_a_default_or_were_priced_in_part_qualified() {
+        let file = Path::new("/synthetic/settings.json");
+        let fix = |verb: &'static str, usd: f64| Fix {
+            verb,
+            saving: Some(usd),
+            share: Some(usd / 100.0),
+            ..change("A", file, Harness::Claude, vec![])
+        };
+        let total = |fixes: &[Fix]| {
+            let mut total = Total::default();
+            for fix in fixes {
+                total.add(fix);
+            }
+            total.text("Accepted")
+        };
+        // An unset TTL's gap may save nothing, so it is never summed as a sure saving.
+        assert_eq!(
+            total(&[fix(UP_TO, 30.0)]),
+            "Accepted: up to $30/mo, 30% of this host's spend, from 1 change whose saving depends on the default it replaces."
+        );
+        assert_eq!(
+            total(&[fix("saves", 10.0), fix(AT_LEAST, 5.0), fix(UP_TO, 30.0)]),
+            "Accepted: about $15/mo, 15% of this host's spend, more where 1 change was priced only in part, plus up to $30/mo, 30% of this host's spend, from 1 change whose saving depends on the default it replaces; overlapping changes may save less."
+        );
+        let unmeasured = Fix {
+            saving: None,
+            ..fix("saves", 0.0)
+        };
+        assert_eq!(
+            total(&[unmeasured.clone(), unmeasured]),
+            "Accepted: 2 changes whose savings were not measured."
+        );
+        assert_eq!(total(&[]), "");
     }
 
     #[test]

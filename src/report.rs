@@ -3919,13 +3919,18 @@ fn headline(changes: usize, considered: usize) -> String {
     }
 }
 
+/// The verb of a saving that holds only when a default would otherwise be the other value.
+pub(crate) const UP_TO: &str = "saves up to";
+/// The verb of a saving priced from only part of what it would save.
+pub(crate) const AT_LEAST: &str = "saves at least";
+
 /// How a recommended or suggested check's saving reads, such as "saves up to".
 fn check_verb(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> &'static str {
     match result {
-        _ if unset_main_ttl(result, r, out) => "saves up to",
+        _ if unset_main_ttl(result, r, out) => UP_TO,
         // Memory priced from only part of the requests, or with unmeasured generation,
         // saves at least what was priced.
-        CheckResult::Memory(m) if r.coverage.is_some() || codex_unmeasured(m) => "saves at least",
+        CheckResult::Memory(m) if r.coverage.is_some() || codex_unmeasured(m) => AT_LEAST,
         _ => "saves",
     }
 }

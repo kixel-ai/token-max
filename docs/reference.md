@@ -48,7 +48,10 @@ selects: after each yes, a running total sums the accepted changes' own
 savings, in dollars and as a percent of this host's spend, and says that
 overlapping changes may save less, since each saving holds every other setting
 constant. An accepted change whose saving was not measured is counted beside
-the total, not in it. A `q`, or end of input, ends the walk and leaves the rest
+the total, not in it, and so is one that saves only when an unset default would
+otherwise be the other value, such as an unset main-agent cache TTL, as an "up
+to" figure. A saving priced from only part of its requests counts what was
+priced, and the total says so. A `q`, or end of input, ends the walk and leaves the rest
 unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the

@@ -40,6 +40,9 @@ whose id matches no parsed call, Claude's `tool_use_id` or Codex's
 record that could hold a call makes every never-used feature yellow, which
 could leave the maintainer's host as it is; searching only the surviving
 bytes, which can call a used tool unused). A call that never ran is no use.
+This rule accepts one miss: a call cut inside its name whose client died
+before writing its result counts as unused, though it may have run. The
+reason line and the docs say so.
 A result does not name its tool, so an unmatched result makes every
 never-used feature of the line's profile yellow, while a name found in a
 line's bytes makes just that feature yellow. Take results from the same transcript

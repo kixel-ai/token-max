@@ -4062,7 +4062,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         // one way a red verdict still accepts.
         if c.skill.is_none() && c.calls == Some(0) {
             let snapshots = &report.scan.snapshots;
-            match (verdict, hidden_use(c, snapshots)) {
+            match (verdict, hidden_use(c, snapshots, &report.scan.exposure)) {
                 (Verdict::Consider, Some(Hidden::Named)) => {
                     text += " An unreadable transcript line names it, so it may have been used."
                 }

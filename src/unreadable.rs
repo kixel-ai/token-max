@@ -52,8 +52,13 @@ fn artifact_marker() -> u64 {
 impl Unreadable {
     /// Take in one unreadable line: its names and the ids of the results it holds.
     pub fn observe(&mut self, line: &[u8]) {
-        for key in [&b"\"tool_use_id\""[..], b"\"call_id\""] {
+        // Claude names a result's call by `tool_use_id`. Codex names it by `call_id`, which
+        // its calls carry too, so only an output item's counts; its tag comes first.
+        for (key, tagged) in [(&b"\"tool_use_id\""[..], false), (b"\"call_id\"", true)] {
             for at in memchr::memmem::find_iter(line, key) {
+                if tagged && !output_before(&line[..at]) {
+                    continue;
+                }
                 if let Some(id) = value_after(&line[at + key.len()..]) {
                     self.results.insert(hash(id));
                 }
@@ -119,6 +124,17 @@ impl Unreadable {
             _ => false,
         }
     }
+}
+
+/// Whether the nearest `"type"` tag before this point names an output item.
+fn output_before(head: &[u8]) -> bool {
+    const TAG: &[u8] = b"\"type\":\"";
+    let Some(at) = memchr::memmem::rfind(head, TAG) else {
+        return false;
+    };
+    let value = &head[at + TAG.len()..];
+    let end = value.iter().position(|&b| b == b'"').unwrap_or(value.len());
+    value[..end].ends_with(b"_output")
 }
 
 /// The text after a JSON key: `:`, optional space, then the string value's opening quote;
@@ -334,8 +350,11 @@ mod tests {
             ],
             Harness::Codex,
         );
-        let mut unreadable =
-            seen(&[r#"{"payload":{"type":"function_call_output","call_id":"k4"}"#]);
+        // An unreadable call carries a call_id too, but nothing ran yet to leave a result.
+        let mut unreadable = seen(&[
+            r#"{"payload":{"type":"function_call_output","call_id":"k4"}"#,
+            r#"{"payload":{"type":"function_call","name":"exec","call_id":"k5"}"#,
+        ]);
         unreadable.finish(&ids, 1);
         assert_eq!(unreadable.unmatched_results, 2);
     }

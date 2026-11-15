@@ -131,10 +131,24 @@ pub enum Hidden {
 /// neither mention it nor sit beside a result with no call leave its nonuse proven. The
 /// one accepted miss is a call cut inside its name whose client died before writing its
 /// result: it counts as unused, though it may have run.
-pub fn hidden_use(c: &ContextCost, snapshots: &[Snapshot]) -> Option<Hidden> {
+pub fn hidden_use(c: &ContextCost, snapshots: &[Snapshot], scan: &ExposureScan) -> Option<Hidden> {
+    // The synced-skills row stands for many skills, which calls name by namespace or as
+    // `/pdf`, never by the row's label.
+    let synced: Vec<&str> = if c.kind == ContextKind::Skill && c.name == SYNCED_SKILLS {
+        std::iter::once(SYNCED_NAMESPACE)
+            .chain(scan.components.iter().filter_map(|m| synced_short(&m.name)))
+            .collect()
+    } else {
+        vec![]
+    };
     covering(c, snapshots)
         .filter_map(|s| {
-            if s.skipped_lines > 0 && s.unreadable.mentions(c.kind, &c.name) {
+            let named = if synced.is_empty() {
+                s.unreadable.mentions(c.kind, &c.name)
+            } else {
+                synced.iter().any(|n| s.unreadable.mentions(c.kind, n))
+            };
+            if s.skipped_lines > 0 && named {
                 Some(Hidden::Named)
             } else if s.skipped_lines > 0 && s.unreadable.unmatched_results > 0 {
                 Some(Hidden::Cut)
@@ -1355,7 +1369,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 // hold a call leaves nonuse unproven.
                 let visible = row.from_start
                     && c.skill.is_none()
-                    && hidden_use(&c, input.snapshots).is_none();
+                    && hidden_use(&c, input.snapshots, input.scan).is_none();
                 c.verdict = Some(match calls {
                     _ if usd <= 0.0 => Verdict::Keep,
                     0 if visible => Verdict::Off,
@@ -1685,7 +1699,8 @@ mod tests {
         assert_eq!(
             hidden_use(
                 &row(&costs(&scan, &requests, 1.0), "Artifact").clone(),
-                &[named]
+                &[named],
+                &scan
             ),
             Some(Hidden::Named)
         );
@@ -2572,6 +2587,16 @@ mod tests {
         let plugin = row(&rows, "tools:deploy");
         assert_eq!(plugin.control, None);
         assert_eq!((plugin.calls, plugin.verdict), (Some(1), None));
+        // An unreadable line names the group by its namespace or a member's short name,
+        // never by the row's label.
+        let hidden =
+            |line: &str| hidden_use(synced, &[make_snapshot("profile", &[line], 0)], &scan);
+        assert_eq!(
+            hidden(r#"{"skill":"anthropic-skills:slides"}"#),
+            Some(Hidden::Named)
+        );
+        assert_eq!(hidden(r#"{"text":"/xlsx"}"#), Some(Hidden::Named));
+        assert_eq!(hidden(r#"{"skill":"review"}"#), None);
     }
 
     #[test]

@@ -33,14 +33,17 @@ hold any call, and a cut inside a name, such as `"name":"Age`, leaves a
 prefix that does not contain `Agent`. So the rule to implement is: read
 each unparseable line, and a deferred unterminated final line, as the
 records it holds; it makes a feature's verdict yellow when its bytes
-contain the feature's name as a call records it, or when it holds a record
-cut off before its JSON closes, unless the cut record's surviving bytes
-rule out a call to that feature, such as a record type that cannot hold a
-call, a call name that survived whole, or a cut inside a call name that
-the feature's name does not start with. Otherwise the feature stays red.
-This applies the decision above to cut records (found in review of the
-planning PR, listed in its body for the maintainer's pick). Cover a cut
-record, a cut name and a joined pair with synthetic tests.
+contain the feature's name as a call records it, after decoding JSON string
+escapes such as `\u0041gent`, or when it holds a record cut off before its
+JSON closes, unless the cut record's surviving bytes show a record type
+that cannot hold a call. A complete or cut call name in a cut record rules
+nothing out, since one record can hold several calls and the next could be
+in the missing bytes. Otherwise the feature stays red. This applies the
+decision above to cut records (found in review of the planning PR, listed
+in its body for the maintainer's pick). Cover an escaped name, a joined
+pair, a cut record of a type that cannot hold a call, and cut records that
+hold a complete `Read` call alone or followed by a cut `Agent` call, which
+both stay yellow for `Agent`, with synthetic tests.
 
 ## Related
 

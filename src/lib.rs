@@ -21,6 +21,7 @@ pub mod memory;
 pub mod model;
 pub mod prices;
 pub mod reader;
+mod rows;
 pub mod replay;
 pub mod report;
 pub mod repository;

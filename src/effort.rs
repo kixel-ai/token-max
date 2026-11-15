@@ -487,11 +487,14 @@ pub struct EffortInput<'a> {
 
 /// One line per profile with a resolved control.
 pub fn effort_checks(input: &EffortInput<'_>) -> Vec<EffortCheck> {
-    input
-        .scan
-        .profiles
+    let owner = |p: &Profile| {
+        let e = p.effort.as_ref().expect("filtered on an effort control");
+        format!("{}\n{}", e.owner, e.model_owner)
+    };
+    let controlled = input.scan.profiles.iter().filter(|p| p.effort.is_some());
+    crate::rows::groups(controlled, owner)
         .iter()
-        .filter_map(|p| Some(check(input, p, p.effort.as_ref()?)))
+        .map(|line| check(input, line, line.lead.effort.as_ref().expect("a control")))
         .collect()
 }
 
@@ -507,7 +510,12 @@ fn target(control: &EffortControl, levels: &[&str]) -> Option<String> {
         .map(|l| l.to_string())
 }
 
-fn check(input: &EffortInput<'_>, profile: &Profile, control: &EffortControl) -> EffortCheck {
+fn check(
+    input: &EffortInput<'_>,
+    line: &crate::rows::Group<'_>,
+    control: &EffortControl,
+) -> EffortCheck {
+    let profile = line.lead;
     let requests: Vec<&Request> = input
         .scan
         .requests
@@ -515,7 +523,7 @@ fn check(input: &EffortInput<'_>, profile: &Profile, control: &EffortControl) ->
         .filter(|r| {
             r.agent == Agent::Main
                 && r.harness == profile.harness
-                && r.profiles.contains(&profile.id)
+                && line.covers(&r.profiles)
                 && input.since.is_none_or(|s| r.time >= s)
         })
         .collect();
@@ -600,6 +608,7 @@ fn check(input: &EffortInput<'_>, profile: &Profile, control: &EffortControl) ->
     EffortCheck {
         base: CheckBase {
             profile: profile.id.clone(),
+            profiles: line.ids.clone(),
             history_profiles: vec![],
             evidence: Evidence::Guidance,
             action,

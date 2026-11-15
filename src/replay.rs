@@ -17,7 +17,7 @@ use crate::memory::{MemoryInput, memory_checks};
 use crate::model::{
     Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
-    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Profile, Report, Request,
+    HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Report, Request,
     RequestEvidence, RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity,
     UnlinkedSensitivity, Usage, UsageEstimate, Usd, WindowBasisKind,
 };
@@ -25,6 +25,7 @@ use crate::prices::{
     Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
     price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
+use crate::rows::Group;
 use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{
     AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
@@ -548,13 +549,14 @@ impl Replayer<'_, '_> {
     }
 }
 
-/// Compare 5m and 1h cache lifetimes for one profile bucket over its time-ordered requests.
+/// Compare 5m and 1h cache lifetimes for one line's bucket over its time-ordered requests.
 fn ttl_check(
     input: &TtlInput,
-    profile: &Profile,
+    group: &Group<'_>,
     requests: &[&Request],
     bucket: Bucket,
 ) -> Option<TtlCheck> {
+    let profile = group.lead;
     let TtlInput {
         scan,
         summaries,
@@ -573,7 +575,7 @@ fn ttl_check(
             .filter(|e| {
                 e.harness == Harness::Claude
                     && e.kind == EventKind::Compaction
-                    && e.profiles.contains(&profile.id)
+                    && group.covers(&e.profiles)
             })
             .collect()
     } else {
@@ -627,7 +629,7 @@ fn ttl_check(
     };
     let replay = |ttl, attempt| replayer.run(ttl, false, attempt);
     // Positive savings when 1h is cheaper than 5m on the parts both replays price.
-    let (short, long, paired) = replayer.compare(skipped_lines(scan, &profile.id));
+    let (short, long, paired) = replayer.compare(skipped_lines(scan, &group.ids));
     let comparison_cost = PerTtl {
         five_minutes: short.comparison.clone(),
         one_hour: long.comparison.clone(),
@@ -743,7 +745,7 @@ fn ttl_check(
     if current.value.is_none() {
         uncertainty.insert(&current.reason);
     }
-    if profiles.len() > 1 {
+    if profiles.iter().any(|p| !group.ids.iter().any(|id| id == p)) {
         uncertainty.insert(
             "shared history has ambiguous profile provenance; this is a conditional replay for the named current profile, not assigned historical spend",
         );
@@ -768,6 +770,7 @@ fn ttl_check(
     Some(TtlCheck {
         base: CheckBase {
             profile: profile.id.clone(),
+            profiles: group.ids.clone(),
             history_profiles: profiles.into_iter().map(String::from).collect(),
             evidence: if recommended.is_some() {
                 Evidence::Estimated
@@ -933,21 +936,22 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         now,
     };
     let mut ttls = vec![];
-    for profile in scan
-        .profiles
-        .iter()
-        .filter(|p| p.harness == Harness::Claude)
-    {
-        let mut requests: Vec<&Request> = scan
-            .cache_context
-            .requests
+    let claude = || {
+        scan.profiles
             .iter()
-            .chain(&scan.requests)
-            .filter(|r| r.harness == Harness::Claude && r.profiles.contains(&profile.id))
-            .collect();
-        requests.sort_by_key(|r| r.time);
-        for bucket in Bucket::ALL {
-            ttls.extend(ttl_check(&input, profile, &requests, bucket));
+            .filter(|p| p.harness == Harness::Claude)
+    };
+    for bucket in Bucket::ALL {
+        for group in crate::rows::groups(claude(), |p| p.ttl.get(bucket).owner.clone()) {
+            let mut requests: Vec<&Request> = scan
+                .cache_context
+                .requests
+                .iter()
+                .chain(&scan.requests)
+                .filter(|r| r.harness == Harness::Claude && group.covers(&r.profiles))
+                .collect();
+            requests.sort_by_key(|r| r.time);
+            ttls.extend(ttl_check(&input, &group, &requests, bucket));
         }
     }
     for check in &mut ttls {

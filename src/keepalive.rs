@@ -140,7 +140,7 @@ fn claude_lifetime(
 ) -> Option<Lifetime> {
     let check = ttls
         .iter()
-        .find(|c| c.base.profile == profile.id && c.bucket == Bucket::Main);
+        .find(|c| c.base.profiles.contains(&profile.id) && c.bucket == Bucket::Main);
     let (ttl, reason) = if let Some(t) = check
         .filter(|c| c.base.action == Action::Change)
         .and_then(|c| c.base.recommended)
@@ -165,14 +165,22 @@ fn claude_lifetime(
     })
 }
 
-/// Keepalive checks for every profile with main-conversation requests.
+/// Keepalive checks for every line of native profiles with main-conversation requests. No
+/// setting schedules pings, so profiles share a line when one file sets the TTLs and windows
+/// the replay applies.
 pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
-    options
-        .scan
-        .profiles
+    let native = options.scan.profiles.iter().filter(|p| p.t3.is_none());
+    let owner = |p: &Profile| {
+        format!(
+            "{}:keepalive\n{}\n{}",
+            p.settings_file,
+            p.ttl.main.owner,
+            crate::rows::window_owner(p)
+        )
+    };
+    crate::rows::groups(native, owner)
         .iter()
-        .filter(|p| p.t3.is_none())
-        .filter_map(|p| check(options, p))
+        .filter_map(|line| check(options, line))
         .collect()
 }
 
@@ -655,7 +663,8 @@ fn ping_input(requests: &[&Request], scan: &Scan) -> Option<i64> {
     median(growth)
 }
 
-fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck> {
+fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<KeepaliveCheck> {
+    let profile = line.lead;
     let mut requests: Vec<_> = options
         .scan
         .cache_context
@@ -663,7 +672,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .iter()
         .chain(&options.scan.requests)
         .filter(|r| {
-            r.profiles.contains(&profile.id)
+            line.covers(&r.profiles)
                 && r.harness == profile.harness
                 && ((match r.harness {
                     Harness::Claude => r.agent == Agent::Main,
@@ -703,7 +712,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     for c in options
         .ttls
         .iter()
-        .filter(|c| c.base.profile == profile.id && c.base.action == Action::Change)
+        .filter(|c| c.base.profiles.contains(&profile.id) && c.base.action == Action::Change)
     {
         *ttls.get_mut(c.bucket) = c.base.recommended;
     }
@@ -720,7 +729,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .boundaries
         .iter()
         .chain(&options.scan.events)
-        .filter(|e| e.kind == EventKind::Compaction && e.profiles.contains(&profile.id))
+        .filter(|e| e.kind == EventKind::Compaction && line.covers(&e.profiles))
         .collect();
     let samples = compaction_samples(&requests, &all_events, options.summaries);
     let mut window_events = WindowEvents::new(all_events.iter().copied());
@@ -736,7 +745,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
         .boundaries
         .iter()
         .chain(&options.scan.events)
-        .filter(|e| e.kind == EventKind::Compaction && e.profiles.contains(&profile.id))
+        .filter(|e| e.kind == EventKind::Compaction && line.covers(&e.profiles))
     {
         for session in
             std::iter::once(e.session.as_ref()).chain(e.origins.iter().map(|o| o.session.as_ref()))
@@ -916,7 +925,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     let idle_checks: Vec<_> = options
         .idle
         .iter()
-        .filter(|c| c.base.profile == profile.id)
+        .filter(|c| c.base.profiles.contains(&profile.id))
         .collect();
     // A partial keepalive replay cannot be compared to an all-session idle aggregate.
     let idle_savings = if profile.harness == Harness::Claude {
@@ -972,7 +981,7 @@ fn check(options: &KeepaliveOptions, profile: &Profile) -> Option<KeepaliveCheck
     let elapsed = options.now - since;
     Some(KeepaliveCheck {
         base: CheckBase {
-            profile: profile.id.clone(), history_profiles: main.iter().flat_map(|r| r.profiles.iter().cloned()).collect::<crate::collections::IndexSet<_>>().into_iter().collect(),
+            profile: profile.id.clone(), profiles: line.ids.clone(), history_profiles: main.iter().flat_map(|r| r.profiles.iter().cloned()).collect::<crate::collections::IndexSet<_>>().into_iter().collect(),
             evidence: if priced > 0 {Evidence::Estimated} else {Evidence::Unknown},
             action: Action::Advisory, current: None, recommended,
             owner: match profile.harness {

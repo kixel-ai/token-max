@@ -2095,10 +2095,14 @@ pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
 /// `detail` asks for them.
 fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<IdlePeriod>; 2])> {
     let mut checks = Vec::new();
-    for profile in &options.scan.profiles {
-        if profile.harness == Harness::Claude && profile.t3.is_none() {
-            profile_checks(options, profile, detail, &mut checks);
-        }
+    let native = options
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_none());
+    let owner = |p: &Profile| p.idle.as_ref().map_or_else(String::new, |i| i.owner.clone());
+    for group in crate::rows::groups(native, owner) {
+        profile_checks(options, &group, detail, &mut checks);
     }
     checks
 }
@@ -2142,7 +2146,7 @@ pub(crate) fn recommended_windows(
         .map(|w| {
             let check = checks
                 .iter()
-                .find(|c| c.base.profile == profile.id && c.base.owner == w.owner);
+                .find(|c| c.base.profiles.contains(&profile.id) && c.base.owner == w.owner);
             ScenarioWindow {
                 value: match check {
                     Some(c) if c.base.action == Action::Change => c.base.recommended,
@@ -2155,15 +2159,16 @@ pub(crate) fn recommended_windows(
     recommended_windows
 }
 
-/// Idle checks for each owning idle control of one Claude profile.
+/// Idle checks for each owning idle control of one line's native Claude profiles.
 fn profile_checks<'a>(
     options: &IdleOptions<'a>,
-    profile: &'a Profile,
+    group: &crate::rows::Group<'a>,
     detail: bool,
     checks: &mut Vec<(IdleCheck, [Vec<IdlePeriod>; 2])>,
 ) {
     let scan = options.scan;
-    let in_profile = |profiles: &[String]| profiles.contains(&profile.id);
+    let profile = group.lead;
+    let in_profile = |profiles: &[String]| group.covers(profiles);
     let mut requests: Vec<&Request> = scan
         .cache_context
         .requests
@@ -2235,7 +2240,7 @@ fn profile_checks<'a>(
         let check = options
             .ttls
             .iter()
-            .find(|c| c.base.profile == profile.id && c.bucket == bucket);
+            .find(|c| c.base.profiles.contains(&profile.id) && c.bucket == bucket);
         if let Some(c) = check.filter(|c| c.base.action == Action::Change) {
             *after_ttls.get_mut(bucket) = c.base.recommended;
         }
@@ -2346,6 +2351,7 @@ fn profile_checks<'a>(
         let check = IdleCheck {
             base: CheckBase {
                 profile: profile.id.clone(),
+                profiles: group.ids.clone(),
                 history_profiles: history_profiles.iter().map(|p| p.to_string()).collect(),
                 evidence: if delta.is_none() {
                     Evidence::Unknown
@@ -2430,13 +2436,26 @@ fn detailed_t3_checks(
 ) -> Vec<(crate::model::T3IdleCheck, [Vec<IdlePeriod>; 2])> {
     use crate::model::T3IdleCheck;
     let mut checks = Vec::new();
-    for profile in &options.scan.profiles {
-        let Some(instance) = &profile.t3 else {
-            continue;
-        };
-        if profile.harness != Harness::Claude {
-            continue;
-        }
+    let instances = options
+        .scan
+        .profiles
+        .iter()
+        .filter(|p| p.harness == Harness::Claude && p.t3.is_some());
+    // Instances that inherit T3's global policy share it, and share a line when the native
+    // TTLs and windows the replay applies are the same too.
+    let owner = |p: &Profile| {
+        let idle = &p.t3.as_ref().expect("a T3 instance").idle_owner;
+        let idle = idle.split(" (instance ").next().unwrap_or(idle);
+        format!(
+            "{idle}\n{}\n{}\n{}",
+            p.ttl.main.owner,
+            p.ttl.subagent.owner,
+            crate::rows::window_owner(p)
+        )
+    };
+    for group in crate::rows::groups(instances, owner) {
+        let profile = group.lead;
+        let instance = profile.t3.as_ref().expect("a T3 instance");
         // T3 prunes its event log, so the proactive mode can be priced only after the
         // boundary; every mode is compared over that same window.
         let retained = instance.retained_since;
@@ -2450,7 +2469,7 @@ fn detailed_t3_checks(
             .requests
             .iter()
             .chain(&options.scan.requests)
-            .filter(|r| r.profiles.contains(&profile.id))
+            .filter(|r| group.covers(&r.profiles))
             .collect();
         let events: Vec<&StructuralEvent> = options
             .scan
@@ -2458,7 +2477,7 @@ fn detailed_t3_checks(
             .boundaries
             .iter()
             .chain(&options.scan.events)
-            .filter(|e| e.profiles.contains(&profile.id))
+            .filter(|e| group.covers(&e.profiles))
             .collect();
         let samples = compaction_samples(&requests, &events, options.summaries);
         let first = requests.iter().map(|r| r.time).min();
@@ -2522,7 +2541,7 @@ fn detailed_t3_checks(
             .ttls
             .iter()
             .find(|c| {
-                c.base.profile == profile.id
+                c.base.profiles.contains(&profile.id)
                     && c.bucket == Bucket::Main
                     && c.base.action == Action::Change
             })
@@ -2534,7 +2553,7 @@ fn detailed_t3_checks(
                 .ttls
                 .iter()
                 .find(|c| {
-                    c.base.profile == profile.id
+                    c.base.profiles.contains(&profile.id)
                         && c.bucket == Bucket::Subagent
                         && c.base.action == Action::Change
                 })
@@ -2582,10 +2601,16 @@ fn detailed_t3_checks(
         let savings = baseline_cost
             .zip(best.and_then(|s| s.cost.total_usd))
             .map(|(a, b)| (a - b).to_f64());
-        let applicable = instance.enabled && instance.ownership_resolved;
+        let history: Vec<String> = requests
+            .iter()
+            .flat_map(|r| r.profiles.iter().cloned())
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect();
+        let applicable = crate::t3::settled(&options.scan.profiles, &group.ids, &history);
         let check = T3IdleCheck {
             base: CheckBase {
-                profile: profile.id.clone(), history_profiles: requests.iter().flat_map(|r|r.profiles.iter().cloned()).collect::<IndexSet<_>>().into_iter().collect(),
+                profile: profile.id.clone(), profiles: group.ids.clone(), history_profiles: history,
                 evidence: if all_priced { Evidence::Estimated } else { Evidence::Unknown },
                 action: if !applicable || winner.is_none() { Action::Advisory } else if winner==Some(instance.idle_mode) || savings==Some(0.0) { Action::Keep } else { Action::Change },
                 current: Some(instance.idle_mode), recommended: if applicable { winner } else { None },
@@ -3689,6 +3714,7 @@ mod tests {
     fn base<V>(action: Action, owner: &str, recommended: Option<V>) -> CheckBase<V> {
         CheckBase {
             profile: "profile".into(),
+            profiles: vec!["profile".into()],
             history_profiles: vec![],
             evidence: Evidence::Estimated,
             action,

@@ -677,13 +677,23 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let components: HashMap<&str, &Component> =
         scan.components.iter().map(|c| (&*c.id, c)).collect();
     let mut interned = Pieces::default();
-    let mut owners: HashMap<Vec<String>, usize> = HashMap::default();
-    let mut owner_profiles: Vec<Vec<String>> = vec![];
+    // A line covers every request whose profiles' switches live in the same settings files,
+    // so profiles sharing a file share its lines, and each request counts on one line.
+    let files: HashMap<&str, String> = input
+        .profiles
+        .iter()
+        .map(|p| (p.id.as_str(), crate::rows::settings_key(p)))
+        .collect();
+    let mut owners: HashMap<Vec<&str>, usize> = HashMap::default();
+    let mut owner_files: Vec<Vec<&str>> = vec![];
+    let mut owner_profiles: Vec<IndexSet<&str>> = vec![];
     let mut rows: IndexMap<(usize, usize), Row> = IndexMap::default();
     let mut latest_catalogs: HashMap<usize, Vec<&Text>> = HashMap::default();
-    let mut latest: HashMap<usize, (Millis, Vec<usize>)> = HashMap::default();
+    // Each line's latest and first shaped request from each set of profiles, since profiles
+    // sharing a file can still send different pieces, such as a T3-only MCP server.
+    let mut latest: HashMap<(usize, Vec<&str>), (Millis, Vec<usize>)> = HashMap::default();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
-    let mut first_shaped: HashMap<usize, &str> = HashMap::default();
+    let mut first_shaped: HashMap<(usize, Vec<&str>), &str> = HashMap::default();
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -691,20 +701,29 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .collect();
     ordered.sort_by_key(|(_, r)| r.time);
     // A request no selected profile owns, such as a removed T3 instance's, has no setting to change.
-    let selected: HashSet<&str> = input.profiles.iter().map(|p| p.id.as_str()).collect();
-    ordered.retain(|(_, r)| r.profiles.iter().any(|p| selected.contains(p.as_str())));
+    ordered.retain(|(_, r)| r.profiles.iter().any(|p| files.contains_key(p.as_str())));
     for (exposure, r) in ordered {
-        let mut profiles = r.profiles.to_vec();
-        profiles.sort();
-        let owner = match owners.get(&profiles) {
+        let mut source: Vec<&str> = r
+            .profiles
+            .iter()
+            .map(String::as_str)
+            .filter(|p| files.contains_key(p))
+            .collect();
+        source.sort_unstable();
+        let mut keys: Vec<&str> = source.iter().map(|p| files[p].as_str()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let owner = match owners.get(&keys) {
             Some(&id) => id,
             None => {
-                let id = owner_profiles.len();
-                owners.insert(profiles.clone(), id);
-                owner_profiles.push(profiles);
+                let id = owner_files.len();
+                owners.insert(keys.clone(), id);
+                owner_files.push(keys);
+                owner_profiles.push(IndexSet::default());
                 id
             }
         };
+        owner_profiles[owner].extend(source.iter().copied());
         let view = &exposure.view;
         let codex = r.harness == Harness::Codex;
         // Claude's recorded request shapes are exact. Codex records each change to
@@ -716,8 +735,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             _ => (vec![], false),
         };
         if shaped {
-            first_shaped.entry(owner).or_insert(&*r.id);
+            first_shaped
+                .entry((owner, source.clone()))
+                .or_insert(&*r.id);
         }
+        let first = first_shaped.get(&(owner, source.clone())) == Some(&&*r.id);
         // The MCP servers each of this request's own Codex profiles declares.
         let servers: Vec<&[String]> = input
             .profiles
@@ -846,7 +868,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 Row {
                     cost: ContextCost {
                         harness: r.harness,
-                        profiles: owner_profiles[owner].clone(),
+                        profiles: vec![],
                         kind: kind.kind,
                         name: kind.name.clone(),
                         control: kind.control.clone(),
@@ -879,9 +901,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     key,
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
-                    from_start: first_shaped.get(&owner) == Some(&&*r.id),
+                    from_start: false,
                 }
             });
+            row.from_start |= first;
             row.cost.requests += 1;
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
@@ -1040,17 +1063,38 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
             }
         }
-        match latest.get(&owner) {
+        match latest.get(&(owner, source.clone())) {
             _ if !shaped => {}
             Some((time, _)) if r.time < *time => {}
             _ => {
                 if codex {
                     latest_catalogs.insert(owner, shown);
                 }
-                latest.insert(owner, (r.time, unique));
+                latest.insert((owner, source), (r.time, unique));
             }
         }
     }
+    let owner_profiles: Vec<Vec<String>> = owner_profiles
+        .into_iter()
+        .map(|set| {
+            let mut ids: Vec<String> = set.into_iter().map(String::from).collect();
+            ids.sort();
+            ids
+        })
+        .collect();
+    for row in rows.values_mut() {
+        row.cost.profiles = owner_profiles[row.owner].clone();
+    }
+    // A use counts on each line whose files the profiles that recorded it all own: a copy
+    // cannot say which of several profiles made a call, but a line none of its own profiles
+    // reach could not have made it.
+    let reaches = |owner: usize, profiles: &[String]| {
+        let theirs: HashSet<&str> = profiles
+            .iter()
+            .filter_map(|p| files.get(p.as_str()).map(String::as_str))
+            .collect();
+        owner_files[owner].iter().all(|f| theirs.contains(f))
+    };
     // Copied histories can leave a call and the requests around it with different
     // profile sets, and a copy cannot say which profile made the call, so it
     // counts for every row of its tool that shares a profile with it.
@@ -1113,21 +1157,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     .into_iter()
                     .flatten()
                     .filter_map(|&index| {
-                        let c = &rows[index].cost;
-                        observed
-                            .profiles
-                            .iter()
-                            .any(|p| c.profiles.contains(p))
-                            .then(|| c.skill.as_ref().unwrap().path.as_deref())
+                        let row = &rows[index];
+                        reaches(row.owner, observed.profiles)
+                            .then(|| row.cost.skill.as_ref().unwrap().path.as_deref())
                     })
                     .collect::<HashSet<_>>()
                     .len()
                     > 1);
         for &index in indices.into_iter().flatten() {
-            let c = &mut rows[index].cost;
-            if !observed.profiles.iter().any(|p| c.profiles.contains(p)) {
+            if !reaches(rows[index].owner, observed.profiles) {
                 continue;
             }
+            let c = &mut rows[index].cost;
             let mut calls = observed.calls;
             if let Some(i) = observed.invocation {
                 let skill = c.skill.as_mut().unwrap();
@@ -1246,19 +1287,20 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             .into_iter()
             .flatten()
         {
-            let row = &mut rows[index].cost;
-            if !t.profiles.iter().any(|p| row.profiles.contains(p)) {
+            if !reaches(rows[index].owner, &t.profiles) {
                 continue;
             }
+            let row = &mut rows[index].cost;
             *row.calls.as_mut().expect("family rows count calls") += t.results;
             let entry = largest.entry(index).or_insert(0);
             *entry = (*entry).max(t.largest_characters);
         }
     }
-    let latest: HashMap<usize, HashSet<usize>> = latest
-        .into_iter()
-        .map(|(owner, (_, keys))| (owner, keys.into_iter().collect()))
-        .collect();
+    // A piece is current while the latest request from any of its line's sources carried it.
+    let mut current: HashMap<usize, HashSet<usize>> = HashMap::default();
+    for ((owner, _), (_, keys)) in latest {
+        current.entry(owner).or_default().extend(keys);
+    }
     let mut details: HashMap<(usize, usize), Vec<ContextCost>> = HashMap::default();
     // Native MCP completions name the raw server and tool. Model-facing names
     // can be sanitized or shortened and cannot safely supply a deny-list entry.
@@ -1282,7 +1324,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         .filter_map(|(index, row)| {
             let mut c = row.cost;
             c.assumptions = row.assumptions.into_iter().collect();
-            c.current = latest
+            c.current = current
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
             c.estimated_usd =
@@ -1294,12 +1336,15 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 && let Some(control) = &c.control
                 && let ControlValue::Text(tool) = &control.value
             {
+                // Profiles that share a file read one declaration, so one proof serves them.
                 let raw = identity(&format!("mcp:mcp__{}__{tool}", control.path[1]));
-                if !c
-                    .profiles
-                    .iter()
-                    .all(|p| raw_tools.contains(&(raw.as_str(), p.as_str())))
-                {
+                let proven = |file: &&str| {
+                    c.profiles.iter().any(|p| {
+                        files.get(p.as_str()).map(String::as_str) == Some(*file)
+                            && raw_tools.contains(&(raw.as_str(), p.as_str()))
+                    })
+                };
+                if !owner_files[row.owner].iter().all(proven) {
                     c.control = None;
                 }
             }

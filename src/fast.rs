@@ -132,14 +132,14 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
         now,
     } = *input;
     let mut result = vec![];
-    for profile in &scan.profiles {
-        let Some(speed) = &profile.speed else {
-            continue;
-        };
+    let owner = |p: &crate::model::Profile| p.speed.as_ref().map_or_else(String::new, |s| s.owner.clone());
+    for line in crate::rows::groups(scan.profiles.iter().filter(|p| p.speed.is_some()), owner) {
+        let profile = line.lead;
+        let speed = profile.speed.as_ref().expect("filtered on speed controls");
         let requests: Vec<&Request> = scan
             .requests
             .iter()
-            .filter(|r| r.profiles.contains(&profile.id) && since.is_none_or(|s| r.time >= s))
+            .filter(|r| line.covers(&r.profiles) && since.is_none_or(|s| r.time >= s))
             .collect();
         // Requests grouped by the control that applies at their working directory, in first-seen order.
         let mut groups: Vec<(&SpeedControl, Vec<&Request>)> = vec![];
@@ -159,7 +159,7 @@ pub fn speed_checks(input: &SpeedInput<'_>) -> Vec<SpeedCheck> {
             groups.push((speed, vec![]));
         }
         for (control, requests) in groups {
-            result.push(check(catalog, &profile.id, control, &requests, since, now));
+            result.push(check(catalog, &line, control, &requests, since, now));
         }
     }
     result
@@ -172,7 +172,7 @@ fn add(total: &mut Option<Sum>, cost: Cost) {
 
 fn check(
     catalog: &Catalog,
-    profile: &str,
+    line: &crate::rows::Group<'_>,
     control: &SpeedControl,
     requests: &[&Request],
     since: Option<Millis>,
@@ -285,7 +285,8 @@ fn check(
     uncertainty.extend(current_cost.unknown.iter().cloned());
     SpeedCheck {
         base: CheckBase {
-            profile: profile.to_string(),
+            profile: line.lead.id.clone(),
+            profiles: line.ids.clone(),
             history_profiles: history_profiles.into_iter().cloned().collect(),
             evidence: Evidence::Guidance,
             action,

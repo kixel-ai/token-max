@@ -15,6 +15,7 @@ use crate::model::{
     Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
     Scan, Text, Ttl, Usage, Usd,
 };
+use crate::rows::Group;
 use crate::prices::{
     Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
 };
@@ -60,18 +61,21 @@ pub struct BackgroundInput<'a> {
 /// One check per distinct owning control, charging only its applicable requests.
 pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
     let mut result = vec![];
-    for profile in &input.scan.profiles {
+    // These features run only in the native terminal clients, so T3's profiles have none.
+    let native = input.scan.profiles.iter().filter(|p| p.t3.is_none());
+    for line in crate::rows::groups(native, |p| format!("{}:background", p.settings_file)) {
+        let profile = line.lead;
         let requests: Vec<&Request> = input
             .scan
             .requests
             .iter()
             .filter(|r| {
                 r.agent == crate::model::Agent::Main
-                    && r.profiles.contains(&profile.id)
+                    && line.covers(&r.profiles)
                     && input.since.is_none_or(|s| r.time >= s)
             })
             .collect();
-        let mut ends = turn_ends(input.scan, profile);
+        let mut ends = turn_ends(input.scan, &line);
         // Earlier history only establishes eligibility; charge turns inside the window.
         let selected: IndexSet<&str> = requests.iter().map(|r| &*r.id).collect();
         ends.retain(|e| selected.contains(&*e.request.id));
@@ -97,9 +101,7 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
                 .requests
                 .iter()
                 .chain(&input.scan.requests)
-                .filter(|r| {
-                    r.agent == crate::model::Agent::Main && r.profiles.contains(&profile.id)
-                })
+                .filter(|r| r.agent == crate::model::Agent::Main && line.covers(&r.profiles))
             {
                 for control in controls(profile, r) {
                     groups.entry(control).or_default();
@@ -111,7 +113,7 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
             }
         }
         for (control, (requests, ends)) in groups {
-            result.push(check(input, profile, control, &requests, &ends));
+            result.push(check(input, &line, control, &requests, &ends));
         }
     }
     result
@@ -165,7 +167,8 @@ impl TurnEnd<'_> {
 
 /// Every turn-ending main-conversation response of a Claude profile, in session order,
 /// counting responses and prompts from before the scanned window too.
-fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
+fn turn_ends<'a>(scan: &'a Scan, line: &Group<'_>) -> Vec<TurnEnd<'a>> {
+    let profile = line.lead;
     if profile.harness != Harness::Claude {
         return vec![];
     }
@@ -174,7 +177,7 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
     for r in scan.cache_context.requests.iter().chain(&scan.requests) {
         if r.harness == Harness::Claude
             && r.agent == crate::model::Agent::Main
-            && r.profiles.contains(&profile.id)
+            && line.covers(&r.profiles)
         {
             sessions.entry(&r.session).or_default().push(r);
         }
@@ -182,7 +185,7 @@ fn turn_ends<'a>(scan: &'a Scan, profile: &Profile) -> Vec<TurnEnd<'a>> {
     let mut starts: crate::collections::IndexMap<&str, Vec<Millis>> =
         crate::collections::IndexMap::default();
     for e in scan.cache_context.prompts.iter().chain(&scan.events) {
-        if e.kind == EventKind::TurnStart && e.profiles.contains(&profile.id) {
+        if e.kind == EventKind::TurnStart && line.covers(&e.profiles) {
             starts.entry(&e.session).or_default().push(e.time);
         }
     }
@@ -439,11 +442,12 @@ fn generations(
 
 fn check(
     input: &BackgroundInput<'_>,
-    profile: &Profile,
+    line: &Group<'_>,
     control: &BackgroundControl,
     requests: &[&Request],
     ends: &[&TurnEnd<'_>],
 ) -> BackgroundCheck {
+    let profile = line.lead;
     let feature = control.feature;
     let measurable = matches!(
         feature,
@@ -520,7 +524,7 @@ fn check(
             .chain(&input.scan.requests)
             .filter(|r| {
                 r.agent == crate::model::Agent::Main
-                    && r.profiles.contains(&profile.id)
+                    && line.covers(&r.profiles)
                     && controls(profile, r).contains(control)
             })
             .map(|r| r.cwd.clone())
@@ -540,6 +544,7 @@ fn check(
     BackgroundCheck {
         base: CheckBase {
             profile: profile.id.clone(),
+            profiles: line.ids.clone(),
             history_profiles: history_profiles.into_iter().cloned().collect(),
             evidence: if measurable && resolved {
                 Evidence::Estimated
@@ -817,7 +822,7 @@ mod tests {
         assert_eq!(c.generations, Some(3));
         let one = fork_cost(
             &prices(),
-            &turn_ends(&s, &s.profiles[0])[0],
+            &turn_ends(&s, &Group::one(&s.profiles[0]))[0],
             BackgroundFeature::PromptSuggestions,
         );
         let expected = one.total_usd.unwrap().to_f64() * 3.0;
@@ -873,7 +878,7 @@ mod tests {
         assert!((c.lost_warming.total_usd.unwrap().to_f64() - lost).abs() < 1e-12);
         let recap = fork_cost(
             &prices(),
-            &turn_ends(&s, &s.profiles[0])[2],
+            &turn_ends(&s, &Group::one(&s.profiles[0]))[2],
             BackgroundFeature::SessionRecaps,
         );
         let net = recap.total_usd.unwrap().to_f64() - lost;
@@ -1080,7 +1085,7 @@ mod tests {
         assert_eq!((coverage.priced, coverage.total), (2, 3));
         let one = fork_cost(
             &prices(),
-            &turn_ends(&s, &s.profiles[0])[0],
+            &turn_ends(&s, &Group::one(&s.profiles[0]))[0],
             BackgroundFeature::PromptSuggestions,
         );
         assert!(

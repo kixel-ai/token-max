@@ -1224,8 +1224,9 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     } = *options;
     let selected_ids: HashSet<&str> = scan.requests.iter().map(|r| &*r.id).collect();
     let mut checks = Vec::new();
-    for profile in &scan.profiles {
-        let in_profile = |profiles: &[String]| profiles.contains(&profile.id);
+    for group in crate::rows::groups(&scan.profiles, crate::rows::window_owner) {
+        let profile = group.lead;
+        let in_profile = |profiles: &[String]| group.covers(profiles);
         let mut requests: Vec<&Request> = scan
             .cache_context
             .requests
@@ -1257,7 +1258,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .ttls
             .iter()
             .copied()
-            .filter(|t| t.base.profile == profile.id)
+            .filter(|t| t.base.profiles.contains(&profile.id))
             .collect();
         let recommended_ttl = |bucket: Bucket| {
             ttl_results
@@ -1453,7 +1454,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     n >= minimum && n <= ceiling && (!claude || n <= CLAUDE_WINDOW_MAXIMUM)
                 })
                 .collect();
-            let skipped = skipped_lines(scan, &profile.id);
+            let skipped = skipped_lines(scan, &group.ids);
             // Compare each candidate with the current window under the same summary scenario
             // (point, larger, cold). Every window's simulation and replay steps through the
             // requests in lockstep, so each part is compared as it comes and none is kept.
@@ -1738,7 +1739,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     "historical recorded limits differ from current files; this replay applies current controls rather than inferring historical ownership".into(),
                 );
             }
-            if profiles.len() > 1 {
+            if profiles.iter().any(|p| !group.ids.contains(p)) {
                 uncertainty.insert("shared history has ambiguous profile attribution".into());
             }
             for s in &scenarios {
@@ -1756,6 +1757,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             checks.push(CompactionCheck {
                 base: CheckBase {
                     profile: profile.id.clone(),
+                    profiles: group.ids.clone(),
                     history_profiles: profiles.into_iter().cloned().collect(),
                     evidence: if recommended.is_none() {
                         Evidence::Unknown
@@ -1832,11 +1834,11 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     checks
 }
 
-/// Unreadable lines in a profile's transcripts; each could have been a request.
-pub fn skipped_lines(scan: &Scan, profile: &str) -> u64 {
+/// Unreadable lines in the transcripts of these profiles; each could have been a request.
+pub fn skipped_lines(scan: &Scan, profiles: &[String]) -> u64 {
     scan.snapshots
         .iter()
-        .filter(|s| s.profiles.iter().any(|p| p == profile))
+        .filter(|s| s.profiles.iter().any(|p| profiles.contains(p)))
         .map(|s| s.skipped_lines)
         .sum()
 }
@@ -3510,8 +3512,8 @@ mod tests {
     #[test]
     fn skipped_lines_sum_the_profile_snapshots() {
         let s = scenario("skipped");
-        assert_eq!(skipped_lines(&s, "profile"), 10000);
-        assert_eq!(skipped_lines(&s, "other"), 0);
+        assert_eq!(skipped_lines(&s, &["profile".into()]), 10000);
+        assert_eq!(skipped_lines(&s, &["other".into()]), 0);
     }
 
     /// Matches the TypeScript replayWindows on the same scan, including an inert first window.

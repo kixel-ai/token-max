@@ -882,10 +882,25 @@ pub fn tune_windows(scan: &mut Scan) {
         ..
     } = scan;
     let undated = |model: &str| strip_dated(model, 8).unwrap_or(model).to_string();
-    for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
+    // Profiles whose windows one file sets share a line, so each reads all of their history.
+    let lines: Vec<Vec<String>> = {
+        let groups = crate::rows::groups(profiles.iter(), crate::rows::window_owner);
+        profiles
+            .iter()
+            .map(|p| {
+                let group = groups.iter().find(|g| g.ids.contains(&p.id));
+                group.expect("every profile has a line").ids.clone()
+            })
+            .collect()
+    };
+    for (profile, line) in profiles.iter_mut().zip(lines) {
+        if profile.harness != Harness::Claude {
+            continue;
+        }
+        let mine = |profiles: &[String]| profiles.iter().any(|p| line.contains(p));
         let mut largest: IndexMap<String, i64> = IndexMap::default();
         for r in cache_context.requests.iter().chain(requests.iter()) {
-            if !r.profiles.contains(&profile.id) {
+            if !mine(&r.profiles) {
                 continue;
             }
             for p in &r.parts {
@@ -922,7 +937,7 @@ pub fn tune_windows(scan: &mut Scan) {
                 e.idle_attribution,
                 &e.model,
                 e.pre_tokens,
-            ) && e.profiles.contains(&profile.id)
+            ) && mine(&e.profiles)
                 && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
             {
                 // A trigger under an explicit window does not show the default.

@@ -1477,7 +1477,10 @@ pub struct Coverage {
 /// Shared recommendation metadata; savings are relative to the named baseline.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CheckBase<V> {
+    /// The profile whose controls the line reports, the first of `profiles`.
     pub profile: String,
+    /// Every profile the line covers, which share the setting's owner.
+    pub profiles: Vec<String>,
     pub history_profiles: Vec<String>,
     pub evidence: Evidence,
     pub action: Action,

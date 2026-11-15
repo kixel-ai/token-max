@@ -4592,6 +4592,7 @@ mod tests {
     fn check_base<V>(action: Action, current: Option<V>, recommended: Option<V>) -> CheckBase<V> {
         CheckBase {
             profile: "profile".into(),
+            profiles: vec!["profile".into()],
             history_profiles: vec!["profile".into()],
             evidence: Evidence::Measured,
             action,
@@ -5453,6 +5454,7 @@ mod tests {
         let background = |feature, on: bool, profile: &str| {
             let mut base = check_base(Action::Keep, Some(on), Some(on));
             base.profile = profile.into();
+            base.profiles = vec![profile.into()];
             base.owner = format!("{ROOT}/settings.json:promptSuggestionEnabled");
             CheckResult::Background(BackgroundCheck {
                 base,
@@ -6921,6 +6923,7 @@ mod tests {
         };
         report.scan.profiles.push(other.clone());
         advisory.base.profile = other.id.clone();
+        advisory.base.profiles = vec![other.id.clone()];
         let values = [
             root,
             change.base.owner.clone(),

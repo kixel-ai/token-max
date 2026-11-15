@@ -203,6 +203,7 @@ struct Common<'a> {
     check: &'static str,
     bucket: &'static str,
     profile: &'a str,
+    profiles: &'a [String],
     history_profiles: &'a [String],
     evidence: Evidence,
     action: Action,
@@ -235,6 +236,7 @@ fn base<'a, V>(
         check,
         bucket,
         profile: &b.profile,
+        profiles: &b.profiles,
         history_profiles: &b.history_profiles,
         evidence: b.evidence,
         action: b.action,
@@ -1198,7 +1200,8 @@ fn details(report: &Report, out: &mut Out<'_>) {
         out.section("Fable weekly use");
         for u in &report.fable {
             out.blank();
-            out.line(&out.profile_name(&u.profile), 0, BOLD);
+            let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
+            out.line(&names.join(", "), 0, BOLD);
             out.field("Requests", &requests_of(u.requests, "Fable request"));
             for w in &u.weeks {
                 out.cost(
@@ -3615,16 +3618,31 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             *tag = out.short_profile(id);
         }
     }
-    let tag = |profile: &str, out: &Out<'_>| {
+    // A line names the settings file that owns it, or its profiles when no file does.
+    let tag = |ids: &[String], owner: &dyn Fn(&Profile) -> String, out: &Out<'_>| {
         if !many {
             return String::new();
         }
-        let tag = tags
-            .get(profile)
-            .cloned()
-            .unwrap_or_else(|| out.short_profile(profile));
-        format!("[{tag}]")
+        let files: Option<IndexSet<String>> = ids
+            .iter()
+            .map(|id| {
+                let p = out.profiles.get(id.as_str())?;
+                crate::rows::owner_file(p, &owner(p)).map(|file| out.home(file))
+            })
+            .collect();
+        let names = files.filter(|f| !f.is_empty()).unwrap_or_else(|| {
+            ids.iter()
+                .map(|id| {
+                    tags.get(id.as_str())
+                        .cloned()
+                        .unwrap_or_else(|| out.short_profile(id))
+                })
+                .collect()
+        });
+        format!("[{}]", names.into_iter().collect::<Vec<_>>().join(", "))
     };
+    // A tool, skill or MCP switch lives in each profile's own settings file.
+    let switch = |p: &Profile| format!("{}:", p.settings_file);
     let pieces: Vec<&ContextCost> = setting_rows(&report.context)
         .filter(|c| c.verdict.is_some())
         .collect();
@@ -3706,7 +3724,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         let (result, r) = c;
         let mark = mark(c);
         let mut row = Row::new(Claim::of(result), mark, setting_name(result));
-        row.profile = tag(r.profile, out);
+        row.profile = tag(r.profiles, &|_| r.owner.to_string(), out);
         let unset = unset_main_ttl(result, r, out);
         let current = match r.current {
             None if unset => "unset".into(),
@@ -4044,7 +4062,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             Verdict::Keep => Mark::Keep,
         };
         let mut row = Row::new(Claim::Measured, mark, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.amount = cost_amount(c.estimated_usd);
         row.value = match verdict {
             Verdict::Off if typed => format!("on {arrow} typed only"),
@@ -4094,7 +4112,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         c.current && c.control.is_some() && c.verdict.is_none() && c.kind != ContextKind::Memory
     }) {
         let mut row = Row::new(Claim::Measured, Mark::Unknown, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.value = "on".into();
         row.amount = c.estimated_usd.and_then(|usd| cost_amount(Some(usd)));
         let uses = uses(c);
@@ -4146,7 +4164,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             continue;
         }
         let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.amount = cost_amount(c.estimated_usd);
         let reason = if covered {
             " Turning off its server covers it."
@@ -4199,7 +4217,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .filter(|c| c.current && c.kind == ContextKind::Instructions)
     {
         let mut row = instruction_row(c, &report.scan.profiles, out);
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         rows.push(row);
     }
     let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
@@ -4211,14 +4229,15 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         rows.push(row);
     }
     // Tool output, one line per cap setting, with tools no cap governs together.
-    let mut outputs: IndexMap<(&str, Option<Cap>), Vec<&ContextCost>> = IndexMap::default();
+    let mut outputs: IndexMap<(&[String], Option<Cap>), Vec<&ContextCost>> =
+        IndexMap::default();
     for c in report
         .context
         .iter()
         .filter(|c| c.kind == ContextKind::ToolOutput)
     {
         outputs
-            .entry((first_profile(c), output_cap(report, c)))
+            .entry((c.profiles.as_slice(), output_cap(report, c)))
             .or_default()
             .push(c);
     }
@@ -4268,18 +4287,18 @@ fn summary(report: &Report, out: &mut Out<'_>) {
             }
         };
         row.amount = Some(("costs", figure));
-        row.profile = tag(key.0, out);
+        row.profile = tag(key.0, &switch, out);
         rows.push(row);
     }
     for c in &report.subagents {
         let mut row = Row::new(Claim::Measured, Mark::Info, subagent_name(c));
-        row.profile = tag(&c.profiles[0], out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.amount = Some(("costs", scaled(&c.cost, &about)));
         row.evidence = subagent_line(c, &about, out);
         rows.push(row);
         if let Some(text) = subagent_guidance(c) {
             let mut row = Row::new(Claim::Official, Mark::Info, subagent_name(c));
-            row.profile = tag(&c.profiles[0], out);
+            row.profile = tag(&c.profiles, &switch, out);
             row.evidence = text;
             row.sources = vec![CLAUDE_MODEL_GUIDE];
             rows.push(row);
@@ -4287,7 +4306,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
     }
     for u in &report.fable {
         let mut row = fable_row(u);
-        row.profile = tag(&u.profile, out);
+        row.profile = tag(&u.profiles, &switch, out);
         rows.push(row);
     }
     // Context with no switch: worth seeing, but not a setting to change.
@@ -4306,7 +4325,7 @@ fn summary(report: &Report, out: &mut Out<'_>) {
         .filter(|c| matches!(c.kind, ContextKind::Skill | ContextKind::McpServer))
     {
         let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
-        row.profile = tag(first_profile(c), out);
+        row.profile = tag(&c.profiles, &switch, out);
         row.amount = cost_amount(c.estimated_usd);
         row.evidence = match c.kind {
             ContextKind::Skill if c.skill.is_some() => {
@@ -6336,7 +6355,7 @@ mod tests {
         let line = |head: &str| report_line(&text, head);
         assert_eq!(
             line("ChatGPT apps").head,
-            "ChatGPT apps on -> off costs $30 [/synthetic/.codex]"
+            "ChatGPT apps on -> off costs $30 [/synthetic/.codex/config.toml]"
         );
         assert!(
             line("ChatGPT apps")
@@ -6355,28 +6374,28 @@ mod tests {
             [
                 (
                     "unknown".to_string(),
-                    "Bash output unset costs $20 [/synthetic/home/.claude]".to_string(),
+                    "Bash output unset costs $20 [/synthetic/home/.claude/settings.json]".to_string(),
                     format!(
                         "{cap} Its largest result was 30,500 characters. bashOutputMaxChars is unset, so about 30,000 characters."
                     )
                 ),
                 (
                     "unknown".into(),
-                    "MCP output 50,000 tokens costs $6 [/synthetic/home/.claude]".into(),
+                    "MCP output 50,000 tokens costs $6 [/synthetic/home/.claude/settings.json]".into(),
                     format!(
                         "{cap} Its largest result was 900 characters. MAX_MCP_OUTPUT_TOKENS is 50,000 tokens."
                     )
                 ),
                 (
                     "unknown".into(),
-                    "Tool output unset costs $50 [/synthetic/.codex]".into(),
+                    "Tool output unset costs $50 [/synthetic/.codex/config.toml]".into(),
                     format!(
                         "{cap} Its largest result was 112,000 characters. tool_output_token_limit is unset."
                     )
                 ),
                 (
                     "info".into(),
-                    "Other tool output costs $8 [/synthetic/home/.claude]".into(),
+                    "Other tool output costs $8 [/synthetic/home/.claude/settings.json]".into(),
                     "From Read. Its largest result was 2,000 characters. No cap is checked for it."
                         .into()
                 ),
@@ -6647,7 +6666,7 @@ mod tests {
         let day = 86_400_000;
         let end = NOV1 + 30 * day;
         report.fable.push(FableUse {
-            profile: "profile".into(),
+            profiles: vec!["profile".into()],
             requests: 5,
             unrecorded: 2,
             shared: 1,

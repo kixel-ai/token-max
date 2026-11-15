@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::collections::IndexSet;
 use crate::context::{json_value, setting_text};
 use crate::model::{BackgroundFeature, Bucket, CheckResult, Control, Harness, Profile, Report};
 use crate::report::{Recommendation, Source, recommendations};
@@ -167,19 +168,29 @@ fn identity(path: &Path) -> PathBuf {
 }
 
 fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
-    let profile_id = match line.source {
-        Source::Check(result) => check_profile(result),
-        Source::Piece(c) => c.profiles.first().map_or("", String::as_str),
+    // Every profile on the line, the one whose controls it reports first.
+    let ids: Vec<&str> = match line.source {
+        Source::Check(result) => {
+            let (lead, all) = check_profiles(result);
+            std::iter::once(lead)
+                .chain(all.iter().map(String::as_str).filter(|id| *id != lead))
+                .collect()
+        }
+        Source::Piece(c) => c.profiles.iter().map(String::as_str).collect(),
     };
-    let profile = report.scan.profiles.iter().find(|p| p.id == profile_id);
-    let how = match (profile, line.source) {
+    let profile_id = ids.first().copied().unwrap_or_default();
+    let members: Vec<&Profile> = ids
+        .iter()
+        .filter_map(|id| report.scan.profiles.iter().find(|p| p.id == *id))
+        .collect();
+    let how = match (members.first(), line.source) {
         (None, _) => How::Manual {
             step: format!("change it where {profile_id} is configured"),
             reason: "its profile is no longer selected".into(),
         },
         (Some(profile), Source::Check(result)) => check_how(result, profile),
-        (Some(profile), Source::Piece(c)) => match &c.control {
-            Some(control) => switch(profile, control.into()),
+        (Some(_), Source::Piece(c)) => match &c.control {
+            Some(control) => switch(&members, control.into()),
             None => How::Manual {
                 step: "disable it in config.toml with [[skills.config]]".into(),
                 reason: "the recorded catalog does not give its SKILL.md path".into(),
@@ -195,16 +206,31 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
     }
 }
 
-/// A tool, skill or MCP switch in the profile's file, unless a file that outranks it for
-/// some sessions sets the same switch, which would keep it on there.
-fn switch(profile: &Profile, edit: Edit) -> How {
+/// A tool, skill or MCP switch in the line's settings file, unless a file that outranks it
+/// for some of its profiles' sessions sets the same switch, which would keep it on there. A
+/// line whose shared history spans several settings files is switched off in each by hand.
+fn switch(members: &[&Profile], edit: Edit) -> How {
+    let profile = members[0];
     let file = &profile.settings_file;
+    let files: IndexSet<&str> = members.iter().map(|p| p.settings_file.as_str()).collect();
+    if files.len() > 1 {
+        let all: Vec<&str> = files.into_iter().collect();
+        return How::Manual {
+            step: format!("in {}, set {}", all.join(" and "), edit.text(profile.harness)),
+            reason: "its requests were copied into the histories of several profiles, so which one made them is unknown".into(),
+        };
+    }
     let patch = Patch {
         file: file.clone(),
         harness: profile.harness,
         edits: vec![edit],
     };
-    match outranking(profile, &patch.edits[0]) {
+    let owners = members
+        .iter()
+        .map(|m| outranking(m, &patch.edits[0]))
+        .collect::<Result<Vec<_>, _>>()
+        .map(|all| all.into_iter().flatten().collect::<IndexSet<String>>());
+    match owners.map(|o| o.into_iter().collect::<Vec<_>>()) {
         Ok(owners) if owners.is_empty() => How::Edit(patch),
         Ok(owners) => {
             let text = patch.edits[0].text(profile.harness);
@@ -279,18 +305,19 @@ fn sets(config: &Map<String, Value>, edit: &Edit) -> bool {
     }
 }
 
-fn check_profile(result: &CheckResult) -> &str {
+/// The profile whose controls a check reports, and every profile its line covers.
+fn check_profiles(result: &CheckResult) -> (&str, &[String]) {
     match result {
-        CheckResult::Ttl(c) => &c.base.profile,
-        CheckResult::Compaction(c) => &c.base.profile,
-        CheckResult::Idle(c) => &c.base.profile,
-        CheckResult::T3Idle(c) => &c.base.profile,
-        CheckResult::Speed(c) => &c.base.profile,
-        CheckResult::Background(c) => &c.base.profile,
-        CheckResult::BashCap(c) => &c.base.profile,
-        CheckResult::Keepalive(c) => &c.base.profile,
-        CheckResult::Memory(c) => &c.base.profile,
-        CheckResult::Effort(c) => &c.base.profile,
+        CheckResult::Ttl(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Compaction(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Idle(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::T3Idle(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Speed(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Background(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::BashCap(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Keepalive(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Memory(c) => (&c.base.profile, &c.base.profiles),
+        CheckResult::Effort(c) => (&c.base.profile, &c.base.profiles),
     }
 }
 

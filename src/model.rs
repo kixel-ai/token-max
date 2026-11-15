@@ -2796,10 +2796,11 @@ pub struct ExposureSummary {
     pub assumptions: Vec<String>,
 }
 
-/// One Claude profile's Fable spend at API prices, in 7-day spans that end at the report.
+/// Fable spend at API prices of the Claude profiles one settings file controls, in 7-day
+/// spans that end at the report.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FableUse {
-    pub profile: String,
+    pub profiles: Vec<String>,
     /// Fable requests in the window.
     pub requests: u64,
     /// Requests whose model was not recorded, which may have run on Fable.

@@ -60,14 +60,31 @@ pub fn groups<'a>(
 /// The line a profile's setting belongs to: its owner's file and key when a file owns it and
 /// the profile's settings are resolved, or else the profile itself.
 pub fn key(profile: &Profile, owner: &str) -> String {
+    match owner_file(profile, owner) {
+        Some(file) => {
+            // Two names for one file, such as a symlink, are one line.
+            let real = crate::discovery::realpath(file).unwrap_or_else(|_| file.to_string());
+            format!("{:?}:{real}{}", profile.harness, &owner[file.len()..])
+        }
+        None => format!("profile:{}", profile.id),
+    }
+}
+
+/// The settings file whose line a profile's setting belongs to, as `owner` names it in
+/// `{file}:{key}`; None when the line is the profile's own: another kind of owner, such as an
+/// environment variable or a T3 thread selection, or a T3 instance that is disabled or whose
+/// effective settings are unresolved.
+pub fn owner_file<'o>(profile: &Profile, owner: &'o str) -> Option<&'o str> {
     let resolved = profile
         .t3
         .as_ref()
         .is_none_or(|t| t.enabled && !t.settings_unresolved);
-    match file_key(owner).filter(|_| resolved) {
-        Some(key) => format!("{:?}:{key}", profile.harness),
-        None => format!("profile:{}", profile.id),
-    }
+    let end = [".json:", ".toml:"]
+        .iter()
+        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len() - 1))
+        .min()?;
+    let file = &owner[..end];
+    (resolved && Path::new(file).has_root()).then_some(file)
 }
 
 /// The line for a profile's tool, skill and MCP switches, which live in its settings file.
@@ -83,21 +100,6 @@ pub fn window_owner(profile: &Profile) -> String {
         .chain(c.models.values().map(|m| m.owner.as_str()))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// An owner that names a settings file, as `{file}:{key}`, with the file resolved so two
-/// names for one file, such as a symlink, compare equal; None for any other owner.
-fn file_key(owner: &str) -> Option<String> {
-    let end = [".json:", ".toml:"]
-        .iter()
-        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len() - 1))
-        .min()?;
-    let (file, rest) = owner.split_at(end);
-    if !Path::new(file).has_root() {
-        return None;
-    }
-    let file = crate::discovery::realpath(file).unwrap_or_else(|_| file.to_string());
-    Some(format!("{file}{rest}"))
 }
 
 #[cfg(test)]

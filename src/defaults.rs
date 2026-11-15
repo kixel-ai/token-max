@@ -224,6 +224,38 @@ pub fn same_switch(a: &Control, b: &Control) -> bool {
             })
 }
 
+/// Whether turning `switch` off also turns off what `control` would: the same switch, or an
+/// MCP server's switch over one of its tools.
+fn covers(switch: &Control, control: &Control) -> bool {
+    if same_switch(switch, control) {
+        return true;
+    }
+    fn path(c: &Control) -> Vec<&str> {
+        c.path.iter().map(String::as_str).collect()
+    }
+    match (
+        path(switch).as_slice(),
+        &switch.value,
+        path(control).as_slice(),
+        &control.value,
+    ) {
+        (
+            ["permissions", "deny"],
+            ControlValue::Text(server),
+            ["permissions", "deny"],
+            ControlValue::Text(tool),
+        ) => {
+            server.starts_with("mcp__")
+                && !server[5..].contains("__")
+                && tool.starts_with(&format!("{server}__"))
+        }
+        (["mcp_servers", id, "enabled"], _, ["mcp_servers", tool_id, "disabled_tools"], _) => {
+            id == tool_id
+        }
+        _ => false,
+    }
+}
+
 /// The value a switch that is off shows, such as `off` or `typed only`.
 pub fn switch_value(control: &Control) -> String {
     match &control.value {
@@ -274,7 +306,7 @@ pub fn applied<'a>(report: &'a Report, c: &ContextCost) -> Option<&'a Control> {
         .iter()
         .filter(|p| c.profiles.contains(&p.id))
     {
-        let switch = p.switched_off.iter().find(|k| same_switch(k, control))?;
+        let switch = p.switched_off.iter().find(|k| covers(k, control))?;
         if crate::doctor::outranked(p, switch) {
             return None;
         }
@@ -548,6 +580,27 @@ mod tests {
             switch_value(&overrides("user-invocable-only")),
             "typed only"
         );
+        // A server's switch covers its tools.
+        assert!(covers(&deny("mcp__github"), &deny("mcp__github__issue")));
+        assert!(!covers(&deny("mcp__git"), &deny("mcp__github__issue")));
+        assert!(!covers(
+            &deny("mcp__github__issue"),
+            &deny("mcp__github__pr")
+        ));
+        let codex = |path: &[&str], value| Control {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            value,
+            append: false,
+        };
+        let tool = || {
+            codex(
+                &["mcp_servers", "docs", "disabled_tools"],
+                ControlValue::Text("read".into()),
+            )
+        };
+        let server = |id: &str| codex(&["mcp_servers", id, "enabled"], ControlValue::Bool(false));
+        assert!(covers(&server("docs"), &tool()));
+        assert!(!covers(&server("web"), &tool()));
         assert_eq!(switch_value(&overrides("off")), "off");
         assert_eq!(switch_value(&deny("Monitor")), "off");
         assert_eq!(switch_name(&deny("Monitor")), "Monitor tool");

@@ -6099,6 +6099,14 @@ mod tests {
                 .default
                 .is_empty()
         );
+        // One that sets it off too leaves it off.
+        std::fs::write(&outranking, r#"{"enableArtifact": false}"#).unwrap();
+        let text = super::tests::text(&report, None, false);
+        assert!(
+            report_line(&text, "Artifact tool off")
+                .default
+                .starts_with("default on")
+        );
     }
 
     #[test]

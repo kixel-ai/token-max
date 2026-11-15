@@ -367,8 +367,9 @@ estimate. When no request in the window carried it, the saving is unknown,
 never zero, and so is a Codex catalog skill's, since removing one can backfill
 the catalog. A switch set after the latest request, such as one the walk just
 wrote, counts as off too, so the next run neither offers it again nor drops
-its saving. A switch that a file outranking the profile's also sets adds no
-line: the feature's own line says what it costs.
+its saving, and an MCP server's switch counts for its tools too. A switch that
+a file outranking the profile's sets otherwise adds no line: the feature's own
+line says what it costs.
 
 ## MCP servers and instruction budgets
 

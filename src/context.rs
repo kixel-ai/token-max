@@ -5,7 +5,7 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{MEMORY_OUTPUT, calibrate, codex_server, cohort};
+use crate::exposure::{MEMORY_OUTPUT, NAMESPACE_DESCRIPTION, calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
@@ -271,12 +271,13 @@ type Split = (usize, Option<i64>);
 impl Pieces<'_> {
     /// Note the description a component ships for one of its pieces, or that it ships none.
     /// Only a record that would carry one counts: a measured tool definition, a listed
-    /// skill or a Codex namespace, not an opaque identity or other context.
+    /// skill or a Codex namespace, not an opaque identity, a Claude deferred-tool name line
+    /// or other context.
     fn describe(&mut self, key: usize, component: &Component) {
         let carries = match component.category {
             Category::ToolSchema | Category::McpSchema => component.size.characters.is_some(),
             Category::SkillListing => component.scope == crate::model::Scope::Component,
-            Category::McpDiscovery => true,
+            Category::McpDiscovery => &*component.provenance == NAMESPACE_DESCRIPTION,
             _ => false,
         };
         if carries {
@@ -2419,12 +2420,15 @@ mod tests {
         // An opaque identity of the same tool records no text, so it says nothing either way.
         let mut opaque = tool("opaque", None);
         opaque.size.characters = None;
+        // Nor does a Claude deferred-tool line, which names the tool without describing it.
+        let line = component("line", Category::McpDiscovery, "Mystery", 10, &[]);
         let scan = ExposureScan {
             components: vec![
                 tool("a", Some("First.")),
                 tool("b", Some("Second.")),
                 tool("bare", None),
                 opaque,
+                line,
             ],
             requests: [
                 // Native sends A, then B, then A again; work sends only B.
@@ -2437,6 +2441,8 @@ mod tests {
                 ("b2", "bare"),
                 ("o1", "a"),
                 ("o2", "opaque"),
+                ("d1", "a"),
+                ("d2", "line"),
             ]
             .iter()
             .map(|(r, c)| exposure(r, &[c], 1, 1000))
@@ -2448,6 +2454,7 @@ mod tests {
             ("w", "work"),
             ("b", "bare"),
             ("o", "opaque"),
+            ("d", "deferred"),
         ];
         let requests: Vec<Request> = scan
             .requests
@@ -2484,6 +2491,7 @@ mod tests {
             described,
             [
                 ("bare", None),
+                ("deferred", Some("First.")),
                 ("native", Some("First.")),
                 ("opaque", Some("First.")),
                 ("work", Some("Second.")),

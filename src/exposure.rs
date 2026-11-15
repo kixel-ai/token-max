@@ -22,6 +22,10 @@ use crate::model::{
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
+/// The provenance of a Codex MCP namespace's description, the one discovery record that
+/// ships text.
+pub(crate) const NAMESPACE_DESCRIPTION: &str = "deferred-namespace-description";
+
 /// Prefer recorded counts; a missing calibration leaves token and dollar estimates unknown.
 pub fn measure_size(text: Option<&str>) -> Size {
     Size {
@@ -1612,7 +1616,7 @@ impl ExposureCollector {
                 }
                 let body = text(Some(value))?;
                 let (content, provenance) = if field == "tools" {
-                    (Content::Text(body), "deferred-namespace-description")
+                    (Content::Text(body), NAMESPACE_DESCRIPTION)
                 } else {
                     (Content::Opaque(value), "opaque-schema-identity")
                 };

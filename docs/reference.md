@@ -195,8 +195,11 @@ Without color a word replaces the dot: `change`, `consider`, `keep`,
 `unknown` or `info`.
 
 Every percent is of this host's spend over the window at API prices: every
-request it recorded, shared histories counted once. A saving's percent compares
-its monthly rate with the host's, so checks with different windows compare.
+request it recorded, shared histories counted once. A cost's percent divides
+its total by the host's, since a profile's history lies within the host's
+window; a saving's compares its monthly rate with the host's. When some
+requests could not be priced, the base is the priced part, so a share can read
+high, and the line explaining the percents says so.
 Comparisons between setting values are per 30 days at the window's rate; what
 features, context and long Bash waits cost, and how often they were used, are
 totals over the whole window.

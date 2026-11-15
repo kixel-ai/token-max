@@ -712,15 +712,18 @@ impl Spend {
         }
     }
 
-    /// The share of this host's spend that `usd` over `since..until` makes at the same rate.
-    fn share(&self, usd: f64, since: Option<Millis>, until: Option<Millis>) -> Option<f64> {
-        let host = monthly(self.usd, self.since, Some(self.until));
-        (host > 0.0).then(|| monthly(usd, since, until) / host)
+    /// The share of this host's spend that `usd`, spent within the window, makes.
+    ///
+    /// A line's own window lies inside the host's, since a profile's history starts no
+    /// earlier than the host's first request, so its total divides the host's directly.
+    fn share(&self, usd: f64) -> Option<f64> {
+        (self.usd > 0.0).then(|| usd / self.usd)
     }
 
-    /// The share of this host's spend that `usd` every 30 days makes.
+    /// The share of this host's spend that `usd` every 30 days makes, at the window's rate.
     fn of_month(&self, usd: f64) -> Option<f64> {
-        self.share(usd, Some(0), Some(30 * DAY as Millis))
+        let host = monthly(self.usd, self.since, Some(self.until));
+        (host > 0.0).then(|| usd / host)
     }
 }
 
@@ -3233,8 +3236,8 @@ impl Row {
         matches!(self.mark, Mark::Change | Mark::Consider)
     }
 
-    /// What it cost over `window`, a lower bound when `at_least`.
-    fn costs(&mut self, usd: Option<f64>, at_least: bool, window: Window, spend: &Spend) {
+    /// What it cost over the window, a lower bound when `at_least`.
+    fn costs(&mut self, usd: Option<f64>, at_least: bool, spend: &Spend) {
         self.amount = Some((
             "costs",
             match usd {
@@ -3243,17 +3246,17 @@ impl Row {
                 Some(usd) => about(usd),
             },
         ));
-        self.share = usd.and_then(|usd| spend.share(usd, window.0, window.1));
+        self.share = usd.and_then(|usd| spend.share(usd));
     }
 
-    /// What `cost` came to over `window`: its known part as a lower bound when partly unpriced.
-    fn cost(&mut self, cost: &Cost, window: Window, spend: &Spend) {
+    /// What `cost` came to over the window: its known part as a lower bound when partly unpriced.
+    fn cost(&mut self, cost: &Cost, spend: &Spend) {
         match cost.total_usd {
-            Some(usd) => self.costs(Some(usd.to_f64()), false, window, spend),
+            Some(usd) => self.costs(Some(usd.to_f64()), false, spend),
             None if cost.known_usd > Usd::ZERO => {
-                self.costs(Some(cost.known_usd.to_f64()), true, window, spend);
+                self.costs(Some(cost.known_usd.to_f64()), true, spend);
             }
-            None => self.costs(None, false, window, spend),
+            None => self.costs(None, false, spend),
         }
     }
 
@@ -3271,9 +3274,6 @@ impl Row {
         }
     }
 }
-
-/// A window's start and end, either unknown.
-type Window = (Option<Millis>, Option<Millis>);
 
 /// `text` padded with spaces to `width` cells.
 fn pad(text: &str, width: usize) -> String {
@@ -3772,7 +3772,6 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
-    let window: Window = (spend.since, Some(spend.until));
     let many = report.scan.profiles.len() > 1;
     out.title();
     t3_coverage(report, out);
@@ -4268,7 +4267,6 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             );
         }
         // The figure: what a change saves, else what the setting cost or saves as it is.
-        let check_window: Window = (r.since, r.until);
         if row.offered() {
             let verb = match result {
                 _ if unset => "saves up to",
@@ -4283,11 +4281,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         } else {
             match result {
                 CheckResult::Effort(e) if !e.runs.is_empty() => {
-                    row.cost(
-                        &add_costs(e.runs.iter().map(|run| &run.cost)),
-                        check_window,
-                        &spend,
-                    );
+                    row.cost(&add_costs(e.runs.iter().map(|run| &run.cost)), &spend);
                 }
                 CheckResult::Ttl(t) if mark == Mark::Keep && t.one_hour_savings_usd != 0.0 => {
                     row.saves(
@@ -4298,14 +4292,14 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
                 }
                 CheckResult::Background(_) if r.current == Some(Setting::Toggle(true)) => {
                     if let Some(usd) = r.savings_usd.filter(|usd| *usd > 0.0) {
-                        row.costs(Some(usd), false, check_window, &spend);
+                        row.costs(Some(usd), false, &spend);
                     }
                 }
                 CheckResult::Memory(m) => match r.savings_usd {
                     Some(0.0) => {}
                     usd => {
                         let at_least = r.coverage.is_some() || codex_unmeasured(m);
-                        row.costs(usd, at_least, check_window, &spend);
+                        row.costs(usd, at_least, &spend);
                     }
                 },
                 _ => {}
@@ -4338,7 +4332,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         if row.offered() {
             row.saves("saves", piece_saving(c, &spend), &spend);
         } else {
-            row.costs(c.estimated_usd, false, window, &spend);
+            row.costs(c.estimated_usd, false, &spend);
         }
         let each = c
             .cost_per_use_usd
@@ -4400,7 +4394,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         row.location = skill_location(c, out);
         row.value = "on".into();
         if c.estimated_usd.is_some() {
-            row.costs(c.estimated_usd, false, window, &spend);
+            row.costs(c.estimated_usd, false, &spend);
         }
         let uses = uses(c);
         let mut text = not_enough(&match c.estimated_usd {
@@ -4475,7 +4469,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
             // Shortening a file saves an unknown part of what it cost.
             row.saves("saves", None, &spend);
         } else {
-            row.costs(c.estimated_usd, false, window, &spend);
+            row.costs(c.estimated_usd, false, &spend);
         }
         row.setting = match offer(Origin::Context(index), out) {
             Some(setting) if row.offered() => setting,
@@ -4559,7 +4553,6 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         row.costs(
             (!known.is_empty()).then(|| known.iter().sum()),
             known.len() < usd.len(),
-            window,
             &spend,
         );
         row.profile = tag(key.0, out);
@@ -4569,7 +4562,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
     for c in &report.subagents {
         let mut row = Row::new(Claim::Measured, Mark::Info, subagent_name(c));
         row.profile = tag(&c.profiles[0], out);
-        row.cost(&c.cost, window, &spend);
+        row.cost(&c.cost, &spend);
         row.evidence = subagent_line(c, &about, out);
         if let Some(text) = subagent_guidance(c) {
             let _ = write!(row.evidence, " Official: {text}");
@@ -4588,7 +4581,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         let mut row = fable_row(u);
         row.profile = tag(&u.profile, out);
         if u.requests > 0 {
-            row.cost(&add_costs(u.weeks.iter().map(|w| &w.cost)), window, &spend);
+            row.cost(&add_costs(u.weeks.iter().map(|w| &w.cost)), &spend);
         }
         row.setting = FABLE_MODEL.into();
         rows.push(row);
@@ -4611,7 +4604,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
         row.profile = tag(first_profile(c), out);
         row.location = skill_location(c, out);
-        row.costs(c.estimated_usd, false, window, &spend);
+        row.costs(c.estimated_usd, false, &spend);
         row.setting = piece_setting(c, out);
         row.evidence = match c.kind {
             ContextKind::Skill if c.skill.is_some() => {
@@ -4652,7 +4645,6 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         row.costs(
             (!known.is_empty()).then(|| known.iter().sum()),
             known.len() < core.len(),
-            window,
             &spend,
         );
         row.setting = "no setting".into();
@@ -4671,9 +4663,18 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) {
         Some(host) if host.name != "this host" => format!("{}'s", host.name),
         _ => "this host's".into(),
     };
+    // With some requests unpriced, the base is only what could be priced, so a share can read high.
+    let base = if spend.complete {
+        format!("{host} spend over the window, {spent}")
+    } else {
+        format!(
+            "the {} {host} priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller",
+            about(spend.usd)
+        )
+    };
     out.line(
         &format!(
-            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {host} spend over the window, {spent}. A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}. A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -7334,6 +7335,44 @@ mod tests {
             ),
             "{summary}"
         );
+    }
+
+    #[test]
+    fn a_cost_is_a_share_of_the_host_total_and_a_saving_of_its_monthly_rate() {
+        // $300 over a 30-day host window: a profile that spent $10 in one day of it is 3%,
+        // however short its own history, while $10 every 30 days is 3% of the rate.
+        let spend = Spend {
+            usd: 300.0,
+            complete: true,
+            since: Some(0),
+            until: 30 * DAY as Millis,
+        };
+        assert_eq!(spend.share(10.0), Some(10.0 / 300.0));
+        assert_eq!(spend.of_month(10.0), Some(10.0 / 300.0));
+        let week = Spend {
+            until: 15 * DAY as Millis,
+            ..spend
+        };
+        assert_eq!(week.share(10.0), Some(10.0 / 300.0));
+        assert_eq!(week.of_month(10.0), Some(10.0 / 600.0));
+        let none = Spend { usd: 0.0, ..spend };
+        assert_eq!((none.share(1.0), none.of_month(1.0)), (None, None));
+    }
+
+    #[test]
+    fn percents_of_partly_priced_spend_say_their_base_is_the_priced_part() {
+        let mut report = synthetic_report();
+        let priced = text(&report, None, false);
+        assert!(priced.contains("each percent is of this host's spend over the window, $"));
+        for group in &mut report.historical {
+            group.cost.total_usd = None;
+        }
+        let summary = text(&report, None, false);
+        assert!(
+            summary.contains(" this host's priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller."),
+            "{summary}"
+        );
+        assert!(!summary.contains("each percent is of this host's spend"));
     }
 
     #[test]

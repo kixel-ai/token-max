@@ -227,9 +227,13 @@ fn timeless(text: &str) -> String {
     let text = text.strip_prefix("token-max\n").unwrap_or(text);
     // A section names its own host as the base of its percents; run there, it is "this host".
     let named;
+    // The name is the word before the first "'s", as in "of devbox's spend" or, when part
+    // of the spend is unpriced, "of the $5 devbox's priced requests".
     let text = match text.find("each percent is of ").and_then(|at| {
         let from = at + "each percent is of ".len();
-        text[from..].find("'s spend").map(|end| (from, from + end))
+        let end = from + text[from..].find("'s ")?;
+        let start = text[..end].rfind(' ').map_or(0, |space| space + 1);
+        (!text[..end].ends_with("this host")).then_some((start, end))
     }) {
         Some((from, to)) => {
             named = format!("{}this host{}", &text[..from], &text[to..]);

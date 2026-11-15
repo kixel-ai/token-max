@@ -722,8 +722,9 @@ struct Row {
     key: usize,
     time: Millis,
     /// By the index of the profiles that recorded it, whether their first shaped request
-    /// carried it, so the whole window could have recorded a use there. One that any
-    /// source first sent later stays advisory when unused.
+    /// carried it, so their whole window could have recorded a use. One no source sent
+    /// from its first request stays advisory when unused; another source sending it
+    /// only sometimes, as native Claude Code does a deferred tool, adds evidence instead.
     from_start: IndexMap<usize, bool>,
 }
 
@@ -1456,7 +1457,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             {
                 // Codex catalog skill uses are only partly recorded, and a line that could
                 // hold a call leaves nonuse unproven.
-                let visible = row.from_start.values().all(|&first| first)
+                let visible = row.from_start.values().any(|&first| first)
                     && c.skill.is_none()
                     && hidden_use(&c, input.snapshots, input.scan, input.profiles).is_none();
                 c.verdict = Some(match calls {
@@ -1985,16 +1986,19 @@ mod tests {
     }
 
     #[test]
-    fn a_piece_one_source_sent_late_stays_advisory_when_unused() {
+    fn one_source_sending_a_piece_from_its_first_request_proves_its_shared_rows_nonuse() {
         let scan = ExposureScan {
             components: vec![
-                component("late", Category::ToolSchema, "Artifact", 1000, &[]),
+                component("tool", Category::ToolSchema, "EnterWorktree", 1000, &[]),
+                component("added", Category::ToolSchema, "Artifact", 1000, &[]),
                 component("system", Category::Other, "wire-system", 1000, &[]),
             ],
             requests: vec![
+                // Native Claude Code defers the tool, so its first request leaves it out.
                 exposure("native-1", &["system"], 1, 1000),
-                exposure("t3-1", &["late", "system"], 2, 2000),
-                exposure("native-2", &["late", "system"], 2, 2000),
+                exposure("t3-1", &["tool", "system"], 2, 2000),
+                exposure("native-2", &["tool", "added", "system"], 3, 3000),
+                exposure("t3-2", &["tool", "added", "system"], 3, 3000),
             ],
             ..ExposureScan::default()
         };
@@ -2002,7 +2006,8 @@ mod tests {
         let requests: Vec<Request> = [
             ("native-1", "native", 300),
             ("t3-1", "agent", 600),
-            ("native-2", "native", 600),
+            ("native-2", "native", 900),
+            ("t3-2", "agent", 900),
         ]
         .into_iter()
         .enumerate()
@@ -2025,11 +2030,16 @@ mod tests {
             snapshots: &[],
             max_cost_per_use_usd: 1.0,
         });
-        // T3 sent it from its first request, but native Claude Code only later, so its
-        // earlier native sessions could not have recorded a use.
-        let late = row(&rows, "Artifact");
-        assert_eq!((late.requests, late.calls), (2, Some(0)));
-        assert_eq!(late.verdict, Some(Verdict::Consider));
+        // T3 carried it through its whole history with no call on the row, which proves
+        // nonuse whatever native sent first.
+        let tool = row(&rows, "EnterWorktree");
+        assert_eq!(tool.profiles, ["agent", "native"]);
+        assert_eq!((tool.requests, tool.calls), (3, Some(0)));
+        assert_eq!(tool.verdict, Some(Verdict::Off));
+        // Added to the shared file mid-window, so no source sent it from its first request.
+        let added = row(&rows, "Artifact");
+        assert_eq!((added.requests, added.calls), (2, Some(0)));
+        assert_eq!(added.verdict, Some(Verdict::Consider));
     }
 
     #[test]

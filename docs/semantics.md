@@ -14,7 +14,7 @@ own TTL is a line of its own. A request with profiles on several lines counts on
 profile's check counted it before; ambiguous provenance outside a line keeps
 its uncertainty. One window serves the whole line: its default start is the
 latest change among the line's sources. A piece of context sent by several
-sources proves nonuse only when each sent it from its first request.
+sources proves nonuse when any of them sent it from its first request.
 
 The reader freezes every selected file's length during discovery before parsing
 any transcript. It streams one newline-terminated JSON record at a time. Raw
@@ -693,12 +693,12 @@ every row of its tool that shares a profile with it; skill uses count only the
 model's Skill calls, since a hidden skill can still be typed, except where the
 switch removes the skill entirely, where typed requests count too. A piece still sent
 today with a positive cost and no recorded use is recommended off (`verdict:
-"off"`, exit 1), whatever the amount, when its profile's first shaped request in
-the window already carried it and none of that profile's transcripts could
-hide a call to it. An unreadable line could if its bytes name the piece (see
+"off"`, exit 1), whatever the amount, when the first shaped request in the
+window of one of its profiles already carried it and none of its profiles'
+transcripts could hide a call to it. An unreadable line could if its bytes name the piece (see
 below), or if its transcript has a tool result whose id matches no parsed call,
-a sign that a record was cut off; so could a deferred line. One first sent
-later, one whose profile's transcripts could hide a call, or a Codex catalog
+a sign that a record was cut off; so could a deferred line. One every profile
+first sent later, one whose profile's transcripts could hide a call, or a Codex catalog
 skill, whose uses are only partly recorded, gets `"consider"`, an advisory that exits
 0, since the window cannot rule out a use. A used piece whose `estimatedUsd`
 divided by its uses (`costPerUseUsd`) exceeds `maxCostPerUseUsd` (default $1,

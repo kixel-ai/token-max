@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use crate::collections::HashMap;
-use crate::model::Profile;
+use crate::model::{Bucket, Profile};
 
 /// The profiles one line covers; every member's setting has the same owner.
 #[derive(Clone, Debug)]
@@ -102,6 +102,24 @@ pub fn window_owner(profile: &Profile) -> String {
         .join("\n")
 }
 
+/// The owner and value of a profile's cache TTL for one bucket. A profile whose TTL
+/// another owner sets, or that caching is off for, replays its requests differently.
+pub fn ttl_owner(profile: &Profile, bucket: Bucket) -> String {
+    let ttl = profile.ttl.get(bucket);
+    format!("{}\n{:?}", ttl.owner, ttl.value)
+}
+
+/// The owners of the compaction windows, then of both cache TTLs the window replay
+/// applies, which a line's profiles must all share.
+pub fn compaction_owner(profile: &Profile) -> String {
+    format!(
+        "{}\n{}\n{}",
+        window_owner(profile),
+        ttl_owner(profile, Bucket::Main),
+        ttl_owner(profile, Bucket::Subagent)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +150,26 @@ mod tests {
             }
         });
         assert_eq!(ids(&thread), [vec!["native", "other"], vec!["agent"]]);
+    }
+
+    #[test]
+    fn replays_share_a_line_only_when_their_ttls_match() {
+        let native = make_profile("native", "/home/.claude");
+        // Caching off for the instance leaves the file's owner but no TTL to replay.
+        let mut off = t3("off", "/home/.claude");
+        off.ttl.main.value = None;
+        // An environment TTL another owner sets changes the window replay, not its owner.
+        let mut env = t3("env", "/home/.claude");
+        env.ttl.subagent.owner = "T3 instance env: CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into();
+        let profiles = [native, off, env];
+        assert_eq!(
+            ids(&groups(&profiles, |p| ttl_owner(p, Bucket::Main))),
+            [vec!["native", "env"], vec!["off"]]
+        );
+        assert_eq!(
+            ids(&groups(&profiles, compaction_owner)),
+            [["native"], ["off"], ["env"]]
+        );
     }
 
     #[test]

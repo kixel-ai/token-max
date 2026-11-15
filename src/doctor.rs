@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::collections::IndexSet;
+use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text};
 use crate::model::{BackgroundFeature, Bucket, CheckResult, Control, Harness, Profile, Report};
 use crate::report::{Recommendation, Source, recommendations};
@@ -212,13 +212,12 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
 fn switch(members: &[&Profile], edit: Edit) -> How {
     let profile = members[0];
     let file = &profile.settings_file;
-    let files: IndexSet<&str> = members.iter().map(|p| p.settings_file.as_str()).collect();
-    if files.len() > 1 {
-        let all: Vec<&str> = files.into_iter().collect();
-        return How::Manual {
-            step: format!("in {}, set {}", all.join(" and "), edit.text(profile.harness)),
-            reason: "its requests were copied into the histories of several profiles, so which one made them is unknown".into(),
-        };
+    // Two names a symlink makes one file are one file.
+    let mut files: IndexMap<String, &str> = IndexMap::default();
+    for m in members {
+        files
+            .entry(crate::rows::settings_key(m))
+            .or_insert(m.settings_file.as_str());
     }
     let patch = Patch {
         file: file.clone(),
@@ -230,6 +229,25 @@ fn switch(members: &[&Profile], edit: Edit) -> How {
         .map(|m| outranking(m, &patch.edits[0]))
         .collect::<Result<Vec<_>, _>>()
         .map(|all| all.into_iter().flatten().collect::<IndexSet<String>>());
+    if files.len() > 1 {
+        let all: Vec<&str> = files.into_values().collect();
+        let also = match &owners {
+            Ok(o) if o.is_empty() => String::new(),
+            Ok(o) => format!(
+                ", and in {} where it is set",
+                o.iter().map(String::as_str).collect::<Vec<_>>().join(", ")
+            ),
+            Err(_) => ", and in any file that outranks them".into(),
+        };
+        return How::Manual {
+            step: format!(
+                "in {}{also}, set {}",
+                all.join(" and "),
+                patch.edits[0].text(profile.harness)
+            ),
+            reason: "its requests were copied into the histories of several profiles, so which one made them is unknown".into(),
+        };
+    }
     match owners.map(|o| o.into_iter().collect::<Vec<_>>()) {
         Ok(owners) if owners.is_empty() => How::Edit(patch),
         Ok(owners) => {
@@ -1419,6 +1437,38 @@ mod tests {
             "{step}"
         );
         assert!(reason.contains("several profiles"), "{reason}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_switch_across_homes_names_outranking_files_and_one_linked_file_is_one_edit() {
+        use crate::test_support::make_profile;
+        let w = Workspace::new();
+        let text = |p: &Path| p.to_string_lossy().into_owned();
+        let project = w.home.join("repo/.claude/settings.json");
+        std::fs::create_dir_all(project.parent().unwrap()).unwrap();
+        std::fs::write(&project, r#"{"enableArtifact": true}"#).unwrap();
+        let mut native = make_profile("native", &text(&w.claude));
+        native.outranking_files = vec![text(&project)];
+        let work = make_profile("work", &text(&w.home.join(".claude-work")));
+        let off = || edit("enableArtifact", false, false);
+        // A project that turns it back on is named, since the homes' edits would not hold.
+        let How::Manual { step, .. } = switch(&[&native, &work], off()) else {
+            panic!("two homes are a step by hand")
+        };
+        assert!(
+            step.contains(&format!("and in {} where it is set", text(&project))),
+            "{step}"
+        );
+        // Two homes whose settings.json links one dotfile take one edit to it.
+        std::fs::write(w.claude.join("settings.json"), "{}").unwrap();
+        let alias = w.home.join(".claude-alias");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(w.claude.join("settings.json"), alias.join("settings.json"))
+            .unwrap();
+        let linked = make_profile("linked", &text(&alias));
+        native.outranking_files.clear();
+        assert!(matches!(switch(&[&native, &linked], off()), How::Edit(_)));
     }
 
     fn change(name: &str, file: &Path, harness: Harness, edits: Vec<Edit>) -> Fix {

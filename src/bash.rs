@@ -48,7 +48,9 @@ pub fn bash_checks(input: &BashInput<'_>) -> Vec<BashCapCheck> {
         let bash = p.bash.as_ref().expect("filtered on a cap");
         format!(
             "{}\n{}\n{}",
-            bash.owner, bash.default_owner, p.ttl.main.owner
+            bash.owner,
+            bash.default_owner,
+            crate::rows::ttl_owner(p, crate::model::Bucket::Main)
         )
     };
     let capped = input.scan.profiles.iter().filter(|p| p.bash.is_some());

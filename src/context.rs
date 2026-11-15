@@ -647,9 +647,10 @@ struct Row {
     owner: usize,
     key: usize,
     time: Millis,
-    /// Whether its owner's first shaped request carried it, so the whole window
-    /// could have recorded a use. One first sent later stays advisory when unused.
-    from_start: bool,
+    /// By the index of the profiles that recorded it, whether their first shaped request
+    /// carried it, so the whole window could have recorded a use there. One that any
+    /// source first sent later stays advisory when unused.
+    from_start: IndexMap<usize, bool>,
 }
 
 /// Evidence credited through the same profile and last-used rules for every harness.
@@ -905,10 +906,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     key,
                     time: Millis::MIN,
                     assumptions: IndexSet::default(),
-                    from_start: false,
+                    from_start: IndexMap::default(),
                 }
             });
-            row.from_start |= first;
+            *row.from_start.entry(share).or_default() |= first;
             row.cost.requests += 1;
             row.shares.entry(share).or_default().0 += 1;
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
@@ -1381,7 +1382,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             {
                 // Codex catalog skill uses are only partly recorded, and an unreadable or
                 // deferred line could hold a call, so their nonuse is unproven.
-                let visible = row.from_start
+                let visible = row.from_start.values().all(|&first| first)
                     && c.skill.is_none()
                     && !c.profiles.iter().any(|p| input.incomplete.contains(p));
                 c.verdict = Some(match calls {
@@ -1840,6 +1841,16 @@ mod tests {
             shared.shares.iter().map(|s| s.cost_usd).sum::<Usd>(),
             shared.cost_usd
         );
+        // A check whose own switch only the T3 instance shares takes only its requests.
+        let t3 = shared.shares_within(|p| p.iter().any(|p| p == "agent"));
+        assert_eq!(
+            t3.iter()
+                .map(|s| (s.profiles.clone(), s.requests))
+                .collect::<Vec<_>>(),
+            [(vec!["agent".to_string()], 1)]
+        );
+        let whole = shared.shares_within(|p| p.iter().any(|p| p == "agent" || p == "native"));
+        assert_eq!((whole.len(), whole[0].requests), (1, 2));
         // Another home's settings file keeps its own row, never credited with those calls.
         let work = agent[1];
         assert_eq!(work.profiles, ["work"]);
@@ -1850,6 +1861,54 @@ mod tests {
         assert_eq!(copy.profiles, ["native", "work"]);
         assert_eq!((copy.requests, copy.calls), (1, Some(3)));
         assert_ne!(copy.verdict, Some(Verdict::Off));
+    }
+
+    #[test]
+    fn a_piece_one_source_sent_late_stays_advisory_when_unused() {
+        let scan = ExposureScan {
+            components: vec![
+                component("late", Category::ToolSchema, "Artifact", 1000, &[]),
+                component("system", Category::Other, "wire-system", 1000, &[]),
+            ],
+            requests: vec![
+                exposure("native-1", &["system"], 1, 1000),
+                exposure("t3-1", &["late", "system"], 2, 2000),
+                exposure("native-2", &["late", "system"], 2, 2000),
+            ],
+            ..ExposureScan::default()
+        };
+        // Each its own session, at the same 0.3 tokens per character.
+        let requests: Vec<Request> = [
+            ("native-1", "native", 300),
+            ("t3-1", "agent", 600),
+            ("native-2", "native", 600),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, (id, profile, tokens))| {
+            let mut r = request(id, i as Millis + 1, 0, tokens, 0);
+            r.session = id.into();
+            r.profiles = vec![profile.into()].into();
+            r
+        })
+        .collect();
+        let profiles = [
+            crate::test_support::make_profile("native", "/synthetic/.claude"),
+            crate::test_support::make_t3_profile("agent", "/synthetic/.claude"),
+        ];
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            incomplete: &HashSet::default(),
+            max_cost_per_use_usd: 1.0,
+        });
+        // T3 sent it from its first request, but native Claude Code only later, so its
+        // earlier native sessions could not have recorded a use.
+        let late = row(&rows, "Artifact");
+        assert_eq!((late.requests, late.calls), (2, Some(0)));
+        assert_eq!(late.verdict, Some(Verdict::Consider));
     }
 
     #[test]

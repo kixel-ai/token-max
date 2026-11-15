@@ -1224,7 +1224,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     } = *options;
     let selected_ids: HashSet<&str> = scan.requests.iter().map(|r| &*r.id).collect();
     let mut checks = Vec::new();
-    for group in crate::rows::groups(&scan.profiles, crate::rows::window_owner) {
+    for group in crate::rows::groups(&scan.profiles, crate::rows::compaction_owner) {
         let profile = group.lead;
         let in_profile = |profiles: &[String]| group.covers(profiles);
         let mut requests: Vec<&Request> = scan

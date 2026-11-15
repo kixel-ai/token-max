@@ -884,7 +884,7 @@ pub fn tune_windows(scan: &mut Scan) {
     let undated = |model: &str| strip_dated(model, 8).unwrap_or(model).to_string();
     // Profiles whose windows one file sets share a line, so each reads all of their history.
     let lines: Vec<Vec<String>> = {
-        let groups = crate::rows::groups(profiles.iter(), crate::rows::window_owner);
+        let groups = crate::rows::groups(profiles.iter(), crate::rows::compaction_owner);
         profiles
             .iter()
             .map(|p| {

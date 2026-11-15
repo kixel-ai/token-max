@@ -2100,10 +2100,13 @@ fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<
         .profiles
         .iter()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none());
+    // Profiles share a line when the TTLs and windows the idle replay applies match too.
     let owner = |p: &Profile| {
-        p.idle
-            .as_ref()
-            .map_or_else(String::new, |i| i.owner.clone())
+        format!(
+            "{}\n{}",
+            p.idle.as_ref().map_or("", |i| i.owner.as_str()),
+            crate::rows::compaction_owner(p)
+        )
     };
     for group in crate::rows::groups(native, owner) {
         profile_checks(options, &group, detail, &mut checks);
@@ -2450,12 +2453,7 @@ fn detailed_t3_checks(
     let owner = |p: &Profile| {
         let idle = &p.t3.as_ref().expect("a T3 instance").idle_owner;
         let idle = idle.split(" (instance ").next().unwrap_or(idle);
-        format!(
-            "{idle}\n{}\n{}\n{}",
-            p.ttl.main.owner,
-            p.ttl.subagent.owner,
-            crate::rows::window_owner(p)
-        )
+        format!("{idle}\n{}", crate::rows::compaction_owner(p))
     };
     for group in crate::rows::groups(instances, owner) {
         let profile = group.lead;

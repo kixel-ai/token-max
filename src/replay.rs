@@ -942,7 +942,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
             .filter(|p| p.harness == Harness::Claude)
     };
     for bucket in Bucket::ALL {
-        for group in crate::rows::groups(claude(), |p| p.ttl.get(bucket).owner.clone()) {
+        for group in crate::rows::groups(claude(), |p| crate::rows::ttl_owner(p, bucket)) {
             let mut requests: Vec<&Request> = scan
                 .cache_context
                 .requests

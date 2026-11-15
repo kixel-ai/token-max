@@ -150,10 +150,14 @@ fn check(
             Harness::Codex => carried && !on,
         })
         .count();
-    let rows: Vec<&ContextCost> = input
+    // A memory row covers every profile of its settings file, while memory's own switch
+    // can differ by profile, such as a T3 instance's environment; this line takes only
+    // the requests its own profiles recorded.
+    let rows: Vec<crate::model::ProfileShare> = input
         .context
         .iter()
-        .filter(|c| c.kind == ContextKind::Memory && line.covers(&c.profiles))
+        .filter(|c| c.kind == ContextKind::Memory)
+        .flat_map(|c| c.shares_within(|profiles| line.covers(profiles)))
         .collect();
     // Requests whose context went unrecorded may have carried memory too, whatever
     // today's setting says, since it may have been on when they ran.
@@ -167,9 +171,13 @@ fn check(
         .iter()
         .filter(|m| m.harness == profile.harness && line.covers(&m.profiles))
         .collect();
+    // Unpriced requests are scaled from the priced ones, as the context row does.
     let context_usd = rows
         .iter()
-        .map(|c| c.estimated_usd.map(Usd::from_f64))
+        .map(|c| {
+            (c.priced > 0)
+                .then(|| Usd::from_f64(c.cost_usd.to_f64() * c.requests as f64 / c.priced as f64))
+        })
         .sum::<Option<Usd>>()
         .filter(|_| !rows.is_empty() || unrecorded == 0);
     let reads = uses

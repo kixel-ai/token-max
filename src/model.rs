@@ -2651,6 +2651,28 @@ pub struct ProfileShare {
     pub cost_usd: Usd,
 }
 
+impl ContextCost {
+    /// The part of this line whose requests profiles `covers` recorded: the whole line when
+    /// it covers every source, else each source share it covers.
+    pub fn shares_within(&self, covers: impl Fn(&[String]) -> bool) -> Vec<ProfileShare> {
+        if self.shares.iter().all(|s| covers(&s.profiles)) {
+            return covers(&self.profiles)
+                .then(|| ProfileShare {
+                    profiles: self.profiles.clone(),
+                    requests: self.requests,
+                    priced: self.priced,
+                    cost_usd: self.cost_usd,
+                })
+                .into_iter()
+                .collect();
+        }
+        self.shares
+            .iter()
+            .filter(|s| covers(&s.profiles))
+            .cloned()
+            .collect()
+    }
+}
 // ---------------------------------------------------------------------------
 // Subagent costs.
 

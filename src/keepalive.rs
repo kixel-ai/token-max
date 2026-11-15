@@ -174,7 +174,7 @@ pub fn keepalive_checks(options: &KeepaliveOptions) -> Vec<KeepaliveCheck> {
         format!(
             "{}:keepalive\n{}\n{}",
             p.settings_file,
-            p.ttl.main.owner,
+            crate::rows::ttl_owner(p, crate::model::Bucket::Main),
             crate::rows::window_owner(p)
         )
     };

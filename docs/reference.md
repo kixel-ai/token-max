@@ -288,7 +288,7 @@ they cost and how often they were used. One never used is recommended off,
 whatever it cost. One that cost more than `--max-cost-per-use` (default $1) per
 use is worth considering off, an advisory that exits 0; the rest are kept. An
 unused one stays an advisory when the window cannot rule out a use: it was first
-sent after the window began, an unreadable transcript line names it or may be
+sent after the window began by every source of its line, an unreadable transcript line names it or may be
 a cut-off call (see [Exit codes and unreadable lines](#exit-codes-and-unreadable-lines)),
 a transcript was still being written, or, for a Codex skill, its uses are only
 partly recorded. A Claude skill's uses count only the model's own calls, because hiding it

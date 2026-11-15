@@ -30,15 +30,17 @@ The search proves nonuse only in bytes that were written. A crash can cut a
 record off, and the reader skips it as unreadable once a later write ends
 its line, often with the next record joined on. Its missing bytes could
 hold any call, and a cut inside a name, such as `"name":"Age`, leaves a
-prefix that does not contain `Agent`. Recommended (review of the planning
-PR, for the maintainer to confirm): read each unparseable line as the
-records it holds; a record cut off before its JSON closes counts as a
-possible use of every feature, unless its surviving bytes rule a call out,
-such as a record type that cannot hold one or a call name that survived
-whole, and a cut inside a call name counts for every feature whose name
-starts with what survived. Treat a deferred unterminated final line the
-same way. Cover a cut record, a cut name and a joined pair with synthetic
-tests.
+prefix that does not contain `Agent`. So the rule to implement is: read
+each unparseable line, and a deferred unterminated final line, as the
+records it holds; it makes a feature's verdict yellow when its bytes
+contain the feature's name as a call records it, or when it holds a record
+cut off before its JSON closes, unless the cut record's surviving bytes
+rule out a call to that feature, such as a record type that cannot hold a
+call, a call name that survived whole, or a cut inside a call name that
+the feature's name does not start with. Otherwise the feature stays red.
+This applies the decision above to cut records (found in review of the
+planning PR, listed in its body for the maintainer's pick). Cover a cut
+record, a cut name and a joined pair with synthetic tests.
 
 ## Related
 

@@ -123,6 +123,29 @@ that cannot take the edit, such as a `permissions` that is not an object, makes
 the change a step by hand naming the resolved path. Ctrl-C at any question,
 the last included, exits 2 with no settings changed.
 
+### Backups
+
+Before replacing a settings file, `doctor` copies it as it was to
+`<file>.token-max.bak` beside it (beside the target of a symlink), so the last
+accepted change is undone by copying the backup back. There is one backup per
+file, overwritten on each write; an older change is not kept. The copy has the
+file's owner and permissions, since these files can hold secrets such as an MCP
+server's `env`. The confirm names each backup before the question, and the
+closing line names each one written.
+
+A file git tracks with no uncommitted changes gets no backup, since a `.bak`
+beside a project's `.claude/settings.json` would show up to be committed; the
+confirm says git keeps its previous version. A tracked file with uncommitted
+changes, an untracked one, or any file when `git` is not installed is backed
+up. A file that does not exist yet has nothing to back up.
+
+Every backup is staged as a temporary sibling before any settings file is
+written, and each replaces the earlier `.bak` only once its own file is
+written. A failure to stage one writes nothing and leaves every earlier backup
+as it was; the run fails with the reason. For `~/.claude.json`, the backup
+holds the text re-read under Claude Code's lock, the text the removal was made
+to, not what the walk read at the start.
+
 ### Removing MCP servers
 
 Turning a never-used MCP server off leaves it configured. After a yes to
@@ -154,11 +177,10 @@ also declares, since that layer may turn it back on. The confirm's diff shows ev
 line it removes, with secret values masked. Claude Code rewrites `~/.claude.json` while it runs, so that file is
 not refused when it changed during the walk, unless an entry it would remove
 now holds something other than what the diff showed. It is written before any other
-file, under Claude Code's own lock (`~/.claude.json.lock`), held only while it
-is read again and replaced, and the removal is made to its current text. A
-lock held for over 5 seconds stops the run, and the error names any file
-already written, which happens only when more than one Claude Code state file
-is locked. A stale lock, one not refreshed for 10 seconds, is not taken over:
+file, under Claude Code's own lock (`~/.claude.json.lock`), taken before any
+backup is staged and held until it is replaced, and the removal is made to its
+current text. A lock held for over 5 seconds stops the run before anything is
+written. A stale lock, one not refreshed for 10 seconds, is not taken over:
 the error asks to remove it if no Claude Code is running, since Claude Code
 takes it over itself. Claude Code re-reads the file under that lock before each save,
 so the removal survives sessions already running, which keep the server until

@@ -1342,13 +1342,23 @@ mod unix {
         let diff = at(
             "\n  ~/.claude/settings.json\n  @@ -1,3 +1,3 @@\n    {\n  -   \"promptCacheTtl\": \"5m\"\n  +   \"promptCacheTtl\": \"1h\"\n    }\n",
         );
+        let backup = at(
+            "\n  Backs up ~/.claude/settings.json to ~/.claude/settings.json.token-max.bak\n  first.\n",
+        );
         let confirm =
             at("\n  Write the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: ");
-        let wrote = at("\n  Wrote 1 edit to ~/.claude/settings.json.\n");
+        let wrote = at(
+            "\n  Wrote 1 edit to ~/.claude/settings.json. Backed up the old file to\n  ~/.claude/settings.json.token-max.bak.\n",
+        );
         assert!(report < accepted && accepted < declined, "{stdout}");
         assert!(
-            declined < diff && diff < confirm && confirm < wrote,
+            declined < diff && diff < backup && backup < confirm && confirm < wrote,
             "{stdout}"
+        );
+        // The backup is the file as it was, so copying it back undoes the change.
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
+            "{\n  \"promptCacheTtl\": \"5m\"\n}\n"
         );
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),

@@ -2210,7 +2210,7 @@ pub fn confirm(
         // Every accepted edit was checked to apply when it was offered.
         let after = apply(&pending.target, &pending.edits, &pending.removals)
             .expect("accepted changes apply");
-        text += &diff(&pending.target, &after, style);
+        text += &diff(pending, &after, style);
     }
     write!(output, "{text}")?;
     let names: Vec<String> = plan
@@ -2257,14 +2257,26 @@ pub fn confirm(
 
 /// How `target`'s text would change to `after`: its name, then each changed line with a
 /// line of context on either side, removed lines red and added ones green.
-fn diff(target: &Target, after: &str, style: &Style) -> String {
-    let before = target.before.as_deref().unwrap_or("");
+/// Secret values show masked, as `mask` describes.
+fn diff(pending: &Pending, after: &str, style: &Style) -> String {
+    let target = &pending.target;
+    let mask = if style.unicode {
+        "••••"
+    } else {
+        "****"
+    };
+    let edited: Vec<&[String]> = pending.edits.iter().map(|e| e.path.as_slice()).collect();
+    let hide = |text: &str| match target.harness {
+        Harness::Claude => mask_json(text, mask, &edited),
+        Harness::Codex => mask_toml(text, mask),
+    };
+    let (before, after) = (hide(target.before.as_deref().unwrap_or("")), hide(after));
     let path = style.path(&target.file);
     let mut text = format!(
         "\n{}",
         style.spans(&[(&path, BOLD)], style.width, MARGIN, None)
     );
-    let diff = similar::TextDiff::from_lines(before, after);
+    let diff = similar::TextDiff::from_lines(&before, &after);
     for hunk in diff.unified_diff().context_radius(1).iter_hunks() {
         text += &style.raw(&hunk.header().to_string(), MARGIN, DIM);
         for change in hunk.iter_changes() {
@@ -2281,6 +2293,126 @@ fn diff(target: &Target, after: &str, style: &Style) -> String {
         }
     }
     text
+}
+
+/// Whether the JSON value at `path` may hold a secret, so the confirm masks it: a variable
+/// or header of an MCP server, or a variable in a settings file's `env` block that no edit
+/// in `edited` sets.
+fn secret_json(path: &[Option<&str>], edited: &[&[String]]) -> bool {
+    match path {
+        [
+            ..,
+            Some("mcpServers"),
+            Some(_),
+            Some("env" | "headers"),
+            Some(_),
+        ] => true,
+        [Some("env"), Some(key)] => !edited
+            .iter()
+            .any(|p| matches!(p, [env, k] if env == "env" && k == key)),
+        _ => false,
+    }
+}
+
+/// `text` with each scalar value that [`secret_json`] names replaced by `mask` in quotes,
+/// keeping every other byte, so lines and their numbers stay as they are.
+fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
+    let b = text.as_bytes();
+    // Each open container: whether it is an object, and its current key.
+    let mut stack: Vec<(bool, Option<String>)> = vec![];
+    let mut want_key = false;
+    let (mut out, mut copied, mut i) = (String::with_capacity(text.len()), 0, 0);
+    while i < b.len() {
+        let start = i;
+        match b[i] {
+            b'{' | b'[' => {
+                stack.push((b[i] == b'{', None));
+                want_key = b[i] == b'{';
+                i += 1;
+                continue;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                want_key = false;
+                i += 1;
+                continue;
+            }
+            b',' => {
+                want_key = matches!(stack.last(), Some((true, _)));
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(b.len());
+                if want_key {
+                    let key = serde_json::from_str::<String>(&text[start..i]).ok();
+                    if let Some(top) = stack.last_mut() {
+                        top.1 = key;
+                    }
+                    want_key = false;
+                    continue;
+                }
+            }
+            c if c == b'-' || c.is_ascii_alphanumeric() => {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b"+-.".contains(&b[i])) {
+                    i += 1;
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        // A scalar value spans start..i.
+        let path: Vec<Option<&str>> = stack
+            .iter()
+            .map(|(object, key)| if *object { key.as_deref() } else { None })
+            .collect();
+        if secret_json(&path, edited) {
+            out.push_str(&text[copied..start]);
+            out.push_str(&format!("\"{mask}\""));
+            copied = i;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// A config.toml with each MCP server's `env` and `http_headers` values, and each variable
+/// `shell_environment_policy.set` sets, replaced by `mask`, keeping the rest as written.
+fn mask_toml(text: &str, mask: &str) -> String {
+    use toml_edit::{DocumentMut, Item, TableLike};
+    fn table(item: Option<&mut Item>) -> Option<&mut dyn TableLike> {
+        item.and_then(Item::as_table_like_mut)
+    }
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return text.into();
+    };
+    let hide = |table: Option<&mut dyn TableLike>| {
+        for (_, item) in table.into_iter().flat_map(|t| t.iter_mut()) {
+            if let Some(value) = item.as_value_mut() {
+                let decor = value.decor().clone();
+                *value = mask.into();
+                *value.decor_mut() = decor;
+            }
+        }
+    };
+    if let Some(servers) = table(doc.get_mut("mcp_servers")) {
+        for (_, server) in servers.iter_mut() {
+            if let Some(server) = server.as_table_like_mut() {
+                hide(table(server.get_mut("env")));
+                hide(table(server.get_mut("http_headers")));
+            }
+        }
+    }
+    if let Some(policy) = table(doc.get_mut("shell_environment_policy")) {
+        hide(table(policy.get_mut("set")));
+    }
+    doc.to_string()
 }
 
 /// A file the doctor wrote.
@@ -3521,7 +3653,7 @@ mod tests {
         let config = w.codex.join("config.toml");
         std::fs::write(
             &state,
-            "{\n  \"numStartups\": 3,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {}\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {}\n      }\n    }\n  }\n}\n",
+            "{\n  \"numStartups\": 3,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {\n          \"headers\": {\n            \"Authorization\": \"Bearer s3cret\"\n          }\n        }\n      }\n    }\n  }\n}\n",
         )
         .unwrap();
         std::fs::write(
@@ -3592,11 +3724,20 @@ mod tests {
         let shown = String::from_utf8(shown).unwrap();
         // Removals show as the lines they delete, with a line of context.
         assert!(shown.contains(&format!(
-            "\n  ~{sep}.claude.json\n  @@ -4,3 +4,2 @@\n        \"A\": {{}},\n  -     \"B\": {{}},\n        \"keep\": {{}}\n"
+            "\n  ~{sep}.claude.json\n  @@ -4,3 +4,2 @@\n        \"A\": {{}},\n  -     \"B\": {{}},\n        \"keep\": {{\n"
         )), "{shown}");
         assert!(shown.contains(
-            "\n  - [mcp_servers.off]\n  - enabled = false\n  - [mcp_servers.off.env]\n  - X = \"1\"\n  -\n    [mcp_servers.on]\n"
+            "\n  - [mcp_servers.off]\n  - enabled = false\n  - [mcp_servers.off.env]\n  - X = \"****\"\n  -\n    [mcp_servers.on]\n"
         ), "{shown}");
+        assert!(
+            shown.contains("\n  -             \"Authorization\": \"****\"\n"),
+            "{shown}"
+        );
+        // A removal names each variable and header but never prints a value.
+        assert!(
+            !shown.contains("s3cret") && !shown.contains("\"1\""),
+            "{shown}"
+        );
         assert!(
             shown.contains("Write the 3 accepted changes and 3 removals to "),
             "{shown}"
@@ -3626,13 +3767,13 @@ mod tests {
         // holds now rather than refusing it.
         std::fs::write(
             &state,
-            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {}\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {}\n      }\n    }\n  }\n}\n",
+            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {\n          \"headers\": {\n            \"Authorization\": \"Bearer s3cret\"\n          }\n        }\n      }\n    }\n  }\n}\n",
         )
         .unwrap();
         let written = write(&plan).unwrap();
         assert_eq!(
             std::fs::read_to_string(&state).unwrap(),
-            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"keep\": {}\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {}\n    }\n  }\n}\n"
+            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {}\n    }\n  }\n}\n"
         );
         assert!(!w.home.join(".claude.json.lock").exists());
         assert_eq!(
@@ -3655,5 +3796,25 @@ mod tests {
         assert_eq!(printed.matches("too? ").count(), 1, "{printed}");
         assert_eq!(choice(&plan, "A"), &Choice::Accepted);
         assert!(plan.files.iter().all(|p| p.removals.is_empty()));
+    }
+
+    #[test]
+    fn the_confirm_masks_secret_json_values_and_keeps_the_lines() {
+        let text = "{\n  \"env\": {\"API_KEY\": \"sk-\\\"x\", \"DISABLE_X\": \"1\"},\n  \"mcpServers\": {\n    \"gh\": {\n      \"command\": \"gh\", \"args\": [\"a\"],\n      \"env\": {\"GITHUB_TOKEN\": \"ghp_1\", \"N\": 3}\n    }\n  },\n  \"projects\": {\"/p\": {\"mcpServers\": {\"web\": {\"headers\": {\"Authorization\": \"Bearer t\"}, \"url\": \"https://x\"}}}}\n}\n";
+        let edited = [vec!["env".to_string(), "DISABLE_X".to_string()]];
+        let edited: Vec<&[String]> = edited.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            mask_json(text, "****", &edited),
+            "{\n  \"env\": {\"API_KEY\": \"****\", \"DISABLE_X\": \"1\"},\n  \"mcpServers\": {\n    \"gh\": {\n      \"command\": \"gh\", \"args\": [\"a\"],\n      \"env\": {\"GITHUB_TOKEN\": \"****\", \"N\": \"****\"}\n    }\n  },\n  \"projects\": {\"/p\": {\"mcpServers\": {\"web\": {\"headers\": {\"Authorization\": \"****\"}, \"url\": \"https://x\"}}}}\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_confirm_masks_secret_toml_values_and_keeps_the_rest() {
+        let text = "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"ghp_1\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"Bearer t\"  # theirs\n\n[shell_environment_policy.set]\nKEY = \"v\"\n";
+        assert_eq!(
+            mask_toml(text, "****"),
+            "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"****\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"****\"  # theirs\n\n[shell_environment_policy.set]\nKEY = \"****\"\n"
+        );
     }
 }

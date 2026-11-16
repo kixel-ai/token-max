@@ -77,7 +77,11 @@ CLAUDE.md over Claude Code's size guidance or a change something else would
 override, each saying why, then every other line, each group ranked as the
 report ranks it. Then the confirm shows how each settings file would change, as
 a diff with a line of context around each change, removed lines in red and
-added ones in green, and one question asks whether to write the accepted
+added ones in green. Values that may be secrets show as `••••` (`****`
+without Unicode), keeping their keys: each variable or header of an MCP server
+(`env` and `headers` in Claude Code, `env` and `http_headers` in Codex), each
+variable in a Claude settings file's `env` block that no accepted change sets,
+and each in Codex's `shell_environment_policy.set`. Then one question asks whether to write the accepted
 changes, naming each file; nothing is written before that yes, end of input is a no,
 and a no says nothing was written. Each file is then written once, with every
 edit accepted for it. A change not accepted keeps its edit in the list, to
@@ -147,7 +151,7 @@ local-scope server turned off in its project with `/mcp`
 (`disabledMcpServers`), and a Codex server with `enabled = false`. A server
 with only some tools denied is not offered, nor a Codex server another layer
 also declares, since that layer may turn it back on. The confirm's diff shows every
-line it removes. Claude Code rewrites `~/.claude.json` while it runs, so that file is
+line it removes, with secret values masked. Claude Code rewrites `~/.claude.json` while it runs, so that file is
 not refused when it changed during the walk, unless an entry it would remove
 now holds something other than what the diff showed. It is written before any other
 file, under Claude Code's own lock (`~/.claude.json.lock`), held only while it

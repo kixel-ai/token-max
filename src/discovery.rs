@@ -87,6 +87,23 @@ impl DiscoveryOptions {
         .contains(&&file.to_string())
     }
 
+    /// The switches managed settings (Claude) or the system `config.toml` (Codex) turn off,
+    /// including a system MCP allowlist, which `--defaults` keeps.
+    fn policy_off(&self, harness: Harness) -> Result<Vec<Control>, ScanError> {
+        Ok(match harness {
+            Harness::Claude => switched_off(
+                Harness::Claude,
+                &settings(&self.managed_settings_file, Harness::Claude)?,
+            ),
+            Harness::Codex => {
+                let system = settings(&self.codex_system_config_file, Harness::Codex)?;
+                let mut off = switched_off(Harness::Codex, &system);
+                off.extend(allowlists(&system));
+                off
+            }
+        })
+    }
+
     /// Under `--defaults`, add to `on` each switch `file` really turns off that policy does
     /// not also turn off, since `--defaults` shows that feature on.
     fn pretend_on(
@@ -98,23 +115,16 @@ impl DiscoveryOptions {
         if !self.defaults {
             return Ok(());
         }
-        let policy = match harness {
-            Harness::Claude => switched_off(
-                Harness::Claude,
-                &settings(&self.managed_settings_file, Harness::Claude)?,
-            ),
-            Harness::Codex => switched_off(
-                Harness::Codex,
-                &settings(&self.codex_system_config_file, Harness::Codex)?,
-            ),
-        };
+        let policy = self.policy_off(harness)?;
         let config = settings(file, harness)?;
         let mut found = switched_off(harness, &config);
         if harness == Harness::Codex {
             found.extend(allowlists(&config));
         }
         for control in found {
-            let kept = policy.iter().any(|k| crate::defaults::covers(k, &control));
+            // Two allowlists differ by what they list, so each tool is checked in context.
+            let allowlist = control.path.last().is_some_and(|k| k == "enabled_tools");
+            let kept = !allowlist && policy.iter().any(|k| crate::defaults::covers(k, &control));
             let seen = on
                 .iter()
                 .any(|(f, k)| f == file && crate::defaults::same_switch(k, &control));
@@ -2065,8 +2075,12 @@ pub(crate) fn profile(
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
         pretended_on: vec![],
+        policy_off: vec![],
     };
-    // What the real file turns off, which --defaults shows on.
+    // What the real file turns off, which --defaults shows on unless policy keeps it off.
+    if options.defaults {
+        profile.policy_off = options.policy_off(harness)?;
+    }
     let file = profile.settings_file.clone();
     options.pretend_on(harness, &mut profile.pretended_on, &file)?;
     Ok(profile)
@@ -2622,6 +2636,11 @@ mod tests {
             w.codex.join("config.toml"),
             "service_tier = 'fast'\n[mcp_servers.docs]\ncommand = 'docs'\nenabled = false\n[mcp_servers.kit]\ncommand = 'kit'\nenabled_tools = ['a']\n",
         );
+        // The system allowlist keeps tool b of kit off whatever the user's files say.
+        write(
+            w.home.join("system.toml"),
+            "[mcp_servers.kit]\nenabled_tools = ['a']\n",
+        );
         // A --profile selection would leave speed unresolved; a default user makes none.
         write(w.codex.join("work.config.toml"), "service_tier = 'fast'\n");
         write(
@@ -2660,6 +2679,18 @@ mod tests {
         // The servers stay declared, and on, with every tool.
         assert_eq!(codex.mcp_servers, ["docs", "kit"]);
         assert!(codex.switched_off.is_empty());
+        let tool = |name: &str| Control {
+            path: vec!["mcp_servers".into(), "kit".into(), "disabled_tools".into()],
+            value: ControlValue::Text(name.into()),
+            append: true,
+        };
+        let policy = |t| {
+            codex
+                .policy_off
+                .iter()
+                .any(|k| crate::defaults::covers(k, &tool(t)))
+        };
+        assert_eq!((policy("a"), policy("b")), (false, true));
         let on: Vec<&[String]> = codex
             .pretended_on
             .iter()

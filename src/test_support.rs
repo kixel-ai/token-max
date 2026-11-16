@@ -241,6 +241,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         codex_system_config: None,
         switched_off: vec![],
         pretended_on: vec![],
+        policy_off: vec![],
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),

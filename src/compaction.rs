@@ -2004,6 +2004,7 @@ mod tests {
             codex_system_config: None,
             switched_off: vec![],
             pretended_on: vec![],
+            policy_off: vec![],
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),

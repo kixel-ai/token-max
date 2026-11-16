@@ -990,6 +990,10 @@ pub struct Profile {
     /// otherwise.
     #[serde(skip)]
     pub pretended_on: Vec<(String, Control)>,
+    /// Under `doctor --defaults`, the switches policy turns off, which keep a feature off
+    /// whatever `pretended_on` restores; empty otherwise.
+    #[serde(skip)]
+    pub policy_off: Vec<Control>,
 }
 
 /// A setting's current value and the file or variable that sets it.

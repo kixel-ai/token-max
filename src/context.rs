@@ -204,11 +204,12 @@ fn pretended_on(c: &ContextCost, profiles: &[Profile]) -> bool {
     let Some(control) = &c.control else {
         return false;
     };
-    profiles
-        .iter()
-        .filter(|p| c.profiles.contains(&p.id))
+    let mine = || profiles.iter().filter(|p| c.profiles.contains(&p.id));
+    let covered = |switch: &Control| crate::defaults::covers(switch, control);
+    mine()
         .flat_map(|p| p.pretended_on.iter().map(|(_, switch)| switch))
-        .any(|switch| crate::defaults::covers(switch, control))
+        .any(covered)
+        && !mine().flat_map(|p| &p.policy_off).any(covered)
 }
 
 /// Context setting rows whose controls are not covered by a server recommendation.
@@ -1582,6 +1583,30 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for (owner, key, c) in &mut result {
         c.details = details.remove(&(*owner, *key)).unwrap_or_default();
         c.details.sort_by(|a, b| a.name.cmp(&b.name));
+        // A tool --defaults restores on a server still sent adds what it cost on the
+        // requests that did not carry it to its server's total.
+        let restored: f64 = c
+            .details
+            .iter()
+            .filter(|d| d.pretended_requests.is_some())
+            .filter_map(|d| {
+                let all = d.pretended_requests? as f64;
+                Some(d.estimated_usd? * (1.0 - d.requests as f64 / all))
+            })
+            .sum();
+        if restored > 0.0
+            && c.pretended_requests.is_none()
+            && let Some(usd) = &mut c.estimated_usd
+        {
+            *usd += restored;
+            c.cost_per_use_usd = c.calls.filter(|&n| n > 0).map(|n| *usd / n as f64);
+            if c.verdict == Some(Verdict::Keep)
+                && c.cost_per_use_usd
+                    .is_some_and(|each| each > input.max_cost_per_use_usd)
+            {
+                c.verdict = Some(Verdict::Consider);
+            }
+        }
         if c.verdict == Some(Verdict::Off) {
             for detail in &mut c.details {
                 detail.verdict = None;

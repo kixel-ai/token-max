@@ -40,6 +40,10 @@ Recommended:
   re-read returned, not what the walk read at the start.
 - Follow a symlinked settings file to its target, as the write already does,
   and put the backup beside the target.
-- Write every backup before the first settings file, holding `~/.claude.json`'s
-  lock from its backup through its write, so a failed backup
-  writes nothing and the run fails with the reason.
+- Order: take `~/.claude.json`'s lock and re-read it first, then stage every
+  file's backup as a temporary sibling before writing any settings file, and
+  hold that lock until its write. A failed staging writes nothing, leaves
+  every existing `.bak` as it was, and fails the run with the reason.
+- Move each staged backup over its `.bak` only once its settings write
+  commits, so a run that stops partway never replaces a `.bak` whose file it
+  didn't change.

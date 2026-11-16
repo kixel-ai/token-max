@@ -1048,6 +1048,15 @@ impl Listing {
         format!("{}{}{}", self.head, out.text, self.tail)
     }
 
+    /// What a report line's setting or feature does, in one sentence.
+    pub fn what(&self, origin: Origin) -> String {
+        self.rows
+            .iter()
+            .find(|r| r.origin == Some(origin))
+            .map(|r| r.what.clone())
+            .unwrap_or_default()
+    }
+
     /// The evidence behind a report line, as one paragraph: what was measured, then why.
     pub fn evidence(&self, origin: Origin) -> String {
         self.rows
@@ -1679,7 +1688,13 @@ fn fable_span(w: &FableWeek) -> String {
 
 /// A profile's weekly Fable spend beside the plan rule, with no share of a limit and no verdict.
 fn fable_row(u: &FableUse) -> Row {
-    let mut row = Row::new(Claim::Official, Mark::Info, "Fable weekly use".into());
+    let mut row = Row::new(
+        Claim::Official,
+        Mark::Info,
+        "Fable weekly use".into(),
+        "What Fable models cost each week, which a Claude plan may limit apart from other models."
+            .into(),
+    );
     row.sources = vec![CLAUDE_PRICING, FABLE_PLANS];
     let caveats = fable_caveats(u);
     let official = format!("Official: {FABLE_RULE} {FABLE_SETTING}");
@@ -2837,6 +2852,70 @@ fn short_label(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
+/// What a tool, skill or MCP server does: Claude Code's own sentence for its built-in tools,
+/// else the first sentence of the description it ships, else that none was recorded.
+fn piece_what(c: &ContextCost) -> String {
+    let shipped = c.description.clone();
+    match c.kind {
+        ContextKind::Skill if c.name == SYNCED_SKILLS => {
+            "Skills from your claude.ai account, which Claude Code syncs into every session.".into()
+        }
+        ContextKind::Tool => (c.harness == Harness::Claude)
+            .then(|| crate::descriptions::claude_tool(&c.name))
+            .flatten()
+            .map(str::to_string)
+            .or(shipped)
+            .unwrap_or_else(|| "A tool with no recorded description.".into()),
+        ContextKind::McpServer if c.harness == Harness::Codex && c.name == "codex_apps" => {
+            "ChatGPT apps, such as connectors to other services, that Codex can call as tools."
+                .into()
+        }
+        ContextKind::McpServer => shipped.unwrap_or_else(|| {
+            let tools: Vec<&str> = c
+                .details
+                .iter()
+                .filter(|d| d.kind == ContextKind::McpTool)
+                .map(|d| d.name.rsplit("__").next().unwrap_or(&d.name))
+                .collect();
+            match tools.as_slice() {
+                [] => "An MCP server with no recorded description.".into(),
+                [tool] => {
+                    format!("An MCP server with no recorded description; its tool is {tool}.")
+                }
+                [first @ .., last] if tools.len() <= 4 => format!(
+                    "An MCP server with no recorded description; its tools are {} and {last}.",
+                    first.join(", ")
+                ),
+                _ => format!(
+                    "An MCP server with no recorded description; its tools include {} and {} more.",
+                    tools[..3].join(", "),
+                    count(tools.len() as u64 - 3)
+                ),
+            }
+        }),
+        ContextKind::McpTool => {
+            shipped.unwrap_or_else(|| "An MCP tool with no recorded description.".into())
+        }
+        ContextKind::Skill => {
+            shipped.unwrap_or_else(|| "A skill with no recorded description.".into())
+        }
+        _ => shipped.unwrap_or_else(|| "Context with no recorded description.".into()),
+    }
+}
+
+/// What an instruction file is.
+fn instructions_what(c: &ContextCost) -> String {
+    match c.harness {
+        Harness::Claude => {
+            "Instructions Claude Code loads from this file into each session it applies to."
+        }
+        Harness::Codex => {
+            "Instructions Codex loads from this file into each session it applies to."
+        }
+    }
+    .into()
+}
+
 /// The directory a skill was found in, which tells apart two skills with one name.
 fn skill_location(c: &ContextCost, out: &Out<'_>) -> Option<String> {
     let path = c.skill.as_ref()?.path.as_ref()?;
@@ -3061,6 +3140,8 @@ fn context_guidance(c: &ContextCost, profiles: &[Profile], name: &str) -> Vec<St
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Cap {
     label: &'static str,
+    /// What the cap does.
+    what: &'static str,
     /// The setting's name.
     key: &'static str,
     /// Its current value, briefly.
@@ -3082,6 +3163,11 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
     };
     let cap = |label, key, value: String, text: String| Cap {
         label,
+        what: match label {
+            "Bash output" => "How much of a Bash command's output stays in the conversation.",
+            "MCP output" => "How many tokens of an MCP tool's result stay in the conversation.",
+            _ => "How many tokens of a tool's output Codex keeps in the conversation.",
+        },
         key,
         value,
         text,
@@ -3313,6 +3399,8 @@ struct Row {
     claim: Claim,
     mark: Mark,
     name: String,
+    /// One plain sentence saying what the setting or feature does.
+    what: String,
     /// The current value, and the recommended one after an arrow for a change.
     value: String,
     /// What it saves per 30 days or costs over the window, as a verb and a figure.
@@ -3337,11 +3425,12 @@ struct Row {
 }
 
 impl Row {
-    fn new(claim: Claim, mark: Mark, name: String) -> Self {
+    fn new(claim: Claim, mark: Mark, name: String, what: String) -> Self {
         Row {
             claim,
             mark,
             name,
+            what,
             value: String::new(),
             amount: None,
             share: None,
@@ -3595,6 +3684,7 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
             let head = format!("{marker}{}", columns.join("  ").trim_end());
             out.hang(&head, indent, row.mark.style());
             if out.options.details {
+                out.line(&format!("What: {}", row.what), indent, PLAIN);
                 out.line(&row.evidence, indent, PLAIN);
             }
         }
@@ -3635,6 +3725,7 @@ const CODEX_AGENTS_DOCS: &str = "https://learn.chatgpt.com/docs/agent-configurat
 /// An instruction file's row: Claude's line guidance or Codex's byte budget, where one applies.
 fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row {
     let name = out.home(&c.name);
+    let what = instructions_what(c);
     let claude_file = c
         .name
         .rsplit(['/', '\\'])
@@ -3642,14 +3733,14 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
         .is_some_and(|n| n == "CLAUDE.md" || n == "CLAUDE.local.md");
     let advice = "Shorten it, or move parts into path-scoped rules or skills.";
     if c.harness == Harness::Claude && !claude_file {
-        let mut row = Row::new(Claim::Measured, Mark::Info, name);
+        let mut row = Row::new(Claim::Measured, Mark::Info, name, what);
         row.amount = cost_amount(c.estimated_usd);
         row.evidence =
             format!("No provider size guidance covers it, and no setting turns it off. {advice}");
         return row;
     }
     let Some(size) = c.instruction_size else {
-        let mut row = Row::new(Claim::Official, Mark::Unknown, name);
+        let mut row = Row::new(Claim::Official, Mark::Unknown, name, what);
         row.amount = cost_amount(c.estimated_usd);
         row.evidence = not_enough(
             "This record has no rendered instruction text to measure against the provider's guidance.",
@@ -3663,6 +3754,7 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
                 Claim::Official,
                 if over { Mark::Consider } else { Mark::Keep },
                 name,
+                what,
             );
             row.value = format!(
                 "{} line{}",
@@ -3703,14 +3795,14 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
             let unseen = "A command-line override is not recorded.";
             let mut row = match agents_budget(c, profiles) {
                 Err(reason) => {
-                    let mut row = Row::new(Claim::Official, Mark::Unknown, name);
+                    let mut row = Row::new(Claim::Official, Mark::Unknown, name, what);
                     row.evidence = not_enough(&reason);
                     row
                 }
                 // Rendered bytes include headers and wrappers, so only reaching the
                 // budget can mean Codex truncated the source files.
                 Ok(budget) if size.bytes >= budget => {
-                    let mut row = Row::new(Claim::Official, Mark::Consider, name);
+                    let mut row = Row::new(Claim::Official, Mark::Consider, name, what);
                     row.evidence = format!(
                         "At or above {}, so Codex may have cut it short. Trim or scope it to keep the important instructions. {unseen}",
                         limit(budget)
@@ -3718,7 +3810,7 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
                     row
                 }
                 Ok(budget) => {
-                    let mut row = Row::new(Claim::Official, Mark::Keep, name);
+                    let mut row = Row::new(Claim::Official, Mark::Keep, name, what);
                     row.evidence = format!("Under {}. {unseen}", limit(budget));
                     row
                 }
@@ -4197,7 +4289,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
     let check_row = |c: &(usize, &CheckResult, Common<'_>), out: &Out<'_>| {
         let (index, result, r) = c;
         let mark = check_mark(result, r);
-        let mut row = Row::new(Claim::of(result), mark, setting_name(result));
+        let mut row = Row::new(
+            Claim::of(result),
+            mark,
+            setting_name(result),
+            crate::descriptions::check(result).into(),
+        );
         row.origin = Some(Origin::Check(*index));
         if r.requests > 0 {
             row.stats = format!(
@@ -4557,7 +4654,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             Verdict::Consider => Mark::Consider,
             Verdict::Keep => Mark::Keep,
         };
-        let mut row = Row::new(Claim::Measured, mark, short_label(c, out));
+        let mut row = Row::new(Claim::Measured, mark, short_label(c, out), piece_what(c));
         row.origin = Some(Origin::Context(*index));
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
@@ -4670,7 +4767,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             && c.verdict.is_none()
             && !matches!(c.kind, ContextKind::Memory | ContextKind::McpDiscovery)
     }) {
-        let mut row = Row::new(Claim::Measured, Mark::Unknown, short_label(c, out));
+        let mut row = Row::new(
+            Claim::Measured,
+            Mark::Unknown,
+            short_label(c, out),
+            piece_what(c),
+        );
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.value = "on".into();
@@ -4714,7 +4816,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         .iter()
         .filter_map(|s| s.text_generation.as_ref())
     {
-        let mut row = Row::new(Claim::Measured, Mark::Unknown, "T3 text generation".into());
+        let mut row = Row::new(
+            Claim::Measured,
+            Mark::Unknown,
+            "T3 text generation".into(),
+            "The model T3 Code uses to write thread titles, branch names, PR text and other generated text.".into(),
+        );
         row.value = format!("{} {}", g.selection.instance, g.selection.model);
         let mut text = format!(
             "{} ({}). Set in {}.",
@@ -4761,7 +4868,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
     }
     let loading = mcp_guidance(report.context.iter().filter(|c| c.current));
     if !loading.is_empty() {
-        let mut row = Row::new(Claim::Official, Mark::Info, "MCP tool loading".into());
+        let mut row = Row::new(
+            Claim::Official,
+            Mark::Info,
+            "MCP tool loading".into(),
+            "Whether each MCP tool's full definition is sent with every request, or only its name until the model loads it.".into(),
+        );
         let notes: IndexSet<&str> = loading.iter().flat_map(|g| g.notes.clone()).collect();
         row.evidence = notes.into_iter().collect::<Vec<_>>().join(" ");
         row.sources = loading.iter().filter_map(|g| g.source).collect();
@@ -4802,7 +4914,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         let mut row = match &key.1 {
             // A cap is a setting whose cost transcripts cannot weigh.
             Some(cap) => {
-                let mut row = Row::new(Claim::Measured, Mark::Unknown, cap.label.into());
+                let mut row = Row::new(
+                    Claim::Measured,
+                    Mark::Unknown,
+                    cap.label.into(),
+                    cap.what.into(),
+                );
                 row.value = cap.value.clone();
                 row.setting = cap.key.into();
                 row.evidence = format!(
@@ -4822,7 +4939,13 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                 } else {
                     String::new()
                 };
-                let mut row = Row::new(Claim::Measured, Mark::Info, "Other tool output".into());
+                let mut row = Row::new(
+                    Claim::Measured,
+                    Mark::Info,
+                    "Other tool output".into(),
+                    "Tool results kept in the conversation from tools no checked cap limits."
+                        .into(),
+                );
                 row.setting = "no cap is checked".into();
                 row.evidence = format!(
                     "From {}{more}. {largest}{unpriced}No cap is checked for it.",
@@ -4842,7 +4965,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
     }
     // One line for each subagent type, whose guidance is evidence beside its cost.
     for c in &report.subagents {
-        let mut row = Row::new(Claim::Measured, Mark::Info, subagent_name(c));
+        let mut row = Row::new(
+            Claim::Measured,
+            Mark::Info,
+            subagent_name(c),
+            crate::descriptions::subagent(c).into(),
+        );
         row.profile = tag(&c.profiles, &switch, out);
         row.cost(&c.cost, &spend);
         row.evidence = subagent_line(c, &about, out);
@@ -4883,7 +5011,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         .iter()
         .filter(|c| matches!(c.kind, ContextKind::Skill | ContextKind::McpServer))
     {
-        let mut row = Row::new(Claim::Measured, Mark::Info, short_label(c, out));
+        let mut row = Row::new(
+            Claim::Measured,
+            Mark::Info,
+            short_label(c, out),
+            piece_what(c),
+        );
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
         row.costs(c.estimated_usd, false, &spend);
@@ -4922,6 +5055,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             Claim::Measured,
             Mark::Info,
             "System prompt and core tools".into(),
+            "The harness's own instructions and the tools it cannot work without, such as Bash and Read, sent with every request.".into(),
         );
         let known: Vec<f64> = core.iter().flatten().copied().collect();
         row.costs(
@@ -5529,6 +5663,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            description: None,
             shares: vec![],
             profiles: vec!["profile".into()],
             kind,
@@ -5968,6 +6103,48 @@ mod tests {
     }
 
     #[test]
+    fn a_feature_says_what_it_does_from_curated_shipped_or_recorded_names() {
+        let piece = |kind, name: &str, description: Option<&str>| {
+            let mut c = context_piece(kind, name, None, Some(1.0), Some(0));
+            c.description = description.map(str::to_string);
+            c
+        };
+        // Claude Code's own sentence outranks the description written for the model.
+        let artifact = piece(ContextKind::Tool, "Artifact", Some("Renders HTML."));
+        assert!(piece_what(&artifact).starts_with("Lets Claude publish"));
+        let unknown = piece(ContextKind::Tool, "Mystery", Some("Does a thing."));
+        assert_eq!(piece_what(&unknown), "Does a thing.");
+        let unknown = piece(ContextKind::Tool, "Mystery", None);
+        assert_eq!(piece_what(&unknown), "A tool with no recorded description.");
+        // A server with no description of its own names its tools.
+        let mut server = piece(ContextKind::McpServer, "docs", None);
+        assert_eq!(
+            piece_what(&server),
+            "An MCP server with no recorded description."
+        );
+        for (n, tool) in ["read", "search", "list", "get", "put"].iter().enumerate() {
+            server.details.push(piece(
+                ContextKind::McpTool,
+                &format!("mcp__docs__{tool}"),
+                None,
+            ));
+            let want = match n {
+                0 => "its tool is read.",
+                1 => "its tools are read and search.",
+                3 => "its tools are read, search, list and get.",
+                4 => "its tools include read, search, list and 2 more.",
+                _ => continue,
+            };
+            assert_eq!(
+                piece_what(&server),
+                format!("An MCP server with no recorded description; {want}")
+            );
+        }
+        server.description = Some("Searches the docs.".into());
+        assert_eq!(piece_what(&server), "Searches the docs.");
+    }
+
+    #[test]
     fn the_summary_gives_one_line_per_setting() {
         let report = synthetic();
         let plain = text(&report, None, false);
@@ -6011,6 +6188,31 @@ mod tests {
         }
         assert!(order[..6].iter().all(|(change, _)| *change));
         assert!(order[6..].iter().all(|(change, _)| !*change));
+        // Details open every line with what it does; by default it stays one line.
+        assert!(report_lines(&plain).iter().all(|r| r.what.is_empty()));
+        let what: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|r| (r.head.as_str(), r.what.as_str()))
+            .collect();
+        assert!(what.iter().all(|(_, w)| w.ends_with('.')), "{what:#?}");
+        for (head, want) in [
+            (
+                "Artifact tool",
+                "Lets Claude publish an HTML or Markdown file to claude.ai as an artifact: a private, interactive page you can share.",
+            ),
+            (
+                "Skills synced from claude.ai",
+                "Skills from your claude.ai account, which Claude Code syncs into every session.",
+            ),
+            // Neither curated nor shipped: it says so rather than guess.
+            ("Skill example", "A skill with no recorded description."),
+            (
+                "Fast mode",
+                "Fast mode serves responses faster at a premium price per token.",
+            ),
+        ] {
+            assert_eq!(line(head).what, want, "{head}");
+        }
         let has = |head: &str, mark: &str, claim: &str, evidence: &str| {
             let row = line(head);
             assert_eq!(
@@ -7705,7 +7907,7 @@ mod tests {
     #[test]
     fn changes_rank_by_saving_and_the_rest_by_cost() {
         let line = |name: &str, mark, verb: &'static str, share: f64| {
-            let mut row = Row::new(Claim::Measured, mark, name.into());
+            let mut row = Row::new(Claim::Measured, mark, name.into(), String::new());
             row.amount = Some((verb, String::new()));
             row.share = Some(share);
             row
@@ -8097,6 +8299,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            description: None,
             shares: vec![],
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
@@ -8205,6 +8408,7 @@ mod tests {
             skill: None,
             details: vec![],
             instruction_size: None,
+            description: None,
             shares: vec![],
             profiles: vec![profile.clone()],
             kind,

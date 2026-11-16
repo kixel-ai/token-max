@@ -77,6 +77,19 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
         }
         let file = &profile.settings_file;
         let step = format!("remove [mcp_servers.{id}] from {file}");
+        // The scan saw the table, but the file may have changed since; with no table to
+        // remove, removing the path would also undo the turn-off edit it follows.
+        let declared = settings(file, Harness::Codex)
+            .map(|user| members(user.get("mcp_servers")).contains_key(id.as_str()));
+        if !matches!(declared, Ok(true)) {
+            return vec![Definition::Manual {
+                step: "remove it where it is configured, such as a -c override or a project's config.toml".into(),
+                reason: match declared {
+                    Err(e) => e.message,
+                    _ => format!("{file} does not declare [mcp_servers.{id}]"),
+                },
+            }];
+        }
         return match codex_layers(profile, id) {
             Ok(layers) if layers.is_empty() => vec![Definition::Entry(Entry {
                 server: id.clone(),
@@ -534,7 +547,13 @@ mod tests {
         let Definition::Manual { step, .. } = &found[2] else {
             panic!("{found:?}")
         };
-        assert_eq!(step, &format!("remove it from {project}/.mcp.json"));
+        assert_eq!(
+            step,
+            &format!(
+                "remove it from {}",
+                Path::new(project.as_ref()).join(".mcp.json").display()
+            )
+        );
         let Definition::Entry(local) = &found[1] else {
             unreachable!()
         };
@@ -565,6 +584,22 @@ mod tests {
             value: ControlValue::Bool(false),
             append: false,
         };
+        // A table the user's file no longer declares is not offered: removing its path
+        // would only undo the turn-off edit that creates it.
+        write(&p.settings_file, "model = \"m\"\n");
+        let control = off(&["mcp_servers", "my.docs", "enabled"]);
+        let found = definitions("my_docs", &control, &[&p]);
+        let [Definition::Manual { reason, .. }] = found.as_slice() else {
+            panic!("{found:?}")
+        };
+        assert!(
+            reason.ends_with(r#"does not declare [mcp_servers.my.docs]"#),
+            "{reason}"
+        );
+        write(
+            &p.settings_file,
+            "[mcp_servers.\"my.docs\"]\ncommand = \"x\"\n",
+        );
         let found = definitions(
             "my_docs",
             &off(&["mcp_servers", "my.docs", "enabled"]),

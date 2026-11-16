@@ -20,7 +20,10 @@ regenerated, and lead with the results' headline figure. Keep the claim
 kinds (Measured, Official, Opinion) and privacy (nothing leaves the machine)
 in a few lines each.
 
+The logo at the top is `assets/logo/logo-on-light.svg` and
+`assets/logo/logo-on-dark.svg`, switched with a `<picture>` element and
+`prefers-color-scheme`; the mark alone is the root `favicon.svg`.
+
 ## Required
 
-- [Draw the token-max logo](/quest/m0/launch/logo.md) - the logo at the top
 - [Make doctor's output pretty](/quest/m0/launch/style.md) - the look the recording shows

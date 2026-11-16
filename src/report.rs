@@ -8558,4 +8558,123 @@ mod tests {
         assert!(details.contains("\n1 change recommended.\n"), "{details}");
         assert!(!details.contains("No applicable"));
     }
+
+    #[test]
+    fn doctor_groups_features_by_kind_and_why_they_are_offered() {
+        use crate::doctor::{Reason, fixes};
+        let mut report = synthetic_report();
+        report.checks.clear();
+        let profile = report.scan.profiles[0].id.clone();
+        let piece = |kind, name: &str, control: Vec<&str>, calls, verdict| ContextCost {
+            harness: Harness::Claude,
+            largest_characters: None,
+            skill: None,
+            details: vec![],
+            instruction_size: None,
+            shares: vec![],
+            profiles: vec![profile.clone()],
+            kind,
+            name: name.into(),
+            control: Some(Control {
+                path: control.into_iter().map(String::from).collect(),
+                value: ControlValue::Text(name.into()),
+                append: false,
+            }),
+            requests: 10,
+            priced: 10,
+            conditional_requests: 0,
+            tier_unknown_requests: 0,
+            assumptions: vec![],
+            tokens: Some(100),
+            cost_usd: Usd::from_f64(0.01),
+            estimated_usd: Some(0.01),
+            calls: Some(calls),
+            last_used: None,
+            current: true,
+            cost_per_use_usd: None,
+            verdict: Some(verdict),
+        };
+        // A redundant catalog copy is off however often it was used.
+        let copy = ContextCost {
+            skill: Some(crate::model::CatalogSkill {
+                path: Some("/synthetic/b/SKILL.md".into()),
+                retained_path: Some("/synthetic/kept/SKILL.md".into()),
+                ..Default::default()
+            }),
+            ..piece(
+                ContextKind::Skill,
+                "b",
+                vec!["skills", "b"],
+                4,
+                Verdict::Off,
+            )
+        };
+        report.context = vec![
+            copy,
+            piece(
+                ContextKind::Skill,
+                "a",
+                vec!["skillOverrides", "a"],
+                0,
+                Verdict::Off,
+            ),
+            piece(
+                ContextKind::McpServer,
+                "docs",
+                vec!["permissions", "deny"],
+                0,
+                Verdict::Off,
+            ),
+            piece(
+                ContextKind::McpServer,
+                "web",
+                vec!["permissions", "deny"],
+                0,
+                Verdict::Consider,
+            ),
+            piece(
+                ContextKind::Tool,
+                "Artifact",
+                vec!["permissions", "deny"],
+                3,
+                Verdict::Consider,
+            ),
+        ];
+        let groups: Vec<(String, Reason, String)> = fixes(&report, false)
+            .into_iter()
+            .map(|f| {
+                let g = f.group.expect("a feature is grouped");
+                (g.label, g.reason, g.member)
+            })
+            .collect();
+        let want = [
+            (
+                "Skills the model never used: on -> typed only",
+                Reason::Unused,
+                "a",
+            ),
+            (
+                "Duplicate copies of skills: on -> off",
+                Reason::Duplicate,
+                "b",
+            ),
+            ("Never-used MCP servers: on -> off", Reason::Unused, "docs"),
+            (
+                "MCP servers with no recorded use: on -> off",
+                Reason::Unrecorded,
+                "web",
+            ),
+            (
+                "Tools over $1 per use: on -> off",
+                Reason::Costly,
+                "Artifact",
+            ),
+        ];
+        for (label, reason, member) in want {
+            assert!(
+                groups.contains(&(label.into(), reason, member.into())),
+                "{label}: {groups:?}"
+            );
+        }
+    }
 }

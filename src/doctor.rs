@@ -1471,6 +1471,8 @@ fn git_keeps(file: &Path) -> bool {
             .args(["--"])
             .arg(name)
             .env("GIT_OPTIONAL_LOCKS", "0")
+            // The file's name is a path, not a glob: `a[1].json` must not match `a1.json`.
+            .env("GIT_LITERAL_PATHSPECS", "1")
             .stdin(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .output()
@@ -4193,6 +4195,16 @@ mod tests {
         git(&["update-index", "--assume-unchanged", "settings.json"]);
         let plan = accepted(&w, &[(&settings, Harness::Claude)]);
         assert!(confirm_text(&plan).contains("Backs up"));
+        // A name with glob characters is matched literally: this ignored file is not the
+        // tracked `a1.json` beside it.
+        std::fs::write(repo.join("a1.json"), "{}\n").unwrap();
+        git(&["add", "a1.json"]);
+        git(&["commit", "-q", "-m", "z"]);
+        std::fs::write(repo.join(".git/info/exclude"), "a[[]1].json\n").unwrap();
+        let globbed = repo.join("a[1].json");
+        std::fs::write(&globbed, "{}\n").unwrap();
+        let written = write(&accepted(&w, &[(&globbed, Harness::Claude)])).unwrap();
+        assert!(written[0].backup.is_some());
         // So is a file git does not track.
         let loose = repo.join("local.json");
         std::fs::write(&loose, "{}\n").unwrap();

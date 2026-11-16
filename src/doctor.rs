@@ -1342,7 +1342,11 @@ impl Target {
         let temp = bak.with_file_name(format!(".{name}-{}", std::process::id()));
         let existing = fs::metadata(&self.resolved).ok();
         create_copy(&temp, existing.as_ref(), before.as_bytes())?;
-        Ok(Some(Staged { temp, bak }))
+        Ok(Some(Staged {
+            temp,
+            bak,
+            keep: false,
+        }))
     }
 
     /// Replace the file with `text` atomically, keeping its permissions and any symlink,
@@ -1386,18 +1390,26 @@ impl Target {
 struct Staged {
     temp: PathBuf,
     bak: PathBuf,
+    /// Set when the commit failed after its file was written, so the copy is the only
+    /// record of the file as it was.
+    keep: bool,
 }
 
 impl Staged {
     /// Replace the earlier backup with this one; the drop then finds nothing left to remove.
-    fn commit(self) -> io::Result<()> {
-        fs::rename(&self.temp, &self.bak)
+    /// A failure keeps the staged copy, which the caller names.
+    fn commit(mut self) -> io::Result<()> {
+        let result = fs::rename(&self.temp, &self.bak);
+        self.keep = result.is_err();
+        result
     }
 }
 
 impl Drop for Staged {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.temp);
+        if !self.keep {
+            let _ = fs::remove_file(&self.temp);
+        }
     }
 }
 
@@ -1465,7 +1477,9 @@ fn git_keeps(file: &Path) -> bool {
             .ok()
             .filter(|o| o.status.success())
     };
-    git(&["ls-files", "--error-unmatch"]).is_some()
+    // `H` marks a tracked file git compares with its index; `assume-unchanged` and
+    // `skip-worktree` files carry other marks, and `status` would not show their changes.
+    git(&["ls-files", "-v", "--error-unmatch"]).is_some_and(|o| o.stdout.starts_with(b"H "))
         && git(&["status", "--porcelain"]).is_some_and(|o| o.stdout.is_empty())
 }
 
@@ -2691,10 +2705,11 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
         drop(lock);
         let backup = staged.as_ref().map(|s| s.bak.display().to_string());
         if let Some(staged) = staged {
+            let temp = staged.temp.display().to_string();
             staged.commit().map_err(|e| {
                 let bak = backup.as_deref().unwrap_or_default();
                 ScanError::new(format!(
-                    "wrote {shown}, but cannot replace its backup {bak} ({e}); {}",
+                    "wrote {shown}, but cannot replace its backup {bak} ({e}); its previous text is kept in {temp}; {}",
                     done(&written)
                 ))
             })?;
@@ -4097,6 +4112,12 @@ mod tests {
             error.contains("cannot replace its backup") && error.contains("already wrote"),
             "{error}"
         );
+        // The file as it was survives in the staged copy the error names.
+        let kept = w
+            .codex
+            .join(format!(".config.toml.token-max.bak-{}", std::process::id()));
+        assert!(error.contains(&kept.display().to_string()), "{error}");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "a = 1\n");
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
             "{}\n"
@@ -4161,6 +4182,17 @@ mod tests {
         );
         write(&plan).unwrap();
         assert!(repo.join("settings.json.token-max.bak").exists());
+        // Git status hides changes to a file marked skip-worktree or assume-unchanged.
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "y", "--allow-empty"]);
+        git(&["update-index", "--skip-worktree", "settings.json"]);
+        std::fs::write(&settings, "{\"mine\": 1}\n").unwrap();
+        let plan = accepted(&w, &[(&settings, Harness::Claude)]);
+        assert!(confirm_text(&plan).contains("Backs up"));
+        git(&["update-index", "--no-skip-worktree", "settings.json"]);
+        git(&["update-index", "--assume-unchanged", "settings.json"]);
+        let plan = accepted(&w, &[(&settings, Harness::Claude)]);
+        assert!(confirm_text(&plan).contains("Backs up"));
         // So is a file git does not track.
         let loose = repo.join("local.json");
         std::fs::write(&loose, "{}\n").unwrap();

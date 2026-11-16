@@ -136,13 +136,16 @@ closing line names each one written.
 A file git tracks with no uncommitted changes gets no backup, since a `.bak`
 beside a project's `.claude/settings.json` would show up to be committed; the
 confirm says git keeps its previous version. A tracked file with uncommitted
-changes, an untracked one, or any file when `git` is not installed is backed
-up. A file that does not exist yet has nothing to back up.
+changes, a tracked one marked `skip-worktree` or `assume-unchanged` (whose
+changes git does not show), an untracked one, or any file when `git` is not
+installed is backed up. A file that does not exist yet has nothing to back up.
 
 Every backup is staged as a temporary sibling before any settings file is
 written, and each replaces the earlier `.bak` only once its own file is
 written. A failure to stage one writes nothing and leaves every earlier backup
-as it was; the run fails with the reason. For `~/.claude.json`, the backup
+as it was; the run fails with the reason. If the last step fails after its file
+was written, such as a directory sitting at the `.bak` path, the error names the
+staged copy, which is kept as the file's previous text. For `~/.claude.json`, the backup
 holds the text re-read under Claude Code's lock, the text the removal was made
 to, not what the walk read at the start.
 

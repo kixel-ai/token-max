@@ -2704,7 +2704,6 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
                 done(&written)
             )));
         }
-        drop(lock);
         let backup = staged.as_ref().map(|s| s.bak.display().to_string());
         if let Some(staged) = staged {
             let temp = staged.temp.display().to_string();
@@ -2716,6 +2715,9 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
                 ))
             })?;
         }
+        // Held through the backup's commit too, so a run that waited for the lock never has
+        // its backup replaced by an earlier run's older copy.
+        drop(lock);
         written.push(Written {
             file: target.file.clone(),
             resolved: (shown != target.file).then_some(shown),

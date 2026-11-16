@@ -341,9 +341,10 @@ your settings save about $945/mo, 2% of this host's spend". Every line whose
 setting differs from its default gets a note under it naming the default and
 what the current value saves against it, such as `default 5m, saves $410/mo`,
 or `costs $12/mo more` when the current value costs more. The line shows on
-every run, including one with nothing left to change, and reads "Your
-settings match the Claude Code and Codex defaults." when none differs. A line
-whose current value is unknown gets no note.
+every run, including one with nothing left to change, and reads "No
+setting was found to differ from its Claude Code or Codex default." when none
+differs. A line whose current value is unknown gets no note, and that
+sentence does not claim it matches its default.
 
 Each saving is priced like its line's own comparison, holding every other
 setting at its current value, so the sum adds savings that may count the same

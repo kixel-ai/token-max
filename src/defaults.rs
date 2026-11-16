@@ -413,7 +413,7 @@ pub fn headline<'a>(
         }
     }
     if measured.settings + up_to.settings + up_to_more.settings + unmeasured == 0 {
-        return "Your settings match the Claude Code and Codex defaults.".into();
+        return "No setting was found to differ from its Claude Code or Codex default.".into();
     }
     let mut sentences = vec![];
     if measured.settings > 0 {
@@ -495,7 +495,7 @@ mod tests {
         let share = |usd: f64| Some(usd / 10_000.0);
         assert_eq!(
             headline([], share, "this host's"),
-            "Your settings match the Claude Code and Codex defaults."
+            "No setting was found to differ from its Claude Code or Codex default."
         );
         assert_eq!(
             headline(

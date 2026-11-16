@@ -4766,9 +4766,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                         .as_ref()
                         .is_some_and(|k| crate::defaults::same_switch(k, control))
             });
-            // Still sent though no request predates the change, so something outranks the
-            // file, and the feature's own line says what it costs.
-            if piece.is_some_and(|c| c.current && !applied(c)) {
+            // A file that outranks this one may turn it back on, and a feature still sent
+            // though no request predates the change has something outranking the file;
+            // either way the feature's own line, if any, says what it costs.
+            if crate::doctor::outranked(p, control)
+                || piece.is_some_and(|c| c.current && !applied(c))
+            {
                 continue;
             }
             let shown = out.home(&p.settings_file);
@@ -6109,6 +6112,23 @@ mod tests {
             report_line(&text, "Artifact tool on -> off")
                 .default
                 .is_empty()
+        );
+        // So does one whose latest request no longer carried the feature: no off line.
+        fn historical(costs: &mut [crate::model::ContextCost], path: &str) {
+            for c in costs {
+                if c.control.as_ref().is_some_and(|k| k.path.join(".") == path) {
+                    c.current = false;
+                }
+                historical(&mut c.details, path);
+            }
+        }
+        historical(&mut report.context, "enableArtifact");
+        let text = super::tests::text(&report, None, false);
+        assert!(
+            !report_lines(&text)
+                .iter()
+                .any(|l| l.head.starts_with("Artifact tool off")),
+            "{text}"
         );
         // One that sets it off too leaves it off.
         std::fs::write(&outranking, r#"{"enableArtifact": false}"#).unwrap();

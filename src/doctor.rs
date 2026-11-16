@@ -61,6 +61,9 @@ pub struct Group {
     pub label: String,
     /// This member's name in the group's list, such as the server's name.
     pub member: String,
+    /// Where the member was found, such as a skill's SKILL.md, which tells apart two
+    /// members with one name.
+    pub location: Option<String>,
 }
 
 impl Group {
@@ -319,6 +322,7 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         reason,
         label: format!("{what}: {}", line.value),
         member: c.name.clone(),
+        location: c.skill.as_ref().and_then(|s| s.path.clone()),
     })
 }
 
@@ -1200,10 +1204,21 @@ impl Question {
             None => "their savings were not measured".into(),
         };
         text += &style.line(&format!("{verdict} ({}): {saving}.", first.claim), 2);
-        let names: Vec<&str> = self
+        let groups: Vec<&Group> = self
             .members
             .iter()
-            .filter_map(|(_, f)| f.group.as_ref().map(|g| g.member.as_str()))
+            .filter_map(|(_, f)| f.group.as_ref())
+            .collect();
+        // A name two members share, such as a duplicate skill's, is followed by its location.
+        let names: Vec<String> = groups
+            .iter()
+            .map(|g| {
+                let shared = groups.iter().filter(|o| o.member == g.member).count() > 1;
+                match &g.location {
+                    Some(at) if shared => format!("{} ({})", g.member, style.path(at)),
+                    _ => g.member.clone(),
+                }
+            })
             .collect();
         text += &style.line(&format!("{}.", names.join(", ")), 2);
         text
@@ -2354,6 +2369,7 @@ mod tests {
                 reason,
                 label: label.into(),
                 member: name.to_lowercase(),
+                location: None,
             }),
             ..fix(name, saving)
         };
@@ -2462,6 +2478,37 @@ mod tests {
     }
 
     #[test]
+    fn a_group_names_the_location_of_members_that_share_a_name() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let home = w.home.to_string_lossy().into_owned();
+        let copy = |line: &str, member: &str, at: Option<&str>| Fix {
+            saving: Some(2.0),
+            group: Some(Group {
+                kind: ContextKind::Skill,
+                reason: Reason::Duplicate,
+                label: "Duplicate copies of skills: on -> off".into(),
+                member: member.into(),
+                location: at.map(|at| format!("{home}/{at}/SKILL.md")),
+            }),
+            ..change(line, &settings, Harness::Claude, vec![edit(line, 1, false)])
+        };
+        let (_, printed) = walk(
+            vec![
+                copy("A", "review", Some("a")),
+                copy("B", "review", Some("b")),
+                copy("C", "lint", Some("c")),
+            ],
+            &w,
+            "n\n",
+        );
+        assert!(
+            printed.contains("\n  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
+            "{printed}"
+        );
+    }
+
+    #[test]
     fn a_report_line_whose_edit_another_makes_is_offered_once_with_both_lines() {
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");
@@ -2526,6 +2573,7 @@ mod tests {
                 reason: Reason::Unused,
                 label: "Never-used tools: on -> off".into(),
                 member: name.into(),
+                location: None,
             }),
             ..change(name, &settings, Harness::Claude, vec![edit(name, 1, false)])
         };

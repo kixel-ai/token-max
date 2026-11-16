@@ -47,18 +47,18 @@ Accept? [y]es, [n]o, [q]uit: y
     "permissions": {"deny": ["WebFetch"]} (added to the list)
 Accept? [y]es, [n]o, [q]uit: n
 
-[3/4] Bash timeout cap: 10m -> 4m
+[3/4] Never-used tools: on -> off
+  Recommended (Measured): together, about $9.40/mo, 2% of this host's spend; overlapping changes may save less.
+  NotebookEdit, EnterWorktree, CronCreate.
+Accept all 3? [y]es, [n]o, [o]ne by one, [q]uit: y
+  Accepted so far: about $215/mo, 40% of this host's spend; overlapping changes may save less.
+
+[4/4] Bash timeout cap: 10m -> 4m
   Recommended (Measured): its saving was not measured.
   Measured on 504 requests over 14 days. A wait that long outlasts the 5m cache. No foreground Bash wait outlasted the cache. Commands past the cap keep running in the background; what checking on them costs is not measured.
   In ~/.claude/settings.json:
     "env": {"BASH_MAX_TIMEOUT_MS": "240000"}
 Accept? [y]es, [n]o, [q]uit: y
-  Accepted so far: about $206/mo, 39% of this host's spend, plus 1 change whose saving was not measured.
-
-[4/4] Never-used tools: on -> off
-  Recommended (Measured): together, about $9.40/mo, 2% of this host's spend; overlapping changes may save less.
-  NotebookEdit, EnterWorktree, CronCreate.
-Accept all 3? [y]es, [n]o, [o]ne by one, [q]uit: y
   Accepted so far: about $215/mo, 40% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less.
 
 1 more change in groups saving under $1/mo was not asked; it's in the list below.

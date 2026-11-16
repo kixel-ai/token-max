@@ -1157,6 +1157,28 @@ mod unix {
         assert!(!format!("{stdout}{stderr}").contains("SYNTHETIC_PRIVATE"));
     }
 
+    /// Replaces each dollar figure followed by `/mo` with `$N/mo`.
+    fn per_month_masked(text: &str) -> String {
+        let mut out = String::new();
+        let mut rest = text;
+        while let Some(at) = rest.find('$') {
+            out.push_str(&rest[..at]);
+            let after = &rest[at + 1..];
+            let digits = after.len()
+                - after
+                    .trim_start_matches(|c: char| c.is_ascii_digit() || c == ',' || c == '.')
+                    .len();
+            if digits > 0 && after[digits..].starts_with("/mo") {
+                out.push_str("$N");
+            } else {
+                out.push_str(&rest[at..at + 1 + digits]);
+            }
+            rest = &after[digits..];
+        }
+        out.push_str(rest);
+        out
+    }
+
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
         let w = Workspace::new();
@@ -1214,6 +1236,9 @@ mod unix {
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
+        // The window ends now, so a per-month figure follows the clock; its percent of
+        // the window's spend does not.
+        let stdout = per_month_masked(&stdout);
         // The walk comes first: a measured saving before a change whose saving was not
         // measured.
         let at = |text: &str| {
@@ -1226,7 +1251,7 @@ mod unix {
             "{stdout}"
         );
         let ttl = at(
-            "\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves $30/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
+            "\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves $N/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
         );
         let memory = at(
             "\n[2/2] Auto memory: on -> off\n  Worth considering (Opinion): its saving was not measured.\n",
@@ -1238,7 +1263,7 @@ mod unix {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $30/mo, 13% of this host's spend."),
+            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
             "{entry}"
         );
         // Then the report, its accepted change first, and one question to write it.

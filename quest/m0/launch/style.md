@@ -40,10 +40,8 @@ the walk today prints only bold, while the list after it is colored.
 - ✅ padding: indent the walk and the list by two spaces, and leave a blank
   line around the headline and between cards. Replace the three
   "token-max: Scanning..." progress lines with one line that clears itself.
-- The headline and the card counter disagreed: that run said "73 changes to
-  review" and then "[1/2]", since 72 small changes shared one question.
-  [Group the walk's small changes by kind](/quest/m0/launch/group-walk.md)
-  owns the fix.
+- The headline now counts the walk's questions and the changes they cover,
+  such as "4 questions about 6 changes", so it matches the card counter.
 
 ## Required
 

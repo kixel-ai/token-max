@@ -30,7 +30,7 @@ in PowerShell,
 ## Applying changes
 
 On a terminal, `doctor` first walks through each change it can make, after a
-headline counting them, across every settings file, recommended and worth
+headline counting its questions and the changes they cover, across every settings file, recommended and worth
 considering alike, biggest monthly saving first. Each one shows its current
 and offered value, whether it is recommended or worth considering, its kind of
 claim, its saving per 30 days in dollars and as a percent of this host's spend
@@ -38,10 +38,21 @@ over the window (the base the report's percents use), what was measured, such
 as the requests a replay covered or a tool's uses and what each cost, why the
 change makes sense, and the exact edit, such as `"promptCacheTtl": "1h"` in
 `~/.claude/settings.json`. A change whose saving was not measured, such as
-raising an effort, comes after those saving $5/mo or more, one question each,
-and says so. Changes saving under $5/mo each come last as one question, which
-lists them with their savings and takes `y` for all, `n` for none or `o` to go
-through them one at a time; a single such change is asked on its own.
+raising an effort, comes after the measured ones and says so.
+
+A change saving $5/mo or more is its own question. A smaller one joins a group
+of its kind and reason: never used, no use recorded where the window cannot
+rule one out, over `--max-cost-per-use` per use, or a redundant copy of a
+Codex catalog skill whose most-used copy stays, such as never-used skills
+or MCP servers over $1 per use. Each reason is its own group, so one yes never
+covers a feature in use. A group is one question ranked by its combined saving,
+which names every member and takes `y` for all, `n` for none or `o` to go
+through them one at a time; a group of one is asked as that change. Features
+whose savings were not measured, such as Codex catalog skills, are grouped the
+same way after the measured questions. A group saving under $1/mo in total,
+including a lone small change such as a check, is not asked: one dim line says
+how many changes were left out, and the list after the walk shows them among
+those not accepted.
 
 Each question takes `y`, `n` or `q`; anything else asks again. An answer only
 selects: after each yes, a running total sums the accepted changes' own

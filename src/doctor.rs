@@ -2396,7 +2396,18 @@ fn mask_toml(text: &str, mask: &str) -> String {
         for (_, item) in table.into_iter().flat_map(|t| t.iter_mut()) {
             if let Some(value) = item.as_value_mut() {
                 let decor = value.decor().clone();
-                *value = mask.into();
+                // A value over several lines keeps its line breaks in a multi-line literal,
+                // so the lines after it keep their numbers.
+                let mut bare = value.clone();
+                bare.decor_mut().clear();
+                let breaks = bare.to_string().matches('\n').count();
+                *value = if breaks == 0 {
+                    mask.into()
+                } else {
+                    format!("'''{mask}{}'''", "\n".repeat(breaks))
+                        .parse()
+                        .unwrap_or_else(|_| mask.into())
+                };
                 *value.decor_mut() = decor;
             }
         }
@@ -3811,10 +3822,13 @@ mod tests {
 
     #[test]
     fn the_confirm_masks_secret_toml_values_and_keeps_the_rest() {
-        let text = "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"ghp_1\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"Bearer t\"  # theirs\n\n[shell_environment_policy.set]\nKEY = \"v\"\n";
+        let text = "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"ghp_1\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"Bearer t\"  # theirs\nCookie = \"\"\"\na\nb\"\"\"\nX = [\n  \"c\",\n]\n\n[shell_environment_policy.set]\nKEY = \"v\"\n";
+        let masked = mask_toml(text, "****");
         assert_eq!(
-            mask_toml(text, "****"),
-            "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"****\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"****\"  # theirs\n\n[shell_environment_policy.set]\nKEY = \"****\"\n"
+            masked,
+            "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"****\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"****\"  # theirs\nCookie = '''****\n\n'''\nX = '''****\n\n'''\n\n[shell_environment_policy.set]\nKEY = \"****\"\n"
         );
+        // A value over several lines keeps them, so the diff's line numbers match the file.
+        assert_eq!(masked.lines().count(), text.lines().count());
     }
 }

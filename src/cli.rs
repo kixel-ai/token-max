@@ -157,14 +157,29 @@ static PHASE: Mutex<Phase> = Mutex::new(Phase::Running);
 static PROGRESS: Mutex<usize> = Mutex::new(0);
 
 /// Replace the progress line on stderr with `message`. Spaces, not escapes, blank what a
-/// longer line left, so this works on any terminal and under `--plain`.
+/// longer line left, so this works on any terminal and under `--plain`. The line is cut to
+/// fit one row, since a carriage return cannot reach a row the line wrapped onto.
 fn show_progress(message: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
-    let text = format!("token-max: {message}...");
+    let columns = terminal_size::terminal_size_of(io::stderr()).map_or(80, |(w, _)| w.0.into());
+    let text = fit(&format!("token-max: {message}..."), columns.max(2) - 1);
     let cells = crate::terminal::cells(&text);
     let pad = " ".repeat(shown.saturating_sub(cells));
     eprint!("\r{text}{pad}");
     *shown = cells;
+}
+
+/// `text` cut to at most `columns` cells, keeping whole characters.
+fn fit(text: &str, columns: usize) -> String {
+    let mut out = String::new();
+    for c in text.chars() {
+        let next = format!("{out}{c}");
+        if crate::terminal::cells(&next) > columns {
+            break;
+        }
+        out = next;
+    }
+    out
 }
 
 /// Clear the progress line, if one is showing, so what follows starts on a clean row.
@@ -1209,6 +1224,13 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_fits_one_row() {
+        assert_eq!(super::fit("token-max: Scanning", 9), "token-max");
+        assert_eq!(super::fit("ab", 9), "ab");
+        assert_eq!(super::fit("漢字", 3), "漢");
+    }
+
     use super::*;
 
     #[test]

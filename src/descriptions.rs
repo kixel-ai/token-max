@@ -28,7 +28,8 @@ pub fn sentence(text: &str) -> Option<String> {
     if text.chars().count() <= MAX_CHARACTERS {
         return Some(text);
     }
-    let cut: String = text.chars().take(MAX_CHARACTERS).collect();
+    // The ellipsis counts toward the bound.
+    let cut: String = text.chars().take(MAX_CHARACTERS - 3).collect();
     let cut = cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head);
     Some(format!("{}...", cut.trim_end_matches([',', ';', ':'])))
 }
@@ -278,12 +279,12 @@ mod tests {
         let long = format!("{} end.", "word, ".repeat(60));
         let cut = sentence(&long).unwrap();
         assert!(cut.ends_with("word..."), "{cut}");
-        assert!(cut.chars().count() <= MAX_CHARACTERS + 3);
+        assert!(cut.chars().count() <= MAX_CHARACTERS);
         // A single unbroken word is cut at the bound itself.
         let unbroken = "λ".repeat(MAX_CHARACTERS * 2);
         assert_eq!(
             sentence(&unbroken).unwrap(),
-            format!("{}...", "λ".repeat(MAX_CHARACTERS))
+            format!("{}...", "λ".repeat(MAX_CHARACTERS - 3))
         );
     }
 }

@@ -799,7 +799,7 @@ fn recorded_request_shapes_price_each_piece_at_its_cache_position_and_count_its_
     );
     assert_eq!(
         artifact.description.as_deref(),
-        Some(format!("{}...", "x".repeat(200)).as_str())
+        Some(format!("{}...", "x".repeat(197)).as_str())
     );
     assert_eq!(
         control_text(review.control.as_ref().unwrap(), Harness::Claude),

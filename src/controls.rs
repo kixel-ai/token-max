@@ -691,7 +691,7 @@ fn claude_family(model: &str) -> Option<&'static str> {
 }
 
 /// Strip a trailing `-` and `digits` ASCII digits, such as a `-20261101` date.
-fn strip_dated(text: &str, digits: usize) -> Option<&str> {
+pub(crate) fn strip_dated(text: &str, digits: usize) -> Option<&str> {
     let split = text.len().checked_sub(digits + 1)?;
     let (head, tail) = text.split_at_checked(split)?;
     let tail = tail.strip_prefix('-')?;

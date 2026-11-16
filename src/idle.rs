@@ -3619,6 +3619,7 @@ mod tests {
             instruction_budget_file: None,
             instruction_budget_unresolved: None,
             outranking_files: vec![],
+            switched_off: vec![],
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),

@@ -895,6 +895,8 @@ pub struct EffortControl {
     pub caps: Vec<Owned>,
     /// The levels the model accepts; empty when unknown.
     pub supported: Vec<String>,
+    /// The model's own level when no setting names one; None when unknown.
+    pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
 }
@@ -970,6 +972,10 @@ pub struct Profile {
     /// the same switch in `settings_file`. Only files that hold settings are listed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outranking_files: Vec<String>,
+    /// The tools, skills and MCP servers `settings_file` turns off, each as the control that
+    /// does it, so the report can show them though no request records them.
+    #[serde(skip)]
+    pub switched_off: Vec<Control>,
 }
 
 /// A setting's current value and the file or variable that sets it.

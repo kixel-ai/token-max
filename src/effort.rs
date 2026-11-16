@@ -192,6 +192,7 @@ pub fn claude_effort(
             lowered: None,
             caps: vec![],
             supported: vec![],
+            default: None,
             unresolved: Some(why),
         };
     let variable = "CLAUDE_CODE_EFFORT_LEVEL";
@@ -383,6 +384,7 @@ pub fn claude_effort(
             .filter(|l| **l != "xhigh" || support.xhigh)
             .map(|l| l.to_string())
             .collect(),
+        default: Some(support.default.into()),
         unresolved: None,
     })
 }
@@ -441,16 +443,17 @@ pub fn codex_effort(
         None => (recorded.map(String::from), RECORDED.to_string()),
     };
     let key = "model_reasoning_effort";
+    let default = model
+        .as_deref()
+        .and_then(|m| catalog.and_then(|c| c.get(m)))
+        .map(|m| m.default.clone());
     let (level, owner) = match highest(scopes, key) {
         Some((Value::String(level), file)) => (Some(level.clone()), format!("{file}:{key}")),
         Some((_, file)) => return Err(invalid(format!("invalid {key}"), file)),
-        None => {
-            let default = model
-                .as_deref()
-                .and_then(|m| catalog.and_then(|c| c.get(m)))
-                .map(|m| m.default.clone());
-            (default, format!("{user_file}:{key} (the model's default)"))
-        }
+        None => (
+            default.clone(),
+            format!("{user_file}:{key} (the model's default)"),
+        ),
     };
     let unresolved = level.is_none().then(|| match (&model, catalog) {
         (None, _) => "no setting names the model and no main-session request recorded one".to_string(),
@@ -471,6 +474,7 @@ pub fn codex_effort(
         lowered: None,
         caps: vec![],
         supported,
+        default,
         unresolved,
     })
 }

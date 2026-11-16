@@ -335,6 +335,59 @@ including those no longer sent.
 A run with no histories or no requests in the selected window gives a next step;
 no applicable changes does not imply complete visibility or optimal settings.
 
+## Savings against the defaults
+
+Under the headline, one line sums what this host's current settings save
+against the Claude Code and Codex defaults, such as "Compared with defaults,
+your settings save about $945/mo, 2% of this host's spend". Every line whose
+setting differs from its default gets a note under it naming the default and
+what the current value saves against it, such as `default 5m, saves $410/mo`,
+or `costs $12/mo more` when the current value costs more. The line shows on
+every run, including one with nothing left to change, and reads "No
+setting was found to differ from its Claude Code or Codex default." when none
+differs. A line whose current value is unknown gets no note, and that
+sentence does not claim it matches its default.
+
+Each saving is priced like its line's own comparison, holding every other
+setting at its current value, so the sum adds savings that may count the same
+requests and says that overlapping settings may save less. A saving that
+holds only for one of two possible defaults is summed apart as "up to", and
+one that cannot be measured is counted, never priced at zero. A line keeps
+its kind of claim: auto memory's note sits on an Opinion line.
+
+| Setting | Default | What the current value saves |
+| --- | --- | --- |
+| Subagent prompt cache TTL | 5m | The TTL replay's gap, when the line has a verdict; otherwise not measured. |
+| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
+| Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
+| Idle compaction | On | The on and off replay under the current settings. |
+| T3 idle compaction | `onReturn` | The difference between the two modes' replays. |
+| Bash timeout cap | 10m | Not measured: what checking on a backgrounded command costs is not recorded. |
+| Fast mode | Off | The measured premium, as a cost. |
+| Background generation | On | Not measured: its requests are estimated only where it runs. |
+| Auto memory | On for Claude Code, off for Codex | Codex memories on cost what the line measured; Claude Code's off is not measured. |
+| Main-session effort | The model's own level | Not measured: a different effort changes the output. A `maxEffortLevel` that lowers the default counts as a difference. |
+| Bash, MCP and Codex tool output caps | 30,000 characters, 25,000 tokens, Codex's built-in limit | Not measured, as their lines say. A cap set to its default counts as the default. |
+| A tool, skill or MCP server turned off in the profile's settings file | On | Estimated: what it cost per request while it was still sent, over every request its line made in the window. |
+
+A tool, skill or MCP server is off when the profile's own `settings.json` or
+`config.toml` turns it off: `"enableArtifact": false`, `"enableWorkflows":
+false` or `"syncClaudeAiSkills": false`, a bare tool or `mcp__server` name in
+`permissions.deny`, a `skillOverrides` value other than `on`,
+`features.apps = false`, an MCP server's `enabled = false` or a tool in its
+`disabled_tools`, or a `[[skills.config]]` entry with `enabled = false`. It
+gets its own `info` line, showing `off` or `typed only`, and its saving is an
+estimate. When no request in the window carried it, the saving is unknown,
+never zero, and so is a Codex catalog skill's, since removing one can backfill
+the catalog. A switch set after the latest request, such as one the walk just
+wrote, counts as off too, so the next run neither offers it again nor drops
+its saving, and an MCP server's switch counts for its tools too. A switch that
+a file outranking the profile's sets otherwise adds no line: the feature's own
+line says what it costs. Any outranking file that sets it otherwise counts,
+even when a file above that one sets it off again, so in that case doctor
+may offer the switch again rather than call a feature off that might still
+be on.
+
 ## MCP servers and instruction budgets
 
 MCP servers include separate tool-schema and discovery-context costs. Those
@@ -453,8 +506,8 @@ as the session export below.
 IDs in the report are opaque hashes. Shared histories are read once, and a
 request whose profile is ambiguous counts once on the line its profiles share
 (see [Profiles](#profiles)). Independent check savings must not be summed; the
-walk's running total is the one sum, and it says that overlapping changes may
-save less.
+walk's running total and the [savings against the defaults](#savings-against-the-defaults)
+are the only sums, and each says that overlapping settings may save less.
 
 ## Session export
 

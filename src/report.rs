@@ -581,7 +581,7 @@ fn background_off(c: &BackgroundCheck, out: &Out<'_>) -> String {
 }
 
 /// A duration in the largest whole unit, such as `55m`.
-fn duration(ms: Millis) -> String {
+pub(crate) fn duration(ms: Millis) -> String {
     for (unit, size) in [("h", 3_600_000), ("m", 60_000), ("s", 1000)] {
         if ms % size == 0 {
             return format!("{}{unit}", ms / size);
@@ -2530,7 +2530,7 @@ fn per_month(usd: f64, since: Option<Millis>, until: Option<Millis>) -> String {
 }
 
 /// `usd` over `since..until` scaled to 30 days at the same rate; as is when the window is unknown.
-fn monthly(usd: f64, since: Option<Millis>, until: Option<Millis>) -> f64 {
+pub(crate) fn monthly(usd: f64, since: Option<Millis>, until: Option<Millis>) -> f64 {
     match (since, until) {
         (Some(from), Some(to)) if to > from => (usd * 30.0 * DAY) / (to - from) as f64,
         _ => usd,
@@ -3148,7 +3148,14 @@ struct Cap {
     value: String,
     /// A sentence naming the setting and its value.
     text: String,
+    /// Its default, when the setting is set.
+    default: Option<&'static str>,
 }
+
+/// Claude Code's Bash output cap when no setting names one.
+const BASH_OUTPUT_DEFAULT: &str = "30,000 chars";
+/// Claude Code's MCP output cap when `MAX_MCP_OUTPUT_TOKENS` is unset.
+const MCP_OUTPUT_DEFAULT: &str = "25,000 tokens";
 
 /// The setting that caps how much of one tool's output stays in context, and its current value.
 fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
@@ -3161,7 +3168,8 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
         Some(Scalar::Number(n)) => Some(count(*n as i64)),
         _ => None,
     };
-    let cap = |label, key, value: String, text: String| Cap {
+    // A setting at its default value differs from nothing.
+    let cap = |label, key, value: String, text: String, default: Option<&'static str>| Cap {
         label,
         what: match label {
             "Bash output" => "How much of a Bash command's output stays in the conversation.",
@@ -3169,6 +3177,7 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
             _ => "How many tokens of a tool's output Codex keeps in the conversation.",
         },
         key,
+        default: default.filter(|d| *d != value),
         value,
         text,
     };
@@ -3182,18 +3191,21 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
                 "bashOutputMaxChars",
                 format!("{n} chars"),
                 format!("bashOutputMaxChars is {n} characters"),
+                Some(BASH_OUTPUT_DEFAULT),
             ),
             (None, Some(n)) => cap(
                 "Bash output",
                 "env.BASH_MAX_OUTPUT_LENGTH",
                 format!("{n} chars"),
                 format!("BASH_MAX_OUTPUT_LENGTH is {n} characters"),
+                Some(BASH_OUTPUT_DEFAULT),
             ),
             (None, None) => cap(
                 "Bash output",
                 "bashOutputMaxChars",
                 "unset".into(),
                 "bashOutputMaxChars is unset, so about 30,000 characters".into(),
+                None,
             ),
         },
         Harness::Claude if c.name.starts_with("mcp__") => match number("MAX_MCP_OUTPUT_TOKENS") {
@@ -3202,12 +3214,14 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
                 "env.MAX_MCP_OUTPUT_TOKENS",
                 format!("{n} tokens"),
                 format!("MAX_MCP_OUTPUT_TOKENS is {n} tokens"),
+                Some(MCP_OUTPUT_DEFAULT),
             ),
             None => cap(
                 "MCP output",
                 "env.MAX_MCP_OUTPUT_TOKENS",
                 "unset".into(),
-                "MAX_MCP_OUTPUT_TOKENS is unset, so 25,000 tokens".into(),
+                format!("MAX_MCP_OUTPUT_TOKENS is unset, so {MCP_OUTPUT_DEFAULT}"),
+                None,
             ),
         },
         Harness::Codex => match number("tool_output_token_limit") {
@@ -3216,12 +3230,14 @@ fn output_cap(report: &Report, c: &ContextCost) -> Option<Cap> {
                 "tool_output_token_limit",
                 format!("{n} tokens"),
                 format!("tool_output_token_limit is {n} tokens"),
+                Some("Codex's built-in limit"),
             ),
             None => cap(
                 "Tool output",
                 "tool_output_token_limit",
                 "unset".into(),
                 "tool_output_token_limit is unset".into(),
+                None,
             ),
         },
         Harness::Claude => return None,
@@ -3422,6 +3438,8 @@ struct Row {
     saving: Option<f64>,
     /// How much was measured, such as the requests a replay covered, ahead of the evidence.
     stats: String,
+    /// What the current value saves against its default, when the two differ.
+    baseline: Option<crate::defaults::Baseline>,
 }
 
 impl Row {
@@ -3442,6 +3460,7 @@ impl Row {
             origin: None,
             saving: None,
             stats: String::new(),
+            baseline: None,
         }
     }
 
@@ -3683,6 +3702,9 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
             columns.push(row.setting.clone());
             let head = format!("{marker}{}", columns.join("  ").trim_end());
             out.hang(&head, indent, row.mark.style());
+            if let Some(baseline) = &row.baseline {
+                out.line(&baseline.text(), indent, DIM);
+            }
             if out.options.details {
                 out.line(&format!("What: {}", row.what), indent, PLAIN);
                 out.line(&row.evidence, indent, PLAIN);
@@ -3707,7 +3729,7 @@ fn cost_amount(usd: Option<f64>) -> Option<(&'static str, String)> {
 }
 
 /// A setting's value in tokens, shortened to thousands or millions when exact.
-fn tokens(n: i64) -> String {
+pub(crate) fn tokens(n: i64) -> String {
     match n {
         0 => "0".into(),
         n if n % 1_000_000 == 0 => format!("{}M", n / 1_000_000),
@@ -3968,6 +3990,8 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             continue;
         }
         let mark = match c.verdict {
+            // A switch the file already sets is a change made before any request showed it.
+            _ if crate::defaults::applied(report, c).is_some() => continue,
             Some(Verdict::Off) => Mark::Change,
             Some(Verdict::Consider) => Mark::Consider,
             _ => continue,
@@ -4250,9 +4274,12 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             .find(|f| f.origins.contains(&origin))
             .map(|f| crate::doctor::setting(f, out.home.as_deref()))
     };
+    // A switch the settings file already sets shows as off below, even while the latest
+    // request, made before the change, still carried the feature.
+    let applied = |c: &ContextCost| crate::defaults::applied(report, c).is_some();
     let pieces: Vec<(usize, &ContextCost)> = setting_rows(&report.context)
         .enumerate()
-        .filter(|(_, c)| c.verdict.is_some())
+        .filter(|(_, c)| c.verdict.is_some() && !applied(c))
         .collect();
     // A server's own loading and exposure controls, after its line's evidence.
     let server_notes = |c: &ContextCost| {
@@ -4296,6 +4323,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             crate::descriptions::check(result).into(),
         );
         row.origin = Some(Origin::Check(*index));
+        row.baseline = crate::defaults::check(result, out.profiles.get(r.profile).copied());
         if r.requests > 0 {
             row.stats = format!(
                 "Measured on {} request{} over {}.",
@@ -4765,6 +4793,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         c.current
             && c.control.is_some()
             && c.verdict.is_none()
+            && !applied(c)
             && !matches!(c.kind, ContextKind::Memory | ContextKind::McpDiscovery)
     }) {
         let mut row = Row::new(
@@ -4809,6 +4838,98 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         row.evidence = text;
         row.setting = piece_setting(c, out);
         rows.push(row);
+    }
+    // Tools, skills and MCP servers a settings file turns off, which are on by default. No
+    // request records one once it is off, so what it saves is estimated from what it cost
+    // while it was still sent, or unknown.
+    let real = |file: &str| crate::discovery::realpath(file).unwrap_or_else(|_| file.into());
+    let mut seen_off: Vec<(String, &crate::model::Control)> = vec![];
+    for p in &report.scan.profiles {
+        let file = real(&p.settings_file);
+        for control in &p.switched_off {
+            if seen_off
+                .iter()
+                .any(|(f, c)| *f == file && crate::defaults::same_switch(c, control))
+            {
+                continue;
+            }
+            seen_off.push((file.clone(), control));
+            let group: Vec<&Profile> = report
+                .scan
+                .profiles
+                .iter()
+                .filter(|q| q.harness == p.harness && real(&q.settings_file) == file)
+                .collect();
+            let ids: Vec<String> = group.iter().map(|q| q.id.clone()).collect();
+            let piece = setting_rows(&report.context).find(|c| {
+                c.harness == p.harness
+                    && c.profiles.iter().any(|id| ids.contains(id))
+                    && c.control
+                        .as_ref()
+                        .is_some_and(|k| crate::defaults::same_switch(k, control))
+            });
+            // A file that outranks this one for any profile sharing it may turn it back on,
+            // and a feature still sent though no request predates the change has something
+            // outranking the file; either way the feature's own line, if any, says what it
+            // costs.
+            if group.iter().any(|q| crate::doctor::outranked(q, control))
+                || piece.is_some_and(|c| c.current && !applied(c))
+            {
+                continue;
+            }
+            let shown = out.home(&p.settings_file);
+            let requests = report
+                .scan
+                .requests
+                .iter()
+                .filter(|r| r.harness == p.harness && r.profiles.iter().any(|id| ids.contains(id)))
+                .count() as u64;
+            let (name, what, saving, evidence) = match piece {
+                Some(c) => {
+                    // A Codex catalog skill's cost is no saving: removing it can backfill the catalog.
+                    let estimate = crate::defaults::estimate(
+                        c.estimated_usd.filter(|_| c.skill.is_none()),
+                        c.requests,
+                        requests,
+                        spend.since,
+                        Some(spend.until),
+                    );
+                    let saving = estimate.map_or(crate::defaults::Saving::NotMeasured, |usd| {
+                        crate::defaults::Saving::Estimated(usd)
+                    });
+                    let evidence = match (estimate, c.estimated_usd) {
+                        (Some(_), Some(usd)) => format!(
+                            "Off in {shown}. While still sent it cost {} on {} requests; the estimate assumes each of this line's {} requests in the window would have carried it.",
+                            about(usd),
+                            count(c.requests),
+                            count(requests)
+                        ),
+                        _ => format!(
+                            "Off in {shown}. What it cost while still sent can't stand for what it saves, so the saving is unknown."
+                        ),
+                    };
+                    (short_label(c, out), piece_what(c), saving, evidence)
+                }
+                None => (
+                    crate::defaults::switch_name(control),
+                    crate::defaults::switch_what(control),
+                    crate::defaults::Saving::NotMeasured,
+                    format!(
+                        "Off in {shown}. No request in the window carried it, so what it saves is unknown."
+                    ),
+                ),
+            };
+            let mut row = Row::new(Claim::Measured, Mark::Info, name, what);
+            row.profile = tag(&ids, &switch, out);
+            row.value = crate::defaults::switch_value(control);
+            row.setting = format!("{shown}:{}", control.path.join("."));
+            row.evidence = evidence;
+            row.baseline = Some(crate::defaults::Baseline {
+                default: "on".into(),
+                saving,
+            });
+            rows.push(row);
+        }
     }
     for g in report
         .scan
@@ -4921,6 +5042,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                     cap.what.into(),
                 );
                 row.value = cap.value.clone();
+                // Transcripts can't price a different cap, so what this one saves is unknown.
+                row.baseline = cap.default.map(|default| crate::defaults::Baseline {
+                    default: default.into(),
+                    saving: crate::defaults::Saving::NotMeasured,
+                });
                 row.setting = cap.key.into();
                 row.evidence = format!(
                     "{} {largest}{unpriced}{}.",
@@ -5079,6 +5205,15 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         Some(host) if host.name != "this host" => format!("{}'s", host.name),
         _ => "this host's".into(),
     };
+    out.line(
+        &crate::defaults::headline(
+            rows.iter().filter_map(|r| r.baseline.as_ref()),
+            |usd| spend.of_month(usd),
+            &host,
+        ),
+        0,
+        PLAIN,
+    );
     // With some requests unpriced, the base is only what could be priced, so a share can read high.
     let base = if spend.complete {
         format!("{host} spend over the window, {spent}")
@@ -5146,7 +5281,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         PLAIN,
     );
     out.line(
-        "Each line compares one setting with everything else unchanged; savings do not add up.",
+        "Each line compares one setting with everything else unchanged, so a sum of savings may count the same requests twice.",
         0,
         PLAIN,
     );
@@ -5246,7 +5381,11 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             String::new()
         };
         let text = format!("{}{profile}: {cost}{used}", piece_label(c, out));
-        out.line(&text, 2, feature_tier(c, covered));
+        let tier = match crate::defaults::applied(report, c) {
+            Some(_) => PLAIN,
+            None => feature_tier(c, covered),
+        };
+        out.line(&text, 2, tier);
         // A line several sources share is broken down by the profiles that recorded it.
         if c.shares.len() > 1 {
             for share in &c.shares {
@@ -5322,6 +5461,10 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             .and_then(|p| p.memory.as_ref())
             .filter(|_| c.kind == ContextKind::Memory);
         let text = match &c.control {
+            _ if crate::defaults::applied(report, c).is_some() => {
+                "Already off in its settings file, since the latest request that carried it"
+                    .into()
+            }
             _ if covered => "Covered by the server-off recommendation".into(),
             Some(_) if memory.is_some() => {
                 let m = memory.expect("checked above");
@@ -6007,6 +6150,275 @@ mod tests {
     }
 
     #[test]
+    fn settings_that_differ_from_their_defaults_say_what_they_save_against_them() {
+        let mut report = synthetic();
+        // The subagent TTL is pinned at 1h, against Claude Code's 5m default; the main TTL
+        // is pinned at 5m, whose default depends on how usage is paid.
+        let text = text(&report, None, false);
+        let sub = report_line(&text, "Subagent prompt cache TTL");
+        assert_eq!(sub.default, "default 5m, saves $4.20/mo");
+        let main = report_line(&text, "Main-agent prompt cache TTL");
+        assert_eq!(
+            main.default,
+            "default 1h on a Claude plan, 5m on usage credits or an API key, costs up to $12/mo more"
+        );
+        // A window at the model's tuned default says nothing; an explicit one names it.
+        report.scan.profiles[0].compaction.tuned.insert(
+            "claude-opus-5-5".into(),
+            TunedWindow {
+                value: Some(1_000_000),
+                reason: "synthetic".into(),
+            },
+        );
+        // Workflow's switch is on, Retired was turned off after it was sent, and Monitor
+        // was never sent at all.
+        report.scan.profiles[0].switched_off = [deny("Retired"), deny("Monitor")]
+            .into_iter()
+            .flatten()
+            .collect();
+        let text = super::tests::text(&report, None, true);
+        let headline = text.lines().find(|l| l.starts_with("Compared with"));
+        assert_eq!(
+            headline,
+            Some(
+                "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to $12/mo more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
+            )
+        );
+        let window = report_line(&text, "Auto-compact window (claude-opus-5-5) 200k");
+        assert_eq!(window.default, "default 1M, saving not measured");
+        assert_eq!(
+            report_line(&text, "Auto-compact window (claude-opus-5-5) 1M").default,
+            ""
+        );
+        let retired = report_line(&text, "Retired tool off");
+        assert_eq!(retired.mark, "info");
+        assert!(
+            retired
+                .default
+                .starts_with("default on, saves an estimated $"),
+            "{retired:#?}"
+        );
+        assert!(retired.evidence.starts_with("Off in "), "{retired:#?}");
+        let monitor = report_line(&text, "Monitor tool off");
+        assert_eq!(monitor.default, "default on, saving not measured");
+        assert_eq!(
+            Some(monitor.what.as_str()),
+            crate::descriptions::claude_tool("Monitor")
+        );
+        assert!(
+            monitor
+                .evidence
+                .contains("No request in the window carried it")
+        );
+        // A switch the file sets before any request shows it reads as off, and doctor no
+        // longer offers it: Artifact was recommended off, Agent was kept.
+        report.scan.profiles[0].switched_off = [
+            switch(&["enableArtifact"], ControlValue::Bool(false)),
+            deny("Agent"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let text = super::tests::text(&report, None, false);
+        let lines = report_lines(&text);
+        for name in ["Artifact tool", "Agent tool"] {
+            let named: Vec<_> = lines.iter().filter(|l| l.head.starts_with(name)).collect();
+            assert_eq!(named.len(), 1, "{name}: {named:#?}");
+            assert!(
+                named[0].head.starts_with(&format!("{name} off")),
+                "{named:#?}"
+            );
+            assert!(
+                named[0]
+                    .default
+                    .starts_with("default on, saves an estimated $"),
+                "{named:#?}"
+            );
+        }
+        assert!(
+            !crate::doctor::fixes(&report, false)
+                .iter()
+                .any(|f| f.name.starts_with("Artifact"))
+        );
+        let detailed = super::tests::text(&report, None, true);
+        assert!(detailed.contains("Already off in its settings file"));
+        assert!(!detailed.contains("Recommended off: \"enableArtifact\": false"));
+        // A file that outranks the profile's and sets the switch keeps the feature's own line.
+        let project = Workspace::new();
+        let outranking = project.home.join("settings.json");
+        std::fs::write(&outranking, r#"{"enableArtifact": true}"#).unwrap();
+        report.scan.profiles[0].outranking_files = vec![outranking.to_string_lossy().into()];
+        let text = super::tests::text(&report, None, false);
+        assert!(
+            report_line(&text, "Artifact tool on -> off")
+                .default
+                .is_empty()
+        );
+        // So does one whose latest request no longer carried the feature: no off line.
+        fn historical(costs: &mut [crate::model::ContextCost], path: &str) {
+            for c in costs {
+                if c.control.as_ref().is_some_and(|k| k.path.join(".") == path) {
+                    c.current = false;
+                }
+                historical(&mut c.details, path);
+            }
+        }
+        historical(&mut report.context, "enableArtifact");
+        let text = super::tests::text(&report, None, false);
+        assert!(
+            !report_lines(&text)
+                .iter()
+                .any(|l| l.head.starts_with("Artifact tool off")),
+            "{text}"
+        );
+        // One that sets it off too leaves it off.
+        std::fs::write(&outranking, r#"{"enableArtifact": false}"#).unwrap();
+        let text = super::tests::text(&report, None, false);
+        assert!(
+            report_line(&text, "Artifact tool off")
+                .default
+                .starts_with("default on")
+        );
+        // A profile sharing the file that another file turns it back on for hides the
+        // line, whichever profile comes first.
+        let turned_on = project.home.join("on.json");
+        std::fs::write(&turned_on, r#"{"enableArtifact": true}"#).unwrap();
+        let mut sharing = report.scan.profiles[0].clone();
+        sharing.id = "sharing".into();
+        sharing.outranking_files = vec![turned_on.to_string_lossy().into()];
+        for first in [false, true] {
+            let mut report = report.clone();
+            if first {
+                report.scan.profiles.insert(0, sharing.clone());
+            } else {
+                report.scan.profiles.push(sharing.clone());
+            }
+            let text = super::tests::text(&report, None, false);
+            assert!(
+                !report_lines(&text)
+                    .iter()
+                    .any(|l| l.head.starts_with("Artifact tool off")),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_check_prices_its_current_value_against_its_documented_default() {
+        use crate::defaults::{Saving, check};
+        let profile = make_profile("profile", ROOT);
+        let saving =
+            |result: &CheckResult| check(result, Some(&profile)).map(|b| (b.default, b.saving));
+        let periods = || counts([period(PeriodStatus::Eligible, true)]);
+        // Idle compaction is on by default; on minus off is what turning it off saves.
+        let off = check_base(Action::Keep, Some(false), Some(false));
+        assert_eq!(
+            saving(&idle_check(off, periods(), Some(3.5))),
+            Some(("on".into(), Saving::Saves(3.5)))
+        );
+        let on = check_base(Action::Keep, Some(true), Some(true));
+        assert_eq!(saving(&idle_check(on, periods(), Some(3.5))), None);
+        // Fast mode costs its premium more than the default, standard speed.
+        let fast = check_base(
+            Action::Change,
+            Some("fast".to_string()),
+            Some("standard".into()),
+        );
+        assert_eq!(
+            saving(&speed_check(fast, "fast")),
+            Some(("off".into(), Saving::Saves(-150.0)))
+        );
+        let standard = check_base(Action::Keep, Some("standard".to_string()), None);
+        assert_eq!(saving(&speed_check(standard, "standard")), None);
+        // A Bash cap other than 10m changes background waits, which are not priced.
+        let bash = |ms: i64| {
+            CheckResult::BashCap(BashCapCheck {
+                base: check_base(Action::Keep, Some(ms), Some(ms)),
+                bucket: "all",
+                ttl: Some(Ttl::OneHour),
+                ttl_basis: "synthetic".into(),
+                replacement: "BASH_MAX_TIMEOUT_MS".into(),
+                waits: BashWaits {
+                    calls: 0,
+                    long: 0,
+                    timed_out: 0,
+                    polling: 0,
+                    miss_cost: cost(Some(0.0), 0.0),
+                },
+            })
+        };
+        assert_eq!(saving(&bash(600_000)), None);
+        assert_eq!(
+            saving(&bash(3_300_000)),
+            Some(("10m".into(), Saving::NotMeasured))
+        );
+        // Codex memories are off by default, so on costs what the check measured.
+        let memory = |harness, current: bool, unmeasured_generation| {
+            CheckResult::Memory(MemoryCheck {
+                base: check_base(Action::Keep, Some(current), Some(current)),
+                harness,
+                off: "off".into(),
+                off_file: None,
+                context_usd: None,
+                writes_usd: None,
+                reads: 0,
+                writes: 0,
+                unresolved: None,
+                overrides: vec![],
+                unmeasured_generation,
+            })
+        };
+        assert_eq!(
+            saving(&memory(Harness::Codex, true, false)),
+            Some(("off".into(), Saving::Saves(-150.0)))
+        );
+        assert_eq!(
+            saving(&memory(Harness::Codex, true, true)),
+            Some(("off".into(), Saving::NotMeasured))
+        );
+        assert_eq!(saving(&memory(Harness::Codex, false, false)), None);
+        assert_eq!(
+            saving(&memory(Harness::Claude, false, false)),
+            Some(("on".into(), Saving::NotMeasured))
+        );
+        // A different effort changes the output, so its saving is never measured.
+        let effort = |level: &str, owner: &str| {
+            let (level, effective) = level.split_once('>').unwrap_or((level, level));
+            CheckResult::Effort(EffortCheck {
+                base: check_base(Action::Keep, Some(effective.to_string()), None),
+                harness: Harness::Claude,
+                control: EffortControl {
+                    model: Some("claude-opus-5-5".into()),
+                    model_owner: "synthetic".into(),
+                    level: Some(level.into()),
+                    owner: owner.into(),
+                    effective: Some(effective.into()),
+                    lowered: None,
+                    caps: vec![],
+                    supported: vec![],
+                    default: Some("medium".into()),
+                    unresolved: None,
+                },
+                enterprise: false,
+                runs: vec![],
+                also: vec![],
+            })
+        };
+        let set = format!("{ROOT}/settings.json:effortLevel");
+        assert_eq!(
+            saving(&effort("high", &set)),
+            Some(("medium".into(), Saving::NotMeasured))
+        );
+        assert_eq!(saving(&effort("medium", &set)), None);
+        assert_eq!(saving(&effort("medium", "x (the model's default)")), None);
+        // A cap that lowers the default runs below it, whatever names the level.
+        assert_eq!(
+            saving(&effort("medium>low", "x (the model's default)")),
+            Some(("medium".into(), Saving::NotMeasured))
+        );
+    }
+
+    #[test]
     fn removed_t3_owners_are_named_in_the_bill() {
         let mut report = synthetic();
         report.scan.t3.push(T3State {
@@ -6620,6 +7032,7 @@ mod tests {
             lowered: None,
             caps: vec![],
             supported: vec![],
+            default: None,
             unresolved: None,
         };
         let set = |path: &[&str], value: &str| {
@@ -6809,6 +7222,7 @@ mod tests {
             Harness::Claude,
             EffortControl {
                 effective: None,
+                default: None,
                 unresolved: Some("T3 picks the model and effort for each thread".into()),
                 ..control("claude-opus-5-5", "max", &owner)
             },

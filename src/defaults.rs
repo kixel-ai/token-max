@@ -294,6 +294,41 @@ pub fn switch_name(control: &Control) -> String {
     }
 }
 
+/// What the feature a switch turns off does, for its off line when no request in the window
+/// carried it to record its own description.
+pub fn switch_what(control: &Control) -> String {
+    use crate::descriptions::{claude_tool, kind};
+    use crate::model::ContextKind;
+    let path: Vec<&str> = control.path.iter().map(String::as_str).collect();
+    let tool = |name: &str| {
+        claude_tool(name).map_or_else(|| kind(ContextKind::Tool).to_string(), str::to_string)
+    };
+    match (path.as_slice(), &control.value) {
+        (["enableArtifact"], _) => tool("Artifact"),
+        (["enableWorkflows"], _) => tool("Workflow"),
+        (["syncClaudeAiSkills"], _) => {
+            "Skills from your claude.ai account, which Claude Code syncs into every session.".into()
+        }
+        (["features", "apps"], _) => {
+            "ChatGPT apps, such as connectors to other services, that Codex can call as tools."
+                .into()
+        }
+        (["mcp_servers", _, "disabled_tools"], ControlValue::Text(_)) => {
+            kind(ContextKind::McpTool).into()
+        }
+        (["mcp_servers", ..], _) => kind(ContextKind::McpServer).into(),
+        (["skillOverrides", _], _) | (_, ControlValue::Skill { .. }) => {
+            kind(ContextKind::Skill).into()
+        }
+        (_, ControlValue::Text(rule)) => match rule.strip_prefix("mcp__") {
+            Some(rest) if rest.contains("__") => kind(ContextKind::McpTool).into(),
+            Some(_) => kind(ContextKind::McpServer).into(),
+            None => tool(rule),
+        },
+        _ => "A feature this setting turns off.".into(),
+    }
+}
+
 /// The switch that already turns a piece off: every selected profile on its line has its
 /// settings file set it, and no file that outranks theirs sets it too. The latest request may
 /// still carry the piece, when the change came after it.

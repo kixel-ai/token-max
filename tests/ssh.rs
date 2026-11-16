@@ -518,7 +518,7 @@ fn codex_context_and_output_keep_their_remote_controls() {
         fixture[1].clone(),
         serde_json::json!({
             "type": "world_state", "timestamp": "2026-11-01T00:00:00Z",
-            "payload": {"full": true, "state": {"tools": {"mcp__docs": "SYNTHETIC_PRIVATE_SCHEMA"}}}
+            "payload": {"full": true, "state": {"tools": {"mcp__docs": "SYNTHETIC_SHIPPED_SCHEMA"}}}
         }),
         serde_json::json!({
             "type": "response_item", "timestamp": "2026-11-01T00:00:00Z",
@@ -599,6 +599,11 @@ fn codex_context_and_output_keep_their_remote_controls() {
         assert_eq!(status, 0, "{stderr}");
         assert_eq!(stderr, "");
         assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
+        // What the remote's server says it does comes back with its report.
+        assert!(
+            section(&stdout, "devbox").contains("What: SYNTHETIC_SHIPPED_SCHEMA"),
+            "{stdout}"
+        );
         let (_, there, stderr) = run(hosts.command(&["--details"]).env("HOME", &home));
         assert_eq!(stderr, "");
         assert_eq!(timeless(section(&stdout, "devbox")), timeless(&there));

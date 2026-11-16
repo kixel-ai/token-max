@@ -316,7 +316,10 @@ pub struct ReportLine {
     /// The line under it naming its default and what the current value saves against it;
     /// empty when the setting is at its default.
     pub default: String,
-    /// The line under it, after any default, in a details report; empty otherwise.
+    /// What the setting or feature does, the first line after any default in a details
+    /// report; empty otherwise.
+    pub what: String,
+    /// The line after that in a details report; empty otherwise.
     pub evidence: String,
 }
 
@@ -359,16 +362,26 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             .min_by_key(|(at, _, _)| *at)
             .map(|(at, claim, after)| (&rest[..at], claim, after))
             .unwrap_or_else(|| panic!("no claim in {line:?}"));
-        let under = |i: usize| lines.get(i).and_then(|l| l.strip_prefix("         "));
-        let default = under(i + 1).filter(|l| l.starts_with("default "));
-        let evidence = under(i + 1 + usize::from(default.is_some())).unwrap_or_default();
+        let under = |n: usize| {
+            lines
+                .get(i + n)
+                .and_then(|l| l.strip_prefix("         "))
+                .unwrap_or_default()
+        };
+        let default = Some(under(1))
+            .filter(|l| l.starts_with("default "))
+            .unwrap_or_default();
+        let skip = usize::from(!default.is_empty());
+        let what = under(1 + skip).strip_prefix("What: ").unwrap_or_default();
+        let evidence = if what.is_empty() { "" } else { under(2 + skip) };
         rows.push(ReportLine {
             change,
             mark: word.into(),
             head: collapse(head),
             claim: claim.into(),
             setting: collapse(setting),
-            default: default.unwrap_or_default().into(),
+            default: default.into(),
+            what: what.into(),
             evidence: evidence.into(),
         });
     }

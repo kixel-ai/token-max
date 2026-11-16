@@ -2304,6 +2304,26 @@ fn apply(target: &Target, edits: &[Edit], removals: &[Entry]) -> Result<String, 
     .map_err(|reason| format!("{reason} in {shown}"))
 }
 
+/// Whether each entry in `removals` holds in `now` what it held in `walked`, the file the
+/// confirm's diff was made from, so a removal never deletes what the person did not see.
+/// Other keys may change, and an entry already gone leaves nothing to remove.
+fn removals_unchanged(walked: &Target, now: &Target, removals: &[Entry]) -> bool {
+    if removals.is_empty() {
+        return true;
+    }
+    let parse = |t: &Target| -> Option<Value> { serde_json::from_str(t.before.as_deref()?).ok() };
+    let (walked, now) = (parse(walked), parse(now));
+    let at = |root: &Option<Value>, path: &[String]| {
+        path.iter()
+            .try_fold(root.as_ref()?, |node, key| node.get(key))
+            .cloned()
+    };
+    removals.iter().all(|e| match at(&now, &e.path) {
+        None => true,
+        found => found == at(&walked, &e.path),
+    })
+}
+
 /// Write each file's accepted changes. Every file is checked first, so a file that changed
 /// while the person was answering stops the run before anything is written. A file Claude
 /// Code rewrites while it runs is instead read again, written first, and written under its
@@ -2315,7 +2335,9 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
         let mut target = pending.target.clone();
         let shown = target.resolved.display().to_string();
         let read = if target.lock {
-            target.reread().map(|()| true)
+            target
+                .reread()
+                .map(|()| removals_unchanged(&pending.target, &target, &pending.removals))
         } else {
             target.unchanged()
         };
@@ -2355,6 +2377,12 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
             target.reread().map_err(|e| {
                 ScanError::new(format!("cannot read {shown} ({e}); {}", done(&written)))
             })?;
+            if !removals_unchanged(&pending.target, &target, &pending.removals) {
+                return Err(ScanError::new(format!(
+                    "{shown} changed while token-max doctor was running; {}, so run it again",
+                    done(&written)
+                )));
+            }
             text = apply(&target, &pending.edits, &pending.removals)
                 .map_err(|e| ScanError::new(format!("{e}; {}", done(&written))))?;
             Some(lock)
@@ -3572,6 +3600,27 @@ mod tests {
         assert!(
             shown.contains("Write the 3 accepted changes and 3 removals to "),
             "{shown}"
+        );
+        // An entry it would remove changed during the walk: nothing is written, since the
+        // diff showed another version.
+        let walked = std::fs::read_to_string(&state).unwrap();
+        std::fs::write(
+            &state,
+            walked.replace(
+                "\"B\": {},\n    \"keep",
+                "\"B\": {\"command\": \"b\"},\n    \"keep",
+            ),
+        )
+        .unwrap();
+        let err = write(&plan).unwrap_err().to_string();
+        assert!(
+            err.contains("changed while token-max doctor was running; nothing was written"),
+            "{err}"
+        );
+        assert!(
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("[mcp_servers.off]")
         );
         // Claude Code saved its state file during the walk: the removal applies to what it
         // holds now rather than refusing it.

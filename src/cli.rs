@@ -161,12 +161,20 @@ static PROGRESS: Mutex<usize> = Mutex::new(0);
 /// fit one row, since a carriage return cannot reach a row the line wrapped onto.
 fn show_progress(message: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
-    let columns = terminal_size::terminal_size_of(io::stderr()).map_or(80, |(w, _)| w.0.into());
-    let text = fit(&format!("token-max: {message}..."), columns.max(2) - 1);
+    let room = progress_room();
+    let text = fit(&format!("token-max: {message}..."), room);
     let cells = crate::terminal::cells(&text);
-    let pad = " ".repeat(shown.saturating_sub(cells));
+    let pad = " ".repeat((*shown).min(room).saturating_sub(cells));
     eprint!("\r{text}{pad}");
     *shown = cells;
+}
+
+/// The cells a progress line may take: one less than stderr's terminal is wide now, so
+/// neither the line nor the spaces blanking it wrap after the terminal shrinks.
+fn progress_room() -> usize {
+    let columns: usize =
+        terminal_size::terminal_size_of(io::stderr()).map_or(80, |(w, _)| w.0.into());
+    columns.max(2) - 1
 }
 
 /// `text` cut to at most `columns` cells, keeping whole characters.
@@ -186,7 +194,7 @@ fn fit(text: &str, columns: usize) -> String {
 fn clear_progress() {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
     if *shown > 0 {
-        eprint!("\r{}\r", " ".repeat(*shown));
+        eprint!("\r{}\r", " ".repeat((*shown).min(progress_room())));
         *shown = 0;
     }
 }

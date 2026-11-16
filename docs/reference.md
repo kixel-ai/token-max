@@ -148,7 +148,8 @@ local-scope server turned off in its project with `/mcp`
 with only some tools denied is not offered, nor a Codex server another layer
 also declares, since that layer may turn it back on. The confirm's diff shows every
 line it removes. Claude Code rewrites `~/.claude.json` while it runs, so that file is
-not refused when it changed during the walk. It is written before any other
+not refused when it changed during the walk, unless an entry it would remove
+now holds something other than what the diff showed. It is written before any other
 file, under Claude Code's own lock (`~/.claude.json.lock`), held only while it
 is read again and replaced, and the removal is made to its current text. A
 lock held for over 5 seconds stops the run, and the error names any file

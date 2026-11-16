@@ -5,7 +5,8 @@
 `token-max doctor --defaults` prints the report a user with no settings
 files would get on this host's own transcripts: every setting at its
 documented Claude Code or Codex default, every tool, skill and MCP server on,
-and the headline, rows and savings priced from there. It is read-only: it
+and the headline, rows and savings priced from there. Managed or system
+policy still applies, so a value or feature it sets stays as it sets it. It is read-only: it
 offers no changes and writes nothing. A normal `doctor` run is unchanged,
 including its "Compared with defaults" line.
 
@@ -37,7 +38,10 @@ the current settings files and pretends they are set to the default values"):
 Recommended:
 
 - Reuse the defaults quest's per-setting replay against each documented
-  default as the baseline, rather than a second pricing path.
+  default as the baseline, rather than a second pricing path. Each row's
+  saving is its own change from that baseline; a headline total sums them
+  and labels the sum as possibly overlapping, as that quest's headline and
+  the walk's running total do, rather than replaying every change at once.
 - A feature the real settings turn off is on by default but absent from the
   transcripts while it was off: price it as the defaults quest does, from
   what it cost per request while it was still sent, and call it unknown

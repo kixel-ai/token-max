@@ -4752,13 +4752,13 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                 continue;
             }
             seen_off.push((file.clone(), control));
-            let ids: Vec<String> = report
+            let group: Vec<&Profile> = report
                 .scan
                 .profiles
                 .iter()
                 .filter(|q| q.harness == p.harness && real(&q.settings_file) == file)
-                .map(|q| q.id.clone())
                 .collect();
+            let ids: Vec<String> = group.iter().map(|q| q.id.clone()).collect();
             let piece = setting_rows(&report.context).find(|c| {
                 c.harness == p.harness
                     && c.profiles.iter().any(|id| ids.contains(id))
@@ -4766,10 +4766,11 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                         .as_ref()
                         .is_some_and(|k| crate::defaults::same_switch(k, control))
             });
-            // A file that outranks this one may turn it back on, and a feature still sent
-            // though no request predates the change has something outranking the file;
-            // either way the feature's own line, if any, says what it costs.
-            if crate::doctor::outranked(p, control)
+            // A file that outranks this one for any profile sharing it may turn it back on,
+            // and a feature still sent though no request predates the change has something
+            // outranking the file; either way the feature's own line, if any, says what it
+            // costs.
+            if group.iter().any(|q| crate::doctor::outranked(q, control))
                 || piece.is_some_and(|c| c.current && !applied(c))
             {
                 continue;
@@ -6138,6 +6139,28 @@ mod tests {
                 .default
                 .starts_with("default on")
         );
+        // A profile sharing the file that another file turns it back on for hides the
+        // line, whichever profile comes first.
+        let turned_on = project.home.join("on.json");
+        std::fs::write(&turned_on, r#"{"enableArtifact": true}"#).unwrap();
+        let mut sharing = report.scan.profiles[0].clone();
+        sharing.id = "sharing".into();
+        sharing.outranking_files = vec![turned_on.to_string_lossy().into()];
+        for first in [false, true] {
+            let mut report = report.clone();
+            if first {
+                report.scan.profiles.insert(0, sharing.clone());
+            } else {
+                report.scan.profiles.push(sharing.clone());
+            }
+            let text = super::tests::text(&report, None, false);
+            assert!(
+                !report_lines(&text)
+                    .iter()
+                    .any(|l| l.head.starts_with("Artifact tool off")),
+                "{text}"
+            );
+        }
     }
 
     #[test]

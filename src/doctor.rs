@@ -1313,6 +1313,42 @@ impl Target {
         Ok(now.as_deref() == self.before.as_deref().map(str::as_bytes))
     }
 
+    /// Where the backup of this file goes, when doctor is to make one: beside the file
+    /// itself, as it was before the change. A file that does not exist yet has nothing to
+    /// keep, and one git tracks with no uncommitted changes is kept by git.
+    fn backup(&self) -> Option<PathBuf> {
+        self.before.as_ref()?;
+        if git_keeps(&self.resolved) {
+            return None;
+        }
+        let mut name = self.resolved.file_name()?.to_os_string();
+        name.push(".token-max.bak");
+        Some(self.resolved.with_file_name(name))
+    }
+
+    /// Whether git holds this file's text as it is now, so a backup would only clutter the
+    /// repository with a file to commit.
+    fn kept_by_git(&self) -> bool {
+        self.before.is_some() && git_keeps(&self.resolved)
+    }
+
+    /// Copy the file as the walk read it to a temporary sibling, to become its backup once
+    /// the write commits.
+    fn stage_backup(&self) -> io::Result<Option<Staged>> {
+        let (Some(bak), Some(before)) = (self.backup(), &self.before) else {
+            return Ok(None);
+        };
+        let name = bak.file_name().unwrap_or_default().to_string_lossy();
+        let temp = bak.with_file_name(format!(".{name}-{}", std::process::id()));
+        let existing = fs::metadata(&self.resolved).ok();
+        create_copy(&temp, existing.as_ref(), before.as_bytes())?;
+        Ok(Some(Staged {
+            temp,
+            bak,
+            keep: false,
+        }))
+    }
+
     /// Replace the file with `text` atomically, keeping its permissions and any symlink,
     /// while `lock`, when given, is still held.
     fn write(&self, text: &str, lock: Option<&Lock>) -> io::Result<()> {
@@ -1325,42 +1361,8 @@ impl Target {
             .resolved
             .with_file_name(format!(".{name}.token-max-{}", std::process::id()));
         let existing = fs::metadata(&self.resolved).ok();
+        create_copy(&temp, existing.as_ref(), text.as_bytes())?;
         let result = (|| {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            // Settings can hold credentials, so the copy starts readable by its owner alone
-            // and takes the replaced file's owner and group before its permissions: group
-            // bits copied onto another group would widen who can read it.
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temp)?;
-            if let Some(metadata) = &existing {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    let made = file.metadata()?;
-                    if (made.uid(), made.gid()) != (metadata.uid(), metadata.gid()) {
-                        std::os::unix::fs::fchown(
-                            &file,
-                            Some(metadata.uid()),
-                            Some(metadata.gid()),
-                        )
-                        .map_err(|e| {
-                            io::Error::new(
-                                e.kind(),
-                                format!("cannot keep its owner and group: {e}"),
-                            )
-                        })?;
-                    }
-                }
-                file.set_permissions(metadata.permissions())?;
-            }
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            drop(file);
             // Check again just before replacing it, so a write by another tool since the
             // walk's check is kept rather than overwritten.
             if !self.unchanged()? {
@@ -1380,6 +1382,107 @@ impl Target {
         }
         result
     }
+}
+
+/// A backup written beside its file, waiting for the file's own write to commit; dropped
+/// uncommitted, it leaves the earlier backup as it was.
+#[derive(Debug)]
+struct Staged {
+    temp: PathBuf,
+    bak: PathBuf,
+    /// Set when the commit failed after its file was written, so the copy is the only
+    /// record of the file as it was.
+    keep: bool,
+}
+
+impl Staged {
+    /// Replace the earlier backup with this one; the drop then finds nothing left to remove.
+    /// A failure keeps the staged copy, which the caller names.
+    fn commit(mut self) -> io::Result<()> {
+        let result = fs::rename(&self.temp, &self.bak);
+        self.keep = result.is_err();
+        result
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if !self.keep {
+            let _ = fs::remove_file(&self.temp);
+        }
+    }
+}
+
+/// Create `temp`, which must not exist, holding `bytes`, with the owner and permissions of
+/// `existing` when given. A failure leaves no `temp` that this call made.
+/// Settings can hold credentials, so the copy starts readable by its owner alone and takes
+/// the replaced file's owner and group before its permissions: group bits copied onto
+/// another group would widen who can read it.
+fn create_copy(temp: &Path, existing: Option<&fs::Metadata>, bytes: &[u8]) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(temp)?;
+    fill(file, existing, bytes).inspect_err(|_| {
+        let _ = fs::remove_file(temp);
+    })
+}
+
+/// Give `file` its owner and permissions, then its contents.
+fn fill(mut file: fs::File, existing: Option<&fs::Metadata>, bytes: &[u8]) -> io::Result<()> {
+    if let Some(metadata) = existing {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let made = file.metadata()?;
+            if (made.uid(), made.gid()) != (metadata.uid(), metadata.gid()) {
+                std::os::unix::fs::fchown(&file, Some(metadata.uid()), Some(metadata.gid()))
+                    .map_err(|e| {
+                        io::Error::new(e.kind(), format!("cannot keep its owner and group: {e}"))
+                    })?;
+            }
+        }
+        file.set_permissions(metadata.permissions())?;
+    }
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Whether git tracks `file` and holds its text as it is now, with no uncommitted change.
+/// Without git, or outside a repository, it keeps nothing.
+fn git_keeps(file: &Path) -> bool {
+    let (Some(dir), Some(name)) = (file.parent(), file.file_name()) else {
+        return false;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .args(["--"])
+            .arg(name)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            // The file's name is a path, not a glob: `a[1].json` must not match `a1.json`.
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+    };
+    // `H` marks a tracked file git compares with its index; `assume-unchanged` and
+    // `skip-worktree` files carry other marks, and `status` would not show their changes.
+    git(&["ls-files", "-v", "--error-unmatch"]).is_some_and(|o| o.stdout.starts_with(b"H "))
+        && git(&["status", "--porcelain"]).is_some_and(|o| o.stdout.is_empty())
 }
 
 /// Whether this process may write `path`.
@@ -2237,6 +2340,30 @@ pub fn confirm(
             if removals == 1 { "" } else { "s" }
         ));
     }
+    // Each file's backup, or why it has none, so nothing is written that the person
+    // wasn't told would be.
+    let mut kept = String::new();
+    for pending in &plan.files {
+        let target = &pending.target;
+        let line = if let Some(bak) = target.backup() {
+            format!(
+                "Backs up {} to {} first.",
+                style.path(&target.file),
+                style.path(&bak.display().to_string())
+            )
+        } else if target.kept_by_git() {
+            format!(
+                "Git keeps the previous version of {}, so it gets no backup.",
+                style.path(&target.file)
+            )
+        } else {
+            continue;
+        };
+        kept += &style.line(&line);
+    }
+    if !kept.is_empty() {
+        write!(output, "\n{kept}")?;
+    }
     let question = format!("Write the {} to {files}?", what.join(" and "));
     let prompt = style.ask(&question, "[y]es, [n]o");
     loop {
@@ -2432,6 +2559,8 @@ pub struct Written {
     pub file: String,
     /// Where the edits landed, when the file is a symlink.
     pub resolved: Option<String>,
+    /// The copy of the file as it was, when doctor kept one.
+    pub backup: Option<String>,
     pub edits: usize,
 }
 
@@ -2467,11 +2596,23 @@ fn removals_unchanged(walked: &Target, now: &Target, removals: &[Entry]) -> bool
     })
 }
 
-/// Write each file's accepted changes. Every file is checked first, so a file that changed
-/// while the person was answering stops the run before anything is written. A file Claude
-/// Code rewrites while it runs is instead read again, written first, and written under its
-/// lock, held only while it is read again and replaced, so its removals are made to what it
-/// holds then.
+/// A file's checked change, ready to write.
+struct Step<'a> {
+    target: Target,
+    text: String,
+    pending: &'a Pending,
+    /// Claude Code's lock on the file, held from when it was read until it is written.
+    lock: Option<Lock>,
+    staged: Option<Staged>,
+}
+
+/// Write each file's accepted changes, after copying each as it was to its backup. Every
+/// file is checked first, so a file that changed while the person was answering stops the
+/// run before anything is written. A file Claude Code rewrites while it runs is instead
+/// locked and read again first, so its removals are made to what it holds then, and stays
+/// locked until it is written. Every backup is staged beside its file before any file is
+/// written, so a failure to back one up writes nothing; each replaces its earlier backup
+/// only once its own file is written.
 pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
     let mut checked = vec![];
     for pending in &plan.files {
@@ -2500,10 +2641,54 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
         let text = apply(&target, &pending.edits, &pending.removals).map_err(ScanError::new)?;
         checked.push((target, text, pending));
     }
-    // A lock another program holds then stops the run before any other file is written.
+    // A lock another program holds then stops the run before anything is written.
     checked.sort_by_key(|(target, _, _)| !target.lock);
-    let mut written: Vec<Written> = vec![];
+    let mut steps: Vec<Step> = vec![];
     for (mut target, mut text, pending) in checked {
+        let shown = target.resolved.display().to_string();
+        let lock = if target.lock {
+            let lock = Lock::take(Path::new(&target.file), crate::mcp::WAIT).map_err(|e| {
+                ScanError::new(format!("cannot lock {shown} ({e}); nothing was written"))
+            })?;
+            target.reread().map_err(|e| {
+                ScanError::new(format!("cannot read {shown} ({e}); nothing was written"))
+            })?;
+            if !removals_unchanged(&pending.target, &target, &pending.removals) {
+                return Err(ScanError::new(format!(
+                    "{shown} changed while token-max doctor was running; nothing was written, so run it again"
+                )));
+            }
+            text = apply(&target, &pending.edits, &pending.removals)
+                .map_err(|e| ScanError::new(format!("{e}; nothing was written")))?;
+            Some(lock)
+        } else {
+            None
+        };
+        steps.push(Step {
+            target,
+            text,
+            pending,
+            lock,
+            staged: None,
+        });
+    }
+    for step in &mut steps {
+        step.staged = step.target.stage_backup().map_err(|e| {
+            let shown = step.target.resolved.display();
+            ScanError::new(format!(
+                "cannot back up {shown} ({e}); nothing was written, and no earlier backup was replaced"
+            ))
+        })?;
+    }
+    let mut written: Vec<Written> = vec![];
+    for step in steps {
+        let Step {
+            target,
+            text,
+            pending,
+            lock,
+            staged,
+        } = step;
         let done = |written: &[Written]| {
             let done: Vec<&str> = written.iter().map(|w| w.file.as_str()).collect();
             if done.is_empty() {
@@ -2513,35 +2698,30 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
             }
         };
         let shown = target.resolved.display().to_string();
-        let lock = if target.lock {
-            let lock = Lock::take(Path::new(&target.file), crate::mcp::WAIT).map_err(|e| {
-                ScanError::new(format!("cannot lock {shown} ({e}); {}", done(&written)))
-            })?;
-            target.reread().map_err(|e| {
-                ScanError::new(format!("cannot read {shown} ({e}); {}", done(&written)))
-            })?;
-            if !removals_unchanged(&pending.target, &target, &pending.removals) {
-                return Err(ScanError::new(format!(
-                    "{shown} changed while token-max doctor was running; {}, so run it again",
-                    done(&written)
-                )));
-            }
-            text = apply(&target, &pending.edits, &pending.removals)
-                .map_err(|e| ScanError::new(format!("{e}; {}", done(&written))))?;
-            Some(lock)
-        } else {
-            None
-        };
         if let Err(e) = target.write(&text, lock.as_ref()) {
             return Err(ScanError::new(format!(
                 "cannot write {shown} ({e}); {}",
                 done(&written)
             )));
         }
+        let backup = staged.as_ref().map(|s| s.bak.display().to_string());
+        if let Some(staged) = staged {
+            let temp = staged.temp.display().to_string();
+            staged.commit().map_err(|e| {
+                let bak = backup.as_deref().unwrap_or_default();
+                ScanError::new(format!(
+                    "wrote {shown}, but cannot replace its backup {bak} ({e}); its previous text is kept in {temp}; {}",
+                    done(&written)
+                ))
+            })?;
+        }
+        // Held through the backup's commit too, so a run that waited for the lock never has
+        // its backup replaced by an earlier run's older copy.
         drop(lock);
         written.push(Written {
             file: target.file.clone(),
             resolved: (shown != target.file).then_some(shown),
+            backup,
             edits: pending.changes(),
         });
     }
@@ -2555,8 +2735,11 @@ pub fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
         let landed = w.resolved.as_ref().map_or_else(String::new, |r| {
             format!(", through its symlink to {}", style.path(r))
         });
+        let kept = w.backup.as_ref().map_or_else(String::new, |b| {
+            format!(" Backed up the old file to {}.", style.path(b))
+        });
         let wrote = format!(
-            "Wrote {} edit{} to {}{landed}.",
+            "Wrote {} edit{} to {}{landed}.{kept}",
             w.edits,
             if w.edits == 1 { "" } else { "s" },
             style.path(&w.file)
@@ -3130,7 +3313,7 @@ mod tests {
         let printed = String::from_utf8(printed).unwrap();
         let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
         assert!(printed.starts_with(&format!(
-            "\n  {shown}\n  @@ -1,3 +1,5 @@\n    {{\n  -   \"keep\": 1\n  +   \"keep\": 1,\n  +   \"a\": true,\n  +   \"c\": true\n    }}\n\n  Write"
+            "\n  {shown}\n  @@ -1,3 +1,5 @@\n    {{\n  -   \"keep\": 1\n  +   \"keep\": 1,\n  +   \"a\": true,\n  +   \"c\": true\n    }}\n\n  Backs up {shown} to {shown}.token-max.bak first.\n\n  Write"
         )), "{printed}");
         assert_eq!(
             printed
@@ -3148,7 +3331,13 @@ mod tests {
         assert!(!config.exists());
         assert_eq!(
             finish(&plan, &written, &style(&w)),
-            format!("\n  Wrote 2 edits to {shown}.\n")
+            format!(
+                "\n  Wrote 2 edits to {shown}. Backed up the old file to {shown}.token-max.bak.\n"
+            )
+        );
+        assert_eq!(
+            std::fs::read_to_string(settings.with_extension("json.token-max.bak")).unwrap(),
+            "{\n  \"keep\": 1\n}\n"
         );
         // End of input is a quit in the walk and a no at the confirm.
         let z = || {
@@ -3551,8 +3740,16 @@ mod tests {
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o640);
         assert!(finish(&plan, &written, &style(&w)).starts_with(
-            "\n  Wrote 1 edit to ~/.claude/settings.json, through its symlink to ~/dotfiles/settings.json.\n"
+            "\n  Wrote 1 edit to ~/.claude/settings.json, through its symlink to ~/dotfiles/settings.json. Backed up the old file to ~/dotfiles/settings.json.token-max.bak.\n"
         ));
+        // The backup sits beside the target, with its permissions, and not beside the link.
+        let bak = dotfiles.join("settings.json.token-max.bak");
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{}\n");
+        assert_eq!(
+            std::fs::metadata(&bak).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert!(!w.claude.join("settings.json.token-max.bak").exists());
         // Root can write anything, so only another user sees a read-only target.
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
@@ -3769,6 +3966,9 @@ mod tests {
             err.contains("changed while token-max doctor was running; nothing was written"),
             "{err}"
         );
+        let bak = |file: &Path| PathBuf::from(format!("{}.token-max.bak", file.display()));
+        assert!(!bak(&state).exists() && !bak(&config).exists());
+        let before_config = std::fs::read_to_string(&config).unwrap();
         assert!(
             std::fs::read_to_string(&config)
                 .unwrap()
@@ -3781,7 +3981,15 @@ mod tests {
             "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {\n          \"headers\": {\n            \"Authorization\": \"Bearer s3cret\"\n          }\n        }\n      }\n    }\n  }\n}\n",
         )
         .unwrap();
+        let reread = std::fs::read_to_string(&state).unwrap();
         let written = write(&plan).unwrap();
+        // The state file's backup holds what the locked re-read returned, not what the
+        // walk read.
+        assert_eq!(std::fs::read_to_string(bak(&state)).unwrap(), reread);
+        assert_eq!(
+            std::fs::read_to_string(bak(&config)).unwrap(),
+            before_config
+        );
         assert_eq!(
             std::fs::read_to_string(&state).unwrap(),
             "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {}\n    }\n  }\n}\n"
@@ -3807,6 +4015,203 @@ mod tests {
         assert_eq!(printed.matches("too? ").count(), 1, "{printed}");
         assert_eq!(choice(&plan, "A"), &Choice::Accepted);
         assert!(plan.files.iter().all(|p| p.removals.is_empty()));
+    }
+
+    /// A change adding `key` to `file`, as the walk accepts it.
+    fn accepted(w: &Workspace, files: &[(&Path, Harness)]) -> Plan {
+        let fixes = files
+            .iter()
+            .enumerate()
+            .map(|(i, (file, harness))| {
+                let name = ["A", "B", "C"][i];
+                change(name, file, *harness, vec![edit("key", 1, false)])
+            })
+            .collect();
+        walk(fixes, w, "y\ny\ny\n").0
+    }
+
+    #[test]
+    fn each_write_replaces_the_one_backup_with_the_file_as_it_was() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let bak = w.claude.join("settings.json.token-max.bak");
+        std::fs::write(&settings, "{}\n").unwrap();
+        write(&accepted(&w, &[(&settings, Harness::Claude)])).unwrap();
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "{}\n");
+        let first = std::fs::read_to_string(&settings).unwrap();
+        // Only the latest change is undone by copying the backup back.
+        std::fs::write(&settings, format!("{first}\n")).unwrap();
+        let (plan, _) = walk(
+            vec![change(
+                "A",
+                &settings,
+                Harness::Claude,
+                vec![edit("other", 2, false)],
+            )],
+            &w,
+            "y\n",
+        );
+        write(&plan).unwrap();
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), format!("{first}\n"));
+        // A file that does not exist yet has nothing to keep.
+        let fresh = w.codex.join("config.toml");
+        let printed = {
+            let plan = accepted(&w, &[(&fresh, Harness::Codex)]);
+            let mut printed = vec![];
+            confirm(&plan, &style(&w), &mut "y\n".as_bytes(), &mut printed).unwrap();
+            write(&plan).unwrap();
+            String::from_utf8(printed).unwrap()
+        };
+        assert!(
+            !printed.contains("Backs up") && !printed.contains("Git"),
+            "{printed}"
+        );
+        assert!(!w.codex.join("config.toml.token-max.bak").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_that_cannot_be_staged_writes_nothing_and_keeps_every_earlier_backup() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let config = w.codex.join("config.toml");
+        std::fs::write(&settings, "{}\n").unwrap();
+        std::fs::write(&config, "a = 1\n").unwrap();
+        std::fs::write(w.claude.join("settings.json.token-max.bak"), "older\n").unwrap();
+        let plan = accepted(
+            &w,
+            &[(&settings, Harness::Claude), (&config, Harness::Codex)],
+        );
+        // Something already sits where the second file's backup is staged.
+        let blocker = w
+            .codex
+            .join(format!(".config.toml.token-max.bak-{}", std::process::id()));
+        std::fs::write(&blocker, "theirs").unwrap();
+        let error = write(&plan).unwrap_err().message;
+        assert!(
+            error.contains("cannot back up") && error.contains("nothing was written"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{}\n");
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "a = 1\n");
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
+            "older\n"
+        );
+        // The first file's staged copy is cleaned up, and the blocker is not ours to remove.
+        let left: Vec<_> = std::fs::read_dir(&w.claude)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 3, "{left:?}");
+        assert!(blocker.exists());
+        std::fs::remove_file(&blocker).unwrap();
+
+        // A backup that cannot replace its earlier one is reported, after its file's write.
+        let bak = w.codex.join("config.toml.token-max.bak");
+        std::fs::create_dir(&bak).unwrap();
+        std::fs::write(bak.join("x"), "").unwrap();
+        let error = write(&plan).unwrap_err().message;
+        assert!(
+            error.contains("cannot replace its backup") && error.contains("already wrote"),
+            "{error}"
+        );
+        // The file as it was survives in the staged copy the error names.
+        let kept = w
+            .codex
+            .join(format!(".config.toml.token-max.bak-{}", std::process::id()));
+        assert!(error.contains(&kept.display().to_string()), "{error}");
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "a = 1\n");
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
+            "{}\n"
+        );
+        assert!(std::fs::read_to_string(&config).unwrap().contains("key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_git_tracks_with_no_uncommitted_changes_gets_no_backup() {
+        use std::process::Command;
+        let w = Workspace::new();
+        let repo = w.home.join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let ok = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        let settings = repo.join("settings.json");
+        std::fs::write(&settings, "{}\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        let confirm_text = |plan: &Plan| {
+            let mut printed = vec![];
+            confirm(plan, &style(&w), &mut "y\n".as_bytes(), &mut printed).unwrap();
+            String::from_utf8(printed).unwrap()
+        };
+        let plan = accepted(&w, &[(&settings, Harness::Claude)]);
+        let printed = confirm_text(&plan);
+        assert!(
+            printed.contains(
+                "Git keeps the previous version of ~/project/settings.json, so it gets no backup."
+            ),
+            "{printed}"
+        );
+        let written = write(&plan).unwrap();
+        assert!(written[0].backup.is_none());
+        assert!(!repo.join("settings.json.token-max.bak").exists());
+        // Uncommitted changes are not in git, so the file is backed up.
+        let plan = accepted(&w, &[(&settings, Harness::Claude)]);
+        let printed = confirm_text(&plan);
+        assert!(
+            printed.contains(
+                "Backs up ~/project/settings.json to ~/project/settings.json.token-max.bak first."
+            ),
+            "{printed}"
+        );
+        write(&plan).unwrap();
+        assert!(repo.join("settings.json.token-max.bak").exists());
+        // Git status hides changes to a file marked skip-worktree or assume-unchanged.
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "y", "--allow-empty"]);
+        git(&["update-index", "--skip-worktree", "settings.json"]);
+        std::fs::write(&settings, "{\"mine\": 1}\n").unwrap();
+        let plan = accepted(&w, &[(&settings, Harness::Claude)]);
+        assert!(confirm_text(&plan).contains("Backs up"));
+        git(&["update-index", "--no-skip-worktree", "settings.json"]);
+        git(&["update-index", "--assume-unchanged", "settings.json"]);
+        let plan = accepted(&w, &[(&settings, Harness::Claude)]);
+        assert!(confirm_text(&plan).contains("Backs up"));
+        // A name with glob characters is matched literally: this ignored file is not the
+        // tracked `a1.json` beside it.
+        std::fs::write(repo.join("a1.json"), "{}\n").unwrap();
+        git(&["add", "a1.json"]);
+        git(&["commit", "-q", "-m", "z"]);
+        std::fs::write(repo.join(".git/info/exclude"), "a[[]1].json\n").unwrap();
+        let globbed = repo.join("a[1].json");
+        std::fs::write(&globbed, "{}\n").unwrap();
+        let written = write(&accepted(&w, &[(&globbed, Harness::Claude)])).unwrap();
+        assert!(written[0].backup.is_some());
+        // So is a file git does not track.
+        let loose = repo.join("local.json");
+        std::fs::write(&loose, "{}\n").unwrap();
+        let written = write(&accepted(&w, &[(&loose, Harness::Claude)])).unwrap();
+        assert!(written[0].backup.is_some());
     }
 
     #[test]

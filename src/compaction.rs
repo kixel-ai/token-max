@@ -2001,6 +2001,7 @@ mod tests {
             instruction_budget_unresolved: None,
             outranking_files: vec![],
             claude_config: None,
+            codex_system_config: None,
             id: "profile".into(),
             harness: Harness::Claude,
             root: "synthetic".into(),

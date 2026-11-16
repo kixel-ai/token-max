@@ -90,7 +90,16 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
                 },
             }];
         }
-        return match codex_layers(profile, id) {
+        // Every profile on the line shares the file but may outrank it with layers of its own.
+        let layers = profiles.iter().try_fold(vec![], |mut all: Vec<String>, p| {
+            for layer in codex_layers(p, id)? {
+                if !all.contains(&layer) {
+                    all.push(layer);
+                }
+            }
+            Ok::<_, crate::safe::ScanError>(all)
+        });
+        return match layers {
             Ok(layers) if layers.is_empty() => vec![Definition::Entry(Entry {
                 server: id.clone(),
                 file: file.clone(),
@@ -100,7 +109,7 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
             Ok(layers) => vec![Definition::Manual {
                 step,
                 reason: format!(
-                    "{} also configures it and may rely on the rest of its table",
+                    "{} also declares it, which removing this table would leave in effect",
                     layers.join(", ")
                 ),
             }],
@@ -207,7 +216,7 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
                 if table.get("enabled") != Some(&Value::Bool(false)) {
                     continue;
                 }
-                // A project or named profile that configures it too may turn it back on.
+                // Another layer that declares it may turn it back on, or start it once this table is gone.
                 match codex_layers(profile, id) {
                     Ok(layers) if !layers.is_empty() => continue,
                     Ok(_) => {}
@@ -269,14 +278,20 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
         .collect()
 }
 
-/// The Codex layers that outrank the profile's `config.toml` for some recorded session and
-/// configure the server `id` too: a project's or named profile's file, or a named profile
-/// table in `config.toml` itself.
+/// The other Codex layers that declare the server `id`: those that outrank the profile's
+/// `config.toml` for some recorded session, a project's or named profile's file or a named
+/// profile table in `config.toml` itself, which may rely on the user's table, and the
+/// system `config.toml` below it, whose declaration would take effect once the user's
+/// table that turns it off is gone.
 fn codex_layers(profile: &Profile, id: &str) -> Result<Vec<String>, crate::safe::ScanError> {
     let declares =
         |config: &Map<String, Value>| members(config.get("mcp_servers")).contains_key(id);
     let mut layers = vec![];
-    for file in &profile.outranking_files {
+    for file in profile
+        .outranking_files
+        .iter()
+        .chain(&profile.codex_system_config)
+    {
         if declares(&settings(file, Harness::Codex)?) {
             layers.push(file.clone());
         }
@@ -355,7 +370,7 @@ pub(crate) struct Lock {
     stop: Arc<AtomicBool>,
 }
 
-/// A lock not refreshed for this long belongs to a process that died, as Claude Code's
+/// A lock not refreshed for this long belongs to a process that exited, as Claude Code's
 /// lock library treats it.
 const STALE: Duration = Duration::from_secs(10);
 
@@ -363,11 +378,11 @@ const STALE: Duration = Duration::from_secs(10);
 const REFRESH: Duration = Duration::from_secs(1);
 
 /// How long to wait for a Claude Code session to finish its save.
-const WAIT: Duration = Duration::from_secs(5);
+pub(crate) const WAIT: Duration = Duration::from_secs(5);
 
 impl Lock {
-    /// Take the lock beside `file`, waiting for a session that holds it.
-    pub(crate) fn take(file: &Path) -> io::Result<Lock> {
+    /// Take the lock beside `file`, waiting up to `wait` for a session that holds it.
+    pub(crate) fn take(file: &Path, wait: Duration) -> io::Result<Lock> {
         let mut name = file.as_os_str().to_owned();
         name.push(".lock");
         let dir = PathBuf::from(name);
@@ -378,24 +393,20 @@ impl Lock {
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
-            let age = fs::metadata(&dir)
-                .and_then(|m| m.modified())
-                .map(|at| at.elapsed().unwrap_or_default());
-            match age {
-                Ok(age) if age > STALE => {
-                    let _ = fs::remove_dir(&dir);
-                    continue;
-                }
-                // Released between the two calls.
-                Err(e) if e.kind() == ErrorKind::NotFound => continue,
-                _ => {}
-            }
-            if started.elapsed().unwrap_or_default() > WAIT {
-                return Err(io::Error::other(format!(
-                    "Claude Code held {} for over {} seconds",
-                    dir.display(),
-                    WAIT.as_secs()
-                )));
+            if started.elapsed().unwrap_or_default() >= wait {
+                // A stale lock is left for Claude Code's own lock library to take over:
+                // removing it here could remove a fresh one another contender just made.
+                let stale = modified(&dir).is_ok_and(|at| at.elapsed().unwrap_or_default() > STALE);
+                let held = if stale {
+                    "is left from a process that exited; remove it if no Claude Code is running"
+                        .to_string()
+                } else {
+                    format!(
+                        "was held by Claude Code for over {} seconds",
+                        wait.as_secs()
+                    )
+                };
+                return Err(io::Error::other(format!("{} {held}", dir.display())));
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -627,7 +638,29 @@ mod tests {
         };
         assert!(reason.starts_with(&p.outranking_files[0]), "{reason}");
         assert!(turned_off(&[p.clone()]).is_empty());
+        // So does another profile on the line that shares the file.
+        let mut other = p.clone();
         p.outranking_files.clear();
+        assert!(matches!(
+            definitions("my_docs", &control, &[&p, &other]).as_slice(),
+            [Definition::Manual { .. }]
+        ));
+        other.outranking_files.clear();
+        assert!(matches!(
+            definitions("my_docs", &control, &[&p, &other]).as_slice(),
+            [Definition::Entry(_)]
+        ));
+        // The system config declares it below the user's file: removing the user's table
+        // would start it again.
+        let system = w.home.join("etc/codex/config.toml");
+        write(&system, "[mcp_servers.\"my.docs\"]\ncommand = \"x\"\n");
+        p.codex_system_config = Some(system.to_string_lossy().into_owned());
+        assert!(matches!(
+            definitions("my_docs", &control, &[&p]).as_slice(),
+            [Definition::Manual { .. }]
+        ));
+        assert!(turned_off(&[p.clone()]).is_empty());
+        p.codex_system_config = None;
         write(
             &p.settings_file,
             "[mcp_servers.\"my.docs\"]\nenabled = false\n[profiles.work.mcp_servers.\"my.docs\"]\nenabled = true\n",
@@ -686,22 +719,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn the_lock_waits_for_a_holder_and_takes_over_a_stale_one() {
+    fn the_lock_is_released_by_its_holder_and_a_held_or_stale_one_is_left_alone() {
         let w = Workspace::new();
         let file = w.home.join(".claude.json");
-        let lock = Lock::take(&file).unwrap();
+        let lock = Lock::take(&file, WAIT).unwrap();
         let dir = w.home.join(".claude.json.lock");
         assert!(dir.is_dir());
         drop(lock);
         assert!(!dir.exists());
-        // A lock last refreshed long ago is taken over.
+        // Another holder's lock, fresh or stale, is never removed here.
         fs::create_dir(&dir).unwrap();
+        let held = Lock::take(&file, Duration::ZERO).err().unwrap().to_string();
+        assert!(
+            held.ends_with("was held by Claude Code for over 0 seconds"),
+            "{held}"
+        );
         let old = SystemTime::now() - Duration::from_secs(60);
         fs::File::open(&dir).unwrap().set_modified(old).unwrap();
-        drop(Lock::take(&file).unwrap());
-        assert!(!dir.exists());
+        let stale = Lock::take(&file, Duration::ZERO).err().unwrap().to_string();
+        assert!(
+            stale.contains("remove it if no Claude Code is running"),
+            "{stale}"
+        );
+        assert!(dir.is_dir());
+        fs::remove_dir(&dir).unwrap();
         // A lock another holder replaced is no longer held, and is left to that holder.
-        let lock = Lock::take(&file).unwrap();
+        let lock = Lock::take(&file, WAIT).unwrap();
         assert!(lock.held());
         fs::File::open(&dir).unwrap().set_modified(old).unwrap();
         assert!(!lock.held());

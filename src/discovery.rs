@@ -1944,6 +1944,7 @@ pub(crate) fn profile(
         instruction_budget_unresolved: None,
         outranking_files: vec![],
         claude_config,
+        codex_system_config: (!claude).then(|| system_file.to_string()),
     })
 }
 

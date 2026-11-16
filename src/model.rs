@@ -974,6 +974,10 @@ pub struct Profile {
     /// its user- and local-scope MCP servers; none for Codex.
     #[serde(skip)]
     pub claude_config: Option<String>,
+    /// Codex's system `config.toml`, below the user's file, which can declare an MCP server
+    /// that the user's table turns off; none for Claude.
+    #[serde(skip)]
+    pub codex_system_config: Option<String>,
 }
 
 /// A setting's current value and the file or variable that sets it.

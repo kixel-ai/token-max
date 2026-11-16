@@ -124,7 +124,10 @@ local-scope `projects.<path>.mcpServers.<name>` in `~/.claude.json` (or
 `~/.claude`), or a Codex `[mcp_servers.<id>]` table, with its subtables, in
 `config.toml`. Comments directly above a removed table go with it. A Codex
 server that a project's or named profile's configuration also declares is a
-step by hand, since that layer may rely on the rest of the user's table. Where token-max cannot remove a
+step by hand, since that layer may rely on the rest of the user's table, and
+so is one the system `/etc/codex/config.toml` declares, which would start
+again once the user's table turning it off is gone. So is a table the user's
+`config.toml` no longer declares when the walk runs. Where token-max cannot remove a
 server, it names the step to take by hand instead of asking: a
 project's `.mcp.json`, which everyone using the project shares, a plugin's
 server (`plugin_*`), a claude.ai connector (`claude_ai_*`), or a server it
@@ -142,7 +145,11 @@ removes. Claude Code rewrites `~/.claude.json` while it runs, so that file is
 not refused when it changed during the walk. It is written before any other
 file, under Claude Code's own lock (`~/.claude.json.lock`), held only while it
 is read again and replaced, and the removal is made to its current text. A
-lock held for over 5 seconds stops the run before anything is written. Claude Code re-reads the file under that lock before each save,
+lock held for over 5 seconds stops the run, and the error names any file
+already written, which happens only when more than one Claude Code state file
+is locked. A stale lock, one not refreshed for 10 seconds, is not taken over:
+the error asks to remove it if no Claude Code is running, since Claude Code
+takes it over itself. Claude Code re-reads the file under that lock before each save,
 so the removal survives sessions already running, which keep the server until
 they restart.
 

@@ -2124,7 +2124,7 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
         };
         let shown = target.resolved.display().to_string();
         let lock = if target.lock {
-            let lock = Lock::take(Path::new(&target.file)).map_err(|e| {
+            let lock = Lock::take(Path::new(&target.file), crate::mcp::WAIT).map_err(|e| {
                 ScanError::new(format!("cannot lock {shown} ({e}); {}", done(&written)))
             })?;
             target.reread().map_err(|e| {

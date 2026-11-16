@@ -534,6 +534,7 @@ enum Output {
 struct Walk {
     listing: Box<Listing>,
     fixes: Vec<Fix>,
+    turned_off: Vec<crate::mcp::Definition>,
     /// What follows this host's report: other hosts' reports and the note on adding them.
     rest: String,
     style: Style,
@@ -570,6 +571,9 @@ pub struct Rendered {
     pub fixes: Vec<Fix>,
     /// The report, to print again after the walk; None for a destination's.
     pub listing: Option<Box<Listing>>,
+    /// MCP servers whose tools are off already, which the walk offers to remove; empty
+    /// for a destination's report.
+    pub turned_off: Vec<crate::mcp::Definition>,
 }
 
 /// Analyze one host's scan and print its report.
@@ -607,6 +611,7 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
         change,
         fixes,
         listing: Some(Box::new(listing)),
+        turned_off: crate::mcp::turned_off(&report.scan.profiles),
     })
 }
 
@@ -1007,12 +1012,14 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let mut text = String::new();
     let mut fixes = vec![];
     let mut listing = None;
+    let mut turned_off = vec![];
     for (ssh, reply) in replies {
         let Reply::Report(Rendered {
             text: report,
             change,
             fixes: local,
             listing: local_listing,
+            turned_off: local_off,
         }) = reply
         else {
             unreachable!("a report job gets reports");
@@ -1022,6 +1029,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         // This host's report comes first; the walk prints it after the questions.
         if walk && ssh.is_none() {
             listing = local_listing;
+            turned_off = local_off;
             continue;
         }
         if !text.is_empty() || listing.is_some() {
@@ -1049,6 +1057,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             Output::Walk(Walk {
                 listing,
                 fixes,
+                turned_off,
                 rest: text,
                 style,
             }),
@@ -1064,13 +1073,14 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
     let Walk {
         listing,
         fixes,
+        turned_off,
         rest,
         style,
     } = walk;
     let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
-    let plan = ask(fixes, &style, &mut stdin, &mut stdout).map_err(failed)?;
+    let plan = ask(fixes, turned_off, &style, &mut stdin, &mut stdout).map_err(failed)?;
     let report = listing.review(plan.choices(), &plan.total("Accepted"));
     // The report reads as its own section after the questions.
     let gap = if plan.choices().is_empty() { "" } else { "\n" };

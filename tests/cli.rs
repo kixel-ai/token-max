@@ -47,6 +47,29 @@ impl Workspace {
         std::fs::copy(fixture("claude.jsonl"), self.transcript()).unwrap();
     }
 
+    /// The fixture moved to start `days` before now. Savings are priced per 30 days of a
+    /// window that ends now, so a fixed date would make them drift with the clock.
+    fn recent_fixture(&self, days: i64) {
+        let text = std::fs::read_to_string(fixture("claude.jsonl")).unwrap();
+        let start: jiff::Timestamp = "2026-11-01T00:00:00Z".parse().unwrap();
+        let shift = jiff::Timestamp::now()
+            .duration_since(start)
+            .checked_sub(jiff::SignedDuration::from_hours(24 * days))
+            .unwrap();
+        let mut out = String::new();
+        let mut rest = text.as_str();
+        while let Some(at) = rest.find("\"timestamp\":\"") {
+            let (head, tail) = rest.split_at(at + "\"timestamp\":\"".len());
+            let end = tail.find('"').unwrap();
+            let moved = tail[..end].parse::<jiff::Timestamp>().unwrap() + shift;
+            out += head;
+            out += &moved.to_string();
+            rest = &tail[end..];
+        }
+        out += rest;
+        std::fs::write(self.transcript(), out).unwrap();
+    }
+
     fn settings(&self, text: &str) {
         std::fs::write(self.claude.join("settings.json"), text).unwrap();
     }
@@ -1160,7 +1183,7 @@ mod unix {
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
         let w = Workspace::new();
-        w.fixture();
+        w.recent_fixture(14);
         w.settings("{\n  \"promptCacheTtl\": \"5m\"\n}\n");
         // Prices ten thousand times the fixture's, so the TTL saves enough to be asked: the
         // walk leaves out a change saving under $1/mo.
@@ -1226,7 +1249,7 @@ mod unix {
             "{stdout}"
         );
         let ttl = at(
-            "\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves $30/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
+            "\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves $32/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
         );
         let memory = at(
             "\n[2/2] Auto memory: on -> off\n  Worth considering (Opinion): its saving was not measured.\n",
@@ -1238,7 +1261,7 @@ mod unix {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $30/mo, 13% of this host's spend."),
+            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $32/mo, 13% of this host's spend."),
             "{entry}"
         );
         // Then the report, its accepted change first, and one question to write it.

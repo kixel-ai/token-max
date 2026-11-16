@@ -970,6 +970,10 @@ pub struct Profile {
     /// the same switch in `settings_file`. Only files that hold settings are listed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outranking_files: Vec<String>,
+    /// Claude Code's own state file for this root, such as `~/.claude.json`, which holds
+    /// its user- and local-scope MCP servers; none for Codex.
+    #[serde(skip)]
+    pub claude_config: Option<String>,
 }
 
 /// A setting's current value and the file or variable that sets it.

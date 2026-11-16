@@ -1912,6 +1912,7 @@ pub(crate) fn profile(
             ..codex_memory(&speed_scopes, &settings_file)?
         }
     };
+    let claude_config = claude.then(|| claude_config(&options.home, &canonical));
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1939,7 +1940,19 @@ pub(crate) fn profile(
         instruction_budget_file,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        claude_config,
     })
+}
+
+/// Claude Code's state file for a canonical root: `~/.claude.json` beside the default
+/// `~/.claude`, else `.claude.json` inside a `CLAUDE_CONFIG_DIR`.
+fn claude_config(home: &str, canonical: &str) -> String {
+    let default = join(&[home, ".claude"]);
+    if realpath(&default).is_ok_and(|d| d == canonical) {
+        join(&[home, ".claude.json"])
+    } else {
+        join(&[canonical, ".claude.json"])
+    }
 }
 
 /// Discover configuration aliases and freeze every selected file's length before parsing.

@@ -26,6 +26,10 @@ use crate::safe::{self, ScanError, identity, label, object};
 /// ships text.
 pub(crate) const NAMESPACE_DESCRIPTION: &str = "deferred-namespace-description";
 
+/// The provenance of a Claude listing delta whose names and lines do not pair one to
+/// one, so its text belongs to no single tool or server.
+pub(crate) const UNMAPPED_DELTA: &str = "unmapped-rendered-delta";
+
 /// Prefer recorded counts; a missing calibration leaves token and dollar estimates unknown.
 pub fn measure_size(text: Option<&str>) -> Size {
     Size {
@@ -1773,7 +1777,7 @@ impl ExposureCollector {
                 let name = format!("{}:{}", js_string(kind), line.location.line);
                 let body = texts(lines)?.join("\n");
                 self.component(
-                    New::active(category, &name, "unmapped-rendered-delta"),
+                    New::active(category, &name, UNMAPPED_DELTA),
                     Content::Text(&body),
                     at,
                 );

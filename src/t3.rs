@@ -596,13 +596,6 @@ pub(crate) fn discover(
             Err(e) if e.kind() == ErrorKind::NotFound => Settings::default(),
             Err(_) => return Err(fail("cannot read T3 settings", &file)),
         };
-        let global = settings
-            .idle_compaction
-            .unwrap_or(match settings.compact_idle_threads {
-                Some(LegacyIdle::Mode(mode)) => mode,
-                Some(LegacyIdle::Bool(true)) => T3IdleMode::BeforeCacheExpires,
-                _ => T3IdleMode::OnReturn,
-            });
         let mut instances = std::mem::take(&mut settings.provider_instances);
         for (driver, config) in std::mem::take(&mut settings.providers) {
             let (config_enabled, custom_models) = common_config(Some(&config));
@@ -614,6 +607,23 @@ pub(crate) fn discover(
                 ..Default::default()
             });
         }
+        if options.defaults {
+            // Each instance keeps its driver and the home it reads; every setting is T3's default.
+            settings = Settings::default();
+            for instance in instances.values_mut() {
+                instance.enabled = None;
+                instance.config_enabled = None;
+                instance.custom_models.clear();
+                instance.environment.clear();
+            }
+        }
+        let global = settings
+            .idle_compaction
+            .unwrap_or(match settings.compact_idle_threads {
+                Some(LegacyIdle::Mode(mode)) => mode,
+                Some(LegacyIdle::Bool(true)) => T3IdleMode::BeforeCacheExpires,
+                _ => T3IdleMode::OnReturn,
+            });
         // T3 restores these built-in instances even before settings have been saved.
         for driver in ["claudeAgent", "codex"] {
             instances.entry(driver.into()).or_insert(Instance {
@@ -668,12 +678,20 @@ pub(crate) fn discover(
                     }
                 }
             }
-            let config = instance
+            let mut config = instance
                 .config
                 .map(|raw| serde_json::from_str::<Config>(raw.get()))
                 .transpose()
                 .map_err(|_| fail("invalid supported T3 provider controls", &file))?
                 .unwrap_or_default();
+            if options.defaults {
+                config = Config {
+                    home_path: config.home_path,
+                    shadow_home_path: config.shadow_home_path,
+                    setup_mode: config.setup_mode,
+                    ..Config::default()
+                };
+            }
             let policy_unresolved = managed_policy_unresolved();
             let variable = if harness == Harness::Claude {
                 "CLAUDE_CONFIG_DIR"
@@ -797,7 +815,11 @@ pub(crate) fn discover(
                 .speed
                 .as_mut()
                 .expect("native profiles have speed controls");
-            if harness == Harness::Claude {
+            if options.defaults {
+                // A thread's selection defaults to no fastMode or serviceTier, so a Claude
+                // thread runs at standard speed and a Codex one at the native default.
+                speed.owner = format!("T3 instance {id}: thread model selection");
+            } else if harness == Harness::Claude {
                 speed.value = None;
                 speed.owner = format!("T3 instance {id}: thread modelSelection.options.fastMode");
                 speed.replacement = "fastMode=false in the T3 thread model selection".into();

@@ -35,6 +35,9 @@ pub struct DiscoveryOptions {
     pub codex_system_config_file: String,
     /// The managed Codex requirements file.
     pub codex_requirements_file: String,
+    /// Read every user, project and local settings file as unset, as `doctor --defaults`
+    /// shows the report; managed and system policy still apply.
+    pub defaults: bool,
 }
 
 impl DiscoveryOptions {
@@ -58,7 +61,57 @@ impl DiscoveryOptions {
             managed_settings_file: managed_settings_path(std::env::consts::OS).into(),
             codex_system_config_file: "/etc/codex/config.toml".into(),
             codex_requirements_file: "/etc/codex/requirements.toml".into(),
+            defaults: false,
         })
+    }
+
+    /// Pretend the settings files and the shell's setting variables away, keeping the
+    /// variables that only say where each CLI keeps its files.
+    pub fn pretend_defaults(&mut self) {
+        self.defaults = true;
+        self.env.retain(|k, _| {
+            matches!(
+                k.as_str(),
+                "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME"
+            )
+        });
+    }
+
+    /// Whether `file` is managed or system policy, which `--defaults` keeps.
+    fn policy(&self, file: &str) -> bool {
+        [
+            &self.managed_settings_file,
+            &self.codex_system_config_file,
+            &self.codex_requirements_file,
+        ]
+        .contains(&&file.to_string())
+    }
+
+    /// Read a settings file as this run sees it. Under `--defaults` a user, project or
+    /// local file sets nothing, except that a Codex file keeps the MCP servers it
+    /// declares, each on: a server is something installed, not a setting's value.
+    pub(crate) fn settings(
+        &self,
+        file: &str,
+        harness: Harness,
+    ) -> Result<Map<String, Value>, ScanError> {
+        if !self.defaults || self.policy(file) {
+            return settings(file, harness);
+        }
+        let mut pretended = Map::new();
+        if harness == Harness::Codex
+            && let Some(Value::Object(mut servers)) = settings(file, harness)?.remove("mcp_servers")
+        {
+            for server in servers.values_mut() {
+                if let Value::Object(server) = server {
+                    for key in ["enabled", "enabled_tools", "disabled_tools"] {
+                        server.remove(key);
+                    }
+                }
+            }
+            pretended.insert("mcp_servers".into(), Value::Object(servers));
+        }
+        Ok(pretended)
     }
 }
 
@@ -717,7 +770,7 @@ pub fn discover_claude_controls(
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none())
     {
         profile.background_requests.clear();
-        let user = settings(&profile.settings_file, Harness::Claude)?;
+        let user = options.settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let local_env = if active == profile.root { env } else { &empty };
         let mut outranking: Vec<String> = vec![];
@@ -789,9 +842,9 @@ pub fn discover_claude_controls(
                 continue;
             }
             let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
-            let project = settings(&project_file, Harness::Claude)?;
-            let legacy = settings(&legacy_file, Harness::Claude)?;
-            let local = settings(&local_file, Harness::Claude)?;
+            let project = options.settings(&project_file, Harness::Claude)?;
+            let legacy = options.settings(&legacy_file, Harness::Claude)?;
+            let local = options.settings(&local_file, Harness::Claude)?;
             for (file, config) in [
                 (&project_file, &project),
                 (&legacy_file, &legacy),
@@ -937,7 +990,7 @@ pub fn discover_claude_controls(
         else {
             continue;
         };
-        let user = settings(&profile.settings_file, Harness::Claude)?;
+        let user = options.settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let user_scope = SettingsScope {
             config: &user,
@@ -963,9 +1016,9 @@ pub fn discover_claude_controls(
                 continue;
             }
             let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
-            let project = settings(&project_file, Harness::Claude)?;
-            let legacy = settings(&legacy_file, Harness::Claude)?;
-            let local = settings(&local_file, Harness::Claude)?;
+            let project = options.settings(&project_file, Harness::Claude)?;
+            let legacy = options.settings(&legacy_file, Harness::Claude)?;
+            let local = options.settings(&local_file, Harness::Claude)?;
             let scopes = [
                 user_scope,
                 SettingsScope {
@@ -1053,8 +1106,8 @@ pub fn discover_codex_controls(
         .iter_mut()
         .filter(|p| p.harness == Harness::Codex && p.t3.is_none())
     {
-        let user = settings(&profile.settings_file, Harness::Codex)?;
-        let system = settings(&options.codex_system_config_file, Harness::Codex)?;
+        let user = options.settings(&profile.settings_file, Harness::Codex)?;
+        let system = options.settings(&options.codex_system_config_file, Harness::Codex)?;
         let base_scopes = [
             SettingsScope {
                 config: &system,
@@ -1091,9 +1144,9 @@ pub fn discover_codex_controls(
         let mut outranking: Vec<String> = vec![];
         // Named profile files that set the model or its effort, which a --profile selection could apply.
         let mut effort_profile_files: Vec<String> = vec![];
-        for name in named_profile_files(&profile.root)? {
+        for name in named_profile_files(options, &profile.root)? {
             let file = join(&[&profile.root, &name]);
-            let config = settings(&file, Harness::Codex)?;
+            let config = options.settings(&file, Harness::Codex)?;
             if !config.is_empty() {
                 outranking.push(file.clone());
             }
@@ -1194,7 +1247,7 @@ pub fn discover_codex_controls(
                     continue;
                 }
                 let file = join(&[path, ".codex", "config.toml"]);
-                let config = settings(&file, Harness::Codex)?;
+                let config = options.settings(&file, Harness::Codex)?;
                 let overrides = CODEX_SPEED_KEYS.iter().any(|k| config.contains_key(*k));
                 let known = profile
                     .speed_directories
@@ -1230,9 +1283,13 @@ pub fn discover_codex_controls(
             // project differently, so any project config up to the home may apply.
             if marker_selection {
                 let keep = |config: &Map<String, Value>| !config.is_empty();
-                for file in
-                    ancestor_codex_configs(cwd, &profile.settings_file, &options.home, keep)?
-                {
+                for file in ancestor_codex_configs(
+                    options,
+                    cwd,
+                    &profile.settings_file,
+                    &options.home,
+                    keep,
+                )? {
                     if !same_file(&file, &profile.settings_file) && !outranking.contains(&file) {
                         outranking.push(file);
                     }
@@ -1272,6 +1329,7 @@ pub fn discover_codex_controls(
                 // project layers apply, as for memories.
                 if marker_selection {
                     for file in ancestor_codex_configs(
+                        options,
                         cwd,
                         &profile.settings_file,
                         &options.home,
@@ -1288,7 +1346,12 @@ pub fn discover_codex_controls(
                 // A named profile's project_root_markers or projects can change which
                 // project layers apply, which matters only where one sets memories.
                 let moved = if marker_selection {
-                    ancestors_setting_codex_memory(cwd, &profile.settings_file, &options.home)?
+                    ancestors_setting_codex_memory(
+                        options,
+                        cwd,
+                        &profile.settings_file,
+                        &options.home,
+                    )?
                 } else {
                     vec![]
                 };
@@ -1394,11 +1457,12 @@ fn codex_memory_stored(root: &str) -> bool {
 /// project root would include. A home's `.codex` is the user layer, and directories
 /// above a home hold no one's project.
 fn ancestors_setting_codex_memory(
+    options: &DiscoveryOptions,
     cwd: &str,
     user: &str,
     home: &str,
 ) -> Result<Vec<String>, ScanError> {
-    ancestor_codex_configs(cwd, user, home, sets_codex_memory)
+    ancestor_codex_configs(options, cwd, user, home, sets_codex_memory)
 }
 
 /// Whether two paths name one file, as recorded or once resolved.
@@ -1409,6 +1473,7 @@ fn same_file(a: &str, b: &str) -> bool {
 /// Every `.codex/config.toml` from `cwd` up to the user's home, or the filesystem root
 /// outside it, other than the user's own, whose settings `keep` accepts.
 fn ancestor_codex_configs(
+    options: &DiscoveryOptions,
     cwd: &str,
     user: &str,
     home: &str,
@@ -1424,7 +1489,7 @@ fn ancestor_codex_configs(
     let mut path = cwd.as_str();
     loop {
         let file = join(&[path, ".codex", "config.toml"]);
-        if file != user && keep(&settings(&file, Harness::Codex)?) {
+        if file != user && keep(&options.settings(&file, Harness::Codex)?) {
             files.push(file);
         }
         if path == home || dirname(path) == path {
@@ -1444,8 +1509,15 @@ fn named_profile_file(name: &str) -> bool {
     })
 }
 
-/// Named profile files in stable order, shared by control discovery.
-pub(crate) fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> {
+/// Named profile files in stable order, shared by control discovery; none under
+/// `--defaults`, whose user selects no `--profile`.
+pub(crate) fn named_profile_files(
+    options: &DiscoveryOptions,
+    root: &str,
+) -> Result<Vec<String>, ScanError> {
+    if options.defaults {
+        return Ok(vec![]);
+    }
     let unreadable = || error("cannot read settings", root, 0);
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|_| unreadable())? {
@@ -1460,6 +1532,7 @@ pub(crate) fn named_profile_files(root: &str) -> Result<Vec<String>, ScanError> 
 
 /// The Codex files that can override or block a profile's saved speed.
 struct CodexSpeedSources<'a> {
+    options: &'a DiscoveryOptions,
     scopes: &'a [SettingsScope<'a>],
     user: &'a Map<String, Value>,
     requirements: &'a Map<String, Value>,
@@ -1471,6 +1544,7 @@ struct CodexSpeedSources<'a> {
 /// Lower a saved Codex premium tier to what managed requirements and unobserved profiles allow.
 fn codex_speed(speed: &mut SpeedControl, sources: &CodexSpeedSources) -> Result<(), ScanError> {
     let CodexSpeedSources {
+        options,
         scopes,
         user,
         requirements,
@@ -1518,9 +1592,9 @@ fn codex_speed(speed: &mut SpeedControl, sources: &CodexSpeedSources) -> Result<
         speed.resolved = false;
         speed.reason = "legacy profile selector/tables exist; current Codex removed them in 0.134.0, installed version and selected profile are unresolved".into();
     }
-    for name in named_profile_files(canonical)? {
+    for name in named_profile_files(options, canonical)? {
         let file = join(&[canonical, &name]);
-        let config = settings(&file, Harness::Codex)?;
+        let config = options.settings(&file, Harness::Codex)?;
         possible.push(or_base(config.get("service_tier")));
         if CODEX_SPEED_KEYS.iter().any(|k| config.contains_key(*k)) {
             speed.value = None;
@@ -1724,7 +1798,7 @@ pub(crate) fn profile(
             "config.toml"
         },
     ]);
-    let user = settings(&settings_file, harness)?;
+    let user = options.settings(&settings_file, harness)?;
     let managed_file = options.managed_settings_file.as_str();
     let managed = if claude {
         settings(managed_file, Harness::Claude)?
@@ -1818,6 +1892,7 @@ pub(crate) fn profile(
         codex_speed(
             &mut speed,
             &CodexSpeedSources {
+                options,
                 scopes: &speed_scopes,
                 user: &user,
                 requirements: &requirements,
@@ -1917,6 +1992,12 @@ pub(crate) fn profile(
     // the default directory.
     let explicit = options.env.contains_key(variable) && active == canonical;
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
+    // What the real file turns off, which --defaults shows on.
+    let pretended_on = if options.defaults {
+        switched_off(harness, &self::settings(&settings_file, harness)?)
+    } else {
+        vec![]
+    };
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1947,6 +2028,7 @@ pub(crate) fn profile(
         claude_config,
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
+        pretended_on,
     })
 }
 
@@ -2248,6 +2330,7 @@ mod tests {
             managed_settings_file: text(&w.managed_settings_file()),
             codex_system_config_file: text(&w.home.join("system.toml")),
             codex_requirements_file: text(&w.home.join("requirements.toml")),
+            defaults: false,
         }
     }
 
@@ -2289,8 +2372,9 @@ mod tests {
             .unwrap();
         }
         let file = |dir: &Path| text(&dir.join(".codex/config.toml"));
+        let o = options(&w);
         let found = |stop: &Path| {
-            ancestors_setting_codex_memory(&text(&cwd), &file(&home), &text(stop)).unwrap()
+            ancestors_setting_codex_memory(&o, &text(&cwd), &file(&home), &text(stop)).unwrap()
         };
         // The home's own is the user layer, and above the home is no one's project.
         assert_eq!(found(&home), [file(&cwd), file(&home.join("repo"))]);
@@ -2310,7 +2394,8 @@ mod tests {
             let link = outside.join("link");
             std::os::unix::fs::symlink(&cwd, &link).unwrap();
             let linked =
-                ancestors_setting_codex_memory(&text(&link), &file(&home), &text(&home)).unwrap();
+                ancestors_setting_codex_memory(&o, &text(&link), &file(&home), &text(&home))
+                    .unwrap();
             assert_eq!(linked, [file(&cwd), file(&home.join("repo"))]);
         }
     }
@@ -2467,6 +2552,62 @@ mod tests {
         assert_eq!(root(&w.claude).ttl.main.owner, "FORCE_PROMPT_CACHING_5M");
         assert_eq!(root(&other).ttl.main.value, Some(Ttl::OneHour));
         assert_eq!(root(&other).ttl.main.reason, "current user/managed setting");
+    }
+
+    #[test]
+    fn defaults_pretend_user_files_and_setting_variables_away_but_keep_policy() {
+        let w = Workspace::new();
+        write(
+            w.claude.join("settings.json"),
+            r#"{"promptCacheTtl":"5m","permissions":{"deny":["WebFetch"]}}"#,
+        );
+        write(
+            w.codex.join("config.toml"),
+            "service_tier = 'fast'\n[mcp_servers.docs]\ncommand = 'docs'\nenabled = false\n",
+        );
+        // A --profile selection would leave speed unresolved; a default user makes none.
+        write(w.codex.join("work.config.toml"), "service_tier = 'fast'\n");
+        write(
+            w.managed_settings_file(),
+            r#"{"subagentPromptCacheTtl":"1h"}"#,
+        );
+        let mut o = options(&w);
+        o.env = env(&[
+            ("CLAUDE_CONFIG_DIR", &text(&w.claude)),
+            ("CLAUDE_CODE_PROMPT_CACHE_TTL", "5m"),
+        ]);
+        o.pretend_defaults();
+        assert_eq!(
+            o.env.keys().collect::<Vec<_>>(),
+            [&"CLAUDE_CONFIG_DIR".to_string()]
+        );
+        let data = discover(&o).unwrap();
+        let claude = claude(&data);
+        assert_eq!(claude.ttl.main.value, None);
+        // Managed policy still sets what it sets.
+        assert_eq!(claude.ttl.subagent.value, Some(Ttl::OneHour));
+        assert!(claude.switched_off.is_empty());
+        assert_eq!(
+            claude
+                .pretended_on
+                .iter()
+                .map(crate::defaults::switch_name)
+                .collect::<Vec<_>>(),
+            ["WebFetch tool"]
+        );
+        let codex = data
+            .profiles
+            .iter()
+            .find(|p| p.harness == Harness::Codex)
+            .unwrap();
+        // The server stays declared, and on.
+        assert_eq!(codex.mcp_servers, ["docs"]);
+        assert!(codex.switched_off.is_empty());
+        assert_eq!(codex.pretended_on.len(), 1);
+        assert_eq!(
+            codex.speed.as_ref().unwrap().value.as_deref(),
+            Some("standard")
+        );
     }
 
     // Ported from reader.test.ts: "managed TTL controls retain the managed owner and API-key presence leaves billing unknown".

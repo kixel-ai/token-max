@@ -984,6 +984,10 @@ pub struct Profile {
     /// does it, so the report can show them though no request records them.
     #[serde(skip)]
     pub switched_off: Vec<Control>,
+    /// Under `doctor --defaults`, the switches the real `settings_file` turns off, whose
+    /// features the report shows on; empty otherwise.
+    #[serde(skip)]
+    pub pretended_on: Vec<Control>,
 }
 
 /// A setting's current value and the file or variable that sets it.
@@ -2659,6 +2663,9 @@ pub struct ContextCost {
     pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.
     pub shares: Vec<ProfileShare>,
+    /// Under `doctor --defaults`, for a feature the settings files turn off: every request on
+    /// its line, which `estimated_usd` is scaled to from the requests that carried it.
+    pub pretended_requests: Option<u64>,
 }
 
 /// The requests on a line that one set of profiles recorded, and what the piece cost in them.
@@ -2818,6 +2825,9 @@ pub struct Scan {
     /// Native session identities, which only the local session export prints.
     #[serde(skip)]
     pub sessions: crate::sessions::Sessions,
+    /// Read for `doctor --defaults`, with the settings files pretended away.
+    #[serde(skip)]
+    pub defaults: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

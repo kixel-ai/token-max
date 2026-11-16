@@ -263,7 +263,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         },
         (Some(_), Source::Piece(c)) => match &c.control {
             Some(control) => {
-                let how = switch(&members, control.into());
+                let how = switch(&members, control.into(), report.scan.defaults);
                 let unused = group.as_ref().is_some_and(|g| {
                     g.kind == ContextKind::McpServer && g.reason == Reason::Unused
                 });
@@ -365,7 +365,8 @@ pub fn explain(fixes: &mut [Fix], listing: &Listing) {
 /// A tool, skill or MCP switch in the line's settings file, unless a file that outranks it
 /// for some of its profiles' sessions sets the same switch, which would keep it on there. A
 /// line whose shared history spans several settings files is switched off in each by hand.
-fn switch(members: &[&Profile], edit: Edit) -> How {
+/// Under `defaults`, the user's own files set nothing, so only policy can outrank them.
+fn switch(members: &[&Profile], edit: Edit, defaults: bool) -> How {
     let profile = members[0];
     let file = &profile.settings_file;
     // Two names a symlink makes one file are one file.
@@ -385,7 +386,7 @@ fn switch(members: &[&Profile], edit: Edit) -> How {
     };
     let owners = members
         .iter()
-        .map(|m| outranking(m, &patch.edits[0]))
+        .map(|m| outranking(m, &patch.edits[0], defaults))
         .collect::<Result<Vec<_>, _>>()
         .map(|all| all.into_iter().flatten().collect::<IndexSet<String>>());
     if files.len() > 1 {
@@ -436,7 +437,7 @@ fn switch(members: &[&Profile], edit: Edit) -> How {
 /// The files, or legacy Codex profile tables, that outrank the profile's settings file and
 /// set what `edit` sets. Claude's `permissions.deny` rules from every file apply together,
 /// so a rule added to the user file is never outranked.
-fn outranking(profile: &Profile, edit: &Edit) -> Result<Vec<String>, ScanError> {
+fn outranking(profile: &Profile, edit: &Edit, defaults: bool) -> Result<Vec<String>, ScanError> {
     if profile.harness == Harness::Claude && edit.append {
         return Ok(vec![]);
     }
@@ -446,7 +447,7 @@ fn outranking(profile: &Profile, edit: &Edit) -> Result<Vec<String>, ScanError> 
             owners.push(file.clone());
         }
     }
-    if profile.harness == Harness::Codex {
+    if profile.harness == Harness::Codex && !defaults {
         let user = crate::discovery::settings(&profile.settings_file, Harness::Codex)?;
         for (name, table) in crate::controls::members(user.get("profiles")) {
             if sets(crate::controls::members(Some(table)), edit) {
@@ -1559,6 +1560,22 @@ impl Total {
             return amount;
         }
         format!("{label}: {amount}.")
+    }
+}
+
+/// What every change in `fixes` saves together, as the line under a `--defaults` report's
+/// headline; empty when there is none.
+pub fn total(fixes: &[Fix]) -> String {
+    let mut total = Total::default();
+    for fix in fixes {
+        total.add(fix);
+    }
+    if total.changes() == 0 {
+        String::new()
+    } else if total.measured.changes + total.up_to.changes == 0 {
+        "From the defaults, no change's saving was measured.".into()
+    } else {
+        format!("From the defaults, these changes save {}.", total.amount())
     }
 }
 
@@ -2862,12 +2879,12 @@ mod tests {
         let work = make_profile("work", "/synthetic/.claude-work");
         let deny = || edit("permissions.deny", "Agent", true);
         // Native Claude Code and a T3 instance sharing ~/.claude get one edit there.
-        let How::Edit(patch) = switch(&[&native, &t3], deny()) else {
+        let How::Edit(patch) = switch(&[&native, &t3], deny(), false) else {
             panic!("one shared settings file is one edit")
         };
         assert_eq!(patch.file, "/synthetic/.claude/settings.json");
         // Requests copied into two homes' histories could have come from either.
-        let How::Manual { step, reason } = switch(&[&native, &work], deny()) else {
+        let How::Manual { step, reason } = switch(&[&native, &work], deny(), false) else {
             panic!("two settings files are a step by hand")
         };
         assert!(
@@ -2893,7 +2910,7 @@ mod tests {
         let work = make_profile("work", &text(&w.home.join(".claude-work")));
         let off = || edit("enableArtifact", false, false);
         // A project that turns it back on is named, since the homes' edits would not hold.
-        let How::Manual { step, .. } = switch(&[&native, &work], off()) else {
+        let How::Manual { step, .. } = switch(&[&native, &work], off(), false) else {
             panic!("two homes are a step by hand")
         };
         assert!(
@@ -2908,7 +2925,10 @@ mod tests {
             .unwrap();
         let linked = make_profile("linked", &text(&alias));
         native.outranking_files.clear();
-        assert!(matches!(switch(&[&native, &linked], off()), How::Edit(_)));
+        assert!(matches!(
+            switch(&[&native, &linked], off(), false),
+            How::Edit(_)
+        ));
     }
 
     /// A change saving $10/mo, 10% of the host's spend; its report line is its name's

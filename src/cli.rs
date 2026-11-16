@@ -51,6 +51,7 @@ Usage: token-max doctor [options]
   --include-local         Also audit this host when --ssh is given
   --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
+  --defaults              Report as a user with no settings files would see it, offering nothing
   --plain                 Plain text without color or decorative Unicode
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access
@@ -65,6 +66,11 @@ settings.json or config.toml only after a final yes. A change another owner woul
 override, such as a shell variable, a project or managed settings file or T3, is listed
 to make by hand. Without a terminal it prints the report, each change naming its edit,
 and edits nothing.
+
+With --defaults it reads every user, project and local settings file, T3 Code's settings
+and the shell's setting variables as unset, so each setting is at its Claude Code or Codex
+default and every tool, skill and MCP server is on; managed and system policy still apply.
+It prints that report and edits nothing, even on a terminal.
 
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
@@ -212,6 +218,7 @@ struct Values {
     offline: bool,
     plain: bool,
     details: bool,
+    defaults: bool,
     version: bool,
     help: bool,
     claude_dirs: Vec<String>,
@@ -247,6 +254,7 @@ impl Values {
             "offline" => &mut self.offline,
             "plain" => &mut self.plain,
             "details" => &mut self.details,
+            "defaults" => &mut self.defaults,
             "version" => &mut self.version,
             "help" => &mut self.help,
             "include-local" => &mut self.include_local,
@@ -717,6 +725,7 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     }
     let report_only = values.plain
         || values.details
+        || values.defaults
         || values.version
         || values.ssh_scan
         || values.max_cost_per_use.is_some();
@@ -727,6 +736,7 @@ fn sessions(args: &[String]) -> Result<(Output, u8), ScanError> {
     let (discovery, destinations) = hosts(&mut values)?;
     let replies = gather(Gather {
         since,
+        defaults: false,
         discovery,
         destinations,
         prices: price_options(values.prices_file, values.price_cache, values.offline)?,
@@ -831,6 +841,8 @@ fn hosts(values: &mut Values) -> Result<(Option<DiscoveryOptions>, Vec<String>),
 /// A run across the selected hosts.
 struct Gather {
     since: Option<Millis>,
+    /// Pretend the settings files away on every host, for `doctor --defaults`.
+    defaults: bool,
     /// This host, when it is selected.
     discovery: Option<DiscoveryOptions>,
     destinations: Vec<String>,
@@ -850,6 +862,7 @@ struct Gather {
 fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     let Gather {
         since,
+        defaults,
         discovery,
         destinations,
         prices,
@@ -908,9 +921,10 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         requests.push((request, labeled(Some(&destination))));
         hosts.push(Some(destination.clone()));
         thread::spawn(move || {
-            let result = panic::catch_unwind(|| ssh::audit(&destination, since, receiver))
-                .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
-                .map(Scanned::Remote);
+            let result =
+                panic::catch_unwind(|| ssh::audit(&destination, since, defaults, receiver))
+                    .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")))
+                    .map(Scanned::Remote);
             let _ = sender.send(Arrival::Host(index, result));
         });
     }
@@ -1024,12 +1038,18 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         if other {
             return Err(invalid());
         }
-        return Ok((Output::Written, ssh::serve(since)));
+        return Ok((Output::Written, ssh::serve(since, values.defaults)));
     }
-    let (discovery, destinations) = hosts(&mut values)?;
+    let (mut discovery, destinations) = hosts(&mut values)?;
+    if values.defaults
+        && let Some(discovery) = &mut discovery
+    {
+        discovery.pretend_defaults();
+    }
     let stdout = io::stdout().is_terminal();
-    // Only this host's changes can be made here, so a run of destinations alone lists them.
-    let walk = discovery.is_some() && stdout && io::stdin().is_terminal();
+    // Only this host's changes can be made here, so a run of destinations alone lists them,
+    // and a report with the settings files pretended away has none to make.
+    let walk = discovery.is_some() && stdout && io::stdin().is_terminal() && !values.defaults;
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let unicode_locale = env_nonempty("LC_ALL")
         .or_else(|| env_nonempty("LC_CTYPE"))
@@ -1050,6 +1070,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
     let replies = gather(Gather {
         since,
+        defaults: values.defaults,
         discovery,
         destinations,
         prices: price_options(values.prices_file, values.price_cache, values.offline)?,

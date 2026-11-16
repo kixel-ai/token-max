@@ -58,10 +58,13 @@ const UNSUPPORTED: i32 = 3;
 const NOT_INSTALLED: i32 = 127;
 const SSH_FAILED: i32 = 255;
 
-fn remote_command(since: Option<Millis>) -> String {
+fn remote_command(since: Option<Millis>, defaults: bool) -> String {
     let mut command = format!("sh -c '{SCRIPT}' sh doctor --ssh-scan");
     if let Some(since) = since {
         command.push_str(&format!(" --since '{}'", iso(since)));
+    }
+    if defaults {
+        command.push_str(" --defaults");
     }
     command
 }
@@ -156,6 +159,7 @@ pub enum Reply {
 pub fn audit(
     destination: &str,
     since: Option<Millis>,
+    defaults: bool,
     request: mpsc::Receiver<Request>,
 ) -> Result<Reply, ScanError> {
     let mut command = Command::new("ssh");
@@ -172,7 +176,7 @@ pub fn audit(
         .args(["-o", "ControlPersist=no"])
         .arg("--")
         .arg(destination)
-        .arg(remote_command(since))
+        .arg(remote_command(since, defaults))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         // Login scripts may print anything; failures are reported from exit statuses.
@@ -331,7 +335,7 @@ fn exit(status: Option<i32>) -> String {
 /// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
 /// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
 /// closes, which happens when the coordinator or its connection ends.
-pub fn serve(since: Option<Millis>) -> u8 {
+pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
     let (sender, requests) = mpsc::channel();
     std::thread::spawn(move || {
         let mut stdin = BufReader::new(io::stdin());
@@ -353,7 +357,10 @@ pub fn serve(since: Option<Millis>) -> u8 {
         return 2;
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let discovery = DiscoveryOptions::host()?;
+        let mut discovery = DiscoveryOptions::host()?;
+        if defaults {
+            discovery.pretend_defaults();
+        }
         let scan = scan(&ScanOptions { discovery, since })?;
         // The stdin thread keeps the sender until it exits this process.
         let request: Request = requests.recv().expect("the request or an exit");

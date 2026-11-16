@@ -2220,6 +2220,7 @@ pub fn scan(options: &ScanOptions) -> Result<Scan, ScanError> {
         subagents: subagents.into_values().collect(),
         t3,
         sessions,
+        defaults: options.discovery.defaults,
     })
 }
 

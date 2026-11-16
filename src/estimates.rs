@@ -252,6 +252,7 @@ mod tests {
             coverage: ScanCoverage::default(),
             t3: vec![],
             sessions: Default::default(),
+            defaults: false,
         }
     }
 

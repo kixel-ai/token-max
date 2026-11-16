@@ -198,6 +198,19 @@ fn covering<'a>(
     })
 }
 
+/// Whether `c` is a feature that a settings file of one of its profiles turns off, which
+/// `doctor --defaults` shows on.
+fn pretended_on(c: &ContextCost, profiles: &[Profile]) -> bool {
+    let Some(control) = &c.control else {
+        return false;
+    };
+    profiles
+        .iter()
+        .filter(|p| c.profiles.contains(&p.id))
+        .flat_map(|p| &p.pretended_on)
+        .any(|switch| crate::defaults::covers(switch, control))
+}
+
 /// Context setting rows whose controls are not covered by a server recommendation.
 pub fn setting_rows(costs: &[ContextCost]) -> impl Iterator<Item = &ContextCost> {
     costs.iter().flat_map(|c| {
@@ -1028,6 +1041,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         instruction_size: None,
                         description: None,
                         shares: vec![],
+                        pretended_requests: None,
                     },
                     shares: IndexMap::default(),
                     owner,
@@ -1492,6 +1506,21 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.current = current
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
+            // Under --defaults a feature the settings files turn off is on, as though every
+            // request on its line carried it.
+            if !c.current && pretended_on(&c, input.profiles) {
+                c.current = true;
+                c.pretended_requests = Some(
+                    input
+                        .requests
+                        .iter()
+                        .filter(|r| {
+                            r.harness == c.harness
+                                && r.profiles.iter().any(|p| c.profiles.contains(p))
+                        })
+                        .count() as u64,
+                );
+            }
             c.estimated_usd =
                 (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
@@ -1535,6 +1564,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     _ if usd / calls as f64 > input.max_cost_per_use_usd => Verdict::Consider,
                     _ => Verdict::Keep,
                 });
+            }
+            // Its uses and cost per use stay those of the requests that carried it; only
+            // its total is scaled to the line.
+            if let Some(all) = c.pretended_requests {
+                c.estimated_usd = c
+                    .estimated_usd
+                    .filter(|_| c.requests > 0)
+                    .map(|usd| usd / c.requests as f64 * all as f64);
             }
             if let Some(parent) = interned.kinds[row.key].parent {
                 details.entry((row.owner, parent)).or_default().push(c);

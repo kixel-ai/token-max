@@ -4222,6 +4222,13 @@ fn summary(
         .iter()
         .map(|p| out.short_profile(&p.id))
         .collect();
+    if report.scan.defaults {
+        out.line(
+            "As a user with no settings files would see it (--defaults): every user, project and local settings file, T3 Code's settings and the shell's setting variables are pretended away, so each setting is at its Claude Code or Codex default and every tool, skill and MCP server is on. Managed and system policy still apply.",
+            0,
+            PLAIN,
+        );
+    }
     if !profiles.is_empty() {
         out.line(&format!("Profiles: {}.", profiles.join(", ")), 0, DIM);
     }
@@ -4371,6 +4378,15 @@ fn summary(
         .enumerate()
         .filter(|(_, c)| c.verdict.is_some() && !applied(c))
         .collect();
+    // Under --defaults, how a feature the settings files turn off is priced on.
+    let pretended_note = |c: &ContextCost| match c.pretended_requests {
+        Some(all) => format!(
+            " A settings file turns it off, so {} of this line's {} requests carried it: its cost is scaled from those to all of them, and its uses are theirs.",
+            count(c.requests),
+            count(all)
+        ),
+        None => String::new(),
+    };
     // A server's own loading and exposure controls, after its line's evidence.
     let server_notes = |c: &ContextCost| {
         if c.kind != ContextKind::McpServer {
@@ -4799,6 +4815,7 @@ fn summary(
             let _ = write!(text, "; {}", catalog_evidence(c));
         }
         text.push('.');
+        text += &pretended_note(c);
         // What leaves nonuse unproven outside the Codex catalog.
         if verdict == Verdict::Consider && c.skill.is_none() && c.calls == Some(0) {
             text += match hidden_use(
@@ -4907,6 +4924,7 @@ fn summary(
             ),
             Some(_) => "Its recorded uses are unknown, so keep or off is unresolved.".into(),
         });
+        text += &pretended_note(c);
         if c.kind == ContextKind::McpTool {
             text += " Included in its server's cost.";
         }
@@ -5018,6 +5036,51 @@ fn summary(
                 default: "on".into(),
                 saving,
             });
+            rows.push(row);
+        }
+    }
+    // Under --defaults, a feature a settings file turns off that no request in the window
+    // carried: on, at a cost no transcript shows.
+    let mut seen_on: Vec<(String, &crate::model::Control)> = vec![];
+    for p in &report.scan.profiles {
+        let file = real(&p.settings_file);
+        for control in &p.pretended_on {
+            let carried = setting_rows(&report.context).any(|c| {
+                c.harness == p.harness
+                    && c.profiles.contains(&p.id)
+                    && c.control
+                        .as_ref()
+                        .is_some_and(|k| crate::defaults::covers(control, k))
+            });
+            if carried
+                || seen_on
+                    .iter()
+                    .any(|(f, c)| *f == file && crate::defaults::same_switch(c, control))
+            {
+                continue;
+            }
+            seen_on.push((file.clone(), control));
+            let ids: Vec<String> = report
+                .scan
+                .profiles
+                .iter()
+                .filter(|q| q.harness == p.harness && real(&q.settings_file) == file)
+                .map(|q| q.id.clone())
+                .collect();
+            let shown = out.home(&p.settings_file);
+            let mut row = Row::new(
+                Claim::Measured,
+                Mark::Unknown,
+                crate::defaults::switch_name(control),
+                crate::defaults::switch_what(control),
+            );
+            row.profile = tag(&ids, &switch, out);
+            row.value = "on".into();
+            row.costs(None, false, &spend);
+            row.setting = format!("{shown}:{}", control.path.join("."));
+            row.evidence = format!(
+                "{shown} turns it off, so no request in the window carried it, and what it costs on is unknown."
+            );
             rows.push(row);
         }
     }
@@ -5297,15 +5360,20 @@ fn summary(
         Some(host) if host.name != "this host" => format!("{}'s", host.name),
         _ => "this host's".into(),
     };
-    out.line(
-        &crate::defaults::headline(
+    // Every setting is at its default already, so what the changes save from there replaces
+    // the comparison with the defaults.
+    let summary = if report.scan.defaults {
+        crate::doctor::total(fixes)
+    } else {
+        crate::defaults::headline(
             rows.iter().filter_map(|r| r.baseline.as_ref()),
             |usd| spend.of_month(usd),
             &host,
-        ),
-        0,
-        PLAIN,
-    );
+        )
+    };
+    if !summary.is_empty() {
+        out.line(&summary, 0, PLAIN);
+    }
     out.blank();
     // With some requests unpriced, the base is only what could be priced, so a share can read high.
     let base = if spend.complete {
@@ -5901,6 +5969,7 @@ mod tests {
             instruction_size: None,
             description: None,
             shares: vec![],
+            pretended_requests: None,
             profiles: vec!["profile".into()],
             kind,
             name: name.into(),
@@ -6109,6 +6178,7 @@ mod tests {
                 subagents: vec![],
                 t3: vec![],
                 sessions: Default::default(),
+                defaults: false,
                 snapshot_started_at: "2026-12-01T00:00:00.000Z".into(),
                 snapshot_finished_at: "2026-12-01T00:00:01.000Z".into(),
                 since: Some(NOV1),
@@ -8854,6 +8924,7 @@ mod tests {
             instruction_size: None,
             description: None,
             shares: vec![],
+            pretended_requests: None,
             profiles: vec![report.scan.profiles[0].id.clone()],
             kind: ContextKind::Skill,
             name: name.into(),
@@ -8963,6 +9034,7 @@ mod tests {
             instruction_size: None,
             description: None,
             shares: vec![],
+            pretended_requests: None,
             profiles: vec![profile.clone()],
             kind,
             name: name.into(),

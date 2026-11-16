@@ -191,6 +191,7 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         managed_settings_file: format!("{home}/managed-settings.json"),
         codex_system_config_file: format!("{home}/system.toml"),
         codex_requirements_file: format!("{home}/requirements.toml"),
+        defaults: false,
     };
     analyze(AnalyzeOptions {
         scan: scan(&ScanOptions { discovery, since }).unwrap(),

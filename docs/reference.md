@@ -439,6 +439,44 @@ even when a file above that one sets it off again, so in that case doctor
 may offer the switch again rather than call a feature off that might still
 be on.
 
+## As a default user sees it
+
+`token-max doctor --defaults` prints the report a user with no settings files
+would get on this host's own transcripts. Every user, project and local
+Claude Code and Codex settings file, Codex's named profile files, T3 Code's
+`settings.json` and the shell's setting variables, such as
+`CLAUDE_CODE_PROMPT_CACHE_TTL`, read as unset, so each setting is at its
+documented default. Managed and system policy (`managed-settings.json`,
+`/etc/codex/config.toml`, `/etc/codex/requirements.toml`) still apply, since a
+user can't change them. What says where each CLI keeps its files stays:
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `T3CODE_HOME` and each T3 instance's home.
+Each MCP server a Codex file declares stays declared, without its `enabled`,
+`enabled_tools` or `disabled_tools`, since a server is something installed
+rather than a setting's value. A T3 thread's model selection is T3's default,
+so fast mode is off.
+
+Every check then runs as it would for that user, and the headline counts the
+changes they would make. The line under it sums what those changes save from
+the defaults, as the walk's running total does, and says overlapping changes
+may save less; the [savings against the defaults](#savings-against-the-defaults)
+line would only restate that everything matches, so it is left out.
+
+A tool, skill or MCP server that the real settings file turns off is on. While
+it was off no request carried it, so its cost is scaled from the requests that
+did carry it to every request its line made in the window, and its verdict
+comes from the uses recorded while it was sent; its evidence says how many
+requests carried it. One that no request in the window carried gets an
+`unknown` line costing unknown, never zero. Claude Code's auto memory is
+scaled the same way, from the main-agent requests that carried it. When it is
+on but no recorded request carried it, as for a user who turned it off before
+the window, its cost is unknown on any run, not zero.
+
+The report is read-only: it offers nothing and writes nothing, even on a
+terminal, and each change still names the edit a default user would make.
+Exit codes are those of a run without a terminal, so a script can still tell
+whether a default user would have anything to change. With `--ssh`, each
+destination reads its own files the same way.
+
 ## MCP servers and instruction budgets
 
 MCP servers include separate tool-schema and discovery-context costs. Those

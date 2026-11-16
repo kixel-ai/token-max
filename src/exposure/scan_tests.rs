@@ -133,6 +133,7 @@ fn options(w: &Workspace, since: Option<Millis>) -> ScanOptions {
             managed_settings_file: text(&w.managed_settings_file()),
             codex_system_config_file: text(&w.home.join("system.toml")),
             codex_requirements_file: text(&w.home.join("requirements.toml")),
+            defaults: false,
         },
         since,
     }
@@ -2518,6 +2519,23 @@ fn claude_auto_memory_turned_off_is_kept_off() {
         report_line(&rendered, "Auto memory").head,
         "Auto memory off"
     );
+    // As a default user sees it, memory is on, though no request carried it: unknown, not free.
+    let defaults = |w: &Workspace| {
+        let mut o = options(w, None);
+        o.discovery.pretend_defaults();
+        report(&scan(&o).unwrap(), 1.0)
+    };
+    let on = defaults(&w);
+    let check = memory_check(&on, Harness::Claude);
+    assert_eq!(check.base.current, Some(true));
+    assert_eq!((check.context_usd, check.base.savings_usd), (None, None));
+    assert!(
+        check
+            .base
+            .uncertainty
+            .iter()
+            .any(|u| u.starts_with("no recorded request carried auto memory"))
+    );
 
     // Turned off after an earlier session used it: still kept off, but what it cost
     // in the window shows, and the earlier session is noted.
@@ -2548,6 +2566,13 @@ fn claude_auto_memory_turned_off_is_kept_off() {
         "Auto memory off costs",
         &["Measured: used 2 times (1 read, 1 write)"]
     ));
+    // As a default user sees it, the session that carried memory stands for both.
+    let on = defaults(&w);
+    let check = memory_check(&on, Harness::Claude);
+    assert_eq!(check.base.current, Some(true));
+    assert!(check.base.uncertainty.iter().any(|u| u.starts_with(
+        "a settings file turns auto memory off, so 2 of 4 recorded main-agent requests carried it"
+    )));
 
     // A T3 instance whose launch arguments or environment could override the
     // setting leaves it unknown, advised off as it may be on.

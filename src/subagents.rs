@@ -426,7 +426,7 @@ pub fn discover(
         }
         let mut agents = match profile.harness {
             Harness::Claude => {
-                let user = settings(&profile.settings_file, Harness::Claude)?;
+                let user = options.settings(&profile.settings_file, Harness::Claude)?;
                 let managed_file = options.managed_settings_file.as_str();
                 let managed = settings(managed_file, Harness::Claude)?;
                 let local_env = if profile.t3.is_none() && active == profile.root {
@@ -447,9 +447,9 @@ pub fn discover(
                 for cwd in existing {
                     let [project_file, legacy_file, local_file] =
                         crate::discovery::claude_project_files(&cwd, options)?;
-                    let project = settings(&project_file, Harness::Claude)?;
-                    let legacy = settings(&legacy_file, Harness::Claude)?;
-                    let local = settings(&local_file, Harness::Claude)?;
+                    let project = options.settings(&project_file, Harness::Claude)?;
+                    let legacy = options.settings(&legacy_file, Harness::Claude)?;
+                    let local = options.settings(&local_file, Harness::Claude)?;
                     let scopes = [
                         user_scope,
                         SettingsScope {
@@ -487,7 +487,7 @@ pub fn discover(
             Harness::Codex => {
                 let system_file = options.codex_system_config_file.as_str();
                 let system = settings(system_file, Harness::Codex)?;
-                let user = settings(&profile.settings_file, Harness::Codex)?;
+                let user = options.settings(&profile.settings_file, Harness::Codex)?;
                 let mut agents = AgentControls::default();
                 let mut roles = IndexMap::default();
                 for (config, file) in [(&system, system_file), (&user, &*profile.settings_file)] {
@@ -506,9 +506,9 @@ pub fn discover(
                     .map(|(name, _)| format!("{}:profiles.{name}", profile.settings_file))
                     .collect();
                 if profile.t3.is_none() {
-                    for name in named_profile_files(&profile.root)? {
+                    for name in named_profile_files(options, &profile.root)? {
                         let file = join(&[&profile.root, &name]);
-                        if overrides(&settings(&file, Harness::Codex)?) {
+                        if overrides(&options.settings(&file, Harness::Codex)?) {
                             selectable.push(file);
                         }
                     }
@@ -543,7 +543,7 @@ pub fn discover(
                     for path in paths.iter().rev() {
                         let folder = join(&[path, ".codex"]);
                         let file = join(&[&folder, "config.toml"]);
-                        let config = settings(&file, Harness::Codex)?;
+                        let config = options.settings(&file, Harness::Codex)?;
                         codex_layer(&mut scoped, &mut scoped_roles, &config, &file, &folder)?;
                     }
                     if scoped == agents {
@@ -1568,6 +1568,7 @@ mod tests {
             coverage: ScanCoverage::default(),
             t3: vec![],
             sessions: Default::default(),
+            defaults: false,
         }
     }
 

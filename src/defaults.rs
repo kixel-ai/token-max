@@ -226,7 +226,7 @@ pub fn same_switch(a: &Control, b: &Control) -> bool {
 
 /// Whether turning `switch` off also turns off what `control` would: the same switch, or an
 /// MCP server's switch over one of its tools.
-fn covers(switch: &Control, control: &Control) -> bool {
+pub(crate) fn covers(switch: &Control, control: &Control) -> bool {
     if same_switch(switch, control) {
         return true;
     }

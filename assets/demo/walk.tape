@@ -15,7 +15,7 @@ Set Theme "Catppuccin Mocha"
 Hide
 # A clean environment, so no gateway or profile from this machine leaks in; the home and
 # its transcripts are synthetic, and a first run caches the public prices.
-Type "rm -rf .tmp/demo && python3 assets/demo/home.py .tmp/demo && exec env -i HOME=$PWD/.tmp/demo PATH=$PWD/target/release:/usr/bin:/bin TERM=xterm-256color LANG=C.UTF-8 PS1='$ ' bash --norc --noprofile"
+Type "rm -rf .tmp/demo && python3 assets/demo/home.py .tmp/demo && exec env -i HOME=$PWD/.tmp/demo PATH=$PWD/target/release:$PATH TERM=xterm-256color LANG=C.UTF-8 PS1='$ ' bash --norc --noprofile"
 Enter
 Sleep 1s
 Type "cd && token-max doctor > /dev/null; clear"

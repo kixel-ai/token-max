@@ -833,14 +833,12 @@ impl<'a> Out<'a> {
             format!("  {rest}")
         };
         let mut spans = vec![(name.to_string(), BOLD), (rest, DIM)];
-        if self.options.color {
-            let used = MARGIN + cells(title) + 1;
-            let room = self.options.width.unwrap_or(RULE_CELLS).min(RULE_CELLS);
+        // The rule fills the heading's row and is left out where three cells don't fit.
+        let used = MARGIN + cells(title) + 1;
+        let room = self.options.width.unwrap_or(RULE_CELLS).min(RULE_CELLS);
+        if self.options.color && room >= used + 3 {
             let rule = if self.options.unicode { "─" } else { "-" };
-            spans.push((
-                format!(" {}", rule.repeat(room.saturating_sub(used).max(3))),
-                DIM,
-            ));
+            spans.push((format!(" {}", rule.repeat(room - used)), DIM));
         }
         let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
         self.spans(&spans, 0, None);
@@ -8008,6 +8006,22 @@ mod tests {
             "{legend:?}"
         );
         assert!(legend[1].contains("no\u{a0}verdict"), "{legend:?}");
+        // A heading's rule stays on its row, or is left out where it doesn't fit.
+        let narrow = strip_ansi(&narrow);
+        assert!(
+            narrow.contains("\n  CHANGES  biggest saving first ---"),
+            "{narrow}"
+        );
+        assert!(
+            narrow.contains("\n  EVERYTHING ELSE  biggest cost first\n"),
+            "{narrow}"
+        );
+        assert!(
+            narrow
+                .lines()
+                .all(|l| l.trim().is_empty() || !l.trim().chars().all(|c| c == '-')),
+            "{narrow}"
+        );
         assert_eq!(words(&unruled(&strip_ansi(&styled))), words(&plain));
         assert_eq!(
             text(&report, None, true)

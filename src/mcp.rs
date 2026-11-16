@@ -195,6 +195,10 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
 /// by hand.
 pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
     let mut found: IndexSet<Entry> = IndexSet::default();
+    // Codex tables some profile sharing their file keeps, by the file's resolved path:
+    // another layer of that profile declares the server, or its layers cannot be read.
+    let mut kept: IndexSet<(String, String)> = IndexSet::default();
+    let resolved = |file: &str| realpath(file).unwrap_or_else(|_| file.to_string());
     let mut manual = vec![];
     let mut unreadable = |file: &str, e: crate::safe::ScanError| {
         let at = e.location.as_ref().map_or(file, |l| &*l.file);
@@ -216,11 +220,16 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
                 if table.get("enabled") != Some(&Value::Bool(false)) {
                     continue;
                 }
-                // Another layer that declares it may turn it back on, or start it once this table is gone.
+                // Another layer that declares it may turn it back on, or start it once this
+                // table is gone.
                 match codex_layers(profile, id) {
-                    Ok(layers) if !layers.is_empty() => continue,
-                    Ok(_) => {}
+                    Ok(layers) if layers.is_empty() => {}
+                    Ok(_) => {
+                        kept.insert((resolved(&profile.settings_file), id.clone()));
+                        continue;
+                    }
                     Err(e) => {
+                        kept.insert((resolved(&profile.settings_file), id.clone()));
                         unreadable(&profile.settings_file, e);
                         continue;
                     }
@@ -273,6 +282,9 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
     }
     found
         .into_iter()
+        .filter(|e| {
+            e.harness != Harness::Codex || !kept.contains(&(resolved(&e.file), e.path[1].clone()))
+        })
         .map(Definition::Entry)
         .chain(manual)
         .collect()
@@ -645,11 +657,13 @@ mod tests {
             definitions("my_docs", &control, &[&p, &other]).as_slice(),
             [Definition::Manual { .. }]
         ));
+        assert!(turned_off(&[p.clone(), other.clone()]).is_empty());
         other.outranking_files.clear();
         assert!(matches!(
             definitions("my_docs", &control, &[&p, &other]).as_slice(),
             [Definition::Entry(_)]
         ));
+        assert_eq!(turned_off(&[p.clone(), other.clone()]).len(), 1);
         // The system config declares it below the user's file: removing the user's table
         // would start it again.
         let system = w.home.join("etc/codex/config.toml");

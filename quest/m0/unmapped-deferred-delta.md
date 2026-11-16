@@ -20,3 +20,7 @@ Recommended: map an unpaired delta to an unswitchable piece, such as the
 `Other` kind the skill listing's framing uses, keyed so it joins the "System
 prompt and core tools" line, and add a synthetic transcript with an unpaired
 delta to the scan tests.
+
+Kept as written 2026-11-16 (maintainer, the round that picked
+[kixel-ai/token-max#131](https://github.com/kixel-ai/token-max/pull/131) to
+merge).

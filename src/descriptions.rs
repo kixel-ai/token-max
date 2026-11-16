@@ -3,7 +3,7 @@
 //! Built-in tools and settings get a curated sentence, checked against the provider's
 //! documentation; a skill or MCP tool reuses the first sentence of the description it ships.
 
-use crate::model::{BackgroundFeature, Bucket, CheckResult, Harness, SubagentCost};
+use crate::model::{BackgroundFeature, Bucket, CheckResult, ContextKind, Harness, SubagentCost};
 
 /// The most characters of a shipped description that are kept, so a long one costs no more.
 const MAX_CHARACTERS: usize = 200;
@@ -188,6 +188,32 @@ pub fn claude_tool(name: &str) -> Option<&'static str> {
         "Write" => "Lets Claude create or overwrite files.",
         _ => return None,
     })
+}
+
+/// What a kind of feature is, for a walk question that groups several of them.
+pub fn kind(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::Tool => {
+            "Built-in tools the model can call; each one's definition is sent with every request."
+        }
+        ContextKind::McpServer => {
+            "MCP servers connect the model to another program or service; each one's tools are listed in every request."
+        }
+        ContextKind::McpTool => "Tools from an MCP server, each listed in every request.",
+        ContextKind::McpDiscovery => {
+            "Listings that tell the model which deferred MCP tools it can load."
+        }
+        ContextKind::Skill => {
+            "Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request."
+        }
+        ContextKind::ToolOutput => {
+            "Tool results kept in the conversation after the calls that returned them."
+        }
+        ContextKind::Instructions
+        | ContextKind::System
+        | ContextKind::Memory
+        | ContextKind::Other => "Context sent with every request.",
+    }
 }
 
 /// What a subagent type or agent role is.

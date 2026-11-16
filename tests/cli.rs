@@ -47,6 +47,33 @@ impl Workspace {
         std::fs::copy(fixture("claude.jsonl"), self.transcript()).unwrap();
     }
 
+    /// The fixture moved so its history starts `days` before now. A report's window ends
+    /// now, so a monthly figure from the fixture as written shrinks as the days pass.
+    fn recent_fixture(&self, days: i64) {
+        let text = std::fs::read_to_string(fixture("claude.jsonl")).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let at = |v: &Value| v["timestamp"].as_str()?.parse::<jiff::Timestamp>().ok();
+        let first = lines.iter().filter_map(at).min().unwrap();
+        let start = jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_hours(24 * days))
+            .unwrap();
+        let shift = start.duration_since(first);
+        let moved: Vec<String> = lines
+            .into_iter()
+            .map(|mut line| {
+                if let Some(t) = at(&line) {
+                    let t = t.checked_add(shift).unwrap();
+                    line["timestamp"] = json!(t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+                }
+                line.to_string()
+            })
+            .collect();
+        std::fs::write(self.transcript(), moved.join("\n") + "\n").unwrap();
+    }
+
     fn settings(&self, text: &str) {
         std::fs::write(self.claude.join("settings.json"), text).unwrap();
     }
@@ -1167,9 +1194,43 @@ mod unix {
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
         let w = Workspace::new();
-        w.fixture();
+        // A fixed window keeps the walk's dollar figures the same on any day.
+        w.recent_fixture(15);
         w.settings("{\n  \"promptCacheTtl\": \"5m\"\n}\n");
-        let base = prices_args(&w);
+        // Prices ten thousand times the fixture's, so the TTL saves enough to be asked: the
+        // walk leaves out a change saving under $1/mo.
+        let mut prices: Value =
+            serde_json::from_str(&std::fs::read_to_string(fixture("prices.json")).unwrap())
+                .unwrap();
+        fn scale(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    for (key, value) in map.iter_mut() {
+                        match value {
+                            Value::Number(n) if key != "size" => {
+                                *value = json!(n.as_f64().unwrap() * 1e4);
+                            }
+                            _ => scale(value),
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(scale),
+                _ => {}
+            }
+        }
+        for provider in prices.as_object_mut().unwrap().values_mut() {
+            for model in provider["models"].as_object_mut().unwrap().values_mut() {
+                scale(&mut model["cost"]);
+            }
+        }
+        let costly = w.home.join("costly-prices.json");
+        std::fs::write(&costly, prices.to_string()).unwrap();
+        let base = [
+            "--claude-dir".to_string(),
+            text(&w.claude),
+            "--prices-file".into(),
+            text(&costly),
+        ];
         let mut c = command(&w, &args(&base, &["--plain"]));
         let input = Pty::new(80);
         let (stdout, out) = Pty::new(80).drain();
@@ -1183,39 +1244,39 @@ mod unix {
         // Answers wait in the terminal until each prompt reads one; the terminal stays
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
-        // No to auto memory, yes to the TTL, then yes to writing it.
-        keyboard.write_all(b"n\ny\ny\n").unwrap();
+        // Yes to the TTL, no to auto memory, then yes to writing it.
+        keyboard.write_all(b"y\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
-        // The walk comes first: a change whose saving was not measured before those
-        // saving under $5/mo.
+        // The walk comes first: a measured saving before a change whose saving was not
+        // measured.
         let at = |text: &str| {
             stdout
                 .find(text)
                 .unwrap_or_else(|| panic!("{text:?} in {stdout}"))
         };
         assert!(
-            stdout.starts_with("\ntoken-max doctor: 2 changes to review"),
+            stdout.starts_with("\ntoken-max doctor: 2 questions, biggest saving first."),
             "{stdout}"
         );
         // Each change opens with what its setting does.
-        at(
-            "\n[1/2] Auto memory: on -> off\n  What: Auto memory lets Claude write notes for itself and loads them into every\n  session.\n  Worth considering (Opinion): its saving was not measured.\n",
+        let ttl = at("\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  What: ");
+        let memory = at(
+            "\n[2/2] Auto memory: on -> off\n  What: Auto memory lets Claude write notes for itself and loads them into every\n  session.\n  Worth considering (Opinion): its saving was not measured.\n",
         );
-        let ttl = at("\n[2/2] Main-agent prompt cache TTL: 5m -> 1h\n  What: ");
         // The window ends now, so its day count and the wrapping after it follow the clock.
         let entry = &stdout[ttl..];
-        let entry = entry[..entry.find("\ntoken-max\n").unwrap_or(entry.len())]
+        let entry = entry[..memory - ttl]
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            entry.starts_with("[2/2] Main-agent prompt cache TTL: 5m -> 1h What: How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Recommended (Measured): saves <$0.01/mo, 13% of this host's spend. Measured on 2 requests over "),
+            entry.starts_with("[1/2] Main-agent prompt cache TTL: 5m -> 1h What: How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Recommended (Measured): saves $30/mo, 13% of this host's spend. Measured on 2 requests over "),
             "{entry}"
         );
         assert!(
-            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: <$0.01/mo, 13% of this host's spend."),
+            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $30/mo, 13% of this host's spend."),
             "{entry}"
         );
         // Then the report, its accepted change first, and one question to write it.
@@ -1225,7 +1286,7 @@ mod unix {
         let confirm = at("\nWrite the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: ");
         let wrote = at("\nWrote 1 edit to ~/.claude/settings.json.\n");
         assert!(
-            ttl < report && report < accepted && accepted < declined,
+            ttl < memory && memory < report && report < accepted && accepted < declined,
             "{stdout}"
         );
         assert!(declined < confirm && confirm < wrote, "{stdout}");

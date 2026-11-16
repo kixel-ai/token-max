@@ -1110,8 +1110,9 @@ impl Target {
         Ok(now.as_deref() == self.before.as_deref().map(str::as_bytes))
     }
 
-    /// Replace the file with `text` atomically, keeping its permissions and any symlink.
-    fn write(&self, text: &str) -> io::Result<()> {
+    /// Replace the file with `text` atomically, keeping its permissions and any symlink,
+    /// while `lock`, when given, is still held.
+    fn write(&self, text: &str, lock: Option<&Lock>) -> io::Result<()> {
         let name = self
             .resolved
             .file_name()
@@ -1162,6 +1163,11 @@ impl Target {
             if !self.unchanged()? {
                 return Err(io::Error::other(
                     "it changed while token-max doctor was writing",
+                ));
+            }
+            if lock.is_some_and(|l| !l.held()) {
+                return Err(io::Error::other(
+                    "another program took over its lock while token-max doctor was writing",
                 ));
             }
             fs::rename(&temp, &self.resolved)
@@ -2119,7 +2125,7 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
         } else {
             None
         };
-        if let Err(e) = target.write(&text) {
+        if let Err(e) = target.write(&text, lock.as_ref()) {
             return Err(ScanError::new(format!(
                 "cannot write {shown} ({e}); {}",
                 done(&written)

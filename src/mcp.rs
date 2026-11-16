@@ -9,6 +9,8 @@
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use serde_json::{Map, Value};
@@ -329,12 +331,23 @@ fn tool_name(server: &str) -> String {
 
 /// Claude Code's lock on its state file, held while token-max rewrites it. Claude Code
 /// saves the file under the same lock, re-reading it first, so a removal made under it
-/// survives sessions that are running.
-pub(crate) struct Lock(PathBuf);
+/// survives sessions that are running. Like Claude Code's lock library, it refreshes the
+/// lock's time while held, so no one takes it over as stale, and releases it only while
+/// it is still the one that set that time.
+pub(crate) struct Lock {
+    dir: PathBuf,
+    /// The time this holder last gave the lock; None once another holder replaced it.
+    owned: Arc<Mutex<Option<SystemTime>>>,
+    refresher: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+}
 
 /// A lock not refreshed for this long belongs to a process that died, as Claude Code's
 /// lock library treats it.
 const STALE: Duration = Duration::from_secs(10);
+
+/// How often a held lock's time is refreshed, well within `STALE`.
+const REFRESH: Duration = Duration::from_secs(1);
 
 /// How long to wait for a Claude Code session to finish its save.
 const WAIT: Duration = Duration::from_secs(5);
@@ -348,7 +361,7 @@ impl Lock {
         let started = SystemTime::now();
         loop {
             match fs::create_dir(&dir) {
-                Ok(()) => return Ok(Lock(dir)),
+                Ok(()) => return Lock::hold(dir),
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
                 Err(e) => return Err(e),
             }
@@ -374,11 +387,86 @@ impl Lock {
             std::thread::sleep(Duration::from_millis(50));
         }
     }
+
+    /// Hold the lock directory just made, refreshing its time until it is dropped.
+    fn hold(dir: PathBuf) -> io::Result<Lock> {
+        let set = match touch(&dir) {
+            Ok(set) => set,
+            Err(e) => {
+                let _ = fs::remove_dir(&dir);
+                return Err(e);
+            }
+        };
+        let owned = Arc::new(Mutex::new(Some(set)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let refresher = {
+            let (dir, owned, stop) = (dir.clone(), owned.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    std::thread::park_timeout(REFRESH);
+                    if stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let mut owned = owned.lock().unwrap_or_else(|e| e.into_inner());
+                    let ours = owned.is_some() && modified(&dir).ok() == *owned;
+                    *owned = if ours { touch(&dir).ok() } else { None };
+                    if owned.is_none() {
+                        break;
+                    }
+                }
+            })
+        };
+        Ok(Lock {
+            dir,
+            owned,
+            refresher: Some(refresher),
+            stop,
+        })
+    }
+
+    /// Whether this holder still has the lock: it refreshed it in time, and no one
+    /// replaced it.
+    pub(crate) fn held(&self) -> bool {
+        let owned = self.owned.lock().unwrap_or_else(|e| e.into_inner());
+        owned.is_some_and(|set| {
+            modified(&self.dir).ok() == Some(set) && set.elapsed().unwrap_or_default() < STALE
+        })
+    }
+}
+
+/// Set the lock directory's time to now, returning the time it reads back.
+fn touch(dir: &Path) -> io::Result<SystemTime> {
+    #[cfg(windows)]
+    let handle = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_FLAG_BACKUP_SEMANTICS, which opening a directory needs.
+        fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(0x0200_0000)
+            .open(dir)?
+    };
+    #[cfg(not(windows))]
+    let handle = fs::File::open(dir)?;
+    handle.set_modified(SystemTime::now())?;
+    modified(dir)
+}
+
+fn modified(dir: &Path) -> io::Result<SystemTime> {
+    fs::metadata(dir)?.modified()
 }
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        let _ = fs::remove_dir(&self.0);
+        self.stop.store(true, Ordering::Release);
+        if let Some(refresher) = self.refresher.take() {
+            refresher.thread().unpark();
+            let _ = refresher.join();
+        }
+        // A lock someone else took over is theirs to release.
+        let owned = *self.owned.lock().unwrap_or_else(|e| e.into_inner());
+        if owned.is_some() && modified(&self.dir).ok() == owned {
+            let _ = fs::remove_dir(&self.dir);
+        }
     }
 }
 
@@ -577,5 +665,12 @@ mod tests {
         fs::File::open(&dir).unwrap().set_modified(old).unwrap();
         drop(Lock::take(&file).unwrap());
         assert!(!dir.exists());
+        // A lock another holder replaced is no longer held, and is left to that holder.
+        let lock = Lock::take(&file).unwrap();
+        assert!(lock.held());
+        fs::File::open(&dir).unwrap().set_modified(old).unwrap();
+        assert!(!lock.held());
+        drop(lock);
+        assert!(dir.is_dir());
     }
 }

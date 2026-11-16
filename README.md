@@ -79,8 +79,8 @@ zero.
 Transcripts are only read, and no prompt, reply, tool argument or tool output
 text is kept or printed. The only network request downloads public prices from
 `https://models.dev/api.json`, unless you name other machines with `--ssh`.
-Nothing is written until you accept a change and then confirm the list of
-edits.
+Settings files change only after you accept a change and then confirm the
+list of edits; the only other file written is that price cache.
 
 ## Install
 

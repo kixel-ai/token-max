@@ -385,6 +385,74 @@ fn claude_attachment_deltas_track_deferred_definitions_and_listing_replacement_u
 }
 
 #[test]
+fn unpaired_listing_deltas_count_toward_core_context_without_a_switch() {
+    // Names and lines that do not pair one to one: no line can be filed under a tool or server.
+    let unpaired = |second: u32, kind: &str, lines: &str| {
+        attachment(
+            second,
+            json!({
+                "type": kind,
+                "addedNames": ["mcp__example__search", "mcp__example__read"],
+                lines: ["SYNTHETIC_PRIVATE_DELTA"],
+                "removedNames": [],
+            }),
+        )
+    };
+    let message = json!({ "role": "user", "content": "SYNTHETIC_PRIVATE_PROMPT" });
+    let data = transcript(
+        Harness::Claude,
+        &[
+            unpaired(0, "deferred_tools_delta", "addedLines"),
+            unpaired(0, "mcp_instructions_delta", "addedBlocks"),
+            json!({
+                "type": "api-request-shape",
+                "sessionId": "session",
+                "timestamp": at(1),
+                "shapeHash": "shape",
+                "shape": { "system": "synthetic", "tools": [] },
+            }),
+            json!({ "type": "api-request-blob", "sessionId": "session", "hash": "m1", "message": message }),
+            json!({
+                "type": "api-request",
+                "id": "api-1",
+                "timestamp": at(1),
+                "sessionId": "session",
+                "shapeHash": "shape",
+                "keep": 0,
+                "tail": ["m1"],
+                "requestDigest": "d1",
+                "params": { "model": "claude-opus-5-5" },
+            }),
+            assistant(1, json!([])),
+        ],
+        None,
+    )
+    .unwrap();
+    let report = report(&data, 1.0);
+    let names: Vec<&str> = report.context.iter().map(|c| c.name.as_str()).collect();
+    let delta = row(&report, "Unpaired listing changes");
+    assert_eq!(delta.kind, ContextKind::Other, "{names:?}");
+    assert_eq!(delta.control, None);
+    assert_eq!(delta.priced, 1);
+    assert!(delta.cost_usd.to_f64() > 0.0);
+    assert!(
+        report
+            .context
+            .iter()
+            .all(|c| !c.name.contains("_delta") && c.kind != ContextKind::McpServer),
+        "{names:?}"
+    );
+    let text = text(&report);
+    assert!(!text.contains("_delta"), "{text}");
+    let core = report_line(&text, "System prompt");
+    assert!(
+        core.head.starts_with("System prompt and core tools costs"),
+        "{core:?}\n{text}"
+    );
+    assert!(!leaks(&report, &["SYNTHETIC_PRIVATE"]));
+}
+
+#[test]
 fn text_only_wire_requests_calibrate_matching_cohorts_and_keep_unknown_net_effects() {
     let data = transcript(
         Harness::Claude,

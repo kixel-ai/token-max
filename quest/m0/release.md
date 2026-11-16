@@ -29,6 +29,7 @@ No crate has been published; `token-max` was unclaimed on crates.io on
 ## Required
 
 - [Launch token-max](/quest/m0/launch/README.md) - the logo, site, README and CLI polish the maintainer wants before release
+- [Back up each settings file before doctor writes it](/quest/m0/backups.md) - undo for the files 0.0.1 users let doctor change
 
 ## Waiting
 

@@ -312,7 +312,10 @@ pub struct ReportLine {
     pub claim: String,
     /// The profile, when several were read, then the setting that changes it.
     pub setting: String,
-    /// The line under it in a details report; empty otherwise.
+    /// What the setting or feature does, the first line under it in a details report; empty
+    /// otherwise.
+    pub what: String,
+    /// The line after that in a details report; empty otherwise.
     pub evidence: String,
 }
 
@@ -355,16 +358,21 @@ pub fn report_lines(text: &str) -> Vec<ReportLine> {
             .min_by_key(|(at, _, _)| *at)
             .map(|(at, claim, after)| (&rest[..at], claim, after))
             .unwrap_or_else(|| panic!("no claim in {line:?}"));
-        let evidence = lines
-            .get(i + 1)
-            .and_then(|l| l.strip_prefix("         "))
-            .unwrap_or_default();
+        let under = |n: usize| {
+            lines
+                .get(i + n)
+                .and_then(|l| l.strip_prefix("         "))
+                .unwrap_or_default()
+        };
+        let what = under(1).strip_prefix("What: ").unwrap_or_default();
+        let evidence = if what.is_empty() { "" } else { under(2) };
         rows.push(ReportLine {
             change,
             mark: word.into(),
             head: collapse(head),
             claim: claim.into(),
             setting: collapse(setting),
+            what: what.into(),
             evidence: evidence.into(),
         });
     }

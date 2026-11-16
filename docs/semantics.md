@@ -19,7 +19,8 @@ sources proves nonuse when any of them sent it from its first request.
 The reader freezes every selected file's length during discovery before parsing
 any transcript. It streams one newline-terminated JSON record at a time. Raw
 objects live only through that line's normalization; retained data contains
-counts, opaque identities, times, and whitelisted structural metadata. A file
+counts, opaque identities, times, whitelisted structural metadata, and the first
+sentence of each description a skill or tool ships, which is configuration. A file
 that changes identity or shrinks fails. Appended bytes are outside the snapshot.
 The report counts skipped lines, and `--details` the files with a deferred final line. Metadata storage grows with requests/events, not transcript text.
 
@@ -549,7 +550,9 @@ Neither harness has a native mechanism for capped idle pings.
 evidence, and client/version/window visibility. Components retain Unicode
 character counts, opaque identities and fingerprints, source locations, one
 owner (`skills` or `context`), and a server/namespace attribution key, or a plugin key where the record explicitly
-identifies it. Listing entry spans are members of their aggregate;
+identifies it. A listed skill, a tool definition and a Codex namespace also
+keep the first sentence of their description, at most 200 characters, which
+the report shows as what the line does; no other text is kept. Listing entry spans are members of their aggregate;
 member sizes must not be added to the aggregate. Listing replacement captures
 backfill and description expansion as a new aggregate revision. It does not
 assume removing one entry shrinks the next listing by that entry's size.

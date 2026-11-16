@@ -5,7 +5,7 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{MEMORY_OUTPUT, calibrate, codex_server, cohort};
+use crate::exposure::{MEMORY_OUTPUT, NAMESPACE_DESCRIPTION, calibrate, codex_server, cohort};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
@@ -254,13 +254,37 @@ struct Pieces<'a> {
     skills: HashMap<String, usize>,
     /// Codex members are keyed by path, with name-only members left unswitchable.
     catalog: HashMap<usize, Option<String>>,
+    /// The descriptions a component ships, by component and owning profile set, for the
+    /// pieces it describes.
+    described: HashMap<(&'a str, usize), Vec<Described>>,
+    /// Descriptions found while splitting the component being interned.
+    pending: Vec<Described>,
 }
+
+/// A piece, and the description a record ships for it, or None when it ships none.
+type Described = (usize, Option<String>);
 
 /// One component's share of a piece: its characters, or None when only its
 /// identity is recorded.
 type Split = (usize, Option<i64>);
 
 impl Pieces<'_> {
+    /// Note the description a component ships for one of its pieces, or that it ships none.
+    /// Only a record that would carry one counts: a measured tool definition, a listed
+    /// skill or a Codex namespace, not an opaque identity, a Claude deferred-tool name line
+    /// or other context.
+    fn describe(&mut self, key: usize, component: &Component) {
+        let carries = match component.category {
+            Category::ToolSchema | Category::McpSchema => component.size.characters.is_some(),
+            Category::SkillListing => component.scope == crate::model::Scope::Component,
+            Category::McpDiscovery => &*component.provenance == NAMESPACE_DESCRIPTION,
+            _ => false,
+        };
+        if carries {
+            self.pending.push((key, component.description.clone()));
+        }
+    }
+
     fn intern(
         &mut self,
         key: String,
@@ -452,22 +476,27 @@ fn pieces(
             one(key, kind, name, control)
         }
         Category::SkillListing => {
-            let members: Vec<(&str, i64)> = component
+            let members: Vec<(&Component, i64)> = component
                 .members
                 .iter()
                 .filter_map(|id| {
                     let m = components
                         .get(id.as_str())
                         .expect("listing members are recorded components");
-                    Some((m.name.as_str(), m.size.characters?))
+                    Some((*m, m.size.characters?))
                 })
                 .collect();
             let listed: i64 = members.iter().map(|(_, n)| n).sum();
             let mut result: Vec<(usize, i64)> = members
                 .into_iter()
-                .map(|(member, n)| {
+                .map(|(m, n)| {
+                    let member = m.name.as_str();
                     let (key, name, control) = skill(member);
                     let id = interned.intern(key, ContextKind::Skill, name, control);
+                    // Synced skills share one line, which no one skill's description fits.
+                    if synced_short(member).is_none() {
+                        interned.describe(id, m);
+                    }
                     interned
                         .skills
                         .insert(identity(&format!("skill:{member}")), id);
@@ -571,6 +600,7 @@ fn codex_pieces(
                     control,
                 );
                 interned.catalog.insert(key, path);
+                interned.describe(key, m);
                 result.push((key, Some(n)));
             }
             assert!(
@@ -863,6 +893,16 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 for (key, _) in &mut split {
                     *key = mcp_detail(component, *key, &mut interned);
                 }
+                // A tool's description is its own; a Codex namespace's describes its server.
+                if let [(key, _)] = split[..] {
+                    let key = match component.category {
+                        Category::McpDiscovery => interned.kinds[key].parent.unwrap_or(key),
+                        _ => key,
+                    };
+                    interned.describe(key, component);
+                }
+                let described = std::mem::take(&mut interned.pending);
+                interned.described.insert((id, owner), described);
                 interned.of.insert((id, owner), split);
             }
             let prefix = !codex && index < view.prefix;
@@ -974,6 +1014,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                             }),
                         details: vec![],
                         instruction_size: None,
+                        description: None,
                         shares: vec![],
                     },
                     shares: IndexMap::default(),
@@ -998,6 +1039,21 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     .expect("piece has a row")
                     .cost
                     .instruction_size = component(revision).instruction_size;
+            }
+        }
+        // Each request's records describe this owner's lines, so the latest request decides:
+        // a description any of its records ships, else none.
+        let mut described: IndexMap<usize, Option<&String>> = IndexMap::default();
+        for id in &shown {
+            let records = interned.described.get(&(&***id, owner));
+            for (key, description) in records.into_iter().flatten() {
+                let latest = described.entry(*key).or_default();
+                *latest = description.as_ref().or(*latest);
+            }
+        }
+        for (key, description) in described {
+            if let Some(row) = rows.get_mut(&(owner, key)) {
+                row.cost.description = description.cloned();
             }
         }
         // The leading tools and system prompt by revision, and the tokenizer that
@@ -1583,6 +1639,7 @@ mod tests {
             },
             members: members.iter().map(|m| m.to_string()).collect(),
             skill_path: None,
+            description: None,
             targets: vec![],
         }
     }
@@ -2351,6 +2408,95 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn descriptions_follow_each_owners_latest_revision() {
+        let tool = |id: &str, description: Option<&str>| {
+            let mut c = component(id, Category::ToolSchema, "Mystery", 1000, &[]);
+            c.description = description.map(str::to_string);
+            c
+        };
+        // An opaque identity of the same tool records no text, so it says nothing either way.
+        let mut opaque = tool("opaque", None);
+        opaque.size.characters = None;
+        // Nor does a Claude deferred-tool line, which names the tool without describing it.
+        let line = component("line", Category::McpDiscovery, "Mystery", 10, &[]);
+        let scan = ExposureScan {
+            components: vec![
+                tool("a", Some("First.")),
+                tool("b", Some("Second.")),
+                tool("bare", None),
+                opaque,
+                line,
+            ],
+            requests: [
+                // Native sends A, then B, then A again; work sends only B.
+                ("n1", "a"),
+                ("n2", "b"),
+                ("n3", "a"),
+                ("w1", "b"),
+                // A later revision that ships no description has none.
+                ("b1", "a"),
+                ("b2", "bare"),
+                ("o1", "a"),
+                ("o2", "opaque"),
+                ("d1", "a"),
+                ("d2", "line"),
+            ]
+            .iter()
+            .map(|(r, c)| exposure(r, &[c], 1, 1000))
+            .collect(),
+            ..ExposureScan::default()
+        };
+        let homes = [
+            ("n", "native"),
+            ("w", "work"),
+            ("b", "bare"),
+            ("o", "opaque"),
+            ("d", "deferred"),
+        ];
+        let requests: Vec<Request> = scan
+            .requests
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                let mut r = request(&e.request, i as Millis + 1, 0, 600, 0);
+                let home = homes
+                    .iter()
+                    .find(|(p, _)| e.request.starts_with(p))
+                    .unwrap();
+                r.profiles = vec![home.1.to_string()].into();
+                r
+            })
+            .collect();
+        let profiles = homes.map(|(_, home)| {
+            crate::test_support::make_profile(home, &format!("/synthetic/.claude-{home}"))
+        });
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &profiles,
+            catalog: &prices(),
+            snapshots: &[],
+            max_cost_per_use_usd: 1.0,
+        });
+        let mut described: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .filter(|c| c.name == "Mystery")
+            .map(|c| (c.profiles[0].as_str(), c.description.as_deref()))
+            .collect();
+        described.sort_unstable();
+        assert_eq!(
+            described,
+            [
+                ("bare", None),
+                ("deferred", Some("First.")),
+                ("native", Some("First.")),
+                ("opaque", Some("First.")),
+                ("work", Some("Second.")),
+            ]
+        );
     }
 
     #[test]

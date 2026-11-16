@@ -8,6 +8,7 @@ pub mod collections;
 pub mod compaction;
 pub mod context;
 pub mod controls;
+mod descriptions;
 pub mod discovery;
 pub mod doctor;
 pub mod effort;

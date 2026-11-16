@@ -895,6 +895,8 @@ pub struct EffortControl {
     pub caps: Vec<Owned>,
     /// The levels the model accepts; empty when unknown.
     pub supported: Vec<String>,
+    /// The model's own level when no setting names one; None when unknown.
+    pub default: Option<String>,
     /// Why the default cannot be resolved, such as an unrecorded `--profile` selection.
     pub unresolved: Option<String>,
 }
@@ -978,6 +980,10 @@ pub struct Profile {
     /// that the user's table turns off; none for Claude.
     #[serde(skip)]
     pub codex_system_config: Option<String>,
+    /// The tools, skills and MCP servers `settings_file` turns off, each as the control that
+    /// does it, so the report can show them though no request records them.
+    #[serde(skip)]
+    pub switched_off: Vec<Control>,
 }
 
 /// A setting's current value and the file or variable that sets it.

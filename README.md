@@ -214,8 +214,9 @@ a word replaces the dot.
 - A line without enough evidence for a verdict says why in its evidence. A
   cost that cannot be measured is shown as unknown, never as zero.
 - Savings on different lines do not add up, except in the walk's running
-  total of the changes you accept, which says that overlapping changes may save
-  less.
+  total of the changes you accept and the line under the headline that sums what
+  your settings save against the defaults, each of which says that overlapping
+  settings may save less.
 
 ## More
 

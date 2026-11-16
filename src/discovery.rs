@@ -14,8 +14,9 @@ use crate::controls::{
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Harness, IdleControl, Location, MemoryControl, PerBucket, Profile,
-    Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl, Ttl, TtlControl,
+    Agent, BackgroundControl, Control, ControlValue, Harness, IdleControl, Location, MemoryControl,
+    PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl,
+    Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -1945,6 +1946,7 @@ pub(crate) fn profile(
         outranking_files: vec![],
         claude_config,
         codex_system_config: (!claude).then(|| system_file.to_string()),
+        switched_off: switched_off(harness, &user),
     })
 }
 
@@ -1958,6 +1960,78 @@ fn claude_config(home: &str, canonical: &str, explicit: bool) -> String {
     } else {
         join(&[canonical, ".claude.json"])
     }
+}
+
+/// The tools, skills and MCP servers a profile's own settings file turns off, each as the
+/// control the report's lines name for it. A Claude `permissions.deny` rule turns a tool off
+/// only when it names the tool alone, without a pattern in parentheses.
+fn switched_off(harness: Harness, user: &Map<String, Value>) -> Vec<Control> {
+    let off = |path: &[&str]| Control {
+        path: path.iter().map(|p| p.to_string()).collect(),
+        value: ControlValue::Bool(false),
+        append: false,
+    };
+    let mut result = vec![];
+    if harness == Harness::Claude {
+        for key in ["enableArtifact", "enableWorkflows", "syncClaudeAiSkills"] {
+            if user.get(key) == Some(&Value::Bool(false)) {
+                result.push(off(&[key]));
+            }
+        }
+        let rules = user.get("permissions").and_then(|p| p.get("deny"));
+        for rule in rules.and_then(Value::as_array).into_iter().flatten() {
+            if let Some(rule) = rule.as_str().filter(|r| !r.is_empty() && !r.contains('(')) {
+                result.push(Control {
+                    path: vec!["permissions".into(), "deny".into()],
+                    value: ControlValue::Text(rule.into()),
+                    append: true,
+                });
+            }
+        }
+        for (name, value) in members(user.get("skillOverrides")) {
+            if let Some(value) = value.as_str().filter(|v| *v != "on") {
+                result.push(Control {
+                    path: vec!["skillOverrides".into(), name.clone()],
+                    value: ControlValue::Text(value.into()),
+                    append: false,
+                });
+            }
+        }
+        return result;
+    }
+    if user.get("features").and_then(|f| f.get("apps")) == Some(&Value::Bool(false)) {
+        result.push(off(&["features", "apps"]));
+    }
+    for (id, server) in members(user.get("mcp_servers")) {
+        if server.get("enabled") == Some(&Value::Bool(false)) {
+            result.push(off(&["mcp_servers", id, "enabled"]));
+            continue;
+        }
+        let tools = server.get("disabled_tools").and_then(Value::as_array);
+        for tool in tools.into_iter().flatten().filter_map(Value::as_str) {
+            result.push(Control {
+                path: vec!["mcp_servers".into(), id.clone(), "disabled_tools".into()],
+                value: ControlValue::Text(tool.into()),
+                append: true,
+            });
+        }
+    }
+    let skills = user.get("skills").and_then(|s| s.get("config"));
+    for entry in skills.and_then(Value::as_array).into_iter().flatten() {
+        if entry.get("enabled") == Some(&Value::Bool(false))
+            && let Some(path) = entry.get("path").and_then(Value::as_str)
+        {
+            result.push(Control {
+                path: vec!["skills".into(), "config".into()],
+                value: ControlValue::Skill {
+                    path: path.into(),
+                    enabled: false,
+                },
+                append: true,
+            });
+        }
+    }
+    result
 }
 
 /// Discover configuration aliases and freeze every selected file's length before parsing.
@@ -2095,6 +2169,54 @@ mod tests {
     use super::*;
     use crate::test_support::{Workspace, make_request};
     use std::path::Path;
+
+    #[test]
+    fn a_settings_file_names_the_switches_it_turns_off() {
+        let map = |v: Value| v.as_object().unwrap().clone();
+        let names = |harness, v: Value| -> Vec<String> {
+            switched_off(harness, &map(v))
+                .iter()
+                .map(crate::defaults::switch_name)
+                .collect()
+        };
+        let claude = serde_json::json!({
+            "enableArtifact": false,
+            "enableWorkflows": true,
+            "syncClaudeAiSkills": false,
+            "permissions": {"deny": ["Monitor", "Bash(rm:*)", "mcp__github", ""]},
+            "skillOverrides": {"pdf": "user-invocable-only", "docx": "on"},
+        });
+        assert_eq!(
+            names(Harness::Claude, claude),
+            [
+                "Artifact tool",
+                "Skills synced from claude.ai",
+                "Monitor tool",
+                "MCP server github",
+                "Skill pdf"
+            ]
+        );
+        let codex = serde_json::json!({
+            "features": {"apps": false},
+            "mcp_servers": {
+                "docs": {"enabled": false, "disabled_tools": ["read"]},
+                "live": {"command": "x", "disabled_tools": ["write"]},
+            },
+            "skills": {"config": [
+                {"path": "/s/imagegen/SKILL.md", "enabled": false},
+                {"path": "/s/other/SKILL.md", "enabled": true},
+            ]},
+        });
+        assert_eq!(
+            names(Harness::Codex, codex),
+            [
+                "ChatGPT apps",
+                "MCP server docs",
+                "MCP tool live.write",
+                "Skill imagegen"
+            ]
+        );
+    }
 
     fn text(path: &Path) -> String {
         // Windows paths joined from "a/b" keep the slash; the code under test normalizes it.

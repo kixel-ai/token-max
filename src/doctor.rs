@@ -456,6 +456,56 @@ fn outranking(profile: &Profile, edit: &Edit) -> Result<Vec<String>, ScanError> 
     Ok(owners)
 }
 
+/// Whether a file that outranks the profile's own sets the switch `control` flips, or
+/// whether that can't be read.
+///
+/// Any such file counts, even one that a higher file overrides back: the maintainer chose
+/// to keep offering the switch in that case rather than resolve each chain here (PR #129).
+pub(crate) fn outranked(profile: &Profile, control: &Control) -> bool {
+    let edit = Edit::from(control);
+    // Claude's deny rules from every file apply together.
+    if profile.harness == Harness::Claude && edit.append {
+        return false;
+    }
+    let differs = |config: &Map<String, Value>| sets(config, &edit) && !sets_to(config, &edit);
+    for file in &profile.outranking_files {
+        match crate::discovery::settings(file, profile.harness) {
+            Ok(config) if !differs(&config) => {}
+            _ => return true,
+        }
+    }
+    if profile.harness == Harness::Codex {
+        let Ok(user) = crate::discovery::settings(&profile.settings_file, Harness::Codex) else {
+            return true;
+        };
+        for (_, table) in crate::controls::members(user.get("profiles")) {
+            if differs(crate::controls::members(Some(table))) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether `config` sets what `edit` sets to the same value: the key's value, or for a Codex
+/// `[[skills.config]]` entry the one with the same `path`.
+fn sets_to(config: &Map<String, Value>, edit: &Edit) -> bool {
+    let mut value = config.get(&edit.path[0]);
+    for key in &edit.path[1..] {
+        value = value.and_then(|v| v.get(key));
+    }
+    match (edit.append, value) {
+        (true, Some(Value::Array(items))) => items.iter().any(|i| match edit.value.get("path") {
+            Some(path) => {
+                i.get("path") == Some(path) && i.get("enabled") == edit.value.get("enabled")
+            }
+            None => *i == edit.value,
+        }),
+        (false, Some(value)) => *value == edit.value,
+        _ => false,
+    }
+}
+
 /// Whether `config` sets what `edit` sets: the same key, or for a list a Codex
 /// `[[skills.config]]` entry with the same `path`.
 fn sets(config: &Map<String, Value>, edit: &Edit) -> bool {

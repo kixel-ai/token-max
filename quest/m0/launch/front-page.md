@@ -27,4 +27,3 @@ The logo at the top is `assets/logo/logo-on-light.svg` and
 ## Required
 
 - [Make doctor's output pretty](/quest/m0/launch/style.md) - the look the recording shows
-- [Show what the settings already save against the defaults](/quest/m0/launch/defaults.md) - the results' headline figure

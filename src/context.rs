@@ -5,7 +5,9 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::exposure::{MEMORY_OUTPUT, NAMESPACE_DESCRIPTION, calibrate, codex_server, cohort};
+use crate::exposure::{
+    MEMORY_OUTPUT, NAMESPACE_DESCRIPTION, UNMAPPED_DELTA, calibrate, codex_server, cohort,
+};
 use crate::model::{
     Category, Component, ContextCost, ContextKind, Control, ControlValue, ExposureScan, Harness,
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
@@ -470,6 +472,16 @@ fn pieces(
     let mut one = |key: String, kind: ContextKind, name: String, control: Option<Control>| {
         vec![(interned.intern(key, kind, name, control), characters)]
     };
+    // An unpaired tool or MCP instructions delta is named by its kind and line, not a
+    // tool or server, so no setting switches it; it is still sent with every request.
+    if &*component.provenance == UNMAPPED_DELTA && component.category != Category::Agents {
+        return one(
+            "other:unmapped-delta".into(),
+            ContextKind::Other,
+            "Unpaired listing changes".into(),
+            None,
+        );
+    }
     match component.category {
         Category::ToolSchema | Category::McpSchema | Category::McpDiscovery => {
             let (key, kind, name, control) = tool(name);

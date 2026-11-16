@@ -181,7 +181,7 @@ line it removes, with secret values masked. Claude Code rewrites `~/.claude.json
 not refused when it changed during the walk, unless an entry it would remove
 now holds something other than what the diff showed. It is written before any other
 file, under Claude Code's own lock (`~/.claude.json.lock`), taken before any
-backup is staged and held until it is replaced, and the removal is made to its
+backup is staged and held until it is replaced and its backup committed, and the removal is made to its
 current text. A lock held for over 5 seconds stops the run before anything is
 written. A stale lock, one not refreshed for 10 seconds, is not taken over:
 the error asks to remove it if no Claude Code is running, since Claude Code

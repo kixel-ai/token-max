@@ -380,7 +380,10 @@ the catalog. A switch set after the latest request, such as one the walk just
 wrote, counts as off too, so the next run neither offers it again nor drops
 its saving, and an MCP server's switch counts for its tools too. A switch that
 a file outranking the profile's sets otherwise adds no line: the feature's own
-line says what it costs.
+line says what it costs. Any outranking file that sets it otherwise counts,
+even when a file above that one sets it off again, so in that case doctor
+may offer the switch again rather than call a feature off that might still
+be on.
 
 ## MCP servers and instruction budgets
 

@@ -24,5 +24,6 @@ skills; replace private skill names, MCP servers and paths, such as the
 maintainer's own `quest-*` and `verify-*` skills and worktree paths, with
 generic labels (rejected: everything verbatim, which publishes private names;
 aggregates only, which convinces less). Never publish prompt or reply text.
-The [README](/quest/m0/launch/front-page.md) quest takes the snapshot and the
-[site](/quest/m0/launch/site.md) reuses it.
+The README's "On the maintainer's workstation" section holds the snapshot,
+taken 2026-11-16 on `desktop`, and the [site](/quest/m0/launch/site.md)
+reuses it.

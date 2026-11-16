@@ -15,9 +15,8 @@ the walk on synthetic transcripts (rejected: a static site generator, a
 build step and dependencies for one page; a recording of the maintainer's
 real run, which would need private names scrubbed from video).
 
-Recommended: reuse the README's results snapshot and recording, and deploy
-it as `docs/releasing.md` describes for `site/`.
-
-## Required
-
-- [Revamp the README](/quest/m0/launch/front-page.md) - the results snapshot, recording and pitch it reuses
+Recommended: reuse the README's pitch, its "On the maintainer's workstation"
+snapshot and the recording, `assets/demo/walk.gif`, which
+`assets/demo/walk.tape` regenerates from the synthetic home
+`assets/demo/home.py` writes; and deploy it as `docs/releasing.md` describes
+for `site/`.

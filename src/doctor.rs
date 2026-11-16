@@ -2064,65 +2064,74 @@ fn apply(target: &Target, edits: &[Edit], removals: &[Entry]) -> Result<String, 
 
 /// Write each file's accepted changes. Every file is checked first, so a file that changed
 /// while the person was answering stops the run before anything is written. A file Claude
-/// Code rewrites while it runs is instead read again under its lock, held until the end,
-/// and its removals made to what it holds then.
+/// Code rewrites while it runs is instead read again, written first, and written under its
+/// lock, held only while it is read again and replaced, so its removals are made to what it
+/// holds then.
 pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
-    let mut texts = vec![];
-    let mut locks = vec![];
-    let mut targets = vec![];
+    let mut checked = vec![];
     for pending in &plan.files {
         let mut target = pending.target.clone();
         let shown = target.resolved.display().to_string();
-        if target.lock {
-            let lock = Lock::take(Path::new(&target.file)).map_err(|e| {
-                ScanError::new(format!(
-                    "cannot lock {shown} ({e}); nothing was written, so run it again"
-                ))
-            })?;
-            locks.push(lock);
-            target.reread().map_err(|e| {
-                ScanError::new(format!("cannot read {shown} ({e}); nothing was written"))
-            })?;
+        let read = if target.lock {
+            target.reread().map(|()| true)
         } else {
-            match target.unchanged() {
-                Ok(true) => {}
-                Ok(false) => {
-                    return Err(ScanError::new(format!(
-                        "{shown} changed while token-max doctor was running; nothing was written, so run it again"
-                    )));
-                }
-                Err(e) => {
-                    return Err(ScanError::new(format!(
-                        "cannot read {shown} ({e}); nothing was written"
-                    )));
-                }
+            target.unchanged()
+        };
+        match read {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(ScanError::new(format!(
+                    "{shown} changed while token-max doctor was running; nothing was written, so run it again"
+                )));
+            }
+            Err(e) => {
+                return Err(ScanError::new(format!(
+                    "cannot read {shown} ({e}); nothing was written"
+                )));
             }
         }
-        texts.push(apply(&target, &pending.edits, &pending.removals).map_err(ScanError::new)?);
-        targets.push((target, pending.changes()));
+        let text = apply(&target, &pending.edits, &pending.removals).map_err(ScanError::new)?;
+        checked.push((target, text, pending));
     }
-    let mut written = vec![];
-    for ((target, edits), text) in targets.iter().zip(texts) {
-        if let Err(e) = target.write(&text) {
-            let done: Vec<&str> = written.iter().map(|w: &Written| w.file.as_str()).collect();
-            let done = if done.is_empty() {
-                "nothing else was written".into()
+    // A lock another program holds then stops the run before any other file is written.
+    checked.sort_by_key(|(target, _, _)| !target.lock);
+    let mut written: Vec<Written> = vec![];
+    for (mut target, mut text, pending) in checked {
+        let done = |written: &[Written]| {
+            let done: Vec<&str> = written.iter().map(|w| w.file.as_str()).collect();
+            if done.is_empty() {
+                "nothing else was written".to_string()
             } else {
                 format!("already wrote {}", done.join(", "))
-            };
+            }
+        };
+        let shown = target.resolved.display().to_string();
+        let lock = if target.lock {
+            let lock = Lock::take(Path::new(&target.file)).map_err(|e| {
+                ScanError::new(format!("cannot lock {shown} ({e}); {}", done(&written)))
+            })?;
+            target.reread().map_err(|e| {
+                ScanError::new(format!("cannot read {shown} ({e}); {}", done(&written)))
+            })?;
+            text = apply(&target, &pending.edits, &pending.removals)
+                .map_err(|e| ScanError::new(format!("{e}; {}", done(&written))))?;
+            Some(lock)
+        } else {
+            None
+        };
+        if let Err(e) = target.write(&text) {
             return Err(ScanError::new(format!(
-                "cannot write {} ({e}); {done}",
-                target.resolved.display()
+                "cannot write {shown} ({e}); {}",
+                done(&written)
             )));
         }
-        let resolved = target.resolved.display().to_string();
+        drop(lock);
         written.push(Written {
             file: target.file.clone(),
-            resolved: (resolved != target.file).then_some(resolved),
-            edits: *edits,
+            resolved: (shown != target.file).then_some(shown),
+            edits: pending.changes(),
         });
     }
-    drop(locks);
     Ok(written)
 }
 

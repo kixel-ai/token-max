@@ -67,14 +67,35 @@ pub fn definitions(server: &str, control: &Control, profiles: &[&Profile]) -> Ve
         return vec![];
     };
     if profile.harness == Harness::Codex {
-        return match control.path.as_slice() {
-            [table, id, _] if table == "mcp_servers" => vec![Definition::Entry(Entry {
+        let [table, id, _] = control.path.as_slice() else {
+            return vec![];
+        };
+        if table != "mcp_servers" {
+            return vec![];
+        }
+        let file = &profile.settings_file;
+        let step = format!("remove [mcp_servers.{id}] from {file}");
+        return match codex_layers(profile, id) {
+            Ok(layers) if layers.is_empty() => vec![Definition::Entry(Entry {
                 server: id.clone(),
-                file: profile.settings_file.clone(),
+                file: file.clone(),
                 harness: Harness::Codex,
                 path: vec![table.clone(), id.clone()],
             })],
-            _ => vec![],
+            Ok(layers) => vec![Definition::Manual {
+                step,
+                reason: format!(
+                    "{} also configures it and may rely on the rest of its table",
+                    layers.join(", ")
+                ),
+            }],
+            Err(e) => vec![Definition::Manual {
+                step,
+                reason: format!(
+                    "{}, so whether another layer relies on it is unknown",
+                    e.message
+                ),
+            }],
         };
     }
     if server.starts_with("plugin_") {
@@ -152,9 +173,10 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
     let mut found: IndexSet<Entry> = IndexSet::default();
     let mut manual = vec![];
     let mut unreadable = |file: &str, e: crate::safe::ScanError| {
+        let at = e.location.as_ref().map_or(file, |l| &*l.file);
         manual.push(Definition::Manual {
             step: format!("look in {file} for MCP servers that are off"),
-            reason: format!("{} ({file})", e.message),
+            reason: format!("{} ({at})", e.message),
         })
     };
     for profile in profiles {
@@ -167,14 +189,24 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
         };
         if profile.harness == Harness::Codex {
             for (id, table) in members(config.get("mcp_servers")) {
-                if table.get("enabled") == Some(&Value::Bool(false)) {
-                    found.insert(Entry {
-                        server: id.clone(),
-                        file: profile.settings_file.clone(),
-                        harness: Harness::Codex,
-                        path: vec!["mcp_servers".into(), id.clone()],
-                    });
+                if table.get("enabled") != Some(&Value::Bool(false)) {
+                    continue;
                 }
+                // A project or named profile that configures it too may turn it back on.
+                match codex_layers(profile, id) {
+                    Ok(layers) if !layers.is_empty() => continue,
+                    Ok(_) => {}
+                    Err(e) => {
+                        unreadable(&profile.settings_file, e);
+                        continue;
+                    }
+                }
+                found.insert(Entry {
+                    server: id.clone(),
+                    file: profile.settings_file.clone(),
+                    harness: Harness::Codex,
+                    path: vec!["mcp_servers".into(), id.clone()],
+                });
             }
             continue;
         }
@@ -220,6 +252,27 @@ pub fn turned_off(profiles: &[Profile]) -> Vec<Definition> {
         .map(Definition::Entry)
         .chain(manual)
         .collect()
+}
+
+/// The Codex layers that outrank the profile's `config.toml` for some recorded session and
+/// configure the server `id` too: a project's or named profile's file, or a named profile
+/// table in `config.toml` itself.
+fn codex_layers(profile: &Profile, id: &str) -> Result<Vec<String>, crate::safe::ScanError> {
+    let declares =
+        |config: &Map<String, Value>| members(config.get("mcp_servers")).contains_key(id);
+    let mut layers = vec![];
+    for file in &profile.outranking_files {
+        if declares(&settings(file, Harness::Codex)?) {
+            layers.push(file.clone());
+        }
+    }
+    let user = settings(&profile.settings_file, Harness::Codex)?;
+    for (name, table) in members(user.get("profiles")) {
+        if declares(members(Some(table))) {
+            layers.push(format!("{}:profiles.{name}", profile.settings_file));
+        }
+    }
+    Ok(layers)
 }
 
 /// Each Claude Code state file the profiles use, once.
@@ -435,6 +488,32 @@ mod tests {
         assert_eq!(entry.path, ["mcp_servers", "my.docs"]);
         assert_eq!(entry.text(), r#"[mcp_servers."my.docs"]"#);
         assert!(definitions("codex_apps", &off(&["features", "apps"]), &[&p]).is_empty());
+
+        // A project or named profile that configures it too may rely on the user's table.
+        let project = w.home.join("project/.codex/config.toml");
+        write(&project, "[mcp_servers.\"my.docs\"]\nenabled = true\n");
+        p.outranking_files = vec![project.to_string_lossy().into_owned()];
+        write(
+            &p.settings_file,
+            "[mcp_servers.\"my.docs\"]\nenabled = false\n",
+        );
+        let control = off(&["mcp_servers", "my.docs", "enabled"]);
+        let found = definitions("my_docs", &control, &[&p]);
+        let [Definition::Manual { reason, .. }] = found.as_slice() else {
+            panic!("{found:?}")
+        };
+        assert!(reason.starts_with(&p.outranking_files[0]), "{reason}");
+        assert!(turned_off(&[p.clone()]).is_empty());
+        p.outranking_files.clear();
+        write(
+            &p.settings_file,
+            "[mcp_servers.\"my.docs\"]\nenabled = false\n[profiles.work.mcp_servers.\"my.docs\"]\nenabled = true\n",
+        );
+        assert!(matches!(
+            definitions("my_docs", &control, &[&p]).as_slice(),
+            [Definition::Manual { .. }]
+        ));
+        assert!(turned_off(&[p]).is_empty());
     }
 
     #[test]

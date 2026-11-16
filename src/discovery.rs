@@ -1912,7 +1912,10 @@ pub(crate) fn profile(
             ..codex_memory(&speed_scopes, &settings_file)?
         }
     };
-    let claude_config = claude.then(|| claude_config(&options.home, &canonical));
+    // A shell's CLAUDE_CONFIG_DIR keeps Claude Code's state inside it, even when it names
+    // the default directory.
+    let explicit = options.env.contains_key(variable) && active == canonical;
+    let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
     Ok(Profile {
         id: identity(key),
         harness,
@@ -1944,11 +1947,12 @@ pub(crate) fn profile(
     })
 }
 
-/// Claude Code's state file for a canonical root: `~/.claude.json` beside the default
-/// `~/.claude`, else `.claude.json` inside a `CLAUDE_CONFIG_DIR`.
-fn claude_config(home: &str, canonical: &str) -> String {
+/// Claude Code's state file for a canonical root: `.claude.json` inside a root the shell's
+/// `CLAUDE_CONFIG_DIR` selects, else `~/.claude.json` beside the default `~/.claude`, else
+/// `.claude.json` inside the root, as another `CLAUDE_CONFIG_DIR` would place it.
+fn claude_config(home: &str, canonical: &str, explicit: bool) -> String {
     let default = join(&[home, ".claude"]);
-    if realpath(&default).is_ok_and(|d| d == canonical) {
+    if !explicit && realpath(&default).is_ok_and(|d| d == canonical) {
         join(&[home, ".claude.json"])
     } else {
         join(&[canonical, ".claude.json"])
@@ -2295,6 +2299,22 @@ mod tests {
             ["fastMode", "model", "model_context_window"]
         );
         assert_eq!(settings["model"], Scalar::Text("claude-opus-5-5".into()));
+    }
+
+    #[test]
+    fn claude_state_lives_beside_the_default_root_unless_the_shell_selects_it() {
+        let w = Workspace::new();
+        let home = text(&w.home);
+        let state = |env: Env| {
+            let data = discover(&DiscoveryOptions { env, ..options(&w) }).unwrap();
+            claude(&data).claude_config.clone().unwrap()
+        };
+        assert_eq!(state(Env::default()), join(&[&home, ".claude.json"]));
+        let root = realpath(&text(&w.claude)).unwrap();
+        assert_eq!(
+            state(env(&[("CLAUDE_CONFIG_DIR", &text(&w.claude))])),
+            join(&[&root, ".claude.json"])
+        );
     }
 
     // Ported from reader.test.ts: "current environment overrides are scoped to the active config root".

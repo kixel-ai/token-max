@@ -16,9 +16,9 @@ Decided 2026-11-16 (maintainer, /quest-plan in token-max: "--default ignores
 the current settings files and pretends they are set to the default values"):
 
 - ✅ add the flag beside the always-on comparison line of
-  [defaults.md](/quest/m0/launch/defaults.md) (rejected: replacing that line
-  with the flag, which reverses that quest's pick of a line on every run).
-  That quest rejected a flag as the way to show the comparison; this one is
+  [#129](https://github.com/kixel-ai/token-max/pull/129) (rejected: replacing that line
+  with the flag, which reverses that PR's pick of a line on every run).
+  Its quest rejected a flag as the way to show the comparison; this one is
   a different view, the whole report as a default user sees it.
 - ✅ read-only (rejected: a walk that writes its picks into the real files;
   rejected: resetting the files to the defaults plus the picks). The
@@ -37,13 +37,13 @@ the current settings files and pretends they are set to the default values"):
 
 Recommended:
 
-- Reuse the defaults quest's per-setting replay against each documented
+- Reuse #129's per-setting replay against each documented
   default as the baseline, rather than a second pricing path. Each row's
   saving is its own change from that baseline; a headline total sums them
-  and labels the sum as possibly overlapping, as that quest's headline and
+  and labels the sum as possibly overlapping, as #129's headline and
   the walk's running total do, rather than replaying every change at once.
 - A feature the real settings turn off is on by default but absent from the
-  transcripts while it was off: price it as the defaults quest does, from
+  transcripts while it was off: price it as #129 does, from
   what it cost per request while it was still sent, and call it unknown
   otherwise, never zero.
 - Under the flag, drop the "Compared with defaults" line, which would only
@@ -51,7 +51,3 @@ Recommended:
   pretends the settings files away.
 - Exit as a normal non-interactive run does, so a script can still tell
   whether a default user would have anything to change.
-
-## Required
-
-- [Show what the settings already save against the defaults](/quest/m0/launch/defaults.md) - the per-setting pricing against each default that this reuses

@@ -273,6 +273,7 @@ pub fn audit(
                 change,
                 fixes: vec![],
                 listing: None,
+                turned_off: vec![],
             }),
         ),
         Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions)),

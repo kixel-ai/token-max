@@ -19,6 +19,7 @@ mod fable;
 pub mod fast;
 pub mod idle;
 pub mod keepalive;
+pub mod mcp;
 pub mod memory;
 pub mod model;
 pub mod prices;

@@ -236,6 +236,8 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         instruction_budget_file: None,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        claude_config: None,
+        codex_system_config: None,
         switched_off: vec![],
         id: id.into(),
         harness: Harness::Claude,

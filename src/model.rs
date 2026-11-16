@@ -972,6 +972,14 @@ pub struct Profile {
     /// the same switch in `settings_file`. Only files that hold settings are listed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outranking_files: Vec<String>,
+    /// Claude Code's own state file for this root, such as `~/.claude.json`, which holds
+    /// its user- and local-scope MCP servers; none for Codex.
+    #[serde(skip)]
+    pub claude_config: Option<String>,
+    /// Codex's system `config.toml`, below the user's file, which can declare an MCP server
+    /// that the user's table turns off; none for Claude.
+    #[serde(skip)]
+    pub codex_system_config: Option<String>,
     /// The tools, skills and MCP servers `settings_file` turns off, each as the control that
     /// does it, so the report can show them though no request records them.
     #[serde(skip)]

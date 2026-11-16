@@ -5040,11 +5040,10 @@ fn summary(
         }
     }
     // Under --defaults, a feature a settings file turns off that no request in the window
-    // carried: on, at a cost no transcript shows.
+    // carried: on, at a cost no transcript shows. An allowlist names no tool it leaves out.
     let mut seen_on: Vec<(String, &crate::model::Control)> = vec![];
     for p in &report.scan.profiles {
-        let file = real(&p.settings_file);
-        for control in &p.pretended_on {
+        for (file, control) in &p.pretended_on {
             let carried = setting_rows(&report.context).any(|c| {
                 c.harness == p.harness
                     && c.profiles.contains(&p.id)
@@ -5052,22 +5051,29 @@ fn summary(
                         .as_ref()
                         .is_some_and(|k| crate::defaults::covers(control, k))
             });
+            let real_file = real(file);
             if carried
+                || control.path.last().is_some_and(|k| k == "enabled_tools")
                 || seen_on
                     .iter()
-                    .any(|(f, c)| *f == file && crate::defaults::same_switch(c, control))
+                    .any(|(f, c)| *f == real_file && crate::defaults::same_switch(c, control))
             {
                 continue;
             }
-            seen_on.push((file.clone(), control));
+            seen_on.push((real_file.clone(), control));
             let ids: Vec<String> = report
                 .scan
                 .profiles
                 .iter()
-                .filter(|q| q.harness == p.harness && real(&q.settings_file) == file)
+                .filter(|q| {
+                    q.harness == p.harness
+                        && q.pretended_on.iter().any(|(f, k)| {
+                            real(f) == real_file && crate::defaults::same_switch(k, control)
+                        })
+                })
                 .map(|q| q.id.clone())
                 .collect();
-            let shown = out.home(&p.settings_file);
+            let shown = out.home(file);
             let mut row = Row::new(
                 Claim::Measured,
                 Mark::Unknown,

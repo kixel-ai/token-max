@@ -252,6 +252,13 @@ pub(crate) fn covers(switch: &Control, control: &Control) -> bool {
         (["mcp_servers", id, "enabled"], _, ["mcp_servers", tool_id, "disabled_tools"], _) => {
             id == tool_id
         }
+        // An allowlist turns off every tool it leaves out.
+        (
+            ["mcp_servers", id, "enabled_tools"],
+            ControlValue::Text(kept),
+            ["mcp_servers", tool_id, "disabled_tools"],
+            ControlValue::Text(tool),
+        ) => id == tool_id && !kept.lines().any(|k| k == tool),
         _ => false,
     }
 }

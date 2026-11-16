@@ -984,10 +984,12 @@ pub struct Profile {
     /// does it, so the report can show them though no request records them.
     #[serde(skip)]
     pub switched_off: Vec<Control>,
-    /// Under `doctor --defaults`, the switches the real `settings_file` turns off, whose
-    /// features the report shows on; empty otherwise.
+    /// Under `doctor --defaults`, each switch a user, project or local file turns off and
+    /// policy does not, with that file: features the report shows on. A Codex MCP server's
+    /// `enabled_tools` allowlist is one too, turning off every tool it leaves out. Empty
+    /// otherwise.
     #[serde(skip)]
-    pub pretended_on: Vec<Control>,
+    pub pretended_on: Vec<(String, Control)>,
 }
 
 /// A setting's current value and the file or variable that sets it.

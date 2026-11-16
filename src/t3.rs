@@ -614,7 +614,10 @@ pub(crate) fn discover(
                 instance.enabled = None;
                 instance.config_enabled = None;
                 instance.custom_models.clear();
-                instance.environment.clear();
+                // Only the variables that choose its home stay.
+                instance
+                    .environment
+                    .retain(|e| matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME"));
             }
         }
         let global = settings
@@ -817,8 +820,14 @@ pub(crate) fn discover(
                 .expect("native profiles have speed controls");
             if options.defaults {
                 // A thread's selection defaults to no fastMode or serviceTier, so a Claude
-                // thread runs at standard speed and a Codex one at the native default.
+                // thread runs at standard speed and a Codex one at the native default, unless
+                // machine policy could change either.
                 speed.owner = format!("T3 instance {id}: thread model selection");
+                if harness == Harness::Claude {
+                    speed.value = Some("standard".into());
+                    speed.reason = "T3 defaults Claude fastMode to false".into();
+                }
+                speed.resolved = speed.resolved && !policy_unresolved;
             } else if harness == Harness::Claude {
                 speed.value = None;
                 speed.owner = format!("T3 instance {id}: thread modelSelection.options.fastMode");
@@ -833,7 +842,9 @@ pub(crate) fn discover(
                 speed.replacement = "serviceTier=default in the T3 thread model selection".into();
                 speed.reason = "T3 passes a selected serviceTier (legacy fastMode=true maps to fast); omission can inherit native service_tier; current selection is unavailable".into();
             }
-            speed.resolved = false;
+            if !options.defaults {
+                speed.resolved = false;
+            }
             let owner = format!("T3 instance {id}: thread model selection");
             profile.effort = Some(crate::model::EffortControl {
                 model: None,
@@ -2499,6 +2510,47 @@ mod tests {
         assert_eq!(
             scan.requests[0].requested_speed.as_ref().unwrap().tier,
             None
+        );
+    }
+    #[test]
+    fn defaults_keep_each_instance_home_and_drop_its_settings() {
+        let w = Workspace::new();
+        let alternate = w.home.join(".codex-alt");
+        fs::create_dir_all(alternate.join("sessions")).unwrap();
+        state(
+            &w,
+            json!({"idleCompaction":"off","providerInstances":{
+                "codex":{"driver":"codex","environment":[
+                    {"name":"CODEX_HOME","value":alternate},
+                    {"name":"FORCE_PROMPT_CACHING_5M","value":"1"}
+                ]},
+                "claudeAgent":{"driver":"claudeAgent","config":{"autoCompactWindow":"200000","idleCompaction":"off"}}
+            }}),
+        );
+        let mut options = w.scan_options().discovery;
+        options.pretend_defaults();
+        let mut profiles = vec![];
+        discover(&options, &mut profiles).unwrap();
+        let instance = |id: &str| {
+            profiles
+                .iter()
+                .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == id))
+                .unwrap()
+        };
+        let codex = instance("codex");
+        // The variable that chose its home stays.
+        assert_eq!(
+            codex.root,
+            crate::discovery::realpath(&alternate.to_string_lossy()).unwrap()
+        );
+        let claude = instance("claudeAgent");
+        let t3 = claude.t3.as_ref().unwrap();
+        assert_eq!(t3.idle_mode, T3IdleMode::OnReturn);
+        assert!(t3.inherited_window.is_some());
+        let speed = claude.speed.as_ref().unwrap();
+        assert_eq!(
+            (speed.value.as_deref(), speed.resolved),
+            (Some("standard"), !managed_policy_unresolved())
         );
     }
     #[test]

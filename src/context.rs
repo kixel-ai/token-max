@@ -207,7 +207,7 @@ fn pretended_on(c: &ContextCost, profiles: &[Profile]) -> bool {
     profiles
         .iter()
         .filter(|p| c.profiles.contains(&p.id))
-        .flat_map(|p| &p.pretended_on)
+        .flat_map(|p| p.pretended_on.iter().map(|(_, switch)| switch))
         .any(|switch| crate::defaults::covers(switch, control))
 }
 
@@ -1507,19 +1507,17 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
             // Under --defaults a feature the settings files turn off is on, as though every
-            // request on its line carried it.
-            if !c.current && pretended_on(&c, input.profiles) {
+            // request on its line carried it, even one the latest request still carried.
+            if pretended_on(&c, input.profiles) {
                 c.current = true;
-                c.pretended_requests = Some(
-                    input
-                        .requests
-                        .iter()
-                        .filter(|r| {
-                            r.harness == c.harness
-                                && r.profiles.iter().any(|p| c.profiles.contains(p))
-                        })
-                        .count() as u64,
-                );
+                let all = input
+                    .requests
+                    .iter()
+                    .filter(|r| {
+                        r.harness == c.harness && r.profiles.iter().any(|p| c.profiles.contains(p))
+                    })
+                    .count() as u64;
+                c.pretended_requests = (all > c.requests).then_some(all);
             }
             c.estimated_usd =
                 (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);

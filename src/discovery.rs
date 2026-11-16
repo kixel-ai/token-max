@@ -87,6 +87,44 @@ impl DiscoveryOptions {
         .contains(&&file.to_string())
     }
 
+    /// Under `--defaults`, add to `on` each switch `file` really turns off that policy does
+    /// not also turn off, since `--defaults` shows that feature on.
+    fn pretend_on(
+        &self,
+        harness: Harness,
+        on: &mut Vec<(String, Control)>,
+        file: &str,
+    ) -> Result<(), ScanError> {
+        if !self.defaults {
+            return Ok(());
+        }
+        let policy = match harness {
+            Harness::Claude => switched_off(
+                Harness::Claude,
+                &settings(&self.managed_settings_file, Harness::Claude)?,
+            ),
+            Harness::Codex => switched_off(
+                Harness::Codex,
+                &settings(&self.codex_system_config_file, Harness::Codex)?,
+            ),
+        };
+        let config = settings(file, harness)?;
+        let mut found = switched_off(harness, &config);
+        if harness == Harness::Codex {
+            found.extend(allowlists(&config));
+        }
+        for control in found {
+            let kept = policy.iter().any(|k| crate::defaults::covers(k, &control));
+            let seen = on
+                .iter()
+                .any(|(f, k)| f == file && crate::defaults::same_switch(k, &control));
+            if !kept && !seen {
+                on.push((file.to_string(), control));
+            }
+        }
+        Ok(())
+    }
+
     /// Read a settings file as this run sees it. Under `--defaults` a user, project or
     /// local file sets nothing, except that a Codex file keeps the MCP servers it
     /// declares, each on: a server is something installed, not a setting's value.
@@ -845,6 +883,9 @@ pub fn discover_claude_controls(
             let project = options.settings(&project_file, Harness::Claude)?;
             let legacy = options.settings(&legacy_file, Harness::Claude)?;
             let local = options.settings(&local_file, Harness::Claude)?;
+            for file in [&project_file, &legacy_file, &local_file] {
+                options.pretend_on(Harness::Claude, &mut profile.pretended_on, file)?;
+            }
             for (file, config) in [
                 (&project_file, &project),
                 (&legacy_file, &legacy),
@@ -1248,6 +1289,7 @@ pub fn discover_codex_controls(
                 }
                 let file = join(&[path, ".codex", "config.toml"]);
                 let config = options.settings(&file, Harness::Codex)?;
+                options.pretend_on(Harness::Codex, &mut profile.pretended_on, &file)?;
                 let overrides = CODEX_SPEED_KEYS.iter().any(|k| config.contains_key(*k));
                 let known = profile
                     .speed_directories
@@ -1992,13 +2034,7 @@ pub(crate) fn profile(
     // the default directory.
     let explicit = options.env.contains_key(variable) && active == canonical;
     let claude_config = claude.then(|| claude_config(&options.home, &canonical, explicit));
-    // What the real file turns off, which --defaults shows on.
-    let pretended_on = if options.defaults {
-        switched_off(harness, &self::settings(&settings_file, harness)?)
-    } else {
-        vec![]
-    };
-    Ok(Profile {
+    let mut profile = Profile {
         id: identity(key),
         harness,
         root: canonical,
@@ -2028,8 +2064,12 @@ pub(crate) fn profile(
         claude_config,
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
-        pretended_on,
-    })
+        pretended_on: vec![],
+    };
+    // What the real file turns off, which --defaults shows on.
+    let file = profile.settings_file.clone();
+    options.pretend_on(harness, &mut profile.pretended_on, &file)?;
+    Ok(profile)
 }
 
 /// Claude Code's state file for a canonical root: `.claude.json` inside a root the shell's
@@ -2114,6 +2154,23 @@ fn switched_off(harness: Harness, user: &Map<String, Value>) -> Vec<Control> {
         }
     }
     result
+}
+
+/// Each Codex MCP server's `enabled_tools` allowlist, as a control whose value lists the
+/// tools it keeps, one per line.
+fn allowlists(config: &Map<String, Value>) -> Vec<Control> {
+    members(config.get("mcp_servers"))
+        .iter()
+        .filter_map(|(id, server)| {
+            let tools = server.get("enabled_tools")?.as_array()?;
+            let kept: Vec<&str> = tools.iter().filter_map(Value::as_str).collect();
+            Some(Control {
+                path: vec!["mcp_servers".into(), id.clone(), "enabled_tools".into()],
+                value: ControlValue::Text(kept.join("\n")),
+                append: false,
+            })
+        })
+        .collect()
 }
 
 /// Discover configuration aliases and freeze every selected file's length before parsing.
@@ -2559,17 +2616,17 @@ mod tests {
         let w = Workspace::new();
         write(
             w.claude.join("settings.json"),
-            r#"{"promptCacheTtl":"5m","permissions":{"deny":["WebFetch"]}}"#,
+            r#"{"promptCacheTtl":"5m","permissions":{"deny":["WebFetch","WebSearch"]}}"#,
         );
         write(
             w.codex.join("config.toml"),
-            "service_tier = 'fast'\n[mcp_servers.docs]\ncommand = 'docs'\nenabled = false\n",
+            "service_tier = 'fast'\n[mcp_servers.docs]\ncommand = 'docs'\nenabled = false\n[mcp_servers.kit]\ncommand = 'kit'\nenabled_tools = ['a']\n",
         );
         // A --profile selection would leave speed unresolved; a default user makes none.
         write(w.codex.join("work.config.toml"), "service_tier = 'fast'\n");
         write(
             w.managed_settings_file(),
-            r#"{"subagentPromptCacheTtl":"1h"}"#,
+            r#"{"subagentPromptCacheTtl":"1h","permissions":{"deny":["WebSearch"]}}"#,
         );
         let mut o = options(&w);
         o.env = env(&[
@@ -2591,7 +2648,7 @@ mod tests {
             claude
                 .pretended_on
                 .iter()
-                .map(crate::defaults::switch_name)
+                .map(|(_, k)| crate::defaults::switch_name(k))
                 .collect::<Vec<_>>(),
             ["WebFetch tool"]
         );
@@ -2600,10 +2657,21 @@ mod tests {
             .iter()
             .find(|p| p.harness == Harness::Codex)
             .unwrap();
-        // The server stays declared, and on.
-        assert_eq!(codex.mcp_servers, ["docs"]);
+        // The servers stay declared, and on, with every tool.
+        assert_eq!(codex.mcp_servers, ["docs", "kit"]);
         assert!(codex.switched_off.is_empty());
-        assert_eq!(codex.pretended_on.len(), 1);
+        let on: Vec<&[String]> = codex
+            .pretended_on
+            .iter()
+            .map(|(_, k)| k.path.as_slice())
+            .collect();
+        assert_eq!(
+            on,
+            [
+                ["mcp_servers", "docs", "enabled"],
+                ["mcp_servers", "kit", "enabled_tools"]
+            ]
+        );
         assert_eq!(
             codex.speed.as_ref().unwrap().value.as_deref(),
             Some("standard")

@@ -1591,22 +1591,34 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
 #[test]
 fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
     let w = Workspace::new();
-    // The user turned WebFetch off after its first request and WebSearch off before any.
-    let settings = r#"{"promptCacheTtl":"1h","permissions":{"deny":["WebFetch","WebSearch"]}}"#;
+    // The user turned WebFetch off after its first request, Glob after its last, and
+    // WebSearch before any; the project turned NotebookEdit off after its first.
+    let settings =
+        r#"{"promptCacheTtl":"1h","permissions":{"deny":["WebFetch","WebSearch","Glob"]}}"#;
     w.settings(settings);
+    let repo = w.home.join("repo");
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.local.json"),
+        r#"{"permissions":{"deny":["NotebookEdit"]}}"#,
+    )
+    .unwrap();
     let tool = |name: &str| json!({"name": name, "description": "synthetic schema ".repeat(50), "input_schema": {"type": "object"}});
     let mut records = vec![];
     for i in 0..3 {
         let mut tools = vec![tool("Bash")];
-        if i == 0 {
-            tools.push(tool("WebFetch"));
+        match i {
+            0 => tools.extend([tool("WebFetch"), tool("NotebookEdit")]),
+            2 => tools.push(tool("Glob")),
+            _ => {}
         }
-        records.push(json!({"type": "api-request", "id": format!("api-{i}"), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:00Z", i + 1), "params": {
+        let input = 1000 * tools.len();
+        records.push(json!({"type": "api-request", "id": format!("api-{i}"), "cwd": text(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:00Z", i + 1), "params": {
             "model": "claude-opus-5-5", "system": "synthetic system", "messages": [], "tools": tools
         }}));
-        records.push(json!({"type": "assistant", "uuid": format!("block-{i}"), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:01Z", i + 1), "entrypoint": "sdk-ts", "requestRef": format!("api-{i}"), "message": {
+        records.push(json!({"type": "assistant", "uuid": format!("block-{i}"), "cwd": text(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:01Z", i + 1), "entrypoint": "sdk-ts", "requestRef": format!("api-{i}"), "message": {
             "id": format!("message-{i}"), "model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": format!("call-{i}"), "name": "Bash", "input": {}}], "usage": {
-                "input_tokens": if i == 0 { 2000 } else { 1000 }, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                "input_tokens": input, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
                 "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard", "speed": "standard", "inference_geo": "global"
             }
         }}));
@@ -1651,6 +1663,16 @@ fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
         evidence.contains("so 1 of this line's 3 requests carried it"),
         "{evidence}"
     );
+    // Turned off in a project file, or after the latest request: scaled the same way.
+    // Glob, first sent mid-window, can't be proven unused.
+    for (name, verdict) in [("NotebookEdit tool", "change"), ("Glob tool", "consider")] {
+        let (word, _, evidence) = report_line(&stdout, name);
+        assert_eq!(word, verdict, "{name}");
+        assert!(
+            evidence.contains("so 1 of this line's 3 requests carried it"),
+            "{evidence}"
+        );
+    }
     // Never carried in the window: on, at a cost no transcript shows.
     let (word, heading, evidence) = report_line(&stdout, "WebSearch tool");
     assert_eq!(

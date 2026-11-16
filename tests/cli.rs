@@ -119,7 +119,12 @@ fn command(w: &Workspace, args: &[&str]) -> Command {
 /// (name, value, figure and percent) with padding collapsed, and the evidence under it,
 /// which only details show. The evidence cards after the lines are not searched.
 fn report_line(text: &str, head: &str) -> (String, String, String) {
-    let lines: Vec<&str> = text.lines().take_while(|l| *l != "EVIDENCE").collect();
+    // Every line but the header sits inside the report's two-cell margin.
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.strip_prefix("  ").unwrap_or(l))
+        .take_while(|l| *l != "EVIDENCE")
+        .collect();
     lines
         .iter()
         .enumerate()
@@ -317,7 +322,10 @@ fn exit_codes_and_no_partial_findings_or_transcript_content() {
     let (status, stdout, stderr) = invoke();
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
-    assert!(stdout.contains("Read 2 requests"), "{stdout}");
+    assert!(
+        stdout.starts_with("token-max  2 requests from "),
+        "{stdout}"
+    );
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(std::fs::read(w.transcript()).unwrap(), before);
     w.settings(r#"{"promptCacheTtl":"1h"}"#);
@@ -514,8 +522,8 @@ fn text_handles_all_clear_empty_windows_missing_histories_offline_prices_and_hel
     w.settings(r#"{"promptCacheTtl":"1h"}"#);
     let (status, stdout, stderr) = invoke(&["--plain"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.contains("\nNo changes recommended"));
-    assert!(stdout.lines().any(|l| l.starts_with("keep     ")));
+    assert!(stdout.contains("\n  No changes recommended"));
+    assert!(stdout.lines().any(|l| l.starts_with("  keep     ")));
     assert!(!stdout.contains('\x1b') && !stdout.contains('→'));
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
     assert_eq!(stderr, "");
@@ -950,7 +958,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
         head.contains("saves $") || head.contains("saves <$"),
         "{text}"
     );
-    assert!(text.contains("Read 2 requests"), "{text}");
+    assert!(text.starts_with("token-max  2 requests from "), "{text}");
     assert_eq!(report_line(&text, "Idle compaction").0, "unknown", "{text}");
     let all = format!("{text}{text_err}");
     assert!(!all.contains("SYNTHETIC_PRIVATE"));
@@ -963,7 +971,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     std::fs::write(&settings, r#"{"promptCacheTtl":"1h"}"#).unwrap();
     let (status, clear, stderr) = invoke(&with("--plain"));
     assert_eq!(status, 0, "{stderr}");
-    assert!(clear.contains("\nNo changes recommended"), "{clear}");
+    assert!(clear.contains("\n  No changes recommended"), "{clear}");
 
     let (status, stdout, stderr) = invoke(&["--bogus"]);
     assert_eq!(status, 2, "{stderr}");
@@ -1185,8 +1193,22 @@ mod unix {
         .unwrap();
         let (status, stdout, stderr) = invoke(&[], &[]);
         assert_ne!(status, 2);
+        // Each wrapped row carries its own styles, so compare the words without them.
+        let mut plain = String::new();
+        for (i, part) in stdout.split('\x1b').enumerate() {
+            let skip = if i == 0 {
+                0
+            } else {
+                part.find('m').map_or(0, |m| m + 1)
+            };
+            plain.push_str(&part[skip..]);
+        }
+        let stdout = plain;
         let unreadable = stdout.find("1 unreadable transcript").unwrap();
-        let rest = stdout[unreadable + "1 unreadable transcript".len()..].trim_start();
+        let rest = stdout[unreadable + "1 unreadable transcript".len()..]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(rest.starts_with("lines in 1 files"), "{stdout}");
         assert!(!format!("{stdout}{stderr}").contains("SYNTHETIC_PRIVATE"));
     }
@@ -1281,40 +1303,53 @@ mod unix {
                 .find(text)
                 .unwrap_or_else(|| panic!("{text:?} in {stdout}"))
         };
+        // The header names what was read, then the walk asks its questions.
         assert!(
-            stdout.starts_with("\ntoken-max doctor: 2 questions, biggest saving first."),
+            stdout.starts_with("token-max  2 requests from "),
             "{stdout}"
         );
-        // Each change opens with what its setting does.
-        let ttl = at("\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  What: ");
-        let memory = at(
-            "\n[2/2] Auto memory: on -> off\n  What: Auto memory lets Claude write notes for itself and loads them into every\n  session.\n  Worth considering (Opinion): its saving was not measured.\n",
+        let headline = at(
+            "\n\n  2 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n",
         );
-        // The window ends now, so its day count and the wrapping after it follow the clock.
-        let entry = &stdout[ttl..];
-        let entry = entry[..memory - ttl]
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ");
+        let ttl = at("\n  [1/2] Main-agent prompt cache TTL ");
+        let memory = at("\n  [2/2] Auto memory ");
+        let report = at("\n  1 change recommended and 1 worth considering.\n");
         assert!(
-            entry.starts_with("[1/2] Main-agent prompt cache TTL: 5m -> 1h What: How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Recommended (Measured): saves $N/mo, 13% of this host's spend. Measured on 2 requests over "),
+            headline < ttl && ttl < memory && memory < report,
+            "{stdout}"
+        );
+        // Each card shows the saving, the change and its verdict, then what the setting does
+        // and why; the window ends now, so its day count and the wrapping follow the clock.
+        let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let entry = words(&stdout[ttl..memory]);
+        assert!(
+            entry.starts_with("[1/2] Main-agent prompt cache TTL saves $N/mo 13% 5m -> 1h Recommended (Measured) What How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Why Measured on 2 requests over "),
             "{entry}"
         );
         assert!(
-            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
+            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
             "{entry}"
+        );
+        assert!(
+            words(&stdout[memory..report]).starts_with("[2/2] Auto memory saving not measured on -> off Worth considering (Opinion) What Auto memory lets Claude write notes for itself and loads them into every session."),
+            "{stdout}"
         );
         // Then the report, its accepted change first, and one question to write it.
-        let report = at("\n1 change recommended and 1 worth considering.\n");
-        let accepted = at("\nACCEPTED  biggest saving first\nchange   Main-agent prompt cache TTL");
-        let declined = at("\nNOT ACCEPTED\nconsider Auto memory");
-        let confirm = at("\nWrite the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: ");
-        let wrote = at("\nWrote 1 edit to ~/.claude/settings.json.\n");
+        let accepted =
+            at("\n  ACCEPTED  biggest saving first\n  change   Main-agent prompt cache TTL");
+        let declined = at("\n  NOT ACCEPTED\n  consider Auto memory");
+        // The confirm shows the file's diff before its one question.
+        let diff = at(
+            "\n  ~/.claude/settings.json\n  @@ -1,3 +1,3 @@\n    {\n  -   \"promptCacheTtl\": \"5m\"\n  +   \"promptCacheTtl\": \"1h\"\n    }\n",
+        );
+        let confirm =
+            at("\n  Write the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: ");
+        let wrote = at("\n  Wrote 1 edit to ~/.claude/settings.json.\n");
+        assert!(report < accepted && accepted < declined, "{stdout}");
         assert!(
-            ttl < memory && memory < report && report < accepted && accepted < declined,
+            declined < diff && diff < confirm && confirm < wrote,
             "{stdout}"
         );
-        assert!(declined < confirm && confirm < wrote, "{stdout}");
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
             "{\n  \"promptCacheTtl\": \"1h\"\n}\n"

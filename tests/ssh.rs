@@ -208,12 +208,12 @@ const NOW: i64 = 1_796_083_200_000;
 const NOVEMBER: i64 = 1_793_491_200_000;
 const MINUTE: i64 = 60_000;
 
-/// One host's section of a report covering several, without its heading.
+/// One host's section of a report covering several, from what its header says was read.
 fn section<'a>(text: &'a str, host: &str) -> &'a str {
-    let heading = format!("token-max: {host}\n");
+    let heading = format!("token-max: {host}  ");
     let start = text.find(&heading).unwrap_or_else(|| panic!("{text}")) + heading.len();
     let rest = &text[start..];
-    let end = ["\ntoken-max: ", "\nEach host is analyzed on its own."]
+    let end = ["\ntoken-max: ", "\n  Each host is analyzed on its own."]
         .iter()
         .filter_map(|marker| rest.find(marker))
         .min()
@@ -224,7 +224,7 @@ fn section<'a>(text: &'a str, host: &str) -> &'a str {
 /// A report without what depends on each run's own clock: instants, dates, day counts, and
 /// dollar amounts, since a per-30-day rate divides by the window that ends at that clock.
 fn timeless(text: &str) -> String {
-    let text = text.strip_prefix("token-max\n").unwrap_or(text);
+    let text = text.strip_prefix("token-max  ").unwrap_or(text);
     // A section names its own host as the base of its percents; run there, it is "this host".
     let named;
     // The name is the word before the first "'s", as in "of devbox's spend" or, when part
@@ -330,12 +330,12 @@ fn a_remote_report_matches_running_there() {
 
     let (status, text, _) = hosts.run(&["--ssh", "devbox", "--include-local"]);
     assert_eq!(status, 0);
-    assert!(text.starts_with("token-max: this host\n"), "{text}");
-    assert!(text.contains("\ntoken-max: devbox\n"), "{text}");
-    assert!(text.contains("  claude ~/.claude\n"), "{text}");
+    assert!(text.starts_with("token-max: this host  "), "{text}");
+    assert!(text.contains("\ntoken-max: devbox  "), "{text}");
+    assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");
     assert!(text.contains("don't add amounts across hosts"), "{text}");
     let (_, alone, _) = hosts.run(&["--ssh", "devbox"]);
-    assert!(alone.starts_with("token-max: devbox\n"), "{alone}");
+    assert!(alone.starts_with("token-max: devbox  "), "{alone}");
     assert!(!alone.contains("token-max: this host") && !alone.contains("across hosts"));
     assert_eq!(
         timeless(section(&alone, "devbox")),
@@ -484,7 +484,7 @@ fn bash_caps_and_waits_keep_their_host_ownership() {
     // The destination's change names the edit to make there, in its own home.
     assert!(
         section(&stdout, "devbox").lines().any(|l| {
-            l.starts_with("change   Bash timeout cap ")
+            l.starts_with("  change   Bash timeout cap ")
                 && l.contains(" 2h -> 55m ")
                 && l.ends_with(
                     "  Measured  \"env\": {\"BASH_MAX_TIMEOUT_MS\": \"3300000\"} in ~/.claude/settings.json",
@@ -837,7 +837,7 @@ fn the_release_installers_directory_is_searched() {
     script(&cargo.join("token-max"), "exit 2");
     let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
     assert_eq!(status, 0, "{stderr}");
-    assert!(stdout.starts_with("token-max: installed\n"), "{stdout}");
+    assert!(stdout.starts_with("token-max: installed  "), "{stdout}");
 }
 
 #[test]

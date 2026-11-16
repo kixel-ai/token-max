@@ -23,7 +23,7 @@ use crate::report::{
     share_text,
 };
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{WrapOptions, wrap_text};
+use crate::terminal::{WrapOptions, wrap_spans};
 
 /// One recommendation and how to carry it out.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,7 +63,7 @@ pub struct Fix {
 pub struct Group {
     pub kind: ContextKind,
     pub reason: Reason,
-    /// The group's heading, such as "Never-used MCP servers: on -> off".
+    /// The group's heading, such as "Never-used MCP servers".
     pub label: String,
     /// This member's name in the group's list, such as the server's name.
     pub member: String,
@@ -73,7 +73,8 @@ pub struct Group {
 }
 
 impl Group {
-    /// Whether two changes in these groups belong to one: the same kind, reason and change.
+    /// Whether two changes in these groups belong to one: the same kind and reason, and
+    /// so the same heading. Their changes must match too.
     fn joins(&self, other: &Group) -> bool {
         self.kind == other.kind && self.reason == other.reason && self.label == other.label
     }
@@ -339,7 +340,7 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
     Some(Group {
         kind: c.kind,
         reason,
-        label: format!("{what}: {}", line.value),
+        label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
     })
@@ -903,13 +904,15 @@ fn unknown(owner: &str) -> How {
 }
 
 /// A fix as lines of text: a heading, then its edit or its step by hand.
+#[cfg(test)]
 pub struct Described {
     pub head: String,
     /// Each line, and whether it is a settings fragment that must not wrap.
     pub body: Vec<(String, bool)>,
 }
 
-/// How a fix reads in a list or at a prompt, with paths under `home` shown from `~`.
+/// How a fix reads as text, with paths under `home` shown from `~`.
+#[cfg(test)]
 pub fn describe(fix: &Fix, home: Option<&str>) -> Described {
     let kind = if fix.suggested {
         format!("{}, worth considering", fix.claim)
@@ -959,83 +962,233 @@ pub fn setting(fix: &Fix, home: Option<&str>) -> String {
 /// How the walk prints.
 pub struct Style {
     pub color: bool,
+    /// Use Unicode decorations such as arrows.
+    pub unicode: bool,
     pub width: Option<usize>,
     /// The home directory, which paths are shown from as `~`.
     pub home: Option<String>,
 }
 
+/// Cells every line of the walk is indented by, as the report's are.
+const MARGIN: usize = crate::report::MARGIN;
+/// A card's figure is aligned to the right of this many cells, or of a narrower terminal,
+/// and its paragraphs wrap there.
+const CARD_CELLS: usize = 88;
+const BOLD: &str = "1";
+const DIM: &str = "2";
+const RED: &str = "31";
+const GREEN: &str = "32";
+const YELLOW: &str = "33";
+
+/// A question of the walk as a card: a heading with its figure at the right, the change,
+/// then labeled paragraphs.
+struct Card<'a> {
+    /// Such as "[1/4]".
+    counter: String,
+    name: &'a str,
+    /// What it saves, such as "saves $206/mo", and its share of this host's spend.
+    saving: Option<(String, String)>,
+    /// Shown instead of a saving, such as "saving not measured".
+    no_saving: &'a str,
+    /// The current value and the offered one, such as "on → off".
+    value: String,
+    suggested: bool,
+    claim: &'a str,
+    /// Labeled paragraphs, such as ("What", ...) and ("Why", ...).
+    rows: Vec<(&'a str, String)>,
+}
+
+/// A prompt: its question, and whether it offers to go one change at a time.
+struct Prompt {
+    text: String,
+    each: bool,
+}
+
 impl Style {
-    fn line(&self, text: &str, indent: usize) -> String {
-        let text = wrap_text(
-            &terminal_text(text),
-            WrapOptions {
-                width: self.width,
-                indent,
-                continuation: None,
-            },
-        );
-        format!("{text}\n")
+    /// Spans wrapped `indent` cells in, rows after the first at `continuation` when given,
+    /// each styled on a color terminal, ending with a line break.
+    fn spans(
+        &self,
+        spans: &[(&str, &str)],
+        width: Option<usize>,
+        indent: usize,
+        continuation: Option<usize>,
+    ) -> String {
+        let escaped: Vec<(String, &str)> = spans
+            .iter()
+            .map(|(text, style)| (terminal_text(text), *style))
+            .collect();
+        let escaped: Vec<(&str, &str)> = escaped.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        let options = WrapOptions {
+            width,
+            indent,
+            continuation,
+        };
+        format!("{}\n", wrap_spans(&escaped, options, self.color))
     }
 
-    fn bold(&self, text: &str, indent: usize) -> String {
-        self.styled("1", text, indent)
+    /// A line of the walk, inside its margin.
+    fn line(&self, text: &str) -> String {
+        self.spans(&[(text, "")], self.width, MARGIN, None)
     }
 
     /// Secondary text, such as what the walk left out.
-    fn dim(&self, text: &str, indent: usize) -> String {
-        self.styled("2", text, indent)
+    fn dim(&self, text: &str) -> String {
+        self.spans(&[(text, DIM)], self.width, MARGIN, None)
     }
 
-    /// `text` wrapped, each row in the SGR attribute `code` on a color terminal.
-    fn styled(&self, code: &str, text: &str, indent: usize) -> String {
-        let text = self.line(text, indent);
-        if self.color {
-            text.split_inclusive('\n')
-                .map(|row| match row.strip_suffix('\n') {
-                    Some(row) => format!("\x1b[{code}m{row}\x1b[0m\n"),
-                    None => format!("\x1b[{code}m{row}\x1b[0m"),
-                })
-                .collect()
+    /// A raw line, such as a settings fragment, that stays whole so it can be copied.
+    fn raw(&self, text: &str, indent: usize, style: &str) -> String {
+        let text = terminal_text(text);
+        let pad = " ".repeat(indent);
+        if self.color && !style.is_empty() {
+            format!("{pad}\x1b[{style}m{text}\x1b[0m\n")
         } else {
-            text
+            format!("{pad}{text}\n")
         }
     }
 
-    /// A change as the walk offers it: its heading after `prefix`, what it does, its verdict
-    /// and saving, the evidence behind it, then its edit.
-    fn entry(&self, fix: &Fix, prefix: &str) -> String {
-        let mut text = self.bold(&format!("{prefix}{}: {}", fix.name, fix.value), 0);
-        if !fix.what.is_empty() {
-            text += &self.line(&format!("What: {}", fix.what), 2);
-        }
-        let verdict = if fix.suggested {
-            "Worth considering"
+    /// The walk's heading: how many questions about how many changes, then that nothing is
+    /// written before the confirm, with a blank line around it.
+    fn headline(&self, text: &str) -> String {
+        format!(
+            "\n{}{}",
+            self.spans(&[(text, BOLD)], self.width, MARGIN, None),
+            self.dim("Nothing is written until you confirm the list at the end.")
+        )
+    }
+
+    /// A question, bold, then its answers, dim.
+    fn prompt(&self, question: &str, each: bool) -> Prompt {
+        let options = if each {
+            "[y]es, [n]o, [o]ne by one, [q]uit"
         } else {
-            "Recommended"
+            "[y]es, [n]o, [q]uit"
         };
-        text += &self.line(
-            &format!("{verdict} ({}): {}.", fix.claim, saving_text(fix)),
-            2,
-        );
-        let why = why(&fix.evidence);
-        if !why.is_empty() {
-            text += &self.line(&home_in(why, self.home.as_deref()), 2);
+        Prompt {
+            text: self.ask(question, options),
+            each,
         }
-        for (row, raw) in describe(fix, self.home.as_deref()).body {
-            if raw {
-                // A settings fragment stays whole, so it can be copied at any width.
-                text += &format!("  {}\n", terminal_text(&row));
-            } else {
-                text += &self.line(&row, 2);
-            }
+    }
+
+    /// `question` and its `options` as the walk asks them, ready for an answer on the line.
+    fn ask(&self, question: &str, options: &str) -> String {
+        let text = self.spans(
+            &[(question, BOLD), (" ", ""), (options, DIM), (":", "")],
+            self.width,
+            MARGIN,
+            None,
+        );
+        format!("{} ", text.trim_end_matches('\n'))
+    }
+
+    fn arrow(&self) -> &'static str {
+        if self.unicode { "→" } else { "->" }
+    }
+
+    /// The cells a card lays out in.
+    fn card_width(&self) -> Option<usize> {
+        self.width.map(|w| w.min(CARD_CELLS))
+    }
+
+    /// A card: the counter and name with the saving at the right, then the change with its
+    /// colored verdict and claim, then each labeled paragraph hanging under its label.
+    fn card(&self, card: &Card<'_>) -> String {
+        let width = self.card_width();
+        let body = MARGIN + crate::terminal::cells(&card.counter) + 1;
+        let (figure, share) = match &card.saving {
+            Some((figure, share)) => (figure.as_str(), share.as_str()),
+            None => (card.no_saving, ""),
+        };
+        let share = if share.is_empty() {
+            String::new()
+        } else {
+            format!("  {share}")
+        };
+        let used = body
+            + crate::terminal::cells(card.name)
+            + crate::terminal::cells(figure)
+            + crate::terminal::cells(&share);
+        // Right-aligned when it fits; otherwise two spaces after the name.
+        let gap = " ".repeat(width.map_or(2, |w| w.saturating_sub(used).max(2)));
+        let figure_style = if card.saving.is_some() { GREEN } else { DIM };
+        let counter = format!("{} ", card.counter);
+        let mut text = self.spans(
+            &[
+                (&counter, DIM),
+                (card.name, BOLD),
+                (&gap, ""),
+                (figure, figure_style),
+                (&share, DIM),
+            ],
+            width,
+            MARGIN,
+            Some(body),
+        );
+        let (verdict, color) = if card.suggested {
+            ("Worth considering", YELLOW)
+        } else {
+            ("Recommended", RED)
+        };
+        let value = format!("{}  ", card.value);
+        let claim = format!(" ({})", card.claim);
+        text += &self.spans(
+            &[(&value, ""), (verdict, color), (&claim, DIM)],
+            width,
+            body,
+            None,
+        );
+        let label = card
+            .rows
+            .iter()
+            .map(|(l, _)| crate::terminal::cells(l))
+            .max()
+            .unwrap_or(0)
+            + 2;
+        for (name, row) in &card.rows {
+            let name = format!("{name:<label$}");
+            text += &self.spans(&[(&name, DIM), (row, "")], width, body, Some(body + label));
         }
         text
+    }
+
+    /// A change as the walk offers it, its counter `counter`: what it does and the evidence
+    /// behind it, or the step to take by hand when it cannot be made here.
+    fn entry(&self, fix: &Fix, counter: &str) -> String {
+        let mut rows = vec![];
+        if !fix.what.is_empty() {
+            rows.push(("What", fix.what.clone()));
+        }
+        let why = why(&fix.evidence);
+        if !why.is_empty() {
+            rows.push(("Why", home_in(why, self.home.as_deref())));
+        }
+        self.card(&Card {
+            counter: counter.into(),
+            name: &fix.name,
+            saving: saving(fix.verb, fix.saving, fix.share),
+            no_saving: "saving not measured",
+            value: fix.value.clone(),
+            suggested: fix.suggested,
+            claim: fix.claim,
+            rows,
+        })
     }
 
     /// A file as the person knows it, from `~`.
     fn path(&self, path: &str) -> String {
         crate::report::home_path(self.home.as_deref(), path)
     }
+}
+
+/// What a change saves, such as ("saves $12/mo", "3%"), or none when it was not measured.
+fn saving(verb: &str, usd: Option<f64>, share: Option<f64>) -> Option<(String, String)> {
+    usd.map(|usd| {
+        (
+            format!("{verb} {}/mo", about(usd)),
+            share.map_or_else(String::new, share_text),
+        )
+    })
 }
 
 /// Evidence without its closing sentence naming the setting, such as "Set in
@@ -1059,14 +1212,6 @@ fn home_in(text: &str, home: Option<&str>) -> String {
             .replace(&format!("{dir}/"), "~/")
             .replace(&format!("{dir}\\"), "~\\"),
         None => text.to_string(),
-    }
-}
-
-/// What a change saves, such as "saves $12/mo, 3% of this host's spend".
-fn saving_text(fix: &Fix) -> String {
-    match fix.saving {
-        Some(usd) => format!("{} {}/mo{}", fix.verb, about(usd), share_of_host(fix.share)),
-        None => "its saving was not measured".into(),
     }
 }
 
@@ -1427,21 +1572,14 @@ enum Answer {
     Each,
 }
 
-/// Ask `question` until it gets an answer it takes; end of input is a quit. `each` offers
-/// to go through a batch one change at a time.
+/// Ask `prompt` until it gets an answer it takes; end of input is a quit.
 fn answer(
-    question: &str,
-    each: bool,
+    prompt: &Prompt,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<Answer> {
-    let options = if each {
-        "[y]es, [n]o, [o]ne by one, [q]uit"
-    } else {
-        "[y]es, [n]o, [q]uit"
-    };
     loop {
-        write!(output, "{question} {options}: ")?;
+        write!(output, "{}", prompt.text)?;
         output.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 {
@@ -1452,7 +1590,7 @@ fn answer(
             "y" | "yes" => return Ok(Answer::Yes),
             "n" | "no" => return Ok(Answer::No),
             "q" | "quit" => return Ok(Answer::Quit),
-            "o" | "one by one" if each => return Ok(Answer::Each),
+            "o" | "one by one" if prompt.each => return Ok(Answer::Each),
             _ => {}
         }
     }
@@ -1515,11 +1653,7 @@ impl Selection {
     ) -> io::Result<bool> {
         self.choose(target, fix, answer == Answer::Yes);
         if answer == Answer::Yes {
-            write!(
-                output,
-                "{}",
-                style.line(&self.total.text("Accepted so far"), 2)
-            )?;
+            write!(output, "{}", style.dim(&self.total.text("Accepted so far")))?;
         }
         Ok(answer != Answer::Quit)
     }
@@ -1610,25 +1744,29 @@ impl Question {
         (total.unmeasured == 0).then_some(total.measured.usd + total.up_to.usd)
     }
 
-    /// A group as the walk offers it: its heading after `prefix`, what its kind of feature
-    /// is, its verdict and saving, then every member's name. Each member says what it does
-    /// when the person goes through them one at a time.
-    fn card(&self, prefix: &str, style: &Style) -> String {
+    /// What the members save together, such as ("saves $9.40/mo", "2%"): up to that
+    /// when one's saving depends on a default, at least that when one was priced in part.
+    fn saving(&self) -> Option<(String, String)> {
+        let total = self.together();
+        let usd = self.usd()?;
+        let verb = if total.up_to.changes > 0 {
+            UP_TO
+        } else if total.partial > 0 {
+            AT_LEAST
+        } else {
+            "saves"
+        };
+        let unknown = total.measured.unknown_share || total.up_to.unknown_share;
+        let share = (!unknown).then_some(total.measured.share + total.up_to.share);
+        saving(verb, Some(usd), share)
+    }
+
+    /// A group as the walk offers it, its counter `counter`: what its kind of feature is,
+    /// then every member's name. Each member says what it does when the person goes
+    /// through them one at a time.
+    fn card(&self, counter: &str, style: &Style) -> String {
         let first = &self.members[0].fix;
         let group = first.group.as_ref().expect("only groups share a question");
-        let mut text = style.bold(&format!("{prefix}{}", group.label), 0);
-        let what = crate::descriptions::kind(group.kind);
-        text += &style.line(&format!("What: {what}"), 2);
-        let verdict = if first.suggested {
-            "Worth considering"
-        } else {
-            "Recommended"
-        };
-        let saving = match self.usd() {
-            Some(_) => format!("together, {}", self.together().amount()),
-            None => "their savings were not measured".into(),
-        };
-        text += &style.line(&format!("{verdict} ({}): {saving}.", first.claim), 2);
         let groups: Vec<&Group> = self
             .members
             .iter()
@@ -1645,8 +1783,19 @@ impl Question {
                 }
             })
             .collect();
-        text += &style.line(&format!("{}.", names.join(", ")), 2);
-        text
+        style.card(&Card {
+            counter: counter.into(),
+            name: &group.label,
+            saving: self.saving(),
+            no_saving: "savings not measured",
+            value: first.value.clone(),
+            suggested: first.suggested,
+            claim: first.claim,
+            rows: vec![
+                ("What", crate::descriptions::kind(group.kind).to_string()),
+                ("Which", format!("{}.", names.join(", "))),
+            ],
+        })
     }
 }
 
@@ -1668,25 +1817,17 @@ fn offer_removal(
         } else {
             "They stay"
         };
-        text += &style.line(
-            &format!("{stays} configured; token-max can also remove:"),
-            2,
-        );
+        text += &style.line(&format!("{stays} configured; token-max can also remove:"));
         for (_, entry) in &entries {
-            text += &format!(
-                "    {}\n",
-                terminal_text(&format!("{} in {}", entry.text(), style.path(&entry.file)))
-            );
+            let place = format!("{} in {}", entry.text(), style.path(&entry.file));
+            text += &style.raw(&place, MARGIN + 2, DIM);
         }
     }
     for (step, reason) in offers.iter().flat_map(|o| &o.manual) {
-        text += &style.line(
-            &home_in(
-                &format!("To remove it by hand, since {reason}: {step}."),
-                style.home.as_deref(),
-            ),
-            2,
-        );
+        text += &style.line(&home_in(
+            &format!("To remove it by hand, since {reason}: {step}."),
+            style.home.as_deref(),
+        ));
     }
     write!(output, "{text}")?;
     if entries.is_empty() {
@@ -1697,7 +1838,7 @@ fn offer_removal(
     } else {
         format!("Remove all {} too?", entries.len())
     };
-    let answer = answer(&question, false, input, output)?;
+    let answer = answer(&style.prompt(&question, false), input, output)?;
     if answer == Answer::Yes {
         for (target, entry) in entries {
             selection.remove(*target, entry);
@@ -1705,9 +1846,6 @@ fn offer_removal(
     }
     Ok(answer != Answer::Quit)
 }
-
-/// The heading of servers that are off already, offered for removal.
-const TURNED_OFF: &str = "Turned-off MCP servers: configured -> removed";
 
 /// Walk through each change the doctor can make, biggest saving first, and return what
 /// the person accepted. Changes saving under $5/mo each are offered in groups of one kind
@@ -1803,6 +1941,7 @@ pub fn ask(
             let first = &q.members[0].fix;
             small(fix)
                 && small(first)
+                && first.value == fix.value
                 && first.saving.is_some() == fix.saving.is_some()
                 && first
                     .group
@@ -1857,14 +1996,11 @@ pub fn ask(
         };
         write!(
             output,
-            "\n{}",
-            style.bold(
-                &format!(
-                    "token-max doctor: {count} question{}{about}, biggest saving first. Nothing is written until you confirm the list at the end.",
-                    if count == 1 { "" } else { "s" },
-                ),
-                0
-            )
+            "{}",
+            style.headline(&format!(
+                "{count} question{}{about}, biggest saving first.",
+                if count == 1 { "" } else { "s" },
+            ))
         )?;
     }
     let mut going = true;
@@ -1879,9 +2015,9 @@ pub fn ask(
             write!(
                 output,
                 "\n{}",
-                style.entry(&offer.fix, &format!("[{}/{count}] ", n + 1))
+                style.entry(&offer.fix, &format!("[{}/{count}]", n + 1))
             )?;
-            let answer = answer("Accept?", false, input, output)?;
+            let answer = answer(&style.prompt("Accept?", false), input, output)?;
             going = selection.take(offer.target, &offer.fix, answer, style, output)?;
             if answer == Answer::Yes {
                 going = offer_removal(&[offer], &mut selection, style, input, output)?;
@@ -1891,19 +2027,20 @@ pub fn ask(
         write!(
             output,
             "\n{}",
-            question.card(&format!("[{}/{count}] ", n + 1), style)
+            question.card(&format!("[{}/{count}]", n + 1), style)
         )?;
         let size = question.members.len();
-        match answer(&format!("Accept all {size}?"), true, input, output)? {
+        let prompt = style.prompt(&format!("Accept all {size}?"), true);
+        match answer(&prompt, input, output)? {
             Answer::Each => {
                 for (i, offer) in question.members.iter().enumerate() {
                     if !going {
                         selection.choose(offer.target, &offer.fix, false);
                         continue;
                     }
-                    let prefix = format!("[{}/{count}, {}/{size}] ", n + 1, i + 1);
-                    write!(output, "\n{}", style.entry(&offer.fix, &prefix))?;
-                    let answer = answer("Accept?", false, input, output)?;
+                    let counter = format!("[{}/{count}, {}/{size}]", n + 1, i + 1);
+                    write!(output, "\n{}", style.entry(&offer.fix, &counter))?;
+                    let answer = answer(&style.prompt("Accept?", false), input, output)?;
                     going = selection.take(offer.target, &offer.fix, answer, style, output)?;
                     if answer == Answer::Yes {
                         going = offer_removal(&[offer], &mut selection, style, input, output)?;
@@ -1916,7 +2053,7 @@ pub fn ask(
                 }
                 if batch == Answer::Yes {
                     let total = selection.total.text("Accepted so far");
-                    write!(output, "{}", style.line(&total, 2))?;
+                    write!(output, "{}", style.dim(&total))?;
                     let all: Vec<&Offer> = question.members.iter().collect();
                     going = offer_removal(&all, &mut selection, style, input, output)?;
                 } else {
@@ -1934,7 +2071,7 @@ pub fn ask(
             &format!("To look for MCP servers that are off by hand, since {reason}: {step}."),
             style.home.as_deref(),
         );
-        write!(output, "\n{}", style.dim(&text, 0))?;
+        write!(output, "\n{}", style.dim(&text))?;
     }
     // Not accepted, so the list shows them with the changes answered no.
     for offer in skipped.iter().flat_map(|q| &q.members) {
@@ -1953,7 +2090,7 @@ pub fn ask(
             if left == 1 { "" } else { "s" },
             about(ASKED_USD)
         );
-        write!(output, "\n{}", style.dim(&text, 0))?;
+        write!(output, "\n{}", style.dim(&text))?;
     }
     let Selection {
         accepted,
@@ -1989,43 +2126,57 @@ fn ask_cleanup(
     output: &mut impl Write,
 ) -> io::Result<bool> {
     let place = |entry: &Entry| format!("{} in {}", entry.text(), style.path(&entry.file));
-    let why = "Worth considering (Opinion): saves nothing, since their tools are off already; it drops configuration no session uses.";
+    let card = |counter: String, name: &str, why: &str, places: Vec<String>| {
+        let mut rows = vec![];
+        if !why.is_empty() {
+            rows.push(("Why", why.to_string()));
+        }
+        rows.push(("Where", places.join(", ")));
+        style.card(&Card {
+            counter,
+            name,
+            saving: None,
+            no_saving: "saves nothing",
+            value: format!("off {} removed", style.arrow()),
+            suggested: true,
+            claim: "Opinion",
+            rows,
+        })
+    };
+    let why = "Their tools are off already, so no session uses this configuration.";
     let size = cleanup.len();
     if let [(target, entry)] = cleanup {
-        let mut text = style.bold(
-            &format!(
-                "[{count}/{count}] MCP server {}: off -> removed",
-                entry.server
-            ),
-            0,
+        let name = format!("MCP server {}", entry.server);
+        let text = card(
+            format!("[{count}/{count}]"),
+            &name,
+            &why.replace("Their tools are", "Its tools are"),
+            vec![place(entry)],
         );
-        text += &style.line(&why.replace("their tools are", "its tools are"), 2);
-        text += &format!("    {}\n", terminal_text(&place(entry)));
         write!(output, "\n{text}")?;
-        let answer = answer("Remove it?", false, input, output)?;
+        let answer = answer(&style.prompt("Remove it?", false), input, output)?;
         if answer == Answer::Yes {
             selection.remove(*target, entry);
         }
         return Ok(answer != Answer::Quit);
     }
-    let mut text = style.bold(&format!("[{count}/{count}] {TURNED_OFF}"), 0);
-    text += &style.line(why, 2);
-    for (_, entry) in cleanup {
-        text += &format!("    {}\n", terminal_text(&place(entry)));
-    }
+    let places = cleanup.iter().map(|(_, e)| place(e)).collect();
+    let text = card(
+        format!("[{count}/{count}]"),
+        "Turned-off MCP servers",
+        why,
+        places,
+    );
     write!(output, "\n{text}")?;
-    match answer(&format!("Remove all {size}?"), true, input, output)? {
+    let prompt = style.prompt(&format!("Remove all {size}?"), true);
+    match answer(&prompt, input, output)? {
         Answer::Each => {
             for (i, (target, entry)) in cleanup.iter().enumerate() {
-                let head = format!(
-                    "[{count}/{count}, {}/{size}] MCP server {}: off -> removed",
-                    i + 1,
-                    entry.server
-                );
-                let text =
-                    style.bold(&head, 0) + &format!("    {}\n", terminal_text(&place(entry)));
+                let name = format!("MCP server {}", entry.server);
+                let counter = format!("[{count}/{count}, {}/{size}]", i + 1);
+                let text = card(counter, &name, "", vec![place(entry)]);
                 write!(output, "\n{text}")?;
-                match answer("Remove it?", false, input, output)? {
+                match answer(&style.prompt("Remove it?", false), input, output)? {
                     Answer::Yes => selection.remove(*target, entry),
                     Answer::Quit => return Ok(false),
                     _ => {}
@@ -2043,8 +2194,8 @@ fn ask_cleanup(
     }
 }
 
-/// Ask once whether to write the accepted changes, naming each file and every MCP server
-/// entry it removes; end of input is a no. With nothing accepted, there is nothing to ask.
+/// Ask once whether to write the accepted changes, after showing each file's text as it
+/// would change; end of input is a no. With nothing accepted, there is nothing to ask.
 pub fn confirm(
     plan: &Plan,
     style: &Style,
@@ -2054,6 +2205,14 @@ pub fn confirm(
     if plan.files.is_empty() {
         return Ok(false);
     }
+    let mut text = String::new();
+    for pending in &plan.files {
+        // Every accepted edit was checked to apply when it was offered.
+        let after = apply(&pending.target, &pending.edits, &pending.removals)
+            .expect("accepted changes apply");
+        text += &diff(pending, &after, style);
+    }
+    write!(output, "{text}")?;
     let names: Vec<String> = plan
         .files
         .iter()
@@ -2063,22 +2222,6 @@ pub fn confirm(
         Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
         _ => names.concat(),
     };
-    let removals: Vec<&Entry> = plan.files.iter().flat_map(|p| &p.removals).collect();
-    if !removals.is_empty() {
-        let mut text = String::from("\n");
-        text += &style.line("Removes these MCP server entries:", 0);
-        for entry in &removals {
-            text += &format!(
-                "  {}\n",
-                terminal_text(&format!(
-                    "{} from {}",
-                    entry.text(),
-                    style.path(&entry.file)
-                ))
-            );
-        }
-        write!(output, "{text}")?;
-    }
     let mut what = vec![];
     let changes = plan.total.changes();
     if changes > 0 {
@@ -2087,13 +2230,17 @@ pub fn confirm(
             if changes == 1 { "" } else { "s" }
         ));
     }
-    if !removals.is_empty() {
-        let n = removals.len();
-        what.push(format!("{n} removal{}", if n == 1 { "" } else { "s" }));
+    let removals: usize = plan.files.iter().map(|p| p.removals.len()).sum();
+    if removals > 0 {
+        what.push(format!(
+            "{removals} removal{}",
+            if removals == 1 { "" } else { "s" }
+        ));
     }
     let question = format!("Write the {} to {files}?", what.join(" and "));
+    let prompt = style.ask(&question, "[y]es, [n]o");
     loop {
-        write!(output, "\n{} [y]es, [n]o: ", terminal_text(&question))?;
+        write!(output, "\n{prompt}")?;
         output.flush()?;
         let mut line = String::new();
         if input.read_line(&mut line)? == 0 {
@@ -2106,6 +2253,177 @@ pub fn confirm(
             _ => {}
         }
     }
+}
+
+/// How `target`'s text would change to `after`: its name, then each changed line with a
+/// line of context on either side, removed lines red and added ones green.
+/// Secret values show masked, as `mask` describes.
+fn diff(pending: &Pending, after: &str, style: &Style) -> String {
+    let target = &pending.target;
+    let mask = if style.unicode {
+        "••••"
+    } else {
+        "****"
+    };
+    let edited: Vec<&[String]> = pending.edits.iter().map(|e| e.path.as_slice()).collect();
+    let hide = |text: &str| match target.harness {
+        Harness::Claude => mask_json(text, mask, &edited),
+        Harness::Codex => mask_toml(text, mask),
+    };
+    let (before, after) = (hide(target.before.as_deref().unwrap_or("")), hide(after));
+    let path = style.path(&target.file);
+    let mut text = format!(
+        "\n{}",
+        style.spans(&[(&path, BOLD)], style.width, MARGIN, None)
+    );
+    let diff = similar::TextDiff::from_lines(&before, &after);
+    for hunk in diff.unified_diff().context_radius(1).iter_hunks() {
+        text += &style.raw(&hunk.header().to_string(), MARGIN, DIM);
+        for change in hunk.iter_changes() {
+            let (sign, color) = match change.tag() {
+                similar::ChangeTag::Delete => ("-", RED),
+                similar::ChangeTag::Insert => ("+", GREEN),
+                similar::ChangeTag::Equal => (" ", DIM),
+            };
+            let line = change
+                .value()
+                .trim_end_matches(['\n', '\r'])
+                .replace('\t', "    ");
+            text += &style.raw(format!("{sign} {line}").trim_end(), MARGIN, color);
+        }
+    }
+    text
+}
+
+/// Whether the JSON value at `path` may hold a secret, so the confirm masks it: a variable
+/// or header of an MCP server, or a variable in a settings file's `env` block that no edit
+/// in `edited` sets.
+fn secret_json(path: &[Option<&str>], edited: &[&[String]]) -> bool {
+    match path {
+        [
+            ..,
+            Some("mcpServers"),
+            Some(_),
+            Some("env" | "headers"),
+            Some(_),
+        ] => true,
+        [Some("env"), Some(key)] => !edited
+            .iter()
+            .any(|p| matches!(p, [env, k] if env == "env" && k == key)),
+        _ => false,
+    }
+}
+
+/// `text` with each scalar value that [`secret_json`] names replaced by `mask` in quotes,
+/// keeping every other byte, so lines and their numbers stay as they are.
+fn mask_json(text: &str, mask: &str, edited: &[&[String]]) -> String {
+    let b = text.as_bytes();
+    // Each open container: whether it is an object, and its current key.
+    let mut stack: Vec<(bool, Option<String>)> = vec![];
+    let mut want_key = false;
+    let (mut out, mut copied, mut i) = (String::with_capacity(text.len()), 0, 0);
+    while i < b.len() {
+        let start = i;
+        match b[i] {
+            b'{' | b'[' => {
+                stack.push((b[i] == b'{', None));
+                want_key = b[i] == b'{';
+                i += 1;
+                continue;
+            }
+            b'}' | b']' => {
+                stack.pop();
+                want_key = false;
+                i += 1;
+                continue;
+            }
+            b',' => {
+                want_key = matches!(stack.last(), Some((true, _)));
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                i += 1;
+                while i < b.len() && b[i] != b'"' {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i = (i + 1).min(b.len());
+                if want_key {
+                    let key = serde_json::from_str::<String>(&text[start..i]).ok();
+                    if let Some(top) = stack.last_mut() {
+                        top.1 = key;
+                    }
+                    want_key = false;
+                    continue;
+                }
+            }
+            c if c == b'-' || c.is_ascii_alphanumeric() => {
+                while i < b.len() && (b[i].is_ascii_alphanumeric() || b"+-.".contains(&b[i])) {
+                    i += 1;
+                }
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        }
+        // A scalar value spans start..i.
+        let path: Vec<Option<&str>> = stack
+            .iter()
+            .map(|(object, key)| if *object { key.as_deref() } else { None })
+            .collect();
+        if secret_json(&path, edited) {
+            out.push_str(&text[copied..start]);
+            out.push_str(&format!("\"{mask}\""));
+            copied = i;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+/// A config.toml with each MCP server's `env` and `http_headers` values, and each variable
+/// `shell_environment_policy.set` sets, replaced by `mask`, keeping the rest as written.
+fn mask_toml(text: &str, mask: &str) -> String {
+    use toml_edit::{DocumentMut, Item, TableLike};
+    fn table(item: Option<&mut Item>) -> Option<&mut dyn TableLike> {
+        item.and_then(Item::as_table_like_mut)
+    }
+    let Ok(mut doc) = text.parse::<DocumentMut>() else {
+        return text.into();
+    };
+    let hide = |table: Option<&mut dyn TableLike>| {
+        for (_, item) in table.into_iter().flat_map(|t| t.iter_mut()) {
+            if let Some(value) = item.as_value_mut() {
+                let decor = value.decor().clone();
+                // A value over several lines keeps its line breaks in a multi-line literal,
+                // so the lines after it keep their numbers.
+                let mut bare = value.clone();
+                bare.decor_mut().clear();
+                let breaks = bare.to_string().matches('\n').count();
+                *value = if breaks == 0 {
+                    mask.into()
+                } else {
+                    format!("'''{mask}{}'''", "\n".repeat(breaks))
+                        .parse()
+                        .unwrap_or_else(|_| mask.into())
+                };
+                *value.decor_mut() = decor;
+            }
+        }
+    };
+    if let Some(servers) = table(doc.get_mut("mcp_servers")) {
+        for (_, server) in servers.iter_mut() {
+            if let Some(server) = server.as_table_like_mut() {
+                hide(table(server.get_mut("env")));
+                hide(table(server.get_mut("http_headers")));
+            }
+        }
+    }
+    if let Some(policy) = table(doc.get_mut("shell_environment_policy")) {
+        hide(table(policy.get_mut("set")));
+    }
+    doc.to_string()
 }
 
 /// A file the doctor wrote.
@@ -2129,6 +2447,26 @@ fn apply(target: &Target, edits: &[Edit], removals: &[Entry]) -> Result<String, 
     .map_err(|reason| format!("{reason} in {shown}"))
 }
 
+/// Whether each entry in `removals` holds in `now` what it held in `walked`, the file the
+/// confirm's diff was made from, so a removal never deletes what the person did not see.
+/// Other keys may change, and an entry already gone leaves nothing to remove.
+fn removals_unchanged(walked: &Target, now: &Target, removals: &[Entry]) -> bool {
+    if removals.is_empty() {
+        return true;
+    }
+    let parse = |t: &Target| -> Option<Value> { serde_json::from_str(t.before.as_deref()?).ok() };
+    let (walked, now) = (parse(walked), parse(now));
+    let at = |root: &Option<Value>, path: &[String]| {
+        path.iter()
+            .try_fold(root.as_ref()?, |node, key| node.get(key))
+            .cloned()
+    };
+    removals.iter().all(|e| match at(&now, &e.path) {
+        None => true,
+        found => found == at(&walked, &e.path),
+    })
+}
+
 /// Write each file's accepted changes. Every file is checked first, so a file that changed
 /// while the person was answering stops the run before anything is written. A file Claude
 /// Code rewrites while it runs is instead read again, written first, and written under its
@@ -2140,7 +2478,9 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
         let mut target = pending.target.clone();
         let shown = target.resolved.display().to_string();
         let read = if target.lock {
-            target.reread().map(|()| true)
+            target
+                .reread()
+                .map(|()| removals_unchanged(&pending.target, &target, &pending.removals))
         } else {
             target.unchanged()
         };
@@ -2180,6 +2520,12 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
             target.reread().map_err(|e| {
                 ScanError::new(format!("cannot read {shown} ({e}); {}", done(&written)))
             })?;
+            if !removals_unchanged(&pending.target, &target, &pending.removals) {
+                return Err(ScanError::new(format!(
+                    "{shown} changed while token-max doctor was running; {}, so run it again",
+                    done(&written)
+                )));
+            }
             text = apply(&target, &pending.edits, &pending.removals)
                 .map_err(|e| ScanError::new(format!("{e}; {}", done(&written))))?;
             Some(lock)
@@ -2209,31 +2555,26 @@ pub fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
         let landed = w.resolved.as_ref().map_or_else(String::new, |r| {
             format!(", through its symlink to {}", style.path(r))
         });
-        text += &style.line(
-            &format!(
-                "Wrote {} edit{} to {}{landed}.",
-                w.edits,
-                if w.edits == 1 { "" } else { "s" },
-                style.path(&w.file)
-            ),
-            0,
+        let wrote = format!(
+            "Wrote {} edit{} to {}{landed}.",
+            w.edits,
+            if w.edits == 1 { "" } else { "s" },
+            style.path(&w.file)
         );
+        text += &style.spans(&[(&wrote, GREEN)], style.width, MARGIN, None);
     }
     if !written.is_empty() {
         return text;
     }
-    text += &style.line(
-        if plan.choices.is_empty() {
-            "Nothing to change on this host."
-        } else if plan.offered == 0 {
-            "token-max cannot make these changes; the steps by hand are listed above."
-        } else if plan.files.is_empty() {
-            "Nothing was accepted, so nothing was written."
-        } else {
-            "Nothing was written."
-        },
-        0,
-    );
+    text += &style.line(if plan.choices.is_empty() {
+        "Nothing to change on this host."
+    } else if plan.offered == 0 {
+        "token-max cannot make these changes; the steps by hand are listed above."
+    } else if plan.files.is_empty() {
+        "Nothing was accepted, so nothing was written."
+    } else {
+        "Nothing was written."
+    });
     text
 }
 
@@ -2611,6 +2952,7 @@ mod tests {
     fn style(w: &Workspace) -> Style {
         Style {
             color: false,
+            unicode: false,
             width: None,
             home: Some(w.home.to_string_lossy().into_owned()),
         }
@@ -2756,11 +3098,11 @@ mod tests {
         // Anything but an answer asks again; a quit leaves the rest unaccepted.
         let (plan, printed) = walk(fixes, &w, "y\nmaybe\nn\nyes\nq\n");
         assert_eq!(printed.matches("Accept? [y]es, [n]o, [q]uit: ").count(), 5);
-        assert!(printed.starts_with("\ntoken-max doctor: 5 questions, biggest saving first. Nothing is written until you confirm the list at the end.\n"));
-        let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
-        assert!(printed.contains(&format!(
-            "\n[1/5] A: on -> off\n  Recommended (Measured): saves $10/mo, 10% of this host's spend.\n  In {shown}:\n    \"a\": true\nAccept? [y]es, [n]o, [q]uit:   Accepted so far: about $10/mo, 10% of this host's spend.\n"
-        )));
+        assert!(printed.starts_with("\n  5 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n"));
+        // A card shows the change, not the edit, which the confirm shows once as a diff.
+        assert!(printed.contains(
+            "\n  [1/5] A  saves $10/mo  10%\n        on -> off  Recommended (Measured)\n  Accept? [y]es, [n]o, [q]uit:   Accepted so far: about $10/mo, 10% of this host's spend.\n"
+        ), "{printed}");
         assert!(printed.contains(
             "  Accepted so far: about $20/mo, 20% of this host's spend; overlapping changes may save less.\n"
         ));
@@ -2781,14 +3123,19 @@ mod tests {
             plan.total("Accepted"),
             "Accepted: about $20/mo, 20% of this host's spend; overlapping changes may save less."
         );
-        // The confirm names each file, and asks again until it gets an answer.
+        // The confirm shows each file's diff, names each file, and asks again until it gets
+        // an answer.
         let mut printed = vec![];
         assert!(confirm(&plan, &style(&w), &mut "sure\ny\n".as_bytes(), &mut printed).unwrap());
         let printed = String::from_utf8(printed).unwrap();
+        let shown = format!("~{0}.claude{0}settings.json", std::path::MAIN_SEPARATOR);
+        assert!(printed.starts_with(&format!(
+            "\n  {shown}\n  @@ -1,3 +1,5 @@\n    {{\n  -   \"keep\": 1\n  +   \"keep\": 1,\n  +   \"a\": true,\n  +   \"c\": true\n    }}\n\n  Write"
+        )), "{printed}");
         assert_eq!(
             printed
                 .matches(&format!(
-                    "\nWrite the 2 accepted changes to {shown}? [y]es, [n]o: "
+                    "\n  Write the 2 accepted changes to {shown}? [y]es, [n]o: "
                 ))
                 .count(),
             2
@@ -2801,7 +3148,7 @@ mod tests {
         assert!(!config.exists());
         assert_eq!(
             finish(&plan, &written, &style(&w)),
-            format!("\nWrote 2 edits to {shown}.\n")
+            format!("\n  Wrote 2 edits to {shown}.\n")
         );
         // End of input is a quit in the walk and a no at the confirm.
         let z = || {
@@ -2817,7 +3164,7 @@ mod tests {
         assert!(!confirm(&plan, &style(&w), &mut "".as_bytes(), &mut vec![]).unwrap());
         assert_eq!(
             finish(&plan, &[], &style(&w)),
-            "\nNothing was accepted, so nothing was written.\n"
+            "\n  Nothing was accepted, so nothing was written.\n"
         );
         let (plan, _) = walk(z(), &w, "y\n");
         let mut printed = vec![];
@@ -2827,7 +3174,7 @@ mod tests {
                 .unwrap()
                 .ends_with("[y]es, [n]o: \n")
         );
-        assert_eq!(finish(&plan, &[], &style(&w)), "\nNothing was written.\n");
+        assert_eq!(finish(&plan, &[], &style(&w)), "\n  Nothing was written.\n");
         assert!(
             !std::fs::read_to_string(&settings)
                 .unwrap()
@@ -2835,7 +3182,7 @@ mod tests {
         );
         assert_eq!(
             finish(&walk(vec![], &w, "").0, &[], &style(&w)),
-            "\nNothing to change on this host.\n"
+            "\n  Nothing to change on this host.\n"
         );
     }
 
@@ -2858,25 +3205,20 @@ mod tests {
             }),
             ..fix(name, saving)
         };
-        let unused = "Never-used skills: on -> off";
+        let unused = "Never-used skills";
         // In the report's order: measured savings, largest first, then unmeasured.
         let fixes = || {
             vec![
                 fix("A", Some(50.0)),
                 member("B", Some(6.0), Reason::Unused, unused),
                 member("S", Some(3.0), Reason::Unused, unused),
-                member(
-                    "M",
-                    Some(2.0),
-                    Reason::Costly,
-                    "Skills over $1 per use: on -> off",
-                ),
+                member("M", Some(2.0), Reason::Costly, "Skills over $1 per use"),
                 member("T", Some(1.5), Reason::Unused, unused),
                 member(
                     "P",
                     Some(0.4),
                     Reason::Unrecorded,
-                    "Skills with no recorded use: on -> off",
+                    "Skills with no recorded use",
                 ),
                 fix("C", Some(0.3)),
                 Fix {
@@ -2889,34 +3231,34 @@ mod tests {
             ]
         };
         let (plan, printed) = walk(fixes(), &w, "y\nn\ny\ny\nn\no\ny\nn\n");
-        let heads: Vec<&str> = printed.lines().filter(|l| l.starts_with('[')).collect();
+        let heads: Vec<&str> = printed
+            .lines()
+            .filter_map(|l| l.strip_prefix("  ").filter(|l| l.starts_with('[')))
+            .collect();
         // A change of $5/mo or more stands alone even in a group, the groups rank by their
         // sum, and the unmeasured come last, grouped apart from the measured.
         assert_eq!(
             heads,
             [
-                "[1/6] A: on -> off",
-                "[2/6] B: on -> off",
-                "[3/6] Never-used skills: on -> off",
-                "[4/6] M: on -> off",
-                "[5/6] U: on -> off",
-                "[6/6] Never-used skills: on -> off",
-                "[6/6, 1/2] K: on -> off",
-                "[6/6, 2/2] L: on -> off",
+                "[1/6] A  saves $50/mo  50%",
+                "[2/6] B  saves $6/mo  6%",
+                "[3/6] Never-used skills  saves $4.50/mo  5%",
+                "[4/6] M  saves $2/mo  2%",
+                "[5/6] U  saving not measured",
+                "[6/6] Never-used skills  savings not measured",
+                "[6/6, 1/2] K  saving not measured",
+                "[6/6, 2/2] L  saving not measured",
             ]
         );
-        assert!(
-            printed
-                .contains("token-max doctor: 6 questions about 8 changes, biggest saving first.")
-        );
+        assert!(printed.contains("\n  6 questions about 8 changes, biggest saving first.\n"));
         assert!(printed.contains(
-            "\n[3/6] Never-used skills: on -> off\n  What: Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n  Recommended (Measured): together, about $4.50/mo, 5% of this host's spend; overlapping changes may save less.\n  s, t.\nAccept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
+            "\n  [3/6] Never-used skills  saves $4.50/mo  5%\n        on -> off  Recommended (Measured)\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  s, t.\n  Accept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
         ), "{printed}");
         assert!(printed.contains(
-            "\n[6/6] Never-used skills: on -> off\n  What: Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n  Recommended (Measured): their savings were not measured.\n  k, l.\n"
+            "\n  [6/6] Never-used skills  savings not measured\n        on -> off  Recommended (Measured)\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
         ), "{printed}");
         assert!(printed.ends_with(
-            "\n2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
+            "\n  2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
         ), "{printed}");
         for (name, want) in [
             ("A", Some(Choice::Accepted)),
@@ -2953,12 +3295,12 @@ mod tests {
         let (plan, printed) = walk(vec![fix("C", Some(0.3))], &w, "");
         assert_eq!(
             printed,
-            "\n1 change in groups saving under $1/mo was not asked; it's in the list below.\n"
+            "\n  1 change in groups saving under $1/mo was not asked; it's in the list below.\n"
         );
         assert_eq!(choice(&plan, "C"), &Choice::Declined);
         assert_eq!(
             finish(&plan, &[], &style(&w)),
-            "\nNothing was accepted, so nothing was written.\n"
+            "\n  Nothing was accepted, so nothing was written.\n"
         );
     }
 
@@ -2972,7 +3314,7 @@ mod tests {
             group: Some(Group {
                 kind: ContextKind::Skill,
                 reason: Reason::Duplicate,
-                label: "Duplicate copies of skills: on -> off".into(),
+                label: "Duplicate copies of skills".into(),
                 member: member.into(),
                 location: at.map(|at| format!("{home}/{at}/SKILL.md")),
             }),
@@ -2988,7 +3330,7 @@ mod tests {
             "n\n",
         );
         assert!(
-            printed.contains("\n  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
+            printed.contains("  Which  review (~/a/SKILL.md), review (~/b/SKILL.md), lint.\n"),
             "{printed}"
         );
     }
@@ -3056,7 +3398,7 @@ mod tests {
             group: Some(Group {
                 kind: ContextKind::Tool,
                 reason: Reason::Unused,
-                label: "Never-used tools: on -> off".into(),
+                label: "Never-used tools".into(),
                 member: name.into(),
                 location: None,
             }),
@@ -3065,11 +3407,63 @@ mod tests {
         let (_, printed) = walk(
             vec![small("A", "saves", 1.0), small("B", UP_TO, 3.0)],
             &w,
-            "n\n",
+            "y\n",
+        );
+        // The heading's figure holds only up to its sum; the running total says which part.
+        assert!(
+            printed.contains("  [1/1] Never-used tools  saves up to $4/mo  4%\n"),
+            "{printed}"
         );
         assert!(printed.contains(
-            "  Recommended (Measured): together, about $1/mo, 1% of this host's spend, plus up to $3/mo, 3% of this host's spend, from 1 change whose saving depends on the default it replaces; overlapping changes may save less.\n"
+            "  Accepted so far: about $1/mo, 1% of this host's spend, plus up to $3/mo, 3% of this host's spend, from 1 change whose saving depends on the default it replaces; overlapping changes may save less.\n"
         ), "{printed}");
+    }
+
+    #[test]
+    fn a_card_puts_its_saving_at_the_right_and_hangs_its_paragraphs() {
+        let style = |width, color| Style {
+            color,
+            unicode: true,
+            width,
+            home: None,
+        };
+        let card = Card {
+            counter: "[1/4]".into(),
+            name: "WebSearch tool",
+            saving: Some(("saves $206/mo".into(), "39%".into())),
+            no_saving: "saving not measured",
+            value: "on → off".into(),
+            suggested: false,
+            claim: "Measured",
+            rows: vec![
+                (
+                    "What",
+                    "Lets Claude search the web and read the results.".into(),
+                ),
+                ("Why", "Never used; it cost $99 over the window.".into()),
+            ],
+        };
+        assert_eq!(
+            style(Some(50), false).card(&card),
+            "  [1/4] WebSearch tool          saves $206/mo  39%\n        on → off  Recommended (Measured)\n        What  Lets Claude search the web and read\n              the results.\n        Why   Never used; it cost $99 over the\n              window.\n"
+        );
+        // A wide terminal still aligns the saving at the card's width.
+        let wide = style(Some(200), false).card(&card);
+        let head = wide.lines().next().unwrap();
+        assert_eq!(crate::terminal::cells(head), CARD_CELLS);
+        // Color carries the verdict and the saving; the words stay the same.
+        let colored = style(Some(50), true).card(&card);
+        assert!(colored.contains("\x1b[31mRecommended\x1b[0m"), "{colored}");
+        assert!(
+            colored.contains("\x1b[32msaves $206/mo\x1b[0m"),
+            "{colored}"
+        );
+        // Without room for the saving at the right, it follows the name.
+        let narrow = style(Some(30), false).card(&card);
+        assert!(
+            narrow.starts_with("  [1/4] WebSearch tool  saves\n"),
+            "{narrow}"
+        );
     }
 
     #[test]
@@ -3113,7 +3507,7 @@ mod tests {
         );
         assert_eq!(
             finish(&plan, &[], &style(&w)),
-            "\ntoken-max cannot make these changes; the steps by hand are listed above.\n"
+            "\n  token-max cannot make these changes; the steps by hand are listed above.\n"
         );
         std::fs::write(&settings, "{}").unwrap();
         let (plan, _) = walk(vec![deny], &w, "y\n");
@@ -3157,7 +3551,7 @@ mod tests {
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o640);
         assert!(finish(&plan, &written, &style(&w)).starts_with(
-            "\nWrote 1 edit to ~/.claude/settings.json, through its symlink to ~/dotfiles/settings.json.\n"
+            "\n  Wrote 1 edit to ~/.claude/settings.json, through its symlink to ~/dotfiles/settings.json.\n"
         ));
         // Root can write anything, so only another user sees a read-only target.
         // SAFETY: geteuid has no preconditions.
@@ -3239,7 +3633,7 @@ mod tests {
             group: Some(Group {
                 kind: ContextKind::McpServer,
                 reason: Reason::Unused,
-                label: "Never-used MCP servers: on -> off".into(),
+                label: "Never-used MCP servers".into(),
                 member: name.to_lowercase(),
                 location: None,
             }),
@@ -3270,7 +3664,7 @@ mod tests {
         let config = w.codex.join("config.toml");
         std::fs::write(
             &state,
-            "{\n  \"numStartups\": 3,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {}\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {}\n      }\n    }\n  }\n}\n",
+            "{\n  \"numStartups\": 3,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {\n          \"headers\": {\n            \"Authorization\": \"Bearer s3cret\"\n          }\n        }\n      }\n    }\n  }\n}\n",
         )
         .unwrap();
         std::fs::write(
@@ -3319,19 +3713,19 @@ mod tests {
         .unwrap();
         let printed = String::from_utf8(printed).unwrap();
         assert!(
-            printed.starts_with("\ntoken-max doctor: 3 questions about 4 changes,"),
+            printed.starts_with("\n  3 questions about 4 changes,"),
             "{printed}"
         );
         let sep = std::path::MAIN_SEPARATOR;
         assert!(printed.contains(&format!(
-            "  It stays configured; token-max can also remove:\n    mcpServers.A in ~{sep}.claude.json\nRemove it too? [y]es, [n]o, [q]uit: "
+            "  It stays configured; token-max can also remove:\n    mcpServers.A in ~{sep}.claude.json\n  Remove it too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         // A group's removal is one question, naming what only a person can remove.
         assert!(printed.contains(&format!(
-            "  They stay configured; token-max can also remove:\n    mcpServers.B in ~{sep}.claude.json\n    mcpServers.B of project /p in ~{sep}.claude.json\n  To remove it by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\nRemove all 2 too? [y]es, [n]o, [q]uit: "
+            "  They stay configured; token-max can also remove:\n    mcpServers.B in ~{sep}.claude.json\n    mcpServers.B of project /p in ~{sep}.claude.json\n  To remove it by hand, since a plugin adds it: uninstall or disable the plugin that provides it.\n  Remove all 2 too? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         assert!(printed.contains(&format!(
-            "\n[3/3] MCP server off: off -> removed\n  Worth considering (Opinion): saves nothing, since its tools are off already; it drops configuration no session uses.\n    [mcp_servers.off] in ~{sep}.codex{sep}config.toml\nRemove it? [y]es, [n]o, [q]uit: "
+            "\n  [3/3] MCP server off  saves nothing\n        off -> removed  Worth considering (Opinion)\n        Why    Its tools are off already, so no session uses this configuration.\n        Where  [mcp_servers.off] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
         )), "{printed}");
         for name in ["A", "B", "C"] {
             assert_eq!(choice(&plan, name), &Choice::Accepted, "{name}");
@@ -3339,24 +3733,58 @@ mod tests {
         let mut shown = vec![];
         assert!(confirm(&plan, &style(&w), &mut "y\n".as_bytes(), &mut shown).unwrap());
         let shown = String::from_utf8(shown).unwrap();
+        // Removals show as the lines they delete, with a line of context.
         assert!(shown.contains(&format!(
-            "Removes these MCP server entries:\n  mcpServers.B from ~{sep}.claude.json\n  mcpServers.B of project /p from ~{sep}.claude.json\n  [mcp_servers.off] from ~{sep}.codex{sep}config.toml\n"
+            "\n  ~{sep}.claude.json\n  @@ -4,3 +4,2 @@\n        \"A\": {{}},\n  -     \"B\": {{}},\n        \"keep\": {{\n"
         )), "{shown}");
+        assert!(shown.contains(
+            "\n  - [mcp_servers.off]\n  - enabled = false\n  - [mcp_servers.off.env]\n  - X = \"****\"\n  -\n    [mcp_servers.on]\n"
+        ), "{shown}");
+        assert!(
+            shown.contains("\n  -             \"Authorization\": \"****\"\n"),
+            "{shown}"
+        );
+        // A removal names each variable and header but never prints a value.
+        assert!(
+            !shown.contains("s3cret") && !shown.contains("\"1\""),
+            "{shown}"
+        );
         assert!(
             shown.contains("Write the 3 accepted changes and 3 removals to "),
             "{shown}"
+        );
+        // An entry it would remove changed during the walk: nothing is written, since the
+        // diff showed another version.
+        let walked = std::fs::read_to_string(&state).unwrap();
+        std::fs::write(
+            &state,
+            walked.replace(
+                "\"B\": {},\n    \"keep",
+                "\"B\": {\"command\": \"b\"},\n    \"keep",
+            ),
+        )
+        .unwrap();
+        let err = write(&plan).unwrap_err().to_string();
+        assert!(
+            err.contains("changed while token-max doctor was running; nothing was written"),
+            "{err}"
+        );
+        assert!(
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .contains("[mcp_servers.off]")
         );
         // Claude Code saved its state file during the walk: the removal applies to what it
         // holds now rather than refusing it.
         std::fs::write(
             &state,
-            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {}\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {}\n      }\n    }\n  }\n}\n",
+            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"B\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {\n        \"B\": {\n          \"headers\": {\n            \"Authorization\": \"Bearer s3cret\"\n          }\n        }\n      }\n    }\n  }\n}\n",
         )
         .unwrap();
         let written = write(&plan).unwrap();
         assert_eq!(
             std::fs::read_to_string(&state).unwrap(),
-            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"keep\": {}\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {}\n    }\n  }\n}\n"
+            "{\n  \"numStartups\": 4,\n  \"mcpServers\": {\n    \"A\": {},\n    \"keep\": {\n      \"env\": {\n        \"K\": \"s3cret\"\n      }\n    }\n  },\n  \"projects\": {\n    \"/p\": {\n      \"mcpServers\": {}\n    }\n  }\n}\n"
         );
         assert!(!w.home.join(".claude.json.lock").exists());
         assert_eq!(
@@ -3379,5 +3807,28 @@ mod tests {
         assert_eq!(printed.matches("too? ").count(), 1, "{printed}");
         assert_eq!(choice(&plan, "A"), &Choice::Accepted);
         assert!(plan.files.iter().all(|p| p.removals.is_empty()));
+    }
+
+    #[test]
+    fn the_confirm_masks_secret_json_values_and_keeps_the_lines() {
+        let text = "{\n  \"env\": {\"API_KEY\": \"sk-\\\"x\", \"DISABLE_X\": \"1\"},\n  \"mcpServers\": {\n    \"gh\": {\n      \"command\": \"gh\", \"args\": [\"a\"],\n      \"env\": {\"GITHUB_TOKEN\": \"ghp_1\", \"N\": 3}\n    }\n  },\n  \"projects\": {\"/p\": {\"mcpServers\": {\"web\": {\"headers\": {\"Authorization\": \"Bearer t\"}, \"url\": \"https://x\"}}}}\n}\n";
+        let edited = [vec!["env".to_string(), "DISABLE_X".to_string()]];
+        let edited: Vec<&[String]> = edited.iter().map(Vec::as_slice).collect();
+        assert_eq!(
+            mask_json(text, "****", &edited),
+            "{\n  \"env\": {\"API_KEY\": \"****\", \"DISABLE_X\": \"1\"},\n  \"mcpServers\": {\n    \"gh\": {\n      \"command\": \"gh\", \"args\": [\"a\"],\n      \"env\": {\"GITHUB_TOKEN\": \"****\", \"N\": \"****\"}\n    }\n  },\n  \"projects\": {\"/p\": {\"mcpServers\": {\"web\": {\"headers\": {\"Authorization\": \"****\"}, \"url\": \"https://x\"}}}}\n}\n"
+        );
+    }
+
+    #[test]
+    fn the_confirm_masks_secret_toml_values_and_keeps_the_rest() {
+        let text = "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"ghp_1\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"Bearer t\"  # theirs\nCookie = \"\"\"\na\nb\"\"\"\nX = [\n  \"c\",\n]\n\n[shell_environment_policy.set]\nKEY = \"v\"\n";
+        let masked = mask_toml(text, "****");
+        assert_eq!(
+            masked,
+            "model = \"m\" # mine\n\n[mcp_servers.gh]\ncommand = \"gh\"\nenv = { GITHUB_TOKEN = \"****\" }\n\n[mcp_servers.web]\nurl = \"https://x\"\n[mcp_servers.web.http_headers]\nAuthorization = \"****\"  # theirs\nCookie = '''****\n\n'''\nX = '''****\n\n'''\n\n[shell_environment_policy.set]\nKEY = \"****\"\n"
+        );
+        // A value over several lines keeps them, so the diff's line numbers match the file.
+        assert_eq!(masked.lines().count(), text.lines().count());
     }
 }

@@ -122,6 +122,62 @@ pub fn wrap_text(text: &str, options: WrapOptions) -> String {
         .join("\n")
 }
 
+/// Wrap spans of text, each with its SGR attribute such as "31" or none (""), and style each
+/// span's characters on every row it lands on; without `color`, only wrap.
+///
+/// Spans must already be free of terminal escapes, as `wrap_text` requires.
+pub fn wrap_spans(spans: &[(&str, &str)], options: WrapOptions, color: bool) -> String {
+    let text: String = spans.iter().map(|(text, _)| *text).collect();
+    let wrapped = wrap_text(&text, options);
+    if !color {
+        return wrapped;
+    }
+    // Wrapping only adds and drops spaces and line breaks, so every other character keeps
+    // its order and takes the style of the span it came from.
+    let mut styles = spans
+        .iter()
+        .flat_map(|(text, style)| text.chars().map(move |c| (c, *style)))
+        .filter(|(c, _)| !matches!(c, ' ' | '\n'));
+    let mut out = String::new();
+    let mut open = "";
+    // Spaces wait for the next character, so a style ends before them when it changes.
+    let mut spaces = 0;
+    for c in wrapped.chars() {
+        match c {
+            '\n' => {
+                if !open.is_empty() {
+                    out.push_str("\x1b[0m");
+                    open = "";
+                }
+                out.push_str(&" ".repeat(spaces));
+                spaces = 0;
+                out.push('\n');
+            }
+            ' ' => spaces += 1,
+            _ => {
+                let (_, style) = styles.next().expect("wrapping keeps every character");
+                if style != open && !open.is_empty() {
+                    out.push_str("\x1b[0m");
+                }
+                out.push_str(&" ".repeat(spaces));
+                spaces = 0;
+                if style != open {
+                    if !style.is_empty() {
+                        out.push_str(&format!("\x1b[{style}m"));
+                    }
+                    open = style;
+                }
+                out.push(c);
+            }
+        }
+    }
+    if !open.is_empty() {
+        out.push_str("\x1b[0m");
+    }
+    out.push_str(&" ".repeat(spaces));
+    out
+}
+
 fn wrap_line(input: &str, options: WrapOptions) -> String {
     let leading = input.len() - input.trim_start_matches(' ').len();
     let Some(width) = options.width else {
@@ -265,6 +321,86 @@ mod tests {
             ),
             "    a"
         );
+    }
+
+    /// `text` without SGR sequences.
+    fn unstyled(text: &str) -> String {
+        let mut out = String::new();
+        for (i, part) in text.split('\x1b').enumerate() {
+            let skip = if i == 0 {
+                0
+            } else {
+                part.find('m').unwrap() + 1
+            };
+            out.push_str(&part[skip..]);
+        }
+        out
+    }
+
+    #[test]
+    fn styled_spans_wrap_as_plain_text_and_style_each_row() {
+        let spans = [
+            ("● ", "31"),
+            ("Workflow tool  ", ""),
+            ("saves $116/mo", "32"),
+        ];
+        let options = WrapOptions {
+            width: Some(12),
+            indent: 2,
+            continuation: Some(4),
+        };
+        // Each row closes its style, and the next reopens it.
+        assert_eq!(
+            wrap_spans(&spans, options, true),
+            "  \x1b[31m●\x1b[0m Workflow\n    tool\n    \x1b[32msaves\x1b[0m\n    \x1b[32m$116/mo\x1b[0m"
+        );
+        assert_eq!(
+            wrap_spans(&spans, options, false),
+            "  ● Workflow\n    tool\n    saves\n    $116/mo"
+        );
+    }
+
+    // A differential check: wrapping spans and dropping their styles is wrapping the text.
+    #[test]
+    fn styled_spans_wrap_exactly_like_their_text() {
+        let words = [
+            "a",
+            "bb",
+            "漢字",
+            "😀",
+            "",
+            " ",
+            "longerword",
+            "e\u{301}",
+            "x  y",
+        ];
+        let styles = ["", "1", "2", "31", "1;33"];
+        let mut seed = 7u64;
+        let mut next = |n: usize| {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (seed >> 33) as usize % n
+        };
+        for _ in 0..2_000 {
+            let spans: Vec<(String, &str)> = (0..1 + next(6))
+                .map(|_| {
+                    let text: Vec<&str> = (0..next(4)).map(|_| words[next(words.len())]).collect();
+                    (text.join(" "), styles[next(styles.len())])
+                })
+                .collect();
+            let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+            let options = WrapOptions {
+                width: [None, Some(1), Some(5), Some(9), Some(30)][next(5)],
+                indent: next(4),
+                continuation: [None, Some(2), Some(6)][next(3)],
+            };
+            let text: String = spans.iter().map(|(t, _)| *t).collect();
+            let styled = wrap_spans(&spans, options, true);
+            assert_eq!(unstyled(&styled), wrap_text(&text, options), "{spans:?}");
+            // No row leaves a style open into the next.
+            for row in styled.split('\n') {
+                assert!(row.matches("\x1b[0m").count() >= row.matches('\x1b').count() / 2);
+            }
+        }
     }
 
     // Ported from report.test.ts: narrow output never exceeds its width.

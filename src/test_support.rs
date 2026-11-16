@@ -334,7 +334,11 @@ fn collapse(text: &str) -> String {
 pub fn report_lines(text: &str) -> Vec<ReportLine> {
     let mut group = None;
     let mut rows = vec![];
-    let lines: Vec<&str> = text.lines().collect();
+    // Every line but the header sits inside the report's margin.
+    let lines: Vec<&str> = text
+        .lines()
+        .map(|l| l.strip_prefix("  ").unwrap_or(l))
+        .collect();
     for (i, line) in lines.iter().enumerate() {
         if line.starts_with("CHANGES  ") {
             group = Some(true);

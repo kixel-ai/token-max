@@ -29,18 +29,22 @@ in PowerShell,
 
 ## Applying changes
 
-On a terminal, `doctor` first walks through each change it can make, after a
-headline counting its questions and the changes they cover, across every settings file, recommended and worth
-considering alike, biggest monthly saving first. Each one opens with its name,
-its current and offered value, and one plain sentence saying what the setting
-or feature does (see [What each line does](#what-each-line-does)), then shows
-whether it is recommended or worth considering, its kind of
-claim, its saving per 30 days in dollars and as a percent of this host's spend
-over the window (the base the report's percents use), what was measured, such
-as the requests a replay covered or a tool's uses and what each cost, why the
-change makes sense, and the exact edit, such as `"promptCacheTtl": "1h"` in
-`~/.claude/settings.json`. A change whose saving was not measured, such as
-raising an effort, comes after the measured ones and says so.
+On a terminal, `doctor` opens with one header line naming what it read: the
+requests, the window and their cost. It then walks through each change it can
+make, after a headline counting its questions and the changes they cover,
+across every settings file, recommended and worth considering alike, biggest
+monthly saving first. Each change is a card. Its first line is a counter, such
+as `[1/4]`, and the setting's name, with its saving per 30 days in dollars and
+as a percent of this host's spend over the window (the base the report's
+percents use) at the right. Next comes the current value and the offered one,
+such as `5m -> 1h`, with whether it is recommended or worth considering and
+its kind of claim. Then `What` gives one plain sentence on what the setting or
+feature does (see [What each line does](#what-each-line-does)), and `Why`
+gives what was measured, such as the requests a replay covered or a tool's
+uses and what each cost, and why the change makes sense. A card leaves out the
+edit, which repeats the value change; the confirm shows every accepted edit
+once, as a diff. A change whose saving was not measured, such as raising an
+effort, comes after the measured ones and says so.
 
 A change saving $5/mo or more is its own question. A smaller one joins a group
 of its kind and reason: never used, no use recorded where the window cannot
@@ -71,8 +75,10 @@ The report follows, its list grouped: the accepted changes first with the
 total, then the ones not accepted, then the steps to take by hand, such as a
 CLAUDE.md over Claude Code's size guidance or a change something else would
 override, each saying why, then every other line, each group ranked as the
-report ranks it. Then one question asks whether to write the accepted changes,
-naming each file; nothing is written before that yes, end of input is a no,
+report ranks it. Then the confirm shows how each settings file would change, as
+a diff with a line of context around each change, removed lines in red and
+added ones in green, and one question asks whether to write the accepted
+changes, naming each file; nothing is written before that yes, end of input is a no,
 and a no says nothing was written. Each file is then written once, with every
 edit accepted for it. A change not accepted keeps its edit in the list, to
 make by hand, which also suits a file another tool rewrites, such as a dotfiles
@@ -140,8 +146,8 @@ that saves nothing: a Claude Code server whose tools the user's
 local-scope server turned off in its project with `/mcp`
 (`disabledMcpServers`), and a Codex server with `enabled = false`. A server
 with only some tools denied is not offered, nor a Codex server another layer
-also declares, since that layer may turn it back on. The confirm lists every entry it
-removes. Claude Code rewrites `~/.claude.json` while it runs, so that file is
+also declares, since that layer may turn it back on. The confirm's diff shows every
+line it removes. Claude Code rewrites `~/.claude.json` while it runs, so that file is
 not refused when it changed during the walk. It is written before any other
 file, under Claude Code's own lock (`~/.claude.json.lock`), held only while it
 is read again and replaced, and the removal is made to its current text. A
@@ -527,15 +533,21 @@ the walk's prompts or a top-N limit. The layout wraps long paths and
 names on narrow terminals, where the name column narrows first and a line too
 long for the width wraps under its name. A name or profile too long for its
 column pushes the rest of its own line along rather than widening every line.
-Redirected output keeps each line whole so paths and edits remain copyable. On
-terminals, the report's colored dot carries each line's verdict, with a legend
-above the lines; `NO_COLOR`
+Redirected output keeps each line whole so paths and edits remain copyable.
+Every line but the header is indented two cells. On terminals, the report's
+colored dot carries each line's verdict, with a legend above the lines; a line
+with a verdict keeps its name, value and figure bright, its saving green and
+the rest dim, and a line without one is dim throughout. The headline counts
+the changes in their verdict colors, notes on what was read are dim, and each
+section heading has a rule after it. The walk colors its cards the same way:
+the verdict in its color, the saving green, and labels dim. `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode, and either
 puts the verdict word back in place of the dot. Evidence cards keep their
 verdict words and only add color, and each names its claim. Redirected output
 is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
 with exit 2 and no success report.
-Unicode decorations require a UTF-8 locale. Progress has phases, never an invented percent.
+Unicode decorations require a UTF-8 locale. Progress is one line that shows each
+phase in turn, never an invented percent, and clears itself before the report.
 
 ## Machine-readable output
 

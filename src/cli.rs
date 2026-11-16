@@ -59,11 +59,12 @@ Usage: token-max doctor [options]
   -h, --help              Show this help
 
 Prints which settings to change, with the evidence for each. When stdin and stdout are
-both a terminal, it then offers each change it can make, one at a time: it shows the edit
-and writes the profile's own settings.json or config.toml only after a yes (y, n, or q to
-stop). A change another owner would override, such as a shell variable, a project or
-managed settings file or T3, is listed to make by hand. Without a terminal it prints the
-report, each change naming its edit, and edits nothing.
+both a terminal, it then offers each change it can make, one at a time (y, n, or q to
+stop), shows the accepted edits as a diff of each file, and writes the profile's own
+settings.json or config.toml only after a final yes. A change another owner would
+override, such as a shell variable, a project or managed settings file or T3, is listed
+to make by hand. Without a terminal it prints the report, each change naming its edit,
+and edits nothing.
 
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
@@ -150,6 +151,30 @@ enum Phase {
 /// The current phase. A cancelling signal holds this lock until the process exits, so a
 /// report or a settings file is either written whole or not at all.
 static PHASE: Mutex<Phase> = Mutex::new(Phase::Running);
+
+/// The cells of the progress line ending stderr, which the next output must clear first;
+/// zero when none is showing.
+static PROGRESS: Mutex<usize> = Mutex::new(0);
+
+/// Replace the progress line on stderr with `message`. Spaces, not escapes, blank what a
+/// longer line left, so this works on any terminal and under `--plain`.
+fn show_progress(message: &str) {
+    let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
+    let text = format!("token-max: {message}...");
+    let cells = crate::terminal::cells(&text);
+    let pad = " ".repeat(shown.saturating_sub(cells));
+    eprint!("\r{text}{pad}");
+    *shown = cells;
+}
+
+/// Clear the progress line, if one is showing, so what follows starts on a clean row.
+fn clear_progress() {
+    let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
+    if *shown > 0 {
+        eprint!("\r{}\r", " ".repeat(*shown));
+        *shown = 0;
+    }
+}
 
 /// Enter `phase`; blocks forever if a cancelling signal already owns the process.
 fn enter(phase: Phase) {
@@ -500,6 +525,7 @@ fn diagnose(json: bool, error: &ScanError) {
         #[serde(skip_serializing_if = "Option::is_none")]
         location: Option<&'a Location>,
     }
+    clear_progress();
     let mut stderr = io::stderr().lock();
     let _ = if json {
         write_json(
@@ -810,7 +836,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
     } = run;
     let phase = |message: &str| {
         if progress {
-            eprintln!("token-max: {message}...");
+            show_progress(message);
         }
     };
     let local = discovery.is_some();
@@ -931,6 +957,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         }
         Ok(())
     })();
+    clear_progress();
     gathered.inspect_err(|_| {
         cancel_downloads();
         ssh::cancel();
@@ -989,10 +1016,11 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             locale.contains("utf8") || locale.contains("utf-8")
         });
     let color = stdout && !values.plain && env_nonempty("NO_COLOR").is_none() && !term_dumb;
+    let unicode = stdout && !values.plain && !term_dumb && unicode_locale;
     let format = Format {
         width: width(),
         color,
-        unicode: stdout && !values.plain && !term_dumb && unicode_locale,
+        unicode,
         details: values.details,
         host: None,
     };
@@ -1045,12 +1073,13 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     }
     if sections > 1 {
         text.push_str(
-            "\nEach host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",
+            "\n  Each host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",
         );
     }
     if walk {
         let style = Style {
             color,
+            unicode,
             width: width(),
             home,
         };
@@ -1082,6 +1111,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
     let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
+    write!(stdout, "{}", listing.title()).map_err(failed)?;
     let plan = ask(fixes, turned_off, &style, &mut stdin, &mut stdout).map_err(failed)?;
     let report = listing.review(plan.choices(), &plan.total("Accepted"));
     // The report reads as its own section after the questions.

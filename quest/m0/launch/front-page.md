@@ -23,7 +23,3 @@ in a few lines each.
 The logo at the top is `assets/logo/logo-on-light.svg` and
 `assets/logo/logo-on-dark.svg`, switched with a `<picture>` element and
 `prefers-color-scheme`; the mark alone is the root `favicon.svg`.
-
-## Required
-
-- [Make doctor's output pretty](/quest/m0/launch/style.md) - the look the recording shows

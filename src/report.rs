@@ -20,7 +20,7 @@ use crate::model::{
 };
 use crate::prices::{Sum, TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
-use crate::terminal::{WrapOptions, cells, wrap_text};
+use crate::terminal::{WrapOptions, cells, wrap_spans};
 
 /// How to lay out the text report; presentation never changes the analysis.
 #[derive(Clone, Copy, Debug, Default)]
@@ -635,6 +635,10 @@ fn token_range(mut values: impl Iterator<Item = i64>) -> String {
 const PLAIN: &str = "";
 /// A heading's ANSI style.
 const BOLD: &str = "1";
+/// Cells every line but the title is indented by.
+pub(crate) const MARGIN: usize = 2;
+/// Section rules stop here on a wide terminal.
+const RULE_CELLS: usize = 100;
 
 /// A verdict's ANSI color, which only repeats what the line's words say: red for
 /// a recommended change, yellow for an advisory, green for a value already right.
@@ -760,62 +764,90 @@ impl<'a> Out<'a> {
     fn line(&mut self, text: &str, indent: usize, style: &str) {
         self.wrap(text, indent, None, style);
     }
-    /// A line whose wrapped rows hang at `continuation` cells.
-    fn hang(&mut self, text: &str, continuation: usize, style: &str) {
-        self.wrap(text, 0, Some(continuation), style);
-    }
     fn wrap(&mut self, text: &str, indent: usize, continuation: Option<usize>, style: &str) {
+        self.spans(&[(text, style)], indent, continuation);
+    }
+    /// A line of spans, each in its own style, wrapped inside the margin with rows hanging
+    /// at `continuation` cells when given.
+    fn spans(&mut self, spans: &[(&str, &str)], indent: usize, continuation: Option<usize>) {
         // Escape metadata before wrapping or adding our own ANSI. Long paths are
         // hard-wrapped, never shortened; wide characters use terminal cell widths.
-        let wrapped = wrap_text(
-            &terminal_text(text),
+        let escaped: Vec<(String, &str)> = spans
+            .iter()
+            .map(|(text, style)| (terminal_text(text), *style))
+            .collect();
+        let escaped: Vec<(&str, &str)> = escaped.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        let wrapped = wrap_spans(
+            &escaped,
             WrapOptions {
                 width: self.options.width,
-                indent,
-                continuation,
+                indent: indent + MARGIN,
+                continuation: continuation.map(|c| c + MARGIN),
             },
+            self.options.color,
         );
-        for part in wrapped.split('\n') {
-            if self.options.color && !style.is_empty() {
-                let _ = write!(self.text, "\x1b[{style}m{part}\x1b[0m");
-            } else {
-                self.text.push_str(part);
-            }
-            self.text.push('\n');
-        }
-    }
-    fn blank(&mut self) {
-        self.line("", 0, PLAIN);
-    }
-    /// What each color means, in its own color; only printed when color is on.
-    fn legend(&mut self) {
-        let parts = [
-            (Mark::Change, "Red: change."),
-            (Mark::Consider, "Yellow: consider."),
-            (Mark::Keep, "Green: keep."),
-            (Mark::Unknown, "Dim: no verdict."),
-        ];
-        // Wrap between parts, so each keeps its own color on a narrow terminal.
-        let mut used = 0;
-        for (mark, text) in parts {
-            let cells = cells(text);
-            if used > 0 {
-                if self.options.width.is_some_and(|w| used + 1 + cells > w) {
-                    self.text.push('\n');
-                    used = 0;
-                } else {
-                    self.text.push(' ');
-                    used += 1;
-                }
-            }
-            let _ = write!(self.text, "\x1b[{}m{text}\x1b[0m", mark.style());
-            used += cells;
-        }
+        self.text.push_str(&wrapped);
         self.text.push('\n');
     }
+    fn blank(&mut self) {
+        self.text.push('\n');
+    }
+    /// What each dot's color means; only printed when color is on.
+    fn legend(&mut self) {
+        let (dot, hollow) = self.dots();
+        // No-break spaces keep each dot with its words, so a narrow terminal wraps between them.
+        let parts = [
+            (Mark::Change, dot, "change  "),
+            (Mark::Consider, dot, "consider  "),
+            (Mark::Keep, dot, "keep  "),
+            (Mark::Unknown, hollow, "no\u{a0}verdict"),
+        ];
+        let spans: Vec<(String, &str)> = parts
+            .iter()
+            .flat_map(|(mark, marker, word)| {
+                [
+                    (format!("{marker}\u{a0}"), mark.style()),
+                    ((*word).into(), DIM),
+                ]
+            })
+            .collect();
+        let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        self.spans(&spans, 0, None);
+    }
+    /// The markers of a line with a verdict and one without.
+    fn dots(&self) -> (&'static str, &'static str) {
+        if self.options.unicode {
+            ("●", "○")
+        } else {
+            ("*", "o")
+        }
+    }
+    /// A section heading, such as "CHANGES  biggest saving first": its name bold, the rest
+    /// dim, and on a color terminal a rule out to the width.
     fn section(&mut self, title: &str) {
         self.blank();
-        self.line(title, 0, BOLD);
+        let (name, rest) = title.split_once("  ").unwrap_or((title, ""));
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            format!("  {rest}")
+        };
+        let mut spans = vec![(name.to_string(), BOLD), (rest, DIM)];
+        if self.options.color {
+            let used = MARGIN + cells(title) + 1;
+            let room = self.options.width.unwrap_or(RULE_CELLS).min(RULE_CELLS);
+            let rule = if self.options.unicode { "─" } else { "-" };
+            spans.push((
+                format!(" {}", rule.repeat(room.saturating_sub(used).max(3))),
+                DIM,
+            ));
+        }
+        let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+        self.spans(&spans, 0, None);
+    }
+    /// A dim note about what was read, such as a T3 state's coverage.
+    fn note(&mut self, name: &str, value: &str) {
+        self.line(&format!("{name}: {value}"), 0, DIM);
     }
     fn field(&mut self, name: &str, value: &str) {
         self.line(&format!("{name}: {value}"), 2, PLAIN);
@@ -884,12 +916,26 @@ impl<'a> Out<'a> {
             self.field("Predecessor", &format!("unrecorded for {unrecorded} parts"));
         }
     }
-    fn title(&mut self) {
-        let title = match self.options.host {
+    /// The report's one-line header: the tool's name in bold, then `read`, what was read,
+    /// dimmed. Unlike every other line it starts at the left edge.
+    fn title(&self, read: &str) -> String {
+        let name = terminal_text(&match self.options.host {
             Some(host) => format!("token-max: {}", host.name),
             None => "token-max".into(),
-        };
-        self.line(&title, 0, BOLD);
+        });
+        let read = terminal_text(&format!("  {read}"));
+        let mut text = wrap_spans(
+            &[(&name, BOLD), (&read, DIM)],
+            WrapOptions {
+                width: self.options.width,
+                indent: 0,
+                // Rows after the first hang under what was read.
+                continuation: Some(cells(&name) + 2),
+            },
+            self.options.color,
+        );
+        text.push('\n');
+        text
     }
     fn home(&self, path: &str) -> String {
         home_path(self.home.as_deref(), path)
@@ -970,11 +1016,12 @@ pub fn format_report<'a>(
     options: ReportOptions<'a>,
 ) -> Listing {
     let mut out = Out::new(report, options);
-    let (head, rows) = summary(report, fixes, &mut out);
+    let (title, head, rows) = summary(report, fixes, &mut out);
     if options.details {
         details(report, &mut out);
     }
     Listing {
+        title,
         head,
         rows,
         tail: out.text,
@@ -1001,7 +1048,9 @@ pub(crate) fn rendered(report: &Report, options: ReportOptions<'_>) -> String {
 /// A rendered report whose list of lines can be printed again once `doctor`'s walk has
 /// sorted its changes into those accepted, declined and left by hand.
 pub struct Listing {
-    /// Everything before the list.
+    /// The one-line header naming what was read.
+    title: String,
+    /// Everything between the header and the list.
     head: String,
     rows: Vec<Row>,
     /// Everything after the list.
@@ -1025,11 +1074,17 @@ pub enum Choice {
 impl Listing {
     /// The report as printed without a terminal.
     pub fn text(&self) -> String {
-        self.with_list(None)
+        format!("{}{}", self.title, self.with_list(None))
     }
 
-    /// The report with its changes grouped by `choices`: the accepted first, ending with
-    /// `total`, then the declined, then the steps by hand, then every other line.
+    /// The one-line header naming what was read, which the walk prints before its questions.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The report without its header, with its changes grouped by `choices`: the accepted
+    /// first, ending with `total`, then the declined, then the steps by hand, then every
+    /// other line.
     pub fn review(&self, choices: &[(Origin, Choice)], total: &str) -> String {
         self.with_list(Some(Review { choices, total }))
     }
@@ -1119,15 +1174,15 @@ fn t3_text_generation(report: &Report, out: &Out<'_>) -> Vec<String> {
 
 fn t3_coverage(report: &Report, out: &mut Out<'_>) {
     for state in report.scan.t3.iter().filter(|s| s.status == "selected") {
-        out.field(
+        out.note(
             "T3 state",
             &format!("{}; {}", display(&state.path), state.metadata),
         );
         for exclusion in &state.exclusions {
-            out.field("T3 coverage", exclusion);
+            out.note("T3 coverage", exclusion);
         }
         for (cause, n) in &state.unresolved {
-            out.field(
+            out.note(
                 "T3 unresolved",
                 &format!(
                     "{} request{}: {cause}",
@@ -1137,7 +1192,7 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
             );
         }
         for (instance, n) in &state.removed {
-            out.field(
+            out.note(
                 "T3 removed",
                 &format!(
                     "{} request{} of instance {instance}, no longer in T3's settings: billed, left out of every current profile's checks",
@@ -1149,7 +1204,7 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
     }
     if out.options.details {
         for line in t3_text_generation(report, out) {
-            out.line(&line, 2, PLAIN);
+            out.line(&line, 0, DIM);
         }
     }
 }
@@ -3399,6 +3454,8 @@ impl Mark {
 
 /// A dim line's ANSI style.
 const DIM: &str = "2";
+/// A saving's ANSI color.
+const GREEN: &str = "32";
 /// Cells the plain-text verdict word takes, with its gap.
 const WORD_CELLS: usize = 9;
 /// Names and values wider than this are not padded, so one long name doesn't widen every line.
@@ -3619,11 +3676,7 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     let (changes, rest): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(Row::offered);
     let all = || changes.iter().chain(&rest);
     let color = out.options.color;
-    let (dot, hollow) = if out.options.unicode {
-        ("●", "○")
-    } else {
-        ("*", "o")
-    };
+    let (dot, hollow) = out.dots();
     let indent = if color { 2 } else { WORD_CELLS };
     // Columns line up across the groups.
     let value_cells = column(all().map(|r| cells(&terminal_text(&r.value))), VALUE_CELLS);
@@ -3649,9 +3702,10 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
     let claim_cells = all().map(|r| cells(r.claim.name())).max().unwrap_or(0);
     let tag_cells = column(all().map(|r| cells(&r.profile)), TAG_CELLS);
     let mut name_cells = column(all().map(|r| cells(&terminal_text(&r.name))), NAME_CELLS);
-    // On a narrow terminal, the name column gives way so the others still fit on one row.
+    // On a narrow terminal, the name column gives way so the columns up to the claim still
+    // fit on one row; the file and setting after them wrap to the next.
     if let Some(width) = out.options.width {
-        let rest = indent + value_cells + amount_cells + share_cells + claim_cells + tag_cells + 10;
+        let rest = MARGIN + indent + value_cells + amount_cells + share_cells + claim_cells + 8;
         name_cells = name_cells.min(width.saturating_sub(rest));
     }
     let mut groups: Vec<(Vec<&Row>, &str)> = match review {
@@ -3689,19 +3743,38 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
                 (true, _) => format!("{dot} "),
                 (false, mark) => pad(mark.word(), WORD_CELLS),
             };
+            // A line without a verdict is dim throughout; one with a verdict keeps its name,
+            // value and figure bright, its saving green, and the rest dim.
+            let verdict = !matches!(row.mark, Mark::Unknown | Mark::Info);
+            let (bright, saving) = match (verdict, &row.amount) {
+                (false, _) => (DIM, DIM),
+                (true, Some((verb, _))) if verb.starts_with("saves") => (PLAIN, GREEN),
+                (true, _) => (PLAIN, PLAIN),
+            };
             let mut columns = vec![
-                pad(&terminal_text(&row.name), name_cells),
-                pad(&terminal_text(&row.value), value_cells),
-                pad(&amount(row), amount_cells),
-                pad_left(&shares(row), share_cells),
-                pad(row.claim.name(), claim_cells),
+                (pad(&terminal_text(&row.name), name_cells), bright),
+                (pad(&terminal_text(&row.value), value_cells), bright),
+                (pad(&amount(row), amount_cells), saving),
+                (pad_left(&shares(row), share_cells), DIM),
+                (pad(row.claim.name(), claim_cells), DIM),
             ];
             if all().any(|r| !r.profile.is_empty()) {
-                columns.push(pad(&row.profile, tag_cells));
+                columns.push((pad(&row.profile, tag_cells), DIM));
             }
-            columns.push(row.setting.clone());
-            let head = format!("{marker}{}", columns.join("  ").trim_end());
-            out.hang(&head, indent, row.mark.style());
+            columns.push((row.setting.clone(), DIM));
+            while columns.last().is_some_and(|(t, _)| t.trim().is_empty()) {
+                columns.pop();
+            }
+            if let Some((last, _)) = columns.last_mut() {
+                last.truncate(last.trim_end().len());
+            }
+            let mut spans = vec![(marker, if verdict { row.mark.style() } else { DIM })];
+            for (i, (text, style)) in columns.into_iter().enumerate() {
+                let gap = if i == 0 { "" } else { "  " };
+                spans.push((format!("{gap}{text}"), style));
+            }
+            let spans: Vec<(&str, &str)> = spans.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+            out.spans(&spans, 0, Some(indent));
             if let Some(baseline) = &row.baseline {
                 out.line(&baseline.text(), indent, DIM);
             }
@@ -4024,15 +4097,30 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
     lines
 }
 
-/// The headline: how many changes the report recommends and how many are worth considering.
-fn headline(changes: usize, considered: usize) -> String {
+/// The headline: how many changes the report recommends and how many are worth considering,
+/// as bold spans with each count in its verdict's color.
+fn headline(changes: usize, considered: usize) -> Vec<(String, &'static str)> {
+    const RED: &str = "1;31";
+    const YELLOW: &str = "1;33";
+    const GREEN: &str = "1;32";
     let s = if changes == 1 { "" } else { "s" };
-    match (changes, considered) {
-        (0, 0) => "No changes recommended or worth considering.".into(),
-        (0, c) => format!("No changes recommended; {c} worth considering."),
-        (r, 0) => format!("{r} change{s} recommended."),
-        (r, c) => format!("{r} change{s} recommended and {c} worth considering."),
-    }
+    let parts: Vec<(String, &'static str)> = match (changes, considered) {
+        (0, 0) => vec![("No changes recommended or worth considering".into(), GREEN)],
+        (0, c) => vec![
+            ("No changes recommended; ".into(), BOLD),
+            (format!("{c} worth considering"), YELLOW),
+        ],
+        (r, 0) => vec![(format!("{r} change{s} recommended"), RED)],
+        (r, c) => vec![
+            (format!("{r} change{s} recommended"), RED),
+            (" and ".into(), BOLD),
+            (format!("{c} worth considering"), YELLOW),
+        ],
+    };
+    parts
+        .into_iter()
+        .chain(std::iter::once((".".into(), BOLD)))
+        .collect()
 }
 
 /// The verb of a saving that holds only when a default would otherwise be the other value.
@@ -4100,43 +4188,47 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
 /// The report: what was read, then every setting and feature on one line, the changes
 /// first, with each line's evidence under `--details`.
 /// Returns the text before the list and the list's rows; what follows them stays in `out`.
-fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> (String, Vec<Row>) {
+fn summary(
+    report: &Report,
+    fixes: &[crate::doctor::Fix],
+    out: &mut Out<'_>,
+) -> (String, String, Vec<Row>) {
     let arrow = out.arrow;
     let coverage = &report.scan.coverage;
     let spend = out.spend;
     let many = report.scan.profiles.len() > 1;
-    out.title();
-    t3_coverage(report, out);
-    out.line(&format!("{PRICES_MEAN} Nothing was changed."), 0, PLAIN);
-    out.blank();
     let spent = format!(
         "{}{}",
         if spend.complete { "" } else { "at least " },
         about(spend.usd)
     );
-    out.line(
-        &match spend.since {
-            Some(since) if coverage.requests > 0 => format!(
-                "Read {} requests from {} to {} ({}), {spent} at API prices:",
-                count(coverage.requests),
-                date(&iso(since)),
-                date(&report.generated_at),
-                days(Some(since), Some(spend.until))
-            ),
-            _ => format!(
-                "No requests found{} in:",
-                report
-                    .scan
-                    .since
-                    .map_or_else(String::new, |s| format!(" since {}", date(&iso(s))))
-            ),
-        },
-        0,
-        PLAIN,
-    );
-    for p in &report.scan.profiles {
-        out.line(&out.short_profile(&p.id), 2, PLAIN);
+    let title = out.title(&match spend.since {
+        Some(since) if coverage.requests > 0 => format!(
+            "{} requests from {} to {} ({}), {spent} at API prices",
+            count(coverage.requests),
+            date(&iso(since)),
+            date(&report.generated_at),
+            days(Some(since), Some(spend.until))
+        ),
+        _ => format!(
+            "No requests found{}",
+            report
+                .scan
+                .since
+                .map_or_else(String::new, |s| format!(" since {}", date(&iso(s))))
+        ),
+    });
+    let profiles: Vec<String> = report
+        .scan
+        .profiles
+        .iter()
+        .map(|p| out.short_profile(&p.id))
+        .collect();
+    if !profiles.is_empty() {
+        out.line(&format!("Profiles: {}.", profiles.join(", ")), 0, DIM);
     }
+    t3_coverage(report, out);
+    out.line(&format!("{PRICES_MEAN} Nothing was changed."), 0, DIM);
     let conditional: u64 = report
         .historical
         .iter()
@@ -4150,7 +4242,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                 count(conditional)
             ),
             0,
-            PLAIN,
+            DIM,
         );
     }
     if coverage.missing_usage > 0 {
@@ -4160,7 +4252,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                 count(coverage.missing_usage)
             ),
             0,
-            PLAIN,
+            DIM,
         );
     }
     if coverage.skipped_lines > 0 {
@@ -4171,7 +4263,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
                 count(coverage.skipped_files)
             ),
             0,
-            PLAIN,
+            DIM,
         );
     }
     if report.scan.snapshots.is_empty() {
@@ -5199,7 +5291,9 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
     out.blank();
     let changes = rows.iter().filter(|r| r.mark == Mark::Change).count();
     let considered = rows.iter().filter(|r| r.mark == Mark::Consider).count();
-    out.line(&headline(changes, considered), 0, BOLD);
+    let headline = headline(changes, considered);
+    let headline: Vec<(&str, &str)> = headline.iter().map(|(t, s)| (t.as_str(), *s)).collect();
+    out.spans(&headline, 0, None);
     // In a report of several hosts, each section's percents are of its own host's spend.
     let host = match out.options.host {
         Some(host) if host.name != "this host" => format!("{}'s", host.name),
@@ -5214,6 +5308,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         0,
         PLAIN,
     );
+    out.blank();
     // With some requests unpriced, the base is only what could be priced, so a share can read high.
     let base = if spend.complete {
         format!("{host} spend over the window, {spent}")
@@ -5229,18 +5324,18 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             about(report.max_cost_per_use_usd)
         ),
         0,
-        PLAIN,
+        DIM,
     );
     if report
         .checks
         .iter()
         .any(|c| matches!(c, CheckResult::Background(_)))
     {
-        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, PLAIN);
+        out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, DIM);
     }
     // Parent and detail coverage overlap; do not combine them into a percentage.
     if pieces.iter().any(|(_, c)| c.priced < c.requests) {
-        out.line("Some feature costs are scaled from their priced requests; --details shows each line's coverage.", 0, PLAIN);
+        out.line("Some feature costs are scaled from their priced requests; --details shows each line's coverage.", 0, DIM);
     }
     if out.options.color {
         out.legend();
@@ -5257,7 +5352,7 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
         out.line(
             "A feature's saving is what it cost, assuming nothing else changes when it is removed; cache writes and compaction can shift.",
             0,
-            PLAIN,
+            DIM,
         );
     }
     out.blank();
@@ -5278,21 +5373,21 @@ fn summary(report: &Report, fixes: &[crate::doctor::Fix], out: &mut Out<'_>) -> 
             out.home(&report.prices.source)
         ),
         0,
-        PLAIN,
+        DIM,
     );
     out.line(
         "Each line compares one setting with everything else unchanged, so a sum of savings may count the same requests twice.",
         0,
-        PLAIN,
+        DIM,
     );
     if !out.options.details {
         out.line(
             "--details shows the evidence, assumptions and sources behind each line.",
             0,
-            PLAIN,
+            DIM,
         );
     }
-    (head, rows)
+    (title, head, rows)
 }
 
 /// What every piece of context cost, including pieces no longer sent.
@@ -6138,6 +6233,21 @@ mod tests {
         text.chars().filter(|c| !c.is_whitespace()).collect()
     }
 
+    /// `text` without the rule a color terminal draws after each section heading.
+    fn unruled(text: &str) -> String {
+        text.split_inclusive('\n')
+            .map(|line| {
+                let body = line.trim_end_matches('\n');
+                let bare = body.trim_end_matches(['─', '-']);
+                if body.len() - bare.len() >= 3 && bare.ends_with(' ') {
+                    format!("{}{}", bare.trim_end(), &line[body.len()..])
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect()
+    }
+
     fn strip_ansi(text: &str) -> String {
         let mut out = String::new();
         let mut rest = text;
@@ -6177,9 +6287,11 @@ mod tests {
             .flatten()
             .collect();
         let text = super::tests::text(&report, None, true);
-        let headline = text.lines().find(|l| l.starts_with("Compared with"));
+        let headline = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("Compared with"));
         assert_eq!(
-            headline,
+            headline.map(str::trim_start),
             Some(
                 "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to $12/mo more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
             )
@@ -6637,7 +6749,7 @@ mod tests {
                 (head, mark, claim, evidence)
             );
         };
-        assert!(text.contains("\n2 changes recommended and 4 worth considering.\n"));
+        assert!(text.contains("\n  2 changes recommended and 4 worth considering.\n"));
         has(
             "Main-agent prompt cache TTL 5m -> 1h saves $25/mo 2%",
             "change",
@@ -6735,7 +6847,9 @@ mod tests {
             "Opinion: standard speed is enough, and fast mode bills a premium for the same work. Official: on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left. Set in /synthetic/home/.claude/settings.json:fastMode.",
         );
         // Sources cite the guidance the evidence quotes, so only details list them.
-        assert!(text.contains("\nSources: https://code.claude.com/docs/en/fast-mode#requirements"));
+        assert!(
+            text.contains("\n  Sources: https://code.claude.com/docs/en/fast-mode#requirements")
+        );
         assert!(!plain.contains("Sources:"));
         // Pieces no longer sent and those without a verdict get no line of their own.
         assert!(!plain.contains("Retired") && !plain.contains("Skill list framing"));
@@ -6802,7 +6916,7 @@ mod tests {
             },
         ]);
         let summary = text(&report, None, true);
-        assert!(summary.contains("\nDollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.\n"), "{summary}");
+        assert!(summary.contains("\n  Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.\n"), "{summary}");
         let rows = report_lines(&summary);
         let evidence = |head: &str| {
             let rows: Vec<&str> = rows
@@ -6855,17 +6969,17 @@ mod tests {
             assert!(
                 summary
                     .lines()
-                    .any(|l| l.starts_with("Sources: ") && l.contains(source)),
+                    .any(|l| l.trim_start().starts_with("Sources: ") && l.contains(source)),
                 "{source}: {summary}"
             );
         }
         // Details give each rule its own field, with its source.
         let details = text(&report, None, true);
         assert!(
-            details.contains(&format!("\n{PRICES_MEAN} Nothing was changed.\n")),
+            details.contains(&format!("\n  {PRICES_MEAN} Nothing was changed.\n")),
             "{details}"
         );
-        assert!(details.contains("\n  Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
+        assert!(details.contains("\n    Official: on a ChatGPT plan, Fast uses included usage 2.5 times as fast as Standard and Ultrafast 8 times, which can exceed the API premium priced here. https://learn.chatgpt.com/docs/pricing\n"), "{details}");
         assert!(!details.contains("subscription"));
         assert!(!summary.contains("subscription"));
     }
@@ -7298,11 +7412,11 @@ mod tests {
         // its card under details, and not at all by default.
         assert!(!text(&report, None, false).contains("Exposure:"));
         let (lines, cards) = rendered
-            .split_once("\nEVIDENCE\n")
+            .split_once("\n  EVIDENCE\n")
             .expect("details have cards");
         assert_eq!(lines.matches("Exposure:").count(), 1);
         assert_eq!(cards.matches("Exposure:").count(), 1);
-        assert!(lines.contains("\n1 change recommended.\n"));
+        assert!(lines.contains("\n  1 change recommended.\n"));
         assert!(!rendered.contains("Available checks favor current settings"));
         assert!(cards.find("MCP server docs:").unwrap() < cards.find("Exposure:").unwrap());
 
@@ -7347,7 +7461,7 @@ mod tests {
         // The server's off covers its tools, so they have no line of their own; details
         // still list each in the server's breakdown.
         let (lines, cards) = rendered
-            .split_once("\nEVIDENCE\n")
+            .split_once("\n  EVIDENCE\n")
             .expect("details have cards");
         assert!(
             report_lines(lines)
@@ -7414,7 +7528,7 @@ mod tests {
         // A tool with no switch of its own is counted in its server's line, and only the
         // details' breakdown names it.
         let (lines, cards) = rendered
-            .split_once("\nEVIDENCE\n")
+            .split_once("\n  EVIDENCE\n")
             .expect("details have cards");
         assert!(
             report_lines(lines)
@@ -7482,7 +7596,7 @@ mod tests {
         assert!(!plain.contains("mcpServers.docs.alwaysLoad"));
         let details = text(&report, None, true);
         let (lines, cards) = details
-            .split_once("\nEVIDENCE\n")
+            .split_once("\n  EVIDENCE\n")
             .expect("details have cards");
         assert!(
             report_line(lines, "ChatGPT apps")
@@ -7815,9 +7929,9 @@ mod tests {
         // continuation lines less, so lines wrap differently and only the words compare.
         let words = |text: &str| {
             text.lines()
-                .filter(|l| !l.starts_with("Red: change."))
+                .filter(|l| !l.ends_with("no\u{a0}verdict"))
                 .flat_map(|l| {
-                    let l = l.replace('→', "->");
+                    let l = l.trim_start().replace('→', "->");
                     let l = ["● ", "○ ", "* ", "o "]
                         .iter()
                         .find_map(|d| l.strip_prefix(d))
@@ -7847,9 +7961,9 @@ mod tests {
         for style in ["1", "31", "33", "32"] {
             assert!(styled.contains(&format!("\x1b[{style}m")), "{style}");
         }
-        let styled = strip_ansi(&styled);
-        let (styled_lines, styled_cards) = styled.split_once("\nEVIDENCE\n").unwrap();
-        let (plain_lines, plain_cards) = plain.split_once("\nEVIDENCE\n").unwrap();
+        let styled = unruled(&strip_ansi(&styled));
+        let (styled_lines, styled_cards) = styled.split_once("\n  EVIDENCE\n").unwrap();
+        let (plain_lines, plain_cards) = plain.split_once("\n  EVIDENCE\n").unwrap();
         assert_eq!(styled_cards, plain_cards);
         assert_eq!(words(styled_lines), words(plain_lines));
         // The summary's color replaces each verdict word with a dot in that color,
@@ -7863,20 +7977,21 @@ mod tests {
             },
         );
         let plain = text(&report, None, false);
-        for (style, dot, line) in [
-            ("31", "●", "Artifact tool"),
-            ("33", "●", "Skill example"),
-            ("32", "●", "Agent tool"),
-            ("2", "○", "Workflow tool"),
-            ("2", "○", "System prompt and core tools"),
-            ("32", "●", "Fast mode"),
+        // A line with a verdict colors only its dot; one without is dim throughout.
+        for (dot, line) in [
+            ("\x1b[31m●\x1b[0m ", "Artifact tool"),
+            ("\x1b[33m●\x1b[0m ", "Skill example"),
+            ("\x1b[32m●\x1b[0m ", "Agent tool"),
+            ("\x1b[2m○ ", "Workflow tool"),
+            ("\x1b[2m○ ", "System prompt and core tools"),
+            ("\x1b[32m●\x1b[0m ", "Fast mode"),
         ] {
             assert!(
-                styled.contains(&format!("\x1b[{style}m{dot} {line} ")),
-                "{line}"
+                styled.contains(&format!("{dot}{line} ")),
+                "{line}: {styled}"
             );
         }
-        assert!(styled.contains("\x1b[31mRed: change.\x1b[0m"));
+        assert!(styled.contains("\x1b[31m●\u{a0}\x1b[0m\x1b[2mchange"));
         // The legend wraps between its parts on a narrow terminal.
         let narrow = rendered(
             &report,
@@ -7886,14 +8001,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        let legend = &narrow[narrow.find("\x1b[31mRed: change.").unwrap()..];
+        let legend = &narrow[narrow.find("\x1b[31m*\u{a0}\x1b[0m").unwrap()..];
         let legend: Vec<&str> = legend.lines().take(2).collect();
         assert!(
             legend.iter().all(|l| cells(&strip_ansi(l)) <= 40),
             "{legend:?}"
         );
-        assert!(legend[1].contains("Dim: no verdict."), "{legend:?}");
-        assert_eq!(words(&strip_ansi(&styled)), words(&plain));
+        assert!(legend[1].contains("no\u{a0}verdict"), "{legend:?}");
+        assert_eq!(words(&unruled(&strip_ansi(&styled))), words(&plain));
         assert_eq!(
             text(&report, None, true)
                 .matches("Identical fixed costs remain unknown")
@@ -7981,7 +8096,7 @@ mod tests {
         assert!(
             summary
                 .lines()
-                .any(|l| l.starts_with("Sources: ") && l.contains(CLAUDE_MODEL_GUIDE))
+                .any(|l| l.trim_start().starts_with("Sources: ") && l.contains(CLAUDE_MODEL_GUIDE))
         );
         let details = text(&report, None, true);
         assert!(
@@ -8148,7 +8263,7 @@ mod tests {
         report.checks.clear();
         report.context.clear();
         let summary = text(&report, None, true);
-        assert!(summary.contains("No requests found since 2026-11-01 in:"));
+        assert!(summary.contains("No requests found since 2026-11-01"));
         assert!(summary.contains("No transcript histories found."));
         assert!(summary.contains("No changes recommended or worth considering."));
         assert!(!summary.contains("CHANGES") && !summary.contains("EVERYTHING ELSE"));
@@ -8354,22 +8469,30 @@ mod tests {
     #[test]
     fn the_headline_counts_both_kinds_of_change() {
         assert_eq!(
-            headline(0, 0),
+            headline_text(0, 0),
             "No changes recommended or worth considering."
         );
         assert_eq!(
-            headline(0, 14),
+            headline_text(0, 14),
             "No changes recommended; 14 worth considering."
         );
-        assert_eq!(headline(1, 0), "1 change recommended.");
+        assert_eq!(headline_text(1, 0), "1 change recommended.");
         assert_eq!(
-            headline(2, 1),
+            headline_text(2, 1),
             "2 changes recommended and 1 worth considering."
         );
     }
 
     fn instant(text: &str) -> Millis {
         text.parse::<jiff::Timestamp>().unwrap().as_millisecond()
+    }
+
+    /// The headline's words, without its styles.
+    fn headline_text(changes: usize, considered: usize) -> String {
+        headline(changes, considered)
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect()
     }
 
     fn ttl_mut(report: &mut Report) -> &mut TtlCheck {
@@ -8604,8 +8727,8 @@ mod tests {
         );
         assert!(styled.contains("\x1b["));
         // Color swaps each line's verdict word for a dot; the cards keep every word.
-        let cards = |text: &str| text.split_once("\nEVIDENCE\n").unwrap().1.to_string();
-        assert_eq!(cards(&strip_ansi(&styled)), cards(&text));
+        let cards = |text: &str| text.split_once("\n  EVIDENCE\n").unwrap().1.to_string();
+        assert_eq!(cards(&unruled(&strip_ansi(&styled))), cards(&text));
     }
 
     #[test]
@@ -8678,7 +8801,9 @@ mod tests {
             "{text}"
         );
         // The vanished directory has no line; only the details' cards keep every check.
-        let (lines, _) = text.split_once("\nEVIDENCE\n").expect("details have cards");
+        let (lines, _) = text
+            .split_once("\n  EVIDENCE\n")
+            .expect("details have cards");
         assert!(
             !lines.contains("working directory no longer exists"),
             "{lines}"
@@ -8806,7 +8931,7 @@ mod tests {
             "{head}"
         );
         let details = text(&report, Some(200), true);
-        assert!(details.contains("\n1 change recommended.\n"), "{details}");
+        assert!(details.contains("\n  1 change recommended.\n"), "{details}");
         assert!(!details.contains("No applicable"));
     }
 
@@ -8900,27 +9025,15 @@ mod tests {
             })
             .collect();
         let want = [
+            ("Skills the model never used", Reason::Unused, "a"),
+            ("Duplicate copies of skills", Reason::Duplicate, "b"),
+            ("Never-used MCP servers", Reason::Unused, "docs"),
             (
-                "Skills the model never used: on -> typed only",
-                Reason::Unused,
-                "a",
-            ),
-            (
-                "Duplicate copies of skills: on -> off",
-                Reason::Duplicate,
-                "b",
-            ),
-            ("Never-used MCP servers: on -> off", Reason::Unused, "docs"),
-            (
-                "MCP servers with no recorded use: on -> off",
+                "MCP servers with no recorded use",
                 Reason::Unrecorded,
                 "web",
             ),
-            (
-                "Tools over $1 per use: on -> off",
-                Reason::Costly,
-                "Artifact",
-            ),
+            ("Tools over $1 per use", Reason::Costly, "Artifact"),
         ];
         for (label, reason, member) in want {
             assert!(

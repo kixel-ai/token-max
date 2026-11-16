@@ -29,72 +29,92 @@ These work from the first release on; until then, see [Install](#install).
 
 ```text
 $ token-max doctor
+token-max  504 requests from 2026-11-01 to 2026-11-15 (14 days), at least $256 at API prices
 
-token-max doctor: 4 questions about 6 changes, biggest saving first. Nothing is written until you confirm the list at the end.
+  4 questions about 6 changes, biggest saving first.
+  Nothing is written until you confirm the list at the end.
 
-[1/4] WebSearch tool: on -> off
-  Recommended (Measured): saves $206/mo, 39% of this host's spend.
-  Never used; it cost $99 over the window.
-  In ~/.claude/settings.json:
-    "permissions": {"deny": ["WebSearch"]} (added to the list)
-Accept? [y]es, [n]o, [q]uit: y
+  [1/4] WebSearch tool                                                saves $206/mo  39%
+        on -> off  Recommended (Measured)
+        What  Lets Claude search the web.
+        Why   Never used; it cost $99 over the window.
+  Accept? [y]es, [n]o, [q]uit: y
   Accepted so far: about $206/mo, 39% of this host's spend.
 
-[2/4] WebFetch tool: on -> off
-  Recommended (Measured): saves $52/mo, 10% of this host's spend.
-  Never used; it cost $25 over the window.
-  In ~/.claude/settings.json:
-    "permissions": {"deny": ["WebFetch"]} (added to the list)
-Accept? [y]es, [n]o, [q]uit: n
+  [2/4] WebFetch tool                                                  saves $52/mo  10%
+        on -> off  Recommended (Measured)
+        What  Lets Claude fetch the content of a URL.
+        Why   Never used; it cost $25 over the window.
+  Accept? [y]es, [n]o, [q]uit: n
 
-[3/4] Never-used tools: on -> off
-  Recommended (Measured): together, about $9.40/mo, 2% of this host's spend; overlapping changes may save less.
-  NotebookEdit, EnterWorktree, CronCreate.
-Accept all 3? [y]es, [n]o, [o]ne by one, [q]uit: y
+  [3/4] Never-used tools                                              saves $9.40/mo  2%
+        on -> off  Recommended (Measured)
+        What   Built-in tools the model can call; each one's definition is sent with
+               every request.
+        Which  NotebookEdit, EnterWorktree, CronCreate.
+  Accept all 3? [y]es, [n]o, [o]ne by one, [q]uit: y
   Accepted so far: about $215/mo, 40% of this host's spend; overlapping changes may save less.
 
-[4/4] Bash timeout cap: 10m -> 4m
-  Recommended (Measured): its saving was not measured.
-  Measured on 504 requests over 14 days. A wait that long outlasts the 5m cache. No foreground Bash wait outlasted the cache. Commands past the cap keep running in the background; what checking on them costs is not measured.
-  In ~/.claude/settings.json:
-    "env": {"BASH_MAX_TIMEOUT_MS": "240000"}
-Accept? [y]es, [n]o, [q]uit: y
+  [4/4] Bash timeout cap                                             saving not measured
+        10m -> 4m  Recommended (Measured)
+        What  The longest Claude waits on a foreground Bash command before Claude Code
+              moves it to the background.
+        Why   Measured on 504 requests over 14 days. A wait that long outlasts the 5m
+              cache. No foreground Bash wait outlasted the cache. Commands past the cap
+              keep running in the background; what checking on them costs is not
+              measured.
+  Accept? [y]es, [n]o, [q]uit: y
   Accepted so far: about $215/mo, 40% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less.
 
-1 more change in groups saving under $1/mo was not asked; it's in the list below.
+  1 more change in groups saving under $1/mo was not asked; it's in the list below.
 
-token-max
-Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.
+  Profiles: claude ~/.claude.
+  Dollars are public API prices, not an invoice: the closest public measure of what a request uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. Nothing was changed.
 
-Read 504 requests from 2026-11-01 to 2026-11-15 (14 days), at least $256 at API prices:
-  claude ~/.claude
+  6 changes recommended and 1 worth considering.
+  ...
 
-6 changes recommended and 1 worth considering.
-...
+  ACCEPTED  biggest saving first
+  change   WebSearch tool                         on -> off       saves   $206/mo   39%  Measured  "permissions": {"deny": ["WebSearch"]} (added to the list) in ~/.claude/settings.json
+  change   NotebookEdit tool                      on -> off       saves  $3.57/mo    1%  Measured  "permissions": {"deny": ["NotebookEdit"]} (added to the list) in ~/.claude/settings.json
+  change   EnterWorktree tool                     on -> off       saves  $3.17/mo    1%  Measured  "permissions": {"deny": ["EnterWorktree"]} (added to the list) in ~/.claude/settings.json
+  change   CronCreate tool                        on -> off       saves  $2.66/mo   <1%  Measured  "permissions": {"deny": ["CronCreate"]} (added to the list) in ~/.claude/settings.json
+  change   Bash timeout cap                       10m -> 4m       saving not measured        Measured  "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json
+           Accepted: about $215/mo, 40% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less.
 
-ACCEPTED  biggest saving first
-change   WebSearch tool                         on -> off       saves   $206/mo   39%  Measured  "permissions": {"deny": ["WebSearch"]} (added to the list) in ~/.claude/settings.json
-change   NotebookEdit tool                      on -> off       saves  $3.57/mo    1%  Measured  "permissions": {"deny": ["NotebookEdit"]} (added to the list) in ~/.claude/settings.json
-change   EnterWorktree tool                     on -> off       saves  $3.17/mo    1%  Measured  "permissions": {"deny": ["EnterWorktree"]} (added to the list) in ~/.claude/settings.json
-change   CronCreate tool                        on -> off       saves  $2.66/mo   <1%  Measured  "permissions": {"deny": ["CronCreate"]} (added to the list) in ~/.claude/settings.json
-change   Bash timeout cap                       10m -> 4m       saving not measured        Measured  "env": {"BASH_MAX_TIMEOUT_MS": "240000"} in ~/.claude/settings.json
-         Accepted: about $215/mo, 40% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less.
+  NOT ACCEPTED
+  change   WebFetch tool                          on -> off       saves    $52/mo   10%  Measured  "permissions": {"deny": ["WebFetch"]} (added to the list) in ~/.claude/settings.json
+  consider Auto memory                            on -> off       saves     $0/mo    0%  Opinion   "autoMemoryEnabled": false in ~/.claude/settings.json
 
-NOT ACCEPTED
-change   WebFetch tool                          on -> off       saves    $52/mo   10%  Measured  "permissions": {"deny": ["WebFetch"]} (added to the list) in ~/.claude/settings.json
-consider Auto memory                            on -> off       saves     $0/mo    0%  Opinion   "autoMemoryEnabled": false in ~/.claude/settings.json
+  EVERYTHING ELSE  biggest cost first
+  info     Main-session effort                    medium          costs  at least $256  100%  Official  ~/.claude/settings.json:modelSettings.claude-opus-5-5.effortLevel (the model's default)
+  info     System prompt and core tools                           costs     $6.89    3%  Measured  no setting
+  keep     Main-agent prompt cache TTL            5m              saves   $139/mo   26%  Measured  ~/.claude/settings.json:promptCacheTtl
+  ...
+  info     Fable weekly use                                                              Official  /model, or model in settings.json
+  ...
 
-EVERYTHING ELSE  biggest cost first
-info     Main-session effort                    medium          costs  at least $256  100%  Official  ~/.claude/settings.json:modelSettings.claude-opus-5-5.effortLevel (the model's default)
-info     System prompt and core tools                           costs     $6.89    3%  Measured  no setting
-keep     Main-agent prompt cache TTL            5m              saves   $139/mo   26%  Measured  ~/.claude/settings.json:promptCacheTtl
-...
-info     Fable weekly use                                                              Official  /model, or model in settings.json
-...
+  ~/.claude/settings.json
+  @@ -1,3 +1,14 @@
+    {
+  -   "model": "opus"
+  +   "model": "opus",
+  +   "permissions": {
+  +     "deny": [
+  +       "WebSearch",
+  +       "NotebookEdit",
+  +       "EnterWorktree",
+  +       "CronCreate"
+  +     ]
+  +   },
+  +   "env": {
+  +     "BASH_MAX_TIMEOUT_MS": "240000"
+  +   }
+    }
 
-Write the 5 accepted changes to ~/.claude/settings.json? [y]es, [n]o: y
+  Write the 5 accepted changes to ~/.claude/settings.json? [y]es, [n]o: y
 
-Wrote 5 edits to ~/.claude/settings.json.
+  Wrote 5 edits to ~/.claude/settings.json.
 ```
 
 That excerpt is from synthetic usage with synthetic prices, not a real host.

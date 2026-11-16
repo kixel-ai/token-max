@@ -42,6 +42,8 @@ pub struct Fix {
     pub verb: &'static str,
     /// The saving's share of this host's spend every 30 days.
     pub share: Option<f64>,
+    /// What the setting or feature does, from the report line.
+    pub what: String,
     /// What was measured and why the change makes sense, from the report line's evidence.
     pub evidence: String,
     pub how: How,
@@ -148,7 +150,8 @@ impl Edit {
 
 /// Every change the report recommends or suggests, biggest saving first, each with its
 /// edit or the step to take by hand. An edit another line already makes is listed once,
-/// naming both lines. Each fix's evidence is empty until `explain` fills it from the report.
+/// naming both lines. Each fix's description and evidence are empty until `explain` fills them
+/// from the report.
 pub fn fixes(report: &Report, unicode: bool) -> Vec<Fix> {
     fixes_from(
         recommendations(report, unicode)
@@ -282,6 +285,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         saving: line.saving,
         verb: line.verb,
         share: line.share,
+        what: String::new(),
         evidence: String::new(),
         how,
         origins: vec![line.origin],
@@ -349,9 +353,10 @@ fn capital(text: &str) -> String {
     })
 }
 
-/// Fill each fix's evidence from the report lines it comes from.
+/// Fill each fix's description and evidence from the report lines it comes from.
 pub fn explain(fixes: &mut [Fix], listing: &Listing) {
     for fix in fixes {
+        fix.what = listing.what(fix.origins[0]);
         fix.evidence = listing.evidence(fix.origins[0]);
     }
 }
@@ -946,10 +951,13 @@ impl Style {
         }
     }
 
-    /// A change as the walk offers it: its heading after `prefix`, its verdict and saving,
-    /// the evidence behind it, then its edit.
+    /// A change as the walk offers it: its heading after `prefix`, what it does, its verdict
+    /// and saving, the evidence behind it, then its edit.
     fn entry(&self, fix: &Fix, prefix: &str) -> String {
         let mut text = self.bold(&format!("{prefix}{}: {}", fix.name, fix.value), 0);
+        if !fix.what.is_empty() {
+            text += &self.line(&format!("What: {}", fix.what), 2);
+        }
         let verdict = if fix.suggested {
             "Worth considering"
         } else {
@@ -1552,12 +1560,15 @@ impl Question {
         (total.unmeasured == 0).then_some(total.measured.usd + total.up_to.usd)
     }
 
-    /// A group as the walk offers it: its heading after `prefix`, its verdict and saving,
-    /// then every member's name.
+    /// A group as the walk offers it: its heading after `prefix`, what its kind of feature
+    /// is, its verdict and saving, then every member's name. Each member says what it does
+    /// when the person goes through them one at a time.
     fn card(&self, prefix: &str, style: &Style) -> String {
         let first = &self.members[0].fix;
         let group = first.group.as_ref().expect("only groups share a question");
         let mut text = style.bold(&format!("{prefix}{}", group.label), 0);
+        let what = crate::descriptions::kind(group.kind);
+        text += &style.line(&format!("What: {what}"), 2);
         let verdict = if first.suggested {
             "Worth considering"
         } else {
@@ -2520,6 +2531,7 @@ mod tests {
             saving: Some(10.0),
             verb: "saves",
             share: Some(0.1),
+            what: String::new(),
             evidence: String::new(),
             origins: vec![Origin::Check(usize::from(name.as_bytes()[0]))],
             group: None,
@@ -2848,10 +2860,10 @@ mod tests {
                 .contains("token-max doctor: 6 questions about 8 changes, biggest saving first.")
         );
         assert!(printed.contains(
-            "\n[3/6] Never-used skills: on -> off\n  Recommended (Measured): together, about $4.50/mo, 5% of this host's spend; overlapping changes may save less.\n  s, t.\nAccept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
+            "\n[3/6] Never-used skills: on -> off\n  What: Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n  Recommended (Measured): together, about $4.50/mo, 5% of this host's spend; overlapping changes may save less.\n  s, t.\nAccept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
         ), "{printed}");
         assert!(printed.contains(
-            "\n[6/6] Never-used skills: on -> off\n  Recommended (Measured): their savings were not measured.\n  k, l.\n"
+            "\n[6/6] Never-used skills: on -> off\n  What: Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n  Recommended (Measured): their savings were not measured.\n  k, l.\n"
         ), "{printed}");
         assert!(printed.ends_with(
             "\n2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"

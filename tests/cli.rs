@@ -47,27 +47,31 @@ impl Workspace {
         std::fs::copy(fixture("claude.jsonl"), self.transcript()).unwrap();
     }
 
-    /// The fixture moved to start `days` before now. Savings are priced per 30 days of a
-    /// window that ends now, so a fixed date would make them drift with the clock.
+    /// The fixture moved so its history starts `days` before now. A report's window ends
+    /// now, so a monthly figure from the fixture as written shrinks as the days pass.
     fn recent_fixture(&self, days: i64) {
         let text = std::fs::read_to_string(fixture("claude.jsonl")).unwrap();
-        let start: jiff::Timestamp = "2026-11-01T00:00:00Z".parse().unwrap();
-        let shift = jiff::Timestamp::now()
-            .duration_since(start)
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let at = |v: &Value| v["timestamp"].as_str()?.parse::<jiff::Timestamp>().ok();
+        let first = lines.iter().filter_map(at).min().unwrap();
+        let start = jiff::Timestamp::now()
             .checked_sub(jiff::SignedDuration::from_hours(24 * days))
             .unwrap();
-        let mut out = String::new();
-        let mut rest = text.as_str();
-        while let Some(at) = rest.find("\"timestamp\":\"") {
-            let (head, tail) = rest.split_at(at + "\"timestamp\":\"".len());
-            let end = tail.find('"').unwrap();
-            let moved = tail[..end].parse::<jiff::Timestamp>().unwrap() + shift;
-            out += head;
-            out += &moved.to_string();
-            rest = &tail[end..];
-        }
-        out += rest;
-        std::fs::write(self.transcript(), out).unwrap();
+        let shift = start.duration_since(first);
+        let moved: Vec<String> = lines
+            .into_iter()
+            .map(|mut line| {
+                if let Some(t) = at(&line) {
+                    let t = t.checked_add(shift).unwrap();
+                    line["timestamp"] = json!(t.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string());
+                }
+                line.to_string()
+            })
+            .collect();
+        std::fs::write(self.transcript(), moved.join("\n") + "\n").unwrap();
     }
 
     fn settings(&self, text: &str) {
@@ -131,10 +135,17 @@ fn report_line(text: &str, head: &str) -> (String, String, String) {
                 .filter_map(|claim| rest.find(&format!("  {claim}")))
                 .min()?;
             let heading = rest[..end].split_whitespace().collect::<Vec<_>>().join(" ");
-            let evidence = lines
-                .get(i + 1)
-                .and_then(|l| l.strip_prefix("         "))
-                .unwrap_or_default();
+            let under = |n: usize| {
+                lines
+                    .get(i + n)
+                    .and_then(|l| l.strip_prefix("         "))
+                    .unwrap_or_default()
+            };
+            // Details open each line with what it does, then its evidence.
+            let evidence = match under(1).starts_with("What: ") {
+                true => under(2),
+                false => under(1),
+            };
             heading
                 .starts_with(head)
                 .then(|| (word.to_string(), heading, evidence.to_string()))
@@ -1183,7 +1194,8 @@ mod unix {
     #[test]
     fn doctor_on_a_terminal_writes_only_the_changes_answered_yes() {
         let w = Workspace::new();
-        w.recent_fixture(14);
+        // A fixed window keeps the walk's dollar figures the same on any day.
+        w.recent_fixture(15);
         w.settings("{\n  \"promptCacheTtl\": \"5m\"\n}\n");
         // Prices ten thousand times the fixture's, so the TTL saves enough to be asked: the
         // walk leaves out a change saving under $1/mo.
@@ -1248,11 +1260,10 @@ mod unix {
             stdout.starts_with("\ntoken-max doctor: 2 questions, biggest saving first."),
             "{stdout}"
         );
-        let ttl = at(
-            "\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  Recommended (Measured): saves $32/mo, 13% of this host's spend.\n  Measured on 2 requests over ",
-        );
+        // Each change opens with what its setting does.
+        let ttl = at("\n[1/2] Main-agent prompt cache TTL: 5m -> 1h\n  What: ");
         let memory = at(
-            "\n[2/2] Auto memory: on -> off\n  Worth considering (Opinion): its saving was not measured.\n",
+            "\n[2/2] Auto memory: on -> off\n  What: Auto memory lets Claude write notes for itself and loads them into every\n  session.\n  Worth considering (Opinion): its saving was not measured.\n",
         );
         // The window ends now, so its day count and the wrapping after it follow the clock.
         let entry = &stdout[ttl..];
@@ -1261,7 +1272,11 @@ mod unix {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $32/mo, 13% of this host's spend."),
+            entry.starts_with("[1/2] Main-agent prompt cache TTL: 5m -> 1h What: How long the main conversation's prompt stays cached between requests: a 1h cache costs more to write than 5m but survives longer pauses. Recommended (Measured): saves $30/mo, 13% of this host's spend. Measured on 2 requests over "),
+            "{entry}"
+        );
+        assert!(
+            entry.contains(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. In ~/.claude/settings.json: \"promptCacheTtl\": \"1h\" Accept? [y]es, [n]o, [q]uit: Accepted so far: about $30/mo, 13% of this host's spend."),
             "{entry}"
         );
         // Then the report, its accepted change first, and one question to write it.

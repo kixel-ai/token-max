@@ -1,7 +1,8 @@
 //! Historical context components and how they were used, derived in the reader's single pass.
 //!
-//! Raw records are observed transiently; only counts, fingerprints, opaque identities and
-//! readable names (tools, skills, servers, file paths) are retained.
+//! Raw records are observed transiently; only counts, fingerprints, opaque identities,
+//! readable names (tools, skills, servers, file paths) and the first sentence of the
+//! description a skill or tool ships are retained.
 
 use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::sync::Arc;
@@ -20,6 +21,10 @@ use crate::model::{
     ToolCalls, ToolResults, Via, Visibility, Visible,
 };
 use crate::safe::{self, ScanError, identity, label, object};
+
+/// The provenance of a Codex MCP namespace's description, the one discovery record that
+/// ships text.
+pub(crate) const NAMESPACE_DESCRIPTION: &str = "deferred-namespace-description";
 
 /// Prefer recorded counts; a missing calibration leaves token and dollar estimates unknown.
 pub fn measure_size(text: Option<&str>) -> Size {
@@ -287,11 +292,15 @@ struct Placed {
     revision: String,
     size: Size,
     group: Option<String>,
+    description: Option<String>,
 }
 
 impl Placed {
     fn new(category: Category, name: &str, content: Content<'_>, group: Option<String>) -> Self {
-        Self::sized(category, name, content.measure(), group)
+        Placed {
+            description: content.description(category),
+            ..Self::sized(category, name, content.measure(), group)
+        }
     }
 
     fn sized(category: Category, name: &str, size: Size, group: Option<String>) -> Self {
@@ -303,6 +312,7 @@ impl Placed {
             key: key.into(),
             size,
             group,
+            description: None,
         }
     }
 }
@@ -319,6 +329,21 @@ enum Content<'a> {
 }
 
 impl Content<'_> {
+    /// The first sentence of a tool definition's own description.
+    fn description(&self, category: Category) -> Option<String> {
+        match self {
+            Content::Json(Value::Object(tool))
+                if matches!(
+                    category,
+                    Category::ToolSchema | Category::McpSchema | Category::McpDiscovery
+                ) =>
+            {
+                crate::descriptions::sentence(tool.get("description")?.as_str()?)
+            }
+            _ => None,
+        }
+    }
+
     fn measure(&self) -> Size {
         match self {
             Content::Text(text) => measure_size(Some(text)),
@@ -1191,8 +1216,11 @@ impl ExposureCollector {
             }),
             _ => None,
         };
+        let description = content.description(new.category);
         let id = self.place(new, &key, &revision, &size, at);
-        self.components[&*id].instruction_size = instruction_size;
+        let component = &mut self.components[&*id];
+        component.instruction_size = instruction_size;
+        component.description = description;
         id
     }
 
@@ -1235,6 +1263,7 @@ impl ExposureCollector {
                     },
                     members: vec![],
                     skill_path: None,
+                    description: None,
                     targets: new.targets.unwrap_or_else(|| {
                         if member || category == Category::SkillBody {
                             vec![target("skill", new.name)]
@@ -1276,7 +1305,9 @@ impl ExposureCollector {
             grouping: Grouping::Fixed(placed.group.as_deref()),
             targets: None,
         };
-        self.place(new, &placed.key, &placed.revision, &placed.size, at)
+        let id = self.place(new, &placed.key, &placed.revision, &placed.size, at);
+        self.components[&*id].description = placed.description.clone();
+        id
     }
 
     /// A listed skill name, and the short name `/pdf` that also reaches `anthropic-skills:pdf`.
@@ -1325,6 +1356,7 @@ impl ExposureCollector {
         };
         for ((name, span), path) in entries.into_iter().zip(paths) {
             self.know_skill(name);
+            let description = listed_description(name, span);
             let new = New {
                 role: Role::Member,
                 ..New::active(Category::SkillListing, name, "rendered-listing-entry-span")
@@ -1349,6 +1381,7 @@ impl ExposureCollector {
             } else {
                 self.component(new, Content::Text(span), at)
             };
+            self.components[&*member].description = description;
             members.push(member.to_string());
         }
         self.components[&*aggregate].members = members;
@@ -1583,11 +1616,14 @@ impl ExposureCollector {
                 }
                 let body = text(Some(value))?;
                 let (content, provenance) = if field == "tools" {
-                    (Content::Text(body), "deferred-namespace-description")
+                    (Content::Text(body), NAMESPACE_DESCRIPTION)
                 } else {
                     (Content::Opaque(value), "opaque-schema-identity")
                 };
-                self.component(New::active(category, name, provenance), content, at);
+                let id = self.component(New::active(category, name, provenance), content, at);
+                if field == "tools" {
+                    self.components[&*id].description = crate::descriptions::sentence(body);
+                }
             }
         }
         // Boolean policy flags cannot establish the rendered plugin/app instruction body.
@@ -3224,6 +3260,17 @@ fn group(value: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The first sentence of a listed skill's description: its `- name: description` line
+/// after the name, without the `(file: ...)` a Codex catalog appends.
+fn listed_description(name: &str, span: &str) -> Option<String> {
+    let text = span
+        .strip_prefix("- ")?
+        .strip_prefix(name)?
+        .strip_prefix(':')?;
+    let text = text.rsplit_once(" (file: ").map_or(text, |(text, _)| text);
+    crate::descriptions::sentence(text)
 }
 
 /// `/^- ([a-zA-Z0-9_.:-]+):[^\n]*$/gm`: each entry's name and whole line.

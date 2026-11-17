@@ -1130,14 +1130,21 @@ content is stored or tested.
 `--ssh HOST` runs `ssh -T -x -a` in batch mode, without forwarding, local
 commands, a configured remote command or a persisted control master, with
 stdin kept open (OpenSSH 8.7 or newer for those overrides), and asks
-the destination's `sh` to run `token-max doctor --ssh-scan` from `PATH`, the
-release installers' directory or `~/.cargo/bin` on Linux or macOS. The destination's own discovery, frozen
+the destination's `sh` to run `token-max doctor --ssh-scan` with this build
+on Linux or macOS, x86_64 or arm64. The script first prints one short line:
+`run` before it execs the binary it found, or `copy` or `download <target>`
+when it found none. Then a second `ssh` streams this binary to the cache
+there, or downloads this version's release archive there and checks it
+against its published `.sha256`; either checks the binary runs before an
+atomic rename into the cache, and a third `ssh` runs the audit. The cache
+names a copy by the first 16 hex digits of its SHA-256 and a release by
+version and target, so a cached binary is always this build. The destination's own discovery, frozen
 snapshots, readers, exposure extraction and checks produce the same report a
 local run there would, priced from the catalog the coordinator sends and dated
 by the destination's own clock once its scan ends. Its stderr is discarded, so
 login-script output cannot reach the report; failures come from the stream or
-from the exit status of `ssh` (255), the shell (127 when token-max is missing)
-or the platform check.
+from the exit status of `ssh` (255), the platform check or the copy and
+download steps.
 
 The stream is private to one build. The destination writes a header naming the
 package version and a fingerprint of the stream's types, and starts scanning.

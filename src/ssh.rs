@@ -69,13 +69,13 @@ const RUN: &str = r#"PATH="$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/s
 const SUM: &str = r#"if command -v sha256sum >/dev/null; then sum=sha256sum; elif command -v shasum >/dev/null; then sum="shasum -a 256"; else exit 5; fi; mkdir -p "$cache" || exit 1; "#;
 
 /// Caches the binary on stdin under the name `$1` once its SHA-256 is `$2` and it runs there.
-/// Each step writes beside the cache so the final move is an atomic rename, and the install
-/// removes every other binary there, so repeated builds don't pile up.
-const COPY: &str = r#"tmp=$(mktemp "$cache/.copy.XXXXXX") || exit 1; clean() { rm -f "$tmp"; }; trap clean EXIT; cat >"$tmp" || exit 1; actual=$($sum <"$tmp") || exit 1; [ "${actual%% *}" = "$2" ] || exit 6; chmod 755 "$tmp" && "$tmp" --version >/dev/null 2>&1 || exit 4; rm -f "$cache"/token-max-*; mv -f "$tmp" "$cache/$1" || exit 1"#;
+/// Each step writes beside the cache so the final move is an atomic rename, and then removes
+/// every other binary there, so repeated builds don't pile up.
+const COPY: &str = r#"tmp=$(mktemp "$cache/.copy.XXXXXX") || exit 1; clean() { rm -f "$tmp"; }; trap clean EXIT; cat >"$tmp" || exit 1; actual=$($sum <"$tmp") || exit 1; [ "${actual%% *}" = "$2" ] || exit 6; chmod 755 "$tmp" && "$tmp" --version >/dev/null 2>&1 || exit 4; mv -f "$tmp" "$cache/$1" || exit 1; for old in "$cache"/token-max-*; do [ "$old" = "$cache/$1" ] || rm -f "$old"; done"#;
 
 /// Caches release `$1` from the releases at `$2` for the destination's platform, as the run
 /// script names it, once its archive matches the published checksum and it runs there.
-const DOWNLOAD: &str = r#"for tool in curl tar; do command -v $tool >/dev/null || exit 7; done; tmp=$(mktemp -d "$cache/.download.XXXXXX") || exit 1; clean() { rm -rf "$tmp"; }; trap clean EXIT; target=$arch-$abi; archive=token-max-$target.tar.xz; curl -LsSf -o "$tmp/$archive" "$2/download/v$1/$archive" && curl -LsSf -o "$tmp/sum" "$2/download/v$1/$archive.sha256" || exit 8; read -r expected rest <"$tmp/sum"; actual=$($sum <"$tmp/$archive") || exit 1; [ -n "$expected" ] && [ "${actual%% *}" = "$expected" ] || exit 6; tar -xf "$tmp/$archive" -C "$tmp" || exit 9; bin=$tmp/token-max-$target/token-max; [ "$("$bin" --version 2>/dev/null)" = "$1" ] || exit 4; rm -f "$cache"/token-max-*; mv -f "$bin" "$cache/token-max-v$1-$target" || exit 1"#;
+const DOWNLOAD: &str = r#"for tool in curl tar; do command -v $tool >/dev/null || exit 7; done; tmp=$(mktemp -d "$cache/.download.XXXXXX") || exit 1; clean() { rm -rf "$tmp"; }; trap clean EXIT; target=$arch-$abi; archive=token-max-$target.tar.xz; curl -LsSf -o "$tmp/$archive" "$2/download/v$1/$archive" && curl -LsSf -o "$tmp/sum" "$2/download/v$1/$archive.sha256" || exit 8; read -r expected rest <"$tmp/sum"; actual=$($sum <"$tmp/$archive") || exit 1; [ -n "$expected" ] && [ "${actual%% *}" = "$expected" ] || exit 6; tar -xf "$tmp/$archive" -C "$tmp" || exit 9; bin=$tmp/token-max-$target/token-max; [ "$("$bin" --version 2>/dev/null)" = "$1" ] || exit 4; mv -f "$bin" "$cache/token-max-v$1-$target" || exit 1; for old in "$cache"/token-max-*; do [ "$old" = "$cache/token-max-v$1-$target" ] || rm -f "$old"; done"#;
 
 /// Exit statuses the scripts and OpenSSH report.
 const UNSUPPORTED: i32 = 3;
@@ -340,10 +340,12 @@ fn provision(destination: &str, found: &Found) -> Result<(), ScanError> {
         Some(0) => return Ok(()),
         Some(SSH_FAILED) => connection_failed(destination),
         Some(DOES_NOT_RUN) => match found {
-            Found::Copy => format!(
-                "a copy of this token-max does not run there; copy a statically linked build, such as one for {}-unknown-linux-musl, or run a release",
+            // Most often a Linux build linked against this host's C library.
+            Found::Copy if cfg!(target_os = "linux") => format!(
+                "a copy of this token-max does not run there; run a statically linked build, such as one for {}-unknown-linux-musl, or a release",
                 std::env::consts::ARCH
             ),
+            Found::Copy => "a copy of this token-max does not run there".to_string(),
             _ => format!("{what} does not run there"),
         },
         Some(NO_CHECKSUM) => format!("needs sha256sum or shasum to check {what}"),
@@ -383,7 +385,7 @@ pub fn audit(
             Some(found) if !provisioned => found,
             Some(_) => {
                 return Err(session.fail(true, |_| {
-                    "token-max was put in the cache there but is still missing; check that ~/.cache/token-max/ssh there keeps its files".into()
+                    "token-max was put in its cache there but is still missing; another build may have replaced it, so run again".into()
                 }));
             }
             None => {
@@ -416,7 +418,10 @@ pub fn audit(
             // Anything but an empty stdout is not a token-max stream, which may never end.
             return Err(session.fail(!error.is_eof(), |status| match status {
                 Some(SSH_FAILED) => connection_failed(destination),
-                status => format!("token-max there did not start an SSH audit ({})", exit(status)),
+                status => format!(
+                    "token-max there did not start an SSH audit ({})",
+                    exit(status)
+                ),
             }));
         }
     };
@@ -598,5 +603,211 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
     match wire::write(&mut stdout, &outcome) {
         Ok(()) => code,
         Err(_) => 2,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use sha2::{Digest, Sha256};
+
+    use super::{COPY, DOWNLOAD, PLATFORM, RUN, SUM};
+    use crate::test_support::Workspace;
+
+    /// This host's release target, as the run script names it.
+    fn target() -> String {
+        let abi = match std::env::consts::OS {
+            "linux" => "unknown-linux-musl",
+            _ => "apple-darwin",
+        };
+        format!("{}-{abi}", std::env::consts::ARCH)
+    }
+
+    fn script(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A stand-in release binary of `version`.
+    fn release(path: &Path, version: &str) {
+        script(
+            path,
+            &format!(r#"[ "$1" = --version ] && echo {version} && exit; echo "ran $*""#),
+        );
+    }
+
+    /// Run `script` as a destination's `sh` does, with `home` and only the system's commands.
+    fn sh(home: &Path, script: &str, args: &[&str]) -> (Option<i32>, String) {
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(format!("{PLATFORM}{script}"))
+            .arg("sh")
+            .args(args)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap(),
+        )
+    }
+
+    fn cache(home: &Path) -> PathBuf {
+        home.join(".cache/token-max/ssh")
+    }
+
+    fn cached(home: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(cache(home))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn scripts_survive_single_quoting() {
+        for script in [PLATFORM, RUN, SUM, COPY, DOWNLOAD] {
+            assert!(!script.contains(['\'', '\\']), "{script}");
+        }
+    }
+
+    #[test]
+    fn the_run_script_picks_this_build_or_says_how_to_get_it() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let run = |os: &str, version: &str| {
+            sh(home, RUN, &[os, arch, "token-max-copy", version, "doctor"])
+        };
+        let download = format!("download {}\n", target());
+        // Nothing there yet.
+        assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), download.clone()));
+        // An installed release of this version runs on any platform; another version or an
+        // installed development build on this one does not.
+        let installed = home.join(".local/bin/token-max");
+        release(&installed, "0.0.1");
+        assert_eq!(run(os, "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run(os, "0.0.2"), (Some(0), "copy\n".into()));
+        release(&installed, "0.0.0");
+        assert_eq!(run(os, "0.0.0"), (Some(0), "copy\n".into()));
+        assert_eq!(run("plan9", "0.0.0"), (Some(0), "run\nran doctor\n".into()));
+        std::fs::remove_file(&installed).unwrap();
+        // Cached binaries: the copy on this platform, the release on another.
+        script(&cache(home).join("token-max-copy"), r#"echo "copy $*""#);
+        release(
+            &cache(home).join(format!("token-max-v0.0.1-{}", target())),
+            "0.0.1",
+        );
+        assert_eq!(run(os, "0.0.1"), (Some(0), "run\ncopy doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.2"), (Some(0), download));
+    }
+
+    /// Releases of `version` for this host under a `file:` URL, with a checksum that lies when
+    /// `corrupt`.
+    fn publish(root: &Path, version: &str, corrupt: bool) -> String {
+        let folder = format!("token-max-{}", target());
+        let stage = root.join("stage");
+        release(&stage.join(&folder).join("token-max"), version);
+        let dir = root.join(format!("releases/download/v{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join(format!("{folder}.tar.xz"));
+        let status = Command::new("tar")
+            .arg("-cJf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&stage)
+            .arg(&folder)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut hash: String = Sha256::digest(std::fs::read(&archive).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if corrupt {
+            hash = hash.replace(|c: char| c != '0', "0");
+        }
+        let name = archive.file_name().unwrap().to_str().unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.sha256")),
+            format!("{hash}  {name}\n"),
+        )
+        .unwrap();
+        format!("file://{}", root.join("releases").display())
+    }
+
+    #[test]
+    fn the_download_script_caches_only_a_checked_release() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        let releases = publish(&home.join("good"), "0.0.1", false);
+        let corrupt = publish(&home.join("bad"), "0.0.2", true);
+        let stale = cache(home).join("token-max-0000000000000000");
+        script(&stale, "exit 2");
+        let download = format!("{SUM}{DOWNLOAD}");
+        assert_eq!(sh(home, &download, &["0.0.2", &corrupt]).0, Some(6));
+        assert_eq!(sh(home, &download, &["0.0.3", &releases]).0, Some(8));
+        // A release that names another version is not this one.
+        let renamed = home.join("good/releases/download/v0.0.4");
+        std::fs::rename(home.join("good/releases/download/v0.0.1"), &renamed).unwrap();
+        assert_eq!(sh(home, &download, &["0.0.4", &releases]).0, Some(4));
+        std::fs::rename(&renamed, home.join("good/releases/download/v0.0.1")).unwrap();
+        // Failures leave the cache as it was.
+        assert_eq!(cached(home), ["token-max-0000000000000000"]);
+        assert_eq!(
+            sh(home, &download, &["0.0.1", &releases]),
+            (Some(0), "".into())
+        );
+        let name = format!("token-max-v0.0.1-{}", target());
+        assert_eq!(cached(home), [name]);
+        let (os, arch) = ("plan9", std::env::consts::ARCH);
+        assert_eq!(
+            sh(home, RUN, &[os, arch, "token-max-copy", "0.0.1", "doctor"]),
+            (Some(0), "run\nran doctor\n".into())
+        );
+    }
+
+    #[test]
+    fn the_copy_script_caches_only_an_intact_binary_that_runs() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        let binary = home.join("binary");
+        release(&binary, "0.0.1");
+        let bytes = std::fs::read(&binary).unwrap();
+        let hash: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let copy = |sha256: &str| {
+            let output = Command::new("sh")
+                .arg("-c")
+                .arg(format!("{PLATFORM}{SUM}{COPY}"))
+                .args(["sh", "token-max-copy", sha256])
+                .env_clear()
+                .env("HOME", home)
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .stdin(std::fs::File::open(&binary).unwrap())
+                .output()
+                .unwrap();
+            output.status.code()
+        };
+        assert_eq!(copy(&"0".repeat(64)), Some(6));
+        assert_eq!(cached(home), Vec::<String>::new());
+        assert_eq!(copy(&hash), Some(0));
+        assert_eq!(cached(home), ["token-max-copy"]);
+        assert_eq!(
+            std::fs::read(cache(home).join("token-max-copy")).unwrap(),
+            bytes
+        );
     }
 }

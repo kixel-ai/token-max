@@ -84,7 +84,10 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
 
     /// The cache the coordinator copies itself into on `host`.
     fn cache(&self, host: &str) -> PathBuf {
-        self.root.join("homes").join(host).join(".cache/token-max/ssh")
+        self.root
+            .join("homes")
+            .join(host)
+            .join(".cache/token-max/ssh")
     }
 
     /// A destination whose copy of this build is this shell script instead.
@@ -962,7 +965,7 @@ fn any_failed_destination_fails_the_whole_report() {
     let bare = format!(
         "bare: runs on {target}, and this development build for {os} {arch} has no release to download; build it with {build}\n"
     );
-    let other = format!("other: the token-max installed there is build 9.9.9+");
+    let other = "other: the token-max installed there is build 9.9.9+";
     for (host, expected) in [
         (
             "unreachable",
@@ -970,13 +973,19 @@ fn any_failed_destination_fails_the_whole_report() {
         ),
         ("bare", bare.as_str()),
         ("windows", "windows: unsupported platform"),
-        ("static", "static: a copy of this token-max does not run there"),
-        ("damaged", "damaged: the copy of this token-max arrived damaged\n"),
+        (
+            "static",
+            "static: a copy of this token-max does not run there",
+        ),
+        (
+            "damaged",
+            "damaged: the copy of this token-max arrived damaged\n",
+        ),
         (
             "old",
             "old: token-max there did not start an SSH audit (exit 2)\n",
         ),
-        ("other", other.as_str()),
+        ("other", other),
         ("corrupt", "corrupt: invalid SSH audit stream at line "),
         ("silent", "silent: invalid SSH audit stream at line 2"),
         ("broken", "broken: "),

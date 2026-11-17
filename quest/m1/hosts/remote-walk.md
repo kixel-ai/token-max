@@ -21,7 +21,3 @@ Recommended:
   the confirm still shows every edit before any write.
 - A host that fails stops the run before any later host is written, and the
   closing line names what each host wrote.
-
-## Required
-
-- [Run on an SSH host without installing token-max there](/quest/m1/hosts/remote-run.md) - a token-max of this version on each host to send the edits to

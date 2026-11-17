@@ -4554,7 +4554,11 @@ fn summary(
                     let better = if mark == Mark::Keep {
                         format!("{} costs less than {other}", setting_value(r.current))
                     } else if unset {
-                        let gap = per_month(t.one_hour_savings_usd.abs(), r.since, r.until);
+                        let gap = approx(
+                            monthly(t.one_hour_savings_usd.abs(), r.since, r.until),
+                            check_margin(result, r),
+                            "",
+                        );
                         let winner = setting_value(r.recommended);
                         format!(
                             "{winner} costs {gap} less every 30 days, saved whenever the unset default would be {}, and setting it keeps {winner} however usage is paid",

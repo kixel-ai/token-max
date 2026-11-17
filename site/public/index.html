@@ -32,7 +32,7 @@
   <p class="lede">token-max replays your Claude Code and Codex transcripts under other
   settings, at API prices, and shows which ones to change.</p>
   <p class="run-label">Run this:</p>
-  <pre class="run"><code><span class="cmd">curl -LsSf https://max.kixel.ai/run.sh | sh</span></code></pre>
+  <pre class="run" id="run"><code><span class="cmd">curl -LsSf https://max.kixel.ai/run.sh | sh</span></code></pre>
   <p class="small">Windows: <code class="cmd">irm https://max.kixel.ai/run.ps1 | iex</code>.
   It changes nothing without a yes. Works from the first release on; until then,
   <a href="https://github.com/kixel-ai/token-max#install">build it from source</a>.</p>
@@ -47,7 +47,7 @@
       <p class="big">~15% cheaper</p>
       <p>Every Claude Code user's subagents cache for 5 minutes. An hour would have
       cost ~$6,105 less.</p>
-      <code class="setting">"subagentPromptCacheTtl": "1h"</code>
+      <code class="setting">subagentPromptCacheTtl</code>
     </article>
     <article class="card">
       <h3 class="who">API-key main agent, 1h instead of 5m</h3>
@@ -55,10 +55,11 @@
       <p>A plan's included usage gets 1 hour, but API keys and usage credits get 5
       minutes. An hour would
       have cost ~$7,383 less.</p>
-      <code class="setting">"promptCacheTtl": "1h"</code>
+      <code class="setting">promptCacheTtl</code>
     </article>
   </div>
-  <p class="small">Both settings go in <code>~/.claude/settings.json</code>. ~ marks
+  <p class="see-yours"><a href="#run">Run it to see yours.</a></p>
+  <p class="small">Both settings live in <code>~/.claude/settings.json</code>. ~ marks
   figures from the requests that could be priced: 95.1% for subagents, 97.9% for
   the main agent. Replayed 2026-11-17;
   <a href="https://github.com/kixel-ai/token-max/blob/main/docs/results.md">full results</a>.</p>

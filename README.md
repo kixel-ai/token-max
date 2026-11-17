@@ -22,14 +22,15 @@ without a yes. These work from the first release on; until then, see
 On the maintainer's 56 days of Claude Code, replayed 2026-11-17:
 
 - **Subagents: a 1h prompt cache cost ~15% less than the default 5m**, ~$6,105.
-  Every Claude Code user's subagents get 5m. Set `"subagentPromptCacheTtl": "1h"`
-  in `~/.claude/settings.json`.
+  Every Claude Code user's subagents get 5m. The setting is
+  `subagentPromptCacheTtl` in `~/.claude/settings.json`.
 - **Main agent on an API key or usage credits: 1h cost ~36% less than 5m**,
   ~$7,383. A plan's included usage already gets 1h; API keys and usage credits
-  get 5m. Set `"promptCacheTtl": "1h"`.
+  get 5m. The setting is `promptCacheTtl`.
 
 ~ marks figures from the requests that could be priced: 95.1% for subagents,
 97.9% for the main agent. [The full results](https://github.com/kixel-ai/token-max/blob/main/docs/results.md) have the rest.
+Your sessions differ: run it to see yours.
 
 ![token-max doctor walking through three changes on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/site/public/walk.gif)
 

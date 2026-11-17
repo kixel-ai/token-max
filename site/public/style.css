@@ -49,10 +49,6 @@ code {
 	overflow-wrap: anywhere;
 }
 
-.small code {
-	white-space: nowrap;
-}
-
 .top,
 main > section,
 footer {
@@ -179,6 +175,12 @@ h2 {
 	background: var(--term);
 	color: var(--term-ink);
 	border-radius: 0.4rem;
+}
+
+.see-yours {
+	margin: 1.25rem 0 0;
+	font-size: 1.15rem;
+	font-weight: 700;
 }
 
 .steps {

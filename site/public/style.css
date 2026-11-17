@@ -49,6 +49,7 @@ code {
 }
 
 .top,
+.hero,
 main > section,
 footer {
 	max-width: 46rem;

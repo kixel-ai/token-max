@@ -205,7 +205,7 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                 (Harness::Codex, true) => baseline(
                     "off",
                     match m.base.monthly_savings_usd {
-                        Some(usd) if !m.unmeasured_generation => Saving::Saves(-usd),
+                        Some(usd) if !m.lower_bound() => Saving::Saves(-usd),
                         _ => Saving::NotMeasured,
                     },
                 ),

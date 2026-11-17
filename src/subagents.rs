@@ -19,7 +19,7 @@ use crate::model::{
     Agent, AgentControls, AgentDefinition, Harness, Millis, ModelSource, Owned, Profile, Request,
     Scan, Share, SourceShare, Subagent, SubagentCost,
 };
-use crate::prices::{Catalog, Sum, price_part, price_request, server_cost};
+use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
 use crate::safe::{ScanError, label};
 
@@ -1206,10 +1206,10 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
         };
         let (model_setting, effort_setting) = (joined(model_settings), joined(effort_settings));
         let mut cost = Sum::new();
-        let mut priced = 0;
+        let mut sample = Sample::default();
         for r in &requests {
             let c = price_request(catalog, r);
-            priced += u64::from(c.total_usd.is_some());
+            sample.add_cost(&c);
             cost.add(&c);
         }
         let provider = requests.iter().find_map(|r| r.provider.as_deref());
@@ -1221,16 +1221,19 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             .filter(|_| !requests.iter().all(on_cheapest))
             .map(|model| {
                 let mut sum = Sum::new();
+                let mut sample = Sample::default();
                 for r in &requests {
-                    if r.provider.as_deref() == provider {
-                        sum.add(&reprice(catalog, r, model));
+                    let cost = if r.provider.as_deref() == provider {
+                        reprice(catalog, r, model)
                     } else {
-                        sum.add(&crate::prices::unknown_cost(
+                        crate::prices::unknown_cost(
                             "a request from another provider has no cheapest model to compare",
-                        ));
-                    }
+                        )
+                    };
+                    sample.add_cost(&cost);
+                    sum.add(&cost);
                 }
-                sum.cost()
+                (sum.cost(), sample.estimate(requests.len() as u64))
             });
         lines.push(SubagentCost {
             harness,
@@ -1240,8 +1243,9 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             fork,
             runs: runs.len() as u64,
             requests: requests.len() as u64,
-            priced,
+            priced: sample.priced(),
             cost: cost.cost(),
+            estimate: sample.estimate(requests.len() as u64),
             models: shares(
                 requests
                     .iter()
@@ -1254,7 +1258,8 @@ pub fn subagent_costs(scan: &Scan, catalog: &Catalog) -> Vec<SubagentCost> {
             ),
             sources,
             cheapest: cheapest.map(str::to_string),
-            reprice,
+            reprice_estimate: reprice.as_ref().and_then(|r| r.1),
+            reprice: reprice.map(|r| r.0),
             model_setting,
             effort_setting,
         });

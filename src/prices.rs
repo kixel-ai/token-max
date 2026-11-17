@@ -746,9 +746,22 @@ impl Sample {
         self.weights += weight * weight;
     }
 
+    /// Add one item's cost when it was priced in full; a partly priced one is left for the
+    /// estimate to cover like any other unpriced item.
+    pub fn add_cost(&mut self, cost: &Cost) {
+        if let Some(usd) = cost.total_usd {
+            self.add(usd);
+        }
+    }
+
     /// How many items were priced.
     pub fn priced(&self) -> u64 {
         self.priced
+    }
+
+    /// What the priced items cost.
+    pub fn sum(&self) -> Usd {
+        self.sum
     }
 
     /// The figure over `total` items, `total` at least the priced ones, extrapolated from the
@@ -795,6 +808,18 @@ impl Sample {
             usd,
             margin: Some(margin),
         })
+    }
+}
+
+/// Pool another sample of different items, as though each had been added here.
+impl std::ops::AddAssign for Sample {
+    fn add_assign(&mut self, other: Self) {
+        self.priced += other.priced;
+        self.weight += other.weight;
+        self.sum += other.sum;
+        self.squares += other.squares;
+        self.cross += other.cross;
+        self.weights += other.weights;
     }
 }
 

@@ -639,6 +639,40 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
     }
 }
 
+/// An answered billing default holds only where every recorded project defaults the same way.
+/// A project that sends its requests to a cloud provider defaults the main conversation to 5m
+/// under the same unset setting as a plan's 1h, so the profile's main default is unknown
+/// again, as without an answer, and pinning the replay's winner covers both.
+fn unanswer_mixed_defaults(profile: &mut Profile) {
+    let answered = |t: &TtlControl| t.reason == TTL_PLAN_DEFAULT || t.reason == TTL_API_DEFAULT;
+    let main = &profile.ttl.main;
+    if !answered(main) {
+        return;
+    }
+    let mixed = profile
+        .idle_directories
+        .iter()
+        .flatten()
+        .filter_map(|(_, c)| c.ttl.as_ref())
+        .any(|t| t.main.owner == main.owner && t.main.value != main.value);
+    if !mixed {
+        return;
+    }
+    let unknown = |t: &mut TtlControl| {
+        if answered(t) {
+            t.value = None;
+            t.reason = TTL_BILLING_UNKNOWN.into();
+        }
+    };
+    unknown(&mut profile.ttl.main);
+    for control in profile.idle_directories.iter_mut().flatten() {
+        if let Some(ttl) = &mut control.1.ttl {
+            unknown(&mut ttl.main);
+        }
+    }
+    profile.billing = None;
+}
+
 /// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
 pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
 /// An unset main-conversation TTL on a profile answered as paid by a Claude plan.
@@ -1102,6 +1136,7 @@ pub fn discover_claude_controls(
         }
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
+        unanswer_mixed_defaults(profile);
         profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
@@ -3981,6 +4016,53 @@ mod tests {
             p.background_directories[&*gone.cwd.clone().unwrap()][0]
                 .value
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_project_on_a_cloud_provider_leaves_an_answered_plan_default_unknown() {
+        let w = Workspace::new();
+        let (plain, bedrock) = (w.home.join("plain"), w.home.join("bedrock"));
+        for project in [&plain, &bedrock] {
+            fs::create_dir_all(project.join(".git")).unwrap();
+        }
+        write(w.claude.join("settings.json"), "{}");
+        write(
+            bedrock.join(".claude/settings.json"),
+            r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#,
+        );
+        let resolve = |billing, projects: &[&Path]| {
+            let mut o = options(&w);
+            o.billing.insert(canonical(&w.claude), billing);
+            let mut data = discover(&o).unwrap();
+            let requests: Vec<Request> = projects
+                .iter()
+                .map(|p| request(claude(&data), Some(p)))
+                .collect();
+            discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
+            claude(&data).clone()
+        };
+        // Only plain projects: the plan's 1h holds everywhere.
+        let p = resolve(Billing::Plan, &[&plain]);
+        assert_eq!(
+            (p.billing, p.ttl.main.value),
+            (Some(Billing::Plan), Some(Ttl::OneHour))
+        );
+        // A Bedrock project defaults to 5m under the same unset setting, so neither default
+        // is the profile's, as without an answer.
+        let p = resolve(Billing::Plan, &[&plain, &bedrock]);
+        assert_eq!((p.billing, p.ttl.main.value), (None, None));
+        assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
+        let directories = p.idle_directories.as_ref().unwrap();
+        let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.clone();
+        assert_eq!(main(&plain).value, None);
+        assert_eq!(main(&plain).reason, TTL_BILLING_UNKNOWN);
+        assert_eq!(main(&bedrock).value, Some(Ttl::FiveMinutes));
+        // An API answer's 5m matches Bedrock's, so it holds.
+        let p = resolve(Billing::Api, &[&plain, &bedrock]);
+        assert_eq!(
+            (p.billing, p.ttl.main.value),
+            (Some(Billing::Api), Some(Ttl::FiveMinutes))
         );
     }
 

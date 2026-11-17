@@ -8747,6 +8747,78 @@ mod tests {
         }
     }
 
+    #[test]
+    fn an_answered_billing_line_keeps_an_extrapolated_figures_margin() {
+        // Three cache writes ten minutes apart, one on a model with no public price, so the
+        // TTL replay extrapolates over it, as in unpriced_requests_are_extrapolated_over.
+        let line = |n: u32, minute: u32, model: &str, tokens: u32| {
+            format!(
+                r#"{{"type":"assistant","sessionId":"session-b","timestamp":"2026-11-01T01:{minute:02}:00Z","version":"2.1.314","entrypoint":"sdk-ts","message":{{"id":"message-b{n}","model":"{model}","usage":{{"input_tokens":0,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":{tokens},"cache_creation":{{"ephemeral_5m_input_tokens":{tokens},"ephemeral_1h_input_tokens":0}},"service_tier":"standard","speed":"standard","inference_geo":"global","server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}}}}}}}}"#
+            )
+        };
+        for (settings, billing) in [
+            ("{}", Billing::Api),
+            (r#"{"promptCacheTtl":"5m"}"#, Billing::Plan),
+        ] {
+            let w = Workspace::new();
+            let file = w.claude.join("projects/project/main.jsonl");
+            w.fixture(&file, "claude.jsonl");
+            let mut text_ = std::fs::read_to_string(&file).unwrap();
+            for (n, minute, model, tokens) in [
+                (1, 0, "claude-opus-5-5", 2000),
+                (2, 10, "claude-opus-5-5", 2400),
+                (3, 20, "private-internal", 2800),
+            ] {
+                text_ += &line(n, minute, model, tokens);
+                text_ += "\n";
+            }
+            std::fs::write(&file, text_).unwrap();
+            std::fs::write(w.claude.join("settings.json"), settings).unwrap();
+            let mut options = w.scan_options();
+            options.discovery.claude_dirs = vec![w.claude.to_string_lossy().into_owned()];
+            let root = crate::discovery::discover(&options.discovery)
+                .unwrap()
+                .profiles[0]
+                .root
+                .clone();
+            options.discovery.billing.insert(root, billing);
+            let report = analyze(AnalyzeOptions {
+                scan: scan(&options).unwrap(),
+                catalog: &prices(),
+                since: None,
+                now: instant("2026-11-02T00:00:00Z"),
+                max_cost_per_use_usd: 1.0,
+            })
+            .unwrap();
+            let ttl = main_ttl(&report);
+            assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
+            // 5m, unset at the API default or pinned under a plan, against a 1h winner.
+            assert_eq!(ttl.base.current, Some(Ttl::FiveMinutes), "{billing:?}");
+            assert_eq!(ttl.base.recommended, Some(Ttl::OneHour), "{billing:?}");
+            let summary = text(&report, None, true);
+            let row = report_line(&summary, "Main-agent prompt cache TTL");
+            assert!(
+                row.head.contains("~$") && row.head.contains(" ± "),
+                "{summary}"
+            );
+            let baseline = crate::defaults::check(
+                &CheckResult::Ttl(ttl.clone()),
+                Some(&report.scan.profiles[0]),
+            );
+            match billing {
+                // Unset at its answered default, so nothing to compare.
+                Billing::Api => assert_eq!(baseline, None),
+                Billing::Plan => {
+                    let note = baseline.unwrap().text();
+                    assert!(
+                        note.starts_with("default 1h, costs ~$") && note.contains(" ± "),
+                        "{note}"
+                    );
+                }
+            }
+        }
+    }
+
     fn main_ttl(report: &Report) -> &TtlCheck {
         report
             .checks

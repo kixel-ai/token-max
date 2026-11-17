@@ -290,6 +290,12 @@ without a terminal, or an SSH destination's profiles keep naming both
 defaults. Nothing is stored: the next run asks again, so a profile that
 changes how it pays is never priced from a stale answer.
 
+An answer holds only where every recorded project of the profile resolves the
+same default. A project whose settings send its requests to Bedrock, Vertex or
+Foundry defaults to 5m under the same unset setting, so under a plan answer the
+profile's main default goes back to unknown: the line names both defaults and
+offers to pin the replay's winner, which outranks both.
+
 A plan's requests past its included usage are paid with usage credits and get
 5m, and the transcripts don't mark which ones those were. A plan answer prices
 them at 1h too, and the line and its `--details` uncertainty say so.

@@ -198,6 +198,67 @@ fn covering<'a>(
     })
 }
 
+/// Whether `doctor --defaults` has `c` on: off when policy turns it off, whatever the
+/// latest request carried; on when only a user, project or local file turns it off; None
+/// when neither applies, so what the requests carried decides. Always None outside
+/// `--defaults`, whose profiles carry no such switches.
+fn default_state(c: &ContextCost, profiles: &[Profile]) -> Option<bool> {
+    let control = c.control.as_ref()?;
+    let mine = || profiles.iter().filter(|p| c.profiles.contains(&p.id));
+    let covered = |switch: &Control| crate::defaults::covers(switch, control);
+    if mine()
+        .flat_map(|p| p.policy_off.iter().map(|(_, switch)| switch))
+        .any(covered)
+    {
+        return Some(false);
+    }
+    mine()
+        .flat_map(|p| p.pretended_on.iter().map(|(_, switch)| switch))
+        .any(covered)
+        .then_some(true)
+}
+
+/// What `c` cost over the window under `doctor --defaults`: its cost per request that
+/// carried it, over every request on its line when it was restored, else its own total.
+fn restored_usd(c: &ContextCost, usd: f64) -> f64 {
+    match c.pretended_requests {
+        Some(all) if c.requests > 0 => usd / c.requests as f64 * all as f64,
+        _ => usd,
+    }
+}
+
+/// Under `doctor --defaults`, scale each restored piece of a server, and the server's
+/// own part, on its own carriage, and rebuild the server's total from them, so the server
+/// always costs its own part plus its tools. Verdicts and costs per use stay those of the
+/// requests that carried each piece.
+fn restore_totals(c: &mut ContextCost) {
+    let restored = |c: &ContextCost| c.pretended_requests.is_some();
+    if !restored(c) && !c.details.iter().any(restored) {
+        return;
+    }
+    // A server's discovery has no switch of its own: it comes back with its server, on each
+    // of the line's requests.
+    if let Some(all) = c.pretended_requests {
+        for d in c
+            .details
+            .iter_mut()
+            .filter(|d| d.kind == ContextKind::McpDiscovery)
+        {
+            d.pretended_requests = (all > d.requests).then_some(all);
+        }
+    }
+    let mut own = c.estimated_usd;
+    let mut tools = 0.0;
+    for d in &mut c.details {
+        let Some(usd) = d.estimated_usd else { continue };
+        own = own.map(|o| o - usd);
+        let restored = restored_usd(d, usd);
+        d.estimated_usd = Some(restored);
+        tools += restored;
+    }
+    c.estimated_usd = own.map(|o| restored_usd(c, o.max(0.0)) + tools);
+}
+
 /// Context setting rows whose controls are not covered by a server recommendation.
 pub fn setting_rows(costs: &[ContextCost]) -> impl Iterator<Item = &ContextCost> {
     costs.iter().flat_map(|c| {
@@ -815,6 +876,8 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     let mut latest: HashMap<(usize, usize), (Millis, Vec<usize>)> = HashMap::default();
     let mut previous: HashMap<&str, Prior<'_>> = HashMap::default();
     let mut first_shaped: HashMap<(usize, usize), &str> = HashMap::default();
+    // Each line's requests whose context was recorded, which a restored piece is scaled to.
+    let mut shaped_requests: Vec<u64> = vec![];
     let mut ordered: Vec<_> = scan
         .requests
         .iter()
@@ -841,6 +904,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 owners.insert(keys.clone(), id);
                 owner_files.push(keys);
                 owner_profiles.push(IndexSet::default());
+                shaped_requests.push(0);
                 id
             }
         };
@@ -858,6 +922,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         };
         if shaped {
             first_shaped.entry((owner, share)).or_insert(&*r.id);
+            shaped_requests[owner] += 1;
         }
         let first = first_shaped.get(&(owner, share)) == Some(&&*r.id);
         // The MCP servers each of this request's own Codex profiles declares.
@@ -1028,6 +1093,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         instruction_size: None,
                         description: None,
                         shares: vec![],
+                        pretended_requests: None,
                     },
                     shares: IndexMap::default(),
                     owner,
@@ -1492,6 +1558,18 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.current = current
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
+            // Under --defaults, policy keeps a feature off whatever the latest request
+            // carried, and a feature only the user's files turn off is on, as though every
+            // request on its line carried it.
+            match default_state(&c, input.profiles) {
+                Some(false) => c.current = false,
+                Some(true) => {
+                    c.current = true;
+                    let all = shaped_requests[row.owner];
+                    c.pretended_requests = (all > c.requests).then_some(all);
+                }
+                None => {}
+            }
             c.estimated_usd =
                 (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);
             c.last_used = last.get(&index).copied();
@@ -1547,6 +1625,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for (owner, key, c) in &mut result {
         c.details = details.remove(&(*owner, *key)).unwrap_or_default();
         c.details.sort_by(|a, b| a.name.cmp(&b.name));
+        restore_totals(c);
         if c.verdict == Some(Verdict::Off) {
             for detail in &mut c.details {
                 detail.verdict = None;
@@ -3109,5 +3188,125 @@ mod tests {
             ),
             r#"mcp_servers."my.server".enabled = false"#
         );
+    }
+
+    #[test]
+    fn a_restored_piece_scales_to_its_own_lines_recorded_requests() {
+        // The user's file turns WebFetch off after the first of two recorded requests on
+        // its line; a third request recorded no context, and a fourth ran on another line.
+        let scan = ExposureScan {
+            components: vec![
+                component("fetch", Category::ToolSchema, "WebFetch", 400, &[]),
+                component("bash", Category::ToolSchema, "Bash", 400, &[]),
+            ],
+            requests: vec![
+                exposure("r1", &["bash", "fetch"], 0, 800),
+                exposure("r2", &["bash"], 0, 400),
+                exposure("r4", &["bash", "fetch"], 0, 800),
+            ],
+            ..ExposureScan::default()
+        };
+        let mut requests = vec![
+            request("r1", 1, 0, 0, 200),
+            request("r2", 2, 0, 0, 100),
+            request("r3", 3, 0, 0, 100),
+            request("r4", 4, 0, 0, 200),
+        ];
+        requests[3].profiles = vec!["other".into()].into();
+        let mut mine = crate::test_support::make_profile("profile", "/mine");
+        mine.pretended_on = vec![(
+            "/mine/settings.json".into(),
+            deny("WebFetch".into()).unwrap(),
+        )];
+        let other = crate::test_support::make_profile("other", "/other");
+        let rows = context_costs(&ContextInput {
+            scan: &scan,
+            requests: &requests,
+            profiles: &[mine, other],
+            catalog: &prices(),
+            snapshots: &[],
+            max_cost_per_use_usd: 1.0,
+        });
+        let fetch = rows
+            .iter()
+            .find(|c| c.name == "WebFetch" && c.profiles == ["profile"])
+            .unwrap();
+        assert_eq!((fetch.requests, fetch.pretended_requests), (1, Some(2)));
+        assert!(fetch.current);
+    }
+
+    #[test]
+    fn a_restored_server_costs_its_own_part_plus_its_tools() {
+        // Three requests: the server carried read and write, then read, then neither, and
+        // the user's files turn the whole server off. Each piece costs $1 a request.
+        let piece = |name: &str, requests: u64, usd: f64, details: Vec<ContextCost>| ContextCost {
+            harness: Harness::Codex,
+            profiles: vec!["p".into()],
+            kind: ContextKind::McpServer,
+            name: name.into(),
+            control: None,
+            requests,
+            priced: requests,
+            conditional_requests: 0,
+            tier_unknown_requests: 0,
+            assumptions: vec![],
+            tokens: None,
+            cost_usd: Usd::from_f64(usd),
+            estimated_usd: Some(usd),
+            calls: Some(0),
+            last_used: None,
+            current: true,
+            cost_per_use_usd: None,
+            verdict: None,
+            largest_characters: None,
+            skill: None,
+            details,
+            instruction_size: None,
+            description: None,
+            shares: vec![],
+            pretended_requests: (requests < 3).then_some(3),
+        };
+        // The server's own part rode on the two requests that carried a tool, and its
+        // discovery, which has no switch of its own, on the first.
+        let tool = |name: &str, requests: u64, usd: f64| ContextCost {
+            control: deny(format!("mcp__docs__{name}")),
+            ..piece(name, requests, usd, vec![])
+        };
+        let discovery = ContextCost {
+            kind: ContextKind::McpDiscovery,
+            pretended_requests: None,
+            ..piece("discovery", 1, 1.0, vec![])
+        };
+        // A tool policy keeps off, whose switch could not be proven, stays as recorded.
+        let kept = ContextCost {
+            kind: ContextKind::McpTool,
+            pretended_requests: None,
+            ..piece("kept", 1, 1.0, vec![])
+        };
+        let mut server = piece(
+            "docs",
+            2,
+            2.0 + 3.0 + 1.0 + 1.0,
+            vec![tool("read", 2, 2.0), tool("write", 1, 1.0), discovery, kept],
+        );
+        restore_totals(&mut server);
+        let details: Vec<f64> = server
+            .details
+            .iter()
+            .map(|d| d.estimated_usd.unwrap())
+            .collect();
+        assert_eq!(details, [3.0, 3.0, 3.0, 1.0]);
+        assert_eq!(server.estimated_usd, Some(3.0 + 9.0 + 1.0));
+        // A server still sent keeps its own total and gains only what its restored tool
+        // would have cost.
+        let mut server = piece("docs", 3, 3.0 + 3.0, vec![piece("write", 1, 1.0, vec![])]);
+        server.pretended_requests = None;
+        server.details[0].estimated_usd = Some(1.0);
+        restore_totals(&mut server);
+        assert_eq!(server.estimated_usd, Some(5.0 + 3.0));
+        // Outside --defaults nothing changes.
+        let mut kept = piece("docs", 3, 4.0, vec![piece("read", 3, 1.0, vec![])]);
+        restore_totals(&mut kept);
+        assert_eq!(kept.estimated_usd, Some(4.0));
     }
 }

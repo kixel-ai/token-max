@@ -92,6 +92,8 @@ fn check(
     let mut sessions: HashMap<&str, (Millis, bool)> = HashMap::default();
     let mut unmeasured = 0;
     let mut recorded_requests = crate::collections::HashSet::default();
+    // Recorded main-agent requests, and those of them that carried memory.
+    let (mut main_recorded, mut main_carried) = (0u64, 0u64);
     for e in &scan.exposure.requests {
         let Some(r) = requests.get(&*e.request) else {
             continue;
@@ -118,6 +120,10 @@ fn check(
             && !memory.iter().any(|c| c.name == MEMORY_SECTION)
         {
             unmeasured += 1;
+        }
+        if r.agent == Agent::Main {
+            main_recorded += 1;
+            main_carried += u64::from(!memory.is_empty());
         }
         let here = control.directory.is_none() || control.directory.as_deref() == r.cwd.as_deref();
         if r.agent == Agent::Main && here {
@@ -171,6 +177,12 @@ fn check(
         .iter()
         .filter(|m| m.harness == profile.harness && line.covers(&m.profiles))
         .collect();
+    // Claude Code loads memory into every request while it is on, so recorded requests
+    // that carried none ran with it off, and what it costs on is unknown, not nothing.
+    let never_on = profile.harness == Harness::Claude
+        && current == Some(true)
+        && rows.is_empty()
+        && mine.len() > unrecorded;
     // Unpriced requests are scaled from the priced ones, as the context row does.
     let context_usd = rows
         .iter()
@@ -179,7 +191,22 @@ fn check(
                 .then(|| Usd::from_f64(c.cost_usd.to_f64() * c.requests as f64 / c.priced as f64))
         })
         .sum::<Option<Usd>>()
-        .filter(|_| !rows.is_empty() || unrecorded == 0);
+        .filter(|_| !rows.is_empty() || (unrecorded == 0 && !never_on));
+    // Under --defaults memory is on, though the settings files turned it off for some
+    // recorded requests: what it cost while main-agent requests carried it, the files read
+    // back included, since a request without memory reads none, stands for all of them.
+    let scaled = (scan.defaults
+        && profile.harness == Harness::Claude
+        && current == Some(true)
+        && main_carried > 0
+        && main_carried < main_recorded)
+        .then_some((main_carried, main_recorded));
+    let context_usd = match scaled {
+        Some((carried, recorded)) => {
+            context_usd.map(|usd| Usd::from_f64(usd.to_f64() * recorded as f64 / carried as f64))
+        }
+        None => context_usd,
+    };
     let reads = uses
         .iter()
         .filter(|m| m.access == MemoryAccess::Read)
@@ -224,7 +251,17 @@ fn check(
                 .to_string(),
         );
     }
-    if rows.is_empty() && unrecorded > 0 {
+    if let Some((carried, recorded)) = scaled {
+        uncertainty.push(format!(
+            "a settings file turns auto memory off, so {carried} of {recorded} recorded main-agent requests carried it; its loaded context and the files read back are scaled from those to all of them, and its writes are theirs"
+        ));
+    }
+    if never_on {
+        uncertainty.push(format!(
+            "no recorded request carried auto memory, though {} turns it on, so what it costs is unmeasured",
+            control.owner
+        ));
+    } else if rows.is_empty() && unrecorded > 0 {
         uncertainty.push(format!(
             "none of {unrecorded} requests recorded their context, so loaded memory is unmeasured"
         ));

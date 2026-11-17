@@ -356,7 +356,7 @@ fn entries(file: &str, config: &Map<String, Value>) -> Vec<Entry> {
 }
 
 /// A Claude server's name as its tools carry it, `mcp__<name>__<tool>`.
-fn tool_name(server: &str) -> String {
+pub(crate) fn tool_name(server: &str) -> String {
     server
         .chars()
         .map(|c| {

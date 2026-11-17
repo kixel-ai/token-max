@@ -161,6 +161,7 @@ mod tests {
             subagents: vec![],
             t3: vec![],
             sessions: Default::default(),
+            defaults: false,
         }
     }
 

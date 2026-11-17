@@ -828,7 +828,7 @@ struct Prior<'a> {
 struct Row {
     cost: ContextCost,
     /// Requests and what each priced one cost, by the index of the profiles that recorded them.
-    shares: IndexMap<usize, (u64, Sample)>,
+    shares: IndexMap<usize, crate::model::ProfileShare>,
     /// What each priced request cost.
     sample: Sample,
     assumptions: IndexSet<String>,
@@ -1118,7 +1118,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             });
             *row.from_start.entry(share).or_default() |= first;
             row.cost.requests += 1;
-            row.shares.entry(share).or_default().0 += 1;
+            let counts = row.shares.entry(share).or_default();
+            counts.requests += 1;
+            counts.recorded_requests += u64::from(shaped);
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
         }
@@ -1284,7 +1286,11 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 row.cost.priced += 1;
                 row.cost.cost_usd += cost;
                 row.sample.add(cost);
-                row.shares.entry(share).or_default().1.add(cost);
+                let counts = row.shares.entry(share).or_default();
+                counts.sample.add(cost);
+                if shaped {
+                    counts.recorded.add(cost);
+                }
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));
                 }
@@ -1559,10 +1565,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.shares = row
                 .shares
                 .into_iter()
-                .map(|(index, (requests, sample))| crate::model::ProfileShare {
+                .map(|(index, share)| crate::model::ProfileShare {
                     profiles: sources[index].iter().map(|p| p.to_string()).collect(),
-                    requests,
-                    sample,
+                    ..share
                 })
                 .collect();
             c.current = current

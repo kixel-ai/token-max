@@ -2766,7 +2766,7 @@ pub struct ContextCost {
 }
 
 /// The requests on a line that one set of profiles recorded, and what the piece cost in them.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProfileShare {
     /// More than one when a request was copied into several profiles' histories, or T3
     /// could not settle which ran it.
@@ -2774,6 +2774,10 @@ pub struct ProfileShare {
     pub requests: u64,
     /// What each priced request cost.
     pub sample: crate::prices::Sample,
+    /// Those of `requests` that recorded their context, rather than only their tool output.
+    pub recorded_requests: u64,
+    /// What each priced one of those cost.
+    pub recorded: crate::prices::Sample,
 }
 
 impl ContextCost {
@@ -2790,13 +2794,18 @@ impl ContextCost {
     pub fn shares_within(&self, covers: impl Fn(&[String]) -> bool) -> Vec<ProfileShare> {
         if self.shares.iter().all(|s| covers(&s.profiles)) {
             return covers(&self.profiles)
-                .then(|| ProfileShare {
-                    profiles: self.profiles.clone(),
-                    requests: self.requests,
-                    sample: self.shares.iter().fold(Default::default(), |mut sum, s| {
-                        sum += s.sample;
-                        sum
-                    }),
+                .then(|| {
+                    let mut whole = ProfileShare {
+                        profiles: self.profiles.clone(),
+                        requests: self.requests,
+                        ..ProfileShare::default()
+                    };
+                    for s in &self.shares {
+                        whole.sample += s.sample;
+                        whole.recorded_requests += s.recorded_requests;
+                        whole.recorded += s.recorded;
+                    }
+                    whole
                 })
                 .into_iter()
                 .collect();

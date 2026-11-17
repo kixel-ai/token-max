@@ -8499,11 +8499,13 @@ mod tests {
         let mut options = w.scan_options();
         let root = w.claude.to_string_lossy().into_owned();
         options.discovery.claude_dirs = vec![root];
-        let canonical = std::fs::canonicalize(&w.claude).unwrap();
-        options
-            .discovery
-            .billing
-            .insert(canonical.to_string_lossy().into_owned(), billing);
+        // Keyed by the root discovery reports, as doctor's question does.
+        let root = crate::discovery::discover(&options.discovery)
+            .unwrap()
+            .profiles[0]
+            .root
+            .clone();
+        options.discovery.billing.insert(root, billing);
         analyze(AnalyzeOptions {
             scan: scan(&options).unwrap(),
             catalog: &prices(),

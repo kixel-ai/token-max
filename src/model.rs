@@ -236,6 +236,26 @@ pub enum Ttl {
     OneHour,
 }
 
+/// How a Claude profile pays for its requests, as the person running doctor answered it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Billing {
+    /// A Claude plan's included usage; usage credits pay for requests past it.
+    Plan,
+    /// An Anthropic API key or usage credits.
+    Api,
+}
+
+impl Billing {
+    /// The main conversation's cache TTL while no setting picks one.
+    pub fn main_ttl(self) -> Ttl {
+        match self {
+            Billing::Plan => Ttl::OneHour,
+            Billing::Api => Ttl::FiveMinutes,
+        }
+    }
+}
+
 impl Ttl {
     pub const ALL: [Ttl; 2] = [Ttl::FiveMinutes, Ttl::OneHour];
     pub fn as_str(self) -> &'static str {
@@ -926,6 +946,9 @@ pub struct Profile {
     pub settings_file: String,
     pub ttl: PerBucket<TtlControl>,
     pub provider: Option<String>,
+    /// How a Claude profile pays, when doctor asked; None when unasked or for a cloud provider.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub billing: Option<Billing>,
     pub settings: IndexMap<String, Scalar>,
     /// MCP server ids the settings file declares, which its own switches can turn off.
     pub mcp_servers: Vec<String>,

@@ -3635,6 +3635,7 @@ mod tests {
                 subagent: ttl(Ttl::FiveMinutes, "settings.json:subagentPromptCacheTtl"),
             },
             provider: Some("anthropic".into()),
+            billing: None,
             settings: IndexMap::from_iter([("idleCompaction".to_string(), Scalar::Bool(false))]),
             mcp_servers: vec![],
             compaction: compaction_controls(&CompactionSources {

@@ -663,6 +663,7 @@ mod tests {
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
                 defaults: false,
+                billing: Default::default(),
             }
         }
 

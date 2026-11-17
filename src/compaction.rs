@@ -2016,6 +2016,7 @@ mod tests {
                 subagent: ttl(Ttl::FiveMinutes, "settings.json:subagentPromptCacheTtl"),
             },
             provider: Some("anthropic".into()),
+            billing: None,
             settings: IndexMap::default(),
             mcp_servers: vec![],
             compaction: controls(
@@ -3686,6 +3687,7 @@ mod tests {
                     codex_system_config_file: text(&w.home.join("system.toml")),
                     codex_requirements_file: text(&w.home.join("requirements.toml")),
                     defaults: false,
+                    billing: Default::default(),
                 },
                 since: None,
             }

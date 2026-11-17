@@ -192,6 +192,7 @@ fn analysis(home: &Path, since: Option<i64>, max_cost_per_use_usd: f64) -> Repor
         codex_system_config_file: format!("{home}/system.toml"),
         codex_requirements_file: format!("{home}/requirements.toml"),
         defaults: false,
+        billing: Default::default(),
     };
     analyze(AnalyzeOptions {
         scan: scan(&ScanOptions { discovery, since }).unwrap(),

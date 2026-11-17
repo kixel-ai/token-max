@@ -9,10 +9,10 @@ use crate::context::{
     typed_only, unreadable_lines,
 };
 use crate::controls::CAPPED_SHARED;
-use crate::discovery::TTL_BILLING_UNKNOWN;
+use crate::discovery::{TTL_API_DEFAULT, TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
-    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
+    Action, BackgroundCheck, Billing, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
     CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
     EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, MemoryCheck, Millis,
     ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share,
@@ -493,8 +493,18 @@ fn plan_note(
     match result {
         CheckResult::Ttl(_) if unset_main_ttl(result, r, out) => Some((
             "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
-            "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets",
+            TTL_SOURCE,
         )),
+        CheckResult::Ttl(_) => match answered_main_ttl(result, r, out)? {
+            Billing::Plan => Some((
+                "while it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m.",
+                TTL_SOURCE,
+            )),
+            Billing::Api => Some((
+                "while it is unset, Claude Code gives the main conversation 5m on an API key or usage credits, which you answered pay for this profile.",
+                TTL_SOURCE,
+            )),
+        },
         CheckResult::Speed(_) if harness == Some(Harness::Claude) => Some((
             "on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left.",
             "https://code.claude.com/docs/en/fast-mode#requirements",
@@ -522,6 +532,22 @@ fn plan_note(
         }
         _ => None,
     }
+}
+
+/// Where Claude Code documents which TTL each request gets.
+const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets";
+
+/// How the profile pays, when a check is the main TTL left unset at the default that billing,
+/// as answered in doctor, picks.
+fn answered_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<Billing> {
+    if !matches!(result, CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main) {
+        return None;
+    }
+    let profile = out.profiles.get(r.profile)?;
+    let reason = profile.ttl.main.reason.as_str();
+    (reason == TTL_PLAN_DEFAULT || reason == TTL_API_DEFAULT)
+        .then_some(profile.billing)
+        .flatten()
 }
 
 /// Whether a check is the main TTL left unset, which Claude Code picks by how the request is paid for.
@@ -4020,8 +4046,8 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
                 other => setting_value(other),
             }
         };
-        if let CheckResult::Compaction(c) = result
-            && c.unset
+        if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || answered_main_ttl(result, &r, &out).is_some()
         {
             current += " (default)";
         }
@@ -4446,8 +4472,8 @@ fn summary(
             other => setting_value(other),
         };
         row.value = current.clone();
-        if let CheckResult::Compaction(c) = result
-            && c.unset
+        if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || answered_main_ttl(result, r, out).is_some()
         {
             row.value += " (default)";
         }

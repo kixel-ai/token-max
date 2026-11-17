@@ -206,6 +206,7 @@ fn analysis(
         codex_system_config_file: text(&w.home.join("system.toml")),
         codex_requirements_file: text(&w.home.join("requirements.toml")),
         defaults: false,
+        billing: Default::default(),
     };
     select(&mut discovery);
     let catalog = load_prices(&PriceOptions {
@@ -835,6 +836,7 @@ fn explicit_windows_match_the_library_replay() {
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
                 defaults: false,
+                billing: Default::default(),
             },
             since: Some(since),
         })

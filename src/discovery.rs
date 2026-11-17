@@ -16,7 +16,7 @@ use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
     Agent, BackgroundControl, Control, ControlValue, Harness, IdleControl, Location, MemoryControl,
     PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl,
-    Ttl, TtlControl,
+    Billing, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -38,6 +38,8 @@ pub struct DiscoveryOptions {
     /// Read every user, project and local settings file as unset, as `doctor --defaults`
     /// shows the report; managed and system policy still apply.
     pub defaults: bool,
+    /// How each Claude profile pays, by its canonical root, as doctor asked.
+    pub billing: IndexMap<String, Billing>,
 }
 
 impl DiscoveryOptions {
@@ -62,6 +64,7 @@ impl DiscoveryOptions {
             codex_system_config_file: "/etc/codex/config.toml".into(),
             codex_requirements_file: "/etc/codex/requirements.toml".into(),
             defaults: false,
+            billing: IndexMap::default(),
         })
     }
 
@@ -538,6 +541,8 @@ struct TtlSources<'a> {
     managed_file: &'a str,
     /// Settings in precedence order; defaults to the merged config then the managed file.
     scopes: Option<&'a [SettingsScope<'a>]>,
+    /// How the profile pays, which picks the main conversation's default.
+    billing: Option<Billing>,
 }
 
 fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
@@ -548,6 +553,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         managed,
         managed_file,
         scopes,
+        billing,
     } = *sources;
     let default_scopes = [
         SettingsScope { config, file },
@@ -612,6 +618,12 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         {
             value = Some(Ttl::FiveMinutes);
             reason = "explicit cloud-provider billing default";
+        } else if let Some(billing) = billing {
+            value = Some(billing.main_ttl());
+            reason = match billing {
+                Billing::Plan => TTL_PLAN_DEFAULT,
+                Billing::Api => TTL_API_DEFAULT,
+            };
         } else {
             reason = TTL_BILLING_UNKNOWN;
         }
@@ -629,6 +641,10 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
 
 /// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
 pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
+/// An unset main-conversation TTL on a profile answered as paid by a Claude plan.
+pub const TTL_PLAN_DEFAULT: &str = "Claude plan default, as answered; requests past the plan's included usage are paid with usage credits and get 5m";
+/// An unset main-conversation TTL on a profile answered as paid by an API key or usage credits.
+pub const TTL_API_DEFAULT: &str = "API key or usage credits default, as answered";
 
 /// Codex's byte budget for the AGENTS.md chain it loads.
 const AGENTS_BUDGET: &str = "project_doc_max_bytes";
@@ -1067,6 +1083,7 @@ pub fn discover_claude_controls(
                 managed: &managed,
                 managed_file,
                 scopes: Some(&scopes),
+                billing: profile.billing,
             }));
             idle.compaction = Some(compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
@@ -2126,6 +2143,10 @@ pub(crate) fn profile(
             Err(_) => return Err(error("cannot inspect transcript directory", &path, 0)),
         }
     }
+    // Only a Claude profile on the Anthropic API has a billing-dependent default.
+    let billing = (claude && provider.is_none())
+        .then(|| options.billing.get(&canonical).copied())
+        .flatten();
     let ttl = ttl_controls(&TtlSources {
         config,
         env: local_env,
@@ -2133,6 +2154,7 @@ pub(crate) fn profile(
         managed: &managed,
         managed_file,
         scopes: None,
+        billing,
     });
     let mut settings = structural_settings(config);
     let mut instruction_budget_file = None;
@@ -2211,6 +2233,7 @@ pub(crate) fn profile(
         settings_file,
         ttl,
         provider,
+        billing,
         settings,
         mcp_servers,
         compaction,
@@ -2560,6 +2583,7 @@ mod tests {
             codex_system_config_file: text(&w.home.join("system.toml")),
             codex_requirements_file: text(&w.home.join("requirements.toml")),
             defaults: false,
+            billing: IndexMap::default(),
         }
     }
 

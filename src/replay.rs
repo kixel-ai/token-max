@@ -7,7 +7,7 @@ use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
 use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
 use crate::context::{ContextInput, context_costs};
-use crate::discovery::TTL_BILLING_UNKNOWN;
+use crate::discovery::{TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
 use crate::estimates::estimate_usage;
 use crate::exposure::calibrate;
 use crate::fast::{SpeedInput, speed_checks};
@@ -751,7 +751,8 @@ fn ttl_check(
             "current supported client version is not established; recorded latest version is absent or predates TTL controls",
         );
     }
-    if current.value.is_none() {
+    // A plan's overflow onto usage credits gets 5m, which the transcripts don't mark.
+    if current.value.is_none() || current.reason == TTL_PLAN_DEFAULT {
         uncertainty.insert(&current.reason);
     }
     if profiles.iter().any(|p| !group.ids.iter().any(|id| id == p)) {

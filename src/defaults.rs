@@ -82,16 +82,23 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                 }
             };
             // Bedrock, Vertex and Foundry default the main conversation to 5m too, whatever
-            // sets the current value.
+            // sets the current value; on the Anthropic API the default follows how the
+            // profile pays, when doctor asked.
             let cloud = profile.is_some_and(|p| p.provider.is_some());
-            match t.bucket {
-                Bucket::Main if !cloud => baseline(
-                    "1h on a Claude plan, 5m on usage credits or an API key",
-                    saving(Saving::UpTo),
-                ),
-                _ if current == Ttl::FiveMinutes => None,
-                _ => baseline("5m", saving(Saving::Saves)),
+            let default = match profile.and_then(|p| p.billing) {
+                Some(billing) if t.bucket == Bucket::Main => billing.main_ttl(),
+                None if t.bucket == Bucket::Main && !cloud => {
+                    return baseline(
+                        "1h on a Claude plan, 5m on usage credits or an API key",
+                        saving(Saving::UpTo),
+                    );
+                }
+                _ => Ttl::FiveMinutes,
+            };
+            if current == default {
+                return None;
             }
+            baseline(default.as_str(), saving(Saving::Saves))
         }
         CheckResult::Compaction(c) => {
             let current = c.base.current.filter(|_| !c.unset)?;

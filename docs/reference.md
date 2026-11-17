@@ -794,8 +794,11 @@ feature availability. The threshold defaults to 200,000 tokens, with a 100,000
 floor for `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`. This check does not tune it.
 Current user, project/local, managed and active-profile environment owners are
 read separately from historical metadata. Missing directories, unknown execution
-mode/version/flags or unresolved controls remain advisory and unpriced where they
-affect the comparison. Native CLI interactivity needs REPL provenance; Desktop
+mode/version/flags or unresolved controls leave the sessions they affect
+unpriced. On and off are paired session by session, and a session that cannot be
+priced both ways is extrapolated from the priced sessions where idle compaction
+could act, marked with `~` and a 95% margin; a session it could not act on
+counts exactly, even when its replay failed. With no such session priced, the line is not enough evidence. Native CLI interactivity needs REPL provenance; Desktop
 labels alone do not establish local/SSH execution. T3's proactive policies are
 outside this native check.
 
@@ -866,8 +869,10 @@ The lifecycle guards for each gap are rebuilt from T3's event log at every
 completed-run event and when the timer would fire. T3 keeps about one day of
 that log, so the check's window starts where the log is complete, and gaps
 that open earlier stay as recorded in every mode. Unknown lifecycle or missing
-compatible full-prefix calibration stays unpriced, and the report names the
-first missing input. See [T3 evidence and sources](t3.md) for supported schema
+compatible full-prefix calibration leaves that session unpriced; each mode is
+paired with the current one session by session and extrapolated over such
+sessions, as the native check does. A mode no session prices, or an unresolved
+window, leaves the line unpriced, and the report names the first missing input. See [T3 evidence and sources](t3.md) for supported schema
 and limits.
 
 ## Other hosts over SSH

@@ -141,13 +141,20 @@ even if most periods prefer the other TTL. A cold-prefix sensitivity and numeric
 reuse break-even accompany the estimate and do not veto it.
 
 Scenarios are compared part by part. The decision sums the difference over parts
-priced under both options and treats every other part as able to differ by at
-most the largest priced difference. A winner is recommended only when that bound
-cannot flip the sign; otherwise the check stays unknown. A handful of failed or
-in-flight requests therefore cannot hide a clear winner, while a close call stays
-unresolved. `coverage` gives the priced and total part counts, and the TTL result
-adds the 1h saving so a kept setting can state its margin. Scenario totals
-still stay unknown with their reasons.
+priced under both options and extrapolates it to every part, priced or not, by the
+priced parts' mean: $950 measured on 95% of the parts reads ~$1,000. Unreadable
+transcript lines count as further unpriced parts. Each scenario's cost and the
+saving get their own margin of error: a 95% interval's half-width for a total
+estimated from a simple random sample of the parts, with the finite-population
+correction and the Student-t value for few priced parts, from the spread of that figure's per-part values among the priced
+parts. It is a statistical estimate under the assumption that unpriced parts
+resemble priced ones, not a bound, since an unpriced part has no price to bound
+it by. One priced part leaves no spread, so its margin is unknown. The sign of
+the extrapolated saving picks the winner whenever any part was priced; with none
+priced, the check stays unknown. `coverage` gives the priced and total part
+counts, and the TTL result adds the 1h saving, extrapolated the same way, so a
+kept setting can state its margin. Scenario totals that include unknown charges
+keep their reasons beside the extrapolated comparison.
 
 The maintainer's [B1 cache-state decision](https://github.com/kixelated/token-max/pull/3#issuecomment-6710296074)
 uses explicit known, estimated and unknown predecessor states. A recorded cache
@@ -537,8 +544,11 @@ checked 2026-11-08). Recorded uniform 12-hour writes keep their actual write
 rate and long coverage; a 30-minute ping preserves that existing expiry.
 Mixed write lifetimes leave prefix geometry unresolved. Older models' retention
 is a range. Every cap compares the
-same fully priced sessions; unresolved sessions leave the aggregate winner
-unknown, without bounding their cost by unrelated priced sessions.
+same fully priced sessions, and every dollar figure is extrapolated from them to
+the unresolved sessions by idle periods: the priced sessions' saving per period
+times all periods, a ratio estimator whose 95% margin comes from how far each
+priced session strays from that rate. It assumes the unresolved sessions
+resemble the priced ones.
 
 Current ping state is unknown: scheduled-task metadata does
 not establish a task's purpose, and recorded turns remain ordinary activity.

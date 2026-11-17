@@ -103,7 +103,9 @@ Decided 2026-11-08 (maintainer), for SSH audits: ✅ each destination runs a
 version fails with the command to run (rejected: copy the local binary over
 SSH to a temporary path, run it and delete it). As built, each SSH host is
 analyzed in its own section of the report, so a history copied between hosts
-counts on each and amounts across hosts are not added.
+counts on each and amounts across hosts are not added. Amended 2026-11-17:
+[the hosts epic](/quest/m1/hosts/README.md) sums hosts and copies or
+downloads token-max onto each.
 
 Recommendations for every check:
 
@@ -114,9 +116,9 @@ Recommendations for every check:
   period or in every sensitivity scenario. Missing inputs that cannot be
   estimated leave their own requests unpriced; the estimate extrapolates
   from the priced requests to all of them, marks the figure with `~`, and
-  gives its margin of error and the share measured (amended 2026-11-17, see
-  [extrapolate.md](/quest/m0/launch/extrapolate.md)). Uncertainty alone never
-  blocks one.
+  gives its margin of error and the share measured (amended 2026-11-17 in
+  [#143](https://github.com/kixel-ai/token-max/pull/143)). Uncertainty alone
+  never blocks one.
 - Distinguish measured token usage, estimated attribution or replay, and
   guidance without dollars in both text and JSON. Missing attribution is
   unknown, never zero. Exit 2 on a failed scan, 1 when a change is

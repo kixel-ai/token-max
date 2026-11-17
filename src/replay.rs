@@ -22,8 +22,8 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
-    price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
+    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sample, Sum, add_costs, conditional_tier,
+    price_part, price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::rows::Group;
 use crate::safe::{ScanError, identity, iso};
@@ -689,14 +689,13 @@ fn ttl_check(
         _ => None,
     };
     let current = profile.ttl.get(bucket);
-    let recommended = if !paired.decided {
-        None
-    } else if paired.usd > Usd::ZERO {
-        Some(Ttl::OneHour)
-    } else if paired.usd < Usd::ZERO {
-        Some(Ttl::FiveMinutes)
-    } else {
-        current.value
+    // Extrapolated over unpriced parts, so a few of them never leave the winner unknown.
+    let gap = paired.usd();
+    let recommended = match gap {
+        None => None,
+        Some(usd) if usd > 0.0 => Some(Ttl::OneHour),
+        Some(usd) if usd < 0.0 => Some(Ttl::FiveMinutes),
+        Some(_) => current.value,
     };
     // Each source's current client must honor the setting, since one file sets it for all.
     fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
@@ -727,8 +726,8 @@ fn ttl_check(
     };
     let savings = match (current.value, recommended) {
         (Some(current), Some(recommended)) if current == recommended => Some(0.0),
-        (Some(Ttl::FiveMinutes), Some(_)) => Some(paired.usd.to_f64()),
-        (Some(_), Some(_)) => Some(-paired.usd.to_f64()),
+        (Some(Ttl::FiveMinutes), Some(_)) => gap,
+        (Some(_), Some(_)) => gap.map(|usd| -usd),
         _ => None,
     };
     let profiles: IndexSet<&str> = relevant
@@ -810,6 +809,7 @@ fn ttl_check(
                 total: paired.total,
             }),
             savings_usd: savings,
+            margin: paired.savings.and_then(|s| s.margin),
             monthly_savings_usd: savings
                 .filter(|_| now > since)
                 .map(|s| s * 30.0 * 24.0 * 60.0 * MINUTE as f64 / (now - since) as f64),
@@ -847,7 +847,11 @@ fn ttl_check(
             WindowBasisKind::Available
         },
         bucket,
-        one_hour_savings_usd: paired.usd.to_f64(),
+        one_hour_savings_usd: gap.unwrap_or(0.0),
+        comparison_estimate: PerTtl {
+            five_minutes: paired.baseline,
+            one_hour: paired.alternative,
+        },
         cost,
         summary_cost,
         comparison_cost,
@@ -910,10 +914,18 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .into_iter()
         .map(|(key, requests)| {
             let mut cost = Sum::new();
+            let mut sample = Sample::default();
+            // What each unpriced request is known to cost, such as its tokens beside an
+            // unknown server fee, which its extrapolated cost never falls below.
+            let mut floors: Vec<f64> = vec![];
             let (mut priced_requests, mut conditional_requests) = (0, 0);
             for &r in &requests {
                 let c = price_request(catalog, r);
-                if c.total_usd.is_some() {
+                if c.total_usd.is_none() {
+                    floors.push(c.known_usd.to_f64());
+                }
+                if let Some(usd) = c.total_usd {
+                    sample.add(usd);
                     priced_requests += 1;
                     conditional_requests +=
                         u64::from(r.parts.iter().any(|p| conditional_tier(r, p)));
@@ -932,6 +944,16 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 conditional_requests,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
                 cost: cost.cost(),
+                estimate: sample.estimate(requests.len() as u64).map(|e| {
+                    // Each unpriced request costs the priced mean, or what it is known to
+                    // cost when that is more.
+                    let mean = e.usd / requests.len() as f64;
+                    let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
+                    crate::model::Estimate {
+                        usd: e.usd + raise,
+                        ..e
+                    }
+                }),
             }
         })
         .collect();
@@ -1120,7 +1142,7 @@ mod tests {
     use super::*;
     use crate::model::{
         Attempt, CacheContext, EstimateEvidence, ExposureScan, IdleAttribution, KnownState,
-        Location, Origin, PrefixEvidence, ReplayOutcome, ScanCoverage, Snapshot,
+        Location, Margin, Origin, PrefixEvidence, ReplayOutcome, ScanCoverage, Snapshot,
     };
     use crate::reader::{ScanOptions, scan, usage};
     use crate::report::{ReportOptions, rendered as format_report};
@@ -1434,9 +1456,9 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_lines_can_block_a_recommendation() {
+    fn unreadable_lines_are_extrapolated_over_with_a_margin() {
         let next = with(at("next", 600_000), u(1100, 0, M5));
-        let mut s = data(vec![make_request(), next], vec![]);
+        let mut s = data(vec![make_request(), next.clone()], vec![]);
         s.snapshots = vec![Snapshot {
             file: "synthetic".into(),
             harness: Harness::Claude,
@@ -1450,10 +1472,20 @@ mod tests {
             lines: 0,
         }];
         let c = check(&s, None, 1_200_000);
-        assert_eq!(c.base.recommended, None);
-        assert_eq!(c.base.action, Action::Advisory);
+        let whole = check(
+            &data(vec![make_request(), next.clone()], vec![]),
+            None,
+            1_200_000,
+        );
+        // The same winner, its gap scaled to every part, now with a margin of error.
+        assert_eq!(c.base.recommended, whole.base.recommended);
+        assert!(c.base.recommended.is_some());
         let coverage = c.base.coverage.unwrap();
         assert_eq!(coverage.total, coverage.priced + 10000);
+        let scale = coverage.total as f64 / coverage.priced as f64;
+        assert!((c.one_hour_savings_usd - whole.one_hour_savings_usd * scale).abs() < 1e-9);
+        assert!(c.base.margin.is_some());
+        assert_eq!(whole.base.margin, None);
     }
 
     #[test]
@@ -1614,6 +1646,28 @@ mod tests {
     }
 
     #[test]
+    fn spend_extrapolation_never_falls_below_what_an_unpriced_request_is_known_to_cost() {
+        let cheap = make_request();
+        // Far more tokens than the priced request, beside a server fee with no price.
+        let mut dear = with(at("dear", 600_000), u(1_000_000, 0, M5));
+        dear.server_tools = Some(crate::model::ServerTools::from_iter([(
+            "code_execution_requests".into(),
+            1,
+        )]));
+        let report = report_at(&data(vec![cheap, dear], vec![]), None, 1_200_000);
+        let group = &report.historical[0];
+        assert_eq!((group.priced_requests, group.requests), (1, 2));
+        let known = group.cost.known_usd.to_f64();
+        let estimate = group.estimate.unwrap();
+        // The priced mean alone would put it at twice the cheap request, far below the known.
+        assert!(
+            (estimate.usd - known).abs() < 1e-9,
+            "{estimate:?} vs {known}"
+        );
+        assert_eq!(estimate.margin, Some(Margin::Unmeasured));
+    }
+
+    #[test]
     fn scenario_invariant_unknown_server_fees_do_not_veto() {
         let first = {
             let mut built = Request { ..make_request() };
@@ -1642,11 +1696,13 @@ mod tests {
                 .to_lowercase()
                 .contains("identical fixed costs remain unknown")
         );
-        // Unknown request usage is not scenario-invariant and must still block a winner.
+        // Unknown request usage is not scenario-invariant, so its part is extrapolated over
+        // from the one priced part, which leaves no spread to measure a margin from.
         next.parts[0].usage.write = None;
         next.parts[0].usage.read = None;
         let c = check(&data(vec![first, next], vec![]), None, 1_200_000);
-        assert_eq!(c.base.recommended, None);
+        assert!(c.base.recommended.is_some());
+        assert_eq!(c.base.margin, Some(Margin::Unmeasured));
     }
 
     #[test]
@@ -2011,7 +2067,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_pre_window_attempts_cannot_choose_winners_from_missing_speed() {
+    fn unsupported_pre_window_attempts_leave_their_parts_to_extrapolation() {
         for speed in [None, Some("standard")] {
             let p = pre_window_attempt(speed);
             let s = data(
@@ -2027,8 +2083,9 @@ mod tests {
             let c = check(&s, None, 21 * MIN);
             assert_eq!(c.base.since, Some(18 * MIN));
             assert_eq!(c.base.requests, 2);
-            assert_eq!(c.base.recommended, None, "{speed:?}");
-            assert_eq!(c.base.action, Action::Advisory);
+            // The unknown 5m part is extrapolated over from the priced one.
+            assert!(c.base.recommended.is_some(), "{speed:?}");
+            assert_eq!(c.base.margin, Some(Margin::Unmeasured), "{speed:?}");
             assert_eq!(total(&c.comparison_cost.five_minutes), None);
             assert!(total(&c.comparison_cost.one_hour).is_some());
             assert_eq!(c.usage_estimates[0].request, p.attempt.id);
@@ -2077,7 +2134,9 @@ mod tests {
             vec![],
         );
         let c = check(&s, None, 22 * MIN);
-        assert_eq!(c.base.recommended, None);
+        let coverage = c.base.coverage.unwrap();
+        assert!(coverage.priced > 0 && coverage.priced < coverage.total);
+        assert!(c.base.margin.is_some());
         for request in [&p.after.id, &fast_after.id] {
             assert!(c.cache_evidence.iter().any(|e| {
                 &e.request == request
@@ -2128,7 +2187,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_attempts_block_only_their_comparison() {
+    fn unsupported_attempts_leave_only_their_comparison_extrapolated() {
         let Bracket {
             first,
             attempt,
@@ -2146,7 +2205,8 @@ mod tests {
         let report = report_at(&s, None, 1_800_000);
         let main = bucket_check(&report, Bucket::Main);
         let outside = bucket_check(&report, Bucket::Subagent);
-        assert_eq!(main.base.recommended, None);
+        assert!(main.base.margin.is_some());
+        assert_eq!(outside.base.margin, None);
         assert_eq!(main.base.requests, 3);
         assert_eq!(main.usage_estimates[0].evidence, EstimateEvidence::Unknown);
         assert!(main.usage_estimates[0].reason.contains("matching"));
@@ -2223,9 +2283,24 @@ mod tests {
             };
             let n = requests.len() as u64;
             let c = check(&data(requests, vec![]), None, 1_800_000);
-            // Two-part histories cannot outweigh their unpriced half; the mixed history can.
-            let expected = if layout == "mixed" { Some(H1) } else { None };
-            assert_eq!(c.base.recommended, expected, "{layout}");
+            // An attempt first leaves its follower unpriced too, so nothing is measured; the
+            // others extrapolate over their unpriced parts, without a margin from one part.
+            let coverage = c.base.coverage.unwrap();
+            let margin = match coverage.priced {
+                0 => None,
+                1 => Some(Margin::Unmeasured),
+                _ => c.base.margin.filter(|m| matches!(m, Margin::Usd(_))),
+            };
+            assert_eq!(c.base.margin, margin, "{layout}");
+            assert_eq!(
+                c.base.recommended.is_none(),
+                coverage.priced == 0,
+                "{layout}"
+            );
+            assert_eq!(coverage.priced == 0, layout == "first", "{layout}");
+            if layout == "mixed" {
+                assert_eq!(c.base.recommended, Some(H1));
+            }
             let coverage = c.base.coverage.unwrap();
             assert!(coverage.priced < coverage.total, "{layout}");
             assert_eq!(c.base.requests, n, "{layout}");
@@ -2260,7 +2335,7 @@ mod tests {
         first.parts[0].model = Some("claude-haiku-5-5".into());
         first.parts[0].usage.input = None;
         let c = check(&data(vec![first, after], vec![]), None, 1_200_000);
-        assert_eq!(c.base.recommended, None);
+        assert_eq!(c.base.margin, Some(Margin::Unmeasured));
     }
 
     #[test]

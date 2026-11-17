@@ -400,8 +400,10 @@ fn keepalive_retains_costs_unknowns_and_caps_over_ssh() {
         .unwrap();
     assert_eq!(check.base.current, None);
     assert_eq!(check.base.action, Action::Advisory);
-    assert_eq!(check.base.savings_usd, None);
-    assert_eq!(check.margin_usd, None);
+    // The unpriced session is extrapolated over from the priced ones, with a margin.
+    assert!(check.base.savings_usd.is_some());
+    assert!(check.margin_usd.is_some());
+    assert!(check.base.margin.is_some());
     assert_eq!(check.ping_input_tokens, Some(1000));
     assert!(check.base.coverage.unwrap().priced > 0);
     assert!(check.unpriced > 0);

@@ -14,7 +14,7 @@ use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, Billing, CacheReplayEvidence,
     CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck,
-    EffortRun, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck,
+    EffortRun, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, Margin,
     MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming,
     Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
@@ -106,6 +106,16 @@ fn instant(value: Option<Millis>) -> String {
     value.map_or_else(|| "unknown".into(), iso)
 }
 
+/// `value` as [`usd`] writes it in details; when extrapolated, after a `~` and before its
+/// margin of error.
+fn approx_usd(value: f64, margin: Option<Margin>) -> String {
+    match margin {
+        None => usd(value),
+        Some(Margin::Usd(m)) => format!("~{} ± {}", usd(value), usd(m)),
+        Some(Margin::Unmeasured) => format!("~{}, margin unknown", usd(value)),
+    }
+}
+
 fn estimate(value: Option<f64>) -> String {
     value.map_or_else(|| "unknown".into(), usd)
 }
@@ -142,6 +152,16 @@ pub(crate) fn about(value: f64) -> String {
             Err(_) => text.to_string(),
         },
         _ => text.to_string(),
+    }
+}
+
+/// `usd` as [`about`] writes it, then `unit` such as "/mo"; when extrapolated over unpriced
+/// requests, after a `~` and before its margin of error, such as "~$3,270/mo ± $410".
+pub(crate) fn approx(usd: f64, margin: Option<Margin>, unit: &str) -> String {
+    match margin {
+        None => format!("{}{unit}", about(usd)),
+        Some(Margin::Usd(m)) => format!("~{}{unit} ± {}", about(usd), about(m)),
+        Some(Margin::Unmeasured) => format!("~{}{unit}, margin unknown", about(usd)),
     }
 }
 
@@ -222,6 +242,7 @@ struct Common<'a> {
     requests: u64,
     coverage: Option<Coverage>,
     savings_usd: Option<f64>,
+    margin: Option<Margin>,
     monthly_savings_usd: Option<f64>,
     break_even: Option<&'a str>,
     assumptions: &'a [String],
@@ -255,6 +276,7 @@ fn base<'a, V>(
         requests: b.requests,
         coverage: b.coverage,
         savings_usd: b.savings_usd,
+        margin: b.margin,
         monthly_savings_usd: b.monthly_savings_usd,
         break_even: b.break_even.as_deref(),
         assumptions: &b.assumptions,
@@ -723,26 +745,82 @@ struct Out<'a> {
 /// This host's spend over the report's window, the base of every percent.
 #[derive(Clone, Copy, Debug)]
 struct Spend {
-    /// The priced total; a lower bound when `complete` is false.
+    /// The total, extrapolated over unpriced requests, plus `floor`.
     usd: f64,
-    complete: bool,
+    /// How far the extrapolated part may be off; None when nothing was extrapolated.
+    margin: Option<Margin>,
+    /// What the profiles that priced none of their requests are known to cost, a lower bound
+    /// with nothing to extrapolate from.
+    floor: f64,
+    /// Whether some profile priced none of its requests, even one with no known charge.
+    partial: bool,
     since: Option<Millis>,
     until: Millis,
 }
 
 impl Spend {
     fn new(report: &Report) -> Self {
-        let cost = add_costs(report.historical.iter().map(|g| &g.cost));
+        let mut usd = 0.0;
+        // Each profile's history is a separate sample, so their errors are independent and
+        // their margins add in quadrature.
+        let mut variance = 0.0;
+        let (mut extrapolated, mut unmeasured, mut floor, mut partial) = (false, false, 0.0, false);
+        for group in &report.historical {
+            match group.estimate {
+                Some(estimate) => {
+                    usd += estimate.usd;
+                    match estimate.margin {
+                        None => {}
+                        Some(Margin::Usd(m)) => {
+                            extrapolated = true;
+                            variance += m * m;
+                        }
+                        Some(Margin::Unmeasured) => unmeasured = true,
+                    }
+                }
+                None => {
+                    usd += group.cost.known_usd.to_f64();
+                    floor += group.cost.known_usd.to_f64();
+                    partial = true;
+                }
+            }
+        }
         Spend {
-            usd: cost
-                .total_usd
-                .map_or(cost.known_usd.to_f64(), |usd| usd.to_f64()),
-            complete: cost.total_usd.is_some(),
+            usd,
+            margin: if unmeasured {
+                Some(Margin::Unmeasured)
+            } else {
+                extrapolated.then(|| Margin::Usd(variance.sqrt()))
+            },
+            floor,
+            partial,
             since: report
                 .scan
                 .since
                 .or(report.scan.requests.first().map(|r| r.time)),
             until: generated_at(report),
+        }
+    }
+
+    /// The total as the title writes it, such as "~$9,392 ± $4.72", "at least $120", or
+    /// "~$9,392 ± $4.72 plus at least $120" when only some profiles priced nothing.
+    fn text(&self) -> String {
+        let measured = self.usd - self.floor;
+        if !self.partial {
+            approx(self.usd, self.margin, "")
+        } else if measured == 0.0 && self.margin.is_none() {
+            format!("at least {}", about(self.floor))
+        } else if self.floor > 0.0 {
+            format!(
+                "{} plus at least {}",
+                approx(measured, self.margin, ""),
+                about(self.floor)
+            )
+        } else {
+            format!(
+                "{} plus requests with no known price",
+                approx(measured, self.margin, "")
+            )
         }
     }
 
@@ -1855,8 +1933,12 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         },
         &format!(
             "{} over window; {} / 30 days",
-            estimate(r.savings_usd),
-            estimate(r.monthly_savings_usd)
+            r.savings_usd
+                .map_or_else(|| "unknown".into(), |v| approx_usd(v, r.margin)),
+            r.monthly_savings_usd.map_or_else(
+                || "unknown".into(),
+                |v| approx_usd(v, r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until))))
+            )
         ),
     );
     match result {
@@ -1931,6 +2013,22 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                     money(&t.comparison_cost.one_hour)
                 ),
             );
+            if let crate::model::PerTtl {
+                five_minutes: Some(short),
+                one_hour: Some(long),
+            } = t.comparison_estimate
+                && (short.margin.is_some() || long.margin.is_some())
+            {
+                out.field(
+                    "Extrapolated cache comparison",
+                    &format!(
+                        "5m {}; 1h {}; 1h saves {}",
+                        approx(short.usd, short.margin, ""),
+                        approx(long.usd, long.margin, ""),
+                        approx(t.one_hour_savings_usd, r.margin, "")
+                    ),
+                );
+            }
             if t.fixed_cost.total_usd.is_none() {
                 out.field(
                     "Fixed costs",
@@ -2337,6 +2435,22 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         }
         CheckResult::BashCap(b) => out.cost("Cache misses after long waits", &b.waits.miss_cost),
         CheckResult::Keepalive(k) => {
+            // Counts are what the priced sessions recorded; dollars cover every period.
+            if let Some(c) = k
+                .base
+                .coverage
+                .filter(|c| c.priced > 0 && c.priced < c.total)
+            {
+                out.field(
+                    "Coverage",
+                    &format!(
+                        "ping and return counts cover the {} of {} periods that could be priced; dollar figures are extrapolated to all {}",
+                        count(c.priced),
+                        count(c.total),
+                        count(c.total)
+                    ),
+                );
+            }
             for s in &k.scenarios {
                 out.field(
                     &format!("Cap {}", keepalive_duration(s.cap_ms)),
@@ -2344,11 +2458,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                         "{} return pings and {} final pings cost {}; {} rescued returns; recorded work saves {}; net {}; {} if final sessions closed at once",
                         s.pings,
                         s.final_pings,
-                        usd(s.ping_cost_usd),
+                        approx_usd(s.ping_cost_usd, s.margins.ping_cost),
                         s.rescued,
-                        usd(s.avoided_usd),
-                        usd(s.savings_usd),
-                        usd(s.closed_savings_usd)
+                        approx_usd(s.avoided_usd, s.margins.avoided),
+                        approx_usd(s.savings_usd, s.margins.savings),
+                        approx_usd(s.closed_savings_usd, s.margins.closed_savings)
                     ),
                 );
             }
@@ -2381,7 +2495,9 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 out.cost("Candidate comparison", &scenario.comparison_cost);
                 out.field(
                     "Candidate net saving vs baseline",
-                    &estimate(scenario.savings_usd),
+                    &scenario
+                        .savings_usd
+                        .map_or_else(|| "unknown".into(), |v| approx_usd(v, scenario.margin)),
                 );
                 out.field(
                     "Candidate sensitivity",
@@ -2631,10 +2747,17 @@ pub(crate) fn share_text(share: f64) -> String {
 /// Why keepalive pings stay off.
 fn keepalive_keep(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     let interval = k.interval_ms.map(keepalive_duration).unwrap_or_default();
+    let figure = |usd: f64| {
+        approx(
+            monthly(usd, r.since, r.until),
+            r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until))),
+            "/mo",
+        )
+    };
     match k.margin_usd {
         Some(m) => format!(
             "Pinging idle sessions every {interval} would cost {} more than {}.",
-            per_month(-m, r.since, r.until),
+            figure(-m),
             if k.idle_compaction_savings_usd.is_some_and(|s| s > 0.0) {
                 "idle compaction"
             } else {
@@ -2653,12 +2776,18 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
     if r.recommended == Some(Setting::Keepalive("off")) {
         return keepalive_keep(k, r);
     }
+    let margin = r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until)));
     if let Some(Setting::Keepalive(policy)) = r.recommended {
         return format!(
             "Pinging idle sessions {policy} would save {}, but {}.",
-            r.monthly_savings_usd.map_or_else(
-                || per_month(r.savings_usd.unwrap_or(0.0), r.since, r.until),
-                about
+            approx(
+                r.monthly_savings_usd.unwrap_or_else(|| monthly(
+                    r.savings_usd.unwrap_or(0.0),
+                    r.since,
+                    r.until
+                )),
+                margin,
+                "/mo"
             ),
             r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
         );
@@ -2675,28 +2804,31 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
             .max_by(|a, b| a.savings_usd.total_cmp(&b.savings_usd)),
         k.interval_ms,
     ) {
-        if k.unpriced == 0 && k.idle_compaction_savings_usd.is_none() {
-            return format!(
-                "Pinging {} would {} {} compared with no pings, but idle compaction could not be priced.",
-                crate::keepalive::policy(interval, best.cap_ms),
-                if best.savings_usd > 0.0 {
-                    "save"
-                } else {
-                    "cost"
-                },
-                per_month(best.savings_usd.abs(), r.since, r.until)
-            );
-        }
-        let margin = k.margin_usd.unwrap_or(best.savings_usd);
+        // A priced replay extrapolates over unpriced periods, so only an unknown served tier
+        // or, for Claude, an unpriced idle compaction alternative leaves it open.
+        let why = if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
+            "effective service tiers could reverse it"
+        } else {
+            "idle compaction could not be priced"
+        };
         format!(
-            "On fully priced sessions, pinging {} would {} {} compared with no pings, but {} unpriced periods leave the aggregate comparison unresolved.",
+            "Pinging {} would {} {} compared with no pings, but {why}.",
             crate::keepalive::policy(interval, best.cap_ms),
-            if margin > 0.0 { "save" } else { "cost" },
-            per_month(margin.abs(), r.since, r.until),
-            k.unpriced,
+            if best.savings_usd > 0.0 {
+                "save"
+            } else {
+                "cost"
+            },
+            approx(
+                monthly(best.savings_usd.abs(), r.since, r.until),
+                best.margins
+                    .savings
+                    .map(|m| m.scale(monthly(1.0, r.since, r.until))),
+                "/mo"
+            )
         )
     } else {
-        "Too many idle periods could not be priced to tell whether pings pay off.".into()
+        "No idle period could be priced.".into()
     }
 }
 
@@ -2758,37 +2890,8 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         return "No requests in this window to compare.".into();
     }
     match result {
-        CheckResult::Ttl(t) => {
-            if r.coverage.is_none_or(|c| c.priced == 0) {
-                return "No requests with measured cache usage to compare.".into();
-            }
-            // Relative to what the requests cost, so a large total doesn't read as a large gap.
-            let (cheaper, dearer, cost) = if t.one_hour_savings_usd > 0.0 {
-                ("1h", "5m", &t.cost.five_minutes)
-            } else {
-                ("5m", "1h", &t.cost.one_hour)
-            };
-            let gap = t.one_hour_savings_usd.abs();
-            let whole = cost.known_usd.to_f64();
-            let relative = if whole > 0.0 {
-                let tenths = js_round(gap / whole * 1000.0);
-                if tenths < 1.0 {
-                    "under 0.1%".to_string()
-                } else {
-                    format!("{}%", js_number(tenths / 10.0))
-                }
-            } else {
-                "an unknown share".into()
-            };
-            let (priced, total) = r.coverage.map_or((0, 0), |c| (c.priced, c.total));
-            format!(
-                "{cheaper} cost {relative} less than {dearer} ({} over {}) on the {}% of requests that could be priced, too little to rule out the {} that could not.",
-                about(gap),
-                days(r.since, r.until),
-                percent(priced, total),
-                count(total - priced)
-            )
-        }
+        // A replay with any priced part extrapolates to the rest, so only none leaves it open.
+        CheckResult::Ttl(_) => "No requests with measured cache usage to compare.".into(),
         CheckResult::Compaction(c) => {
             if r.current.is_none() {
                 return if r
@@ -2812,7 +2915,17 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             {
                 return "Too few recorded compactions to model a different window.".into();
             }
-            "Too many requests lack recorded usage to compare windows.".into()
+            // A replay with any priced part extrapolates to the rest, so either none was
+            // priced or the comparison itself is unsupported.
+            match c
+                .scenarios
+                .iter()
+                .find(|s| s.coverage.priced > 0)
+                .and_then(|s| s.comparison_cost.unknown.first())
+            {
+                Some(reason) => capitalize(reason) + ".",
+                None => "No request a different window would change has recorded usage to compare windows.".into(),
+            }
         }
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
@@ -3377,7 +3490,7 @@ fn coverage_note(r: &Common<'_>) -> String {
     match r.coverage {
         // Percent, because one request can bill several parts.
         Some(c) if c.priced != c.total => format!(
-            ", using the {}% of requests with measured usage",
+            ", extrapolated from the {}% of requests with measured usage to the rest, assuming they resemble each other",
             percent(c.priced, c.total)
         ),
         _ => String::new(),
@@ -3519,6 +3632,8 @@ struct Row {
     origin: Option<Origin>,
     /// What it saves every 30 days, when measured.
     saving: Option<f64>,
+    /// How far `saving` may be off when extrapolated over unpriced requests.
+    margin: Option<Margin>,
     /// How much was measured, such as the requests a replay covered, ahead of the evidence.
     stats: String,
     /// What the current value saves against its default, when the two differ.
@@ -3542,6 +3657,7 @@ impl Row {
             location: None,
             origin: None,
             saving: None,
+            margin: None,
             stats: String::new(),
             baseline: None,
         }
@@ -3576,12 +3692,20 @@ impl Row {
         }
     }
 
-    /// What it saves every 30 days, `verb` such as "saves up to"; unmeasured when None.
-    fn saves(&mut self, verb: &'static str, usd: Option<f64>, spend: &Spend) {
+    /// What it saves every 30 days, `verb` such as "saves up to", and how far that may be off
+    /// when extrapolated; unmeasured when None.
+    fn saves(
+        &mut self,
+        verb: &'static str,
+        usd: Option<f64>,
+        margin: Option<Margin>,
+        spend: &Spend,
+    ) {
         self.saving = usd;
+        self.margin = margin.filter(|_| usd.is_some());
         match usd {
             Some(usd) => {
-                self.amount = Some((verb, format!("{}/mo", about(usd))));
+                self.amount = Some((verb, approx(usd, self.margin, "/mo")));
                 self.share = spend.of_month(usd);
             }
             None => {
@@ -3986,6 +4110,8 @@ pub(crate) struct Recommendation<'a> {
     pub value: String,
     /// What it saves every 30 days, when measured.
     pub saving: Option<f64>,
+    /// How far `saving` may be off when extrapolated over unpriced requests.
+    pub margin: Option<Margin>,
     /// How the saving reads, such as "saves up to".
     pub verb: &'static str,
     /// The saving's share of this host's spend every 30 days.
@@ -4060,6 +4186,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             name: setting_name(result),
             value: format!("{current} {arrow} {target}"),
             saving,
+            margin: check_margin(result, &r).filter(|_| saving.is_some()),
             verb: check_verb(result, &r, &out),
             share: saving.and_then(|usd| out.spend.of_month(usd)),
             source: Source::Check(result),
@@ -4080,6 +4207,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
                     name: row.name,
                     value: format!("{} {arrow} shorter", row.value),
                     saving: None,
+                    margin: None,
                     verb: "saves",
                     share: None,
                     source: Source::Piece(c),
@@ -4107,6 +4235,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             name: short_label(c, &out),
             value: format!("on {arrow} {target}"),
             saving,
+            margin: None,
             verb: "saves",
             share: saving.and_then(|usd| out.spend.of_month(usd)),
             source: Source::Piece(c),
@@ -4180,6 +4309,15 @@ fn check_saving(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<f
     }
 }
 
+/// How far a check's monthly saving may be off when extrapolated over unpriced requests,
+/// scaled from the window to 30 days as the saving is.
+fn check_margin(result: &CheckResult, r: &Common<'_>) -> Option<Margin> {
+    match result {
+        CheckResult::Effort(_) => None,
+        _ => r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until))),
+    }
+}
+
 /// What turning a piece of context off saves every 30 days: what it cost, all else equal.
 ///
 /// A Codex catalog skill's listing cost is no such saving, since removing it can backfill the
@@ -4223,11 +4361,7 @@ fn summary(
     let coverage = &report.scan.coverage;
     let spend = out.spend;
     let many = report.scan.profiles.len() > 1;
-    let spent = format!(
-        "{}{}",
-        if spend.complete { "" } else { "at least " },
-        about(spend.usd)
-    );
+    let spent = spend.text();
     let title = out.title(&match spend.since {
         Some(since) if coverage.requests > 0 => format!(
             "{} requests from {} to {} ({}), {spent} at API prices",
@@ -4511,7 +4645,11 @@ fn summary(
                     let better = if mark == Mark::Keep {
                         format!("{} costs less than {other}", setting_value(r.current))
                     } else if unset {
-                        let gap = per_month(t.one_hour_savings_usd.abs(), r.since, r.until);
+                        let gap = approx(
+                            monthly(t.one_hour_savings_usd.abs(), r.since, r.until),
+                            check_margin(result, r),
+                            "",
+                        );
                         let winner = setting_value(r.recommended);
                         format!(
                             "{winner} costs {gap} less every 30 days, saved whenever the unset default would be {}, and setting it keeps {winner} however usage is paid",
@@ -4769,6 +4907,7 @@ fn summary(
             row.saves(
                 check_verb(result, r, out),
                 check_saving(result, r, out),
+                check_margin(result, r),
                 &spend,
             );
         } else {
@@ -4780,6 +4919,7 @@ fn summary(
                     row.saves(
                         "saves",
                         Some(monthly(t.one_hour_savings_usd.abs(), r.since, r.until)),
+                        check_margin(result, r),
                         &spend,
                     );
                 }
@@ -4787,7 +4927,14 @@ fn summary(
                     // A feature that is on says plainly when its cost could not be measured.
                     match r.savings_usd {
                         Some(usd) if usd <= 0.0 => {}
-                        usd => row.costs(usd, false, &spend),
+                        usd => {
+                            row.costs(usd, false, &spend);
+                            // An estimate extrapolated over unpriced turns keeps its ~ and margin.
+                            if let (Some(usd), Some(margin)) = (usd, r.margin) {
+                                row.amount = Some(("costs", approx(usd, Some(margin), "")));
+                                row.margin = Some(margin);
+                            }
+                        }
                     }
                 }
                 CheckResult::Memory(m) => match r.savings_usd {
@@ -4826,7 +4973,7 @@ fn summary(
             Verdict::Keep => "on".into(),
         };
         if row.offered() && c.skill.is_none() {
-            row.saves("saves", piece_saving(c, &spend), &spend);
+            row.saves("saves", piece_saving(c, &spend), None, &spend);
         } else {
             row.costs(c.estimated_usd, false, &spend);
         }
@@ -5063,6 +5210,7 @@ fn summary(
             row.baseline = Some(crate::defaults::Baseline {
                 default: "on".into(),
                 saving,
+                margin: None,
             });
             rows.push(row);
         }
@@ -5218,7 +5366,7 @@ fn summary(
         if row.offered() {
             row.value = format!("{} {arrow} shorter", row.value);
             // Shortening a file saves an unknown part of what it cost.
-            row.saves("saves", None, &spend);
+            row.saves("saves", None, None, &spend);
         } else {
             row.costs(c.estimated_usd, false, &spend);
         }
@@ -5287,6 +5435,7 @@ fn summary(
                 row.baseline = cap.default.map(|default| crate::defaults::Baseline {
                     default: default.into(),
                     saving: crate::defaults::Saving::NotMeasured,
+                    margin: None,
                 });
                 row.setting = cap.key.into();
                 row.evidence = format!(
@@ -5463,18 +5612,27 @@ fn summary(
         out.line(&summary, 0, PLAIN);
     }
     out.blank();
-    // With some requests unpriced, the base is only what could be priced, so a share can read high.
-    let base = if spend.complete {
+    // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
+    let base = if !spend.partial && spend.margin.is_some() {
+        format!(
+            "{host} spend over the window, {spent}, extrapolated from the requests that could be priced"
+        )
+    } else if !spend.partial {
         format!("{host} spend over the window, {spent}")
     } else {
         format!(
-            "the {} {host} priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller",
-            about(spend.usd)
+            "{host} spend over the window, {spent}, since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller"
         )
+    };
+    // Said once, for every figure extrapolated over requests that could not be priced.
+    let tilde = if spend.margin.is_some() || rows.iter().any(|r| r.margin.is_some()) {
+        " A ~ marks a figure extrapolated from the requests that could be priced to those that could not, assuming they resemble each other, followed by its 95% margin of error."
+    } else {
+        ""
     };
     out.line(
         &format!(
-            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}. A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
+            "Savings are per 30 days at the window's rate, and costs are totals over the window; each percent is of {base}.{tilde} A tool, skill or MCP server that was never used is recommended off, and one that cost more than {} per use (--max-cost-per-use) is worth considering off.",
             about(report.max_cost_per_use_usd)
         ),
         0,
@@ -5809,6 +5967,7 @@ mod tests {
                 total: 2000,
             }),
             savings_usd: Some(150.0),
+            margin: None,
             monthly_savings_usd: Some(150.0),
             break_even: None,
             assumptions: vec!["synthetic assumption".into()],
@@ -5823,6 +5982,7 @@ mod tests {
             window_basis_kind: WindowBasisKind::Explicit,
             bucket,
             one_hour_savings_usd: one_hour,
+            comparison_estimate: PerTtl::default(),
             cost: PerTtl {
                 five_minutes: cost(Some(300.0), 300.0),
                 one_hour: cost(Some(150.0), 150.0),
@@ -5897,6 +6057,7 @@ mod tests {
                     ..cost(None, 2.675)
                 },
                 savings_usd: Some(0.375),
+                margin: None,
                 coverage: Coverage {
                     priced: 3,
                     total: 4,
@@ -6204,6 +6365,8 @@ mod tests {
         let mut ttl_main = check_base(Action::Change, Some(Ttl::FiveMinutes), Some(Ttl::OneHour));
         ttl_main.savings_usd = Some(12.34);
         ttl_main.monthly_savings_usd = Some(24.68);
+        // Ten of its requests unpriced, so its saving is extrapolated with a margin.
+        ttl_main.margin = Some(Margin::Usd(1.25));
         let mut ttl_sub = check_base(Action::Keep, Some(Ttl::OneHour), Some(Ttl::OneHour));
         ttl_sub.coverage = Some(Coverage {
             priced: 2000,
@@ -6316,7 +6479,12 @@ mod tests {
                 priced_requests: 1000,
                 conditional_requests: 0,
                 tier_sensitivity: vec![],
-                cost: cost(None, 1500.0),
+                // Half the requests priced, extrapolated to twice what they cost.
+                cost: cost(None, 750.0),
+                estimate: Some(Estimate {
+                    usd: 1500.0,
+                    margin: Some(Margin::Usd(60.0)),
+                }),
             }],
             compactions: vec![CompactionCharge {
                 event: "synthetic-boundary".into(),
@@ -6450,7 +6618,7 @@ mod tests {
         let main = report_line(&text, "Main-agent prompt cache TTL");
         assert_eq!(
             main.default,
-            "default 1h on a Claude plan, 5m on usage credits or an API key, costs up to $12/mo more"
+            "default 1h on a Claude plan, 5m on usage credits or an API key, costs up to ~$12/mo ± $1.25 more"
         );
         // A window at the model's tuned default says nothing; an explicit one names it.
         report.scan.profiles[0].compaction.tuned.insert(
@@ -6473,7 +6641,7 @@ mod tests {
         assert_eq!(
             headline.map(str::trim_start),
             Some(
-                "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to $12/mo more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
+                "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to ~$12/mo ± $1.25 more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
             )
         );
         let window = report_line(&text, "Auto-compact window (claude-opus-5-5) 200k");
@@ -6931,10 +7099,10 @@ mod tests {
         };
         assert!(text.contains("\n  2 changes recommended and 4 worth considering.\n"));
         has(
-            "Main-agent prompt cache TTL 5m -> 1h saves $25/mo 2%",
+            "Main-agent prompt cache TTL 5m -> 1h saves ~$25/mo ± $1.25 2%",
             "change",
             "Measured",
-            "Replayed at 5m and 1h, assuming the same sessions, using the 99.5% of requests with measured usage; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
+            "Replayed at 5m and 1h, assuming the same sessions, extrapolated from the 99.5% of requests with measured usage to the rest, assuming they resemble each other; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
         // A change names the edit `doctor` offers for it.
         assert_eq!(
@@ -7818,7 +7986,9 @@ mod tests {
             removed: Default::default(),
             spend: Spend {
                 usd: 0.0,
-                complete: true,
+                margin: None,
+                floor: 0.0,
+                partial: false,
                 since: None,
                 until: 0,
             },
@@ -8648,27 +8818,79 @@ mod tests {
     }
 
     #[test]
-    fn an_undecided_ttl_gives_its_gap_relative_to_the_cost() {
-        let mut report = synthetic_report();
-        let ttl = ttl_mut(&mut report);
-        ttl.base.action = Action::Advisory;
-        ttl.base.recommended = None;
-        ttl.base.coverage = Some(Coverage {
-            priced: 93,
-            total: 100,
-        });
-        // A gap that reads as large in dollars but is small against what the requests cost.
-        ttl.one_hour_savings_usd = 1_177.0;
-        ttl.cost.five_minutes.known_usd = Usd::from_f64(294_250.0);
-        let summary = text(&report, None, true);
-        let line = report_line(&summary, "Main-agent prompt cache TTL");
-        assert_eq!(line.mark, "unknown", "{summary}");
+    fn unpriced_requests_are_extrapolated_over_with_a_margin() {
+        // A second session of three cache writes ten minutes apart, one on a model with no
+        // public price, so its replay and the host's spend extrapolate over that one.
+        let line = |n: u32, minute: u32, model: &str, tokens: u32| {
+            format!(
+                r#"{{"type":"assistant","sessionId":"session-b","timestamp":"2026-11-01T01:{minute:02}:00Z","version":"2.1.314","entrypoint":"sdk-ts","message":{{"id":"message-b{n}","model":"{model}","usage":{{"input_tokens":0,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":{tokens},"cache_creation":{{"ephemeral_5m_input_tokens":{tokens},"ephemeral_1h_input_tokens":0}},"service_tier":"standard","speed":"standard","inference_geo":"global","server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}}}}}}}}"#
+            )
+        };
+        let run = |unpriced: bool| {
+            let w = Workspace::new();
+            let file = w.claude.join("projects/project/main.jsonl");
+            w.fixture(&file, "claude.jsonl");
+            let mut text = std::fs::read_to_string(&file).unwrap();
+            text += &line(1, 0, "claude-opus-5-5", 2000);
+            text += "\n";
+            text += &line(2, 10, "claude-opus-5-5", 2400);
+            text += "\n";
+            if unpriced {
+                text += &line(3, 20, "private-internal", 2800);
+                text += "\n";
+            }
+            std::fs::write(&file, text).unwrap();
+            std::fs::write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
+            let mut options = w.scan_options();
+            options.discovery.claude_dirs = vec![w.claude.to_string_lossy().into_owned()];
+            analyze(AnalyzeOptions {
+                scan: scan(&options).unwrap(),
+                catalog: &prices(),
+                since: None,
+                now: instant("2026-11-02T00:00:00Z"),
+                max_cost_per_use_usd: 1.0,
+            })
+            .unwrap()
+        };
+        let (whole, partial) = (run(false), run(true));
+        let (whole_ttl, ttl) = (ttl_ref(&whole), ttl_ref(&partial));
+        let coverage = ttl.base.coverage.unwrap();
+        assert!(coverage.priced >= 2 && coverage.priced < coverage.total);
+        // The unpriced part is not left out of the verdict, and the figure is marked.
+        assert_eq!(ttl.base.recommended, whole_ttl.base.recommended);
+        assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
+        assert_eq!(whole_ttl.base.margin, None);
+        let spend = Spend::new(&partial);
+        assert!(!spend.partial && matches!(spend.margin, Some(Margin::Usd(_))));
+        assert_eq!(Spend::new(&whole).margin, None);
+        let summary = text(&partial, None, true);
+        let title = summary.lines().next().unwrap();
+        assert!(title.contains(", ~$") && title.contains(" ± "), "{title}");
         assert!(
-            line.evidence.contains(
-                "Not enough evidence: 1h cost 0.4% less than 5m ($1,177 over 1 day) on the 93% of requests that could be priced, too little to rule out the 7 that could not."
-            ),
+            summary.contains("A ~ marks a figure extrapolated"),
             "{summary}"
         );
+        let row = report_line(&summary, "Main-agent prompt cache TTL");
+        assert!(
+            row.head.contains("~$") && row.head.contains(" ± "),
+            "{row:?}"
+        );
+        assert!(!row.evidence.contains("Not enough evidence"), "{row:?}");
+        assert!(row.evidence.contains("extrapolated from the"), "{row:?}");
+        let full = text(&whole, None, true);
+        assert!(!full.contains("~$") && !full.contains('±'), "{full}");
+    }
+
+    /// The report's main-agent TTL check.
+    fn ttl_ref(report: &Report) -> &TtlCheck {
+        report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t),
+                _ => None,
+            })
+            .expect("a main-agent claude-cache-ttl check")
     }
 
     #[test]
@@ -8694,7 +8916,9 @@ mod tests {
         // however short its own history, while $10 every 30 days is 3% of the rate.
         let spend = Spend {
             usd: 300.0,
-            complete: true,
+            margin: None,
+            floor: 0.0,
+            partial: false,
             since: Some(0),
             until: 30 * DAY as Millis,
         };
@@ -8711,19 +8935,60 @@ mod tests {
     }
 
     #[test]
-    fn percents_of_partly_priced_spend_say_their_base_is_the_priced_part() {
+    fn percents_of_partly_priced_spend_say_their_base() {
         let mut report = synthetic_report();
         let priced = text(&report, None, false);
         assert!(priced.contains("each percent is of this host's spend over the window, $"));
         for group in &mut report.historical {
             group.cost.total_usd = None;
+            group.estimate = Some(Estimate {
+                usd: 2.0,
+                margin: Some(Margin::Usd(0.5)),
+            });
         }
         let summary = text(&report, None, false);
         assert!(
-            summary.contains(" this host's priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller."),
+            summary.contains(" this host's spend over the window, ~$2 ± $0.50, extrapolated from the requests that could be priced."),
             "{summary}"
         );
-        assert!(!summary.contains("each percent is of this host's spend"));
+        // A profile with no priced request adds only its known part, a lower bound.
+        for group in &mut report.historical {
+            group.estimate = None;
+        }
+        let summary = text(&report, None, false);
+        assert!(
+            summary.contains(", since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller."),
+            "{summary}"
+        );
+        assert!(summary.lines().next().unwrap().contains(", at least $"));
+    }
+
+    #[test]
+    fn a_spend_partly_extrapolated_keeps_its_margin_beside_the_lower_bound() {
+        let spend = |usd, margin, floor, partial| Spend {
+            usd,
+            margin,
+            floor,
+            partial,
+            since: None,
+            until: 0,
+        };
+        assert_eq!(spend(100.0, None, 0.0, false).text(), "$100");
+        assert_eq!(
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0, false).text(),
+            "~$100 ± $4"
+        );
+        assert_eq!(spend(100.0, None, 100.0, true).text(), "at least $100");
+        // One profile extrapolated, another with nothing priced: never a bare "at least".
+        assert_eq!(
+            spend(130.0, Some(Margin::Usd(4.0)), 30.0, true).text(),
+            "~$100 ± $4 plus at least $30"
+        );
+        // A profile with nothing priced and no known charge still marks the total partial.
+        assert_eq!(
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0, true).text(),
+            "~$100 ± $4 plus requests with no known price"
+        );
     }
 
     #[test]

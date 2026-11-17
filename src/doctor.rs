@@ -16,12 +16,12 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Profile,
-    Report, Verdict,
+    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Margin,
+    Profile, Report, Verdict,
 };
 use crate::report::{
-    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, recommendations,
-    share_text,
+    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
+    recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, wrap_spans};
@@ -39,6 +39,8 @@ pub struct Fix {
     pub suggested: bool,
     /// What it saves every 30 days, when measured.
     pub saving: Option<f64>,
+    /// How far `saving` may be off when extrapolated over unpriced requests.
+    pub margin: Option<Margin>,
     /// How the saving reads, such as "saves up to".
     pub verb: &'static str,
     /// The saving's share of this host's spend every 30 days.
@@ -285,6 +287,7 @@ fn fix(report: &Report, line: Recommendation<'_>) -> Fix {
         claim: line.claim,
         suggested: line.suggested,
         saving: line.saving,
+        margin: line.margin,
         verb: line.verb,
         share: line.share,
         what: String::new(),
@@ -1168,7 +1171,7 @@ impl Style {
         self.card(&Card {
             counter: counter.into(),
             name: &fix.name,
-            saving: saving(fix.verb, fix.saving, fix.share),
+            saving: saving(fix.verb, fix.saving, fix.margin, fix.share),
             no_saving: "saving not measured",
             value: fix.value.clone(),
             suggested: fix.suggested,
@@ -1184,10 +1187,15 @@ impl Style {
 }
 
 /// What a change saves, such as ("saves $12/mo", "3%"), or none when it was not measured.
-fn saving(verb: &str, usd: Option<f64>, share: Option<f64>) -> Option<(String, String)> {
+fn saving(
+    verb: &str,
+    usd: Option<f64>,
+    margin: Option<Margin>,
+    share: Option<f64>,
+) -> Option<(String, String)> {
     usd.map(|usd| {
         (
-            format!("{verb} {}/mo", about(usd)),
+            format!("{verb} {}", approx(usd, margin, "/mo")),
             share.map_or_else(String::new, share_text),
         )
     })
@@ -1568,25 +1576,28 @@ struct Total {
 struct Sum {
     changes: usize,
     usd: f64,
+    /// How far `usd` may be off, from the changes extrapolated over unpriced requests.
+    margin: Option<Margin>,
     share: f64,
     /// Whether some change's share of the host's spend is unknown.
     unknown_share: bool,
 }
 
 impl Sum {
-    fn add(&mut self, usd: f64, share: Option<f64>) {
+    fn add(&mut self, usd: f64, margin: Option<Margin>, share: Option<f64>) {
         self.changes += 1;
         self.usd += usd;
+        self.margin = Margin::plus(self.margin, margin);
         match share {
             Some(share) => self.share += share,
             None => self.unknown_share = true,
         }
     }
 
-    /// Such as "$40/mo, 9% of this host's spend".
+    /// Such as "$40/mo, 9% of this host's spend", or "~$40/mo ± $6" when extrapolated.
     fn text(&self) -> String {
         let share = share_of_host((!self.unknown_share).then_some(self.share));
-        format!("{}/mo{share}", about(self.usd))
+        format!("{}{share}", approx(self.usd, self.margin, "/mo"))
     }
 }
 
@@ -1602,10 +1613,10 @@ impl Total {
             return;
         };
         if fix.verb == UP_TO {
-            self.up_to.add(usd, fix.share);
+            self.up_to.add(usd, fix.margin, fix.share);
             return;
         }
-        self.measured.add(usd, fix.share);
+        self.measured.add(usd, fix.margin, fix.share);
         self.partial += usize::from(fix.verb == AT_LEAST);
     }
 
@@ -1619,7 +1630,7 @@ impl Total {
         let mut parts = vec![];
         if self.measured.changes > 0 {
             let usd = self.measured.text();
-            let mut text = if usd.starts_with('<') {
+            let mut text = if usd.starts_with(['<', '~']) {
                 usd
             } else {
                 format!("about {usd}")
@@ -1926,7 +1937,8 @@ impl Question {
         };
         let unknown = total.measured.unknown_share || total.up_to.unknown_share;
         let share = (!unknown).then_some(total.measured.share + total.up_to.share);
-        saving(verb, Some(usd), share)
+        let margin = Margin::plus(total.measured.margin, total.up_to.margin);
+        saving(verb, Some(usd), margin, share)
     }
 
     /// A group as the walk offers it, its counter `counter`: what its kind of feature is,
@@ -3171,6 +3183,7 @@ mod tests {
             claim: "Measured",
             suggested: false,
             saving: Some(10.0),
+            margin: None,
             verb: "saves",
             share: Some(0.1),
             what: String::new(),
@@ -3682,6 +3695,27 @@ mod tests {
             "Accepted: 2 changes whose savings were not measured."
         );
         assert_eq!(total(&[]), "");
+        // Extrapolated savings carry a ~, their margins added since they may share requests,
+        // and one with no spread to measure leaves the total's margin unknown.
+        let extrapolated = |usd, margin| Fix {
+            margin: Some(margin),
+            ..fix("saves", usd)
+        };
+        assert_eq!(
+            total(&[
+                fix("saves", 10.0),
+                extrapolated(20.0, Margin::Usd(2.0)),
+                extrapolated(5.0, Margin::Usd(1.0))
+            ]),
+            "Accepted: ~$35/mo ± $3, 35% of this host's spend; overlapping changes may save less."
+        );
+        assert_eq!(
+            total(&[
+                extrapolated(20.0, Margin::Usd(2.0)),
+                extrapolated(5.0, Margin::Unmeasured)
+            ]),
+            "Accepted: ~$25/mo, margin unknown, 25% of this host's spend; overlapping changes may save less."
+        );
         // A group's heading sums its members the same way.
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");

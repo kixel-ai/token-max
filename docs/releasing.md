@@ -48,12 +48,25 @@ verify the archive against `sha256.sum` or with `gh attestation verify`.
 ## max.kixel.ai
 
 `site/` is a Cloudflare Worker with only static assets and no code:
-`_redirects` sends `/install.sh` and `/install.ps1` to the latest release's
-installers, and `run.sh` and `run.ps1` are served as they are, so a release
-needs no deploy. `tests/run_script.rs` runs the run script for the host
+`index.html` and `style.css` are the landing page, `_redirects` sends
+`/install.sh` and `/install.ps1` to the latest release's installers, and
+`run.sh` and `run.ps1` are served as they are, so a release needs no deploy
+unless the page changes. `_headers` forbids scripts and other origins, which
+the page promises. `tests/run_script.rs` runs the run script for the host
 (`run.ps1` on the Windows CI job) against fixture releases on a local server.
-After changing `site/`, deploy by hand from that directory with a wrangler
-login for the kixel.ai account:
+
+The page copies the README's top: the headline, the run line, the
+pre-release notice, the two cache findings from `docs/results.md` and "How it
+knows"; change them together. Its
+recording, `walk.gif`, is the README's too, and `assets/demo/walk.tape`
+regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
+page's top in dark mode, from the logo through the run box;
+retake it after changing that part.
+
+Preview the page, its headers and redirects locally with
+`nix shell nixpkgs#wrangler -c wrangler dev` from `site/`. After changing
+`site/`, deploy by hand from that directory with a wrangler login for the
+kixel.ai account:
 
 ```sh
 nix shell nixpkgs#wrangler -c wrangler deploy
@@ -97,7 +110,8 @@ and crate ownership still belong to the owner. Do not send credentials in chat.
 
 After all m0 children merge, m0 sets the version in `Cargo.toml` to 0.0.1
 through the protected, reviewed squash path, validates the complete tool, and
-updates the README's pre-release notice in that change.
+updates the README's and the site's pre-release notices in that change;
+redeploy the site once the release is public.
 
 Dispatch **Release** on protected `main` with that exact version. Preflight
 refuses 0.0.0, a prerelease (the release is always marked latest, which the

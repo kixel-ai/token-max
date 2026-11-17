@@ -461,12 +461,18 @@ the defaults, as the walk's running total does, and says overlapping changes
 may save less; the [savings against the defaults](#savings-against-the-defaults)
 line would only restate that everything matches, so it is left out.
 
-A tool, skill or MCP server that the real settings file turns off is on. While
-it was off no request carried it, so its cost is scaled from the requests that
-did carry it to every request its line made in the window, and its verdict
-comes from the uses recorded while it was sent; its evidence says how many
-requests carried it. One that no request in the window carried gets an
-`unknown` line costing unknown, never zero. Claude Code's auto memory is
+One rule decides whether each tool, skill or MCP server is on, before any
+verdict. One that managed or system policy turns off stays off, whatever the
+latest request carried, including a tool a system MCP `enabled_tools`
+allowlist leaves out. Otherwise one that a user, project or local file turns
+off, including a tool a Codex `enabled_tools` allowlist leaves out, is on.
+While it was off no request carried it, so its cost is scaled from the
+requests that did carry it to every request its line made in the window,
+while its verdict and cost per use come from the uses recorded while it was
+sent; its evidence says how many requests carried it. An MCP server's total is
+its own part, scaled on the requests that carried the server, plus each of its
+tools' totals, scaled on their own. One that no request in the window carried
+gets an `unknown` line costing unknown, never zero. Claude Code's auto memory is
 scaled the same way, from the main-agent requests that carried it. When it is
 on but no recorded request carried it, as for a user who turned it off before
 the window, its cost is unknown on any run, not zero.

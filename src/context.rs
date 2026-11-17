@@ -198,18 +198,51 @@ fn covering<'a>(
     })
 }
 
-/// Whether `c` is a feature that a settings file of one of its profiles turns off, which
-/// `doctor --defaults` shows on.
-fn pretended_on(c: &ContextCost, profiles: &[Profile]) -> bool {
-    let Some(control) = &c.control else {
-        return false;
-    };
+/// Whether `doctor --defaults` has `c` on: off when policy turns it off, whatever the
+/// latest request carried; on when only a user, project or local file turns it off; None
+/// when neither applies, so what the requests carried decides. Always None outside
+/// `--defaults`, whose profiles carry no such switches.
+fn default_state(c: &ContextCost, profiles: &[Profile]) -> Option<bool> {
+    let control = c.control.as_ref()?;
     let mine = || profiles.iter().filter(|p| c.profiles.contains(&p.id));
     let covered = |switch: &Control| crate::defaults::covers(switch, control);
+    if mine().flat_map(|p| &p.policy_off).any(covered) {
+        return Some(false);
+    }
     mine()
         .flat_map(|p| p.pretended_on.iter().map(|(_, switch)| switch))
         .any(covered)
-        && !mine().flat_map(|p| &p.policy_off).any(covered)
+        .then_some(true)
+}
+
+/// What `c` cost over the window under `doctor --defaults`: its cost per request that
+/// carried it, over every request on its line when it was restored, else its own total.
+fn restored_usd(c: &ContextCost, usd: f64) -> f64 {
+    match c.pretended_requests {
+        Some(all) if c.requests > 0 => usd / c.requests as f64 * all as f64,
+        _ => usd,
+    }
+}
+
+/// Under `doctor --defaults`, scale each restored piece of a server, and the server's
+/// own part, on its own carriage, and rebuild the server's total from them, so the server
+/// always costs its own part plus its tools. Verdicts and costs per use stay those of the
+/// requests that carried each piece.
+fn restore_totals(c: &mut ContextCost) {
+    let restored = |c: &ContextCost| c.pretended_requests.is_some();
+    if !restored(c) && !c.details.iter().any(restored) {
+        return;
+    }
+    let mut own = c.estimated_usd;
+    let mut tools = 0.0;
+    for d in &mut c.details {
+        let Some(usd) = d.estimated_usd else { continue };
+        own = own.map(|o| o - usd);
+        let restored = restored_usd(d, usd);
+        d.estimated_usd = Some(restored);
+        tools += restored;
+    }
+    c.estimated_usd = own.map(|o| restored_usd(c, o.max(0.0)) + tools);
 }
 
 /// Context setting rows whose controls are not covered by a server recommendation.
@@ -1507,18 +1540,24 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.current = current
                 .get(&row.owner)
                 .is_some_and(|keys| keys.contains(&row.key));
-            // Under --defaults a feature the settings files turn off is on, as though every
-            // request on its line carried it, even one the latest request still carried.
-            if pretended_on(&c, input.profiles) {
-                c.current = true;
-                let all = input
-                    .requests
-                    .iter()
-                    .filter(|r| {
-                        r.harness == c.harness && r.profiles.iter().any(|p| c.profiles.contains(p))
-                    })
-                    .count() as u64;
-                c.pretended_requests = (all > c.requests).then_some(all);
+            // Under --defaults, policy keeps a feature off whatever the latest request
+            // carried, and a feature only the user's files turn off is on, as though every
+            // request on its line carried it.
+            match default_state(&c, input.profiles) {
+                Some(false) => c.current = false,
+                Some(true) => {
+                    c.current = true;
+                    let all = input
+                        .requests
+                        .iter()
+                        .filter(|r| {
+                            r.harness == c.harness
+                                && r.profiles.iter().any(|p| c.profiles.contains(p))
+                        })
+                        .count() as u64;
+                    c.pretended_requests = (all > c.requests).then_some(all);
+                }
+                None => {}
             }
             c.estimated_usd =
                 (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);
@@ -1564,14 +1603,6 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     _ => Verdict::Keep,
                 });
             }
-            // Its uses and cost per use stay those of the requests that carried it; only
-            // its total is scaled to the line.
-            if let Some(all) = c.pretended_requests {
-                c.estimated_usd = c
-                    .estimated_usd
-                    .filter(|_| c.requests > 0)
-                    .map(|usd| usd / c.requests as f64 * all as f64);
-            }
             if let Some(parent) = interned.kinds[row.key].parent {
                 details.entry((row.owner, parent)).or_default().push(c);
                 None
@@ -1583,30 +1614,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
     for (owner, key, c) in &mut result {
         c.details = details.remove(&(*owner, *key)).unwrap_or_default();
         c.details.sort_by(|a, b| a.name.cmp(&b.name));
-        // A tool --defaults restores on a server still sent adds what it cost on the
-        // requests that did not carry it to its server's total.
-        let restored: f64 = c
-            .details
-            .iter()
-            .filter(|d| d.pretended_requests.is_some())
-            .filter_map(|d| {
-                let all = d.pretended_requests? as f64;
-                Some(d.estimated_usd? * (1.0 - d.requests as f64 / all))
-            })
-            .sum();
-        if restored > 0.0
-            && c.pretended_requests.is_none()
-            && let Some(usd) = &mut c.estimated_usd
-        {
-            *usd += restored;
-            c.cost_per_use_usd = c.calls.filter(|&n| n > 0).map(|n| *usd / n as f64);
-            if c.verdict == Some(Verdict::Keep)
-                && c.cost_per_use_usd
-                    .is_some_and(|each| each > input.max_cost_per_use_usd)
-            {
-                c.verdict = Some(Verdict::Consider);
-            }
-        }
+        restore_totals(c);
         if c.verdict == Some(Verdict::Off) {
             for detail in &mut c.details {
                 detail.verdict = None;
@@ -3169,5 +3177,67 @@ mod tests {
             ),
             r#"mcp_servers."my.server".enabled = false"#
         );
+    }
+
+    #[test]
+    fn a_restored_server_costs_its_own_part_plus_its_tools() {
+        // Three requests: the server carried read and write, then read, then neither, and
+        // the user's files turn the whole server off. Each piece costs $1 a request.
+        let piece = |name: &str, requests: u64, usd: f64, details: Vec<ContextCost>| ContextCost {
+            harness: Harness::Codex,
+            profiles: vec!["p".into()],
+            kind: ContextKind::McpServer,
+            name: name.into(),
+            control: None,
+            requests,
+            priced: requests,
+            conditional_requests: 0,
+            tier_unknown_requests: 0,
+            assumptions: vec![],
+            tokens: None,
+            cost_usd: Usd::from_f64(usd),
+            estimated_usd: Some(usd),
+            calls: Some(0),
+            last_used: None,
+            current: true,
+            cost_per_use_usd: None,
+            verdict: None,
+            largest_characters: None,
+            skill: None,
+            details,
+            instruction_size: None,
+            description: None,
+            shares: vec![],
+            pretended_requests: (requests < 3).then_some(3),
+        };
+        // The server's own part rode on the two requests that carried a tool.
+        let mut server = piece(
+            "docs",
+            2,
+            2.0 + 3.0,
+            vec![
+                piece("read", 2, 2.0, vec![]),
+                piece("write", 1, 1.0, vec![]),
+            ],
+        );
+        restore_totals(&mut server);
+        let tools: Vec<f64> = server
+            .details
+            .iter()
+            .map(|d| d.estimated_usd.unwrap())
+            .collect();
+        assert_eq!(tools, [3.0, 3.0]);
+        assert_eq!(server.estimated_usd, Some(3.0 + 6.0));
+        // A server still sent keeps its own total and gains only what its restored tool
+        // would have cost.
+        let mut server = piece("docs", 3, 3.0 + 3.0, vec![piece("write", 1, 1.0, vec![])]);
+        server.pretended_requests = None;
+        server.details[0].estimated_usd = Some(1.0);
+        restore_totals(&mut server);
+        assert_eq!(server.estimated_usd, Some(5.0 + 3.0));
+        // Outside --defaults nothing changes.
+        let mut kept = piece("docs", 3, 4.0, vec![piece("read", 3, 1.0, vec![])]);
+        restore_totals(&mut kept);
+        assert_eq!(kept.estimated_usd, Some(4.0));
     }
 }

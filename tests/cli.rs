@@ -1728,6 +1728,26 @@ fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
     );
     assert!((on - 3.0 * sent).abs() < 1e-12, "{on} {sent}");
 
+    // Policy keeps a feature off, though the latest request carried it.
+    std::fs::write(
+        w.home.join("managed-settings.json"),
+        r#"{"permissions":{"deny":["Glob"]}}"#,
+    )
+    .unwrap();
+    let report = analysis(
+        &w,
+        |d| {
+            d.claude_dirs = vec![text(&w.claude)];
+            d.pretend_defaults();
+        },
+        1.0,
+    );
+    let glob = report.context.iter().find(|c| c.name == "Glob").unwrap();
+    assert_eq!(
+        (glob.current, glob.verdict, glob.pretended_requests),
+        (false, None, None)
+    );
+
     // The flag only shapes doctor's report.
     let (status, _, stderr) = run(&mut command(&w, &["sessions", "--defaults"]));
     assert_eq!(status, 2, "{stderr}");

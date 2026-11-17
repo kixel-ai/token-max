@@ -722,8 +722,10 @@ struct Spend {
     /// How far the extrapolated part may be off; None when nothing was extrapolated.
     margin: Option<Margin>,
     /// What the profiles that priced none of their requests are known to cost, a lower bound
-    /// with nothing to extrapolate from; zero when every profile priced some.
+    /// with nothing to extrapolate from.
     floor: f64,
+    /// Whether some profile priced none of its requests, even one with no known charge.
+    partial: bool,
     since: Option<Millis>,
     until: Millis,
 }
@@ -734,7 +736,7 @@ impl Spend {
         // Each profile's history is a separate sample, so their errors are independent and
         // their margins add in quadrature.
         let mut variance = 0.0;
-        let (mut extrapolated, mut unmeasured, mut floor) = (false, false, 0.0);
+        let (mut extrapolated, mut unmeasured, mut floor, mut partial) = (false, false, 0.0, false);
         for group in &report.historical {
             match group.estimate {
                 Some(estimate) => {
@@ -751,6 +753,7 @@ impl Spend {
                 None => {
                     usd += group.cost.known_usd.to_f64();
                     floor += group.cost.known_usd.to_f64();
+                    partial = true;
                 }
             }
         }
@@ -762,6 +765,7 @@ impl Spend {
                 extrapolated.then(|| Margin::Usd(variance.sqrt()))
             },
             floor,
+            partial,
             since: report
                 .scan
                 .since
@@ -773,14 +777,22 @@ impl Spend {
     /// The total as the title writes it, such as "~$9,392 ± $4.72", "at least $120", or
     /// "~$9,392 ± $4.72 plus at least $120" when only some profiles priced nothing.
     fn text(&self) -> String {
-        match (self.floor > 0.0, self.margin) {
-            (false, margin) => approx(self.usd, margin, ""),
-            (true, None) => format!("at least {}", about(self.usd)),
-            (true, margin) => format!(
+        let measured = self.usd - self.floor;
+        if !self.partial {
+            approx(self.usd, self.margin, "")
+        } else if measured == 0.0 && self.margin.is_none() {
+            format!("at least {}", about(self.floor))
+        } else if self.floor > 0.0 {
+            format!(
                 "{} plus at least {}",
-                approx(self.usd - self.floor, margin, ""),
+                approx(measured, self.margin, ""),
                 about(self.floor)
-            ),
+            )
+        } else {
+            format!(
+                "{} plus requests with no known price",
+                approx(measured, self.margin, "")
+            )
         }
     }
 
@@ -2391,6 +2403,22 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         }
         CheckResult::BashCap(b) => out.cost("Cache misses after long waits", &b.waits.miss_cost),
         CheckResult::Keepalive(k) => {
+            // Counts are what the priced sessions recorded; dollars cover every period.
+            if let Some(c) = k
+                .base
+                .coverage
+                .filter(|c| c.priced > 0 && c.priced < c.total)
+            {
+                out.field(
+                    "Coverage",
+                    &format!(
+                        "ping and return counts cover the {} of {} periods that could be priced; dollar figures are extrapolated to all {}",
+                        count(c.priced),
+                        count(c.total),
+                        count(c.total)
+                    ),
+                );
+            }
             for s in &k.scenarios {
                 out.field(
                     &format!("Cap {}", keepalive_duration(s.cap_ms)),
@@ -5538,11 +5566,11 @@ fn summary(
     }
     out.blank();
     // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
-    let base = if spend.floor == 0.0 && spend.margin.is_some() {
+    let base = if !spend.partial && spend.margin.is_some() {
         format!(
             "{host} spend over the window, {spent}, extrapolated from the requests that could be priced"
         )
-    } else if spend.floor == 0.0 {
+    } else if !spend.partial {
         format!("{host} spend over the window, {spent}")
     } else {
         format!(
@@ -7913,6 +7941,7 @@ mod tests {
                 usd: 0.0,
                 margin: None,
                 floor: 0.0,
+                partial: false,
                 since: None,
                 until: 0,
             },
@@ -8688,7 +8717,7 @@ mod tests {
         assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
         assert_eq!(whole_ttl.base.margin, None);
         let spend = Spend::new(&partial);
-        assert!(spend.floor == 0.0 && matches!(spend.margin, Some(Margin::Usd(_))));
+        assert!(!spend.partial && matches!(spend.margin, Some(Margin::Usd(_))));
         assert_eq!(Spend::new(&whole).margin, None);
         let summary = text(&partial, None, true);
         let title = summary.lines().next().unwrap();
@@ -8745,6 +8774,7 @@ mod tests {
             usd: 300.0,
             margin: None,
             floor: 0.0,
+            partial: false,
             since: Some(0),
             until: 30 * DAY as Millis,
         };
@@ -8791,23 +8821,29 @@ mod tests {
 
     #[test]
     fn a_spend_partly_extrapolated_keeps_its_margin_beside_the_lower_bound() {
-        let spend = |usd, margin, floor| Spend {
+        let spend = |usd, margin, floor, partial| Spend {
             usd,
             margin,
             floor,
+            partial,
             since: None,
             until: 0,
         };
-        assert_eq!(spend(100.0, None, 0.0).text(), "$100");
+        assert_eq!(spend(100.0, None, 0.0, false).text(), "$100");
         assert_eq!(
-            spend(100.0, Some(Margin::Usd(4.0)), 0.0).text(),
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0, false).text(),
             "~$100 ± $4"
         );
-        assert_eq!(spend(100.0, None, 100.0).text(), "at least $100");
+        assert_eq!(spend(100.0, None, 100.0, true).text(), "at least $100");
         // One profile extrapolated, another with nothing priced: never a bare "at least".
         assert_eq!(
-            spend(130.0, Some(Margin::Usd(4.0)), 30.0).text(),
+            spend(130.0, Some(Margin::Usd(4.0)), 30.0, true).text(),
             "~$100 ± $4 plus at least $30"
+        );
+        // A profile with nothing priced and no known charge still marks the total partial.
+        assert_eq!(
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0, true).text(),
+            "~$100 ± $4 plus requests with no known price"
         );
     }
 

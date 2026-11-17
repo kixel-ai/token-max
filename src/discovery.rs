@@ -1216,6 +1216,7 @@ pub fn discover_codex_controls(
         .iter_mut()
         .filter(|p| p.harness == Harness::Codex && p.t3.is_none())
     {
+        pretend_named_profiles_on(options, profile)?;
         let user = options.settings(&profile.settings_file, Harness::Codex)?;
         let system = options.settings(&options.codex_system_config_file, Harness::Codex)?;
         let base_scopes = [
@@ -1254,25 +1255,6 @@ pub fn discover_codex_controls(
         let mut outranking: Vec<String> = vec![];
         // Named profile files that set the model or its effort, which a --profile selection could apply.
         let mut effort_profile_files: Vec<String> = vec![];
-        // A named profile file's switches are a user's too, which --defaults shows on, for
-        // the servers a default user has: those the files it reads declare.
-        if options.defaults {
-            for name in profile_file_names(&profile.root)? {
-                let file = join(&[&profile.root, &name]);
-                let config = settings(&file, Harness::Codex)?;
-                let mut found = switched_off(Harness::Codex, &config);
-                found.extend(allowlists(&config));
-                found.retain(|k| {
-                    k.path[0] != "mcp_servers" || profile.mcp_servers.contains(&k.path[1])
-                });
-                options.pretend_switches_on(
-                    Harness::Codex,
-                    &mut profile.pretended_on,
-                    &file,
-                    found,
-                )?;
-            }
-        }
         for name in named_profile_files(options, &profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = options.settings(&file, Harness::Codex)?;
@@ -1563,6 +1545,26 @@ pub fn discover_codex_controls(
     pretend_t3_projects_on(options, profiles, requests, Harness::Codex)
 }
 
+/// Under `--defaults`, what a Codex home's named profile files turn off, which --defaults
+/// shows on, for the servers a default user has: those the files it reads declare.
+fn pretend_named_profiles_on(
+    options: &DiscoveryOptions,
+    profile: &mut Profile,
+) -> Result<(), ScanError> {
+    if !options.defaults {
+        return Ok(());
+    }
+    for name in profile_file_names(&profile.root)? {
+        let file = join(&[&profile.root, &name]);
+        let config = settings(&file, Harness::Codex)?;
+        let mut found = switched_off(Harness::Codex, &config);
+        found.extend(allowlists(&config));
+        found.retain(|k| k.path[0] != "mcp_servers" || profile.mcp_servers.contains(&k.path[1]));
+        options.pretend_switches_on(Harness::Codex, &mut profile.pretended_on, &file, found)?;
+    }
+    Ok(())
+}
+
 /// Under `--defaults`, what the project files at each directory a T3 instance's requests
 /// ran in turn off, as for a native profile: the CLI it launches reads them there. A Codex
 /// project reads as untrusted by no file and rooted at `.git`, since the defaults hold no
@@ -1580,6 +1582,9 @@ fn pretend_t3_projects_on(
         .iter_mut()
         .filter(|p| p.harness == harness && p.t3.is_some())
     {
+        if harness == Harness::Codex {
+            pretend_named_profiles_on(options, profile)?;
+        }
         let mine = requests.iter().filter(|r| r.profiles.contains(&profile.id));
         let cwds: Vec<String> = directories(mine).into_iter().map(String::from).collect();
         for cwd in cwds {
@@ -2915,8 +2920,7 @@ mod tests {
             let (claude, codex, outranking) = restored(t3);
             assert_eq!(claude, ["WebFetch tool", "MCP server notes"], "t3 {t3}");
             // Only the server the main file declares is a default user's.
-            let docs: &[&str] = if t3 { &[] } else { &["MCP server docs"] };
-            assert_eq!(codex, docs, "t3 {t3}");
+            assert_eq!(codex, ["MCP server docs"], "t3 {t3}");
             assert!(outranking.is_empty(), "{outranking:?}");
         }
     }

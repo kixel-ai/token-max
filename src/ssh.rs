@@ -62,8 +62,9 @@ const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linu
 ///
 /// Installed ones are searched on `PATH`, then in the release installers' directory, the first
 /// of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`, then in `cargo install`'s
-/// `~/.cargo/bin`; non-interactive shells often leave these off `PATH`.
-const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; echo run; shift 4; exec "$bin" "$@""#;
+/// `~/.cargo/bin`; non-interactive shells often leave these off `PATH`. An empty `PATH` entry
+/// is the current directory, as POSIX has it.
+const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do dir=${dir:-.}; if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; echo run; shift 4; exec "$bin" "$@""#;
 
 /// Picks a SHA-256 command, since Linux and macOS ship different ones.
 const SUM: &str = r#"if command -v sha256sum >/dev/null; then sum=sha256sum; elif command -v shasum >/dev/null; then sum="shasum -a 256"; else exit 5; fi; mkdir -p "$cache" || exit 1; "#;
@@ -655,7 +656,8 @@ mod tests {
             .args(args)
             .env_clear()
             .env("HOME", home)
-            .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .env("PATH", "/usr/bin::/bin:/usr/sbin:/sbin")
+            .current_dir(home)
             .output()
             .unwrap();
         (
@@ -710,6 +712,11 @@ mod tests {
         assert_eq!(run("plan9", "0.0.0"), (Some(0), "run\nran doctor\n".into()));
         std::fs::remove_file(&installed).unwrap();
         std::fs::remove_file(home.join(".local/bin/token-max")).unwrap();
+        // The empty entry in this `PATH` is the current directory, the home here.
+        let current = home.join("token-max");
+        release(&current, "0.0.1");
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        std::fs::remove_file(&current).unwrap();
         // Cached binaries: the copy on this platform, the release on another.
         script(&cache(home).join("token-max-copy"), r#"echo "copy $*""#);
         release(

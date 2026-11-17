@@ -60,7 +60,7 @@ pre-release notice, the two cache findings from `docs/results.md` and "How it
 knows"; change them together. Its
 recording, `walk.gif`, is the README's too, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
-page's top in dark mode, from the logo through the first install block;
+page's top in dark mode, from the logo through the run box;
 retake it after changing that part.
 
 Preview the page, its headers and redirects locally with

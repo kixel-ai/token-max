@@ -35,7 +35,7 @@
   <pre class="run"><code><span class="cmd">curl -LsSf https://max.kixel.ai/run.sh | sh</span></code></pre>
   <p class="small">Windows: <code class="cmd">irm https://max.kixel.ai/run.ps1 | iex</code>.
   It changes nothing without a yes. Works from the first release on; until then,
-  <code class="cmd">cargo install --locked --git https://github.com/kixel-ai/token-max</code>.</p>
+  <a href="https://github.com/kixel-ai/token-max#install">build it from source</a>.</p>
 </section>
 
 <!-- The maintainer's results, as docs/results.md and the README's top give them; update all three together. -->
@@ -43,14 +43,14 @@
   <h2 id="found">On the maintainer's 56 days of Claude Code</h2>
   <div class="cards">
     <article class="card">
-      <p class="who">Subagents: 1h cache instead of the default 5m</p>
+      <h3 class="who">Subagent cache, 1h instead of 5m</h3>
       <p class="big">~15% cheaper</p>
       <p>Every Claude Code user's subagents cache for 5 minutes. An hour would have
       cost ~$6,105 less.</p>
       <code class="setting">"subagentPromptCacheTtl": "1h"</code>
     </article>
     <article class="card">
-      <p class="who">Main agent on an API key or usage credits: 1h instead of 5m</p>
+      <h3 class="who">API-key main agent, 1h instead of 5m</h3>
       <p class="big">~36% cheaper</p>
       <p>A plan's included usage gets 1 hour, but API keys and usage credits get 5
       minutes. An hour would

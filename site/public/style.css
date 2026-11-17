@@ -49,6 +49,10 @@ code {
 	overflow-wrap: anywhere;
 }
 
+.small code {
+	white-space: nowrap;
+}
+
 .top,
 main > section,
 footer {
@@ -102,8 +106,10 @@ pre.run {
 	box-shadow: 0 0 0 1px var(--rule);
 }
 
+/* Wrapped rather than scrolled, so the whole command shows on a phone. */
 pre.run code {
-	font-size: clamp(0.9rem, 2.6vw, 1.2rem);
+	font-size: clamp(0.95rem, 2.6vw, 1.2rem);
+	white-space: pre-wrap;
 }
 
 /* A click selects the whole command, ready to copy, without a script. */
@@ -151,6 +157,7 @@ h2 {
 }
 
 .card .who {
+	margin: 0 0 0.75rem;
 	font-size: 0.9rem;
 	font-weight: 600;
 	color: var(--muted);

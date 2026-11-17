@@ -1732,11 +1732,11 @@ pub fn ask_billing(
     }
     write!(
         output,
-        "\n{}{}",
+        "{}{}",
         style.line("Claude Code caches the main conversation for 1h on a Claude plan and 5m on an API key or usage credits. Which pays can't be read from the transcripts, so say which to price each profile against its own default."),
         style.dim("Nothing is saved; the next run asks again."),
     )?;
-    for root in roots {
+    'roots: for root in roots {
         let question = format!("How is {} paid for?", home_in(root, style.home.as_deref()));
         let prompt = style.ask(&question, "[p]lan, [a]PI key or usage credits, [s]kip");
         loop {
@@ -1745,7 +1745,7 @@ pub fn ask_billing(
             let mut line = String::new();
             if input.read_line(&mut line)? == 0 {
                 writeln!(output)?;
-                return Ok(answers);
+                break 'roots;
             }
             let billing = match line.trim().to_ascii_lowercase().as_str() {
                 "p" | "plan" => Some(Billing::Plan),
@@ -1759,6 +1759,8 @@ pub fn ask_billing(
             break;
         }
     }
+    // The report follows as its own section.
+    writeln!(output)?;
     Ok(answers)
 }
 

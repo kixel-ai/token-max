@@ -495,7 +495,7 @@ fn plan_note(
             "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
             TTL_SOURCE,
         )),
-        CheckResult::Ttl(_) => match answered_main_ttl(result, r, out)? {
+        CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main => match profile?.billing? {
             Billing::Plan => Some((
                 "while it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m.",
                 TTL_SOURCE,
@@ -539,7 +539,7 @@ const TTL_SOURCE: &str =
     "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets";
 
 /// How the profile pays, when a check is the main TTL left unset at the default that billing,
-/// as answered in doctor, picks.
+/// as answered in doctor, picks. A pinned TTL's line still notes the answered default.
 fn answered_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<Billing> {
     if !matches!(result, CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main) {
         return None;
@@ -8551,6 +8551,18 @@ mod tests {
             let other = if default == Ttl::OneHour { "5m" } else { "1h" };
             let report = answered_report(&format!(r#"{{"promptCacheTtl":"{other}"}}"#), billing);
             let profile = &report.scan.profiles[0];
+            // Its line still notes the answered default, and a plan's overflow onto credits.
+            let summary = text(&report, None, true);
+            let line = report_line(&summary, "Main-agent prompt cache TTL");
+            assert!(
+                line.evidence.contains("which you answered pay"),
+                "{summary}"
+            );
+            assert_eq!(
+                line.evidence.contains("paid with usage credits and get 5m"),
+                billing == Billing::Plan,
+                "{summary}"
+            );
             let baseline =
                 crate::defaults::check(&CheckResult::Ttl(main_ttl(&report).clone()), Some(profile))
                     .unwrap();

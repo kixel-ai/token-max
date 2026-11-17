@@ -1337,7 +1337,7 @@ mod unix {
             "{entry}"
         );
         assert!(
-            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
+            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Official: while it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
             "{entry}"
         );
         assert!(

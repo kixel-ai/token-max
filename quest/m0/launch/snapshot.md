@@ -40,5 +40,4 @@ server and path names out, and redeploy the site from `site/` once it merges
 
 ## Required
 
-- [Extrapolate over unpriced requests](/quest/m0/launch/extrapolate.md) - the `~` figures and margins the page leads with
 - [Ask whether a Claude profile is on a plan or API billing](/quest/m0/launch/ask-billing.md) - the main-agent TTL priced against how each profile pays

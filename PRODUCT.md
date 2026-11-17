@@ -79,6 +79,11 @@ other tool recommends settings from transcripts for both harnesses.
 
 - Name: `token-max`, lowercase.
 - Maker: presented as made by kixelated, with kixelated's avatar.
+- Visual register: the developer-tool standard, played straight, at the
+  craft level of Bun, Linear, Vercel, Charm and Astral. No metaphor
+  costumes, printed-form parodies or retro hardware (the maintainer rejected
+  two rounds of them as gimmicky, dated, unexciting and wrong for
+  developers).
 - Voice: plain and evidence-first. Short sentences, claims labeled by kind,
   unknowns stated as unknown, no hype.
 - Verdict colors in the CLI: red for a recommended change, yellow for one

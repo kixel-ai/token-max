@@ -287,21 +287,26 @@ enum Found {
 }
 
 /// Read the run script's first line, which is short, so a destination cannot make this host
-/// hold more.
-fn found(stdout: &mut BufReader<ChildStdout>) -> Option<Found> {
+/// hold more. An error says whether stdout was empty, as it is when `ssh` or the script failed.
+fn found(stdout: &mut BufReader<ChildStdout>) -> Result<Found, bool> {
     let mut line = String::new();
-    stdout.take(64).read_line(&mut line).ok()?;
-    match line.strip_suffix('\n')? {
-        "run" => Some(Found::Run),
-        "copy" => Some(Found::Copy),
-        other => {
-            let target = other.strip_prefix("download ")?;
+    match stdout.take(64).read_line(&mut line) {
+        Ok(0) => return Err(true),
+        Ok(_) => {}
+        Err(_) => return Err(false),
+    }
+    let found = match line.strip_suffix('\n') {
+        Some("run") => Some(Found::Run),
+        Some("copy") => Some(Found::Copy),
+        Some(other) => other.strip_prefix("download ").and_then(|target| {
             TARGETS
                 .iter()
                 .find(|t| **t == target)
                 .map(|t| Found::Download(t))
-        }
-    }
+        }),
+        None => None,
+    };
+    found.ok_or(false)
 }
 
 fn connection_failed(destination: &str) -> String {
@@ -379,17 +384,18 @@ pub fn audit(
         let (mut session, mut stdout) = spawn(destination, command.clone(), Stdio::piped())?;
         let found = found(&mut stdout);
         let found = match found {
-            Some(Found::Run) => break (session, stdout),
+            Ok(Found::Run) => break (session, stdout),
             // Only once: a binary just put there that the script still cannot find means the
             // cache does not keep it.
-            Some(found) if !provisioned => found,
-            Some(_) => {
+            Ok(found) if !provisioned => found,
+            Ok(_) => {
                 return Err(session.fail(true, |_| {
                     "token-max was put in its cache there but is still missing; another build may have replaced it, so run again".into()
                 }));
             }
-            None => {
-                return Err(session.fail(true, |status| match status {
+            // Anything but an empty stdout is not the script, which may never end.
+            Err(empty) => {
+                return Err(session.fail(!empty, |status| match status {
                     Some(SSH_FAILED) => connection_failed(destination),
                     Some(UNSUPPORTED) => {
                         "unsupported platform; SSH audits support Linux and macOS destinations on x86_64 or arm64".into()

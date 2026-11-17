@@ -4899,7 +4899,14 @@ fn summary(
                     // A feature that is on says plainly when its cost could not be measured.
                     match r.savings_usd {
                         Some(usd) if usd <= 0.0 => {}
-                        usd => row.costs(usd, false, &spend),
+                        usd => {
+                            row.costs(usd, false, &spend);
+                            // An estimate extrapolated over unpriced turns keeps its ~ and margin.
+                            if let (Some(usd), Some(margin)) = (usd, r.margin) {
+                                row.amount = Some(("costs", approx(usd, Some(margin), "")));
+                                row.margin = Some(margin);
+                            }
+                        }
                     }
                 }
                 CheckResult::Memory(m) => match r.savings_usd {

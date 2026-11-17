@@ -7,9 +7,10 @@ way a replay's saving does since
 [#143](https://github.com/kixel-ai/token-max/pull/143): extrapolated to all
 of its requests, prefixed with `~`, and followed by its 95% margin of error,
 such as "costs ~$2,880 ± $40". That covers what a tool, skill or MCP server
-costs, the subagent, effort and Fable weekly lines, and "System prompt and
-core tools". No such line reads "at least" because some of its requests could
-not be priced; one with no priced requests stays unknown.
+costs, the subagent, effort and Fable weekly lines, "System prompt and core
+tools", and Auto memory over requests that recorded no context. No such line
+reads "at least" because some of its requests could not be priced or record
+their context; one with no priced requests stays unknown.
 
 ## Plan
 
@@ -29,6 +30,7 @@ Recommended:
 - A parent row's own cost is today its total minus its children's, then
   restored; give it the margin of its own total rather than combining the
   children's, since they come from the same requests.
-- Auto memory's lower bound for requests that recorded no context is a
-  different gap (whether memory was carried at all), so it stays "at least"
-  unless the maintainer wants it extrapolated too.
+
+Decided 2026-11-17 (maintainer, /quest-run on #143): ✅ extrapolate Auto
+memory's "at least" too, assuming requests that recorded no context loaded
+memory as often as those that did (rejected: keep "at least").

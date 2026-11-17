@@ -1,4 +1,4 @@
-// max.kixel.ai: the install and run scripts, as static assets with no Worker code.
+// max.kixel.ai: the landing page and the install and run scripts, as static assets with no Worker code.
 // Deploy by hand from this directory with `wrangler deploy`; see docs/releasing.md.
 {
 	"name": "max-kixel-ai",

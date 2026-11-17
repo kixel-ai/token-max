@@ -4262,7 +4262,7 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
             name: short_label(c, &out),
             value: format!("on {arrow} {target}"),
             saving,
-            margin: None,
+            margin: piece_margin(c, &out.spend).filter(|_| saving.is_some()),
             verb: "saves",
             share: saving.and_then(|usd| out.spend.of_month(usd)),
             source: Source::Piece(c),
@@ -4307,7 +4307,7 @@ fn headline(changes: usize, considered: usize) -> Vec<(String, &'static str)> {
 
 /// The verb of a saving that holds only when a default would otherwise be the other value.
 pub(crate) const UP_TO: &str = "saves up to";
-/// The verb of a saving priced from only part of what it would save.
+/// The verb of a saving that leaves part of what it would save unmeasured.
 pub(crate) const AT_LEAST: &str = "saves at least";
 
 /// How a recommended or suggested check's saving reads, such as "saves up to".
@@ -4360,6 +4360,12 @@ fn piece_saving(c: &ContextCost, spend: &Spend) -> Option<f64> {
     c.estimated_usd
         .filter(|_| c.skill.is_none())
         .map(|usd| monthly(usd, spend.since, Some(spend.until)))
+}
+
+/// How far [`piece_saving`] may be off when extrapolated over unpriced requests.
+fn piece_margin(c: &ContextCost, spend: &Spend) -> Option<Margin> {
+    c.margin
+        .map(|m| m.scale(monthly(1.0, spend.since, Some(spend.until))))
 }
 
 /// The settings file a piece's switch lives in: its first profile's.
@@ -4991,20 +4997,19 @@ fn summary(
             Verdict::Keep => "on".into(),
         };
         if row.offered() && c.skill.is_none() {
-            let margin = c
-                .margin
-                .map(|m| m.scale(monthly(1.0, spend.since, Some(spend.until))));
-            row.saves("saves", piece_saving(c, &spend), margin, &spend);
+            row.saves(
+                "saves",
+                piece_saving(c, &spend),
+                piece_margin(c, &spend),
+                &spend,
+            );
         } else {
             row.costs(c.estimate(), false, &spend);
         }
+        // A share of the figure beside it, which carries the line's ~ and margin.
         let each = c
             .cost_per_use_usd
-            .zip(c.calls)
-            .map_or_else(String::new, |(usd, calls)| {
-                let margin = c.margin.map(|m| m.scale(1.0 / calls as f64));
-                format!(", {} each", approx(usd, margin, ""))
-            });
+            .map_or_else(String::new, |usd| format!(", {} each", about(usd)));
         let mut text = format!(
             "{}{each}; it cost {} over the window",
             capitalize(&uses(c)),
@@ -5666,10 +5671,6 @@ fn summary(
     {
         out.line("Background estimates apply current files to history; historical settings and unrecorded launch overrides remain unknown.", 0, DIM);
     }
-    // Parent and detail coverage overlap; do not combine them into a percentage.
-    if pieces.iter().any(|(_, c)| c.priced < c.requests) {
-        out.line("Some feature costs are scaled from their priced requests; --details shows each line's coverage.", 0, DIM);
-    }
     if out.options.color {
         out.legend();
     }
@@ -6250,12 +6251,12 @@ mod tests {
             kind,
             name: name.into(),
             requests: 100,
-            priced: if estimated.is_some() { 90 } else { 0 },
+            priced: if estimated.is_some() { 100 } else { 0 },
             conditional_requests: 0,
             tier_unknown_requests: 0,
             assumptions: vec![],
             tokens: estimated.map(|_| 12_345),
-            cost_usd: Usd::from_f64(estimated.map_or(0.0, |e| e * 0.9)),
+            cost_usd: Usd::from_f64(estimated.unwrap_or(0.0)),
             estimated_usd: estimated,
             margin: None,
             calls,
@@ -7852,7 +7853,6 @@ mod tests {
         );
         assert!(cards.contains("MCP tool mcp__docs__write (included in server total)"));
         assert!(!rendered.contains("Not enough evidence"));
-        assert!(rendered.contains("Some feature costs are scaled from their priced requests"));
         let detailed = text(&report, None, true);
         assert_eq!(detailed.matches("Recommended off:").count(), 1);
         assert_eq!(
@@ -8414,6 +8414,63 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn partly_priced_pieces_show_a_tilde_and_their_margin() {
+        let mut report = synthetic();
+        let margins = [
+            ("Artifact", Margin::Usd(4.0)),
+            ("Agent", Margin::Unmeasured),
+            ("Claude Code system prompt", Margin::Usd(2.0)),
+            ("Bash", Margin::Usd(1.0)),
+        ];
+        for (name, margin) in margins {
+            let c = report.context.iter_mut().find(|c| c.name == name).unwrap();
+            c.margin = Some(margin);
+        }
+        // A fixed piece nothing priced leaves the sum a lower bound.
+        report.context.push(context_piece(
+            ContextKind::Tool,
+            "Read",
+            None,
+            None,
+            Some(3),
+        ));
+        let text = text(&report, None, true);
+        let artifact = report_line(&text, "Artifact tool");
+        assert_eq!(
+            artifact.head,
+            "Artifact tool on -> off saves ~$90/mo ± $4 6%"
+        );
+        assert!(
+            artifact
+                .evidence
+                .starts_with("Never used; it cost ~$90 ± $4 over the window."),
+            "{}",
+            artifact.evidence
+        );
+        // The per-use figure is a share of the one beside it, which carries the margin.
+        let agent = report_line(&text, "Agent tool");
+        assert_eq!(agent.head, "Agent tool on costs ~$40, margin unknown 3%");
+        assert!(agent.evidence.starts_with(
+            "Used 310 times, $0.13 each; it cost ~$40, margin unknown over the window."
+        ));
+        // Pieces on the same requests add their margins.
+        let core = report_line(&text, "System prompt and core tools");
+        assert_eq!(
+            core.head,
+            "System prompt and core tools costs at least ~$213 ± $3 14%"
+        );
+        assert!(core.evidence.starts_with("1 piece could not be priced. "));
+        assert!(text.contains("A ~ marks a figure extrapolated"));
+        // `doctor` offers the change with the same margin.
+        let offered = recommendations(&report, false);
+        let artifact = offered
+            .iter()
+            .find(|r| r.name.starts_with("Artifact"))
+            .unwrap();
+        assert_eq!(artifact.margin, Some(Margin::Usd(4.0)));
     }
 
     #[test]

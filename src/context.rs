@@ -1702,8 +1702,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Exposure, ExposureView, IdentityBasis, Ids, Invocation, Owner, Scope, Size, TextCoverage,
-        ToolCalls, ToolResults, Usage, Via,
+        Exposure, ExposureView, IdentityBasis, Ids, Invocation, Margin, Owner, Scope, Size,
+        TextCoverage, ToolCalls, ToolResults, Usage, Via,
     };
     use crate::test_support::{make_request, make_snapshot, prices};
 
@@ -2042,10 +2042,16 @@ mod tests {
             file.estimated_usd.unwrap(),
             file.cost_usd.to_f64() * 3.0 / 2.0
         ));
+        // Extrapolated over the unpriced request, with a margin from the two priced ones'
+        // spread; one priced request leaves none to measure.
+        assert!(matches!(file.margin, Some(Margin::Usd(m)) if m > 0.0));
         let new = row(&rows, "/repo/sub/CLAUDE.md");
         assert_eq!((new.requests, new.priced), (2, 1));
         assert!(close(new.cost_usd.to_f64(), 300.0 * WRITE1H));
+        assert_eq!(new.margin, Some(Margin::Unmeasured));
         assert!(file.current && new.current);
+        let fixed = row(&rows, "Search");
+        assert_eq!((fixed.requests, fixed.priced, fixed.margin), (3, 3, None));
     }
 
     #[test]
@@ -3299,9 +3305,21 @@ mod tests {
             "docs",
             2,
             2.0 + 3.0 + 1.0 + 1.0,
-            vec![tool("read", 2, 2.0), tool("write", 1, 1.0), discovery, kept],
+            vec![
+                ContextCost {
+                    margin: Some(Margin::Usd(0.5)),
+                    ..tool("read", 2, 2.0)
+                },
+                tool("write", 1, 1.0),
+                discovery,
+                kept,
+            ],
         );
+        server.margin = Some(Margin::Usd(1.4));
         restore_totals(&mut server);
+        // Each margin scales with its figure; the server keeps its own total's.
+        assert_eq!(server.details[0].margin, Some(Margin::Usd(0.75)));
+        assert!(matches!(server.margin, Some(Margin::Usd(m)) if close(m, 1.4 * 13.0 / 7.0)));
         let details: Vec<f64> = server
             .details
             .iter()

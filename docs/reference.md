@@ -67,8 +67,8 @@ overlapping changes may save less, since each saving holds every other setting
 constant. An accepted change whose saving was not measured is counted beside
 the total, not in it, and so is one that saves only when an unset default would
 otherwise be the other value, such as an unset main-agent cache TTL, as an "up
-to" figure. A saving priced from only part of its requests counts what was
-priced, and the total says so. A `q`, or end of input, ends the walk and leaves the rest
+to" figure. A saving that leaves part of its cost unmeasured, such as Codex
+memory generation, counts what was measured, and the total says so. A `q`, or end of input, ends the walk and leaves the rest
 unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the
@@ -391,8 +391,14 @@ $120`, so a share can read high; the line explaining the percents says so.
 A `~` marks any figure extrapolated over requests that could not be priced, such
 as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the
 assumption that the unpriced requests resemble the priced ones. A figure priced
-in full has neither. The walk's and `--defaults` headline's totals add their
-changes' margins, since savings from overlapping requests can err the same way.
+in full has neither. Costs read the same way: what a tool, skill, MCP server,
+subagent type, main-session effort or Fable week cost is extrapolated from its
+own priced requests to all of them, such as `~$2,880 ± $40`, and one with no
+priced request is unknown. A line summing pieces of context, such as System
+prompt and core tools, adds their margins, and reads `at least` only beside a
+piece none of whose requests could be priced. The walk's and `--defaults`
+headline's totals add their changes' margins, since savings from overlapping
+requests can err the same way.
 
 Comparisons between setting values are per 30 days at the window's rate; what
 features, context and long Bash waits cost, and how often they were used, are
@@ -599,8 +605,10 @@ ratio measured from the same transcripts. It is priced at the cache position it
 occupied in that request: cached read, 1h write, 5m write, then ordinary input.
 Attachments have no recorded position, so one is priced only when every
 position its history allows pays the same rate. Requests that could not be
-priced are estimated from those that could, and a piece with none is shown as
-unknown.
+priced are extrapolated from those that could, with a `~` and a 95% margin from
+the priced requests' spread, and a piece with none is shown as unknown. An MCP
+server's tools ride on its requests, so its total keeps its own margin rather
+than adding its tools'.
 Removing a piece can also shift later cache writes and compaction, which this
 does not model. Claude requests without a recorded shape cannot price their
 context pieces. Codex prices rendered chronological context with a quarter-token

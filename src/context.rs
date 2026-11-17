@@ -311,6 +311,8 @@ struct Placed<'a> {
     opaque: bool,
     /// Keep the aggregate catalog's placement bounds when allocating its charge to entries.
     extent: Option<i64>,
+    /// A tool's output, which any request prices, rather than context only a recorded shape shows.
+    output: bool,
 }
 
 /// Pieces by key, interned so each request compares indices rather than strings.
@@ -1004,6 +1006,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     extent: (codex && component.category == Category::SkillListing)
                         .then_some(component.size.characters)
                         .flatten(),
+                    output: false,
                 }
             }));
         }
@@ -1032,6 +1035,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     history,
                     opaque: *opaque,
                     extent: None,
+                    output: true,
                 });
             }
         }
@@ -1223,11 +1227,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         .filter(|&input| input <= end)
                         .map(|i| (i, prior))
                 });
-            let mut charged: IndexMap<usize, (f64, f64, bool)> = IndexMap::default();
+            // Tokens, cost, whether any part is unpriced, and the cost of tool output.
+            let mut charged: IndexMap<usize, (f64, f64, bool, f64)> = IndexMap::default();
             let mut offset = 0.0;
             for piece in &parts {
                 let tokens = size(piece);
-                let entry = charged.entry(piece.key).or_insert((0.0, 0.0, false));
+                let entry = charged.entry(piece.key).or_insert((0.0, 0.0, false, 0.0));
                 entry.0 += tokens;
                 if piece.opaque {
                     entry.2 = true;
@@ -1261,6 +1266,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let first = slot(from);
                 if to >= from && first == slot(to + extent - 1e-9) {
                     entry.1 += tokens * slots[first].1;
+                    if piece.output {
+                        entry.3 += tokens * slots[first].1;
+                    }
                 } else {
                     entry.2 = true;
                 }
@@ -1269,13 +1277,14 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .iter()
                 .filter_map(|(&key, &value)| Some((interned.kinds[key].parent?, value)))
                 .collect();
-            for (parent, (tokens, cost, missing)) in parents {
-                let entry = charged.entry(parent).or_insert((0.0, 0.0, false));
+            for (parent, (tokens, cost, missing, output)) in parents {
+                let entry = charged.entry(parent).or_insert((0.0, 0.0, false, 0.0));
                 entry.0 += tokens;
                 entry.1 += cost;
                 entry.2 |= missing;
+                entry.3 += output;
             }
-            for (key, (tokens, cost, missing)) in charged {
+            for (key, (tokens, cost, missing, output)) in charged {
                 // A row with any piece of unknown cost in this request stays unpriced
                 // for it, so a subtotal is never shown as the whole.
                 if missing {
@@ -1290,6 +1299,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 counts.sample.add(cost);
                 if shaped {
                     counts.recorded.add(cost);
+                    counts.loaded.add(cost - Usd::from_f64(output));
+                } else {
+                    counts.unrecorded.add(cost);
                 }
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));

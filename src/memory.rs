@@ -380,55 +380,71 @@ fn check(
 
 /// What memory cost over `recorded` requests that recorded their context and `unrecorded`
 /// that did not, from `rows`, its rows' shares on the line; None when no recorded request
-/// is known or none that carried memory was priced.
+/// is known, or none of the requests that carried memory, or of those that read it back
+/// without recording their context, was priced.
 ///
 /// Recorded requests are extrapolated over the unpriced ones that carried memory, as the
-/// context row does. Unrecorded ones, which a row sees only through memory files they read
-/// back, are extrapolated from the recorded ones, assuming they loaded and read memory as
-/// often, so what they read back is left to that extrapolation rather than added to it.
+/// context row does. Unrecorded ones keep the memory files they were measured to read back,
+/// extrapolated over the unpriced ones that read, and add the context memory loads, at the
+/// recorded requests' mean, assuming they loaded it as often.
 fn extrapolate(rows: &[ProfileShare], recorded: u64, unrecorded: u64) -> Option<Estimate> {
-    let mut carriers = Sample::default();
-    let mut carried = 0;
+    let (mut whole, mut loaded, mut reads) =
+        (Sample::default(), Sample::default(), Sample::default());
+    let (mut carried, mut read) = (0, 0);
     for c in rows {
-        carriers += c.recorded;
+        whole += c.recorded;
+        loaded += c.loaded;
+        reads += c.unrecorded;
         carried += c.recorded_requests;
+        read += c.requests - c.recorded_requests;
     }
     if recorded == 0 {
         return None;
     }
-    let e = carriers.estimate(carried)?;
-    // Every recorded request: a priced carrier at its cost, an unpriced one at the carriers'
-    // mean, as `e` takes it, and one that carried none at zero.
-    let mut each = carriers;
-    let mean = Usd::from_f64(if carried > 0 {
-        e.usd / carried as f64
-    } else {
-        0.0
-    });
-    for _ in carriers.priced()..carried {
-        each.add(mean);
+    let e = whole.estimate(carried)?;
+    let (mut usd, mut margin) = (e.usd, e.margin);
+    if read > 0 {
+        let r = reads.estimate(read)?;
+        usd += r.usd;
+        margin = Margin::plus(margin, r.margin);
     }
-    for _ in carried..recorded {
-        each.add(Usd::ZERO);
+    if unrecorded > 0 {
+        let l = loaded.estimate(carried)?;
+        // Every recorded request's loaded context: a priced carrier's own, an unpriced one's
+        // at the carriers' mean, as `l` takes it, and zero for one that carried none.
+        let mut each = loaded;
+        let mean = Usd::from_f64(if carried > 0 {
+            l.usd / carried as f64
+        } else {
+            0.0
+        });
+        for _ in loaded.priced()..carried {
+            each.add(mean);
+        }
+        for _ in carried..recorded {
+            each.add(Usd::ZERO);
+        }
+        let all = each
+            .estimate(recorded + unrecorded)
+            .expect("every recorded request is in the sample");
+        let scale = unrecorded as f64 / recorded as f64;
+        usd += l.usd * scale;
+        // The carriers' own margin grows with the extrapolation; the other covers how the
+        // unrecorded requests may differ from the recorded ones.
+        margin = Margin::plus(
+            margin,
+            Margin::plus(l.margin.map(|m| m.scale(scale)), all.margin),
+        );
     }
-    let all = each
-        .estimate(recorded + unrecorded)
-        .expect("every recorded request is in the sample");
-    // The carriers' own margin grows with the extrapolation; the second covers how the
-    // unrecorded requests may differ from the recorded ones.
-    let scale = (recorded + unrecorded) as f64 / recorded as f64;
-    Some(Estimate {
-        usd: all.usd,
-        margin: Margin::plus(e.margin.map(|m| m.scale(scale)), all.margin),
-    })
+    Some(Estimate { usd, margin })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A share whose recorded requests cost `costs` where priced, and `extra` more requests
-    /// that recorded no context but read memory back for $1 each.
+    /// A share whose recorded requests loaded `costs` where priced, and `extra` more
+    /// requests that recorded no context but read memory back for $10 each.
     fn share(recorded: u64, costs: &[f64], extra: u64) -> ProfileShare {
         let mut s = ProfileShare {
             requests: recorded + extra,
@@ -438,24 +454,32 @@ mod tests {
         for &usd in costs {
             s.sample.add(Usd::from_f64(usd));
             s.recorded.add(Usd::from_f64(usd));
+            s.loaded.add(Usd::from_f64(usd));
         }
         for _ in 0..extra {
-            s.sample.add(Usd::from_f64(1.0));
+            s.sample.add(Usd::from_f64(10.0));
+            s.unrecorded.add(Usd::from_f64(10.0));
         }
         s
     }
 
     #[test]
-    fn unrecorded_requests_take_the_recorded_mean_once() {
-        // One recorded request loaded $1 of memory; one unrecorded request read $1 back. It
-        // stands in for the recorded one, not on top of its own read.
-        let e = extrapolate(&[share(1, &[1.0], 1)], 1, 1).unwrap();
-        assert!((e.usd - 2.0).abs() < 1e-9);
-        // One recorded request leaves no spread to measure.
-        assert_eq!(e.margin, Some(Margin::Unmeasured));
+    fn unrecorded_requests_keep_their_reads_and_load_the_recorded_mean() {
+        // Two recorded requests loaded $1 each; one unrecorded request read $10 back. It keeps
+        // its $10 and loads $1 like them, never scaled on top of the recorded total.
+        let e = extrapolate(&[share(2, &[1.0, 1.0], 1)], 2, 1).unwrap();
+        assert!((e.usd - 13.0).abs() < 1e-9, "{}", e.usd);
+        // Every recorded request loaded the same, so the extrapolation has no spread.
+        assert_eq!(e.margin, Some(Margin::Usd(0.0)));
         // Priced in full and nothing unrecorded: exact.
         let e = extrapolate(&[share(2, &[1.0, 3.0], 0)], 2, 0).unwrap();
         assert_eq!((e.usd, e.margin), (4.0, None));
+        // A recorded request's own reads stay in its total, never in the loaded mean.
+        let mut s = share(1, &[], 0);
+        s.recorded.add(Usd::from_f64(5.0));
+        s.loaded.add(Usd::from_f64(2.0));
+        let e = extrapolate(&[s], 1, 1).unwrap();
+        assert!((e.usd - 7.0).abs() < 1e-9, "{}", e.usd);
     }
 
     #[test]

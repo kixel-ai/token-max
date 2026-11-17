@@ -901,15 +901,15 @@ slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-c
 apply. The check reports the total cost, the reads and writes, and the setting
 that turns it off; its `savingsUsd` is that total. Once memory is off, the line
 still shows what it cost and how often it was used earlier in the window.
-Requests that recorded no context are assumed to have loaded and read memory as
-often as those that did, so what memory cost over the recorded requests is
-extrapolated to them, with a `~` and a 95% margin; the memory files they read
-back are left to that extrapolation rather than added to it. The margin adds the
-carrying requests' own, grown with the extrapolation, to one for how the
-unrecorded requests may differ from the recorded ones, in which an unpriced
-carrying request counts at the carriers' mean and one that carried none at zero.
-`coverage` counts the requests that recorded their context. When no request
-recorded one, the cost is unknown rather than zero.
+Requests that recorded no context keep the memory files they were measured to
+read back, and are assumed to have loaded memory as often as those that did, so
+the context memory loads is extrapolated to them at the recorded requests' mean,
+with a `~` and a 95% margin. That margin adds the carrying requests' own, grown
+with the extrapolation, to one for how the unrecorded requests may differ from
+the recorded ones, in which an unpriced carrying request counts at the carriers'
+mean and one that carried none at zero. `coverage` counts the requests that
+recorded their context. When no request recorded one, the cost is unknown
+rather than zero.
 
 [Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
 memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or

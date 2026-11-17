@@ -2778,6 +2778,10 @@ pub struct ProfileShare {
     pub recorded_requests: u64,
     /// What each priced one of those cost.
     pub recorded: crate::prices::Sample,
+    /// The same, less the piece's tool output: the context it loaded.
+    pub loaded: crate::prices::Sample,
+    /// What each priced request that recorded no context cost, which is only tool output.
+    pub unrecorded: crate::prices::Sample,
 }
 
 impl ContextCost {
@@ -2804,6 +2808,8 @@ impl ContextCost {
                         whole.sample += s.sample;
                         whole.recorded_requests += s.recorded_requests;
                         whole.recorded += s.recorded;
+                        whole.loaded += s.loaded;
+                        whole.unrecorded += s.unrecorded;
                     }
                     whole
                 })

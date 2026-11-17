@@ -5,7 +5,9 @@
 The README's top, the max.kixel.ai page and `docs/results.md` show the
 maintainer's real usage over the last 30 days summed across all four hosts,
 kixtop, desktop, nixos and fedora, instead of desktop alone, with the
-figures the extrapolation and billing quests produce.
+figures the extrapolation and billing quests produce. Like T3 Code's usage
+view, it opens with three totals: the API cost, the session count, and the
+potential savings.
 
 ## Plan
 
@@ -17,6 +19,10 @@ days: $60,391.31, 23,285 sessions · API estimate"):
   with their math (rejected: now, and again later).
 - ✅ the last 30 days on every host (rejected: all history, whose span
   differs per host).
+- ✅ lead with the totals, as T3 Code's usage view does: the total API cost,
+  the number of sessions, and the potential savings across all four hosts
+  ("please do like T3Code and list out the total API cost, sessions, and
+  potential savings").
 - Sum the hosts as they are, as the hosts epic in
   [kixel-ai/token-max#151](https://github.com/kixel-ai/token-max/pull/151)
   decided for its total; until that total exists, add the four reports by

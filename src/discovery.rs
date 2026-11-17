@@ -89,19 +89,23 @@ impl DiscoveryOptions {
 
     /// The switches managed settings (Claude) or the system `config.toml` (Codex) turn off,
     /// including a system MCP allowlist, which `--defaults` keeps.
-    fn policy_off(&self, harness: Harness) -> Result<Vec<Control>, ScanError> {
-        Ok(match harness {
-            Harness::Claude => switched_off(
-                Harness::Claude,
-                &settings(&self.managed_settings_file, Harness::Claude)?,
+    fn policy_off(&self, harness: Harness) -> Result<Vec<(String, Control)>, ScanError> {
+        let (file, off) = match harness {
+            Harness::Claude => (
+                &self.managed_settings_file,
+                switched_off(
+                    Harness::Claude,
+                    &settings(&self.managed_settings_file, Harness::Claude)?,
+                ),
             ),
             Harness::Codex => {
                 let system = settings(&self.codex_system_config_file, Harness::Codex)?;
                 let mut off = switched_off(Harness::Codex, &system);
                 off.extend(allowlists(&system));
-                off
+                (&self.codex_system_config_file, off)
             }
-        })
+        };
+        Ok(off.into_iter().map(|k| (file.clone(), k)).collect())
     }
 
     /// Under `--defaults`, add to `on` each switch `file` really turns off that policy does
@@ -115,16 +119,67 @@ impl DiscoveryOptions {
         if !self.defaults {
             return Ok(());
         }
-        let policy = self.policy_off(harness)?;
         let config = settings(file, harness)?;
         let mut found = switched_off(harness, &config);
         if harness == Harness::Codex {
             found.extend(allowlists(&config));
         }
+        self.pretend_switches_on(harness, on, file, found)
+    }
+
+    /// Under `--defaults`, add to `on` each server the state file `file` turns off with
+    /// `/mcp` in the project at `cwd`, which Claude Code keys by the directory or its
+    /// repository's root.
+    fn pretend_mcp_on(
+        &self,
+        on: &mut Vec<(String, Control)>,
+        file: &str,
+        cwd: &str,
+    ) -> Result<(), ScanError> {
+        if !self.defaults {
+            return Ok(());
+        }
+        let paths = project_directories(cwd, &[".git".into()])?;
+        let root = paths.last().map_or(cwd, String::as_str);
+        let state = settings(file, Harness::Claude)?;
+        let mut found = vec![];
+        for (project, entry) in members(state.get("projects")) {
+            if project != cwd && project != root {
+                continue;
+            }
+            let names = entry.get("disabledMcpServers").and_then(Value::as_array);
+            for name in names.into_iter().flatten().filter_map(Value::as_str) {
+                found.push(Control {
+                    path: vec![
+                        "projects".into(),
+                        project.clone(),
+                        "disabledMcpServers".into(),
+                    ],
+                    value: ControlValue::Text(name.into()),
+                    append: true,
+                });
+            }
+        }
+        self.pretend_switches_on(Harness::Claude, on, file, found)
+    }
+
+    /// Add to `on` each of `found`, the switches `file` turns off, that policy does not also
+    /// turn off and `on` does not already hold.
+    fn pretend_switches_on(
+        &self,
+        harness: Harness,
+        on: &mut Vec<(String, Control)>,
+        file: &str,
+        found: Vec<Control>,
+    ) -> Result<(), ScanError> {
+        let policy = self.policy_off(harness)?;
         for control in found {
             // Two allowlists differ by what they list, so each tool is checked in context.
             let allowlist = control.path.last().is_some_and(|k| k == "enabled_tools");
-            let kept = !allowlist && policy.iter().any(|k| crate::defaults::covers(k, &control));
+            let kept = !allowlist
+                && policy
+                    .iter()
+                    .any(|(_, k)| crate::defaults::covers(k, &control));
             let seen = on
                 .iter()
                 .any(|(f, k)| f == file && crate::defaults::same_switch(k, &control));
@@ -896,6 +951,9 @@ pub fn discover_claude_controls(
             for file in [&project_file, &legacy_file, &local_file] {
                 options.pretend_on(Harness::Claude, &mut profile.pretended_on, file)?;
             }
+            if let Some(state) = &profile.claude_config {
+                options.pretend_mcp_on(&mut profile.pretended_on, state, cwd)?;
+            }
             for (file, config) in [
                 (&project_file, &project),
                 (&legacy_file, &legacy),
@@ -1031,6 +1089,7 @@ pub fn discover_claude_controls(
             }
         }
     }
+    pretend_t3_projects_on(options, profiles, requests, Harness::Claude)?;
     // A T3 instance that inherits its window reads it from the same project/local files,
     // under the instance's own environment; its other controls stay T3's.
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
@@ -1195,6 +1254,25 @@ pub fn discover_codex_controls(
         let mut outranking: Vec<String> = vec![];
         // Named profile files that set the model or its effort, which a --profile selection could apply.
         let mut effort_profile_files: Vec<String> = vec![];
+        // A named profile file's switches are a user's too, which --defaults shows on, for
+        // the servers a default user has: those the files it reads declare.
+        if options.defaults {
+            for name in profile_file_names(&profile.root)? {
+                let file = join(&[&profile.root, &name]);
+                let config = settings(&file, Harness::Codex)?;
+                let mut found = switched_off(Harness::Codex, &config);
+                found.extend(allowlists(&config));
+                found.retain(|k| {
+                    k.path[0] != "mcp_servers" || profile.mcp_servers.contains(&k.path[1])
+                });
+                options.pretend_switches_on(
+                    Harness::Codex,
+                    &mut profile.pretended_on,
+                    &file,
+                    found,
+                )?;
+            }
+        }
         for name in named_profile_files(options, &profile.root)? {
             let file = join(&[&profile.root, &name]);
             let config = options.settings(&file, Harness::Codex)?;
@@ -1322,8 +1400,10 @@ pub fn discover_codex_controls(
                 {
                     budget_overrides.push(file.clone());
                 }
-                // A layer Codex may read, unless it is the user's own file again.
+                // A layer Codex may read, unless it is the user's own file again. Under
+                // --defaults one holds only server declarations, which set no switch.
                 if !config.is_empty()
+                    && !options.defaults
                     && !same_file(&file, &profile.settings_file)
                     && !outranking.contains(&file)
                 {
@@ -1480,6 +1560,47 @@ pub fn discover_codex_controls(
             )
         });
     }
+    pretend_t3_projects_on(options, profiles, requests, Harness::Codex)
+}
+
+/// Under `--defaults`, what the project files at each directory a T3 instance's requests
+/// ran in turn off, as for a native profile: the CLI it launches reads them there. A Codex
+/// project reads as untrusted by no file and rooted at `.git`, since the defaults hold no
+/// trust or markers.
+fn pretend_t3_projects_on(
+    options: &DiscoveryOptions,
+    profiles: &mut [Profile],
+    requests: &[Request],
+    harness: Harness,
+) -> Result<(), ScanError> {
+    if !options.defaults {
+        return Ok(());
+    }
+    for profile in profiles
+        .iter_mut()
+        .filter(|p| p.harness == harness && p.t3.is_some())
+    {
+        let mine = requests.iter().filter(|r| r.profiles.contains(&profile.id));
+        let cwds: Vec<String> = directories(mine).into_iter().map(String::from).collect();
+        for cwd in cwds {
+            if !existing_directory(&cwd)? {
+                continue;
+            }
+            let files = match harness {
+                Harness::Claude => claude_project_files(&cwd, options)?.to_vec(),
+                Harness::Codex => project_directories(&cwd, &[".git".into()])?
+                    .iter()
+                    .map(|path| join(&[path, ".codex", "config.toml"]))
+                    .collect(),
+            };
+            for file in &files {
+                options.pretend_on(harness, &mut profile.pretended_on, file)?;
+            }
+            if let Some(state) = &profile.claude_config {
+                options.pretend_mcp_on(&mut profile.pretended_on, state, &cwd)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1570,6 +1691,11 @@ pub(crate) fn named_profile_files(
     if options.defaults {
         return Ok(vec![]);
     }
+    profile_file_names(root)
+}
+
+/// The named profile files in a Codex home, in stable order, whatever the run pretends.
+fn profile_file_names(root: &str) -> Result<Vec<String>, ScanError> {
     let unreadable = || error("cannot read settings", root, 0);
     let mut names = Vec::new();
     for entry in fs::read_dir(root).map_err(|_| unreadable())? {
@@ -2688,7 +2814,7 @@ mod tests {
             codex
                 .policy_off
                 .iter()
-                .any(|k| crate::defaults::covers(k, &tool(t)))
+                .any(|(_, k)| crate::defaults::covers(k, &tool(t)))
         };
         assert_eq!((policy("a"), policy("b")), (false, true));
         let on: Vec<&[String]> = codex
@@ -2707,6 +2833,92 @@ mod tests {
             codex.speed.as_ref().unwrap().value.as_deref(),
             Some("standard")
         );
+    }
+
+    #[test]
+    fn defaults_restore_project_named_profile_and_mcp_state_switches() {
+        let w = Workspace::new();
+        let repo = w.home.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        write(
+            repo.join(".claude/settings.json"),
+            r#"{"permissions":{"deny":["WebFetch"]}}"#,
+        );
+        // A project layer that turns a server back on sets nothing a default user has.
+        write(
+            repo.join(".codex/config.toml"),
+            "[mcp_servers.docs]\ncommand = 'docs'\nenabled = true\n",
+        );
+        write(
+            w.codex.join("config.toml"),
+            "[mcp_servers.docs]\ncommand = 'docs'\n",
+        );
+        write(
+            w.codex.join("work.config.toml"),
+            "[mcp_servers.docs]\nenabled = false\n[mcp_servers.lint]\ncommand = 'lint'\nenabled = false\n",
+        );
+        let state = claude(&discover(&options(&w)).unwrap())
+            .claude_config
+            .clone()
+            .unwrap();
+        // /mcp turned two servers off in the repo; policy denies one's tools by wildcard.
+        write(
+            &state,
+            &serde_json::json!({"projects": {text(&repo): {"disabledMcpServers": ["notes", "blocked"]}}})
+                .to_string(),
+        );
+        write(
+            w.managed_settings_file(),
+            r#"{"permissions":{"deny":["mcp__blocked__*"]}}"#,
+        );
+        let mut o = options(&w);
+        o.pretend_defaults();
+        let restored = |t3: bool| {
+            let mut d = discover(&o).unwrap();
+            for p in &mut d.profiles {
+                p.t3 = t3.then(|| crate::model::T3Instance {
+                    state: String::new(),
+                    instance: "synthetic".into(),
+                    enabled: true,
+                    idle_mode: crate::model::T3IdleMode::Off,
+                    idle_owner: String::new(),
+                    ownership_resolved: true,
+                    settings_unresolved: false,
+                    limitations: vec![],
+                    inherited_window: None,
+                    retained_since: None,
+                });
+            }
+            let requests: Vec<Request> =
+                d.profiles.iter().map(|p| request(p, Some(&repo))).collect();
+            discover_claude_controls(&o, &mut d.profiles, &requests).unwrap();
+            discover_codex_controls(&o, &mut d.profiles, &requests).unwrap();
+            let names = |harness| {
+                let p = d.profiles.iter().find(|p| p.harness == harness).unwrap();
+                p.pretended_on
+                    .iter()
+                    .map(|(_, k)| crate::defaults::switch_name(k))
+                    .collect::<Vec<_>>()
+            };
+            let codex = d
+                .profiles
+                .iter()
+                .find(|p| p.harness == Harness::Codex)
+                .unwrap();
+            (
+                names(Harness::Claude),
+                names(Harness::Codex),
+                codex.outranking_files.clone(),
+            )
+        };
+        for t3 in [false, true] {
+            let (claude, codex, outranking) = restored(t3);
+            assert_eq!(claude, ["WebFetch tool", "MCP server notes"], "t3 {t3}");
+            // Only the server the main file declares is a default user's.
+            let docs: &[&str] = if t3 { &[] } else { &["MCP server docs"] };
+            assert_eq!(codex, docs, "t3 {t3}");
+            assert!(outranking.is_empty(), "{outranking:?}");
+        }
     }
 
     // Ported from reader.test.ts: "managed TTL controls retain the managed owner and API-key presence leaves billing unknown".

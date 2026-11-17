@@ -464,8 +464,13 @@ line would only restate that everything matches, so it is left out.
 One rule decides whether each tool, skill or MCP server is on, before any
 verdict. One that managed or system policy turns off stays off, whatever the
 latest request carried, including a tool a system MCP `enabled_tools`
-allowlist leaves out. Otherwise one that a user, project or local file turns
-off, including a tool a Codex `enabled_tools` allowlist leaves out, is on.
+allowlist leaves out, and its `info` line says policy keeps it off. Otherwise
+one that a user, project, local or named profile file turns off is on,
+including a tool a Codex `enabled_tools` allowlist leaves out, a server a
+`mcp__<server>__*` rule denies, and a Claude Code server turned off with `/mcp`
+in the project, which `.claude.json` records. A named profile file counts only
+for a server the files a default user reads declare, and a T3 instance reads
+the project files where its requests ran, as its CLI does.
 While it was off no request carried it, so its cost is scaled from the
 requests that did carry it to every request its line made in the window,
 while its verdict and cost per use come from the uses recorded while it was

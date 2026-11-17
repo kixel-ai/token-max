@@ -206,7 +206,10 @@ fn default_state(c: &ContextCost, profiles: &[Profile]) -> Option<bool> {
     let control = c.control.as_ref()?;
     let mine = || profiles.iter().filter(|p| c.profiles.contains(&p.id));
     let covered = |switch: &Control| crate::defaults::covers(switch, control);
-    if mine().flat_map(|p| &p.policy_off).any(covered) {
+    if mine()
+        .flat_map(|p| p.policy_off.iter().map(|(_, switch)| switch))
+        .any(covered)
+    {
         return Some(false);
     }
     mine()

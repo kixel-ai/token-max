@@ -5090,6 +5090,55 @@ fn summary(
             rows.push(row);
         }
     }
+    // Under --defaults, what managed or system policy turns off stays off, and a user can't
+    // turn it on, so its line says so and recommends nothing.
+    let mut seen_policy: Vec<&crate::model::Control> = vec![];
+    for p in &report.scan.profiles {
+        for (file, control) in &p.policy_off {
+            if seen_policy
+                .iter()
+                .any(|c| crate::defaults::same_switch(c, control))
+            {
+                continue;
+            }
+            seen_policy.push(control);
+            let ids: Vec<String> = report
+                .scan
+                .profiles
+                .iter()
+                .filter(|q| {
+                    q.harness == p.harness
+                        && q.policy_off
+                            .iter()
+                            .any(|(_, k)| crate::defaults::same_switch(k, control))
+                })
+                .map(|q| q.id.clone())
+                .collect();
+            let shown = out.home(file);
+            let allowlist = control.path.last().is_some_and(|k| k == "enabled_tools");
+            let mut row = Row::new(
+                Claim::Measured,
+                Mark::Info,
+                crate::defaults::switch_name(control),
+                crate::defaults::switch_what(control),
+            );
+            row.profile = tag(&ids, &switch, out);
+            row.value = if allowlist {
+                "listed tools only".into()
+            } else {
+                crate::defaults::switch_value(control)
+            };
+            row.setting = format!("{shown}:{}", control.path.join("."));
+            row.evidence = if allowlist {
+                format!(
+                    "Policy in {shown} keeps every tool it doesn't list off, which a user can't change."
+                )
+            } else {
+                format!("Policy in {shown} keeps it off, which a user can't change.")
+            };
+            rows.push(row);
+        }
+    }
     for g in report
         .scan
         .t3
@@ -6331,6 +6380,30 @@ mod tests {
             rest = &rest[start + end + 1..];
         }
         out + rest
+    }
+
+    #[test]
+    fn defaults_show_what_policy_keeps_off_on_its_own_line() {
+        let mut report = synthetic();
+        report.scan.defaults = true;
+        report.scan.profiles[0].policy_off = vec![
+            (
+                "/etc/managed-settings.json".into(),
+                deny("Monitor").unwrap(),
+            ),
+            (
+                "/etc/managed-settings.json".into(),
+                deny("mcp__docs__*").unwrap(),
+            ),
+        ];
+        let text = text(&report, None, true);
+        let monitor = report_line(&text, "Monitor tool off");
+        assert_eq!(monitor.mark, "info");
+        assert_eq!(
+            monitor.evidence,
+            "Policy in /etc/managed-settings.json keeps it off, which a user can't change."
+        );
+        assert_eq!(report_line(&text, "MCP server docs off").mark, "info");
     }
 
     #[test]

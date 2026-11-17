@@ -4774,7 +4774,8 @@ mod tests {
             ownership_resolved: true,
             settings_unresolved: false,
             limitations: vec![],
-            inherited_window: None,
+            env: None,
+            inherited_window: true,
             retained_since: None,
         });
         for r in &mut scan.requests {

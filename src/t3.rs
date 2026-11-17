@@ -874,12 +874,10 @@ pub(crate) fn discover(
                 ownership_resolved: resolved,
                 settings_unresolved: unresolved_env || launch_unresolved || policy_unresolved,
                 limitations,
+                env: (resolved && harness == Harness::Claude).then(|| local.env.clone()),
                 // Without its own window, T3 passes no window, so Claude Code reads the
                 // same user, project and local settings as a native session.
-                inherited_window: (resolved
-                    && harness == Harness::Claude
-                    && config.auto_compact_window.is_empty())
-                .then(|| local.env.clone()),
+                inherited_window: config.auto_compact_window.is_empty(),
                 retained_since: None,
             });
             if harness == Harness::Codex {
@@ -2350,9 +2348,9 @@ fn unsettled_for(
         if control.main_only() && !main {
             continue;
         }
-        // A removed instance or one off the control's lines is a line of its own.
+        // A removed instance, or one no line of the control covers, is a line of its own.
         let lines: HashSet<Option<String>> = owners.iter().map(line).collect();
-        if lines.len() > 1 || lines.contains(&None) {
+        if lines.len() > 1 {
             open.extend(owners.iter().cloned());
         }
     }
@@ -2460,6 +2458,78 @@ mod tests {
             assert!(!exported.contains(secret), "{secret}");
         }
         assert_eq!(fs::read(root.join("statev2.sqlite")).unwrap(), before);
+    }
+    #[test]
+    fn unsettled_owners_leave_open_only_controls_they_read_from_different_lines() {
+        use crate::test_support::{make_profile, make_t3_profile};
+        let root = "/home/.claude";
+        let mut native = make_profile("native", root);
+        native.speed = Some(SpeedControl {
+            value: Some("standard".into()),
+            owner: format!("{root}/settings.json:fastMode"),
+            replacement: String::new(),
+            resolved: true,
+            reason: String::new(),
+        });
+        let mut agent = make_t3_profile("agent", root);
+        agent.speed = Some(SpeedControl {
+            owner: "T3 instance agent: thread modelSelection.options.fastMode".into(),
+            ..native.speed.clone().unwrap()
+        });
+        // T3's own window outranks the native file's.
+        let mut windowed = make_t3_profile("windowed", root);
+        windowed.compaction.default.owner =
+            "/state/settings.json:providerInstances.windowed.config.autoCompactWindow".into();
+        // An instance environment sets the subagent TTL for T3's requests alone.
+        let mut env = make_t3_profile("env", root);
+        env.ttl.subagent.owner = "T3 instance env: CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into();
+        let profiles = [native, agent, windowed, env];
+        let open = |owners: &[&str], main: bool| {
+            let owners: Profiles = owners.iter().map(|o| o.to_string()).collect();
+            let unsettled = HashSet::from_iter([(owners, main)]);
+            let mut open: Vec<&str> = [
+                ("speed", Control::Speed),
+                ("t3 idle", Control::T3Idle),
+                ("idle", Control::Idle),
+                ("background", Control::Background),
+                ("main ttl", Control::Ttl(Bucket::Main)),
+                ("subagent ttl", Control::Ttl(Bucket::Subagent)),
+                ("compaction", Control::Compaction),
+            ]
+            .into_iter()
+            .filter(|(_, c)| !unsettled_for(&profiles, &unsettled, *c).is_empty())
+            .map(|(name, _)| name)
+            .collect();
+            open.sort_unstable();
+            open
+        };
+        // Both read the TTLs and windows from one file; only T3 sets the speed.
+        assert_eq!(open(&["native", "agent"], false), ["speed"]);
+        // Idle compaction and background features act on main requests, and each is
+        // read by one owner alone.
+        assert_eq!(
+            open(&["native", "agent"], true),
+            ["background", "idle", "speed", "t3 idle"]
+        );
+        // Native-only controls cover neither instance; T3's idle line replays the TTL
+        // the environment sets.
+        assert_eq!(
+            open(&["agent", "env"], true),
+            ["compaction", "speed", "subagent ttl", "t3 idle"]
+        );
+        assert_eq!(
+            open(&["native", "windowed"], false),
+            ["compaction", "speed"]
+        );
+        assert_eq!(
+            open(&["native", "env"], false),
+            ["compaction", "speed", "subagent ttl"]
+        );
+        // A removed instance's controls are gone, so nothing it could share is known.
+        assert_eq!(
+            open(&["native", "gone"], false),
+            ["compaction", "main ttl", "speed", "subagent ttl"]
+        );
     }
     #[test]
     fn removed_owners_stay_billed_outside_current_checks() {
@@ -2651,7 +2721,10 @@ mod tests {
         let t3 = claude.t3.as_ref().unwrap();
         assert_eq!(t3.idle_mode, T3IdleMode::OnReturn);
         // Unread machine policy, as on Windows, leaves the instance unresolved.
-        assert_eq!(t3.inherited_window.is_some(), !managed_policy_unresolved());
+        assert_eq!(
+            t3.env.is_some() && t3.inherited_window,
+            !managed_policy_unresolved()
+        );
         let speed = claude.speed.as_ref().unwrap();
         assert_eq!(
             (speed.value.as_deref(), speed.resolved),

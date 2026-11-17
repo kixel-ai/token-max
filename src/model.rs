@@ -1104,10 +1104,13 @@ pub struct T3Instance {
     /// override native settings in ways discovery does not resolve.
     pub settings_unresolved: bool,
     pub limitations: Vec<String>,
-    /// The instance's environment when it inherits the native settings window, which
-    /// discovery resolves at each recorded project like a native profile's.
+    /// A Claude instance's environment when its settings resolve, under which discovery
+    /// reads each recorded project's settings as it does a native profile's.
     #[serde(skip)]
-    pub inherited_window: Option<crate::controls::Env>,
+    pub env: Option<crate::controls::Env>,
+    /// Whether T3 passes no window, so Claude Code reads the native user, project and local ones.
+    #[serde(skip)]
+    pub inherited_window: bool,
     /// When T3's pruned event log becomes complete, which starts its idle check's window;
     /// None when it never pruned or was not read.
     pub retained_since: Option<Millis>,

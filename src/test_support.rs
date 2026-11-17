@@ -301,7 +301,8 @@ pub fn make_t3_profile(id: &str, root: &str) -> Profile {
         ownership_resolved: true,
         settings_unresolved: false,
         limitations: vec![],
-        inherited_window: None,
+        env: None,
+        inherited_window: true,
         retained_since: None,
     });
     p

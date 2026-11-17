@@ -1928,7 +1928,9 @@ pub(crate) fn enrich(
             .and_then(|p| p.t3.as_ref())
             .map(|t| t.state.clone())
     };
-    let mut ambiguous_profiles = HashSet::default();
+    // The possible owners of each selected request T3 could not settle, and whether it may
+    // be a main-agent request, which the main-only controls ask.
+    let mut unsettled: HashSet<(Profiles, bool)> = HashSet::default();
     let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::default();
     // How each root session's own requests resolved, which its subagents inherit: one
     // profile, or why not. Requests inside the window decide; earlier ones only fill in.
@@ -2152,7 +2154,7 @@ pub(crate) fn enrich(
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
-                        ambiguous_profiles.extend(r.profiles.iter().cloned());
+                        unsettled.insert((r.profiles.clone(), !subagent));
                     }
                 }
             }
@@ -2231,36 +2233,130 @@ pub(crate) fn enrich(
             }
         }
     }
+    let open = |control: Control| unsettled_for(profiles, &unsettled, control);
+    let [
+        speed,
+        t3_idle,
+        idle,
+        background,
+        main_ttl,
+        subagent_ttl,
+        compaction,
+    ] = [
+        Control::Speed,
+        Control::T3Idle,
+        Control::Idle,
+        Control::Background,
+        Control::Ttl(Bucket::Main),
+        Control::Ttl(Bucket::Subagent),
+        Control::Compaction,
+    ]
+    .map(open);
+    const REASON: &str = "shared native history has unresolved T3 control ownership";
     for p in profiles.iter_mut() {
-        if p.t3.is_some() || ambiguous_profiles.contains(&p.id) {
+        if p.t3.is_some() || speed.contains(&p.id) {
             p.speed_directories = None;
             if let Some(speed) = &mut p.speed {
                 speed.resolved = false;
             }
         }
-        if ambiguous_profiles.contains(&p.id) {
-            if let Some(t3) = &mut p.t3 {
-                t3.ownership_resolved = false;
-                // Its directory windows would otherwise bypass the unresolved profile window.
-                p.idle_directories = None;
-            }
-            p.compaction.default.comparison_unknown =
-                Some("shared native history has unresolved T3 control ownership".into());
+        if t3_idle.contains(&p.id)
+            && let Some(t3) = &mut p.t3
+        {
+            t3.ownership_resolved = false;
+            // Its directory windows would otherwise bypass the unresolved profile window.
+            p.idle_directories = None;
+        }
+        if compaction.contains(&p.id) {
+            p.compaction.default.comparison_unknown = Some(REASON.into());
             for c in p.compaction.models.values_mut() {
                 c.comparison_unknown = p.compaction.default.comparison_unknown.clone();
             }
-            if let Some(idle) = &mut p.idle {
-                idle.resolved = false;
-            }
-            for ttl in [&mut p.ttl.main, &mut p.ttl.subagent] {
+        }
+        if idle.contains(&p.id)
+            && let Some(idle) = &mut p.idle
+        {
+            idle.resolved = false;
+        }
+        for (open, ttl) in [
+            (&main_ttl, &mut p.ttl.main),
+            (&subagent_ttl, &mut p.ttl.subagent),
+        ] {
+            if open.contains(&p.id) {
                 ttl.value = None;
-                ttl.reason = "shared native history has unresolved T3 control ownership".into();
+                ttl.reason = REASON.into();
             }
+        }
+        if background.contains(&p.id) {
             p.background.clear();
             p.background_directories.clear();
             p.background_requests.clear();
         }
     }
+}
+
+/// A control whose current value T3's unsettled ownership can leave unknown.
+#[derive(Clone, Copy)]
+enum Control {
+    Speed,
+    /// T3's own idle compaction mode.
+    T3Idle,
+    /// Claude Code's native idle compaction.
+    Idle,
+    Background,
+    Ttl(Bucket),
+    /// The compaction windows, with both TTLs their replay applies.
+    Compaction,
+}
+
+impl Control {
+    /// Whether the control acts only on main-agent requests.
+    fn main_only(self) -> bool {
+        matches!(self, Control::T3Idle | Control::Idle | Control::Background)
+    }
+
+    /// The owner that puts a profile on this control's line, as its check groups them, or
+    /// None when no line of this control covers the profile.
+    fn owner(self, p: &Profile) -> Option<String> {
+        let native = p.t3.is_none();
+        match self {
+            Control::Speed => p.speed.as_ref().map(|s| s.owner.clone()),
+            Control::T3Idle => p.t3.as_ref().map(|_| crate::idle::t3_owner(p)),
+            Control::Idle => native.then(|| crate::idle::native_owner(p)),
+            Control::Background => native.then(|| crate::background::owner(p)),
+            Control::Ttl(bucket) => Some(crate::rows::ttl_owner(p, bucket)),
+            Control::Compaction => Some(crate::rows::compaction_owner(p)),
+        }
+    }
+}
+
+/// The profiles whose current value of `control` stays unknown: those an unsettled request
+/// could belong to when its possible owners fall on more than one of the control's lines. A
+/// request left open only between profiles that read the control from one file and key gets
+/// that file's value whichever of them ran it.
+fn unsettled_for(
+    profiles: &[Profile],
+    unsettled: &HashSet<(Profiles, bool)>,
+    control: Control,
+) -> HashSet<String> {
+    let line = |id: &String| {
+        profiles
+            .iter()
+            .find(|p| &p.id == id)
+            .and_then(|p| Some(crate::rows::key(p, &control.owner(p)?)))
+    };
+    let mut open = HashSet::default();
+    for (owners, main) in unsettled {
+        if control.main_only() && !main {
+            continue;
+        }
+        // A removed instance or one off the control's lines is a line of its own.
+        let lines: HashSet<Option<String>> = owners.iter().map(line).collect();
+        if lines.len() > 1 || lines.contains(&None) {
+            open.extend(owners.iter().cloned());
+        }
+    }
+    open
 }
 
 #[cfg(test)]
@@ -2397,12 +2493,19 @@ mod tests {
                 .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
                 .unwrap();
             // `ownership_resolved` also reflects platform policy (always unresolved on
-            // Windows), so check the marker shared-history ambiguity leaves on the TTL.
+            // Windows), so check the native speed T3 overrides, which shared-history
+            // ambiguity leaves unresolved, while the TTL both owners read stays known.
+            let native = scan
+                .profiles
+                .iter()
+                .find(|p| p.t3.is_none() && p.harness == Harness::Codex)
+                .unwrap();
             assert_eq!(
-                current.ttl.main.reason.contains("shared native history"),
+                !native.speed.as_ref().unwrap().resolved,
                 !removed,
                 "{owner}"
             );
+            assert!(!current.ttl.main.reason.contains("shared native history"));
             if removed {
                 assert_eq!(*r.profiles, [profile_key(&t3.path, "gone")]);
                 assert!(r.t3.is_some(), "joined evidence still applies");
@@ -3406,16 +3509,21 @@ mod tests {
         let t3 = |p: &String| window.profiles.iter().any(|q| &q.id == p && q.t3.is_some());
         assert!(r.profiles.len() == 1 && t3(&r.profiles[0]), "{r:?}");
         // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
-        // so check the marker shared-history ambiguity leaves on the TTL instead.
+        // so check the native speed T3 overrides, which shared-history ambiguity leaves
+        // unresolved, while the TTL every possible owner reads from one file stays known.
         let ambiguous = |s: &Scan| {
-            s.profiles.iter().any(|p| {
-                p.ttl
-                    .main
-                    .reason
-                    .contains("unresolved T3 control ownership")
-            })
+            s.profiles
+                .iter()
+                .filter(|p| p.t3.is_none())
+                .any(|p| p.speed.as_ref().is_some_and(|s| !s.resolved))
         };
         assert!(ambiguous(&data));
+        assert!(data.profiles.iter().all(|p| {
+            !p.ttl
+                .main
+                .reason
+                .contains("unresolved T3 control ownership")
+        }));
         // History before the window leaves current ownership alone.
         let mut options = w.scan_options();
         options.since = timestamp(&json!("2026-01-02T00:00:00Z"));

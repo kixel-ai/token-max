@@ -2153,6 +2153,24 @@ pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
         .collect()
 }
 
+/// The owner of a native profile's idle line. Profiles share a line when the TTLs and
+/// windows the idle replay applies match too.
+pub(crate) fn native_owner(p: &Profile) -> String {
+    format!(
+        "{}\n{}",
+        p.idle.as_ref().map_or("", |i| i.owner.as_str()),
+        crate::rows::compaction_owner(p)
+    )
+}
+
+/// The owner of a T3 instance's idle line. Instances that inherit T3's global policy share
+/// it, and share a line when the native TTLs and windows the replay applies are the same too.
+pub(crate) fn t3_owner(p: &Profile) -> String {
+    let idle = &p.t3.as_ref().expect("a T3 instance").idle_owner;
+    let idle = idle.split(" (instance ").next().unwrap_or(idle);
+    format!("{idle}\n{}", crate::rows::compaction_owner(p))
+}
+
 /// Each check with its single periods at current settings and after recommendations, when
 /// `detail` asks for them.
 fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<IdlePeriod>; 2])> {
@@ -2162,15 +2180,7 @@ fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<
         .profiles
         .iter()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_none());
-    // Profiles share a line when the TTLs and windows the idle replay applies match too.
-    let owner = |p: &Profile| {
-        format!(
-            "{}\n{}",
-            p.idle.as_ref().map_or("", |i| i.owner.as_str()),
-            crate::rows::compaction_owner(p)
-        )
-    };
-    for group in crate::rows::groups(native, owner) {
+    for group in crate::rows::groups(native, native_owner) {
         profile_checks(options, &group, detail, &mut checks);
     }
     checks
@@ -2514,14 +2524,7 @@ fn detailed_t3_checks(
         .profiles
         .iter()
         .filter(|p| p.harness == Harness::Claude && p.t3.is_some());
-    // Instances that inherit T3's global policy share it, and share a line when the native
-    // TTLs and windows the replay applies are the same too.
-    let owner = |p: &Profile| {
-        let idle = &p.t3.as_ref().expect("a T3 instance").idle_owner;
-        let idle = idle.split(" (instance ").next().unwrap_or(idle);
-        format!("{idle}\n{}", crate::rows::compaction_owner(p))
-    };
-    for group in crate::rows::groups(instances, owner) {
+    for group in crate::rows::groups(instances, t3_owner) {
         let profile = group.lead;
         let instance = profile.t3.as_ref().expect("a T3 instance");
         // T3 prunes its event log, so the proactive mode can be priced only after the

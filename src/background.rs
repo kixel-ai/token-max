@@ -58,12 +58,17 @@ pub struct BackgroundInput<'a> {
     pub max_cost_per_use_usd: f64,
 }
 
+/// The owner of a native profile's background line: its settings file.
+pub(crate) fn owner(p: &Profile) -> String {
+    format!("{}:background", p.settings_file)
+}
+
 /// One check per distinct owning control, charging only its applicable requests.
 pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
     let mut result = vec![];
     // These features run only in the native terminal clients, so T3's profiles have none.
     let native = input.scan.profiles.iter().filter(|p| p.t3.is_none());
-    for line in crate::rows::groups(native, |p| format!("{}:background", p.settings_file)) {
+    for line in crate::rows::groups(native, owner) {
         let profile = line.lead;
         let requests: Vec<&Request> = input
             .scan

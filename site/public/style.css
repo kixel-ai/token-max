@@ -134,6 +134,13 @@ pre code {
 	margin: 3.5rem auto;
 }
 
+.walk summary {
+	margin-bottom: 0.75rem;
+	cursor: pointer;
+	font-size: 0.95rem;
+	color: var(--muted);
+}
+
 .walk img {
 	display: block;
 	width: 100%;

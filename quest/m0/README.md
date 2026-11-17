@@ -103,7 +103,9 @@ Decided 2026-11-08 (maintainer), for SSH audits: ✅ each destination runs a
 version fails with the command to run (rejected: copy the local binary over
 SSH to a temporary path, run it and delete it). As built, each SSH host is
 analyzed in its own section of the report, so a history copied between hosts
-counts on each and amounts across hosts are not added.
+counts on each and amounts across hosts are not added. Amended 2026-11-17:
+[the hosts epic](/quest/m1/hosts/README.md) sums hosts and copies or
+downloads token-max onto each.
 
 Recommendations for every check:
 

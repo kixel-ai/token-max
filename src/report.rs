@@ -2097,10 +2097,8 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                         extrapolated(scenario.delta),
                         extrapolated(scenario.monthly_delta),
                         match scenario.coverage {
-                            c if c.priced != c.total => format!(
-                                "; {} of {} sessions priced both ways",
-                                c.priced, c.total
-                            ),
+                            c if c.priced != c.total =>
+                                format!("; {} of {} sessions priced both ways", c.priced, c.total),
                             _ => String::new(),
                         }
                     ),
@@ -2991,7 +2989,11 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
         .iter()
         .filter_map(|s| {
             let e = s.estimate?.scale(monthly(1.0, r.since, r.until));
-            Some(format!("{} {}", s.mode.as_str(), approx(e.usd, e.margin, "")))
+            Some(format!(
+                "{} {}",
+                s.mode.as_str(),
+                approx(e.usd, e.margin, "")
+            ))
         })
         .collect();
     let priced = if priced.is_empty() {

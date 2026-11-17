@@ -25,8 +25,8 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowControl,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sample, Sum, add_costs, paired_savings, price_components, price_part,
-    server_cost, unknown_cost, zero_cost,
+    Catalog, PRICE_SOURCES, Pairs, Sum, add_costs, price_components, price_part, server_cost,
+    unknown_cost, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
 
@@ -40,6 +40,38 @@ const SOURCES: [&str; 2] = [
     "https://code.claude.com/docs/en/prompt-caching#compacting-the-conversation (2026-11-07)",
 ];
 const POLICY_CHANGE: &str = "effective project TTL/window policy changes within a conversation; its counterfactual is unresolved";
+
+/// A comparison of two runs session by session, as (baseline, alternative, acting): baseline
+/// minus alternative, extrapolated over the unpriced sessions, with how many were priced.
+///
+/// Only sessions where idle compaction could act, `acting`, stand for the unpriced ones; a
+/// priced session where it could not counts exactly, so its zero doesn't dilute them.
+fn paired<'c>(
+    sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool)>,
+) -> (Option<Estimate>, Coverage) {
+    let mut pairs = Pairs::default();
+    let mut exact = Usd::ZERO;
+    let mut known = 0;
+    for (baseline, alternative, acting) in sessions {
+        match (baseline.total_usd, alternative.total_usd) {
+            (Some(b), Some(a)) if !acting => {
+                exact += b - a;
+                known += 1;
+            }
+            _ => pairs.add(baseline, alternative),
+        }
+    }
+    let paired = pairs.savings(0);
+    let estimate = paired.savings.map(|e| Estimate {
+        usd: e.usd + exact.to_f64(),
+        margin: e.margin,
+    });
+    let coverage = Coverage {
+        priced: paired.priced + known,
+        total: paired.total + known,
+    };
+    (estimate, coverage)
+}
 
 /// Inputs to the idle checks, which run after the TTL and window decisions.
 pub struct IdleOptions<'a> {
@@ -2030,7 +2062,16 @@ impl<'a> Profiled<'a> {
         let mut states =
             MODES.map(|(_, mode)| RunState::new((mode == Mode::Point).then_some(sizes.len())));
         let mut detail: Vec<IdlePeriod> = vec![];
+        // Whether idle compaction could change each session: a period that could trigger, or
+        // an applied one that off undoes.
+        let mut acting: Vec<bool> = vec![];
         for (failed, mut periods) in sessions() {
+            acting.push(periods.iter().any(|p| {
+                matches!(
+                    p.kind.status,
+                    PeriodStatus::Eligible | PeriodStatus::Unknown
+                ) || p.boundary.is_some()
+            }));
             activate(&mut periods, &cohorts);
             let first = detail.len();
             if self.detail {
@@ -2056,8 +2097,12 @@ impl<'a> Profiled<'a> {
         };
         // Each run is paired with off session by session, so a few unpriced sessions are
         // extrapolated over instead of hiding the comparison.
-        let paired = |r: &Run| paired_savings(r.sessions.iter().zip(&off.sessions), 0);
-        let delta = |r: &Run| paired(r).savings.filter(|_| !replay.blocked);
+        let pair = |r: &Run| {
+            let sessions = r.sessions.iter().zip(&off.sessions).zip(&acting);
+            let (delta, coverage) = paired(sessions.map(|((on, off), &a)| (on, off, a)));
+            (delta.filter(|_| !replay.blocked), coverage)
+        };
+        let delta = |r: &Run| pair(r).0;
         let closed = delta(&closed);
         let open = delta(&open);
         let mut lifetime_break_even_fraction = None;
@@ -2099,8 +2144,7 @@ impl<'a> Profiled<'a> {
             .chain(&off.adjustment.unknown)
             .collect();
         let unknown: Vec<String> = unknown.into_iter().cloned().collect();
-        let pairs = paired(&on);
-        let delta = pairs.savings.filter(|_| !replay.blocked);
+        let (delta, coverage) = pair(&on);
         let delta_usd = delta.map(|d| d.usd);
         let by_context = sizes
             .into_iter()
@@ -2125,10 +2169,7 @@ impl<'a> Profiled<'a> {
                 on: add_costs([&common, &on.adjustment]),
             },
             delta,
-            coverage: Coverage {
-                priced: pairs.priced,
-                total: pairs.total,
-            },
+            coverage,
             monthly_delta: delta
                 .filter(|_| elapsed > 0)
                 .map(|d| d.scale(30.0 * 86_400_000.0 / elapsed as f64)),
@@ -2691,7 +2732,7 @@ fn detailed_t3_checks(
             .collect();
         let applicable = crate::t3::settled(&options.scan.profiles, &group.ids, &history);
         // Every mode's saving over the current one, extrapolated where some sessions were
-        // unpriced; the largest wins, and a tie keeps the current mode.
+        // unpriced; the largest wins.
         let all_priced = requests
             .iter()
             .any(|r| r.agent == Agent::Main && r.parts.iter().any(is_message))
@@ -2700,12 +2741,13 @@ fn detailed_t3_checks(
             after
                 .scenarios
                 .iter()
-                .max_by(|a, b| {
+                // The first of the largest savings, the current mode first among them.
+                .min_by(|a, b| {
                     let usd = |s: &crate::model::T3IdleScenario| {
                         s.savings.expect("every mode is priced").usd
                     };
-                    usd(a).total_cmp(&usd(b)).then_with(|| {
-                        (a.mode == instance.idle_mode).cmp(&(b.mode == instance.idle_mode))
+                    usd(b).total_cmp(&usd(a)).then_with(|| {
+                        (b.mode == instance.idle_mode).cmp(&(a.mode == instance.idle_mode))
                     })
                 })
                 .expect("three modes")
@@ -3102,6 +3144,17 @@ fn t3_comparison(
             .map(|r| &*r.id)
             .collect(),
     };
+    // Sessions where some mode could act: a gap it could compact, or a recorded idle
+    // compaction every mode undoes.
+    let acting: HashSet<&str> = gaps
+        .iter()
+        .filter(|g| {
+            matches!(g.status, PeriodStatus::Eligible | PeriodStatus::Unknown)
+                || matches!(g.on_return, OnReturn::Generate | OnReturn::Unknown(_))
+                || g.boundary.is_some()
+        })
+        .map(|g| &*g.previous.session)
+        .collect();
     // Every session the window changes or could change, the same for every mode.
     let sessions: IndexSet<&str> = requests
         .iter()
@@ -3143,26 +3196,31 @@ fn t3_comparison(
     // Each mode is paired with the current one session by session, so a few unpriced
     // sessions are extrapolated over instead of hiding the comparison. An error that is no
     // one session's leaves every mode unpriced.
+    let zero = zero_cost();
     let scenarios = runs
         .into_iter()
         .map(|run| {
-            let mut sample = Sample::default();
-            for cost in &run.sessions {
-                if let Some(usd) = cost.total_usd {
-                    sample.add(usd);
-                }
-            }
-            let paired = paired_savings(current.iter().zip(&run.sessions), 0);
+            let acting = sessions.iter().map(|s| acting.contains(s));
+            let (estimate, _) = paired(
+                run.sessions
+                    .iter()
+                    .zip(acting.clone())
+                    .map(|(cost, a)| (cost, &zero, a)),
+            );
+            let (savings, coverage) = paired(
+                current
+                    .iter()
+                    .zip(&run.sessions)
+                    .zip(acting)
+                    .map(|((current, cost), a)| (current, cost, a)),
+            );
             let unblocked = |e: Option<Estimate>| e.filter(|_| !replay.blocked);
             T3IdleScenario {
                 mode: run.mode,
                 cost: run.cost,
-                estimate: unblocked(sample.estimate(run.sessions.len() as u64)),
-                savings: unblocked(paired.savings),
-                coverage: Coverage {
-                    priced: paired.priced,
-                    total: paired.total,
-                },
+                estimate: unblocked(estimate),
+                savings: unblocked(savings),
+                coverage,
                 summaries: run.summaries,
                 final_summaries: run.final_summaries,
             }
@@ -4383,7 +4441,10 @@ mod tests {
         let p = period(&c.after, "before");
         assert_eq!(p.outcome, PeriodOutcome::Applied);
         near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
-        near(a.delta.map(|d| d.usd), 0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6);
+        near(
+            a.delta.map(|d| d.usd),
+            0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6,
+        );
         near(
             Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             a.delta.map(|d| d.usd).unwrap(),

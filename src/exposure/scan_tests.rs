@@ -2757,7 +2757,8 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
             .any(|u| u.contains("loaded memory is unmeasured"))
     );
 
-    // Beside a session that recorded its context, the total is a lower bound.
+    // Beside a session that recorded its context, the total is extrapolated from it, assuming
+    // the unrecorded request loaded memory as often.
     std::fs::write(
         w.claude.join("projects/project/later.jsonl"),
         jsonl(&later(claude_memory_session(&root.to_string_lossy(), true))),
@@ -2768,14 +2769,15 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
     let coverage = check.base.coverage.unwrap();
     assert_eq!((coverage.priced, coverage.total), (2, 3));
     assert!(check.base.savings_usd.unwrap() > 0.0);
+    assert!(check.base.margin.is_some());
     // The temporary path's length moves the cents, since the loaded paths are part
     // of the priced context.
     let both = text(&both);
     assert!(shows(
         &both,
         "consider",
-        "Auto memory on -> off saves at least ",
-        &["; from the 66.6% of requests that recorded their context."]
+        "Auto memory on -> off saves ~",
+        &["; extrapolated from the 66.6% of requests that recorded their context."]
     ));
 }
 

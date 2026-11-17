@@ -1564,7 +1564,7 @@ impl Plan {
 struct Total {
     /// Savings measured whatever the defaults, in full or as the part that was priced.
     measured: Sum,
-    /// How many of `measured` were priced only in part, so save at least their figure.
+    /// How many of `measured` leave part of their cost unmeasured, so save at least their figure.
     partial: usize,
     /// Savings that hold only when an unset default would otherwise be the other value.
     up_to: Sum,
@@ -1924,7 +1924,7 @@ impl Question {
     }
 
     /// What the members save together, such as ("saves $9.40/mo", "2%"): up to that
-    /// when one's saving depends on a default, at least that when one was priced in part.
+    /// when one's saving depends on a default, at least that when one was measured in part.
     fn saving(&self) -> Option<(String, String)> {
         let total = self.together();
         let usd = self.usd()?;

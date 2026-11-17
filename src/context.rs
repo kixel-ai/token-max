@@ -13,7 +13,7 @@ use crate::model::{
     Invocation, InvocationKind, InvocationStatus, Linkage, Millis, Profile, Request, ResultTotals,
     Snapshot, Text, Usd, Verdict, Via,
 };
-use crate::prices::{Catalog, conditional_tier, prefix_spans, pricing_assumptions};
+use crate::prices::{Catalog, Sample, conditional_tier, prefix_spans, pricing_assumptions};
 use crate::safe::identity;
 
 /// The settings fragment for one control: settings.json's `"enableArtifact": false`,
@@ -218,12 +218,12 @@ fn default_state(c: &ContextCost, profiles: &[Profile]) -> Option<bool> {
         .then_some(true)
 }
 
-/// What `c` cost over the window under `doctor --defaults`: its cost per request that
-/// carried it, over every request on its line when it was restored, else its own total.
-fn restored_usd(c: &ContextCost, usd: f64) -> f64 {
+/// What scales `c`'s cost over the window under `doctor --defaults`: every request on its
+/// line per request that carried it when it was restored, else 1.
+fn restored_scale(c: &ContextCost) -> f64 {
     match c.pretended_requests {
-        Some(all) if c.requests > 0 => usd / c.requests as f64 * all as f64,
-        _ => usd,
+        Some(all) if c.requests > 0 => all as f64 / c.requests as f64,
+        _ => 1.0,
     }
 }
 
@@ -247,16 +247,25 @@ fn restore_totals(c: &mut ContextCost) {
             d.pretended_requests = (all > d.requests).then_some(all);
         }
     }
-    let mut own = c.estimated_usd;
+    let total = c.estimated_usd;
+    let mut own = total;
     let mut tools = 0.0;
     for d in &mut c.details {
         let Some(usd) = d.estimated_usd else { continue };
         own = own.map(|o| o - usd);
-        let restored = restored_usd(d, usd);
-        d.estimated_usd = Some(restored);
-        tools += restored;
+        let scale = restored_scale(d);
+        d.estimated_usd = Some(usd * scale);
+        d.margin = d.margin.map(|m| m.scale(scale));
+        tools += usd * scale;
     }
-    c.estimated_usd = own.map(|o| restored_usd(c, o.max(0.0)) + tools);
+    c.estimated_usd = own.map(|o| o.max(0.0) * restored_scale(c) + tools);
+    // The tools are priced in the server's own requests, so the server keeps the margin of
+    // its own total, scaled as that total was.
+    if let (Some(before), Some(after)) = (total, c.estimated_usd)
+        && before > 0.0
+    {
+        c.margin = c.margin.map(|m| m.scale(after / before));
+    }
 }
 
 /// Context setting rows whose controls are not covered by a server recommendation.
@@ -302,6 +311,8 @@ struct Placed<'a> {
     opaque: bool,
     /// Keep the aggregate catalog's placement bounds when allocating its charge to entries.
     extent: Option<i64>,
+    /// A tool's output, which any request prices, rather than context only a recorded shape shows.
+    output: bool,
 }
 
 /// Pieces by key, interned so each request compares indices rather than strings.
@@ -818,8 +829,10 @@ struct Prior<'a> {
 
 struct Row {
     cost: ContextCost,
-    /// Requests, priced requests and their cost by the index of the profiles that recorded them.
-    shares: IndexMap<usize, (u64, u64, Usd)>,
+    /// Requests and what each priced one cost, by the index of the profiles that recorded them.
+    shares: IndexMap<usize, crate::model::ProfileShare>,
+    /// What each priced request cost.
+    sample: Sample,
     assumptions: IndexSet<String>,
     owner: usize,
     key: usize,
@@ -993,6 +1006,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     extent: (codex && component.category == Category::SkillListing)
                         .then_some(component.size.characters)
                         .flatten(),
+                    output: false,
                 }
             }));
         }
@@ -1021,6 +1035,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                     history,
                     opaque: *opaque,
                     extent: None,
+                    output: true,
                 });
             }
         }
@@ -1075,6 +1090,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         tokens: None,
                         cost_usd: Usd::ZERO,
                         estimated_usd: None,
+                        margin: None,
                         calls: None,
                         last_used: None,
                         current: false,
@@ -1096,6 +1112,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         pretended_requests: None,
                     },
                     shares: IndexMap::default(),
+                    sample: Sample::default(),
                     owner,
                     key,
                     time: Millis::MIN,
@@ -1105,7 +1122,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             });
             *row.from_start.entry(share).or_default() |= first;
             row.cost.requests += 1;
-            row.shares.entry(share).or_default().0 += 1;
+            let counts = row.shares.entry(share).or_default();
+            counts.requests += 1;
+            counts.recorded_requests += u64::from(shaped);
             row.cost.tier_unknown_requests += u64::from(p.is_some_and(|p| conditional_tier(r, p)));
             row.assumptions.extend(assumptions.iter().cloned());
         }
@@ -1208,11 +1227,12 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                         .filter(|&input| input <= end)
                         .map(|i| (i, prior))
                 });
-            let mut charged: IndexMap<usize, (f64, f64, bool)> = IndexMap::default();
+            // Tokens, cost, whether any part is unpriced, and the cost of tool output.
+            let mut charged: IndexMap<usize, (f64, f64, bool, f64)> = IndexMap::default();
             let mut offset = 0.0;
             for piece in &parts {
                 let tokens = size(piece);
-                let entry = charged.entry(piece.key).or_insert((0.0, 0.0, false));
+                let entry = charged.entry(piece.key).or_insert((0.0, 0.0, false, 0.0));
                 entry.0 += tokens;
                 if piece.opaque {
                     entry.2 = true;
@@ -1246,6 +1266,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 let first = slot(from);
                 if to >= from && first == slot(to + extent - 1e-9) {
                     entry.1 += tokens * slots[first].1;
+                    if piece.output {
+                        entry.3 += tokens * slots[first].1;
+                    }
                 } else {
                     entry.2 = true;
                 }
@@ -1254,24 +1277,32 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 .iter()
                 .filter_map(|(&key, &value)| Some((interned.kinds[key].parent?, value)))
                 .collect();
-            for (parent, (tokens, cost, missing)) in parents {
-                let entry = charged.entry(parent).or_insert((0.0, 0.0, false));
+            for (parent, (tokens, cost, missing, output)) in parents {
+                let entry = charged.entry(parent).or_insert((0.0, 0.0, false, 0.0));
                 entry.0 += tokens;
                 entry.1 += cost;
                 entry.2 |= missing;
+                entry.3 += output;
             }
-            for (key, (tokens, cost, missing)) in charged {
+            for (key, (tokens, cost, missing, output)) in charged {
                 // A row with any piece of unknown cost in this request stays unpriced
                 // for it, so a subtotal is never shown as the whole.
                 if missing {
                     continue;
                 }
                 let row = &mut rows[&(owner, key)];
+                let cost = Usd::from_f64(cost);
                 row.cost.priced += 1;
-                row.cost.cost_usd += Usd::from_f64(cost);
+                row.cost.cost_usd += cost;
+                row.sample.add(cost);
                 let counts = row.shares.entry(share).or_default();
-                counts.1 += 1;
-                counts.2 += Usd::from_f64(cost);
+                counts.sample.add(cost);
+                if shaped {
+                    counts.recorded.add(cost);
+                    counts.loaded.add(cost - Usd::from_f64(output));
+                } else {
+                    counts.unrecorded.add(cost);
+                }
                 if let Some(p) = p {
                     row.cost.conditional_requests += u64::from(conditional_tier(r, p));
                 }
@@ -1546,14 +1577,10 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
             c.shares = row
                 .shares
                 .into_iter()
-                .map(
-                    |(index, (requests, priced, cost_usd))| crate::model::ProfileShare {
-                        profiles: sources[index].iter().map(|p| p.to_string()).collect(),
-                        requests,
-                        priced,
-                        cost_usd,
-                    },
-                )
+                .map(|(index, share)| crate::model::ProfileShare {
+                    profiles: sources[index].iter().map(|p| p.to_string()).collect(),
+                    ..share
+                })
                 .collect();
             c.current = current
                 .get(&row.owner)
@@ -1570,8 +1597,9 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
                 }
                 None => {}
             }
-            c.estimated_usd =
-                (c.priced > 0).then(|| (c.cost_usd.to_f64() * c.requests as f64) / c.priced as f64);
+            let estimate = row.sample.estimate(c.requests);
+            c.estimated_usd = estimate.map(|e| e.usd);
+            c.margin = estimate.and_then(|e| e.margin);
             c.last_used = last.get(&index).copied();
             c.largest_characters = largest.get(&index).copied();
             if c.harness == Harness::Codex
@@ -1691,8 +1719,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Exposure, ExposureView, IdentityBasis, Ids, Invocation, Owner, Scope, Size, TextCoverage,
-        ToolCalls, ToolResults, Usage, Via,
+        Exposure, ExposureView, IdentityBasis, Ids, Invocation, Margin, Owner, Scope, Size,
+        TextCoverage, ToolCalls, ToolResults, Usage, Via,
     };
     use crate::test_support::{make_request, make_snapshot, prices};
 
@@ -2031,10 +2059,16 @@ mod tests {
             file.estimated_usd.unwrap(),
             file.cost_usd.to_f64() * 3.0 / 2.0
         ));
+        // Extrapolated over the unpriced request, with a margin from the two priced ones'
+        // spread; one priced request leaves none to measure.
+        assert!(matches!(file.margin, Some(Margin::Usd(m)) if m > 0.0));
         let new = row(&rows, "/repo/sub/CLAUDE.md");
         assert_eq!((new.requests, new.priced), (2, 1));
         assert!(close(new.cost_usd.to_f64(), 300.0 * WRITE1H));
+        assert_eq!(new.margin, Some(Margin::Unmeasured));
         assert!(file.current && new.current);
+        let fixed = row(&rows, "Search");
+        assert_eq!((fixed.requests, fixed.priced, fixed.margin), (3, 3, None));
     }
 
     #[test]
@@ -2108,7 +2142,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            shared.shares.iter().map(|s| s.cost_usd).sum::<Usd>(),
+            shared.shares.iter().map(|s| s.sample.sum()).sum::<Usd>(),
             shared.cost_usd
         );
         // A check whose own switch only the T3 instance shares takes only its requests.
@@ -3253,6 +3287,7 @@ mod tests {
             tokens: None,
             cost_usd: Usd::from_f64(usd),
             estimated_usd: Some(usd),
+            margin: None,
             calls: Some(0),
             last_used: None,
             current: true,
@@ -3287,9 +3322,21 @@ mod tests {
             "docs",
             2,
             2.0 + 3.0 + 1.0 + 1.0,
-            vec![tool("read", 2, 2.0), tool("write", 1, 1.0), discovery, kept],
+            vec![
+                ContextCost {
+                    margin: Some(Margin::Usd(0.5)),
+                    ..tool("read", 2, 2.0)
+                },
+                tool("write", 1, 1.0),
+                discovery,
+                kept,
+            ],
         );
+        server.margin = Some(Margin::Usd(1.4));
         restore_totals(&mut server);
+        // Each margin scales with its figure; the server keeps its own total's.
+        assert_eq!(server.details[0].margin, Some(Margin::Usd(0.75)));
+        assert!(matches!(server.margin, Some(Margin::Usd(m)) if close(m, 1.4 * 13.0 / 7.0)));
         let details: Vec<f64> = server
             .details
             .iter()

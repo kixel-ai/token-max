@@ -2,7 +2,7 @@
 
 use crate::model::{FableUse, FableWeek, Harness, Millis, Request, Scan, Usd};
 use crate::prices::{
-    Catalog, Sum, add_costs, price_part, request_evidence, server_cost, unknown_cost,
+    Catalog, Sample, Sum, add_costs, price_part, request_evidence, server_cost, unknown_cost,
 };
 
 const WEEK: Millis = 7 * 24 * 60 * 60 * 1000;
@@ -79,7 +79,10 @@ pub fn fable_use(
         .iter()
         .map(|line| {
             let mine = |p: &String| line.ids.contains(p);
-            let mut sums: Vec<(u64, Sum)> = spans.iter().map(|_| (0, Sum::new())).collect();
+            let mut sums: Vec<(u64, Sum, Sample)> = spans
+                .iter()
+                .map(|_| (0, Sum::new(), Sample::default()))
+                .collect();
             let mut unrecorded = 0;
             let mut shared = 0;
             for r in scan.requests.iter().filter(|r| {
@@ -101,6 +104,7 @@ pub fn fable_use(
                 if let Some(i) = i {
                     sums[i].0 += 1;
                     sums[i].1.add(&cost);
+                    sums[i].2.add_cost(&cost);
                 }
                 if r.profiles
                     .iter()
@@ -109,26 +113,33 @@ pub fn fable_use(
                     shared += 1;
                 }
             }
+            let mut all = Sample::default();
+            for (_, _, sample) in &sums {
+                all += *sample;
+            }
             let mut weeks: Vec<FableWeek> = spans
                 .iter()
                 .zip(sums)
-                .map(|(&(start, end), (requests, sum))| FableWeek {
+                .map(|(&(start, end), (requests, sum, sample))| FableWeek {
                     start,
                     end,
                     requests,
                     cost: sum.cost(),
+                    estimate: sample.estimate(requests),
                 })
                 .collect();
             // Weeks before the first Fable request say nothing, and a long history has many.
             while weeks.last().is_some_and(|w| w.requests == 0) {
                 weeks.pop();
             }
+            let requests = weeks.iter().map(|w| w.requests).sum();
             FableUse {
                 profiles: line.ids.clone(),
-                requests: weeks.iter().map(|w| w.requests).sum(),
+                requests,
                 unrecorded,
                 shared,
                 weeks,
+                estimate: all.estimate(requests),
             }
         })
         .collect()

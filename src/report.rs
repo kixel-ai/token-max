@@ -2656,7 +2656,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
             }
             .into();
         }
-        CheckResult::T3Idle(_) => return "Lowest estimated changed cost among off, conditional on-return acceptance and conditional proactive server liveness; unavailable lifecycle or summary evidence stays unpriced.".into(),
+        CheckResult::T3Idle(_) => return "Lowest estimated changed cost among off, conditional on-return acceptance and conditional proactive server liveness; sessions without lifecycle or summary evidence are extrapolated from the priced ones.".into(),
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
                 "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
@@ -2969,7 +2969,8 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
                 return "On and off cost the same on recorded idle gaps, so neither is cheaper."
                     .into();
             }
-            "Idle summaries or resumed sessions could not be priced.".into()
+            "Idle summaries or resumed sessions could not be priced in any session it could act on."
+                .into()
         }
         CheckResult::Speed(_)
         | CheckResult::Background(_)

@@ -2484,7 +2484,8 @@ fn profile_checks<'a>(
         });
         let mut uncertainty: IndexSet<String> = [
             "missing applied boundaries do not prove that unlogged or discarded summaries never ran; their unobserved charges are not measured or included as known zero, and can change this conditional API-price estimate",
-            "native transcripts do not establish historical idle settings, feature-flag fetch state or closed/asleep client lifetime; precomputed alone is not idle attribution; unknown eligibility or missing full-prefix calibration remains unpriced",
+            "native transcripts do not establish historical idle settings, feature-flag fetch state or closed/asleep client lifetime; precomputed alone is not idle attribution",
+            "sessions where unknown eligibility, missing full-prefix calibration or a failed replay leaves on or off unpriced are extrapolated from the priced sessions idle compaction could act on, assuming they resemble each other; sessions it could not act on count exactly",
             "Desktop labels alone do not establish local execution; CLI labels require REPL provenance; T3 proactive policies are outside this native check",
         ]
         .into_iter()
@@ -2774,7 +2775,7 @@ fn detailed_t3_checks(
                 baseline: format!("{}; onReturn assumes accepting the offered summary, beforeCacheExpires assumes the server remains running until its observed-expiry timer fires",instance.idle_mode.as_str()),
                 requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: best.map(|s| s.coverage),
                 savings_usd: savings.filter(|_|applicable), margin, monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
-                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
+                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence leave a session unpriced, and each mode is extrapolated over such sessions from the priced ones some mode could act on, assuming they resemble each other; sessions no mode acts on count exactly".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
         };
@@ -3667,7 +3668,7 @@ mod tests {
     use crate::controls::{CompactionSources, compaction_controls};
     use crate::model::{
         CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan, Location,
-        Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
+        Margin, Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
     };
     use crate::reader::{ScanOptions, scan};
     use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
@@ -4040,6 +4041,138 @@ mod tests {
             uncertainty: vec![],
             sources: vec![],
         }
+    }
+
+    /// Sessions like the convergence test's, each saving 2.196 with idle on, under `ids`.
+    fn sessions_saving(ids: &[&str]) -> Vec<Request> {
+        ids.iter()
+            .flat_map(|id| {
+                let mut follow = request(&format!("{id}-follow"), 201.0, 1000);
+                follow.parts[0].usage = usage(1000, 301_000, 0, Ttl::OneHour);
+                [
+                    request(&format!("{id}-before"), 100.0, 300_000),
+                    request(&format!("{id}-return"), 200.0, 301_000),
+                    follow,
+                ]
+                .map(|r| in_session(r, id))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pairs_extrapolate_only_from_sessions_idle_could_act_on() {
+        let usd = |v: f64| Cost {
+            known_usd: Usd::from_f64(v),
+            total_usd: Some(Usd::from_f64(v)),
+            unknown: vec![],
+            assumptions: vec![],
+        };
+        let (zero, unknown) = (zero_cost(), unknown_cost("synthetic"));
+        // A priced session no mode acts on counts exactly, beside the extrapolated ones.
+        let (estimate, coverage) = paired([
+            (&usd(3.0), &zero, true),
+            (&usd(5.0), &zero, true),
+            (&unknown, &zero, true),
+            (&usd(1.0), &zero, false),
+        ]);
+        let estimate = estimate.unwrap();
+        near(Some(estimate.usd), 4.0 * 3.0 + 1.0);
+        assert!(matches!(estimate.margin, Some(Margin::Usd(m)) if m > 0.0));
+        assert_eq!(
+            coverage,
+            Coverage {
+                priced: 3,
+                total: 4
+            }
+        );
+        // Nothing priced where idle could act leaves nothing to extrapolate from.
+        let (estimate, _) = paired([(&unknown, &zero, true), (&usd(1.0), &zero, false)]);
+        assert_eq!(estimate, None);
+        // Every session priced is exact.
+        let (estimate, coverage) =
+            paired([(&usd(2.0), &usd(0.5), true), (&usd(1.0), &zero, false)]);
+        assert_eq!(
+            estimate,
+            Some(Estimate {
+                usd: 2.5,
+                margin: None
+            })
+        );
+        assert_eq!(
+            coverage,
+            Coverage {
+                priced: 2,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn an_unpriced_session_is_extrapolated_from_those_idle_could_act_on() {
+        let mut target = sessions_saving(&["one", "two", "three"]);
+        // Its idle period's size is unrecorded, so on cannot be priced there.
+        target[6].parts[0].usage.input = None;
+        // Never idle long enough to trigger, so it changes nothing and counts exactly.
+        target.push(in_session(request("short", 199.0, 300_000), "short"));
+        target.push(in_session(request("short-return", 200.0, 301_000), "short"));
+        let c = check(&data(target, vec![]), 202.0);
+        let a = &c.after_recommendations;
+        // The calibration sample's session is idle too, never long enough to trigger.
+        assert_eq!(
+            a.coverage,
+            Coverage {
+                priced: 4,
+                total: 5
+            }
+        );
+        // Two priced sessions of three that idle could act on, scaled to all three; the
+        // session it could not act on adds its exact zero rather than diluting them.
+        near(a.delta.map(|d| d.usd), -2.196 * 3.0);
+        assert_eq!(a.delta.unwrap().margin, Some(Margin::Usd(0.0)));
+        assert!(a.cost.on.total_usd.is_none(), "the total keeps its unknown");
+        assert_eq!(c.base.action, Action::Change);
+        assert_eq!(c.base.recommended, Some(true));
+        assert_eq!(c.base.evidence, Evidence::Estimated);
+        near(c.base.savings_usd, 2.196 * 3.0);
+        assert_eq!(c.base.margin, Some(Margin::Usd(0.0)));
+        assert_eq!(c.base.coverage, Some(a.coverage));
+        // Each sensitivity run is paired the same way.
+        assert!(a.sensitivity.open_delta.and_then(|d| d.margin).is_some());
+    }
+
+    #[test]
+    fn a_failed_session_replay_is_unpriced_but_the_rest_still_decide() {
+        let mut target = sessions_saving(&["one", "two"]);
+        // A project policy that changes within one conversation leaves its replay unresolved.
+        target[1].cwd = Some("/elsewhere".into());
+        let mut s = data(target, vec![]);
+        let profile = &mut s.profiles[0];
+        let mut ttl = profile.ttl.clone();
+        ttl.main.value = Some(Ttl::FiveMinutes);
+        profile.idle_directories = Some(IndexMap::from_iter([(
+            "/elsewhere".to_string(),
+            IdleControl {
+                ttl: Some(ttl),
+                ..profile.idle.clone().unwrap()
+            },
+        )]));
+        let c = check(&s, 202.0);
+        let a = &c.after_recommendations;
+        assert!(
+            a.unknown.iter().any(|u| u == POLICY_CHANGE),
+            "{:?}",
+            a.unknown
+        );
+        assert_eq!(
+            a.coverage,
+            Coverage {
+                priced: 2,
+                total: 3
+            }
+        );
+        near(a.delta.map(|d| d.usd), -2.196 * 2.0);
+        assert_eq!(a.delta.unwrap().margin, Some(Margin::Unmeasured));
+        assert_eq!(c.base.recommended, Some(true));
     }
 
     #[test]
@@ -5033,6 +5166,59 @@ mod tests {
             now: (now * MINUTE as f64) as Millis,
         };
         Checked::new(detailed_t3_checks(&options, true).remove(0))
+    }
+
+    #[test]
+    fn t3_extrapolates_over_a_session_no_t3_turn_joins() {
+        use crate::model::T3IdleMode::*;
+        let target: Vec<Request> = ["one", "two", "three"]
+            .iter()
+            .flat_map(|id| {
+                [
+                    request(&format!("{id}-a"), 0.0, 300_000),
+                    request(&format!("{id}-b"), 10.0, 320_000),
+                ]
+                .map(|r| in_session(r, id))
+            })
+            .collect();
+        let mut scan = t3_data(target, Ttl::FiveMinutes, Off);
+        let full = t3_check(&scan, 10.0);
+        let all = full.base.savings_usd.unwrap();
+        assert!(all > 0.0);
+        assert_eq!(full.base.margin, None);
+        // No T3 turn joins this gap, so neither generating mode can be priced there.
+        let three = scan
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "three-a")
+            .unwrap();
+        three.t3 = None;
+        let check = t3_check(&scan, 10.0);
+        assert_eq!(check.base.action, Action::Change);
+        assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
+        // The two priced sessions save the same, so the third is extrapolated exactly.
+        near(check.base.savings_usd, all);
+        assert_eq!(check.base.margin, Some(Margin::Usd(0.0)));
+        // The calibration sample's session is in the window but no mode acts on it.
+        assert_eq!(
+            check.base.coverage,
+            Some(Coverage {
+                priced: 3,
+                total: 4
+            })
+        );
+        let s = &check.after_recommendations.scenarios;
+        assert!(s[2].cost.total_usd.is_none(), "the total keeps its unknown");
+        let estimate = s[2].estimate.unwrap();
+        near(
+            Some(estimate.usd),
+            full.after_recommendations.scenarios[2]
+                .cost
+                .total_usd
+                .unwrap()
+                .to_f64(),
+        );
+        assert_eq!(s[0].savings.unwrap().usd, 0.0);
     }
 
     #[test]

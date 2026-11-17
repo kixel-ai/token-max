@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::collections::{IndexMap, IndexSet};
+use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 
 use crate::context::{
     CLAUDE_MEMORY, CODEX_MEMORY, Hidden, SYNCED_SKILLS, control_text, hidden_use, setting_rows,
@@ -4349,6 +4349,32 @@ fn piece_setting(c: &ContextCost, out: &Out<'_>) -> String {
     }
 }
 
+/// The sessions the selected requests ran in, each subagent counted with the session that
+/// spawned it.
+fn sessions(scan: &crate::model::Scan) -> u64 {
+    let parents: HashMap<&str, &str> = scan
+        .subagents
+        .iter()
+        .filter_map(|s| Some((&*s.session, &**s.parent.as_ref()?)))
+        .collect();
+    let roots: HashSet<&str> = scan
+        .requests
+        .iter()
+        .map(|r| {
+            let mut session: &str = &r.session;
+            // Bounded so a cycle in recorded lineage cannot loop.
+            for _ in 0..parents.len() {
+                match parents.get(session) {
+                    Some(parent) => session = parent,
+                    None => break,
+                }
+            }
+            session
+        })
+        .collect();
+    roots.len() as u64
+}
+
 /// The report: what was read, then every setting and feature on one line, the changes
 /// first, with each line's evidence under `--details`.
 /// Returns the text before the list and the list's rows; what follows them stays in `out`.
@@ -4364,8 +4390,9 @@ fn summary(
     let spent = spend.text();
     let title = out.title(&match spend.since {
         Some(since) if coverage.requests > 0 => format!(
-            "{} requests from {} to {} ({}), {spent} at API prices",
+            "{} requests in {} from {} to {} ({}), {spent} at API prices",
             count(coverage.requests),
+            requests_of(sessions(&report.scan), "session"),
             date(&iso(since)),
             date(&report.generated_at),
             days(Some(since), Some(spend.until))
@@ -8618,6 +8645,38 @@ mod tests {
             subagent_guidance(&line(Harness::Claude, "fork", "claude-opus-5-5")),
             None
         );
+    }
+
+    #[test]
+    fn subagents_count_with_the_session_that_spawned_them() {
+        let mut report = synthetic();
+        // Two main sessions, a subagent of the first and a subagent that subagent spawned.
+        for (r, session) in report
+            .scan
+            .requests
+            .iter_mut()
+            .zip(["main", "other", "child", "grandchild"])
+        {
+            r.session = session.into();
+        }
+        let spawn = |session: &str, parent: &str| crate::model::Subagent {
+            harness: Harness::Claude,
+            session: session.into(),
+            parent: Some(parent.into()),
+            kind: "Explore".into(),
+            built_in: Some(true),
+            fork: false,
+            native: false,
+            model: None,
+            effort: None,
+        };
+        report.scan.subagents = vec![spawn("grandchild", "child"), spawn("child", "main")];
+        assert_eq!(sessions(&report.scan), 2);
+        let summary = text(&report, None, true);
+        assert!(summary.contains(" requests in 2 sessions from "), "{summary}");
+        // A subagent whose parent left no request in the window still counts once.
+        report.scan.requests.remove(0);
+        assert_eq!(sessions(&report.scan), 2);
     }
 
     #[test]

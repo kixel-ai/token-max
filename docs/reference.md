@@ -30,7 +30,8 @@ in PowerShell,
 ## Applying changes
 
 On a terminal, `doctor` opens with one header line naming what it read: the
-requests, the window and their cost. It then walks through each change it can
+requests, the sessions they ran in (each subagent counted with the session
+that spawned it), the window and their cost. It then walks through each change it can
 make, after a headline counting its questions and the changes they cover,
 across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such

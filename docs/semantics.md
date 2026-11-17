@@ -496,9 +496,11 @@ for unknown eligibility, missing full-prefix calibration, or a window/TTL replay
 that failed for that conversation. Sessions where idle compaction could act, those
 with an eligible, unresolved or applied idle period, extrapolate the difference
 to the unpriced sessions by their mean, with the same 95% margin as the TTL
-replay; a priced session where it could not act changes nothing and counts
-exactly, so its zero does not dilute the estimate. `coverage` counts priced and
-total sessions. The extrapolated delta decides whenever one session it could act
+replay; a session where it could not act changes nothing and counts exactly,
+even when its replay failed, so its zero does not dilute the estimate.
+`coverage` counts priced and total sessions. The extra re-read break-even per
+resumed summary divides the priced sessions' saving by their own resumed
+summaries. The extrapolated delta decides whenever one session it could act
 on was priced; with none, the check stays unknown. The keepalive comparison adds
 the idle alternative's margin to its own. Closed/open,
 maximum-summary and late-trigger scenarios explain uncertainty without vetoing

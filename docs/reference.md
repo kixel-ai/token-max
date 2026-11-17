@@ -790,7 +790,7 @@ mode/version/flags or unresolved controls leave the sessions they affect
 unpriced. On and off are paired session by session, and a session that cannot be
 priced both ways is extrapolated from the priced sessions where idle compaction
 could act, marked with `~` and a 95% margin; a session it could not act on
-counts exactly. With no such session priced, the line is not enough evidence. Native CLI interactivity needs REPL provenance; Desktop
+counts exactly, even when its replay failed. With no such session priced, the line is not enough evidence. Native CLI interactivity needs REPL provenance; Desktop
 labels alone do not establish local/SSH execution. T3's proactive policies are
 outside this native check.
 

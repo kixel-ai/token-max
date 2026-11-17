@@ -44,8 +44,9 @@ const POLICY_CHANGE: &str = "effective project TTL/window policy changes within 
 /// A comparison of two runs session by session, as (baseline, alternative, acting): baseline
 /// minus alternative, extrapolated over the unpriced sessions, with how many were priced.
 ///
-/// Only sessions where idle compaction could act, `acting`, stand for the unpriced ones; a
-/// priced session where it could not counts exactly, so its zero doesn't dilute them.
+/// Only sessions where idle compaction could act, `acting`, stand for the unpriced ones. One
+/// where it could not counts exactly, so its zero doesn't dilute them; unpriced, such as when
+/// its replay failed, it still changes nothing, since no run acts on it.
 fn paired<'c>(
     sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool)>,
 ) -> (Option<Estimate>, Coverage) {
@@ -53,13 +54,14 @@ fn paired<'c>(
     let mut exact = Usd::ZERO;
     let mut known = 0;
     for (baseline, alternative, acting) in sessions {
-        match (baseline.total_usd, alternative.total_usd) {
-            (Some(b), Some(a)) if !acting => {
-                exact += b - a;
-                known += 1;
-            }
-            _ => pairs.add(baseline, alternative),
+        if acting {
+            pairs.add(baseline, alternative);
+            continue;
         }
+        if let (Some(b), Some(a)) = (baseline.total_usd, alternative.total_usd) {
+            exact += b - a;
+        }
+        known += 1;
     }
     let paired = pairs.savings(0);
     let estimate = paired.savings.map(|e| Estimate {
@@ -919,9 +921,11 @@ struct RunState<'r> {
     /// The session in progress's charges, and each finished session's.
     session: Sum,
     sessions: Vec<Cost>,
+    /// Expected resumed summaries in the session in progress, and in each finished one.
+    resumed: f64,
+    resumed_sessions: Vec<f64>,
     /// Charges per context size; only point runs, which report them, keep any.
     by_size: Option<Vec<Option<Sum>>>,
-    resumed: f64,
     /// Boundaries already charged, which another session sharing them must not charge again.
     charged: HashSet<&'r Id>,
 }
@@ -933,8 +937,9 @@ impl RunState<'_> {
             total: Sum::new(),
             session: Sum::new(),
             sessions: vec![],
-            by_size: sizes.map(|n| vec![None; n]),
             resumed: 0.0,
+            resumed_sessions: vec![],
+            by_size: sizes.map(|n| vec![None; n]),
             charged: HashSet::default(),
         }
     }
@@ -958,6 +963,8 @@ impl RunState<'_> {
         let session = std::mem::take(&mut self.session).cost();
         self.sessions
             .push(failed.map_or(session, |reason| unknown_cost(reason.clone())));
+        self.resumed_sessions
+            .push(std::mem::take(&mut self.resumed));
     }
 
     fn finish(self) -> Run {
@@ -970,7 +977,7 @@ impl RunState<'_> {
                 .into_iter()
                 .map(|s| s.map(Sum::cost))
                 .collect(),
-            resumed: self.resumed,
+            resumed: self.resumed_sessions,
         }
     }
 }
@@ -982,7 +989,8 @@ struct Run {
     sessions: Vec<Cost>,
     /// Charges per context size; only point runs, which report them, keep any.
     by_size: Vec<Option<Cost>>,
-    resumed: f64,
+    /// Each session's expected resumed summaries.
+    resumed: Vec<f64>,
 }
 
 impl Run {
@@ -2194,8 +2202,8 @@ impl<'a> Profiled<'a> {
                 late_trigger_delta,
                 lifetime_break_even_fraction,
                 reread_break_even_usd_per_resumed_summary: delta_usd
-                    .filter(|&d| d < 0.0 && on.resumed > 0.0)
-                    .map(|d| -d / on.resumed),
+                    .filter(|&d| d < 0.0)
+                    .and_then(|_| saving_per_resumed(&on, &off)),
             },
             adjustment: OnOff {
                 on: on.adjustment,
@@ -2205,6 +2213,21 @@ impl<'a> Profiled<'a> {
         };
         (scenario, detail)
     }
+}
+
+/// What on saves per expected resumed summary over the sessions priced both ways, so the
+/// summaries counted match the saving; None when none resumed or on saves nothing there.
+fn saving_per_resumed(on: &Run, off: &Run) -> Option<f64> {
+    let mut saving = Usd::ZERO;
+    let mut resumed = 0.0;
+    for ((on, off), r) in on.sessions.iter().zip(&off.sessions).zip(&on.resumed) {
+        if let (Some(on), Some(off)) = (on.total_usd, off.total_usd) {
+            saving += off - on;
+            resumed += r;
+        }
+    }
+    let saving = saving.to_f64();
+    (resumed > 0.0 && saving > 0.0).then(|| saving / resumed)
 }
 
 /// Profile events followed by modeled window boundaries, in stable time order.
@@ -4157,6 +4180,16 @@ mod tests {
         assert_eq!(c.base.coverage, Some(a.coverage));
         // Each sensitivity run is paired the same way.
         assert!(a.sensitivity.open_delta.and_then(|d| d.margin).is_some());
+        // The re-read break-even counts only the priced sessions' resumed summaries, so it
+        // matches one priced session's.
+        let one = check(&data(sessions_saving(&["one"]), vec![]), 202.0);
+        let per_summary = |c: &Checked<IdleCheck>| {
+            c.after_recommendations
+                .sensitivity
+                .reread_break_even_usd_per_resumed_summary
+        };
+        assert!(per_summary(&one).is_some());
+        near(per_summary(&c), per_summary(&one).unwrap());
         // Doctor's full run recommends the 5m TTL these requests favor, which leaves idle
         // compaction inapplicable, but the current-settings comparison keeps its margin.
         let rendered = format_report(&report(scan, 202.0), ReportOptions::default());
@@ -4171,6 +4204,10 @@ mod tests {
         let mut target = sessions_saving(&["one", "two"]);
         // A project policy that changes within one conversation leaves its replay unresolved.
         target[1].cwd = Some("/elsewhere".into());
+        // So it does in a session never idle long enough to trigger, which changes nothing.
+        let mut short = in_session(request("short-return", 200.0, 301_000), "short");
+        short.cwd = Some("/elsewhere".into());
+        target.extend([in_session(request("short", 199.0, 300_000), "short"), short]);
         let mut s = data(target, vec![]);
         let profile = &mut s.profiles[0];
         let mut ttl = profile.ttl.clone();
@@ -4192,8 +4229,8 @@ mod tests {
         assert_eq!(
             a.coverage,
             Coverage {
-                priced: 2,
-                total: 3
+                priced: 3,
+                total: 4
             }
         );
         near(a.delta.map(|d| d.usd), -2.196 * 2.0);

@@ -20,7 +20,7 @@ use crate::model::{
     Ttl, TtlCheck, Usage, UsageEstimate, Usd,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
+    Catalog, PRICE_SOURCES, Sample, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
 };
 
 const MINUTE: Millis = 60_000;
@@ -808,6 +808,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     // Avoided, ping and closed-savings totals per cap, summed exactly and shown as f64.
     let mut totals = vec![[Usd::ZERO; 3]; caps.len()];
     let mut final_costs: Vec<Vec<Usd>> = vec![vec![]; caps.len()];
+    // Each cap's savings per priced session, weighted by its periods, to extrapolate from.
+    let mut extrapolations = vec![Sample::default(); caps.len()];
+    let mut sessions = 0;
     let mut uncertainty = vec![
         "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
         "transcripts do not record when clients close or sleep; returning sessions stay awake and final periods ping for the full cap, including beyond the observation window".into(),
@@ -878,6 +881,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                     Some((baseline, candidates))
                 })
                 .flatten();
+            sessions += 1;
             let Some((baseline, runs)) = runs else {
                 unpriced += periods;
                 continue;
@@ -899,8 +903,11 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                     })
                     .count() as u64;
                 let [avoided, ping, closed] = &mut totals[i];
-                *avoided += baseline.recorded - run.recorded;
-                *ping += run.pings.iter().chain(&run.finals).copied().sum::<Usd>();
+                let session_avoided = baseline.recorded - run.recorded;
+                let session_ping = run.pings.iter().chain(&run.finals).copied().sum::<Usd>();
+                extrapolations[i].add_weighted(session_avoided - session_ping, periods as f64);
+                *avoided += session_avoided;
+                *ping += session_ping;
                 *closed +=
                     baseline.recorded - run.recorded - run.pings.iter().copied().sum::<Usd>();
                 let size = run.finals.len().max(final_costs[i].len());
@@ -913,11 +920,28 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     } else {
         unpriced = returns + finals;
     }
-    for (s, [avoided, ping, closed]) in scenarios.iter_mut().zip(totals) {
-        s.avoided_usd = avoided.to_f64();
-        s.ping_cost_usd = ping.to_f64();
-        s.closed_savings_usd = closed.to_f64();
-        s.savings_usd = (avoided - ping).to_f64();
+    // Unpriced periods are extrapolated over from the priced ones, as their share of all.
+    let scale = if priced > 0 {
+        (priced + unpriced) as f64 / priced as f64
+    } else {
+        1.0
+    };
+    let mut margins = vec![];
+    for ((s, [avoided, ping, closed]), sample) in scenarios.iter_mut().zip(totals).zip(&extrapolations) {
+        s.avoided_usd = avoided.to_f64() * scale;
+        s.ping_cost_usd = ping.to_f64() * scale;
+        s.closed_savings_usd = closed.to_f64() * scale;
+        s.savings_usd = (avoided - ping).to_f64() * scale;
+        margins.push(
+            sample
+                .estimate_weighted(sessions, (priced + unpriced) as f64)
+                .and_then(|e| e.margin),
+        );
+    }
+    for costs in &mut final_costs {
+        for cost in costs {
+            *cost = Usd::from_f64(cost.to_f64() * scale);
+        }
     }
     if priced == 0 {
         scenarios.clear();
@@ -949,7 +973,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         .enumerate()
         .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd));
     let comparable = !conditional
-        && unpriced == 0
+        && priced > 0
         && (profile.harness == Harness::Codex || idle_savings.is_some());
     if conditional {
         uncertainty.push(TIER_SENSITIVITY.into());
@@ -960,8 +984,11 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     let margin = best
         .filter(|_| comparable)
         .map(|(_, s)| s.savings_usd - alternative);
-    let savings = margin.filter(|_| unpriced == 0).map(|s| s.max(0.0));
-    let recommended = margin.filter(|_| unpriced == 0).map(|m| {
+    let savings = margin.map(|s| s.max(0.0));
+    // The best cap's own margin, which every figure built on it shares, since the idle
+    // alternative's figure is priced in full or not at all.
+    let error = best.and_then(|(i, _)| margins[i]);
+    let recommended = margin.map(|m| {
         if m > 0.0 {
             policy(interval.unwrap(), best.unwrap().1.cap_ms)
         } else {
@@ -979,8 +1006,8 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         Some(format!("pinging {} wins only if sessions that never came back close within {} of their last request",
             policy(interval.unwrap(), s.cap_ms), duration((count + 1) as Millis * interval.unwrap())))
     });
-    if unpriced > 0 {
-        uncertainty.push(format!("{unpriced} periods have unresolved pricing or context geometry; priced-session savings cannot establish the aggregate winner"));
+    if unpriced > 0 && priced > 0 {
+        uncertainty.push(format!("{unpriced} periods have unresolved pricing or context geometry; every dollar figure is extrapolated from the {priced} periods that could be priced, assuming the rest resemble them"));
     }
     let elapsed = options.now - since;
     Some(KeepaliveCheck {
@@ -996,7 +1023,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             window_basis: if options.since.is_some() {"explicit --since window"} else {"available transcript window"}.into(),
             baseline: if alternative > 0.0 {"idle compaction as recommended, with no pings"} else {"sessions left idle, with no pings"}.into(),
             requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced}),
-            savings_usd: savings, margin: None, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| s * 30.0 * DAY as f64 / elapsed as f64), break_even,
+            savings_usd: savings, margin: error, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| s * 30.0 * DAY as f64 / elapsed as f64), break_even,
             assumptions: vec![
                 lifetime.as_ref().map_or_else(|| "cache lifetime unknown".into(), |l| format!("cache lifetime: {}", l.reason)),
                 "each session is replayed sequentially at each cap and with no pings, carrying cache warmth and ping context; all policies use the same recommended compaction windows and their modeled summary costs".into(),

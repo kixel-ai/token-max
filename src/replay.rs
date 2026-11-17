@@ -22,7 +22,7 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sum, add_costs, conditional_tier, price_part,
+    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sample, Sum, add_costs, conditional_tier, price_part,
     price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::rows::Group;
@@ -913,10 +913,12 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .into_iter()
         .map(|(key, requests)| {
             let mut cost = Sum::new();
+            let mut sample = Sample::default();
             let (mut priced_requests, mut conditional_requests) = (0, 0);
             for &r in &requests {
                 let c = price_request(catalog, r);
-                if c.total_usd.is_some() {
+                if let Some(usd) = c.total_usd {
+                    sample.add(usd);
                     priced_requests += 1;
                     conditional_requests +=
                         u64::from(r.parts.iter().any(|p| conditional_tier(r, p)));
@@ -935,6 +937,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 conditional_requests,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
                 cost: cost.cost(),
+                estimate: sample.estimate(requests.len() as u64),
             }
         })
         .collect();

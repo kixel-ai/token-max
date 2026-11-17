@@ -1512,6 +1512,16 @@ pub enum Margin {
 }
 
 impl Margin {
+    /// The margin of two figures added, each with its own margin or none when exact: their
+    /// margins added, since figures from overlapping requests can err the same way.
+    pub fn plus(a: Option<Margin>, b: Option<Margin>) -> Option<Margin> {
+        match (a, b) {
+            (None, m) | (m, None) => m,
+            (Some(Margin::Usd(a)), Some(Margin::Usd(b))) => Some(Margin::Usd(a + b)),
+            _ => Some(Margin::Unmeasured),
+        }
+    }
+
     /// The margin scaled like the figure it belongs to, such as from the window to 30 days.
     pub fn scale(self, factor: f64) -> Self {
         match self {
@@ -2892,6 +2902,8 @@ pub struct HistoricalCost {
     /// Alternative served tiers for missing-tier parts only; these are scenarios, not bounds.
     pub tier_sensitivity: Vec<TierScenario>,
     pub cost: Cost,
+    /// What every request cost, extrapolated from the priced ones; None when none was.
+    pub estimate: Option<Estimate>,
 }
 
 /// One hypothetical served tier, preserving every recorded effective tier.

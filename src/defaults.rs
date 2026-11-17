@@ -142,32 +142,38 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
             }
             // On minus off, so what turning it off saves.
             let s = &i.current_settings;
-            let saving = match s.monthly_delta_usd {
-                Some(delta) if s.applicable => Saving::Saves(delta),
-                _ => Saving::NotMeasured,
-            };
-            baseline("on", saving)
+            match s.monthly_delta.filter(|_| s.applicable) {
+                Some(delta) => Some(Baseline {
+                    default: "on".into(),
+                    saving: Saving::Saves(delta.usd),
+                    margin: delta.margin,
+                }),
+                None => baseline("on", Saving::NotMeasured),
+            }
         }
         CheckResult::T3Idle(t) => {
             let current = t.base.current?;
             if current == T3IdleMode::OnReturn {
                 return None;
             }
-            let cost = |mode| {
-                let s = t
-                    .current_settings
-                    .scenarios
-                    .iter()
-                    .find(|s| s.mode == mode)?;
-                Some(s.cost.total_usd?.to_f64())
-            };
-            let saving = match (cost(T3IdleMode::OnReturn), cost(current)) {
-                (Some(default), Some(current)) => {
-                    Saving::Saves(monthly(default - current, t.base.since, t.base.until))
+            // The current mode's cost minus the default's, so what the default costs more.
+            let savings = t
+                .current_settings
+                .scenarios
+                .iter()
+                .find(|s| s.mode == T3IdleMode::OnReturn)
+                .and_then(|s| s.savings);
+            match savings {
+                Some(s) => {
+                    let s = s.scale(monthly(1.0, t.base.since, t.base.until));
+                    Some(Baseline {
+                        default: T3IdleMode::OnReturn.as_str().into(),
+                        saving: Saving::Saves(-s.usd),
+                        margin: s.margin,
+                    })
                 }
-                _ => Saving::NotMeasured,
-            };
-            baseline(T3IdleMode::OnReturn.as_str(), saving)
+                None => baseline(T3IdleMode::OnReturn.as_str(), Saving::NotMeasured),
+            }
         }
         // A cap other than the default changes when commands move to the background, and
         // what checking on them costs is not recorded.

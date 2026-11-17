@@ -962,7 +962,10 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
         head.contains("saves $") || head.contains("saves <$"),
         "{text}"
     );
-    assert!(text.starts_with("token-max  2 requests in 1 session from "), "{text}");
+    assert!(
+        text.starts_with("token-max  2 requests in 1 session from "),
+        "{text}"
+    );
     assert_eq!(report_line(&text, "Idle compaction").0, "unknown", "{text}");
     let all = format!("{text}{text_err}");
     assert!(!all.contains("SYNTHETIC_PRIVATE"));

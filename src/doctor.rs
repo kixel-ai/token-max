@@ -1678,19 +1678,28 @@ impl Total {
     }
 }
 
-/// What every change in `fixes` saves together, as the line under a `--defaults` report's
-/// headline; empty when there is none.
-pub fn total(fixes: &[Fix]) -> String {
+/// What every change in `fixes` saves together, as the line under the report's headline,
+/// counted from the defaults in a `--defaults` report; empty when there is none.
+pub fn total(fixes: &[Fix], defaults: bool) -> String {
     let mut total = Total::default();
     for fix in fixes {
         total.add(fix);
     }
+    let lead = if defaults {
+        "From the defaults, these"
+    } else {
+        "Together, these"
+    };
     if total.changes() == 0 {
         String::new()
     } else if total.measured.changes + total.up_to.changes == 0 {
-        "From the defaults, no change's saving was measured.".into()
+        if defaults {
+            "From the defaults, no change's saving was measured.".into()
+        } else {
+            "No change's saving was measured.".into()
+        }
     } else {
-        format!("From the defaults, these changes save {}.", total.amount())
+        format!("{lead} changes save {}.", total.amount())
     }
 }
 

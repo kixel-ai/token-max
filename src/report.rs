@@ -5626,17 +5626,19 @@ fn summary(
     };
     // Every setting is at its default already, so what the changes save from there replaces
     // the comparison with the defaults.
-    let summary = if report.scan.defaults {
-        crate::doctor::total(fixes)
-    } else {
-        crate::defaults::headline(
+    let together = crate::doctor::total(fixes, report.scan.defaults);
+    if !together.is_empty() {
+        out.line(&together, 0, PLAIN);
+    }
+    if !report.scan.defaults {
+        let compared = crate::defaults::headline(
             rows.iter().filter_map(|r| r.baseline.as_ref()),
             |usd| spend.of_month(usd),
             &host,
-        )
-    };
-    if !summary.is_empty() {
-        out.line(&summary, 0, PLAIN);
+        );
+        if !compared.is_empty() {
+            out.line(&compared, 0, PLAIN);
+        }
     }
     out.blank();
     // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
@@ -6670,6 +6672,17 @@ mod tests {
             Some(
                 "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to ~$12/mo ± $1.25 more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
             )
+        );
+        // What every offered change saves together sits just above the comparison.
+        let lines: Vec<&str> = text.lines().map(str::trim_start).collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("Compared with"))
+            .unwrap();
+        assert!(
+            lines[at - 1].starts_with("Together, these changes save "),
+            "{}",
+            lines[at - 1]
         );
         let window = report_line(&text, "Auto-compact window (claude-opus-5-5) 200k");
         assert_eq!(window.default, "default 1M, saving not measured");
@@ -8651,11 +8664,12 @@ mod tests {
     fn subagents_count_with_the_session_that_spawned_them() {
         let mut report = synthetic();
         // Two main sessions, a subagent of the first and a subagent that subagent spawned.
-        for (r, session) in report
-            .scan
-            .requests
-            .iter_mut()
-            .zip(["main", "other", "child", "grandchild"])
+        for (r, session) in
+            report
+                .scan
+                .requests
+                .iter_mut()
+                .zip(["main", "other", "child", "grandchild"])
         {
             r.session = session.into();
         }
@@ -8673,7 +8687,10 @@ mod tests {
         report.scan.subagents = vec![spawn("grandchild", "child"), spawn("child", "main")];
         assert_eq!(sessions(&report.scan), 2);
         let summary = text(&report, None, true);
-        assert!(summary.contains(" requests in 2 sessions from "), "{summary}");
+        assert!(
+            summary.contains(" requests in 2 sessions from "),
+            "{summary}"
+        );
         // A subagent whose parent left no request in the window still counts once.
         report.scan.requests.remove(0);
         assert_eq!(sessions(&report.scan), 2);

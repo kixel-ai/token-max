@@ -14,11 +14,12 @@ use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, Billing, CacheReplayEvidence,
     CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck,
-    EffortRun, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, Margin,
-    MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming,
-    Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
+    EffortRun, Estimate, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck,
+    Margin, MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence,
+    ReturnTiming, Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate,
+    Verdict,
 };
-use crate::prices::{Sum, TIER_SENSITIVITY, add_costs};
+use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
 use crate::terminal::{WrapOptions, cells, wrap_spans};
 
@@ -99,6 +100,19 @@ fn money(cost: &Cost) -> String {
     match cost.total_usd {
         None => format!("unknown ({} known subtotal)", usd(cost.known_usd.to_f64())),
         Some(total) => usd(total.to_f64()),
+    }
+}
+
+/// [`money`], then what the whole came to extrapolated from the priced requests when some
+/// were not.
+fn extrapolated(cost: &Cost, estimate: Option<Estimate>) -> String {
+    match (cost.total_usd, estimate) {
+        (None, Some(e)) => format!(
+            "{}; extrapolated, {}",
+            money(cost),
+            approx_usd(e.usd, e.margin)
+        ),
+        _ => money(cost),
     }
 }
 
@@ -459,10 +473,9 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
             .iter()
             .take(EFFORT_PAIRS)
             .map(|run| {
-                let cost = match run.cost.total_usd {
-                    Some(usd) => about(usd.to_f64()),
-                    None if run.cost.known_usd == Usd::ZERO => "unpriced".into(),
-                    None => format!("at least {}", about(run.cost.known_usd.to_f64())),
+                let cost = match run.estimate {
+                    Some(e) => approx(e.usd, e.margin, ""),
+                    None => "unpriced".into(),
                 };
                 format!(
                     "{} {} time{}, {cost}",
@@ -962,7 +975,11 @@ impl<'a> Out<'a> {
         }
     }
     fn cost(&mut self, name: &str, value: &Cost) {
-        self.field(name, &money(value));
+        self.estimate(name, value, None);
+    }
+    /// [`Out::cost`] with what it came to extrapolated over unpriced requests.
+    fn estimate(&mut self, name: &str, value: &Cost, estimate: Option<Estimate>) {
+        self.field(name, &extrapolated(value, estimate));
         self.notes("Unknown", &value.unknown);
         self.notes("Assumption", &value.assumptions);
     }
@@ -1465,7 +1482,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
                     count(c.priced)
                 ),
             );
-            out.cost("Cost", &c.cost);
+            out.estimate("Cost", &c.cost, c.estimate);
             out.field("Models", &shares(&c.models, c.requests));
             out.field("Efforts", &shares(&c.efforts, c.requests));
             for s in &c.sources {
@@ -1481,9 +1498,9 @@ fn details(report: &Report, out: &mut Out<'_>) {
             }
             match (&c.cheapest, &c.reprice) {
                 (Some(model), Some(cost)) => {
-                    out.cost(&format!("Same tokens on {model}"), cost);
+                    out.estimate(&format!("Same tokens on {model}"), cost, c.reprice_estimate);
                 }
-                _ => out.field("Cheapest model", &reprice_text(c, &usd)),
+                _ => out.field("Cheapest model", &reprice_text(c)),
             }
             out.field("Model setting", &out.home_in(&c.model_setting));
             out.field("Effort setting", &out.home_in(&c.effort_setting));
@@ -1502,9 +1519,10 @@ fn details(report: &Report, out: &mut Out<'_>) {
             out.line(&names.join(", "), 0, BOLD);
             out.field("Requests", &requests_of(u.requests, "Fable request"));
             for w in &u.weeks {
-                out.cost(
+                out.estimate(
                     &format!("{}, {}", fable_span(w), requests_of(w.requests, "request")),
                     &w.cost,
+                    w.estimate,
                 );
             }
             if u.requests > 0 {
@@ -1710,33 +1728,39 @@ fn shares(values: &[Share], whole: u64) -> String {
     }
 }
 
-/// A cost scaled by `scale`, a known lower bound, or unknown.
-fn scaled(cost: &Cost, scale: &dyn Fn(f64) -> String) -> String {
-    match cost.total_usd {
-        Some(value) => scale(value.to_f64()),
-        None if cost.known_usd > Usd::ZERO => {
-            format!("at least {}", scale(cost.known_usd.to_f64()))
-        }
+/// A cost written by `write`, such as [`about`], after a `~` and before its margin when
+/// extrapolated; "an unknown amount" when nothing was priced.
+fn figure(estimate: Option<Estimate>, write: &dyn Fn(f64) -> String) -> String {
+    match estimate {
         None => "an unknown amount".into(),
+        Some(Estimate { usd, margin: None }) => write(usd),
+        Some(Estimate {
+            usd,
+            margin: Some(Margin::Usd(m)),
+        }) => format!("~{} ± {}", write(usd), write(m)),
+        Some(Estimate {
+            usd,
+            margin: Some(Margin::Unmeasured),
+        }) => format!("~{}, margin unknown", write(usd)),
     }
 }
 
 /// What the same tokens would cost on the provider's cheapest current model.
-fn reprice_text(c: &SubagentCost, scale: &dyn Fn(f64) -> String) -> String {
+fn reprice_text(c: &SubagentCost) -> String {
     match (&c.cheapest, &c.reprice) {
         (None, _) => "The price catalog has no cheapest current model for its provider.".into(),
         (Some(model), None) => {
             format!("It already ran on {model}, its provider's cheapest current model.")
         }
-        (Some(model), Some(cost)) => format!(
+        (Some(model), Some(_)) => format!(
             "On {model} the same recorded tokens would cost {}, assuming the same turns.",
-            scaled(cost, scale)
+            figure(c.reprice_estimate, &about)
         ),
     }
 }
 
 /// One subagent type's evidence: its runs, models, efforts and what a cheaper model would cost.
-fn subagent_line(c: &SubagentCost, scale: &dyn Fn(f64) -> String, out: &Out<'_>) -> String {
+fn subagent_line(c: &SubagentCost, out: &Out<'_>) -> String {
     let coverage = if c.priced < c.requests {
         format!(
             " ({} of {} requests priced)",
@@ -1777,7 +1801,7 @@ fn subagent_line(c: &SubagentCost, scale: &dyn Fn(f64) -> String, out: &Out<'_>)
         capitalize(&runs(c.runs)),
         shares(&c.models, c.requests),
         sources.join("; "),
-        reprice_text(c, scale),
+        reprice_text(c),
         out.home_in(&c.model_setting),
         out.home_in(&c.effort_setting),
     )
@@ -1861,21 +1885,19 @@ fn fable_row(u: &FableUse) -> Row {
         row.evidence = format!("No Fable requests recorded in the window.{caveats} {official}");
         return row;
     }
-    let mut total = Sum::new();
     let weeks: Vec<String> = u
         .weeks
         .iter()
         .map(|w| {
-            total.add(&w.cost);
             format!(
                 "{} ({}, {})",
-                scaled(&w.cost, &about),
+                figure(w.estimate, &about),
                 requests_of(w.requests, "request"),
                 fable_span(w)
             )
         })
         .collect();
-    row.amount = Some(("costs", scaled(&total.cost(), &about)));
+    row.amount = Some(("costs", figure(u.estimate, &about)));
     row.evidence = format!(
         "{} at API prices, per 7 days back from this report: {}. {FABLE_PARTIAL}{caveats} {official}",
         requests_of(u.requests, "Fable request"),
@@ -1964,14 +1986,18 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                         "{}, {} requests, {}",
                         effort_pair(run),
                         count(run.requests),
-                        money(&run.cost)
+                        extrapolated(&run.cost, run.estimate)
                     ),
                 );
             }
         }
         CheckResult::Memory(m) => {
             out.field("Turn off", &memory_off(m, out));
-            out.field("Loaded memory and reads", &estimate(m.context_usd));
+            out.field(
+                "Loaded memory and reads",
+                &m.context_usd
+                    .map_or_else(|| "unknown".into(), |usd| approx_usd(usd, m.base.margin)),
+            );
             out.field(
                 "Writes, estimated at the output price",
                 &estimate(m.writes_usd),
@@ -2433,7 +2459,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 out.notes("Idle unknown", &scenario.unknown);
             }
         }
-        CheckResult::BashCap(b) => out.cost("Cache misses after long waits", &b.waits.miss_cost),
+        CheckResult::BashCap(b) => out.estimate(
+            "Cache misses after long waits",
+            &b.waits.miss_cost,
+            b.waits.miss_estimate,
+        ),
         CheckResult::Keepalive(k) => {
             // Counts are what the priced sessions recorded; dollars cover every period.
             if let Some(c) = k
@@ -3497,24 +3527,26 @@ fn coverage_note(r: &Common<'_>) -> String {
     }
 }
 
-/// A sum of context costs as a row's figure, and a sentence counting the pieces it leaves out.
-fn known_figure(values: &[Option<f64>]) -> (String, String) {
-    let known: Vec<f64> = values.iter().flatten().copied().collect();
-    if known.is_empty() {
-        return ("unknown".into(), String::new());
+/// Context pieces as one row's figure: their sum, whether it is a lower bound beside pieces
+/// nothing priced, and a sentence counting those.
+fn pieces_figure(pieces: &[&ContextCost]) -> (Option<Estimate>, bool, String) {
+    let mut total: Option<Estimate> = None;
+    for e in pieces.iter().filter_map(|c| c.estimate()) {
+        let sum = total.get_or_insert(Estimate {
+            usd: 0.0,
+            margin: None,
+        });
+        sum.usd += e.usd;
+        // The pieces ride on the same requests, so their errors can add up.
+        sum.margin = Margin::plus(sum.margin, e.margin);
     }
-    let total = about(known.iter().fold(0.0, |n, c| n + c));
-    match values.len() - known.len() {
-        0 => (total, String::new()),
-        1 => (
-            format!("at least {total}"),
-            "1 piece could not be priced. ".into(),
-        ),
-        n => (
-            format!("at least {total}"),
-            format!("{} pieces could not be priced. ", count(n as u64)),
-        ),
-    }
+    let unpriced = pieces.iter().filter(|c| c.estimated_usd.is_none()).count() as u64;
+    let note = match unpriced {
+        0 => String::new(),
+        1 => "1 piece could not be priced. ".into(),
+        n => format!("{} pieces could not be priced. ", count(n)),
+    };
+    (total, total.is_some() && unpriced > 0, note)
 }
 
 /// The profile a piece of context is filed under: the first of its sorted set.
@@ -3668,28 +3700,19 @@ impl Row {
         matches!(self.mark, Mark::Change | Mark::Consider)
     }
 
-    /// What it cost over the window, a lower bound when `at_least`.
-    fn costs(&mut self, usd: Option<f64>, at_least: bool, spend: &Spend) {
+    /// What it cost over the window, extrapolated over unpriced requests with a ~ and its
+    /// margin, and a lower bound when `at_least`, such as beside pieces nothing priced.
+    fn costs(&mut self, estimate: Option<Estimate>, at_least: bool, spend: &Spend) {
+        self.margin = estimate.and_then(|e| e.margin);
         self.amount = Some((
             "costs",
-            match usd {
+            match estimate {
                 None => "unknown".into(),
-                Some(usd) if at_least => format!("at least {}", about(usd)),
-                Some(usd) => about(usd),
+                Some(e) if at_least => format!("at least {}", approx(e.usd, e.margin, "")),
+                Some(e) => approx(e.usd, e.margin, ""),
             },
         ));
-        self.share = usd.and_then(|usd| spend.share(usd));
-    }
-
-    /// What `cost` came to over the window: its known part as a lower bound when partly unpriced.
-    fn cost(&mut self, cost: &Cost, spend: &Spend) {
-        match cost.total_usd {
-            Some(usd) => self.costs(Some(usd.to_f64()), false, spend),
-            None if cost.known_usd > Usd::ZERO => {
-                self.costs(Some(cost.known_usd.to_f64()), true, spend);
-            }
-            None => self.costs(None, false, spend),
-        }
+        self.share = estimate.and_then(|e| spend.share(e.usd));
     }
 
     /// What it saves every 30 days, `verb` such as "saves up to", and how far that may be off
@@ -3947,8 +3970,12 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
 }
 
 /// What a context piece costs over the window, as a row's amount.
-fn cost_amount(usd: Option<f64>) -> Option<(&'static str, String)> {
-    Some(("costs", usd.map_or_else(|| "unknown".into(), about)))
+fn cost_amount(c: &ContextCost) -> Option<(&'static str, String)> {
+    Some((
+        "costs",
+        c.estimate()
+            .map_or_else(|| "unknown".into(), |e| approx(e.usd, e.margin, "")),
+    ))
 }
 
 /// A setting's value in tokens, shortened to thousands or millions when exact.
@@ -3979,14 +4006,14 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
     let advice = "Shorten it, or move parts into path-scoped rules or skills.";
     if c.harness == Harness::Claude && !claude_file {
         let mut row = Row::new(Claim::Measured, Mark::Info, name, what);
-        row.amount = cost_amount(c.estimated_usd);
+        row.amount = cost_amount(c);
         row.evidence =
             format!("No provider size guidance covers it, and no setting turns it off. {advice}");
         return row;
     }
     let Some(size) = c.instruction_size else {
         let mut row = Row::new(Claim::Official, Mark::Unknown, name, what);
-        row.amount = cost_amount(c.estimated_usd);
+        row.amount = cost_amount(c);
         row.evidence = not_enough(
             "This record has no rendered instruction text to measure against the provider's guidance.",
         );
@@ -4065,7 +4092,7 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
             row
         }
     };
-    row.amount = cost_amount(c.estimated_usd);
+    row.amount = cost_amount(c);
     row
 }
 
@@ -4287,9 +4314,8 @@ pub(crate) const AT_LEAST: &str = "saves at least";
 fn check_verb(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> &'static str {
     match result {
         _ if unset_main_ttl(result, r, out) => UP_TO,
-        // Memory priced from only part of the requests, or with unmeasured generation,
-        // saves at least what was priced.
-        CheckResult::Memory(m) if r.coverage.is_some() || codex_unmeasured(m) => AT_LEAST,
+        // Memory with unmeasured generation saves at least what was priced.
+        CheckResult::Memory(m) if codex_unmeasured(m) => AT_LEAST,
         _ => "saves",
     }
 }
@@ -4307,6 +4333,14 @@ fn check_saving(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<f
             .monthly_savings_usd
             .or_else(|| r.savings_usd.map(|usd| monthly(usd, r.since, r.until))),
     }
+}
+
+/// A check's measured figure over the window, with its margin when extrapolated.
+fn check_estimate(usd: Option<f64>, r: &Common<'_>) -> Option<Estimate> {
+    usd.map(|usd| Estimate {
+        usd,
+        margin: r.margin,
+    })
 }
 
 /// How far a check's monthly saving may be off when extrapolated over unpriced requests,
@@ -4565,14 +4599,7 @@ fn summary(
         if w.long == 0 {
             return "No foreground Bash wait outlasted the cache.".to_string();
         }
-        let cost = &w.miss_cost;
-        let cost = match cost.total_usd {
-            Some(usd) => about(usd.to_f64()),
-            None if cost.known_usd > Usd::ZERO => {
-                format!("at least {}", about(cost.known_usd.to_f64()))
-            }
-            None => "an unknown amount".into(),
-        };
+        let cost = figure(w.miss_estimate, &about);
         format!(
             "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost} over the window.",
             count(w.long),
@@ -4913,7 +4940,7 @@ fn summary(
         } else {
             match result {
                 CheckResult::Effort(e) if !e.runs.is_empty() => {
-                    row.cost(&add_costs(e.runs.iter().map(|run| &run.cost)), &spend);
+                    row.costs(e.estimate, false, &spend);
                 }
                 CheckResult::Ttl(t) if mark == Mark::Keep && t.one_hour_savings_usd != 0.0 => {
                     row.saves(
@@ -4927,22 +4954,13 @@ fn summary(
                     // A feature that is on says plainly when its cost could not be measured.
                     match r.savings_usd {
                         Some(usd) if usd <= 0.0 => {}
-                        usd => {
-                            row.costs(usd, false, &spend);
-                            // An estimate extrapolated over unpriced turns keeps its ~ and margin.
-                            if let (Some(usd), Some(margin)) = (usd, r.margin) {
-                                row.amount = Some(("costs", approx(usd, Some(margin), "")));
-                                row.margin = Some(margin);
-                            }
-                        }
+                        usd => row.costs(check_estimate(usd, r), false, &spend),
                     }
                 }
+                // Codex extraction and consolidation are never measured.
                 CheckResult::Memory(m) => match r.savings_usd {
                     Some(0.0) => {}
-                    usd => {
-                        let at_least = r.coverage.is_some() || codex_unmeasured(m);
-                        row.costs(usd, at_least, &spend);
-                    }
+                    usd => row.costs(check_estimate(usd, r), codex_unmeasured(m), &spend),
                 },
                 _ => {}
             }
@@ -4973,18 +4991,24 @@ fn summary(
             Verdict::Keep => "on".into(),
         };
         if row.offered() && c.skill.is_none() {
-            row.saves("saves", piece_saving(c, &spend), None, &spend);
+            let margin = c
+                .margin
+                .map(|m| m.scale(monthly(1.0, spend.since, Some(spend.until))));
+            row.saves("saves", piece_saving(c, &spend), margin, &spend);
         } else {
-            row.costs(c.estimated_usd, false, &spend);
+            row.costs(c.estimate(), false, &spend);
         }
         let each = c
             .cost_per_use_usd
-            .map_or_else(String::new, |usd| format!(", {} each", about(usd)));
+            .zip(c.calls)
+            .map_or_else(String::new, |(usd, calls)| {
+                let margin = c.margin.map(|m| m.scale(1.0 / calls as f64));
+                format!(", {} each", approx(usd, margin, ""))
+            });
         let mut text = format!(
             "{}{each}; it cost {} over the window",
             capitalize(&uses(c)),
-            c.estimated_usd
-                .map_or_else(|| "an unknown amount".into(), about)
+            figure(c.estimate(), &about)
         );
         if c.skill.is_some() {
             let _ = write!(text, "; {}", catalog_evidence(c));
@@ -5088,7 +5112,7 @@ fn summary(
         row.location = skill_location(c, out);
         row.value = "on".into();
         if c.estimated_usd.is_some() {
-            row.costs(c.estimated_usd, false, &spend);
+            row.costs(c.estimate(), false, &spend);
         }
         let uses = uses(c);
         let mut text = not_enough(&match c.estimated_usd {
@@ -5167,7 +5191,7 @@ fn summary(
                 .iter()
                 .filter(|r| r.harness == p.harness && r.profiles.iter().any(|id| ids.contains(id)))
                 .count() as u64;
-            let (name, what, saving, evidence) = match piece {
+            let (name, what, saving, margin, evidence) = match piece {
                 Some(c) => {
                     // A Codex catalog skill's cost is no saving: removing it can backfill the catalog.
                     let estimate = crate::defaults::estimate(
@@ -5180,10 +5204,17 @@ fn summary(
                     let saving = estimate.map_or(crate::defaults::Saving::NotMeasured, |usd| {
                         crate::defaults::Saving::Estimated(usd)
                     });
-                    let evidence = match (estimate, c.estimated_usd) {
-                        (Some(_), Some(usd)) => format!(
+                    // Scaled as the saving is, from the requests that carried it to 30 days.
+                    let margin = c.margin.filter(|_| estimate.is_some()).map(|m| {
+                        m.scale(
+                            requests as f64 / c.requests as f64
+                                * monthly(1.0, spend.since, Some(spend.until)),
+                        )
+                    });
+                    let evidence = match estimate {
+                        Some(_) => format!(
                             "Off in {shown}. While still sent it cost {} on {} requests; the estimate assumes each of this line's {} requests in the window would have carried it.",
-                            about(usd),
+                            figure(c.estimate(), &about),
                             count(c.requests),
                             count(requests)
                         ),
@@ -5191,12 +5222,13 @@ fn summary(
                             "Off in {shown}. What it cost while still sent can't stand for what it saves, so the saving is unknown."
                         ),
                     };
-                    (short_label(c, out), piece_what(c), saving, evidence)
+                    (short_label(c, out), piece_what(c), saving, margin, evidence)
                 }
                 None => (
                     crate::defaults::switch_name(control),
                     crate::defaults::switch_what(control),
                     crate::defaults::Saving::NotMeasured,
+                    None,
                     format!(
                         "Off in {shown}. No request in the window carried it, so what it saves is unknown."
                     ),
@@ -5210,7 +5242,7 @@ fn summary(
             row.baseline = Some(crate::defaults::Baseline {
                 default: "on".into(),
                 saving,
-                margin: None,
+                margin,
             });
             rows.push(row);
         }
@@ -5368,7 +5400,7 @@ fn summary(
             // Shortening a file saves an unknown part of what it cost.
             row.saves("saves", None, None, &spend);
         } else {
-            row.costs(c.estimated_usd, false, &spend);
+            row.costs(c.estimate(), false, &spend);
         }
         row.setting = match offer(Origin::Context(index), out) {
             Some(setting) if row.offered() => setting,
@@ -5415,8 +5447,7 @@ fn summary(
         .collect();
     for key in order {
         let group = &outputs[&key];
-        let usd: Vec<Option<f64>> = group.iter().map(|c| c.estimated_usd).collect();
-        let (_, unpriced) = known_figure(&usd);
+        let (total, at_least, unpriced) = pieces_figure(group);
         let largest = group.iter().filter_map(|c| c.largest_characters).max();
         let largest = largest.map_or_else(String::new, |n| {
             format!("Its largest result was {} characters. ", count(n))
@@ -5470,12 +5501,7 @@ fn summary(
                 row
             }
         };
-        let known: Vec<f64> = usd.iter().flatten().copied().collect();
-        row.costs(
-            (!known.is_empty()).then(|| known.iter().sum()),
-            known.len() < usd.len(),
-            &spend,
-        );
+        row.costs(total, at_least, &spend);
         row.profile = tag(key.0, &switch, out);
         rows.push(row);
     }
@@ -5488,8 +5514,8 @@ fn summary(
             crate::descriptions::subagent(c).into(),
         );
         row.profile = tag(&c.profiles, &switch, out);
-        row.cost(&c.cost, &spend);
-        row.evidence = subagent_line(c, &about, out);
+        row.costs(c.estimate, false, &spend);
+        row.evidence = subagent_line(c, out);
         if let Some(text) = subagent_guidance(c) {
             let _ = write!(row.evidence, " Official: {text}");
             row.sources = vec![CLAUDE_MODEL_GUIDE];
@@ -5507,7 +5533,7 @@ fn summary(
         let mut row = fable_row(u);
         row.profile = tag(&u.profiles, &switch, out);
         if u.requests > 0 {
-            row.cost(&add_costs(u.weeks.iter().map(|w| &w.cost)), &spend);
+            row.costs(u.estimate, false, &spend);
         }
         row.setting = FABLE_MODEL.into();
         rows.push(row);
@@ -5535,7 +5561,7 @@ fn summary(
         );
         row.profile = tag(&c.profiles, &switch, out);
         row.location = skill_location(c, out);
-        row.costs(c.estimated_usd, false, &spend);
+        row.costs(c.estimate(), false, &spend);
         row.setting = piece_setting(c, out);
         row.evidence = match c.kind {
             ContextKind::Skill if c.skill.is_some() => {
@@ -5560,25 +5586,20 @@ fn summary(
         };
         rows.push(row);
     }
-    let core: Vec<Option<f64>> = fixed
+    let core: Vec<&ContextCost> = fixed
         .iter()
         .filter(|c| !matches!(c.kind, ContextKind::Skill | ContextKind::McpServer))
-        .map(|c| c.estimated_usd)
+        .copied()
         .collect();
     if !core.is_empty() {
-        let (_, unpriced) = known_figure(&core);
         let mut row = Row::new(
             Claim::Measured,
             Mark::Info,
             "System prompt and core tools".into(),
             "The harness's own instructions and the tools it cannot work without, such as Bash and Read, sent with every request.".into(),
         );
-        let known: Vec<f64> = core.iter().flatten().copied().collect();
-        row.costs(
-            (!known.is_empty()).then(|| known.iter().sum()),
-            known.len() < core.len(),
-            &spend,
-        );
+        let (total, at_least, unpriced) = pieces_figure(&core);
+        row.costs(total, at_least, &spend);
         row.setting = "no setting".into();
         row.evidence = format!(
             "{unpriced}Includes core tools such as Bash and Read, and the skill and subagent lists. No setting turns these off."
@@ -5740,16 +5761,22 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         )
     }) {
         let first = first_profile(c);
-        // Unpriced requests are scaled from the priced ones, never counted as free.
-        let cost = match c.estimated_usd {
+        // Unpriced requests are extrapolated from the priced ones, never counted as free.
+        let cost = match c.estimate() {
             None => "cost unknown".to_string(),
-            Some(usd) => format!(
+            Some(Estimate { usd, margin }) => format!(
                 "{}{}{}",
-                about(usd),
-                span.map_or_else(String::new, |span| format!(
-                    " (about {} per 30 days)",
-                    about((usd * 30.0 * DAY) / span)
-                )),
+                approx(usd, margin, ""),
+                span.map_or_else(String::new, |span| {
+                    let scale = 30.0 * DAY / span;
+                    match margin {
+                        None => format!(" (about {} per 30 days)", about(usd * scale)),
+                        Some(m) => format!(
+                            " ({} per 30 days)",
+                            approx(usd * scale, Some(m.scale(scale)), "")
+                        ),
+                    }
+                }),
                 if c.priced < c.requests {
                     format!(
                         ", estimated from the {} of {} requests that could be priced",
@@ -5796,13 +5823,13 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         // A line several sources share is broken down by the profiles that recorded it.
         if c.shares.len() > 1 {
             for share in &c.shares {
-                let priced = if share.priced == 0 {
+                let priced = if share.sample.priced() == 0 {
                     "none priced".to_string()
                 } else {
                     format!(
                         "{} over {} priced",
-                        about(share.cost_usd.to_f64()),
-                        count(share.priced)
+                        about(share.sample.sum().to_f64()),
+                        count(share.sample.priced())
                     )
                 };
                 out.line(
@@ -6230,6 +6257,7 @@ mod tests {
             tokens: estimated.map(|_| 12_345),
             cost_usd: Usd::from_f64(estimated.map_or(0.0, |e| e * 0.9)),
             estimated_usd: estimated,
+            margin: None,
             calls,
             last_used: calls.filter(|&c| c > 0).map(|_| NOV1 + 5 * DAY_MS),
             current: true,
@@ -6804,6 +6832,10 @@ mod tests {
                     timed_out: 0,
                     polling: 0,
                     miss_cost: cost(Some(0.0), 0.0),
+                    miss_estimate: Some(Estimate {
+                        usd: 0.0,
+                        margin: None,
+                    }),
                 },
             })
         };
@@ -6861,6 +6893,7 @@ mod tests {
                 },
                 enterprise: false,
                 runs: vec![],
+                estimate: None,
                 also: vec![],
             })
         };
@@ -8406,6 +8439,10 @@ mod tests {
                 total_usd: None,
                 ..cost(2.0)
             },
+            estimate: Some(Estimate {
+                usd: 2.2,
+                margin: Some(Margin::Usd(0.3)),
+            }),
             models: vec![
                 Share {
                     name: "claude-opus-5-5".into(),
@@ -8427,6 +8464,10 @@ mod tests {
             }],
             cheapest: Some("claude-haiku-5-5".into()),
             reprice: Some(cost(0.5)),
+            reprice_estimate: Some(Estimate {
+                usd: 0.5,
+                margin: None,
+            }),
             model_setting: "model: in /synthetic/.claude/agents/Explore.md".into(),
             effort_setting: "effort: in /synthetic/.claude/agents/Explore.md".into(),
         });
@@ -8440,7 +8481,7 @@ mod tests {
         let row = report_line(&summary, "Explore subagent");
         assert_eq!(
             (row.mark.as_str(), row.head.as_str()),
-            ("info", "Explore subagent costs at least $2 <1%")
+            ("info", "Explore subagent costs ~$2.20 ± $0.30 <1%")
         );
         let line = row.evidence;
         for part in [
@@ -8503,14 +8544,23 @@ mod tests {
                     end,
                     requests: 4,
                     cost: cost(412.4, Some(412.4)),
+                    estimate: Some(Estimate {
+                        usd: 412.4,
+                        margin: None,
+                    }),
                 },
                 FableWeek {
                     start: end - 10 * day,
                     end: end - 7 * day,
                     requests: 1,
                     cost: cost(3.0, None),
+                    estimate: None,
                 },
             ],
+            estimate: Some(Estimate {
+                usd: 515.5,
+                margin: Some(Margin::Usd(40.0)),
+            }),
         });
         let summary = text(&report, None, true);
         let first = |text: &str| {
@@ -8522,14 +8572,10 @@ mod tests {
         let row = report_line(&summary, "Fable weekly use");
         assert_eq!(
             (row.claim.as_str(), row.mark.as_str(), row.head.as_str()),
-            (
-                "Official",
-                "info",
-                "Fable weekly use costs at least $415 28%"
-            )
+            ("Official", "info", "Fable weekly use costs ~$516 ± $40 34%")
         );
         for part in [
-            "5 Fable requests at API prices, per 7 days back from this report: $412 (4 requests, to 2026-12-01), at least $3 (1 request, 3 days to 2026-11-24).",
+            "5 Fable requests at API prices, per 7 days back from this report: $412 (4 requests, to 2026-12-01), an unknown amount (1 request, 3 days to 2026-11-24).",
             "can use up to half the weekly usage limit",
             "no share of it is shown",
             "they cover only this profile's recorded sessions",
@@ -8587,6 +8633,7 @@ mod tests {
             requests: 1,
             priced: 1,
             cost: Cost::default(),
+            estimate: None,
             models: vec![Share {
                 name: model.into(),
                 count: 1,
@@ -8595,6 +8642,7 @@ mod tests {
             sources: vec![],
             cheapest: None,
             reprice: None,
+            reprice_estimate: None,
             model_setting: String::new(),
             effort_setting: String::new(),
         };
@@ -9487,6 +9535,7 @@ mod tests {
             tokens: Some(100),
             cost_usd: Usd::from_f64(5.0),
             estimated_usd: Some(5.0),
+            margin: None,
             calls: Some(0),
             last_used: None,
             current: true,
@@ -9597,6 +9646,7 @@ mod tests {
             tokens: Some(100),
             cost_usd: Usd::from_f64(0.01),
             estimated_usd: Some(0.01),
+            margin: None,
             calls: Some(calls),
             last_used: None,
             current: true,

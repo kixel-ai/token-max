@@ -8,10 +8,10 @@ use crate::collections::HashMap;
 use crate::context::CODEX_TOKENS_PER_CHARACTER;
 use crate::exposure::{MEMORY_SECTION, calibrate, cohort};
 use crate::model::{
-    Action, Agent, Category, CheckBase, Component, ContextCost, ContextKind, Evidence, Harness,
-    Linkage, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, Request, Scan, Usd,
+    Action, Agent, Category, CheckBase, Component, ContextCost, ContextKind, Estimate, Evidence,
+    Harness, Linkage, MemoryAccess, MemoryCheck, Millis, PartKind, Profile, Request, Scan, Usd,
 };
-use crate::prices::{Catalog, output_rate};
+use crate::prices::{Catalog, Sample, output_rate};
 
 const DAY: f64 = 86_400_000.0;
 
@@ -183,15 +183,32 @@ fn check(
         && current == Some(true)
         && rows.is_empty()
         && mine.len() > unrecorded;
-    // Unpriced requests are scaled from the priced ones, as the context row does.
-    let context_usd = rows
-        .iter()
-        .map(|c| {
-            (c.priced > 0)
-                .then(|| Usd::from_f64(c.cost_usd.to_f64() * c.requests as f64 / c.priced as f64))
-        })
-        .sum::<Option<Usd>>()
-        .filter(|_| !rows.is_empty() || (unrecorded == 0 && !never_on));
+    // Unpriced requests are extrapolated from the priced ones, as the context row does, and
+    // requests that recorded no context from those that did, assuming they loaded memory as
+    // often: each recorded request that carried none adds a zero to the sample.
+    let (recorded, unrecorded) = ((mine.len() - unrecorded) as u64, unrecorded as u64);
+    let mut sample = Sample::default();
+    let mut carried = 0;
+    for c in &rows {
+        sample += c.sample;
+        carried += c.requests;
+    }
+    let loaded = (recorded > 0 && !never_on)
+        .then(|| sample.estimate(carried))
+        .flatten()
+        .map(|e| Estimate {
+            usd: e.usd * (recorded + unrecorded) as f64 / recorded as f64,
+            margin: if unrecorded == 0 {
+                e.margin
+            } else {
+                for _ in carried..recorded {
+                    sample.add(Usd::ZERO);
+                }
+                sample
+                    .estimate(recorded + unrecorded)
+                    .and_then(|e| e.margin)
+            },
+        });
     // Under --defaults memory is on, though the settings files turned it off for some
     // recorded requests: what it cost while main-agent requests carried it, the files read
     // back included, since a request without memory reads none, stands for all of them.
@@ -201,12 +218,18 @@ fn check(
         && main_carried > 0
         && main_carried < main_recorded)
         .then_some((main_carried, main_recorded));
-    let context_usd = match scaled {
+    let loaded = match scaled {
         Some((carried, recorded)) => {
-            context_usd.map(|usd| Usd::from_f64(usd.to_f64() * recorded as f64 / carried as f64))
+            let scale = recorded as f64 / carried as f64;
+            loaded.map(|e| Estimate {
+                usd: e.usd * scale,
+                margin: e.margin.map(|m| m.scale(scale)),
+            })
         }
-        None => context_usd,
+        None => loaded,
     };
+    let context_usd = loaded.map(|e| Usd::from_f64(e.usd));
+    let margin = loaded.and_then(|e| e.margin);
     let reads = uses
         .iter()
         .filter(|m| m.access == MemoryAccess::Read)
@@ -245,9 +268,9 @@ fn check(
         _ => total,
     };
     let mut uncertainty = vec![];
-    if rows.iter().any(|c| c.priced < c.requests) {
+    if rows.iter().any(|c| c.sample.priced() < c.requests) {
         uncertainty.push(
-            "loaded memory is scaled from the requests that could be priced to every request that carried it"
+            "loaded memory is extrapolated from the requests that could be priced to every request that carried it"
                 .to_string(),
         );
     }
@@ -261,13 +284,13 @@ fn check(
             "no recorded request carried auto memory, though {} turns it on, so what it costs is unmeasured",
             control.owner
         ));
-    } else if rows.is_empty() && unrecorded > 0 {
+    } else if recorded == 0 && unrecorded > 0 {
         uncertainty.push(format!(
             "none of {unrecorded} requests recorded their context, so loaded memory is unmeasured"
         ));
     } else if unrecorded > 0 {
         uncertainty.push(format!(
-            "{unrecorded} requests did not record their context; memory they loaded is unmeasured"
+            "{unrecorded} requests did not record their context; memory they loaded is extrapolated from the requests that did, assuming they loaded it as often"
         ));
     } else if context_usd.is_none() {
         uncertainty.push("no request that carried memory could be priced".into());
@@ -338,13 +361,13 @@ fn check(
             .into(),
             baseline: "the recorded requests without auto memory's loaded context, reads and writes, holding all other work constant".into(),
             requests: rows.iter().map(|c| c.requests).sum(),
-            // With requests that recorded no context, the total is a lower bound.
-            coverage: (unrecorded > 0).then(|| crate::model::Coverage {
-                priced: (mine.len() - unrecorded) as u64,
+            // Requests that recorded no context are extrapolated over.
+            coverage: (unrecorded > 0).then_some(crate::model::Coverage {
+                priced: recorded,
                 total: mine.len() as u64,
             }),
             savings_usd: total,
-            margin: None,
+            margin: margin.filter(|_| total.is_some()),
             monthly_savings_usd: monthly,
             break_even: None,
             assumptions: [

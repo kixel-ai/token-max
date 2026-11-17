@@ -25,5 +25,5 @@ maintainer's own `quest-*` and `verify-*` skills and worktree paths, with
 generic labels (rejected: everything verbatim, which publishes private names;
 aggregates only, which convinces less). Never publish prompt or reply text.
 `docs/results.md` holds the snapshot, taken 2026-11-17 on `desktop`; the
-README's top and the [site](/quest/m0/launch/site.md) lead with its two cache
+README's top and [max.kixel.ai](https://max.kixel.ai) lead with its two cache
 TTL findings.

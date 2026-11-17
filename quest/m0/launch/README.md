@@ -28,4 +28,7 @@ aggregates only, which convinces less). Never publish prompt or reply text.
 days on all four hosts; the README's top and
 [max.kixel.ai](https://max.kixel.ai) lead with its totals (API cost, sessions
 and potential savings, as T3 Code's usage view does) and its two cache TTL
-findings.
+findings. ✅ The potential savings come from `doctor --defaults` (rejected:
+the changes doctor offers against the current settings), and the page says
+the plan profiles' subagent TTL saving stays out until doctor can tell which
+settings T3 Code's shared sessions ran with (maintainer, 2026-11-17).

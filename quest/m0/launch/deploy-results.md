@@ -11,5 +11,5 @@
 Deploy `site/` from main as `docs/releasing.md`
 describes (`nix shell nixpkgs#wrangler -c wrangler deploy` from `site/`;
 wrangler is logged in on fedora), then load the page and check that its
-totals read ~$69,222, 11,797 sessions and ~$721/mo. `og.png` covers only the
+totals read ~$69,222, 11,797 sessions and ~$1,604/mo. `og.png` covers only the
 page above the results, so it needs no retake.

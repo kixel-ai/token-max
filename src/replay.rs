@@ -1126,7 +1126,7 @@ mod tests {
     use super::*;
     use crate::model::{
         Attempt, CacheContext, EstimateEvidence, ExposureScan, IdleAttribution, KnownState,
-        Location, Origin, PrefixEvidence, ReplayOutcome, ScanCoverage, Snapshot,
+        Location, Margin, Origin, PrefixEvidence, ReplayOutcome, ScanCoverage, Snapshot,
     };
     use crate::reader::{ScanOptions, scan, usage};
     use crate::report::{ReportOptions, rendered as format_report};
@@ -1440,9 +1440,9 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_lines_can_block_a_recommendation() {
+    fn unreadable_lines_are_extrapolated_over_with_a_margin() {
         let next = with(at("next", 600_000), u(1100, 0, M5));
-        let mut s = data(vec![make_request(), next], vec![]);
+        let mut s = data(vec![make_request(), next.clone()], vec![]);
         s.snapshots = vec![Snapshot {
             file: "synthetic".into(),
             harness: Harness::Claude,
@@ -1456,10 +1456,16 @@ mod tests {
             lines: 0,
         }];
         let c = check(&s, None, 1_200_000);
-        assert_eq!(c.base.recommended, None);
-        assert_eq!(c.base.action, Action::Advisory);
+        let whole = check(&data(vec![make_request(), next.clone()], vec![]), None, 1_200_000);
+        // The same winner, its gap scaled to every part, now with a margin of error.
+        assert_eq!(c.base.recommended, whole.base.recommended);
+        assert!(c.base.recommended.is_some());
         let coverage = c.base.coverage.unwrap();
         assert_eq!(coverage.total, coverage.priced + 10000);
+        let scale = coverage.total as f64 / coverage.priced as f64;
+        assert!((c.one_hour_savings_usd - whole.one_hour_savings_usd * scale).abs() < 1e-9);
+        assert!(c.base.margin.is_some());
+        assert_eq!(whole.base.margin, None);
     }
 
     #[test]
@@ -1648,11 +1654,13 @@ mod tests {
                 .to_lowercase()
                 .contains("identical fixed costs remain unknown")
         );
-        // Unknown request usage is not scenario-invariant and must still block a winner.
+        // Unknown request usage is not scenario-invariant, so its part is extrapolated over
+        // from the one priced part, which leaves no spread to measure a margin from.
         next.parts[0].usage.write = None;
         next.parts[0].usage.read = None;
         let c = check(&data(vec![first, next], vec![]), None, 1_200_000);
-        assert_eq!(c.base.recommended, None);
+        assert!(c.base.recommended.is_some());
+        assert_eq!(c.base.margin, Some(Margin::Unmeasured));
     }
 
     #[test]
@@ -2017,7 +2025,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_pre_window_attempts_cannot_choose_winners_from_missing_speed() {
+    fn unsupported_pre_window_attempts_leave_their_parts_to_extrapolation() {
         for speed in [None, Some("standard")] {
             let p = pre_window_attempt(speed);
             let s = data(
@@ -2033,8 +2041,9 @@ mod tests {
             let c = check(&s, None, 21 * MIN);
             assert_eq!(c.base.since, Some(18 * MIN));
             assert_eq!(c.base.requests, 2);
-            assert_eq!(c.base.recommended, None, "{speed:?}");
-            assert_eq!(c.base.action, Action::Advisory);
+            // The unknown 5m part is extrapolated over from the priced one.
+            assert!(c.base.recommended.is_some(), "{speed:?}");
+            assert_eq!(c.base.margin, Some(Margin::Unmeasured), "{speed:?}");
             assert_eq!(total(&c.comparison_cost.five_minutes), None);
             assert!(total(&c.comparison_cost.one_hour).is_some());
             assert_eq!(c.usage_estimates[0].request, p.attempt.id);
@@ -2083,7 +2092,9 @@ mod tests {
             vec![],
         );
         let c = check(&s, None, 22 * MIN);
-        assert_eq!(c.base.recommended, None);
+        let coverage = c.base.coverage.unwrap();
+        assert!(coverage.priced > 0 && coverage.priced < coverage.total);
+        assert!(c.base.margin.is_some());
         for request in [&p.after.id, &fast_after.id] {
             assert!(c.cache_evidence.iter().any(|e| {
                 &e.request == request
@@ -2134,7 +2145,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_attempts_block_only_their_comparison() {
+    fn unsupported_attempts_leave_only_their_comparison_extrapolated() {
         let Bracket {
             first,
             attempt,
@@ -2152,7 +2163,8 @@ mod tests {
         let report = report_at(&s, None, 1_800_000);
         let main = bucket_check(&report, Bucket::Main);
         let outside = bucket_check(&report, Bucket::Subagent);
-        assert_eq!(main.base.recommended, None);
+        assert!(main.base.margin.is_some());
+        assert_eq!(outside.base.margin, None);
         assert_eq!(main.base.requests, 3);
         assert_eq!(main.usage_estimates[0].evidence, EstimateEvidence::Unknown);
         assert!(main.usage_estimates[0].reason.contains("matching"));
@@ -2229,9 +2241,20 @@ mod tests {
             };
             let n = requests.len() as u64;
             let c = check(&data(requests, vec![]), None, 1_800_000);
-            // Two-part histories cannot outweigh their unpriced half; the mixed history can.
-            let expected = if layout == "mixed" { Some(H1) } else { None };
-            assert_eq!(c.base.recommended, expected, "{layout}");
+            // An attempt first leaves its follower unpriced too, so nothing is measured; the
+            // others extrapolate over their unpriced parts, without a margin from one part.
+            let coverage = c.base.coverage.unwrap();
+            let margin = match coverage.priced {
+                0 => None,
+                1 => Some(Margin::Unmeasured),
+                _ => c.base.margin.filter(|m| matches!(m, Margin::Usd(_))),
+            };
+            assert_eq!(c.base.margin, margin, "{layout}");
+            assert_eq!(c.base.recommended.is_none(), coverage.priced == 0, "{layout}");
+            assert_eq!(coverage.priced == 0, layout == "first", "{layout}");
+            if layout == "mixed" {
+                assert_eq!(c.base.recommended, Some(H1));
+            }
             let coverage = c.base.coverage.unwrap();
             assert!(coverage.priced < coverage.total, "{layout}");
             assert_eq!(c.base.requests, n, "{layout}");
@@ -2266,7 +2289,7 @@ mod tests {
         first.parts[0].model = Some("claude-haiku-5-5".into());
         first.parts[0].usage.input = None;
         let c = check(&data(vec![first, after], vec![]), None, 1_200_000);
-        assert_eq!(c.base.recommended, None);
+        assert_eq!(c.base.margin, Some(Margin::Unmeasured));
     }
 
     #[test]

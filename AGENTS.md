@@ -15,7 +15,9 @@ Every recommendation is one of three kinds, and its line says which:
   measurement that makes it apply to this user.
 
 Never present one kind as another. Say plainly when a cost can't be measured
-rather than hiding the setting or guessing a number.
+rather than hiding the setting or guessing a number. A cost measured on only some
+requests is extrapolated to the rest, marked with `~` and its margin of error,
+and states its assumption that the unpriced requests resemble the priced ones.
 
 - A setting that changes only the bill, such as the cache TTL, gets the
   cheaper value recommended outright.

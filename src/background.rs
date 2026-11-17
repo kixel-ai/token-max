@@ -464,10 +464,9 @@ fn check(
         Generations::default()
     };
     let paired = pairs.savings(0);
-    // Scale the measured net cost up to every turn where it ran, as context costs do.
-    let estimate = (paired.priced > 0)
-        .then(|| paired.usd.to_f64() * paired.total as f64 / paired.priced as f64)
-        .or((paired.total == 0).then_some(0.0));
+    // Extrapolate the measured net cost to every turn where it ran, as context costs do.
+    let estimate = paired.usd();
+    let margin = paired.savings.and_then(|s| s.margin);
     let start = input.since.or(requests.iter().map(|r| r.time).min());
     let month = |v: Option<f64>| match (v, start) {
         (Some(v), Some(start)) if input.now > start => {
@@ -577,6 +576,7 @@ fn check(
                 total: paired.total,
             }),
             savings_usd: if measurable && enabled { estimate } else { None },
+            margin: margin.filter(|_| measurable && enabled),
             monthly_savings_usd: if measurable && enabled {
                 month(estimate)
             } else {

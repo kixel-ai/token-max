@@ -116,9 +116,9 @@ Recommendations for every check:
   period or in every sensitivity scenario. Missing inputs that cannot be
   estimated leave their own requests unpriced; the estimate extrapolates
   from the priced requests to all of them, marks the figure with `~`, and
-  gives its margin of error and the share measured (amended 2026-11-17, see
-  [extrapolate.md](/quest/m0/launch/extrapolate.md)). Uncertainty alone never
-  blocks one.
+  gives its margin of error and the share measured (amended 2026-11-17 in
+  [#143](https://github.com/kixel-ai/token-max/pull/143)). Uncertainty alone
+  never blocks one.
 - Distinguish measured token usage, estimated attribution or replay, and
   guidance without dollars in both text and JSON. Missing attribution is
   unknown, never zero. Exit 2 on a failed scan, 1 when a change is

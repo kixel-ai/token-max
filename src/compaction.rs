@@ -10,8 +10,8 @@ use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
-    Harness, Id, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
-    StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
+    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar,
+    Scan, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
     WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
@@ -1155,6 +1155,7 @@ struct Run {
     baseline_comparison_cost: Cost,
     comparison_cost: Cost,
     savings_usd: Option<f64>,
+    margin: Option<Margin>,
     coverage: Coverage,
     added: Vec<AddedCompaction>,
     affected: usize,
@@ -1617,16 +1618,17 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     let comparison_cost = alternative_sum.cost();
                     // Per-session failures are unpriced pairs; an unknown current control still blocks a price.
                     let paired = pairs.savings(skipped);
-                    let savings_usd = if control.comparison_unknown.is_some() || !paired.decided {
-                        None
+                    let (savings_usd, margin) = if control.comparison_unknown.is_some() {
+                        (None, None)
                     } else {
-                        Some(paired.usd.to_f64())
+                        (paired.usd(), paired.savings.and_then(|s| s.margin))
                     };
                     runs.push(Run {
                         cost,
                         baseline_comparison_cost,
                         comparison_cost,
                         savings_usd,
+                        margin,
                         coverage: Coverage {
                             priced: paired.priced,
                             total: paired.total,
@@ -1648,6 +1650,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     baseline_comparison_cost: point.baseline_comparison_cost,
                     comparison_cost: point.comparison_cost,
                     savings_usd: point.savings_usd,
+                    margin: point.margin,
                     coverage: point.coverage,
                     added: point.added,
                     affected_requests: point.affected as u64,
@@ -1715,6 +1718,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .and_then(|w| w.savings_usd)
                 .or(recommended.map(|_| 0.0))
                 .filter(|_| !conditional);
+            let margin = winning.and_then(|w| w.margin).filter(|_| !conditional);
             let mut uncertainty: IndexSet<String> = [
                 "compaction loses detail; re-reading files, repeated tool calls or changed reasoning may erase savings; that work is unmeasured, not priced at zero",
                 "observed boundary timestamps, precomputed flags and durations do not prove summary generation time or idle attribution; unlogged/discarded summaries remain unknown",
@@ -1789,6 +1793,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     requests: selected.iter().filter(|r| r.time >= since).count() as u64,
                     coverage,
                     savings_usd: savings,
+                    margin,
                     monthly_savings_usd: savings
                         .filter(|_| now > since)
                         .map(|s| (s * 30.0 * 86400000.0) / (now - since) as f64),
@@ -2868,11 +2873,12 @@ mod tests {
         let expected: [(&str, Expected); 17] = [
             (
                 "codexOld",
+                // The 20k window is extrapolated over its three unpriced parts, and loses.
                 (
-                    None,
-                    Action::Advisory,
-                    None,
-                    &[(20000, None), (400000, Some(0.0))],
+                    Some(400000),
+                    Action::Keep,
+                    Some(0.0),
+                    &[(20000, Some(-0.7625)), (400000, Some(0.0))],
                 ),
             ),
             (
@@ -2974,8 +2980,8 @@ mod tests {
                 (
                     Some(100000),
                     Action::Change,
-                    Some(1.96),
-                    &[(100000, Some(1.96)), (400000, None)],
+                    Some(2.352),
+                    &[(100000, Some(2.352)), (400000, None)],
                 ),
             ),
             (
@@ -2983,8 +2989,8 @@ mod tests {
                 (
                     Some(100000),
                     Action::Change,
-                    Some(19.6),
-                    &[(100000, Some(19.6)), (400000, None)],
+                    Some(21.168),
+                    &[(100000, Some(21.168)), (400000, None)],
                 ),
             ),
             (
@@ -3007,11 +3013,12 @@ mod tests {
             ),
             (
                 "skipped",
+                // Each unreadable line is one more part, extrapolated over like an unpriced one.
                 (
-                    None,
-                    Action::Advisory,
-                    None,
-                    &[(100000, None), (400000, None)],
+                    Some(100000),
+                    Action::Change,
+                    Some(3921.96),
+                    &[(100000, Some(3921.96)), (400000, None)],
                 ),
             ),
             (
@@ -3043,6 +3050,13 @@ mod tests {
                     Some(s) => near(scenario.savings_usd, s),
                     None => assert_eq!(scenario.savings_usd, None, "{name} {window}"),
                 }
+                // A margin exactly when some parts, but not all, were priced.
+                let c = scenario.coverage;
+                assert_eq!(
+                    scenario.margin.is_some(),
+                    c.priced > 0 && c.priced < c.total,
+                    "{name} {window}"
+                );
             }
         }
     }
@@ -3848,9 +3862,10 @@ mod tests {
             let mut missing = data(4);
             missing.requests[2].parts[0].usage.input = None;
             missing.requests[2].evidence = RequestEvidence::Unknown;
+            // Its session is extrapolated over from the priced ones.
             let unknown = check(&missing);
-            assert_eq!(unknown.base.action, Action::Advisory);
-            assert_eq!(unknown.scenarios[0].savings_usd, None);
+            assert_eq!(unknown.base.action, Action::Change);
+            assert!(unknown.scenarios[0].margin.is_some());
             assert!(unknown.base.uncertainty.join(" ").contains("missing input"));
             let mut no_sample = data(4);
             no_sample.events[0].post_tokens = None;
@@ -3879,7 +3894,7 @@ mod tests {
             assert_eq!(check(&old).base.action, Action::Advisory);
             let mut unsupported = data(4);
             unsupported.requests[2].parts[0].model = Some("unknown-model".into());
-            assert_eq!(check(&unsupported).scenarios[0].savings_usd, None);
+            assert!(check(&unsupported).scenarios[0].margin.is_some());
         }
 
         // Ported from compaction.test.ts: "Codex standalone compaction uses linked billed summary and cold prefix at the full context tier".
@@ -4296,14 +4311,17 @@ mod tests {
             assert_eq!(first.base.action, Action::Change);
             near(first.base.savings_usd, 1.96);
             s.requests.last_mut().unwrap().parts[0].usage.input = None;
+            // The unpriced session is extrapolated over: 1.96 across five pairs, scaled to six.
             let scenario = check(&s).scenarios[0].clone();
-            near(scenario.savings_usd, 1.96);
+            near(scenario.savings_usd, 2.352);
             assert_eq!(scenario.coverage.total - scenario.coverage.priced, 1);
+            assert!(scenario.margin.is_some());
         }
 
         // Ported from compaction.test.ts: "each added summary is its own pair, so a few unpriced sessions cannot outweigh many small differences".
+        // Unpriced sessions are now extrapolated over rather than bounded.
         #[test]
-        fn each_added_summary_is_its_own_pair_so_few_unpriced_sessions_cannot_outweigh_many() {
+        fn each_added_summary_is_its_own_pair_so_unpriced_sessions_are_extrapolated_over() {
             let mut s = data(4);
             let large: Vec<Request> = s
                 .requests
@@ -4336,7 +4354,9 @@ mod tests {
             let scenario = window(&check, 100000);
             assert_eq!(scenario.added.len(), 10);
             assert_eq!(scenario.coverage.total - scenario.coverage.priced, 4);
-            near(scenario.savings_usd, 19.6);
+            // 19.6 over 50 priced pairs, scaled to all 54.
+            near(scenario.savings_usd, 19.6 * 54.0 / 50.0);
+            assert!(scenario.margin.is_some());
             assert_eq!(check.base.action, Action::Change);
         }
 
@@ -4363,8 +4383,9 @@ mod tests {
         }
 
         // Ported from compaction.test.ts: "unreadable lines count as unknown parts, so many of them block a recommendation".
+        // They are now extrapolated over like any unpriced part.
         #[test]
-        fn unreadable_lines_count_as_unknown_parts_so_many_block_a_recommendation() {
+        fn unreadable_lines_count_as_unknown_parts_extrapolated_over() {
             let mut s = data(4);
             let snapshot = |skipped_lines| Snapshot {
                 file: "synthetic".into(),
@@ -4381,9 +4402,9 @@ mod tests {
             s.snapshots = vec![snapshot(1)];
             assert_eq!(check(&s).base.action, Action::Change);
             s.snapshots = vec![snapshot(10000)];
-            let blocked = check(&s);
-            assert_eq!(blocked.base.recommended, None);
-            assert_eq!(blocked.base.action, Action::Advisory);
+            let extrapolated = check(&s);
+            assert_eq!(extrapolated.base.recommended, Some(100000));
+            assert!(extrapolated.base.margin.is_some());
         }
 
         // Ported from compaction.test.ts: "Claude historical window differences and structured TTL window alignment remain visible".

@@ -1905,8 +1905,12 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
         },
         &format!(
             "{} over window; {} / 30 days",
-            estimate(r.savings_usd),
-            estimate(r.monthly_savings_usd)
+            r.savings_usd
+                .map_or_else(|| "unknown".into(), |v| approx_usd(v, r.margin)),
+            r.monthly_savings_usd.map_or_else(
+                || "unknown".into(),
+                |v| approx_usd(v, r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until))))
+            )
         ),
     );
     match result {
@@ -2719,7 +2723,7 @@ fn keepalive_keep(k: &KeepaliveCheck, r: &Common<'_>) -> String {
         approx(
             monthly(usd, r.since, r.until),
             r.margin.map(|m| m.scale(monthly(1.0, r.since, r.until))),
-            "",
+            "/mo",
         )
     };
     match k.margin_usd {
@@ -2755,7 +2759,7 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
                     r.until
                 )),
                 margin,
-                ""
+                "/mo"
             ),
             r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
         );
@@ -2772,9 +2776,15 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
             .max_by(|a, b| a.savings_usd.total_cmp(&b.savings_usd)),
         k.interval_ms,
     ) {
-        // A priced replay extrapolates over unpriced periods, so only idle compaction is left.
+        // A priced replay extrapolates over unpriced periods, so only an unknown served tier
+        // or, for Claude, an unpriced idle compaction alternative leaves it open.
+        let why = if r.uncertainty.iter().any(|s| s == TIER_SENSITIVITY) {
+            "effective service tiers could reverse it"
+        } else {
+            "idle compaction could not be priced"
+        };
         format!(
-            "Pinging {} would {} {} compared with no pings, but idle compaction could not be priced.",
+            "Pinging {} would {} {} compared with no pings, but {why}.",
             crate::keepalive::policy(interval, best.cap_ms),
             if best.savings_usd > 0.0 {
                 "save"
@@ -2783,8 +2793,10 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
             },
             approx(
                 monthly(best.savings_usd.abs(), r.since, r.until),
-                margin,
-                ""
+                best.margins
+                    .savings
+                    .map(|m| m.scale(monthly(1.0, r.since, r.until))),
+                "/mo"
             )
         )
     } else {

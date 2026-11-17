@@ -701,6 +701,17 @@ impl Sum {
 /// The z-score of a two-sided 95% normal interval.
 const Z95: f64 = 1.959_963_984_540_054;
 
+/// The two-sided 95% Student-t critical value for `df` degrees of freedom, at least 1, so a
+/// margin estimated from a few priced items widens as it should; the normal value past 30.
+fn critical95(df: u64) -> f64 {
+    const T: [f64; 30] = [
+        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306, 2.262, 2.228, 2.201, 2.179, 2.160,
+        2.145, 2.131, 2.120, 2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064, 2.060, 2.056,
+        2.052, 2.048, 2.045, 2.042,
+    ];
+    T.get(df as usize - 1).copied().unwrap_or(Z95)
+}
+
 /// Per-item dollar figures summed over the items that could be priced, so their total over
 /// every item can be extrapolated with a margin of error.
 ///
@@ -777,7 +788,8 @@ impl Sample {
             // The residuals' spread around the ratio; rounding can leave it a hair below zero.
             let residuals = self.squares - 2.0 * ratio * self.cross + ratio * ratio * self.weights;
             let variance = (residuals / (n - 1.0)).max(0.0);
-            Margin::Usd(Z95 * total * ((1.0 - n / total) * variance / n).sqrt())
+            let critical = critical95(self.priced - 1);
+            Margin::Usd(critical * total * ((1.0 - n / total) * variance / n).sqrt())
         };
         Some(Estimate {
             usd,
@@ -1957,7 +1969,8 @@ mod tests {
         let Some(Margin::Usd(margin)) = savings.margin else {
             panic!("two priced parts measure a spread");
         };
-        assert!((margin - Z95 * 3.0 * (1.0f64 / 12.0).sqrt()).abs() < 1e-12);
+        // Two priced parts leave one degree of freedom, so the t value 12.706 stands for Z95.
+        assert!((margin - 12.706 * 3.0 * (1.0f64 / 12.0).sqrt()).abs() < 1e-12);
         // Both priced parts cost 1 under the alternative, so its cost has no spread.
         assert_eq!(
             partial.alternative,
@@ -2008,6 +2021,36 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             (self.0 >> 11) as f64 / (1u64 << 53) as f64
         }
+    }
+
+    #[test]
+    fn small_samples_widen_their_margin_to_keep_95_percent_coverage() {
+        // Five priced requests of a hundred, from a bell-shaped spread of costs.
+        let mut draws = Draws(11);
+        let population: Vec<f64> = (0..100)
+            .map(|_| (0..4).map(|_| draws.next()).sum::<f64>())
+            .collect();
+        let truth: f64 = population.iter().sum();
+        let trials = 4000;
+        let mut covered = 0;
+        for _ in 0..trials {
+            let mut sample = Sample::default();
+            let mut picked = std::collections::BTreeSet::new();
+            while picked.len() < 5 {
+                picked.insert((draws.next() * population.len() as f64) as usize);
+            }
+            for &i in &picked {
+                sample.add(Usd::from_f64(population[i]));
+            }
+            let estimate = sample.estimate(population.len() as u64).unwrap();
+            let Some(Margin::Usd(margin)) = estimate.margin else {
+                panic!("a partial sample has a margin");
+            };
+            covered += usize::from((estimate.usd - truth).abs() <= margin);
+        }
+        let rate = covered as f64 / trials as f64;
+        // The normal value would cover about 88% here.
+        assert!((0.93..=0.98).contains(&rate), "covered {rate}");
     }
 
     #[test]

@@ -14,8 +14,8 @@ keep this follow-up (rejected: drop it).
 
 The page is `site/public/index.html`; `docs/releasing.md` says how to
 preview it with `wrangler dev` and what to change together with the README.
-Its link preview is `og.png`, so a shared link shows the logo, the question
-and the run line. Wait for 0.0.1, since the install lines only work from the
+Its link preview is `og.png`, so a shared link shows the logo, the headline
+and the run line. Wait for 0.0.1, since the run line only works from the
 first release on.
 
 ## Waiting

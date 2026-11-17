@@ -1,3 +1,8 @@
+# The page runs no scripts and loads nothing from another origin; index.html says so.
+/*
+  Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
 /run.sh
   Content-Type: text/plain; charset=utf-8
 /run.ps1

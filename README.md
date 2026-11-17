@@ -11,7 +11,7 @@ under other settings at public API prices, and tells you which settings use up
 more of your plan's limits than they return. Then it offers to change them, one
 at a time, and shows the edit before writing it.
 
-![token-max doctor walking through three changes on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/assets/demo/walk.gif)
+![token-max doctor walking through three changes on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/site/public/walk.gif)
 
 <sub>The recording runs on [synthetic transcripts](https://github.com/kixel-ai/token-max/blob/main/assets/demo/home.py), not a real host.</sub>
 

@@ -28,8 +28,8 @@ On the maintainer's last 30 days across four machines, replayed 2026-11-17:
 That is 1,166,636 Claude Code, Codex and T3 Code requests at public API
 prices. The savings are what `token-max doctor`'s offered changes save
 together, 1% of the spend, mostly unused skills and tools. Two cache
-replays are bigger: doctor holds back the first for lack of evidence, and the
-maintainer already uses the second.
+replays sit outside it: doctor holds back the first, far bigger, for lack of
+evidence, and the maintainer already uses the second.
 
 - **Subagents: a 1h prompt cache cost ~17% less than the default 5m**, ~$4,143
   over the 30 days. Every Claude Code user's subagents get 5m. The setting is

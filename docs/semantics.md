@@ -907,9 +907,11 @@ the context memory loads is extrapolated to them at the recorded requests' mean,
 with a `~` and a 95% margin. That margin adds the carrying requests' own, grown
 with the extrapolation, to one for how the unrecorded requests may differ from
 the recorded ones, in which an unpriced carrying request counts at the carriers'
-mean and one that carried none at zero. `coverage` counts the requests that
-recorded their context. When no request recorded one, the cost is unknown
-rather than zero.
+mean and one that carried none at zero. When none of the reads on unrecorded
+requests could be priced, the rest stands as a lower bound, shown as "at least"
+and naming those reads. `coverage` counts the requests that recorded their
+context. When no request recorded one, or none that carried memory was priced,
+the cost is unknown rather than zero.
 
 [Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
 memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or

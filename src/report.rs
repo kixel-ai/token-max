@@ -1728,21 +1728,12 @@ fn shares(values: &[Share], whole: u64) -> String {
     }
 }
 
-/// A cost written by `write`, such as [`about`], after a `~` and before its margin when
-/// extrapolated; "an unknown amount" when nothing was priced.
-fn figure(estimate: Option<Estimate>, write: &dyn Fn(f64) -> String) -> String {
-    match estimate {
-        None => "an unknown amount".into(),
-        Some(Estimate { usd, margin: None }) => write(usd),
-        Some(Estimate {
-            usd,
-            margin: Some(Margin::Usd(m)),
-        }) => format!("~{} ± {}", write(usd), write(m)),
-        Some(Estimate {
-            usd,
-            margin: Some(Margin::Unmeasured),
-        }) => format!("~{}, margin unknown", write(usd)),
-    }
+/// A cost as [`approx`] writes it; "an unknown amount" when nothing was priced.
+fn figure(estimate: Option<Estimate>) -> String {
+    estimate.map_or_else(
+        || "an unknown amount".into(),
+        |e| approx(e.usd, e.margin, ""),
+    )
 }
 
 /// What the same tokens would cost on the provider's cheapest current model.
@@ -1754,7 +1745,7 @@ fn reprice_text(c: &SubagentCost) -> String {
         }
         (Some(model), Some(_)) => format!(
             "On {model} the same recorded tokens would cost {}, assuming the same turns.",
-            figure(c.reprice_estimate, &about)
+            figure(c.reprice_estimate)
         ),
     }
 }
@@ -1891,13 +1882,13 @@ fn fable_row(u: &FableUse) -> Row {
         .map(|w| {
             format!(
                 "{} ({}, {})",
-                figure(w.estimate, &about),
+                figure(w.estimate),
                 requests_of(w.requests, "request"),
                 fable_span(w)
             )
         })
         .collect();
-    row.amount = Some(("costs", figure(u.estimate, &about)));
+    row.amount = Some(("costs", figure(u.estimate)));
     row.evidence = format!(
         "{} at API prices, per 7 days back from this report: {}. {FABLE_PARTIAL}{caveats} {official}",
         requests_of(u.requests, "Fable request"),
@@ -2619,7 +2610,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::Speed(s) => return s.reason.clone(),
         CheckResult::Effort(e) => return effort_guidance(e),
         CheckResult::Memory(m)
-            if r.action == Action::Keep && memory_free(m) && !codex_unmeasured(m) =>
+            if r.action == Action::Keep && memory_free(m) && !m.lower_bound() =>
         {
             return "Off; it costs nothing.".into();
         }
@@ -4314,8 +4305,8 @@ pub(crate) const AT_LEAST: &str = "saves at least";
 fn check_verb(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> &'static str {
     match result {
         _ if unset_main_ttl(result, r, out) => UP_TO,
-        // Memory with unmeasured generation saves at least what was priced.
-        CheckResult::Memory(m) if codex_unmeasured(m) => AT_LEAST,
+        // Memory with unmeasured generation or reads saves at least what was priced.
+        CheckResult::Memory(m) if m.lower_bound() => AT_LEAST,
         _ => "saves",
     }
 }
@@ -4605,7 +4596,7 @@ fn summary(
         if w.long == 0 {
             return "No foreground Bash wait outlasted the cache.".to_string();
         }
-        let cost = figure(w.miss_estimate, &about);
+        let cost = figure(w.miss_estimate);
         format!(
             "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost} over the window.",
             count(w.long),
@@ -4878,10 +4869,17 @@ fn summary(
                             .to_string(),
                     ),
                     Some(c) if r.savings_usd.is_some() => notes.push(format!(
-                        "from the {}% of requests that recorded their context",
+                        "extrapolated from the {}% of requests that recorded their context",
                         percent(c.priced, c.total)
                     )),
                     _ => {}
+                }
+                if m.unpriced_reads > 0 && r.savings_usd.is_some() {
+                    notes.push(format!(
+                        "memory read back by {} request{} that recorded no context could not be priced",
+                        count(m.unpriced_reads),
+                        if m.unpriced_reads == 1 { "" } else { "s" }
+                    ));
                 }
                 if unmeasured {
                     notes.push(if r.savings_usd == Some(0.0) && r.coverage.is_none() {
@@ -4890,7 +4888,7 @@ fn summary(
                         "extraction and consolidation are not measured".into()
                     });
                 }
-                let measured = if mark == Mark::Keep && memory_free(m) && !unmeasured {
+                let measured = if mark == Mark::Keep && memory_free(m) && !m.lower_bound() {
                     "costs nothing".to_string()
                 } else {
                     memory_uses(m)
@@ -4963,10 +4961,10 @@ fn summary(
                         usd => row.costs(check_estimate(usd, r), false, &spend),
                     }
                 }
-                // Codex extraction and consolidation are never measured.
+                // Codex extraction and consolidation, or reads nothing priced, are left out.
                 CheckResult::Memory(m) => match r.savings_usd {
                     Some(0.0) => {}
-                    usd => row.costs(check_estimate(usd, r), codex_unmeasured(m), &spend),
+                    usd => row.costs(check_estimate(usd, r), m.lower_bound(), &spend),
                 },
                 _ => {}
             }
@@ -5013,7 +5011,7 @@ fn summary(
         let mut text = format!(
             "{}{each}; it cost {} over the window",
             capitalize(&uses(c)),
-            figure(c.estimate(), &about)
+            figure(c.estimate())
         );
         if c.skill.is_some() {
             let _ = write!(text, "; {}", catalog_evidence(c));
@@ -5219,7 +5217,7 @@ fn summary(
                     let evidence = match estimate {
                         Some(_) => format!(
                             "Off in {shown}. While still sent it cost {} on {} requests; the estimate assumes each of this line's {} requests in the window would have carried it.",
-                            figure(c.estimate(), &about),
+                            figure(c.estimate()),
                             count(c.requests),
                             count(requests)
                         ),
@@ -6447,6 +6445,7 @@ mod tests {
                     unresolved: None,
                     overrides: vec![],
                     unmeasured_generation: false,
+                    unpriced_reads: 0,
                 })
             },
         ];
@@ -6859,6 +6858,7 @@ mod tests {
                 unresolved: None,
                 overrides: vec![],
                 unmeasured_generation,
+                unpriced_reads: 0,
             })
         };
         assert_eq!(

@@ -1807,6 +1807,16 @@ pub struct MemoryCheck {
     /// Whether Codex may have extracted or consolidated memories in the window, which
     /// is never measured, so the total is a lower bound.
     pub unmeasured_generation: bool,
+    /// Requests that recorded no context and read memory back, none of whose reads could be
+    /// priced, so the total leaves those reads out and is a lower bound.
+    pub unpriced_reads: u64,
+}
+
+impl MemoryCheck {
+    /// Whether the total leaves out a part that could not be measured, so it is a lower bound.
+    pub fn lower_bound(&self) -> bool {
+        self.unmeasured_generation || self.unpriced_reads > 0
+    }
 }
 
 /// Foreground Bash calls that held the cache idle, and what their misses cost.

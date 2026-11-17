@@ -2777,7 +2777,7 @@ fn claude_auto_memory_without_recorded_context_has_an_unknown_cost() {
         &both,
         "consider",
         "Auto memory on -> off saves ~",
-        &["; from the 66.6% of requests that recorded their context."]
+        &["; extrapolated from the 66.6% of requests that recorded their context."]
     ));
 }
 

@@ -185,7 +185,8 @@ fn check(
         && rows.is_empty()
         && mine.len() > unrecorded;
     let (recorded, unrecorded) = ((mine.len() - unrecorded) as u64, unrecorded as u64);
-    let loaded = extrapolate(&rows, recorded, unrecorded).filter(|_| !never_on);
+    let (loaded, unpriced_reads) = extrapolate(&rows, recorded, unrecorded);
+    let loaded = loaded.filter(|_| !never_on);
     // Under --defaults memory is on, though the settings files turned it off for some
     // recorded requests: what it cost while main-agent requests carried it, the files read
     // back included, since a request without memory reads none, stands for all of them.
@@ -268,12 +269,17 @@ fn check(
         uncertainty.push(format!(
             "none of {unrecorded} requests recorded their context, so loaded memory is unmeasured"
         ));
+    } else if context_usd.is_none() {
+        uncertainty.push("no request that carried memory could be priced".into());
     } else if unrecorded > 0 {
         uncertainty.push(format!(
             "{unrecorded} requests did not record their context; memory they loaded is extrapolated from the requests that did, assuming they loaded it as often"
         ));
-    } else if context_usd.is_none() {
-        uncertainty.push("no request that carried memory could be priced".into());
+    }
+    if unpriced_reads > 0 && context_usd.is_some() {
+        uncertainty.push(format!(
+            "{unpriced_reads} requests that did not record their context read memory back, and none of those reads could be priced, so the total leaves them out"
+        ));
     }
     if writes > 0 && writes_usd.is_none() {
         uncertainty.push(
@@ -375,19 +381,20 @@ fn check(
                 || control.stored
                 || !uses.is_empty()
                 || !rows.is_empty()),
+        unpriced_reads,
     }
 }
 
 /// What memory cost over `recorded` requests that recorded their context and `unrecorded`
 /// that did not, from `rows`, its rows' shares on the line; None when no recorded request
-/// is known, or none of the requests that carried memory, or of those that read it back
-/// without recording their context, was priced.
+/// is known or none that carried memory was priced. Also how many unrecorded requests read
+/// memory back with none of those reads priced, which the figure leaves out.
 ///
 /// Recorded requests are extrapolated over the unpriced ones that carried memory, as the
 /// context row does. Unrecorded ones keep the memory files they were measured to read back,
 /// extrapolated over the unpriced ones that read, and add the context memory loads, at the
 /// recorded requests' mean, assuming they loaded it as often.
-fn extrapolate(rows: &[ProfileShare], recorded: u64, unrecorded: u64) -> Option<Estimate> {
+fn extrapolate(rows: &[ProfileShare], recorded: u64, unrecorded: u64) -> (Option<Estimate>, u64) {
     let (mut whole, mut loaded, mut reads) =
         (Sample::default(), Sample::default(), Sample::default());
     let (mut carried, mut read) = (0, 0);
@@ -398,18 +405,23 @@ fn extrapolate(rows: &[ProfileShare], recorded: u64, unrecorded: u64) -> Option<
         carried += c.recorded_requests;
         read += c.requests - c.recorded_requests;
     }
+    // Reads none of which was priced have nothing to extrapolate from.
+    let unpriced_reads = if reads.priced() == 0 { read } else { 0 };
     if recorded == 0 {
-        return None;
+        return (None, unpriced_reads);
     }
-    let e = whole.estimate(carried)?;
+    let Some(e) = whole.estimate(carried) else {
+        return (None, unpriced_reads);
+    };
     let (mut usd, mut margin) = (e.usd, e.margin);
-    if read > 0 {
-        let r = reads.estimate(read)?;
+    if let Some(r) = reads.estimate(read).filter(|_| unpriced_reads == 0) {
         usd += r.usd;
         margin = Margin::plus(margin, r.margin);
     }
     if unrecorded > 0 {
-        let l = loaded.estimate(carried)?;
+        let l = loaded
+            .estimate(carried)
+            .expect("the carriers' loaded context is priced with their whole cost");
         // Every recorded request's loaded context: a priced carrier's own, an unpriced one's
         // at the carriers' mean, as `l` takes it, and zero for one that carried none.
         let mut each = loaded;
@@ -436,7 +448,7 @@ fn extrapolate(rows: &[ProfileShare], recorded: u64, unrecorded: u64) -> Option<
             Margin::plus(l.margin.map(|m| m.scale(scale)), all.margin),
         );
     }
-    Some(Estimate { usd, margin })
+    (Some(Estimate { usd, margin }), unpriced_reads)
 }
 
 #[cfg(test)]
@@ -467,38 +479,47 @@ mod tests {
     fn unrecorded_requests_keep_their_reads_and_load_the_recorded_mean() {
         // Two recorded requests loaded $1 each; one unrecorded request read $10 back. It keeps
         // its $10 and loads $1 like them, never scaled on top of the recorded total.
-        let e = extrapolate(&[share(2, &[1.0, 1.0], 1)], 2, 1).unwrap();
+        let e = extrapolate(&[share(2, &[1.0, 1.0], 1)], 2, 1).0.unwrap();
         assert!((e.usd - 13.0).abs() < 1e-9, "{}", e.usd);
         // Every recorded request loaded the same, so the extrapolation has no spread.
         assert_eq!(e.margin, Some(Margin::Usd(0.0)));
         // Priced in full and nothing unrecorded: exact.
-        let e = extrapolate(&[share(2, &[1.0, 3.0], 0)], 2, 0).unwrap();
+        let e = extrapolate(&[share(2, &[1.0, 3.0], 0)], 2, 0).0.unwrap();
         assert_eq!((e.usd, e.margin), (4.0, None));
         // A recorded request's own reads stay in its total, never in the loaded mean.
         let mut s = share(1, &[], 0);
         s.recorded.add(Usd::from_f64(5.0));
         s.loaded.add(Usd::from_f64(2.0));
-        let e = extrapolate(&[s], 1, 1).unwrap();
+        let e = extrapolate(&[s], 1, 1).0.unwrap();
         assert!((e.usd - 7.0).abs() < 1e-9, "{}", e.usd);
+        // Reads none of which was priced leave the rest standing, a lower bound that names
+        // them, rather than making the line unknown.
+        let mut s = share(100, &[1.0; 100], 0);
+        s.requests += 1;
+        let (e, unpriced) = extrapolate(&[s], 100, 1);
+        assert!((e.unwrap().usd - 101.0).abs() < 1e-9);
+        assert_eq!(unpriced, 1);
     }
 
     #[test]
     fn unpriced_carriers_count_at_the_carriers_mean_in_the_margin_too() {
         // 500 of 1,000 recorded requests carried memory and one was priced at $1; 1,000 more
         // recorded no context. Both the figure and its margin take the carriers at $1 each.
-        let e = extrapolate(&[share(500, &[1.0], 0)], 1000, 1000).unwrap();
+        let e = extrapolate(&[share(500, &[1.0], 0)], 1000, 1000).0.unwrap();
         assert!((e.usd - 1000.0).abs() < 1e-6);
         assert_eq!(e.margin, Some(Margin::Unmeasured));
         // With every carrier priced, half the recorded requests at $1 and half at zero, the
         // unrecorded half has a measured margin around the same $1,000.
-        let e = extrapolate(&[share(500, &[1.0; 500], 0)], 1000, 1000).unwrap();
+        let e = extrapolate(&[share(500, &[1.0; 500], 0)], 1000, 1000)
+            .0
+            .unwrap();
         assert!((e.usd - 1000.0).abs() < 1e-6);
         let Some(Margin::Usd(m)) = e.margin else {
             panic!("a measured spread")
         };
         assert!(m > 0.0 && m < 100.0, "{m}");
         // Nothing priced among the carriers, or nothing recorded: unknown.
-        assert_eq!(extrapolate(&[share(5, &[], 0)], 10, 0), None);
-        assert_eq!(extrapolate(&[share(0, &[], 3)], 0, 3), None);
+        assert_eq!(extrapolate(&[share(5, &[], 0)], 10, 0), (None, 0));
+        assert_eq!(extrapolate(&[share(0, &[], 3)], 0, 3).0, None);
     }
 }

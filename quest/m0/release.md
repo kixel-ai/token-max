@@ -17,8 +17,9 @@ quest. m0's Plan holds the decisions behind it, such as 0.0.1 rather than
 
 - Validate end to end: rerun `token-max doctor` on the maintainer's host and
   confirm the report and the walk read well.
-- Change the version to 0.0.1 and publish the crate through the protected
-  release path.
+- Change the version to 0.0.1, drop the README's and the site's pre-release
+  notices, and publish the crate through the protected
+  release path, then redeploy the site.
 - Verify the README's install commands against the published crate and
   release, including both curl lines.
 - Clear Quest's release handoff.

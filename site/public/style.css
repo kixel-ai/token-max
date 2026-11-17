@@ -1,0 +1,224 @@
+/* max.kixel.ai: one page, no build step. The terminal colors match the recording's Catppuccin Mocha. */
+
+:root {
+	--bg: #fafafa;
+	--ink: #0f172a;
+	--muted: #475569;
+	--rule: #e2e8f0;
+	--panel: #f1f5f9;
+	--link: #6d28d9;
+	--save: #15803d;
+	--term: #1e1e2e;
+	--term-ink: #cdd6f4;
+	--term-dim: #7f849c;
+	--mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+	--sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: #11111b;
+		--ink: #f1f5f9;
+		--muted: #a6adc8;
+		--rule: #313244;
+		--panel: #181825;
+		--link: #b4a0fb;
+		--save: #a6e3a1;
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--ink);
+	font: 1.0625rem/1.6 var(--sans);
+	-webkit-text-size-adjust: 100%;
+}
+
+a {
+	color: var(--link);
+	text-underline-offset: 0.15em;
+}
+
+code {
+	font: 0.9em var(--mono);
+	overflow-wrap: anywhere;
+}
+
+.top,
+main > section,
+footer {
+	max-width: 50rem;
+	margin: 0 auto;
+	padding: 0 1.25rem;
+}
+
+.top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 1rem;
+	padding-top: 2rem;
+	font-weight: 600;
+}
+
+.logo {
+	height: 2.5rem;
+	width: auto;
+	max-width: 70%;
+}
+
+h1 {
+	margin: 4rem 0 1rem;
+	font-size: clamp(2.25rem, 7vw, 4rem);
+	line-height: 1.05;
+	letter-spacing: -0.03em;
+	text-wrap: balance;
+}
+
+.lede {
+	margin: 0;
+	max-width: 36rem;
+	font-size: 1.25rem;
+	color: var(--muted);
+}
+
+.run-label {
+	margin: 2.5rem 0 0.5rem;
+	font-weight: 700;
+}
+
+pre.run {
+	margin: 0;
+	padding: 1.1rem 1.3rem;
+	overflow-x: auto;
+	background: var(--term);
+	color: var(--term-ink);
+	border-radius: 0.6rem;
+	box-shadow: 0 0 0 1px var(--rule);
+}
+
+/* Wrapped rather than scrolled, so the whole command shows on a phone. */
+pre.run code {
+	font-size: clamp(0.95rem, 2.6vw, 1.2rem);
+	white-space: pre-wrap;
+}
+
+/* A click selects the whole command, ready to copy, without a script. */
+.cmd {
+	user-select: all;
+	-webkit-user-select: all;
+}
+
+pre .cmd::before {
+	content: "$ ";
+	color: var(--term-dim);
+	user-select: none;
+	-webkit-user-select: none;
+}
+
+.small {
+	margin: 0.75rem 0 0;
+	font-size: 0.9rem;
+	color: var(--muted);
+}
+
+h2 {
+	margin: 5rem 0 1.25rem;
+	font-size: 1.4rem;
+	letter-spacing: -0.01em;
+}
+
+.cards {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+	gap: 1rem;
+}
+
+.card {
+	display: flex;
+	flex-direction: column;
+	padding: 1.25rem 1.4rem;
+	background: var(--panel);
+	border: 1px solid var(--rule);
+	border-radius: 0.6rem;
+}
+
+.card p {
+	margin: 0 0 0.75rem;
+}
+
+.card .who {
+	margin: 0 0 0.75rem;
+	font-size: 0.9rem;
+	font-weight: 600;
+	color: var(--muted);
+}
+
+.card .big {
+	margin: 0 0 0.5rem;
+	font-size: 2.6rem;
+	font-weight: 700;
+	line-height: 1.1;
+	letter-spacing: -0.02em;
+	color: var(--save);
+	font-variant-numeric: tabular-nums;
+}
+
+.card .setting {
+	margin-top: auto;
+	padding: 0.5rem 0.75rem;
+	background: var(--term);
+	color: var(--term-ink);
+	border-radius: 0.4rem;
+}
+
+.see-yours {
+	margin: 1.25rem 0 0;
+	font-size: 1.15rem;
+	font-weight: 700;
+}
+
+.steps {
+	margin: 0;
+	padding-left: 1.4rem;
+}
+
+.steps li + li {
+	margin-top: 1rem;
+}
+
+.walk {
+	max-width: min(70rem, 100% - 2.5rem);
+	margin: 5rem auto 0;
+}
+
+.walk summary {
+	margin-bottom: 0.75rem;
+	cursor: pointer;
+	font-size: 0.95rem;
+	color: var(--muted);
+}
+
+.walk img {
+	display: block;
+	width: 100%;
+	height: auto;
+	border-radius: 0.6rem;
+	box-shadow: 0 0 0 1px var(--rule), 0 1.5rem 3rem -1.5rem rgb(0 0 0 / 0.45);
+}
+
+footer {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1.5rem;
+	margin-top: 4rem;
+	padding-top: 1.5rem;
+	padding-bottom: 3rem;
+	border-top: 1px solid var(--rule);
+	font-size: 0.95rem;
+}

@@ -488,7 +488,21 @@ Uncertain activations branch weighted context states, merging equal states after
 replacement or convergence; the expected cost does not compact a fractional
 number of tokens across price tiers. Final summaries receive their activation
 weight with no return savings. Full on/off totals retain common unknown charges;
-unchanged unknown components may cancel in the comparison only. Closed/open,
+unchanged unknown components may cancel in the comparison only.
+
+On and off, and every sensitivity run, are paired session by session, as the
+cache TTL replay pairs parts. A session is unpriced when either run is, such as
+for unknown eligibility, missing full-prefix calibration, or a window/TTL replay
+that failed for that conversation. Sessions where idle compaction could act, those
+with an eligible, unresolved or applied idle period, extrapolate the difference
+to the unpriced sessions by their mean, with the same 95% margin as the TTL
+replay; a session where it could not act changes nothing and counts exactly,
+even when its replay failed, so its zero does not dilute the estimate.
+`coverage` counts priced and total sessions. The extra re-read break-even per
+resumed summary divides the priced sessions' saving by their own resumed
+summaries. The extrapolated delta decides whenever one session it could act
+on was priced; with none, the check stays unknown. The keepalive comparison adds
+the idle alternative's margin to its own. Closed/open,
 maximum-summary and late-trigger scenarios explain uncertainty without vetoing
 the aggregate point winner. When closed/open endpoints bracket a crossing,
 a common uncertain activation fraction is replayed to find a break-even, including
@@ -901,10 +915,17 @@ slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-c
 apply. The check reports the total cost, the reads and writes, and the setting
 that turns it off; its `savingsUsd` is that total. Once memory is off, the line
 still shows what it cost and how often it was used earlier in the window.
-Requests that recorded no context leave the memory they loaded unmeasured. When
-no request recorded one, the cost is unknown rather than zero; otherwise the
-total is a lower bound, shown as "at least", and `coverage` counts the requests
-that recorded their context.
+Requests that recorded no context keep the memory files they were measured to
+read back, and are assumed to have loaded memory as often as those that did, so
+the context memory loads is extrapolated to them at the recorded requests' mean,
+with a `~` and a 95% margin. That margin adds the carrying requests' own, grown
+with the extrapolation, to one for how the unrecorded requests may differ from
+the recorded ones, in which an unpriced carrying request counts at the carriers'
+mean and one that carried none at zero. When none of the reads on unrecorded
+requests could be priced, the rest stands as a lower bound, shown as "at least"
+and naming those reads. `coverage` counts the requests that recorded their
+context. When no request recorded one, or none that carried memory was priced,
+the cost is unknown rather than zero.
 
 [Claude Code](https://code.claude.com/docs/en/memory#auto-memory) keeps auto
 memory on unless `CLAUDE_CODE_DISABLE_AUTO_MEMORY` (shell or settings `env`) or
@@ -957,8 +978,8 @@ them, or a T3 instance whose launch arguments, secret environment values or
 machine policy could override them (as for Claude Code's T3 instances). Its turn-off advice then also names each file that sets memories, since
 the user setting alone would not override them. Fully resolved settings keep a
 definite on or off. A session there that carried a summary at its latest
-request while the settings turn memory off is noted, and requests that recorded no context leave the cost
-a lower bound or unknown even with memories off now, since they may have run
+request while the settings turn memory off is noted, and requests that recorded no context are
+extrapolated over, or leave the cost unknown, even with memories off now, since they may have run
 while memories were on. A missing summary shows nothing, since it appears only once one has
 been written. Uses are
 the dedicated `memories` tools (`list`, `read` and `search` as reads,
@@ -1162,8 +1183,9 @@ run there.
 Every host is analyzed separately against one price catalog, so cache replay,
 profile ownership, coverage and settings never mix between hosts, and paths
 keep each host's meaning. A history copied between hosts is billed in each
-host's report, which is why amounts across hosts must not be added; no
-cross-host total is reported. The first failure, of a host or of loading
+host's report, and the one total that heads a run of several hosts adds their
+figures as they are, so it counts that history on each. Each host sends beside
+its report only its own sums, never its scan. The first failure, of a host or of loading
 prices, stops the run at once: every `ssh` process is killed and reaped, a
 destination stops when its stdin closes, and a partial price download is
 deleted. SIGINT and SIGTERM do the same before exiting 2.

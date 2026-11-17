@@ -8,7 +8,7 @@ use crate::model::{
     Harness, Id, Millis, Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck,
     Usd,
 };
-use crate::prices::{Catalog, add_costs, unit_rates, unknown_cost, zero_cost};
+use crate::prices::{Catalog, Sample, add_costs, unit_rates, unknown_cost, zero_cost};
 
 const SOURCES: [&str; 3] = [
     "https://code.claude.com/docs/en/env-vars (2026-11-08)",
@@ -214,6 +214,11 @@ fn check(
         }
     }
     let miss_cost = add_costs(&costs);
+    let mut sample = Sample::default();
+    for cost in &costs {
+        sample.add_cost(cost);
+    }
+    let miss_estimate = sample.estimate(costs.len() as u64);
 
     let (action, recommended) = match ttl {
         None => (Action::Advisory, None),
@@ -282,6 +287,7 @@ fn check(
             timed_out,
             polling,
             miss_cost,
+            miss_estimate,
         },
     }
 }

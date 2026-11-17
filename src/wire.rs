@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::model::{Location, Millis};
 use crate::prices::Catalog;
 use crate::sessions::Session;
+use crate::totals::Totals;
 
 /// This build's identity: the package version and a fingerprint of the types a stream carries,
 /// the price catalog, report and session lines included.
@@ -28,6 +29,9 @@ pub fn build() -> String {
             include_str!("model.rs"),
             include_str!("sessions.rs"),
             include_str!("repository.rs"),
+            include_str!("totals.rs"),
+            // Its `Total` is a field of the totals a report carries.
+            include_str!("doctor.rs"),
         ]
         .concat(),
     );
@@ -89,6 +93,8 @@ pub enum Outcome {
         text: String,
         /// Whether the report recommends a change, which sets the exit code.
         change: bool,
+        /// What the report adds to a total across hosts.
+        totals: Totals,
     },
     #[serde(rename_all = "camelCase")]
     Sessions {
@@ -191,6 +197,7 @@ mod tests {
                 since: None,
                 text: "report\n".into(),
                 change: true,
+                totals: Totals::default(),
             },
         )
         .unwrap();

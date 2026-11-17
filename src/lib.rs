@@ -36,6 +36,7 @@ pub mod ssh;
 mod subagents;
 pub mod t3;
 pub mod terminal;
+pub mod totals;
 pub mod unreadable;
 pub mod wire;
 

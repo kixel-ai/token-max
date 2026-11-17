@@ -1524,9 +1524,19 @@ pub struct Estimate {
     pub margin: Option<Margin>,
 }
 
+impl Estimate {
+    /// The figure and its margin scaled by a positive `factor`, such as from the window to 30 days.
+    pub fn scale(self, factor: f64) -> Self {
+        Self {
+            usd: self.usd * factor,
+            margin: self.margin.map(|m| m.scale(factor)),
+        }
+    }
+}
+
 /// How far a figure extrapolated over unpriced items may be off, assuming they resemble the
 /// priced ones.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Margin {
     /// A 95% interval's half-width, in dollars.
     Usd(f64),
@@ -1541,6 +1551,16 @@ impl Margin {
         match (a, b) {
             (None, m) | (m, None) => m,
             (Some(Margin::Usd(a)), Some(Margin::Usd(b))) => Some(Margin::Usd(a + b)),
+            _ => Some(Margin::Unmeasured),
+        }
+    }
+
+    /// The margin of two figures added from separate samples, such as two hosts' histories:
+    /// their margins combine in quadrature, since their errors are independent.
+    pub fn independent(a: Option<Margin>, b: Option<Margin>) -> Option<Margin> {
+        match (a, b) {
+            (None, m) | (m, None) => m,
+            (Some(Margin::Usd(a)), Some(Margin::Usd(b))) => Some(Margin::Usd(a.hypot(b))),
             _ => Some(Margin::Unmeasured),
         }
     }
@@ -1737,6 +1757,8 @@ pub struct EffortRun {
     pub effort: Option<String>,
     pub requests: u64,
     pub cost: Cost,
+    /// `cost` extrapolated from the priced requests to every one; None when none was priced.
+    pub estimate: Option<Estimate>,
 }
 
 /// A profile's main-session default effort beside what each model and effort pair cost.
@@ -1751,6 +1773,9 @@ pub struct EffortCheck {
     pub enterprise: bool,
     /// Main-session requests by model and recorded effort, most first.
     pub runs: Vec<EffortRun>,
+    /// What every run's requests cost, extrapolated from the priced ones over all of them;
+    /// None when none was priced.
+    pub estimate: Option<Estimate>,
     /// Settings beside `base.owner`, such as caps below the recommended level, that must
     /// change with it.
     pub also: Vec<String>,
@@ -1802,6 +1827,16 @@ pub struct MemoryCheck {
     /// Whether Codex may have extracted or consolidated memories in the window, which
     /// is never measured, so the total is a lower bound.
     pub unmeasured_generation: bool,
+    /// Requests that recorded no context and read memory back, none of whose reads could be
+    /// priced, so the total leaves those reads out and is a lower bound.
+    pub unpriced_reads: u64,
+}
+
+impl MemoryCheck {
+    /// Whether the total leaves out a part that could not be measured, so it is a lower bound.
+    pub fn lower_bound(&self) -> bool {
+        self.unmeasured_generation || self.unpriced_reads > 0
+    }
 }
 
 /// Foreground Bash calls that held the cache idle, and what their misses cost.
@@ -1817,6 +1852,8 @@ pub struct BashWaits {
     pub polling: u64,
     /// Rewriting the prefix the next request could have read, priced at write minus read rates.
     pub miss_cost: Cost,
+    /// `miss_cost` extrapolated from the priced misses to every one; None when none was priced.
+    pub miss_estimate: Option<Estimate>,
 }
 
 /// Whether the foreground Bash timeout cap outlasts the cache TTL.
@@ -1937,10 +1974,10 @@ pub struct ActivationCohort {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdleSensitivity {
-    pub closed_delta_usd: Option<f64>,
-    pub open_delta_usd: Option<f64>,
-    pub larger_summary_delta_usd: Option<f64>,
-    pub late_trigger_delta_usd: Option<f64>,
+    pub closed_delta: Option<Estimate>,
+    pub open_delta: Option<Estimate>,
+    pub larger_summary_delta: Option<Estimate>,
+    pub late_trigger_delta: Option<Estimate>,
     pub lifetime_break_even_fraction: Option<f64>,
     pub reread_break_even_usd_per_resumed_summary: Option<f64>,
 }
@@ -1956,8 +1993,11 @@ pub struct IdleScenario {
     pub cost: OnOff<Cost>,
     /// Only changed charges, relative to the shared recorded-request baseline.
     pub adjustment: OnOff<Cost>,
-    pub delta_usd: Option<f64>,
-    pub monthly_delta_usd: Option<f64>,
+    /// On minus off, paired per session and extrapolated over the sessions it could not price.
+    pub delta: Option<Estimate>,
+    /// Sessions with idle periods, and how many of them the on/off pair priced.
+    pub coverage: Coverage,
+    pub monthly_delta: Option<Estimate>,
     pub by_context: Vec<ContextDelta>,
     pub activation_cohorts: Vec<ActivationCohort>,
     pub sensitivity: IdleSensitivity,
@@ -1981,6 +2021,12 @@ pub struct IdleCheck {
 pub struct T3IdleScenario {
     pub mode: T3IdleMode,
     pub cost: Cost,
+    /// The changed cost, extrapolated over the sessions it could not price.
+    pub estimate: Option<Estimate>,
+    /// The current mode's changed cost minus this one's, paired per session and extrapolated.
+    pub savings: Option<Estimate>,
+    /// Sessions in the window, and how many of them that pair priced.
+    pub coverage: Coverage,
     pub summaries: u64,
     pub final_summaries: u64,
 }
@@ -2052,7 +2098,7 @@ pub struct KeepaliveCheck {
     /// Periods in sessions whose complete policy comparison could not be priced.
     pub unpriced: u64,
     /// Idle compaction's estimated saving where recommended; None when unknown or unsupported.
-    pub idle_compaction_savings_usd: Option<f64>,
+    pub idle_compaction_savings: Option<Estimate>,
     /// The best cap's saving minus the best alternative's; negative when pinging loses.
     pub margin_usd: Option<f64>,
     /// One-ping and recorded rescue-threshold caps, shortest first.
@@ -2728,6 +2774,9 @@ pub struct ContextCost {
     pub cost_usd: Usd,
     /// cost_usd scaled to every request that carried it; None when none could be priced.
     pub estimated_usd: Option<f64>,
+    /// How far `estimated_usd` may be off when extrapolated over requests that could not be
+    /// priced; None when every request was.
+    pub margin: Option<Margin>,
     /// Observed uses in the window; None when uses are not observable.
     pub calls: Option<u64>,
     pub last_used: Option<Millis>,
@@ -2756,28 +2805,52 @@ pub struct ContextCost {
 }
 
 /// The requests on a line that one set of profiles recorded, and what the piece cost in them.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProfileShare {
     /// More than one when a request was copied into several profiles' histories, or T3
     /// could not settle which ran it.
     pub profiles: Vec<String>,
     pub requests: u64,
-    pub priced: u64,
-    /// API-price equivalent over the priced requests only.
-    pub cost_usd: Usd,
+    /// What each priced request cost.
+    pub sample: crate::prices::Sample,
+    /// Those of `requests` that recorded their context, rather than only their tool output.
+    pub recorded_requests: u64,
+    /// What each priced one of those cost.
+    pub recorded: crate::prices::Sample,
+    /// The same, less the piece's tool output: the context it loaded.
+    pub loaded: crate::prices::Sample,
+    /// What each priced request that recorded no context cost, which is only tool output.
+    pub unrecorded: crate::prices::Sample,
 }
 
 impl ContextCost {
+    /// What it cost over the window with its margin; None when no request was priced.
+    pub fn estimate(&self) -> Option<Estimate> {
+        self.estimated_usd.map(|usd| Estimate {
+            usd,
+            margin: self.margin,
+        })
+    }
+
     /// The part of this line whose requests profiles `covers` recorded: the whole line when
     /// it covers every source, else each source share it covers.
     pub fn shares_within(&self, covers: impl Fn(&[String]) -> bool) -> Vec<ProfileShare> {
         if self.shares.iter().all(|s| covers(&s.profiles)) {
             return covers(&self.profiles)
-                .then(|| ProfileShare {
-                    profiles: self.profiles.clone(),
-                    requests: self.requests,
-                    priced: self.priced,
-                    cost_usd: self.cost_usd,
+                .then(|| {
+                    let mut whole = ProfileShare {
+                        profiles: self.profiles.clone(),
+                        requests: self.requests,
+                        ..ProfileShare::default()
+                    };
+                    for s in &self.shares {
+                        whole.sample += s.sample;
+                        whole.recorded_requests += s.recorded_requests;
+                        whole.recorded += s.recorded;
+                        whole.loaded += s.loaded;
+                        whole.unrecorded += s.unrecorded;
+                    }
+                    whole
                 })
                 .into_iter()
                 .collect();
@@ -2841,6 +2914,8 @@ pub struct SubagentCost {
     pub priced: u64,
     /// The API-price equivalent of its recorded requests.
     pub cost: Cost,
+    /// `cost` extrapolated from the priced requests to every one; None when none was priced.
+    pub estimate: Option<Estimate>,
     /// Requests by recorded model, most first.
     pub models: Vec<Share>,
     /// Requests by recorded effort, most first; `unrecorded` when none was recorded.
@@ -2852,6 +2927,9 @@ pub struct SubagentCost {
     /// The same recorded tokens priced on `cheapest`, assuming the same turns; None when
     /// every request already ran on it or no cheapest model is known.
     pub reprice: Option<Cost>,
+    /// `reprice` extrapolated from the requests it priced to every one; None when it is None
+    /// or priced none.
+    pub reprice_estimate: Option<Estimate>,
     /// The settings that change its model.
     pub model_setting: String,
     /// The settings that change its effort; a lower effort changes output tokens, so its cost is unmeasured.
@@ -2967,6 +3045,9 @@ pub struct FableUse {
     /// The spans, most recent first, from the first with a Fable request; the oldest may be
     /// shorter than 7 days.
     pub weeks: Vec<FableWeek>,
+    /// What every week's requests cost, extrapolated from the priced ones over all of them;
+    /// None when none was priced.
+    pub estimate: Option<Estimate>,
 }
 
 /// Fable spend in one span of at most 7 days.
@@ -2976,6 +3057,8 @@ pub struct FableWeek {
     pub end: Millis,
     pub requests: u64,
     pub cost: Cost,
+    /// `cost` extrapolated from the priced requests to every one; None when none was priced.
+    pub estimate: Option<Estimate>,
 }
 
 /// One host's analysis, which the text report presents.

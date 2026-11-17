@@ -13,7 +13,7 @@ use crate::model::{
     Action, Agent, CheckBase, EffortCheck, EffortControl, EffortRun, Evidence, Harness, Location,
     Millis, Owned, Profile, Request, Scan,
 };
-use crate::prices::{Catalog, Sum, price_request};
+use crate::prices::{Catalog, Sample, Sum, price_request};
 use crate::safe::ScanError;
 
 const SOURCES: [&str; 5] = [
@@ -537,23 +537,29 @@ fn check(
         .collect();
     // Requests and their cost by recorded model and effort.
     type Pair<'a> = (Option<&'a str>, Option<&'a str>);
-    let mut groups: IndexMap<Pair<'_>, (u64, Sum)> = IndexMap::default();
+    let mut groups: IndexMap<Pair<'_>, (u64, Sum, Sample)> = IndexMap::default();
+    let mut all = Sample::default();
     for r in &requests {
-        let (n, sum) = groups
+        let (n, sum, sample) = groups
             .entry((r.model.as_deref(), r.effort.as_deref()))
-            .or_insert_with(|| (0, Sum::new()));
+            .or_insert_with(|| (0, Sum::new(), Sample::default()));
+        let cost = price_request(input.catalog, r);
         *n += 1;
-        sum.add(&price_request(input.catalog, r));
+        sample.add_cost(&cost);
+        all.add_cost(&cost);
+        sum.add(&cost);
     }
     let mut runs: Vec<EffortRun> = groups
         .into_iter()
-        .map(|((model, effort), (requests, sum))| EffortRun {
+        .map(|((model, effort), (requests, sum, sample))| EffortRun {
             model: model.map(String::from),
             effort: effort.map(String::from),
             requests,
             cost: sum.cost(),
+            estimate: sample.estimate(requests),
         })
         .collect();
+    let estimate = all.estimate(requests.len() as u64);
     runs.sort_by_key(|r| Reverse(r.requests));
     let effective = control
         .unresolved
@@ -648,6 +654,7 @@ fn check(
         control: control.clone(),
         enterprise,
         runs,
+        estimate,
         also,
     }
 }

@@ -26,8 +26,7 @@ these totals are its four header lines added by hand:
   quadrature, as doctor combines profiles. The machines are summed as they
   are: a history copied from one to another would count on both.
 - **Sessions** count each Claude Code session and Codex thread once, with the
-  subagents and review threads it spawned. The machines also ran 8,166
-  subagents.
+  subagents and review threads it spawned.
 - **Changes save together** is the line under each report's headline: what
   every change doctor offers saves at the window's rate, recommended and worth
   considering alike. Each saving holds the other settings constant, so

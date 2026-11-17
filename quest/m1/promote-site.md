@@ -20,9 +20,8 @@ first release on.
 
 ## Waiting
 
-- Maintainer: open https://max.kixel.ai once it is deployed and 0.0.1 is published, try it, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
+- Maintainer: open https://max.kixel.ai (deployed 2026-11-17) once 0.0.1 is published, try it, and promote it; report anything to change as a new quest. Only the maintainer can judge the page and post as themselves.
 
 ## Required
 
-- [Deploy the max.kixel.ai landing page](/quest/m0/launch/site.md) - the page is live
 - [Publish token-max 0.0.1](/quest/m0/release.md) - the install lines on the page work

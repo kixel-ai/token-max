@@ -32,14 +32,20 @@ evidence", leaving out the snapshot's largest finding: a 1h subagent TTL at
 
 Recommended:
 
-- Decide ambiguity per control, not per profile: a control T3 leaves to the
-  home's settings has the same current value whichever owner ran a request,
-  so ownership cannot change it. On fedora the `claudeAgent` instance sets
-  no environment or launch arguments, only its home.
-- Where the replay prices the profiles apart, such as T3's own idle modes,
+- Decide ambiguity per control, not per profile: a control resolves to one
+  current value when every layer that could set it applies to every possible
+  owner alike, that is the home's and the project's settings, with no T3
+  override and no layer only one owner reads. Native runs can also take a
+  control from a flag, `--settings` or a variable exported in the user's
+  shell; where doctor can see such a layer for only one owner, the control
+  stays unresolved. On fedora the `claudeAgent` instance sets no environment
+  or launch arguments, only its home.
+- Where the replay prices the owners apart, such as T3's own idle modes,
   keep the unmatched requests out of the per-owner comparison and
   extrapolate over them, as the unpriced ones are since
-  [kixel-ai/token-max#143](https://github.com/kixel-ai/token-max/pull/143).
+  [kixel-ai/token-max#143](https://github.com/kixel-ai/token-max/pull/143),
+  and say on the line that this assumes the unmatched requests split between
+  owners as the matched ones do, which the margin does not cover.
 - This keeps m0's rule that unresolved current state is advisory; it only
   stops calling a current value unresolved when every possible owner reads
   the same one.

@@ -1524,6 +1524,16 @@ pub struct Estimate {
     pub margin: Option<Margin>,
 }
 
+impl Estimate {
+    /// The figure and its margin scaled by a positive `factor`, such as from the window to 30 days.
+    pub fn scale(self, factor: f64) -> Self {
+        Self {
+            usd: self.usd * factor,
+            margin: self.margin.map(|m| m.scale(factor)),
+        }
+    }
+}
+
 /// How far a figure extrapolated over unpriced items may be off, assuming they resemble the
 /// priced ones.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -1964,10 +1974,10 @@ pub struct ActivationCohort {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdleSensitivity {
-    pub closed_delta_usd: Option<f64>,
-    pub open_delta_usd: Option<f64>,
-    pub larger_summary_delta_usd: Option<f64>,
-    pub late_trigger_delta_usd: Option<f64>,
+    pub closed_delta: Option<Estimate>,
+    pub open_delta: Option<Estimate>,
+    pub larger_summary_delta: Option<Estimate>,
+    pub late_trigger_delta: Option<Estimate>,
     pub lifetime_break_even_fraction: Option<f64>,
     pub reread_break_even_usd_per_resumed_summary: Option<f64>,
 }
@@ -1983,8 +1993,11 @@ pub struct IdleScenario {
     pub cost: OnOff<Cost>,
     /// Only changed charges, relative to the shared recorded-request baseline.
     pub adjustment: OnOff<Cost>,
-    pub delta_usd: Option<f64>,
-    pub monthly_delta_usd: Option<f64>,
+    /// On minus off, paired per session and extrapolated over the sessions it could not price.
+    pub delta: Option<Estimate>,
+    /// Sessions with idle periods, and how many of them the on/off pair priced.
+    pub coverage: Coverage,
+    pub monthly_delta: Option<Estimate>,
     pub by_context: Vec<ContextDelta>,
     pub activation_cohorts: Vec<ActivationCohort>,
     pub sensitivity: IdleSensitivity,
@@ -2008,6 +2021,12 @@ pub struct IdleCheck {
 pub struct T3IdleScenario {
     pub mode: T3IdleMode,
     pub cost: Cost,
+    /// The changed cost, extrapolated over the sessions it could not price.
+    pub estimate: Option<Estimate>,
+    /// The current mode's changed cost minus this one's, paired per session and extrapolated.
+    pub savings: Option<Estimate>,
+    /// Sessions in the window, and how many of them that pair priced.
+    pub coverage: Coverage,
     pub summaries: u64,
     pub final_summaries: u64,
 }
@@ -2079,7 +2098,7 @@ pub struct KeepaliveCheck {
     /// Periods in sessions whose complete policy comparison could not be priced.
     pub unpriced: u64,
     /// Idle compaction's estimated saving where recommended; None when unknown or unsupported.
-    pub idle_compaction_savings_usd: Option<f64>,
+    pub idle_compaction_savings: Option<Estimate>,
     /// The best cap's saving minus the best alternative's; negative when pinging loses.
     pub margin_usd: Option<f64>,
     /// One-ping and recorded rescue-threshold caps, shortest first.

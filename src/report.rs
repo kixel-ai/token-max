@@ -134,6 +134,11 @@ fn estimate(value: Option<f64>) -> String {
     value.map_or_else(|| "unknown".into(), usd)
 }
 
+/// [`estimate`] for a figure that may be extrapolated, with its `~` and margin.
+fn approx_estimate(value: Option<Estimate>) -> String {
+    value.map_or_else(|| "unknown".into(), |e| approx_usd(e.usd, e.margin))
+}
+
 /// A whole number grouped like `toLocaleString("en-US")`.
 fn count(value: impl Into<i128>) -> String {
     let value = value.into();
@@ -2107,7 +2112,22 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
             for comparison in [&i.current_settings, &i.after_recommendations] {
                 out.field("T3 baseline", &comparison.baseline);
                 for scenario in &comparison.scenarios {
-                    out.cost(scenario.mode.as_str(), &scenario.cost);
+                    out.estimate(scenario.mode.as_str(), &scenario.cost, scenario.estimate);
+                    // An error no one session owns leaves nothing extrapolated to show.
+                    if let Some(savings) = scenario
+                        .savings
+                        .filter(|_| scenario.coverage.priced != scenario.coverage.total)
+                    {
+                        out.field(
+                            "Saving over the current mode",
+                            &format!(
+                                "{}, extrapolated from the {} of {} sessions priced in both",
+                                approx_usd(savings.usd, savings.margin),
+                                scenario.coverage.priced,
+                                scenario.coverage.total
+                            ),
+                        );
+                    }
                     out.field(
                         "Summaries",
                         &format!(
@@ -2142,9 +2162,14 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 out.field(
                     "On minus off",
                     &format!(
-                        "{} over window; {} / 30 days",
-                        estimate(scenario.delta_usd),
-                        estimate(scenario.monthly_delta_usd)
+                        "{} over window; {} / 30 days{}",
+                        approx_estimate(scenario.delta),
+                        approx_estimate(scenario.monthly_delta),
+                        match scenario.coverage {
+                            c if c.priced != c.total =>
+                                format!("; {} of {} sessions priced both ways", c.priced, c.total),
+                            _ => String::new(),
+                        }
                     ),
                 );
                 let periods = &scenario.periods;
@@ -2171,10 +2196,10 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 "Idle sensitivity, on minus off",
                 &format!(
                     "closed {}; open/awake {}; larger summary/full prefix {}; late trigger {}. The aggregate estimate decides.",
-                    estimate(s.closed_delta_usd),
-                    estimate(s.open_delta_usd),
-                    estimate(s.larger_summary_delta_usd),
-                    estimate(s.late_trigger_delta_usd)
+                    approx_estimate(s.closed_delta),
+                    approx_estimate(s.open_delta),
+                    approx_estimate(s.larger_summary_delta),
+                    approx_estimate(s.late_trigger_delta)
                 ),
             );
             out.field(
@@ -2228,8 +2253,10 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
             );
             out.field(
                 "Idle compaction saving",
-                &k.idle_compaction_savings_usd
-                    .map_or_else(|| "unknown or unsupported".into(), usd),
+                &k.idle_compaction_savings.map_or_else(
+                    || "unknown or unsupported".into(),
+                    |e| approx_usd(e.usd, e.margin),
+                ),
             );
             out.field("Best cap over best alternative", &estimate(k.margin_usd));
         }
@@ -2702,7 +2729,7 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
             }
             .into();
         }
-        CheckResult::T3Idle(_) => return "Lowest estimated changed cost among off, conditional on-return acceptance and conditional proactive server liveness; unavailable lifecycle or summary evidence stays unpriced.".into(),
+        CheckResult::T3Idle(_) => return "Lowest estimated changed cost among off, conditional on-return acceptance and conditional proactive server liveness; sessions without lifecycle or summary evidence are extrapolated from the priced ones.".into(),
         CheckResult::Idle(_) => {
             return if r.recommended.is_none() {
                 "Idle prerequisites are inapplicable or required cost/eligibility inputs remain unpriced."
@@ -2829,7 +2856,7 @@ fn keepalive_keep(k: &KeepaliveCheck, r: &Common<'_>) -> String {
         Some(m) => format!(
             "Pinging idle sessions every {interval} would cost {} more than {}.",
             figure(-m),
-            if k.idle_compaction_savings_usd.is_some_and(|s| s > 0.0) {
+            if k.idle_compaction_savings.is_some_and(|s| s.usd > 0.0) {
                 "idle compaction"
             } else {
                 "leaving them idle"
@@ -3011,11 +3038,12 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             if periods.with_status(PeriodStatus::Eligible) == 0 {
                 return "No idle gaps could be compared with it on and off.".into();
             }
-            if i.after_recommendations.delta_usd == Some(0.0) {
+            if i.after_recommendations.delta.is_some_and(|d| d.usd == 0.0) {
                 return "On and off cost the same on recorded idle gaps, so neither is cheaper."
                     .into();
             }
-            "Idle summaries or resumed sessions could not be priced.".into()
+            "Idle summaries or resumed sessions could not be priced in any session it could act on."
+                .into()
         }
         CheckResult::Speed(_)
         | CheckResult::Background(_)
@@ -3034,11 +3062,11 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     let priced: Vec<String> = scenarios
         .iter()
         .filter_map(|s| {
-            let usd = s.cost.total_usd?.to_f64();
+            let e = s.estimate?.scale(monthly(1.0, r.since, r.until));
             Some(format!(
                 "{} {}",
                 s.mode.as_str(),
-                per_month(usd, r.since, r.until)
+                approx(e.usd, e.margin, "")
             ))
         })
         .collect();
@@ -3049,21 +3077,24 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     };
     let unpriced: Vec<&str> = scenarios
         .iter()
-        .filter(|s| s.cost.total_usd.is_none())
+        .filter(|s| s.estimate.is_none())
         .map(|s| s.mode.as_str())
         .collect();
     let reasons: IndexSet<&str> = scenarios
         .iter()
         .flat_map(|s| s.cost.unknown.iter().map(String::as_str))
         .collect();
-    let Some(first) = reasons.first() else {
-        if c.after_recommendations.periods.total() == 0 {
-            return "No main-thread idle gaps in this window to compare.".into();
+    let first = match reasons.first() {
+        Some(first) if scenarios.iter().any(|s| s.savings.is_none()) => first,
+        _ => {
+            if c.after_recommendations.periods.total() == 0 {
+                return "No main-thread idle gaps in this window to compare.".into();
+            }
+            // Every mode is priced, so only a disabled instance or ownership keeps it advisory.
+            return format!(
+                "{priced}The instance is disabled or its sessions' ownership is unresolved, so no mode is recommended."
+            );
         }
-        // Every mode is priced, so only a disabled instance or ownership keeps it advisory.
-        return format!(
-            "{priced}The instance is disabled or its sessions' ownership is unresolved, so no mode is recommended."
-        );
     };
     let more = match reasons.len() - 1 {
         0 => String::new(),
@@ -3072,6 +3103,8 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     };
     let modes = match unpriced[..] {
         _ if unpriced.len() == scenarios.len() => "No mode is priced".into(),
+        // Each mode priced some session, but never one the current mode priced too.
+        [] => "No session is priced in every mode".into(),
         [mode] => format!("{mode} is unpriced"),
         _ => format!("{} are unpriced", unpriced.join(" and ")),
     };
@@ -3557,16 +3590,23 @@ fn context_sizes(report: &Report, result: &CheckResult, profile: &str) -> String
     )
 }
 
-fn coverage_note(r: &Common<'_>) -> String {
+/// How a replay's figure was extrapolated over the `items` it priced, such as "requests with
+/// measured usage", when some were not.
+fn coverage_note(r: &Common<'_>, items: &str) -> String {
     match r.coverage {
         // Percent, because one request can bill several parts.
         Some(c) if c.priced != c.total => format!(
-            ", extrapolated from the {}% of requests with measured usage to the rest, assuming they resemble each other",
+            ", extrapolated from the {}% of {items} to the rest, assuming they resemble each other",
             percent(c.priced, c.total)
         ),
         _ => String::new(),
     }
 }
+
+/// What most replays extrapolate from.
+const MEASURED: &str = "requests with measured usage";
+/// What the idle replays extrapolate from, since they pair each session's runs.
+const PRICED_SESSIONS: &str = "sessions that could be priced";
 
 /// Context pieces as one row's figure: their sum, whether it is a lower bound beside pieces
 /// nothing priced, and a sentence counting those.
@@ -4734,7 +4774,7 @@ fn summary(
                     };
                     format!(
                         "Replayed at 5m and 1h, assuming the same sessions{}; {better}. {set_in}",
-                        coverage_note(r)
+                        coverage_note(r, MEASURED)
                     )
                 }
             },
@@ -4771,7 +4811,7 @@ fn summary(
                         );
                         format!(
                             "Replayed assuming the same sessions{}{net}. {}{} {set_in}",
-                            coverage_note(r),
+                            coverage_note(r, MEASURED),
                             if smaller {
                                 "Detail lost to summaries is not measured."
                             } else {
@@ -4794,7 +4834,7 @@ fn summary(
                 match mark {
                     Mark::Change => format!(
                         "Replayed on and off, assuming the same sessions{}.{} {set_in}",
-                        coverage_note(r),
+                        coverage_note(r, PRICED_SESSIONS),
                         if on(r.recommended) { loss } else { "" }
                     ),
                     Mark::Keep if on(r.current) => format!(
@@ -4809,7 +4849,7 @@ fn summary(
             CheckResult::T3Idle(_) => match mark {
                 Mark::Change => format!(
                     "Replayed under each mode, assuming the same sessions{}.{} {set_in}",
-                    coverage_note(r),
+                    coverage_note(r, PRICED_SESSIONS),
                     if r.recommended == Some(Setting::T3Idle(crate::model::T3IdleMode::Off)) {
                         ""
                     } else {
@@ -4876,11 +4916,11 @@ fn summary(
                 text += &match mark {
                     Mark::Change => format!(
                         "Estimated where it would have run{}; its uses are not recorded. {off}.",
-                        coverage_note(r)
+                        coverage_note(r, MEASURED)
                     ),
                     Mark::Consider => format!(
                         "Estimated where it would have run{}; its uses are not recorded, so it may still cost less than {} per use. {off} to turn it off.",
-                        coverage_note(r),
+                        coverage_note(r, MEASURED),
                         about(report.max_cost_per_use_usd)
                     ),
                     Mark::Keep if r.current != Some(Setting::Toggle(true)) => {
@@ -4891,7 +4931,7 @@ fn summary(
                     ),
                     Mark::Keep => format!(
                         "Estimated where it would have run{}; its whole cost is under {}, so it costs no more than that per use. {off} to turn it off.",
-                        coverage_note(r),
+                        coverage_note(r, MEASURED),
                         about(report.max_cost_per_use_usd)
                     ),
                     _ if r.current.is_none() => format!(
@@ -6211,8 +6251,12 @@ mod tests {
                 off: cost(None, 3.0),
             },
             adjustment: OnOff::default(),
-            delta_usd: delta,
-            monthly_delta_usd: delta,
+            delta: delta.map(|usd| Estimate { usd, margin: None }),
+            coverage: Coverage {
+                priced: 1,
+                total: 1,
+            },
+            monthly_delta: delta.map(|usd| Estimate { usd, margin: None }),
             by_context: vec![ContextDelta {
                 tokens: Some(100_000),
                 periods: 2,
@@ -6227,10 +6271,19 @@ mod tests {
                 fraction: 1.0 / 3.0,
             }],
             sensitivity: IdleSensitivity {
-                closed_delta_usd: Some(0.1),
-                open_delta_usd: None,
-                larger_summary_delta_usd: Some(-2.5),
-                late_trigger_delta_usd: Some(0.3),
+                closed_delta: Some(Estimate {
+                    usd: 0.1,
+                    margin: None,
+                }),
+                open_delta: None,
+                larger_summary_delta: Some(Estimate {
+                    usd: -2.5,
+                    margin: None,
+                }),
+                late_trigger_delta: Some(Estimate {
+                    usd: 0.3,
+                    margin: None,
+                }),
                 lifetime_break_even_fraction: None,
                 reread_break_even_usd_per_resumed_summary: Some(0.02),
             },
@@ -7098,6 +7151,29 @@ mod tests {
         }
         server.description = Some("Searches the docs.".into());
         assert_eq!(piece_what(&server), "Searches the docs.");
+    }
+
+    #[test]
+    fn an_extrapolated_idle_change_names_its_priced_sessions() {
+        let mut report = synthetic();
+        let mut base = check_base(Action::Change, Some(false), Some(true));
+        base.owner = format!("{ROOT}/settings.json:idleCompaction");
+        base.evidence = Evidence::Estimated;
+        base.savings_usd = Some(30.0);
+        base.monthly_savings_usd = Some(30.0);
+        base.margin = Some(Margin::Usd(6.0));
+        base.coverage = Some(Coverage {
+            priced: 4,
+            total: 5,
+        });
+        report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
+        let text = text(&report, None, true);
+        let row = report_line(&text, "Idle compaction");
+        assert!(row.head.contains("saves ~$30/mo ± $6"), "{row:?}");
+        assert!(
+            row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 80% of sessions that could be priced to the rest, assuming they resemble each other."),
+            "{row:?}"
+        );
     }
 
     #[test]

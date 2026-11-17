@@ -488,7 +488,21 @@ Uncertain activations branch weighted context states, merging equal states after
 replacement or convergence; the expected cost does not compact a fractional
 number of tokens across price tiers. Final summaries receive their activation
 weight with no return savings. Full on/off totals retain common unknown charges;
-unchanged unknown components may cancel in the comparison only. Closed/open,
+unchanged unknown components may cancel in the comparison only.
+
+On and off, and every sensitivity run, are paired session by session, as the
+cache TTL replay pairs parts. A session is unpriced when either run is, such as
+for unknown eligibility, missing full-prefix calibration, or a window/TTL replay
+that failed for that conversation. Sessions where idle compaction could act, those
+with an eligible, unresolved or applied idle period, extrapolate the difference
+to the unpriced sessions by their mean, with the same 95% margin as the TTL
+replay; a session where it could not act changes nothing and counts exactly,
+even when its replay failed, so its zero does not dilute the estimate.
+`coverage` counts priced and total sessions. The extra re-read break-even per
+resumed summary divides the priced sessions' saving by their own resumed
+summaries. The extrapolated delta decides whenever one session it could act
+on was priced; with none, the check stays unknown. The keepalive comparison adds
+the idle alternative's margin to its own. Closed/open,
 maximum-summary and late-trigger scenarios explain uncertainty without vetoing
 the aggregate point winner. When closed/open endpoints bracket a crossing,
 a common uncertain activation fraction is replayed to find a break-even, including

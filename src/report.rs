@@ -2820,7 +2820,17 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             {
                 return "Too few recorded compactions to model a different window.".into();
             }
-            "Too many requests lack recorded usage to compare windows.".into()
+            // A replay with any priced part extrapolates to the rest, so either none was
+            // priced or the comparison itself is unsupported.
+            match c
+                .scenarios
+                .iter()
+                .find(|s| s.coverage.priced > 0)
+                .and_then(|s| s.comparison_cost.unknown.first())
+            {
+                Some(reason) => capitalize(reason) + ".",
+                None => "No request a different window would change has recorded usage to compare windows.".into(),
+            }
         }
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
@@ -5098,6 +5108,7 @@ fn summary(
             row.baseline = Some(crate::defaults::Baseline {
                 default: "on".into(),
                 saving,
+                margin: None,
             });
             rows.push(row);
         }
@@ -5322,6 +5333,7 @@ fn summary(
                 row.baseline = cap.default.map(|default| crate::defaults::Baseline {
                     default: default.into(),
                     saving: crate::defaults::Saving::NotMeasured,
+                    margin: None,
                 });
                 row.setting = cap.key.into();
                 row.evidence = format!(
@@ -6504,7 +6516,7 @@ mod tests {
         let main = report_line(&text, "Main-agent prompt cache TTL");
         assert_eq!(
             main.default,
-            "default 1h on a Claude plan, 5m on usage credits or an API key, costs up to $12/mo more"
+            "default 1h on a Claude plan, 5m on usage credits or an API key, costs up to ~$12/mo ± $1.25 more"
         );
         // A window at the model's tuned default says nothing; an explicit one names it.
         report.scan.profiles[0].compaction.tuned.insert(
@@ -6527,7 +6539,7 @@ mod tests {
         assert_eq!(
             headline.map(str::trim_start),
             Some(
-                "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to $12/mo more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
+                "Compared with defaults, your settings save about $4.22/mo, <1% of this host's spend, including an estimate for 1 feature that is now off. 1 setting whose default depends on how usage is paid costs up to ~$12/mo ± $1.25 more, 1% of this host's spend. 2 more settings differ by amounts not measured. Overlapping settings may save less."
             )
         );
         let window = report_line(&text, "Auto-compact window (claude-opus-5-5) 200k");

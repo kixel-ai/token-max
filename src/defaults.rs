@@ -3,10 +3,10 @@
 //! its own line already runs.
 
 use crate::model::{
-    Action, Bucket, CheckResult, ContextCost, Control, ControlValue, Harness, Profile, Report,
-    T3IdleMode, Ttl,
+    Action, Bucket, CheckResult, ContextCost, Control, ControlValue, Harness, Margin, Profile,
+    Report, T3IdleMode, Ttl,
 };
-use crate::report::{about, duration, monthly, tokens};
+use crate::report::{approx, duration, monthly, tokens};
 
 /// Claude Code's `BASH_MAX_TIMEOUT_MS` when unset, which `BASH_DEFAULT_TIMEOUT_MS`'s default stays under.
 const BASH_CAP_DEFAULT: i64 = 600_000;
@@ -17,6 +17,8 @@ pub struct Baseline {
     /// The default as a line shows it, such as `5m` or `on`.
     pub default: String,
     pub saving: Saving,
+    /// How far the saving may be off when extrapolated over unpriced requests, per 30 days.
+    pub margin: Option<Margin>,
 }
 
 /// What a current value saves every 30 days against its default; negative when it costs more.
@@ -37,9 +39,9 @@ impl Baseline {
     pub fn text(&self) -> String {
         let amount = |verb: &str, usd: f64| {
             if usd < 0.0 {
-                format!("costs {verb}{}/mo more", about(-usd))
+                format!("costs {verb}{} more", approx(-usd, self.margin, "/mo"))
             } else {
-                format!("saves {verb}{}/mo", about(usd))
+                format!("saves {verb}{}", approx(usd, self.margin, "/mo"))
             }
         };
         let saving = match self.saving {
@@ -59,6 +61,7 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
         Some(Baseline {
             default: default.into(),
             saving,
+            margin: None,
         })
     };
     match result {
@@ -84,6 +87,10 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
             // Bedrock, Vertex and Foundry default the main conversation to 5m too, whatever
             // sets the current value.
             let cloud = profile.is_some_and(|p| p.provider.is_some());
+            let margin = b
+                .margin
+                .filter(|_| measured)
+                .map(|m| m.scale(monthly(1.0, b.since, b.until)));
             match t.bucket {
                 Bucket::Main if !cloud => baseline(
                     "1h on a Claude plan, 5m on usage credits or an API key",
@@ -92,6 +99,7 @@ pub fn check(result: &CheckResult, profile: Option<&Profile>) -> Option<Baseline
                 _ if current == Ttl::FiveMinutes => None,
                 _ => baseline("5m", saving(Saving::Saves)),
             }
+            .map(|b| Baseline { margin, ..b })
         }
         CheckResult::Compaction(c) => {
             let current = c.base.current.filter(|_| !c.unset)?;
@@ -425,13 +433,15 @@ pub fn headline<'a>(
     struct Sum {
         settings: usize,
         usd: f64,
+        margin: Option<Margin>,
         share: f64,
         unknown_share: bool,
     }
     impl Sum {
-        fn add(&mut self, usd: f64, share: Option<f64>) {
+        fn add(&mut self, usd: f64, margin: Option<Margin>, share: Option<f64>) {
             self.settings += 1;
             self.usd += usd;
+            self.margin = Margin::plus(self.margin, margin);
             match share {
                 Some(s) => self.share += s,
                 None => self.unknown_share = true,
@@ -445,8 +455,8 @@ pub fn headline<'a>(
             } else {
                 ("save", self.usd, "")
             };
-            let amount = about(usd);
-            let about_word = if amount.starts_with('<') {
+            let amount = approx(usd, self.margin, "/mo");
+            let about_word = if amount.starts_with(['<', '~']) {
                 ""
             } else {
                 about_word
@@ -464,7 +474,7 @@ pub fn headline<'a>(
             } else {
                 String::new()
             };
-            format!("{verb}{about_word}{amount}/mo{more}{share}")
+            format!("{verb}{about_word}{amount}{more}{share}")
         }
     }
     let settings = |n: usize| format!("{n} setting{}", if n == 1 { "" } else { "s" });
@@ -482,13 +492,13 @@ pub fn headline<'a>(
         (Sum::default(), Sum::default(), Sum::default(), 0, 0);
     for b in baselines {
         match b.saving {
-            Saving::Saves(usd) => measured.add(usd, share(usd)),
+            Saving::Saves(usd) => measured.add(usd, b.margin, share(usd)),
             Saving::Estimated(usd) => {
-                measured.add(usd, share(usd));
+                measured.add(usd, b.margin, share(usd));
                 estimated += 1;
             }
-            Saving::UpTo(usd) if usd < 0.0 => up_to_more.add(usd, share(usd)),
-            Saving::UpTo(usd) => up_to.add(usd, share(usd)),
+            Saving::UpTo(usd) if usd < 0.0 => up_to_more.add(usd, b.margin, share(usd)),
+            Saving::UpTo(usd) => up_to.add(usd, b.margin, share(usd)),
             Saving::NotMeasured => unmeasured += 1,
         }
     }
@@ -549,6 +559,7 @@ mod tests {
         Baseline {
             default: "5m".into(),
             saving,
+            margin: None,
         }
     }
 

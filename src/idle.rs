@@ -2146,6 +2146,18 @@ impl<'a> Profiled<'a> {
         let unknown: Vec<String> = unknown.into_iter().cloned().collect();
         let (delta, coverage) = pair(&on);
         let delta_usd = delta.map(|d| d.usd);
+        // Priced in full, the pairs add up to the aggregate difference.
+        debug_assert!(
+            coverage.priced < coverage.total
+                || replay.blocked
+                || (delta_usd.unwrap()
+                    - difference(&on.adjustment, &off.adjustment)
+                        .total_usd
+                        .expect("every session priced")
+                        .to_f64())
+                .abs()
+                    < 1e-6
+        );
         let by_context = sizes
             .into_iter()
             .enumerate()
@@ -3187,13 +3199,12 @@ fn t3_comparison(
         )
     })
     .collect();
-    let current = profile.t3.as_ref().expect("a T3 instance").idle_mode;
-    let current = runs
+    let mode = profile.t3.as_ref().expect("a T3 instance").idle_mode;
+    let run = runs
         .iter()
-        .find(|r| r.mode == current)
-        .expect("every mode is replayed")
-        .sessions
-        .clone();
+        .find(|r| r.mode == mode)
+        .expect("every mode is replayed");
+    let (current, current_total) = (run.sessions.clone(), run.cost.total_usd);
     // Each mode is paired with the current one session by session, so a few unpriced
     // sessions are extrapolated over instead of hiding the comparison. An error that is no
     // one session's leaves every mode unpriced.
@@ -3216,6 +3227,13 @@ fn t3_comparison(
                     .map(|((current, cost), a)| (current, cost, a)),
             );
             let unblocked = |e: Option<Estimate>| e.filter(|_| !replay.blocked);
+            // Priced in full, the pairs add up to the totals' difference.
+            debug_assert!(
+                coverage.priced < coverage.total
+                    || savings
+                        .zip(current_total.zip(run.cost.total_usd))
+                        .is_none_or(|(s, (c, m))| (s.usd - (c - m).to_f64()).abs() < 1e-6)
+            );
             T3IdleScenario {
                 mode: run.mode,
                 cost: run.cost,
@@ -4115,7 +4133,8 @@ mod tests {
         // Never idle long enough to trigger, so it changes nothing and counts exactly.
         target.push(in_session(request("short", 199.0, 300_000), "short"));
         target.push(in_session(request("short-return", 200.0, 301_000), "short"));
-        let c = check(&data(target, vec![]), 202.0);
+        let scan = data(target, vec![]);
+        let c = check(&scan, 202.0);
         let a = &c.after_recommendations;
         // The calibration sample's session is idle too, never long enough to trigger.
         assert_eq!(
@@ -4138,6 +4157,13 @@ mod tests {
         assert_eq!(c.base.coverage, Some(a.coverage));
         // Each sensitivity run is paired the same way.
         assert!(a.sensitivity.open_delta.and_then(|d| d.margin).is_some());
+        // Doctor's full run recommends the 5m TTL these requests favor, which leaves idle
+        // compaction inapplicable, but the current-settings comparison keeps its margin.
+        let rendered = format_report(&report(scan, 202.0), ReportOptions::default());
+        assert!(
+            rendered.contains("default on, costs ~$1,430/mo ± $0 more"),
+            "{rendered}"
+        );
     }
 
     #[test]

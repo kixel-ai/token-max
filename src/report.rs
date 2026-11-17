@@ -2047,7 +2047,10 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 out.field("T3 baseline", &comparison.baseline);
                 for scenario in &comparison.scenarios {
                     out.cost(scenario.mode.as_str(), &scenario.cost);
-                    if scenario.coverage.priced != scenario.coverage.total {
+                    // An error no one session owns leaves nothing extrapolated to show.
+                    if scenario.coverage.priced != scenario.coverage.total
+                        && scenario.estimate.or(scenario.savings).is_some()
+                    {
                         out.field(
                             "Extrapolated over unpriced sessions",
                             &format!(
@@ -7065,6 +7068,29 @@ mod tests {
         }
         server.description = Some("Searches the docs.".into());
         assert_eq!(piece_what(&server), "Searches the docs.");
+    }
+
+    #[test]
+    fn an_extrapolated_idle_change_names_its_priced_sessions() {
+        let mut report = synthetic();
+        let mut base = check_base(Action::Change, Some(false), Some(true));
+        base.owner = format!("{ROOT}/settings.json:idleCompaction");
+        base.evidence = Evidence::Estimated;
+        base.savings_usd = Some(30.0);
+        base.monthly_savings_usd = Some(30.0);
+        base.margin = Some(Margin::Usd(6.0));
+        base.coverage = Some(Coverage {
+            priced: 4,
+            total: 5,
+        });
+        report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
+        let text = text(&report, None, true);
+        let row = report_line(&text, "Idle compaction");
+        assert!(row.head.contains("saves ~$30/mo ± $6"), "{row:?}");
+        assert!(
+            row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 80% of sessions that could be priced to the rest, assuming they resemble each other."),
+            "{row:?}"
+        );
     }
 
     #[test]

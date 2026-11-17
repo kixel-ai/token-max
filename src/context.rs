@@ -239,7 +239,11 @@ fn restore_totals(c: &mut ContextCost) {
     // A server's discovery has no switch of its own: it comes back with its server, on each
     // of the line's requests.
     if let Some(all) = c.pretended_requests {
-        for d in c.details.iter_mut().filter(|d| d.control.is_none()) {
+        for d in c
+            .details
+            .iter_mut()
+            .filter(|d| d.kind == ContextKind::McpDiscovery)
+        {
             d.pretended_requests = (all > d.requests).then_some(all);
         }
     }
@@ -3269,14 +3273,21 @@ mod tests {
             ..piece(name, requests, usd, vec![])
         };
         let discovery = ContextCost {
+            kind: ContextKind::McpDiscovery,
             pretended_requests: None,
             ..piece("discovery", 1, 1.0, vec![])
+        };
+        // A tool policy keeps off, whose switch could not be proven, stays as recorded.
+        let kept = ContextCost {
+            kind: ContextKind::McpTool,
+            pretended_requests: None,
+            ..piece("kept", 1, 1.0, vec![])
         };
         let mut server = piece(
             "docs",
             2,
-            2.0 + 3.0 + 1.0,
-            vec![tool("read", 2, 2.0), tool("write", 1, 1.0), discovery],
+            2.0 + 3.0 + 1.0 + 1.0,
+            vec![tool("read", 2, 2.0), tool("write", 1, 1.0), discovery, kept],
         );
         restore_totals(&mut server);
         let details: Vec<f64> = server
@@ -3284,8 +3295,8 @@ mod tests {
             .iter()
             .map(|d| d.estimated_usd.unwrap())
             .collect();
-        assert_eq!(details, [3.0, 3.0, 3.0]);
-        assert_eq!(server.estimated_usd, Some(3.0 + 9.0));
+        assert_eq!(details, [3.0, 3.0, 3.0, 1.0]);
+        assert_eq!(server.estimated_usd, Some(3.0 + 9.0 + 1.0));
         // A server still sent keeps its own total and gains only what its restored tool
         // would have cost.
         let mut server = piece("docs", 3, 3.0 + 3.0, vec![piece("write", 1, 1.0, vec![])]);

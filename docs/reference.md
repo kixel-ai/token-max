@@ -357,8 +357,18 @@ Every percent is of this host's spend over the window at API prices: every
 request it recorded, shared histories counted once. A cost's percent divides
 its total by the host's, since a profile's history lies within the host's
 window; a saving's compares its monthly rate with the host's. When some
-requests could not be priced, the base is the priced part, so a share can read
-high, and the line explaining the percents says so.
+requests could not be priced, each profile's spend is extrapolated from the ones
+that could, its 95% margins combined in quadrature since the profiles are
+separate samples, and the title shows it as `~$9,392 ± $4.72`. Only when a
+profile priced none of its requests does the base fall back to the priced part,
+a lower bound, so a share can read high; the line explaining the percents says so.
+
+A `~` marks any figure extrapolated over requests that could not be priced, such
+as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the
+assumption that the unpriced requests resemble the priced ones. A figure priced
+in full has neither. The walk's and `--defaults` headline's totals add their
+changes' margins, since savings from overlapping requests can err the same way.
+
 Comparisons between setting values are per 30 days at the window's rate; what
 features, context and long Bash waits cost, and how often they were used, are
 totals over the whole window.
@@ -367,8 +377,9 @@ totals over the whole window.
 such as the same sessions, and what it could not measure, such as the detail a
 smaller compaction window or idle summary loses, or what checking on a
 backgrounded Bash command costs, then the setting that changes it. A line
-without enough evidence says why there, such as two options too close to call
-for the requests that could not be priced. Unresolved current ownership gives
+without enough evidence says why there, such as no request with recorded usage
+to compare; a line extrapolated over unpriced requests names the share measured.
+Unresolved current ownership gives
 no verdict and does not cause exit 1. The list then cites its sources, and the
 evidence cards follow.
 
@@ -570,10 +581,10 @@ does not model. Claude requests without a recorded shape cannot price their
 context pieces. Codex prices rendered chronological context with a quarter-token
 per-character estimate; metadata-only pieces remain unknown.
 
-Comparisons use the requests priced under both options. Requests with missing
-usage are left out of both sides, and a recommendation is made only when they
-could not flip it, assuming none differs by more than the largest measured
-difference. The verdict then says what share of requests was measured.
+Comparisons use the requests priced under both options and extrapolate to the
+rest, assuming requests with missing usage resemble the measured ones, so a
+verdict stands whenever any request was priced. The figure carries a `~` and its
+margin of error, and `--details` says what share of requests was measured.
 
 ## What each line does
 

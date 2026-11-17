@@ -146,7 +146,7 @@ priced parts' mean: $950 measured on 95% of the parts reads ~$1,000. Unreadable
 transcript lines count as further unpriced parts. Each scenario's cost and the
 saving get their own margin of error: a 95% interval's half-width for a total
 estimated from a simple random sample of the parts, with the finite-population
-correction, from the spread of that figure's per-part values among the priced
+correction and the Student-t value for few priced parts, from the spread of that figure's per-part values among the priced
 parts. It is a statistical estimate under the assumption that unpriced parts
 resemble priced ones, not a bound, since an unpriced part has no price to bound
 it by. One priced part leaves no spread, so its margin is unknown. The sign of

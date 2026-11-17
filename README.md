@@ -19,18 +19,28 @@ without a yes. These work from the first release on; until then, see
 
 ## What it found
 
-On the maintainer's 56 days of Claude Code, replayed 2026-11-17:
+On the maintainer's last 30 days across four machines, replayed 2026-11-17:
 
-- **Subagents: a 1h prompt cache cost ~15% less than the default 5m**, ~$6,105.
-  Every Claude Code user's subagents get 5m. The setting is
+| API cost | Sessions | Potential savings |
+| --- | --- | --- |
+| ~$69,222 | 11,797 | ~$721/mo |
+
+That is 1,166,636 Claude Code, Codex and T3 Code requests at public API
+prices. The savings are what `token-max doctor`'s offered changes save
+together, 1% of the spend, mostly unused skills and tools. Two replays it
+holds back for lack of evidence are bigger:
+
+- **Subagents: a 1h prompt cache cost ~17% less than the default 5m**, ~$4,143
+  over the 30 days. Every Claude Code user's subagents get 5m. The setting is
   `subagentPromptCacheTtl` in `~/.claude/settings.json`.
-- **Main agent on an API key or usage credits: 1h cost ~36% less than 5m**,
-  ~$7,383. A plan's included usage already gets 1h; API keys and usage credits
+- **Main agent on an API key or usage credits: 1h cost ~37% less than 5m**,
+  ~$519. A plan's included usage already gets 1h; API keys and usage credits
   get 5m. The setting is `promptCacheTtl`.
 
-~ marks figures from the requests that could be priced: 95.1% for subagents,
-97.9% for the main agent. [The full results](https://github.com/kixel-ai/token-max/blob/main/docs/results.md) have the rest.
-Your sessions differ: run it to see yours.
+~ marks figures extrapolated over requests that could not be priced.
+[The full results](https://github.com/kixel-ai/token-max/blob/main/docs/results.md)
+have each machine, the margins and how this compares with T3 Code's own
+count. Your sessions differ: run it to see yours.
 
 ![token-max doctor walking through three changes on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/site/public/walk.gif)
 

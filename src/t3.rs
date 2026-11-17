@@ -69,6 +69,11 @@ pub(crate) fn profile_key(state: &str, instance: &str) -> String {
     format!("t3:{state}:{instance}")
 }
 
+/// Whether a profile id is a T3 instance's, current or removed; native ids are digests.
+fn instance_key(id: &str) -> bool {
+    id.starts_with("t3:")
+}
+
 /// Whether a line's T3 instances can take guidance: each is enabled with resolved settings,
 /// and T3 settled which profile ran each request, or left it open only between the line's
 /// own profiles, which share its owner.
@@ -1926,9 +1931,8 @@ pub(crate) fn enrich(
             .and_then(|p| p.t3.as_ref())
             .map(|t| t.state.clone())
     };
-    // The possible owners of each selected request T3 could not settle, and whether it may
-    // be a main-agent request, which the main-only controls ask.
-    let mut unsettled: HashSet<(Profiles, bool)> = HashSet::default();
+    // The possible owners of each selected request T3 could not settle.
+    let mut unsettled: HashSet<Profiles> = HashSet::default();
     let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::default();
     // How each root session's own requests resolved, which its subagents inherit: one
     // profile, or why not. Requests inside the window decide; earlier ones only fill in.
@@ -2152,7 +2156,7 @@ pub(crate) fn enrich(
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
-                        unsettled.insert((r.profiles.clone(), !subagent));
+                        unsettled.insert(r.profiles.clone());
                     }
                 }
             }
@@ -2232,19 +2236,8 @@ pub(crate) fn enrich(
         }
     }
     let open = |control: Control| unsettled_for(profiles, &unsettled, control);
-    let [
-        speed,
-        t3_idle,
-        idle,
-        background,
-        main_ttl,
-        subagent_ttl,
-        compaction,
-    ] = [
+    let [speed, main_ttl, subagent_ttl, compaction] = [
         Control::Speed,
-        Control::T3Idle,
-        Control::Idle,
-        Control::Background,
         Control::Ttl(Bucket::Main),
         Control::Ttl(Bucket::Subagent),
         Control::Compaction,
@@ -2258,23 +2251,15 @@ pub(crate) fn enrich(
                 speed.resolved = false;
             }
         }
-        if t3_idle.contains(&p.id)
-            && let Some(t3) = &mut p.t3
-        {
-            t3.ownership_resolved = false;
-            // Its directory windows would otherwise bypass the unresolved profile window.
-            p.idle_directories = None;
-        }
         if compaction.contains(&p.id) {
             p.compaction.default.comparison_unknown = Some(REASON.into());
             for c in p.compaction.models.values_mut() {
                 c.comparison_unknown = p.compaction.default.comparison_unknown.clone();
             }
-        }
-        if idle.contains(&p.id)
-            && let Some(idle) = &mut p.idle
-        {
-            idle.resolved = false;
+            if p.t3.is_some() {
+                // Its directory windows would otherwise bypass the unresolved profile window.
+                p.idle_directories = None;
+            }
         }
         for (open, ttl) in [
             (&main_ttl, &mut p.ttl.main),
@@ -2285,43 +2270,26 @@ pub(crate) fn enrich(
                 ttl.reason = REASON.into();
             }
         }
-        if background.contains(&p.id) {
-            p.background.clear();
-            p.background_directories.clear();
-            p.background_requests.clear();
-        }
     }
 }
 
-/// A control whose current value T3's unsettled ownership can leave unknown.
+/// A control whose current value T3's unsettled ownership can leave unknown. Idle
+/// compaction and the background features act for one owner alone, so their checks
+/// extrapolate over the requests T3 could not settle instead; see [`Split`].
 #[derive(Clone, Copy)]
 enum Control {
     Speed,
-    /// T3's own idle compaction mode.
-    T3Idle,
-    /// Claude Code's native idle compaction.
-    Idle,
-    Background,
     Ttl(Bucket),
     /// The compaction windows, with both TTLs their replay applies.
     Compaction,
 }
 
 impl Control {
-    /// Whether the control acts only on main-agent requests.
-    fn main_only(self) -> bool {
-        matches!(self, Control::T3Idle | Control::Idle | Control::Background)
-    }
-
     /// The owner that puts a profile on this control's line, as its check groups them, or
     /// None when no line of this control covers the profile.
     fn owner(self, p: &Profile) -> Option<String> {
-        let native = p.t3.is_none();
         match self {
             Control::Speed => p.speed.as_ref().map(|s| s.owner.clone()),
-            Control::T3Idle => p.t3.as_ref().map(|_| crate::idle::t3_owner(p)),
-            Control::Idle => native.then(|| crate::idle::native_owner(p)),
-            Control::Background => native.then(|| crate::background::owner(p)),
             Control::Ttl(bucket) => Some(crate::rows::ttl_owner(p, bucket)),
             Control::Compaction => Some(crate::rows::compaction_owner(p)),
         }
@@ -2334,7 +2302,7 @@ impl Control {
 /// that file's value whichever of them ran it.
 fn unsettled_for(
     profiles: &[Profile],
-    unsettled: &HashSet<(Profiles, bool)>,
+    unsettled: &HashSet<Profiles>,
     control: Control,
 ) -> HashSet<String> {
     let line = |id: &String| {
@@ -2344,10 +2312,7 @@ fn unsettled_for(
             .and_then(|p| Some(crate::rows::key(p, &control.owner(p)?)))
     };
     let mut open = HashSet::default();
-    for (owners, main) in unsettled {
-        if control.main_only() && !main {
-            continue;
-        }
+    for owners in unsettled {
         // A removed instance, or one no line of the control covers, is a line of its own.
         let lines: HashSet<Option<String>> = owners.iter().map(line).collect();
         if lines.len() > 1 {
@@ -2355,6 +2320,72 @@ fn unsettled_for(
         }
     }
     open
+}
+
+/// Whether T3 left a request's owner open between `line`'s profiles and others.
+pub(crate) fn unsettled(profiles: &[String], line: &[String]) -> bool {
+    profiles.iter().any(|p| line.contains(p))
+        && profiles.iter().any(|p| !line.contains(p))
+        && profiles.iter().any(|p| instance_key(p))
+}
+
+/// How a line that acts for one owner alone, such as native idle compaction, T3's idle
+/// modes or the background features, extrapolates over the main-agent requests T3 left open
+/// between its profiles and others: their sessions are left out of its comparison, and stand
+/// in at `share`, the line's part of the requests T3 settled between the same owners.
+#[derive(Debug, Default)]
+pub(crate) struct Split<'a> {
+    /// Sessions with a selected request whose owner T3 left open.
+    pub sessions: HashSet<&'a str>,
+    /// The line's share of the settled requests; None when T3 settled none of them.
+    pub share: Option<f64>,
+}
+
+impl<'a> Split<'a> {
+    /// The split of `line`'s selected main-agent requests from `since`.
+    pub fn new(requests: &'a [Request], line: &[String], since: Option<Millis>) -> Self {
+        let selected = || {
+            requests
+                .iter()
+                .filter(|r| r.agent == Agent::Main && since.is_none_or(|s| r.time >= s))
+        };
+        let mut split = Split::default();
+        let mut rivals: HashSet<&str> = HashSet::default();
+        for r in selected().filter(|r| unsettled(&r.profiles, line)) {
+            split.sessions.insert(&r.session);
+            rivals.extend(
+                r.profiles
+                    .iter()
+                    .filter(|p| !line.contains(p))
+                    .map(String::as_str),
+            );
+        }
+        if split.sessions.is_empty() {
+            return split;
+        }
+        let within = |r: &Request, set: &dyn Fn(&str) -> bool| {
+            !r.profiles.is_empty() && r.profiles.iter().all(|p| set(p))
+        };
+        let (mut own, mut other) = (0u64, 0u64);
+        for r in selected() {
+            if within(r, &|p| line.iter().any(|l| l == p)) {
+                own += 1;
+            } else if within(r, &|p| rivals.contains(p)) {
+                other += 1;
+            }
+        }
+        split.share = (own + other > 0).then(|| own as f64 / (own + other) as f64);
+        split
+    }
+
+    /// How many of `count` left-out sessions or turns stand in for the line, or None when
+    /// none can be estimated.
+    pub fn stand_ins(&self, count: u64) -> Option<u64> {
+        if count == 0 {
+            return Some(0);
+        }
+        self.share.map(|s| (s * count as f64).round() as u64)
+    }
 }
 
 #[cfg(test)]
@@ -2484,14 +2515,11 @@ mod tests {
         let mut env = make_t3_profile("env", root);
         env.ttl.subagent.owner = "T3 instance env: CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into();
         let profiles = [native, agent, windowed, env];
-        let open = |owners: &[&str], main: bool| {
+        let open = |owners: &[&str]| {
             let owners: Profiles = owners.iter().map(|o| o.to_string()).collect();
-            let unsettled = HashSet::from_iter([(owners, main)]);
+            let unsettled = HashSet::from_iter([owners]);
             let mut open: Vec<&str> = [
                 ("speed", Control::Speed),
-                ("t3 idle", Control::T3Idle),
-                ("idle", Control::Idle),
-                ("background", Control::Background),
                 ("main ttl", Control::Ttl(Bucket::Main)),
                 ("subagent ttl", Control::Ttl(Bucket::Subagent)),
                 ("compaction", Control::Compaction),
@@ -2504,33 +2532,60 @@ mod tests {
             open
         };
         // Both read the TTLs and windows from one file; only T3 sets the speed.
-        assert_eq!(open(&["native", "agent"], false), ["speed"]);
-        // Idle compaction and background features act on main requests, and each is
-        // read by one owner alone.
+        assert_eq!(open(&["native", "agent"]), ["speed"]);
+        assert_eq!(open(&["native", "windowed"]), ["compaction", "speed"]);
+        // The window replay applies the TTL the environment sets.
         assert_eq!(
-            open(&["native", "agent"], true),
-            ["background", "idle", "speed", "t3 idle"]
-        );
-        // Native-only controls cover neither instance; T3's idle line replays the TTL
-        // the environment sets.
-        assert_eq!(
-            open(&["agent", "env"], true),
-            ["compaction", "speed", "subagent ttl", "t3 idle"]
-        );
-        assert_eq!(
-            open(&["native", "windowed"], false),
-            ["compaction", "speed"]
-        );
-        assert_eq!(
-            open(&["native", "env"], false),
+            open(&["native", "env"]),
             ["compaction", "speed", "subagent ttl"]
         );
         // A removed instance's controls are gone, so nothing it could share is known.
         assert_eq!(
-            open(&["native", "gone"], false),
+            open(&["native", "gone"]),
             ["compaction", "main ttl", "speed", "subagent ttl"]
         );
     }
+
+    #[test]
+    fn a_split_stands_in_unsettled_sessions_at_the_settled_share() {
+        let native = "native".to_string();
+        let t3 = "t3:/state:agent".to_string();
+        let request = |id: &str, session: &str, profiles: &[&String]| {
+            let mut r = make_request();
+            r.id = id.into();
+            r.session = session.into();
+            r.profiles = profiles.iter().map(|p| p.to_string()).collect();
+            r
+        };
+        let mut requests = vec![
+            request("a", "native-1", &[&native]),
+            request("b", "native-2", &[&native]),
+            request("c", "native-3", &[&native]),
+            request("d", "t3-1", &[&t3]),
+            request("e", "open", &[&native, &t3]),
+        ];
+        let line = [native.clone()];
+        let split = Split::new(&requests, &line, None);
+        assert_eq!(split.sessions, HashSet::from_iter(["open"]));
+        assert_eq!(split.share, Some(0.75));
+        assert_eq!(split.stand_ins(4), Some(3));
+        // T3's line sees the same requests from its side.
+        assert_eq!(Split::new(&requests, std::slice::from_ref(&t3), None).share, Some(0.25));
+        // Requests open between native profiles alone are not T3's to settle.
+        let other = "other".to_string();
+        requests.push(request("f", "copied", &[&native, &other]));
+        assert!(
+            !Split::new(&requests, &line, None)
+                .sessions
+                .contains("copied")
+        );
+        // With nothing settled between them, no share can be estimated.
+        let open = [request("e", "open", &[&native, &t3])];
+        let split = Split::new(&open, &line, None);
+        assert_eq!((split.share, split.stand_ins(1)), (None, None));
+        assert_eq!(split.stand_ins(0), Some(0));
+    }
+
     #[test]
     fn removed_owners_stay_billed_outside_current_checks() {
         // `gone` is no longer in settings; `elsewhere` is, but under another home.
@@ -3127,7 +3182,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_history_ambiguity_clears_scoped_terminal_background_controls() {
+    fn shared_history_ambiguity_keeps_background_controls_but_prices_nothing_without_a_share() {
         let w = Workspace::new();
         let cwd = w.home.join("project");
         fs::create_dir_all(cwd.join(".git")).unwrap();
@@ -3200,12 +3255,19 @@ mod tests {
             now: timestamp(&json!("2026-11-02T00:00:00Z")).unwrap(),
             max_cost_per_use_usd: 1.0,
         });
-        assert!(checks.is_empty(), "{checks:?}");
-        for profile in &data.profiles {
-            assert!(profile.background.is_empty());
-            assert!(profile.background_directories.is_empty());
-            assert!(profile.background_requests.is_empty());
+        // The settings are still read; T3 settled none of the requests, so no share of
+        // them can be priced on the native lines.
+        assert!(!checks.is_empty());
+        for check in &checks {
+            assert_eq!(check.base.action, Action::Advisory, "{check:?}");
+            assert_eq!(check.base.savings_usd, None, "{check:?}");
         }
+        assert!(
+            data.profiles
+                .iter()
+                .filter(|p| p.t3.is_none())
+                .all(|p| !p.background_directories.is_empty())
+        );
     }
 
     #[test]

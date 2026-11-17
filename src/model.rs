@@ -1578,10 +1578,14 @@ impl Margin {
 }
 
 /// Request parts priced in both compared scenarios.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Coverage {
     pub priced: u64,
     pub total: u64,
+    /// Sessions or turns T3 could not settle between this line and another owner, left out
+    /// of the comparison; `stand_ins` of them count in `total`, at the line's settled share.
+    pub left_out: u64,
+    pub stand_ins: u64,
 }
 
 /// Shared recommendation metadata; savings are relative to the named baseline.

@@ -351,6 +351,7 @@ fn check(
             coverage: (unrecorded > 0).then_some(crate::model::Coverage {
                 priced: recorded,
                 total: mine.len() as u64,
+                ..Default::default()
             }),
             savings_usd: total,
             margin: margin.filter(|_| total.is_some()),

@@ -1045,7 +1045,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             since: Some(since), until: Some(options.now),
             window_basis: if options.since.is_some() {"explicit --since window"} else {"available transcript window"}.into(),
             baseline: if alternative > 0.0 {"idle compaction as recommended, with no pings"} else {"sessions left idle, with no pings"}.into(),
-            requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced}),
+            requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced, ..Default::default()}),
             savings_usd: savings, margin: error, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| s * 30.0 * DAY as f64 / elapsed as f64), break_even,
             assumptions: vec![
                 lifetime.as_ref().map_or_else(|| "cache lifetime unknown".into(), |l| format!("cache lifetime: {}", l.reason)),

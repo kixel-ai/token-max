@@ -807,6 +807,7 @@ fn ttl_check(
             coverage: Some(Coverage {
                 priced: paired.priced,
                 total: paired.total,
+                ..Default::default()
             }),
             savings_usd: savings,
             margin: paired.savings.and_then(|s| s.margin),

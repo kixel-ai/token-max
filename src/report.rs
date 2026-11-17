@@ -3593,14 +3593,26 @@ fn context_sizes(report: &Report, result: &CheckResult, profile: &str) -> String
 /// How a replay's figure was extrapolated over the `items` it priced, such as "requests with
 /// measured usage", when some were not.
 fn coverage_note(r: &Common<'_>, items: &str) -> String {
-    match r.coverage {
-        // Percent, because one request can bill several parts.
-        Some(c) if c.priced != c.total => format!(
+    let Some(c) = r.coverage else {
+        return String::new();
+    };
+    let mut note = String::new();
+    // Percent, because one request can bill several parts.
+    if c.priced != c.total {
+        note += &format!(
             ", extrapolated from the {}% of {items} to the rest, assuming they resemble each other",
             percent(c.priced, c.total)
-        ),
-        _ => String::new(),
+        );
     }
+    if c.left_out > 0 {
+        let unit = items.split(' ').next().unwrap_or(items);
+        note += &format!(
+            "; {} {unit} T3 could not settle between this line's owner and another count as {}, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover",
+            count(c.left_out),
+            count(c.stand_ins)
+        );
+    }
+    note
 }
 
 /// What most replays extrapolate from.
@@ -6081,6 +6093,7 @@ mod tests {
             coverage: Some(Coverage {
                 priced: 1990,
                 total: 2000,
+                ..Default::default()
             }),
             savings_usd: Some(150.0),
             margin: None,
@@ -6177,6 +6190,7 @@ mod tests {
                 coverage: Coverage {
                     priced: 3,
                     total: 4,
+                    ..Default::default()
                 },
                 added: vec![AddedCompaction {
                     request: "synthetic-added".into(),
@@ -6255,6 +6269,7 @@ mod tests {
             coverage: Coverage {
                 priced: 1,
                 total: 1,
+                ..Default::default()
             },
             monthly_delta: delta.map(|usd| Estimate { usd, margin: None }),
             by_context: vec![ContextDelta {
@@ -6501,6 +6516,7 @@ mod tests {
         ttl_sub.coverage = Some(Coverage {
             priced: 2000,
             total: 2000,
+            ..Default::default()
         });
         let mut window = check_base(Action::Advisory, Some(200_000), None);
         window.owner = format!("{ROOT}/settings.json:autoCompactWindow");
@@ -7165,13 +7181,30 @@ mod tests {
         base.coverage = Some(Coverage {
             priced: 4,
             total: 5,
+            ..Default::default()
         });
         report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
-        let text = text(&report, None, true);
-        let row = report_line(&text, "Idle compaction");
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
         assert!(row.head.contains("saves ~$30/mo ± $6"), "{row:?}");
         assert!(
             row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 80% of sessions that could be priced to the rest, assuming they resemble each other."),
+            "{row:?}"
+        );
+        // Sessions T3 could not settle stand in at the line's share, an assumption the
+        // margin leaves out.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.base.coverage = Some(Coverage {
+                priced: 4,
+                total: 6,
+                left_out: 4,
+                stand_ins: 1,
+            });
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 66.6% of sessions that could be priced to the rest, assuming they resemble each other; 4 sessions T3 could not settle between this line's owner and another count as 1, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover."),
             "{row:?}"
         );
     }

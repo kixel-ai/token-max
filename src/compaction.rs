@@ -1632,6 +1632,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                         coverage: Coverage {
                             priced: paired.priced,
                             total: paired.total,
+                            ..Default::default()
                         },
                         // Sensitivity runs report only their savings, so skip copying their detail.
                         added: if detail { added.to_vec() } else { vec![] },

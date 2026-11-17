@@ -58,17 +58,12 @@ pub struct BackgroundInput<'a> {
     pub max_cost_per_use_usd: f64,
 }
 
-/// The owner of a native profile's background line: its settings file.
-pub(crate) fn owner(p: &Profile) -> String {
-    format!("{}:background", p.settings_file)
-}
-
 /// One check per distinct owning control, charging only its applicable requests.
 pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
     let mut result = vec![];
     // These features run only in the native terminal clients, so T3's profiles have none.
     let native = input.scan.profiles.iter().filter(|p| p.t3.is_none());
-    for line in crate::rows::groups(native, owner) {
+    for line in crate::rows::groups(native, |p| format!("{}:background", p.settings_file)) {
         let profile = line.lead;
         let requests: Vec<&Request> = input
             .scan
@@ -421,6 +416,8 @@ struct Generations {
     pairs: Pairs,
     on: Sum,
     off: Sum,
+    /// Turns where it would have run that T3 could not settle to the line, left out.
+    left_out: u64,
 }
 
 /// Total the estimated (on, off) cost of each turn where the feature would have run.
@@ -428,6 +425,7 @@ fn generations(
     catalog: &Catalog,
     feature: BackgroundFeature,
     ends: &[&TurnEnd<'_>],
+    line: &[String],
 ) -> Generations {
     let mut result = Generations::default();
     for end in ends.iter().filter(|e| e.interactive) {
@@ -437,6 +435,10 @@ fn generations(
             BackgroundFeature::GoalCheckIns | BackgroundFeature::AutoRecaps => false,
         };
         if !runs {
+            continue;
+        }
+        if crate::t3::unsettled(&end.request.profiles, line) {
+            result.left_out += 1;
             continue;
         }
         let on = fork_cost(catalog, end, feature);
@@ -463,14 +465,22 @@ fn check(
     );
     let enabled = control.value == Some(true);
     let resolved = control.value.is_some();
-    let Generations { pairs, on, off } = if measurable && enabled {
-        generations(input.catalog, feature, ends)
+    let Generations {
+        pairs,
+        on,
+        off,
+        left_out,
+    } = if measurable && enabled {
+        generations(input.catalog, feature, ends, &line.ids)
     } else {
         Generations::default()
     };
-    let paired = pairs.savings(0);
+    // Turns T3 could not settle to this line stand in at its share of those it did.
+    let stand_ins =
+        crate::t3::Split::new(&input.scan.requests, &line.ids, input.since).stand_ins(left_out);
+    let paired = pairs.savings(stand_ins.unwrap_or(0));
     // Extrapolate the measured net cost to every turn where it ran, as context costs do.
-    let estimate = paired.usd();
+    let estimate = paired.usd().filter(|_| stand_ins.is_some());
     let margin = paired.savings.and_then(|s| s.margin);
     let start = input.since.or(requests.iter().map(|r| r.time).min());
     let month = |v: Option<f64>| match (v, start) {
@@ -579,6 +589,8 @@ fn check(
             coverage: (measurable && enabled).then_some(Coverage {
                 priced: paired.priced,
                 total: paired.total,
+                left_out,
+                stand_ins: stand_ins.unwrap_or(0),
             }),
             savings_usd: if measurable && enabled { estimate } else { None },
             margin: margin.filter(|_| measurable && enabled),
@@ -1083,6 +1095,47 @@ mod tests {
         assert_eq!(checks[1].base.evidence, Evidence::Guidance);
         assert_eq!(checks[1].generations, None);
         assert_eq!(checks[1].cost.total_usd, None);
+    }
+
+    #[test]
+    fn turns_t3_left_open_stand_in_at_the_line_share() {
+        let mut s = turns(&[(BackgroundFeature::PromptSuggestions, true)]);
+        let t3 = "t3:/state:agent".to_string();
+        s.requests[1].profiles = vec!["profile".into(), t3.clone()].into();
+        // T3 settled one request of four to itself, so the line's share is three in four.
+        let mut settled = response(20, 100_000);
+        settled.id = "t3".into();
+        settled.session = "t3".into();
+        settled.profiles = vec![t3].into();
+        s.requests.push(settled);
+        let c = &run(&s, 100.0)[0];
+        let coverage = c.base.coverage.unwrap();
+        assert_eq!(
+            (
+                coverage.priced,
+                coverage.total,
+                coverage.left_out,
+                coverage.stand_ins
+            ),
+            (2, 3, 1, 1)
+        );
+        let one = fork_cost(
+            &prices(),
+            &turn_ends(&s, &Group::one(&s.profiles[0]))[0],
+            BackgroundFeature::PromptSuggestions,
+        );
+        assert!(
+            (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 3.0).abs() < 1e-12
+        );
+        // With nothing settled to estimate a share from, nothing is priced.
+        for r in &mut s.requests {
+            r.profiles = vec!["profile".into(), "t3:/state:agent".into()].into();
+        }
+        let c = &run(&s, 100.0)[0];
+        assert_eq!(
+            (c.base.action, c.base.savings_usd),
+            (Action::Advisory, None)
+        );
     }
 
     #[test]

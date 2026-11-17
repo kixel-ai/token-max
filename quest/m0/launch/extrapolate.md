@@ -2,11 +2,12 @@
 
 ## Goal
 
-A replay with unpriced requests always gives a figure and a verdict: it
-extrapolates from the priced requests to all of them, prefixes the cost with
+A replay with unpriced requests always gives a figure and a verdict when at
+least one request was priced: it extrapolates from the priced requests to all of them, prefixes the cost with
 `~`, and shows the margin of error beside it, such as "~$3,270/mo ± $410".
 No line reads "Not enough evidence" because some requests could not be
-priced; a figure with no unpriced requests keeps no `~`.
+priced; a figure with no unpriced requests keeps no `~`, and one with no
+priced requests at all stays unmeasured.
 
 ## Plan
 
@@ -25,9 +26,14 @@ extrapolate or something who cares about 5%."):
 
 Recommended:
 
-- Scale the priced requests' figure by the unpriced share, and use the old
-  worst-case bound (each unpriced request bounded by the largest measured
-  difference) as the margin, so the margin shrinks as coverage grows.
+- Extrapolate by dividing the priced requests' figure by the priced share,
+  so $950 measured on 95% of requests reads ~$1,000.
+- Give each figure its own margin, measured from the extrapolated estimate:
+  each scenario's cost and each saving bound the unpriced requests by that
+  same figure's smallest and largest per-request value among the priced
+  ones. A difference bound alone can't bound a cost, since two scenarios
+  can cost the same and still be large, and a bound around the measured sum
+  rather than the estimate can miss the true value.
 - Apply it to every replay that leaves requests unpriced, not only the cache
   TTLs, and to the walk's and headline's totals, which then carry the `~`
   when any part does.

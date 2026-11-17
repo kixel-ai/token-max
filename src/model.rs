@@ -1997,6 +1997,17 @@ pub struct KeepaliveScenario {
     pub savings_usd: f64,
     /// The same, if every final period closed right after its last request.
     pub closed_savings_usd: f64,
+    /// How far each dollar figure may be off when extrapolated over unpriced sessions.
+    pub margins: KeepaliveMargins,
+}
+
+/// The margins of a keepalive scenario's dollar figures; None when every session was priced.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct KeepaliveMargins {
+    pub ping_cost: Option<Margin>,
+    pub avoided: Option<Margin>,
+    pub savings: Option<Margin>,
+    pub closed_savings: Option<Margin>,
 }
 
 /// Capped cache keepalive pings, against leaving sessions idle and idle compaction.

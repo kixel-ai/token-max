@@ -359,9 +359,11 @@ its total by the host's, since a profile's history lies within the host's
 window; a saving's compares its monthly rate with the host's. When some
 requests could not be priced, each profile's spend is extrapolated from the ones
 that could, its 95% margins combined in quadrature since the profiles are
-separate samples, and the title shows it as `~$9,392 ± $4.72`. Only when a
-profile priced none of its requests does the base fall back to the priced part,
-a lower bound, so a share can read high; the line explaining the percents says so.
+separate samples, and the title shows it as `~$9,392 ± $4.72`. An unpriced
+request is never extrapolated below what it is known to cost, such as its tokens
+beside an unknown server fee. A profile that priced none of its requests adds
+only its known part, a lower bound, shown as `~$9,392 ± $4.72 plus at least
+$120`, so a share can read high; the line explaining the percents says so.
 
 A `~` marks any figure extrapolated over requests that could not be priced, such
 as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the

@@ -914,9 +914,15 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
         .map(|(key, requests)| {
             let mut cost = Sum::new();
             let mut sample = Sample::default();
+            // What each unpriced request is known to cost, such as its tokens beside an
+            // unknown server fee, which its extrapolated cost never falls below.
+            let mut floors: Vec<f64> = vec![];
             let (mut priced_requests, mut conditional_requests) = (0, 0);
             for &r in &requests {
                 let c = price_request(catalog, r);
+                if c.total_usd.is_none() {
+                    floors.push(c.known_usd.to_f64());
+                }
                 if let Some(usd) = c.total_usd {
                     sample.add(usd);
                     priced_requests += 1;
@@ -937,7 +943,16 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
                 conditional_requests,
                 tier_sensitivity: tier_sensitivity(catalog, &requests),
                 cost: cost.cost(),
-                estimate: sample.estimate(requests.len() as u64),
+                estimate: sample.estimate(requests.len() as u64).map(|e| {
+                    // Each unpriced request costs the priced mean, or what it is known to
+                    // cost when that is more.
+                    let mean = e.usd / requests.len() as f64;
+                    let raise: f64 = floors.iter().map(|&k| (k - mean).max(0.0)).sum();
+                    crate::model::Estimate {
+                        usd: e.usd + raise,
+                        ..e
+                    }
+                }),
             }
         })
         .collect();
@@ -1627,6 +1642,28 @@ mod tests {
         let s = data(vec![make_request(), changed], vec![]);
         assert_eq!(check(&s, None, 1_200_000).base.since, Some(600_000));
         assert_eq!(check(&s, Some(0), 1_200_000).base.since, Some(0));
+    }
+
+    #[test]
+    fn spend_extrapolation_never_falls_below_what_an_unpriced_request_is_known_to_cost() {
+        let cheap = make_request();
+        // Far more tokens than the priced request, beside a server fee with no price.
+        let mut dear = with(at("dear", 600_000), u(1_000_000, 0, M5));
+        dear.server_tools = Some(crate::model::ServerTools::from_iter([(
+            "code_execution_requests".into(),
+            1,
+        )]));
+        let report = report_at(&data(vec![cheap, dear], vec![]), None, 1_200_000);
+        let group = &report.historical[0];
+        assert_eq!((group.priced_requests, group.requests), (1, 2));
+        let known = group.cost.known_usd.to_f64();
+        let estimate = group.estimate.unwrap();
+        // The priced mean alone would put it at twice the cheap request, far below the known.
+        assert!(
+            (estimate.usd - known).abs() < 1e-9,
+            "{estimate:?} vs {known}"
+        );
+        assert_eq!(estimate.margin, Some(Margin::Unmeasured));
     }
 
     #[test]

@@ -106,6 +106,16 @@ fn instant(value: Option<Millis>) -> String {
     value.map_or_else(|| "unknown".into(), iso)
 }
 
+/// `value` as [`usd`] writes it in details; when extrapolated, after a `~` and before its
+/// margin of error.
+fn approx_usd(value: f64, margin: Option<Margin>) -> String {
+    match margin {
+        None => usd(value),
+        Some(Margin::Usd(m)) => format!("~{} ± {}", usd(value), usd(m)),
+        Some(Margin::Unmeasured) => format!("~{}, margin unknown", usd(value)),
+    }
+}
+
 fn estimate(value: Option<f64>) -> String {
     value.map_or_else(|| "unknown".into(), usd)
 }
@@ -707,12 +717,13 @@ struct Out<'a> {
 /// This host's spend over the report's window, the base of every percent.
 #[derive(Clone, Copy, Debug)]
 struct Spend {
-    /// The total, extrapolated over unpriced requests; a lower bound when `complete` is false.
+    /// The total, extrapolated over unpriced requests, plus `floor`.
     usd: f64,
-    /// How far an extrapolated total may be off; None when every request was priced.
+    /// How far the extrapolated part may be off; None when nothing was extrapolated.
     margin: Option<Margin>,
-    /// False when some profile priced none of its requests, leaving nothing to extrapolate from.
-    complete: bool,
+    /// What the profiles that priced none of their requests are known to cost, a lower bound
+    /// with nothing to extrapolate from; zero when every profile priced some.
+    floor: f64,
     since: Option<Millis>,
     until: Millis,
 }
@@ -723,7 +734,7 @@ impl Spend {
         // Each profile's history is a separate sample, so their errors are independent and
         // their margins add in quadrature.
         let mut variance = 0.0;
-        let (mut extrapolated, mut unmeasured, mut complete) = (false, false, true);
+        let (mut extrapolated, mut unmeasured, mut floor) = (false, false, 0.0);
         for group in &report.historical {
             match group.estimate {
                 Some(estimate) => {
@@ -739,7 +750,7 @@ impl Spend {
                 }
                 None => {
                     usd += group.cost.known_usd.to_f64();
-                    complete = false;
+                    floor += group.cost.known_usd.to_f64();
                 }
             }
         }
@@ -750,12 +761,26 @@ impl Spend {
             } else {
                 extrapolated.then(|| Margin::Usd(variance.sqrt()))
             },
-            complete,
+            floor,
             since: report
                 .scan
                 .since
                 .or(report.scan.requests.first().map(|r| r.time)),
             until: generated_at(report),
+        }
+    }
+
+    /// The total as the title writes it, such as "~$9,392 ± $4.72", "at least $120", or
+    /// "~$9,392 ± $4.72 plus at least $120" when only some profiles priced nothing.
+    fn text(&self) -> String {
+        match (self.floor > 0.0, self.margin) {
+            (false, margin) => approx(self.usd, margin, ""),
+            (true, None) => format!("at least {}", about(self.usd)),
+            (true, margin) => format!(
+                "{} plus at least {}",
+                approx(self.usd - self.floor, margin, ""),
+                about(self.floor)
+            ),
         }
     }
 
@@ -2373,11 +2398,11 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                         "{} return pings and {} final pings cost {}; {} rescued returns; recorded work saves {}; net {}; {} if final sessions closed at once",
                         s.pings,
                         s.final_pings,
-                        usd(s.ping_cost_usd),
+                        approx_usd(s.ping_cost_usd, s.margins.ping_cost),
                         s.rescued,
-                        usd(s.avoided_usd),
-                        usd(s.savings_usd),
-                        usd(s.closed_savings_usd)
+                        approx_usd(s.avoided_usd, s.margins.avoided),
+                        approx_usd(s.savings_usd, s.margins.savings),
+                        approx_usd(s.closed_savings_usd, s.margins.closed_savings)
                     ),
                 );
             }
@@ -2410,7 +2435,9 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 out.cost("Candidate comparison", &scenario.comparison_cost);
                 out.field(
                     "Candidate net saving vs baseline",
-                    &estimate(scenario.savings_usd),
+                    &scenario
+                        .savings_usd
+                        .map_or_else(|| "unknown".into(), |v| approx_usd(v, scenario.margin)),
                 );
                 out.field(
                     "Candidate sensitivity",
@@ -4266,11 +4293,7 @@ fn summary(
     let coverage = &report.scan.coverage;
     let spend = out.spend;
     let many = report.scan.profiles.len() > 1;
-    let spent = if spend.complete {
-        approx(spend.usd, spend.margin, "")
-    } else {
-        format!("at least {}", about(spend.usd))
-    };
+    let spent = spend.text();
     let title = out.title(&match spend.since {
         Some(since) if coverage.requests > 0 => format!(
             "{} requests from {} to {} ({}), {spent} at API prices",
@@ -5515,11 +5538,11 @@ fn summary(
     }
     out.blank();
     // With a profile that priced nothing, the base is only what could be priced, so a share can read high.
-    let base = if spend.complete && spend.margin.is_some() {
+    let base = if spend.floor == 0.0 && spend.margin.is_some() {
         format!(
             "{host} spend over the window, {spent}, extrapolated from the requests that could be priced"
         )
-    } else if spend.complete {
+    } else if spend.floor == 0.0 {
         format!("{host} spend over the window, {spent}")
     } else {
         format!(
@@ -7889,7 +7912,7 @@ mod tests {
             spend: Spend {
                 usd: 0.0,
                 margin: None,
-                complete: true,
+                floor: 0.0,
                 since: None,
                 until: 0,
             },
@@ -8665,7 +8688,7 @@ mod tests {
         assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
         assert_eq!(whole_ttl.base.margin, None);
         let spend = Spend::new(&partial);
-        assert!(spend.complete && matches!(spend.margin, Some(Margin::Usd(_))));
+        assert!(spend.floor == 0.0 && matches!(spend.margin, Some(Margin::Usd(_))));
         assert_eq!(Spend::new(&whole).margin, None);
         let summary = text(&partial, None, true);
         let title = summary.lines().next().unwrap();
@@ -8721,7 +8744,7 @@ mod tests {
         let spend = Spend {
             usd: 300.0,
             margin: None,
-            complete: true,
+            floor: 0.0,
             since: Some(0),
             until: 30 * DAY as Millis,
         };
@@ -8764,6 +8787,28 @@ mod tests {
             "{summary}"
         );
         assert!(summary.lines().next().unwrap().contains(", at least $"));
+    }
+
+    #[test]
+    fn a_spend_partly_extrapolated_keeps_its_margin_beside_the_lower_bound() {
+        let spend = |usd, margin, floor| Spend {
+            usd,
+            margin,
+            floor,
+            since: None,
+            until: 0,
+        };
+        assert_eq!(spend(100.0, None, 0.0).text(), "$100");
+        assert_eq!(
+            spend(100.0, Some(Margin::Usd(4.0)), 0.0).text(),
+            "~$100 ± $4"
+        );
+        assert_eq!(spend(100.0, None, 100.0).text(), "at least $100");
+        // One profile extrapolated, another with nothing priced: never a bare "at least".
+        assert_eq!(
+            spend(130.0, Some(Margin::Usd(4.0)), 30.0).text(),
+            "~$100 ± $4 plus at least $30"
+        );
     }
 
     #[test]

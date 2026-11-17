@@ -15,9 +15,9 @@ use crate::compaction::{
 use crate::idle::{Scopes, recommended_windows};
 use crate::model::{
     Action, Agent, BillingPart, Bucket, CheckBase, CompactionCharge, CompactionCheck, Coverage,
-    EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck, KeepaliveScenario,
-    Millis, PartKind, PerBucket, Profile, Request, Scan, ScenarioWindow, StructuralEvent, Text,
-    Ttl, TtlCheck, Usage, UsageEstimate, Usd,
+    EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck, KeepaliveMargins,
+    KeepaliveScenario, Millis, PartKind, PerBucket, Profile, Request, Scan, ScenarioWindow,
+    StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sample, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
@@ -800,6 +800,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             avoided_usd: 0.0,
             savings_usd: 0.0,
             closed_savings_usd: 0.0,
+            margins: KeepaliveMargins::default(),
         })
         .collect();
     let mut unpriced = 0;
@@ -809,7 +810,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     let mut totals = vec![[Usd::ZERO; 3]; caps.len()];
     let mut final_costs: Vec<Vec<Usd>> = vec![vec![]; caps.len()];
     // Each cap's savings per priced session, weighted by its periods, to extrapolate from.
-    let mut extrapolations = vec![Sample::default(); caps.len()];
+    let mut extrapolations = vec![[Sample::default(); 4]; caps.len()];
     let mut sessions = 0;
     let mut uncertainty = vec![
         "current ping state is unknown: scheduled-task metadata does not establish a task's purpose; recorded turns remain activity, with hypothetical pings added on top".into(),
@@ -905,11 +906,18 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
                 let [avoided, ping, closed] = &mut totals[i];
                 let session_avoided = baseline.recorded - run.recorded;
                 let session_ping = run.pings.iter().chain(&run.finals).copied().sum::<Usd>();
-                extrapolations[i].add_weighted(session_avoided - session_ping, periods as f64);
+                let session_closed =
+                    baseline.recorded - run.recorded - run.pings.iter().copied().sum::<Usd>();
+                let weight = periods as f64;
+                let [ping_sample, avoided_sample, savings_sample, closed_sample] =
+                    &mut extrapolations[i];
+                ping_sample.add_weighted(session_ping, weight);
+                avoided_sample.add_weighted(session_avoided, weight);
+                savings_sample.add_weighted(session_avoided - session_ping, weight);
+                closed_sample.add_weighted(session_closed, weight);
                 *avoided += session_avoided;
                 *ping += session_ping;
-                *closed +=
-                    baseline.recorded - run.recorded - run.pings.iter().copied().sum::<Usd>();
+                *closed += session_closed;
                 let size = run.finals.len().max(final_costs[i].len());
                 final_costs[i].resize(size, Usd::ZERO);
                 for (n, cost) in run.finals.into_iter().enumerate() {
@@ -927,18 +935,25 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         1.0
     };
     let mut margins = vec![];
-    for ((s, [avoided, ping, closed]), sample) in
+    for ((s, [avoided, ping, closed]), samples) in
         scenarios.iter_mut().zip(totals).zip(&extrapolations)
     {
         s.avoided_usd = avoided.to_f64() * scale;
         s.ping_cost_usd = ping.to_f64() * scale;
         s.closed_savings_usd = closed.to_f64() * scale;
         s.savings_usd = (avoided - ping).to_f64() * scale;
-        margins.push(
+        let [ping_margin, avoided_margin, savings_margin, closed_margin] = samples.map(|sample| {
             sample
                 .estimate_weighted(sessions, (priced + unpriced) as f64)
-                .and_then(|e| e.margin),
-        );
+                .and_then(|e| e.margin)
+        });
+        s.margins = KeepaliveMargins {
+            ping_cost: ping_margin,
+            avoided: avoided_margin,
+            savings: savings_margin,
+            closed_savings: closed_margin,
+        };
+        margins.push(savings_margin);
     }
     for costs in &mut final_costs {
         for cost in costs {

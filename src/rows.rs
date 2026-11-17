@@ -135,13 +135,17 @@ pub fn window_owner(profile: &Profile) -> String {
         .join("\n")
 }
 
-/// The owner and value of a profile's cache TTL for one bucket, and whether an unset value
-/// is the billing default a change can pin rather than caching turned off. A profile whose
-/// TTL another owner sets, or that caching is off for, replays its requests differently.
+/// The owner and value of a profile's cache TTL for one bucket, whether an unset value
+/// is the billing default a change can pin rather than caching turned off, and, for the main
+/// conversation, how the profile was answered to pay. A profile whose TTL another owner sets,
+/// that caching is off for, or whose default differs replays or compares differently.
 pub fn ttl_owner(profile: &Profile, bucket: Bucket) -> String {
     let ttl = profile.ttl.get(bucket);
     let pinnable = ttl.value.is_none() && ttl.reason == crate::discovery::TTL_BILLING_UNKNOWN;
-    format!("{}\n{:?}\n{pinnable}", ttl.owner, ttl.value)
+    let billing = (bucket == Bucket::Main)
+        .then_some(profile.billing)
+        .flatten();
+    format!("{}\n{:?}\n{pinnable}\n{billing:?}", ttl.owner, ttl.value)
 }
 
 /// The owners of the compaction windows, then of both cache TTLs the window replay
@@ -212,6 +216,24 @@ mod tests {
         assert_eq!(
             ids(&groups(&[native, off], |p| ttl_owner(p, Bucket::Main))),
             [["native"], ["off"]]
+        );
+        // Roots answered to pay differently compare with different main defaults.
+        let plan = crate::model::Profile {
+            billing: Some(crate::model::Billing::Plan),
+            ..make_profile("plan", "/home/.claude")
+        };
+        let api = crate::model::Profile {
+            billing: Some(crate::model::Billing::Api),
+            ..make_profile("api", "/home/.claude")
+        };
+        let profiles = [plan, api];
+        assert_eq!(
+            ids(&groups(&profiles, |p| ttl_owner(p, Bucket::Main))),
+            [["plan"], ["api"]]
+        );
+        assert_eq!(
+            ids(&groups(&profiles, |p| ttl_owner(p, Bucket::Subagent))),
+            [vec!["plan", "api"]]
         );
     }
 

@@ -9,14 +9,14 @@ use crate::context::{
     typed_only, unreadable_lines,
 };
 use crate::controls::CAPPED_SHARED;
-use crate::discovery::TTL_BILLING_UNKNOWN;
+use crate::discovery::{TTL_API_DEFAULT, TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
-    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
-    EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, Margin, MemoryCheck,
-    Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar,
-    Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
+    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, Billing, CacheReplayEvidence,
+    CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck,
+    EffortRun, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, Margin,
+    MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming,
+    Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{Sum, TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -515,8 +515,18 @@ fn plan_note(
     match result {
         CheckResult::Ttl(_) if unset_main_ttl(result, r, out) => Some((
             "while it is unset, Claude Code gives the main conversation 1h on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it.",
-            "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets",
+            TTL_SOURCE,
         )),
+        CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main => match profile?.billing? {
+            Billing::Plan => Some((
+                "while it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m.",
+                TTL_SOURCE,
+            )),
+            Billing::Api => Some((
+                "while it is unset, Claude Code gives the main conversation 5m on an API key or usage credits, which you answered pay for this profile.",
+                TTL_SOURCE,
+            )),
+        },
         CheckResult::Speed(_) if harness == Some(Harness::Claude) => Some((
             "on a Claude plan, fast mode is paid only from usage credits, at its API rates, even with plan usage left.",
             "https://code.claude.com/docs/en/fast-mode#requirements",
@@ -544,6 +554,24 @@ fn plan_note(
         }
         _ => None,
     }
+}
+
+/// Where Claude Code documents which TTL each request gets.
+const TTL_SOURCE: &str =
+    "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets";
+
+/// How the profile pays, when a check is the main TTL left unset at the default that billing,
+/// as answered in doctor, picks. A pinned TTL's line still notes the answered default.
+fn answered_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Option<Billing> {
+    if !matches!(result, CheckResult::Ttl(t) if t.bucket == crate::model::Bucket::Main) {
+        return None;
+    }
+    let profile = out.profiles.get(r.profile)?;
+    let reason = profile.ttl.main.reason.as_str();
+    // A T3 instance whose ownership is unresolved keeps the reason but loses the value.
+    (profile.ttl.main.value.is_some() && (reason == TTL_PLAN_DEFAULT || reason == TTL_API_DEFAULT))
+        .then_some(profile.billing)
+        .flatten()
 }
 
 /// Whether a check is the main TTL left unset, which Claude Code picks by how the request is paid for.
@@ -4146,8 +4174,8 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
                 other => setting_value(other),
             }
         };
-        if let CheckResult::Compaction(c) = result
-            && c.unset
+        if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || answered_main_ttl(result, &r, &out).is_some()
         {
             current += " (default)";
         }
@@ -4580,8 +4608,8 @@ fn summary(
             other => setting_value(other),
         };
         row.value = current.clone();
-        if let CheckResult::Compaction(c) = result
-            && c.unset
+        if matches!(result, CheckResult::Compaction(c) if c.unset)
+            || answered_main_ttl(result, r, out).is_some()
         {
             row.value += " (default)";
         }
@@ -8631,6 +8659,175 @@ mod tests {
         })
         .unwrap();
         (report, file.to_string_lossy().into_owned())
+    }
+
+    /// The synthetic report with `settings`, the profile's billing answered as `billing`.
+    fn answered_report(settings: &str, billing: Billing) -> Report {
+        let w = Workspace::new();
+        w.fixture(w.claude.join("projects/project/main.jsonl"), "claude.jsonl");
+        std::fs::write(w.claude.join("settings.json"), settings).unwrap();
+        let mut options = w.scan_options();
+        let root = w.claude.to_string_lossy().into_owned();
+        options.discovery.claude_dirs = vec![root];
+        // Keyed by the root discovery reports, as doctor's question does.
+        let root = crate::discovery::discover(&options.discovery)
+            .unwrap()
+            .profiles[0]
+            .root
+            .clone();
+        options.discovery.billing.insert(root, billing);
+        analyze(AnalyzeOptions {
+            scan: scan(&options).unwrap(),
+            catalog: &prices(),
+            since: None,
+            now: instant("2026-11-02T00:00:00Z"),
+            max_cost_per_use_usd: 1.0,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_answered_billing_prices_the_main_ttl_against_its_one_default() {
+        for billing in [Billing::Plan, Billing::Api] {
+            let default = billing.main_ttl();
+            let report = answered_report("{}", billing);
+            let ttl = main_ttl(&report);
+            assert_eq!(ttl.base.current, Some(default), "{billing:?}");
+            let winner = ttl.base.recommended.unwrap();
+            let summary = text(&report, None, true);
+            let line = report_line(&summary, "Main-agent prompt cache TTL");
+            assert!(
+                line.head.starts_with(&format!(
+                    "Main-agent prompt cache TTL {} (default)",
+                    default.as_str()
+                )),
+                "{summary}"
+            );
+            assert!(!line.head.contains("up to"), "{summary}");
+            assert!(
+                line.evidence.contains("which you answered pay"),
+                "{summary}"
+            );
+            if winner == default {
+                assert_eq!(ttl.base.action, Action::Keep, "{billing:?}");
+            } else {
+                assert_eq!(ttl.base.action, Action::Change, "{billing:?}");
+                assert!(ttl.base.savings_usd.is_some(), "{billing:?}");
+            }
+            let overflow = ttl
+                .base
+                .uncertainty
+                .iter()
+                .any(|u| u == crate::discovery::TTL_PLAN_DEFAULT);
+            assert_eq!(overflow, billing == Billing::Plan);
+            // A pinned TTL is compared with the answered default alone.
+            let other = if default == Ttl::OneHour { "5m" } else { "1h" };
+            let report = answered_report(&format!(r#"{{"promptCacheTtl":"{other}"}}"#), billing);
+            let profile = &report.scan.profiles[0];
+            // Its line still notes the answered default, and a plan's overflow onto credits.
+            let summary = text(&report, None, true);
+            let line = report_line(&summary, "Main-agent prompt cache TTL");
+            assert!(
+                line.evidence.contains("which you answered pay"),
+                "{summary}"
+            );
+            assert_eq!(
+                line.evidence.contains("paid with usage credits and get 5m"),
+                billing == Billing::Plan,
+                "{summary}"
+            );
+            let baseline =
+                crate::defaults::check(&CheckResult::Ttl(main_ttl(&report).clone()), Some(profile))
+                    .unwrap();
+            assert_eq!(baseline.default, default.as_str(), "{billing:?}");
+            assert!(
+                !matches!(baseline.saving, crate::defaults::Saving::UpTo(_)),
+                "{billing:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answered_billing_line_keeps_an_extrapolated_figures_margin() {
+        // Three cache writes ten minutes apart, one on a model with no public price, so the
+        // TTL replay extrapolates over it, as in unpriced_requests_are_extrapolated_over.
+        let line = |n: u32, minute: u32, model: &str, tokens: u32| {
+            format!(
+                r#"{{"type":"assistant","sessionId":"session-b","timestamp":"2026-11-01T01:{minute:02}:00Z","version":"2.1.314","entrypoint":"sdk-ts","message":{{"id":"message-b{n}","model":"{model}","usage":{{"input_tokens":0,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":{tokens},"cache_creation":{{"ephemeral_5m_input_tokens":{tokens},"ephemeral_1h_input_tokens":0}},"service_tier":"standard","speed":"standard","inference_geo":"global","server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}}}}}}}}"#
+            )
+        };
+        for (settings, billing) in [
+            ("{}", Billing::Api),
+            (r#"{"promptCacheTtl":"5m"}"#, Billing::Plan),
+        ] {
+            let w = Workspace::new();
+            let file = w.claude.join("projects/project/main.jsonl");
+            w.fixture(&file, "claude.jsonl");
+            let mut text_ = std::fs::read_to_string(&file).unwrap();
+            for (n, minute, model, tokens) in [
+                (1, 0, "claude-opus-5-5", 2000),
+                (2, 10, "claude-opus-5-5", 2400),
+                (3, 20, "private-internal", 2800),
+            ] {
+                text_ += &line(n, minute, model, tokens);
+                text_ += "\n";
+            }
+            std::fs::write(&file, text_).unwrap();
+            std::fs::write(w.claude.join("settings.json"), settings).unwrap();
+            let mut options = w.scan_options();
+            options.discovery.claude_dirs = vec![w.claude.to_string_lossy().into_owned()];
+            let root = crate::discovery::discover(&options.discovery)
+                .unwrap()
+                .profiles[0]
+                .root
+                .clone();
+            options.discovery.billing.insert(root, billing);
+            let report = analyze(AnalyzeOptions {
+                scan: scan(&options).unwrap(),
+                catalog: &prices(),
+                since: None,
+                now: instant("2026-11-02T00:00:00Z"),
+                max_cost_per_use_usd: 1.0,
+            })
+            .unwrap();
+            let ttl = main_ttl(&report);
+            assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
+            // 5m, unset at the API default or pinned under a plan, against a 1h winner.
+            assert_eq!(ttl.base.current, Some(Ttl::FiveMinutes), "{billing:?}");
+            assert_eq!(ttl.base.recommended, Some(Ttl::OneHour), "{billing:?}");
+            let summary = text(&report, None, true);
+            let row = report_line(&summary, "Main-agent prompt cache TTL");
+            assert!(
+                row.head.contains("~$") && row.head.contains(" ± "),
+                "{summary}"
+            );
+            let baseline = crate::defaults::check(
+                &CheckResult::Ttl(ttl.clone()),
+                Some(&report.scan.profiles[0]),
+            );
+            match billing {
+                // Unset at its answered default, so nothing to compare.
+                Billing::Api => assert_eq!(baseline, None),
+                Billing::Plan => {
+                    let note = baseline.unwrap().text();
+                    assert!(
+                        note.starts_with("default 1h, costs ~$") && note.contains(" ± "),
+                        "{note}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn main_ttl(report: &Report) -> &TtlCheck {
+        report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t),
+                _ => None,
+            })
+            .unwrap()
     }
 
     #[test]

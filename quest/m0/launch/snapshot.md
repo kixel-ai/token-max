@@ -37,7 +37,3 @@ days back; check the summed spend against T3 Code's $60,391.31 over the same
 30 days and explain any gap in `docs/results.md`; keep private skill, MCP
 server and path names out, and redeploy the site from `site/` once it merges
 (wrangler is logged in on fedora).
-
-## Required
-
-- [Ask whether a Claude profile is on a plan or API billing](/quest/m0/launch/ask-billing.md) - the main-agent TTL priced against how each profile pays

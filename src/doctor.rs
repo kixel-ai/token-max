@@ -16,8 +16,8 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Margin, Profile, Report,
-    Verdict,
+    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Margin,
+    Profile, Report, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
@@ -1728,6 +1728,53 @@ fn answer(
     }
 }
 
+/// Ask how each Claude profile at `roots` pays, before the report, so its main conversation's
+/// cache TTL is priced against the one default that applies. A skip leaves a profile naming
+/// both defaults, and end of input skips the rest. Nothing is stored: the next run asks again.
+pub fn ask_billing(
+    roots: &[String],
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<IndexMap<String, Billing>> {
+    let mut answers = IndexMap::default();
+    if roots.is_empty() {
+        return Ok(answers);
+    }
+    write!(
+        output,
+        "{}{}",
+        style.line("Claude Code caches the main conversation for 1h on a Claude plan and 5m on an API key or usage credits. Which pays can't be read from the transcripts, so say which to price each profile against its own default."),
+        style.dim("Nothing is saved; the next run asks again."),
+    )?;
+    'roots: for root in roots {
+        let question = format!("How is {} paid for?", home_in(root, style.home.as_deref()));
+        let prompt = style.ask(&question, "[p]lan, [a]PI key or usage credits, [s]kip");
+        loop {
+            write!(output, "{prompt}")?;
+            output.flush()?;
+            let mut line = String::new();
+            if input.read_line(&mut line)? == 0 {
+                writeln!(output)?;
+                break 'roots;
+            }
+            let billing = match line.trim().to_ascii_lowercase().as_str() {
+                "p" | "plan" => Some(Billing::Plan),
+                "a" | "api" | "api key" | "usage credits" => Some(Billing::Api),
+                "s" | "skip" => None,
+                _ => continue,
+            };
+            if let Some(billing) = billing {
+                answers.insert(root.clone(), billing);
+            }
+            break;
+        }
+    }
+    // The report follows as its own section.
+    writeln!(output)?;
+    Ok(answers)
+}
+
 /// What the walk has accepted so far.
 #[derive(Default)]
 struct Selection {
@@ -3187,6 +3234,43 @@ mod tests {
         )
         .unwrap();
         (plan, String::from_utf8(printed).unwrap())
+    }
+
+    #[test]
+    fn billing_is_asked_per_root_until_answered_and_end_of_input_skips_the_rest() {
+        let w = Workspace::new();
+        let home = w.home.to_string_lossy().into_owned();
+        let roots: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| format!("{home}/.claude-{n}"))
+            .collect();
+        let mut printed = vec![];
+        let answers = ask_billing(
+            &roots,
+            &style(&w),
+            &mut "maybe\nP\nskip\napi\n".as_bytes(),
+            &mut printed,
+        )
+        .unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        assert_eq!(
+            answers.into_iter().collect::<Vec<_>>(),
+            [
+                (roots[0].clone(), Billing::Plan),
+                (roots[2].clone(), Billing::Api)
+            ]
+        );
+        // The unrecognized answer asks the same profile again, shown from home.
+        assert_eq!(printed.matches("How is ~/.claude-a paid for?").count(), 2);
+        let answers = ask_billing(&roots, &style(&w), &mut "a\n".as_bytes(), &mut vec![]).unwrap();
+        assert_eq!(answers.len(), 1);
+        let mut printed = vec![];
+        assert!(
+            ask_billing(&[], &style(&w), &mut "p\n".as_bytes(), &mut printed)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(printed.is_empty(), "nothing to ask prints nothing");
     }
 
     #[test]

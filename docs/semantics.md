@@ -238,7 +238,9 @@ enable-1h, then defaults. Shell overrides apply only to the active config root;
 each profile's settings environment is read separately. Whether a main request
 is within a Claude plan's included usage or paid by usage credits is not
 inferred from credential files, so its unset default is unknown, and the line
-names both defaults. A decided replay still recommends setting the winner: it
+names both defaults, unless `doctor` asked how the profile pays
+(`DiscoveryOptions.billing`): a plan answer resolves the unset main TTL to 1h
+and an API answer to 5m, as a current value whose reason says it was answered. A decided replay still recommends setting the winner: it
 matches one default and replaces the other, so `savings_usd` stays null and the
 line shows the replayed gap as an upper bound. An API key in the environment does not prove that Claude
 Code accepted API billing. User settings and the platform's system managed JSON

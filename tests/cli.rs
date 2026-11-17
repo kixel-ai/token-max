@@ -206,6 +206,7 @@ fn analysis(
         codex_system_config_file: text(&w.home.join("system.toml")),
         codex_requirements_file: text(&w.home.join("requirements.toml")),
         defaults: false,
+        billing: Default::default(),
     };
     select(&mut discovery);
     let catalog = load_prices(&PriceOptions {
@@ -835,6 +836,7 @@ fn explicit_windows_match_the_library_replay() {
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
                 defaults: false,
+                billing: Default::default(),
             },
             since: Some(since),
         })
@@ -1290,8 +1292,8 @@ mod unix {
         // Answers wait in the terminal until each prompt reads one; the terminal stays
         // open until the child exits, as a person's would.
         let mut keyboard = std::fs::File::from(master);
-        // Yes to the TTL, no to auto memory, then yes to writing it.
-        keyboard.write_all(b"y\nn\ny\n").unwrap();
+        // A plan pays, then yes to the TTL, no to auto memory, then yes to writing it.
+        keyboard.write_all(b"p\ny\nn\ny\n").unwrap();
         let status = child.wait().unwrap().code().unwrap();
         let (stdout, stderr) = (out.join().unwrap(), err.join().unwrap());
         assert_eq!(status, 0, "{stderr}");
@@ -1305,10 +1307,16 @@ mod unix {
                 .find(text)
                 .unwrap_or_else(|| panic!("{text:?} in {stdout}"))
         };
-        // The header names what was read, then the walk asks its questions.
+        // How the profile pays is asked before the scan, then the header names what was
+        // read, then the walk asks its questions.
         assert!(
-            stdout.starts_with("token-max  2 requests from "),
+            stdout.starts_with("  Claude Code caches the main conversation for 1h on a Claude"),
             "{stdout}"
+        );
+        // The answer echoes on the input terminal, so a separate stdout shows only the
+        // blank line that ends the questions.
+        at(
+            "\n  How is ~/.claude paid for? [p]lan, [a]PI key or usage credits, [s]kip: \ntoken-max  2 requests from ",
         );
         let headline = at(
             "\n\n  2 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n",
@@ -1329,7 +1337,7 @@ mod unix {
             "{entry}"
         );
         assert!(
-            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
+            entry.ends_with(" days. Replayed at 5m and 1h, assuming the same sessions; 1h costs less. Official: while it is unset, Claude Code gives the main conversation 1h on a Claude plan, which you answered pays for this profile; requests past the plan's included usage are paid with usage credits and get 5m. Accept? [y]es, [n]o, [q]uit: Accepted so far: about $N/mo, 13% of this host's spend."),
             "{entry}"
         );
         assert!(

@@ -14,9 +14,9 @@ use crate::controls::{
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Control, ControlValue, Harness, IdleControl, Location, MemoryControl,
-    PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl,
-    Ttl, TtlControl,
+    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, Location,
+    MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar,
+    Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -38,6 +38,8 @@ pub struct DiscoveryOptions {
     /// Read every user, project and local settings file as unset, as `doctor --defaults`
     /// shows the report; managed and system policy still apply.
     pub defaults: bool,
+    /// How each Claude profile pays, by its canonical root, as doctor asked.
+    pub billing: IndexMap<String, Billing>,
 }
 
 impl DiscoveryOptions {
@@ -62,6 +64,7 @@ impl DiscoveryOptions {
             codex_system_config_file: "/etc/codex/config.toml".into(),
             codex_requirements_file: "/etc/codex/requirements.toml".into(),
             defaults: false,
+            billing: IndexMap::default(),
         })
     }
 
@@ -538,6 +541,8 @@ struct TtlSources<'a> {
     managed_file: &'a str,
     /// Settings in precedence order; defaults to the merged config then the managed file.
     scopes: Option<&'a [SettingsScope<'a>]>,
+    /// How the profile pays, which picks the main conversation's default.
+    billing: Option<Billing>,
 }
 
 fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
@@ -548,6 +553,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         managed,
         managed_file,
         scopes,
+        billing,
     } = *sources;
     let default_scopes = [
         SettingsScope { config, file },
@@ -612,6 +618,12 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
         {
             value = Some(Ttl::FiveMinutes);
             reason = "explicit cloud-provider billing default";
+        } else if let Some(billing) = billing {
+            value = Some(billing.main_ttl());
+            reason = match billing {
+                Billing::Plan => TTL_PLAN_DEFAULT,
+                Billing::Api => TTL_API_DEFAULT,
+            };
         } else {
             reason = TTL_BILLING_UNKNOWN;
         }
@@ -627,8 +639,46 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
     }
 }
 
+/// An answered billing default holds only where every recorded project defaults the same way.
+/// A project that sends its requests to a cloud provider defaults the main conversation to 5m
+/// under the same unset setting as a plan's 1h, so the profile's main default is unknown
+/// again, as without an answer, and pinning the replay's winner covers both.
+fn unanswer_mixed_defaults(profile: &mut Profile) {
+    let answered = |t: &TtlControl| t.reason == TTL_PLAN_DEFAULT || t.reason == TTL_API_DEFAULT;
+    let main = &profile.ttl.main;
+    if !answered(main) {
+        return;
+    }
+    let mixed = profile
+        .idle_directories
+        .iter()
+        .flatten()
+        .filter_map(|(_, c)| c.ttl.as_ref())
+        .any(|t| t.main.owner == main.owner && t.main.value != main.value);
+    if !mixed {
+        return;
+    }
+    let unknown = |t: &mut TtlControl| {
+        if answered(t) {
+            t.value = None;
+            t.reason = TTL_BILLING_UNKNOWN.into();
+        }
+    };
+    unknown(&mut profile.ttl.main);
+    for control in profile.idle_directories.iter_mut().flatten() {
+        if let Some(ttl) = &mut control.1.ttl {
+            unknown(&mut ttl.main);
+        }
+    }
+    profile.billing = None;
+}
+
 /// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
 pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
+/// An unset main-conversation TTL on a profile answered as paid by a Claude plan.
+pub const TTL_PLAN_DEFAULT: &str = "Claude plan default, as answered; requests past the plan's included usage are paid with usage credits and get 5m";
+/// An unset main-conversation TTL on a profile answered as paid by an API key or usage credits.
+pub const TTL_API_DEFAULT: &str = "API key or usage credits default, as answered";
 
 /// Codex's byte budget for the AGENTS.md chain it loads.
 const AGENTS_BUDGET: &str = "project_doc_max_bytes";
@@ -1067,6 +1117,7 @@ pub fn discover_claude_controls(
                 managed: &managed,
                 managed_file,
                 scopes: Some(&scopes),
+                billing: profile.billing,
             }));
             idle.compaction = Some(compaction_controls(&CompactionSources {
                 harness: Harness::Claude,
@@ -1085,6 +1136,7 @@ pub fn discover_claude_controls(
         }
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
+        unanswer_mixed_defaults(profile);
         profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
@@ -2126,6 +2178,10 @@ pub(crate) fn profile(
             Err(_) => return Err(error("cannot inspect transcript directory", &path, 0)),
         }
     }
+    // Only a Claude profile on the Anthropic API has a billing-dependent default.
+    let billing = (claude && provider.is_none())
+        .then(|| options.billing.get(&canonical).copied())
+        .flatten();
     let ttl = ttl_controls(&TtlSources {
         config,
         env: local_env,
@@ -2133,6 +2189,7 @@ pub(crate) fn profile(
         managed: &managed,
         managed_file,
         scopes: None,
+        billing,
     });
     let mut settings = structural_settings(config);
     let mut instruction_budget_file = None;
@@ -2211,6 +2268,7 @@ pub(crate) fn profile(
         settings_file,
         ttl,
         provider,
+        billing,
         settings,
         mcp_servers,
         compaction,
@@ -2560,6 +2618,7 @@ mod tests {
             codex_system_config_file: text(&w.home.join("system.toml")),
             codex_requirements_file: text(&w.home.join("requirements.toml")),
             defaults: false,
+            billing: IndexMap::default(),
         }
     }
 
@@ -3308,6 +3367,41 @@ mod tests {
 
     // Ported from the discovery half of reader.test.ts: "a custom ANTHROPIC_BASE_URL proxy is priced as the public Anthropic API".
     #[test]
+    fn an_answered_billing_sets_only_an_unset_main_ttl_on_the_anthropic_api() {
+        let w = Workspace::new();
+        let answered = |settings: &str, billing| {
+            write(w.claude.join("settings.json"), settings);
+            let mut o = options(&w);
+            o.billing.insert(canonical(&w.claude), billing);
+            claude(&discover(&o).unwrap()).clone()
+        };
+        let p = answered("{}", Billing::Plan);
+        assert_eq!(p.billing, Some(Billing::Plan));
+        assert_eq!(p.ttl.main.value, Some(Ttl::OneHour));
+        assert_eq!(p.ttl.main.reason, TTL_PLAN_DEFAULT);
+        assert_eq!(p.ttl.subagent.value, Some(Ttl::FiveMinutes));
+        let p = answered("{}", Billing::Api);
+        assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
+        assert_eq!(p.ttl.main.reason, TTL_API_DEFAULT);
+        // A setting outranks the default, and the answer still picks the default compared.
+        let p = answered(r#"{"promptCacheTtl":"5m"}"#, Billing::Plan);
+        assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
+        assert_eq!(p.ttl.main.reason, "current user/managed setting");
+        assert_eq!(p.billing, Some(Billing::Plan));
+        // A cloud provider bills per token, whatever was answered.
+        let p = answered(r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#, Billing::Plan);
+        assert_eq!(p.billing, None);
+        assert_eq!(p.ttl.main.reason, "explicit cloud-provider billing default");
+        // An answer for another root changes nothing.
+        write(w.claude.join("settings.json"), "{}");
+        let mut o = options(&w);
+        o.billing.insert("/elsewhere".into(), Billing::Plan);
+        let p = claude(&discover(&o).unwrap()).clone();
+        assert_eq!((p.billing, p.ttl.main.value), (None, None));
+        assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
+    }
+
+    #[test]
     fn custom_base_urls_keep_the_public_provider_while_cloud_flags_set_one() {
         let w = Workspace::new();
         write(
@@ -3922,6 +4016,53 @@ mod tests {
             p.background_directories[&*gone.cwd.clone().unwrap()][0]
                 .value
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_project_on_a_cloud_provider_leaves_an_answered_plan_default_unknown() {
+        let w = Workspace::new();
+        let (plain, bedrock) = (w.home.join("plain"), w.home.join("bedrock"));
+        for project in [&plain, &bedrock] {
+            fs::create_dir_all(project.join(".git")).unwrap();
+        }
+        write(w.claude.join("settings.json"), "{}");
+        write(
+            bedrock.join(".claude/settings.json"),
+            r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#,
+        );
+        let resolve = |billing, projects: &[&Path]| {
+            let mut o = options(&w);
+            o.billing.insert(canonical(&w.claude), billing);
+            let mut data = discover(&o).unwrap();
+            let requests: Vec<Request> = projects
+                .iter()
+                .map(|p| request(claude(&data), Some(p)))
+                .collect();
+            discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
+            claude(&data).clone()
+        };
+        // Only plain projects: the plan's 1h holds everywhere.
+        let p = resolve(Billing::Plan, &[&plain]);
+        assert_eq!(
+            (p.billing, p.ttl.main.value),
+            (Some(Billing::Plan), Some(Ttl::OneHour))
+        );
+        // A Bedrock project defaults to 5m under the same unset setting, so neither default
+        // is the profile's, as without an answer.
+        let p = resolve(Billing::Plan, &[&plain, &bedrock]);
+        assert_eq!((p.billing, p.ttl.main.value), (None, None));
+        assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
+        let directories = p.idle_directories.as_ref().unwrap();
+        let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.clone();
+        assert_eq!(main(&plain).value, None);
+        assert_eq!(main(&plain).reason, TTL_BILLING_UNKNOWN);
+        assert_eq!(main(&bedrock).value, Some(Ttl::FiveMinutes));
+        // An API answer's 5m matches Bedrock's, so it holds.
+        let p = resolve(Billing::Api, &[&plain, &bedrock]);
+        assert_eq!(
+            (p.billing, p.ttl.main.value),
+            (Some(Billing::Api), Some(Ttl::FiveMinutes))
         );
     }
 

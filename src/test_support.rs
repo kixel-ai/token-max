@@ -185,6 +185,7 @@ impl Workspace {
                 codex_system_config_file: text(self.home.join("system.toml")),
                 codex_requirements_file: text(self.home.join("requirements.toml")),
                 defaults: false,
+                billing: Default::default(),
             },
             since: None,
         }
@@ -253,6 +254,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
             subagent: ttl(),
         },
         provider: None,
+        billing: None,
         settings: IndexMap::default(),
         mcp_servers: vec![],
         compaction: CompactionControls {

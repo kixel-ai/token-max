@@ -450,6 +450,10 @@ documented default. Managed and system policy (`managed-settings.json`,
 `/etc/codex/config.toml`, `/etc/codex/requirements.toml`) still apply, since a
 user can't change them. What says where each CLI keeps its files stays:
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `T3CODE_HOME` and each T3 instance's home.
+So does where its requests went, which sets their prices:
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and
+`CLAUDE_CODE_USE_FOUNDRY`, from the shell or a settings file's `env`, and
+Codex's `model_provider` and `model_providers`.
 Each MCP server a Codex file declares stays declared, without its `enabled`,
 `enabled_tools` or `disabled_tools`, since a server is something installed
 rather than a setting's value. A T3 thread's model selection is T3's default,

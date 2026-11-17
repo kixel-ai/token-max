@@ -258,7 +258,10 @@ pub(crate) fn covers(switch: &Control, control: &Control) -> bool {
             ControlValue::Text(rule),
             ["projects", _, "disabledMcpServers"],
             ControlValue::Text(name),
-        ) => denied_server(rule) == Some(&crate::mcp::tool_name(name)),
+        ) => {
+            let server = format!("mcp__{}", crate::mcp::tool_name(name));
+            *rule == server || *rule == format!("{server}__*")
+        }
         (["mcp_servers", id, "enabled"], _, ["mcp_servers", tool_id, "disabled_tools"], _) => {
             id == tool_id
         }
@@ -572,6 +575,9 @@ mod tests {
         assert_eq!(switch_name(&deny("mcp__docs__*")), "MCP server docs");
         assert_eq!(switch_name(&toggle("my docs")), "MCP server my docs");
         assert!(covers(&toggle("my docs"), &deny("mcp__my_docs__read")));
+        // A server name may hold `__` itself.
+        assert!(covers(&deny("mcp__docs__api__*"), &toggle("docs__api")));
+        assert!(covers(&deny("mcp__docs__api"), &toggle("docs__api")));
     }
 
     #[test]

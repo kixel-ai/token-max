@@ -66,14 +66,14 @@ impl DiscoveryOptions {
     }
 
     /// Pretend the settings files and the shell's setting variables away, keeping the
-    /// variables that only say where each CLI keeps its files.
+    /// variables that only say where each CLI keeps its files or sends its requests.
     pub fn pretend_defaults(&mut self) {
         self.defaults = true;
         self.env.retain(|k, _| {
             matches!(
                 k.as_str(),
                 "CLAUDE_CONFIG_DIR" | "CODEX_HOME" | "T3CODE_HOME"
-            )
+            ) || CLAUDE_PROVIDERS.contains(&k.as_str())
         });
     }
 
@@ -192,7 +192,8 @@ impl DiscoveryOptions {
 
     /// Read a settings file as this run sees it. Under `--defaults` a user, project or
     /// local file sets nothing, except that a Codex file keeps the MCP servers it
-    /// declares, each on: a server is something installed, not a setting's value.
+    /// declares, each on, since a server is something installed, not a setting's value,
+    /// and either CLI's file keeps the provider its requests went to.
     pub(crate) fn settings(
         &self,
         file: &str,
@@ -201,10 +202,21 @@ impl DiscoveryOptions {
         if !self.defaults || self.policy(file) {
             return settings(file, harness);
         }
+        let mut real = settings(file, harness)?;
         let mut pretended = Map::new();
-        if harness == Harness::Codex
-            && let Some(Value::Object(mut servers)) = settings(file, harness)?.remove("mcp_servers")
-        {
+        if harness == Harness::Claude {
+            // Which cloud the requests went to, and so how they were billed.
+            let env: Map<String, Value> = members(real.get("env"))
+                .iter()
+                .filter(|(k, _)| CLAUDE_PROVIDERS.contains(&k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            if !env.is_empty() {
+                pretended.insert("env".into(), Value::Object(env));
+            }
+            return Ok(pretended);
+        }
+        if let Some(Value::Object(mut servers)) = real.remove("mcp_servers") {
             for server in servers.values_mut() {
                 if let Value::Object(server) = server {
                     for key in ["enabled", "enabled_tools", "disabled_tools"] {
@@ -214,9 +226,22 @@ impl DiscoveryOptions {
             }
             pretended.insert("mcp_servers".into(), Value::Object(servers));
         }
+        for key in ["model_provider", "model_providers"] {
+            if let Some(value) = real.remove(key) {
+                pretended.insert(key.into(), value);
+            }
+        }
         Ok(pretended)
     }
 }
+
+/// The variables that send Claude Code's requests to a cloud provider, which say how they
+/// were billed rather than set anything, so `--defaults` keeps them.
+pub(crate) const CLAUDE_PROVIDERS: [&str; 3] = [
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+];
 
 /// Every root considered, the selected profiles, and each history file's frozen identity and length.
 #[derive(Clone, Debug, PartialEq)]
@@ -960,7 +985,9 @@ pub fn discover_claude_controls(
                 (&local_file, &local),
             ] {
                 // A session in the home directory reads the user's own file as its project's.
+                // Under --defaults a project file sets no switch.
                 if !config.is_empty()
+                    && !options.defaults
                     && !same_file(file, &profile.settings_file)
                     && !outranking.contains(file)
                 {
@@ -2838,6 +2865,27 @@ mod tests {
             codex.speed.as_ref().unwrap().value.as_deref(),
             Some("standard")
         );
+        // Where requests went decides how they are priced, from the shell or the file.
+        for (shell, file, provider) in [
+            (Some("CLAUDE_CODE_USE_BEDROCK"), "{}", "amazon-bedrock"),
+            (
+                None,
+                r#"{"env":{"CLAUDE_CODE_USE_VERTEX":"1","CLAUDE_CODE_PROMPT_CACHE_TTL":"1h"}}"#,
+                "google-vertex-anthropic",
+            ),
+        ] {
+            write(w.claude.join("settings.json"), file);
+            let mut o = options(&w);
+            o.env = env(&[("CLAUDE_CONFIG_DIR", &text(&w.claude))]);
+            if let Some(variable) = shell {
+                o.env.insert(variable.into(), "1".into());
+            }
+            o.pretend_defaults();
+            let data = discover(&o).unwrap();
+            let profile = super::tests::claude(&data);
+            assert_eq!(profile.provider.as_deref(), Some(provider));
+            assert_eq!(profile.ttl.main.value, Some(Ttl::FiveMinutes), "{provider}");
+        }
     }
 
     #[test]

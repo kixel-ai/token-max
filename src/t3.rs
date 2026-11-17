@@ -614,10 +614,11 @@ pub(crate) fn discover(
                 instance.enabled = None;
                 instance.config_enabled = None;
                 instance.custom_models.clear();
-                // Only the variables that choose its home stay.
-                instance
-                    .environment
-                    .retain(|e| matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME"));
+                // Only the variables that choose its home or its provider stay.
+                instance.environment.retain(|e| {
+                    matches!(e.name.as_str(), "CLAUDE_CONFIG_DIR" | "CODEX_HOME")
+                        || crate::discovery::CLAUDE_PROVIDERS.contains(&e.name.as_str())
+                });
             }
         }
         let global = settings

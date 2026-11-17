@@ -193,8 +193,8 @@ fn check(
         .sum::<Option<Usd>>()
         .filter(|_| !rows.is_empty() || (unrecorded == 0 && !never_on));
     // Under --defaults memory is on, though the settings files turned it off for some
-    // recorded requests: what it cost while main-agent requests carried it stands for all
-    // of them.
+    // recorded requests: what it cost while main-agent requests carried it, the files read
+    // back included, since a request without memory reads none, stands for all of them.
     let scaled = (scan.defaults
         && profile.harness == Harness::Claude
         && current == Some(true)
@@ -253,7 +253,7 @@ fn check(
     }
     if let Some((carried, recorded)) = scaled {
         uncertainty.push(format!(
-            "a settings file turns auto memory off, so {carried} of {recorded} recorded main-agent requests carried it; its loaded context is scaled from those to all of them, and its reads and writes are theirs"
+            "a settings file turns auto memory off, so {carried} of {recorded} recorded main-agent requests carried it; its loaded context and the files read back are scaled from those to all of them, and its writes are theirs"
         ));
     }
     if never_on {

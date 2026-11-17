@@ -5044,13 +5044,18 @@ fn summary(
     let mut seen_on: Vec<(String, &crate::model::Control)> = vec![];
     for p in &report.scan.profiles {
         for (file, control) in &p.pretended_on {
-            let carried = setting_rows(&report.context).any(|c| {
-                c.harness == p.harness
-                    && c.profiles.contains(&p.id)
-                    && c.control
-                        .as_ref()
-                        .is_some_and(|k| crate::defaults::covers(control, k))
-            });
+            // A server recommended off hides its tools' lines, which still say what was sent.
+            let carried = report
+                .context
+                .iter()
+                .flat_map(|c| std::iter::once(c).chain(&c.details))
+                .any(|c| {
+                    c.harness == p.harness
+                        && c.profiles.contains(&p.id)
+                        && c.control
+                            .as_ref()
+                            .is_some_and(|k| crate::defaults::covers(control, k))
+                });
             let real_file = real(file);
             if carried
                 || control.path.last().is_some_and(|k| k == "enabled_tools")

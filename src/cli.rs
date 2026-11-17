@@ -18,11 +18,12 @@ use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Host, Listing, ReportOptions, format_report};
+use crate::report::{Host, Listing, ReportOptions, format_report, totals_section};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply};
 use crate::terminal::{WrapOptions, wrap_text};
+use crate::totals::Totals;
 use crate::wire::{Format, Job, Request};
 
 const HELP: &str =
@@ -77,7 +78,8 @@ Without profile flags, discover local Claude/Codex profiles and T3 instances. Ex
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
 and needs this same version installed there; it prices its own history with this host's
-prices, and only its report crosses SSH, never its scan. Its changes are listed to make there. Current
+prices, and only its report and its totals cross SSH, never its scan. Several hosts get one
+total, their figures added as they are. Its changes are listed to make there. Current
 settings are applied to the selected history; checks can use different windows and
 baselines. Independent savings do not add.
 
@@ -595,7 +597,9 @@ struct Walk {
     listing: Box<Listing>,
     fixes: Vec<Fix>,
     turned_off: Vec<crate::mcp::Definition>,
-    /// What follows this host's report: other hosts' reports and the note on adding them.
+    /// The total across hosts, printed first; empty for one host.
+    head: String,
+    /// What follows this host's report: other hosts' reports.
     rest: String,
     style: Style,
 }
@@ -627,6 +631,8 @@ pub struct Render<'a> {
 pub struct Rendered {
     pub text: String,
     pub change: bool,
+    /// What the report adds to a total across hosts.
+    pub totals: Box<Totals>,
     /// Empty for a destination's report, whose changes are listed in its text.
     pub fixes: Vec<Fix>,
     /// The report, to print again after the walk; None for a destination's.
@@ -671,6 +677,7 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     Ok(Rendered {
         text: listing.text(),
         change,
+        totals: Box::new(Totals::new(&report, &fixes)),
         fixes,
         listing: Some(Box::new(listing)),
         turned_off: crate::mcp::turned_off(&report.scan.profiles),
@@ -1122,10 +1129,12 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let mut fixes = vec![];
     let mut listing = None;
     let mut turned_off = vec![];
+    let mut sum: Option<Totals> = None;
     for (ssh, reply) in replies {
         let Reply::Report(Rendered {
             text: report,
             change,
+            totals,
             fixes: local,
             listing: local_listing,
             turned_off: local_off,
@@ -1135,6 +1144,10 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         };
         code = code.max(u8::from(change));
         fixes.extend(local);
+        match &mut sum {
+            Some(sum) => sum.merge(&totals),
+            None => sum = Some(*totals),
+        }
         // This host's report comes first; the walk prints it after the questions.
         if walk && ssh.is_none() {
             listing = local_listing;
@@ -1150,11 +1163,24 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
             None => text.push_str(&report),
         }
     }
-    if sections > 1 {
-        text.push_str(
-            "\n  Each host is analyzed on its own. A history copied between hosts counts on each, so don't add amounts across hosts.\n",
-        );
-    }
+    // Several hosts get one total at the head, beside each host's own section.
+    let head = match sum {
+        Some(sum) if sections > 1 => {
+            let mut head = totals_section(
+                &sum,
+                sections,
+                ReportOptions {
+                    width: style.width,
+                    color,
+                    unicode,
+                    ..ReportOptions::default()
+                },
+            );
+            head.push('\n');
+            head
+        }
+        _ => String::new(),
+    };
     if walk {
         let listing = listing.expect("a walk has this host's report");
         return Ok((
@@ -1162,13 +1188,14 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
                 listing,
                 fixes,
                 turned_off,
+                head,
                 rest: text,
                 style,
             }),
             0,
         ));
     }
-    Ok((Output::Text(text), code))
+    Ok((Output::Text(format!("{head}{text}")), code))
 }
 
 /// Walk through the changes, print the report with the accepted ones first, then write
@@ -1178,13 +1205,14 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
         listing,
         fixes,
         turned_off,
+        head,
         rest,
         style,
     } = walk;
     let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
-    write!(stdout, "{}", listing.title()).map_err(failed)?;
+    write!(stdout, "{head}{}", listing.title()).map_err(failed)?;
     let plan = ask(fixes, turned_off, &style, &mut stdin, &mut stdout).map_err(failed)?;
     let report = listing.review(plan.choices(), &plan.total("Accepted"));
     // The report reads as its own section after the questions.

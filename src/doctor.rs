@@ -9,7 +9,7 @@ use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::collections::{IndexMap, IndexSet};
@@ -25,6 +25,9 @@ use crate::report::{
 };
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, wrap_spans};
+
+/// Whose spend a share is of, in a walk, which only offers this host's changes.
+const THIS_HOST: &str = "this host's";
 
 /// One recommendation and how to carry it out.
 #[derive(Clone, Debug, PartialEq)]
@@ -1225,10 +1228,11 @@ fn home_in(text: &str, home: Option<&str>) -> String {
     }
 }
 
-/// ", 3% of this host's spend", or nothing when the host's spend is unknown.
-fn share_of_host(share: Option<f64>) -> String {
+/// ", 3% of this host's spend", or nothing when the spend is unknown; `whose` names the
+/// host or hosts, such as "this host's".
+fn share_of(share: Option<f64>, whose: &str) -> String {
     share.map_or_else(String::new, |s| {
-        format!(", {} of this host's spend", share_text(s))
+        format!(", {} of {whose} spend", share_text(s))
     })
 }
 
@@ -1554,14 +1558,14 @@ impl Plan {
     /// The accepted changes' summed saving after `label`, such as "Accepted"; empty when
     /// nothing was accepted.
     pub fn total(&self, label: &str) -> String {
-        self.total.text(label)
+        self.total.text(label, THIS_HOST)
     }
 }
 
 /// The accepted changes' own savings: those measured, summed apart from those that hold only
 /// when a default would be the other value, and how many were not measured.
-#[derive(Clone, Copy, Debug, Default)]
-struct Total {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Total {
     /// Savings measured whatever the defaults, in full or as the part that was priced.
     measured: Sum,
     /// How many of `measured` leave part of their cost unmeasured, so save at least their figure.
@@ -1572,7 +1576,7 @@ struct Total {
 }
 
 /// Monthly savings added up, with their share of this host's spend.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 struct Sum {
     changes: usize,
     usd: f64,
@@ -1594,9 +1598,17 @@ impl Sum {
         }
     }
 
+    /// Another host's sum added to this one. Hosts are separate samples, so their margins
+    /// combine in quadrature, and the share is set again once the hosts' spend is added.
+    fn merge(&mut self, other: &Sum) {
+        self.changes += other.changes;
+        self.usd += other.usd;
+        self.margin = Margin::independent(self.margin, other.margin);
+    }
+
     /// Such as "$40/mo, 9% of this host's spend", or "~$40/mo ± $6" when extrapolated.
-    fn text(&self) -> String {
-        let share = share_of_host((!self.unknown_share).then_some(self.share));
+    fn text(&self, whose: &str) -> String {
+        let share = share_of((!self.unknown_share).then_some(self.share), whose);
         format!("{}{share}", approx(self.usd, self.margin, "/mo"))
     }
 }
@@ -1607,6 +1619,36 @@ fn changes(n: usize) -> String {
 }
 
 impl Total {
+    /// What every change in `fixes` saves together.
+    pub(crate) fn of(fixes: &[Fix]) -> Self {
+        let mut total = Total::default();
+        for fix in fixes {
+            total.add(fix);
+        }
+        total
+    }
+
+    /// Another host's savings added to these.
+    pub(crate) fn merge(&mut self, other: &Total) {
+        self.measured.merge(&other.measured);
+        self.up_to.merge(&other.up_to);
+        self.partial += other.partial;
+        self.unmeasured += other.unmeasured;
+    }
+
+    /// Set each saving's share to its part of `monthly`, the spend every 30 days of the hosts
+    /// merged; unknown when it is none.
+    pub(crate) fn set_share(&mut self, monthly: f64) {
+        for sum in [&mut self.measured, &mut self.up_to] {
+            sum.unknown_share = monthly <= 0.0;
+            sum.share = if monthly > 0.0 {
+                sum.usd / monthly
+            } else {
+                0.0
+            };
+        }
+    }
+
     fn add(&mut self, fix: &Fix) {
         let Some(usd) = fix.saving else {
             self.unmeasured += 1;
@@ -1621,15 +1663,15 @@ impl Total {
     }
 
     /// How many changes were accepted.
-    fn changes(&self) -> usize {
+    pub(crate) fn changes(&self) -> usize {
         self.measured.changes + self.up_to.changes + self.unmeasured
     }
 
     /// Such as "about $40/mo, 9% of this host's spend; overlapping changes may save less".
-    fn amount(&self) -> String {
+    fn amount(&self, whose: &str) -> String {
         let mut parts = vec![];
         if self.measured.changes > 0 {
-            let usd = self.measured.text();
+            let usd = self.measured.text(whose);
             let mut text = if usd.starts_with(['<', '~']) {
                 usd
             } else {
@@ -1647,7 +1689,7 @@ impl Total {
         if self.up_to.changes > 0 {
             parts.push(format!(
                 "up to {}, from {} whose saving depends on the default it replaces",
-                self.up_to.text(),
+                self.up_to.text(whose),
                 changes(self.up_to.changes)
             ));
         }
@@ -1669,8 +1711,8 @@ impl Total {
     }
 
     /// The amount after `label`, as a sentence; empty when nothing was added.
-    fn text(&self, label: &str) -> String {
-        let amount = self.amount();
+    pub(crate) fn text(&self, label: &str, whose: &str) -> String {
+        let amount = self.amount(whose);
         if amount.is_empty() {
             return amount;
         }
@@ -1681,16 +1723,16 @@ impl Total {
 /// What every change in `fixes` saves together, as the line under a `--defaults` report's
 /// headline; empty when there is none.
 pub fn total(fixes: &[Fix]) -> String {
-    let mut total = Total::default();
-    for fix in fixes {
-        total.add(fix);
-    }
+    let total = Total::of(fixes);
     if total.changes() == 0 {
         String::new()
     } else if total.measured.changes + total.up_to.changes == 0 {
         "From the defaults, no change's saving was measured.".into()
     } else {
-        format!("From the defaults, these changes save {}.", total.amount())
+        format!(
+            "From the defaults, these changes save {}.",
+            total.amount(THIS_HOST)
+        )
     }
 }
 
@@ -1832,7 +1874,11 @@ impl Selection {
     ) -> io::Result<bool> {
         self.choose(target, fix, answer == Answer::Yes);
         if answer == Answer::Yes {
-            write!(output, "{}", style.dim(&self.total.text("Accepted so far")))?;
+            write!(
+                output,
+                "{}",
+                style.dim(&self.total.text("Accepted so far", THIS_HOST))
+            )?;
         }
         Ok(answer != Answer::Quit)
     }
@@ -2232,7 +2278,7 @@ pub fn ask(
                     selection.choose(offer.target, &offer.fix, batch == Answer::Yes);
                 }
                 if batch == Answer::Yes {
-                    let total = selection.total.text("Accepted so far");
+                    let total = selection.total.text("Accepted so far", THIS_HOST);
                     write!(output, "{}", style.dim(&total))?;
                     let all: Vec<&Offer> = question.members.iter().collect();
                     going = offer_removal(&all, &mut selection, style, input, output)?;
@@ -3662,6 +3708,40 @@ mod tests {
     }
 
     #[test]
+    fn savings_across_hosts_add_with_independent_margins_and_a_share_of_all_their_spend() {
+        let file = Path::new("/synthetic/settings.json");
+        let fix = |usd: Option<f64>, margin| Fix {
+            saving: usd,
+            margin,
+            ..change("A", file, Harness::Claude, vec![])
+        };
+        // Each host's own changes add their margins, since they may share requests.
+        let host = |fixes: &[Fix], monthly| {
+            let mut total = Total::of(fixes);
+            total.set_share(monthly);
+            total
+        };
+        let mut total = host(
+            &[
+                fix(Some(30.0), Some(Margin::Usd(3.0))),
+                fix(Some(10.0), Some(Margin::Usd(1.0))),
+            ],
+            400.0,
+        );
+        total.merge(&host(
+            &[fix(Some(60.0), Some(Margin::Usd(3.0))), fix(None, None)],
+            600.0,
+        ));
+        total.set_share(1000.0);
+        // 4 and 3 combine in quadrature; the share is of both hosts' spend together.
+        assert_eq!(
+            total.text("Changes offered", "these hosts'"),
+            "Changes offered: ~$100/mo ± $5, 10% of these hosts' spend, plus 1 change whose saving was not measured; overlapping changes may save less."
+        );
+        assert_eq!(total.changes(), 4);
+    }
+
+    #[test]
     fn the_total_keeps_savings_that_depend_on_a_default_or_were_priced_in_part_qualified() {
         let file = Path::new("/synthetic/settings.json");
         let fix = |verb: &'static str, usd: f64| Fix {
@@ -3675,7 +3755,7 @@ mod tests {
             for fix in fixes {
                 total.add(fix);
             }
-            total.text("Accepted")
+            total.text("Accepted", THIS_HOST)
         };
         // An unset TTL's gap may save nothing, so it is never summed as a sure saving.
         assert_eq!(

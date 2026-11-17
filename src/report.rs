@@ -757,22 +757,22 @@ struct Out<'a> {
 
 /// This host's spend over the report's window, the base of every percent.
 #[derive(Clone, Copy, Debug)]
-struct Spend {
+pub(crate) struct Spend {
     /// The total, extrapolated over unpriced requests, plus `floor`.
-    usd: f64,
+    pub(crate) usd: f64,
     /// How far the extrapolated part may be off; None when nothing was extrapolated.
-    margin: Option<Margin>,
+    pub(crate) margin: Option<Margin>,
     /// What the profiles that priced none of their requests are known to cost, a lower bound
     /// with nothing to extrapolate from.
-    floor: f64,
+    pub(crate) floor: f64,
     /// Whether some profile priced none of its requests, even one with no known charge.
-    partial: bool,
+    pub(crate) partial: bool,
     since: Option<Millis>,
     until: Millis,
 }
 
 impl Spend {
-    fn new(report: &Report) -> Self {
+    pub(crate) fn new(report: &Report) -> Self {
         let mut usd = 0.0;
         // Each profile's history is a separate sample, so their errors are independent and
         // their margins add in quadrature.
@@ -818,23 +818,12 @@ impl Spend {
     /// The total as the title writes it, such as "~$9,392 ± $4.72", "at least $120", or
     /// "~$9,392 ± $4.72 plus at least $120" when only some profiles priced nothing.
     fn text(&self) -> String {
-        let measured = self.usd - self.floor;
-        if !self.partial {
-            approx(self.usd, self.margin, "")
-        } else if measured == 0.0 && self.margin.is_none() {
-            format!("at least {}", about(self.floor))
-        } else if self.floor > 0.0 {
-            format!(
-                "{} plus at least {}",
-                approx(measured, self.margin, ""),
-                about(self.floor)
-            )
-        } else {
-            format!(
-                "{} plus requests with no known price",
-                approx(measured, self.margin, "")
-            )
-        }
+        spend_text(self.usd, self.margin, self.floor, self.partial)
+    }
+
+    /// What this host spends every 30 days at the window's rate.
+    pub(crate) fn monthly(&self) -> f64 {
+        monthly(self.usd, self.since, Some(self.until))
     }
 
     /// The share of this host's spend that `usd`, spent within the window, makes.
@@ -847,8 +836,30 @@ impl Spend {
 
     /// The share of this host's spend that `usd` every 30 days makes, at the window's rate.
     fn of_month(&self, usd: f64) -> Option<f64> {
-        let host = monthly(self.usd, self.since, Some(self.until));
+        let host = self.monthly();
         (host > 0.0).then(|| usd / host)
+    }
+}
+
+/// A spend of `usd` as the title writes it, `floor` of it from profiles that priced none of
+/// their requests, `partial` when there is one.
+pub(crate) fn spend_text(usd: f64, margin: Option<Margin>, floor: f64, partial: bool) -> String {
+    let measured = usd - floor;
+    if !partial {
+        approx(usd, margin, "")
+    } else if measured == 0.0 && margin.is_none() {
+        format!("at least {}", about(floor))
+    } else if floor > 0.0 {
+        format!(
+            "{} plus at least {}",
+            approx(measured, margin, ""),
+            about(floor)
+        )
+    } else {
+        format!(
+            "{} plus requests with no known price",
+            approx(measured, margin, "")
+        )
     }
 }
 
@@ -1126,6 +1137,45 @@ impl<'a> Out<'a> {
             .get(id)
             .map(|instance| format!("T3 {instance} (removed from T3 settings)"))
     }
+}
+
+/// The section heading a report of several hosts: what `hosts` hosts spent and what the
+/// changes they offer would save, added as they are.
+pub fn totals_section(
+    totals: &crate::totals::Totals,
+    hosts: usize,
+    options: ReportOptions<'_>,
+) -> String {
+    let spent = spend_text(totals.spend, totals.margin, totals.floor, totals.partial);
+    let name = format!("token-max: total over {hosts} hosts");
+    let read = format!(
+        "  {} requests, {spent} at API prices",
+        count(totals.requests)
+    );
+    let mut text = wrap_spans(
+        &[(&name, BOLD), (&read, DIM)],
+        WrapOptions {
+            width: options.width,
+            indent: 0,
+            continuation: Some(cells(&name) + 2),
+        },
+        options.color,
+    );
+    text.push('\n');
+    let saving = totals.savings.text("Changes offered", "these hosts'");
+    if !saving.is_empty() {
+        text.push_str(&wrap_spans(
+            &[(&saving, PLAIN)],
+            WrapOptions {
+                width: options.width,
+                indent: MARGIN,
+                continuation: Some(MARGIN),
+            },
+            options.color,
+        ));
+        text.push('\n');
+    }
+    text
 }
 
 /// Render every setting and feature on one line, the changes first, with each line's

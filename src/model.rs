@@ -1526,7 +1526,7 @@ pub struct Estimate {
 
 /// How far a figure extrapolated over unpriced items may be off, assuming they resemble the
 /// priced ones.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Margin {
     /// A 95% interval's half-width, in dollars.
     Usd(f64),
@@ -1541,6 +1541,16 @@ impl Margin {
         match (a, b) {
             (None, m) | (m, None) => m,
             (Some(Margin::Usd(a)), Some(Margin::Usd(b))) => Some(Margin::Usd(a + b)),
+            _ => Some(Margin::Unmeasured),
+        }
+    }
+
+    /// The margin of two figures added from separate samples, such as two hosts' histories:
+    /// their margins combine in quadrature, since their errors are independent.
+    pub fn independent(a: Option<Margin>, b: Option<Margin>) -> Option<Margin> {
+        match (a, b) {
+            (None, m) | (m, None) => m,
+            (Some(Margin::Usd(a)), Some(Margin::Usd(b))) => Some(Margin::Usd(a.hypot(b))),
             _ => Some(Margin::Unmeasured),
         }
     }

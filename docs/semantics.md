@@ -1138,7 +1138,9 @@ there, or downloads this version's release archive there and checks it
 against its published `.sha256`; either checks the binary runs before an
 atomic rename into the cache, and a third `ssh` runs the audit. The cache
 names a copy by the first 16 hex digits of its SHA-256 and a release by
-version and target, so a cached binary is always this build. The destination's own discovery, frozen
+version and target. On the coordinator's platform only its copy runs; on
+another, a release or installed binary is matched by version, and the stream's
+header rejects one of another build. The destination's own discovery, frozen
 snapshots, readers, exposure extraction and checks produce the same report a
 local run there would, priced from the catalog the coordinator sends and dated
 by the destination's own clock once its scan ends. Its stderr is discarded, so

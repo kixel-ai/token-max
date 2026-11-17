@@ -965,7 +965,7 @@ fn any_failed_destination_fails_the_whole_report() {
     let bare = format!(
         "bare: runs on {target}, and this development build for {os} {arch} has no release to download; build it with {build}\n"
     );
-    let other = "other: the token-max installed there is build 9.9.9+";
+    let other = "other: the token-max 0.0.0 there is build 9.9.9+";
     for (host, expected) in [
         (
             "unreachable",

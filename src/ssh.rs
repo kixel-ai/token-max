@@ -54,16 +54,16 @@ const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linu
 /// Finds this build on the destination and runs it, or says how to put it there. Takes the
 /// coordinator's OS, architecture, copy name and version, then token-max's arguments.
 ///
-/// Prints `run` and execs a binary of this build: a copy of the coordinator on its own
-/// platform, else this version's release, else an installed `token-max` of this version. An
-/// installed development build may be any commit, so on the coordinator's own platform its
-/// copy is used instead. Otherwise prints `copy` or `download <target>` and exits.
+/// Prints `run` and execs a binary of this build, or prints `copy` or `download <target>` and
+/// exits. On the coordinator's own platform only its copy runs, since every build from a
+/// commit after a release reports that release's version. On another platform nothing else
+/// can, so a binary of this version stands in, checked by the stream's header: this version's
+/// cached release, else the first installed `token-max` reporting it.
 ///
-/// The release installers put the command in the first of `$XDG_BIN_HOME`,
-/// `$XDG_DATA_HOME/../bin` and `~/.local/bin`, searched first since they are the documented
-/// install, and `cargo install` in `~/.cargo/bin`; non-interactive shells often leave these
-/// off `PATH`.
-const RUN: &str = r#"PATH="$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin"; if [ "$os $arch" = "$1 $2" ]; then same=1 bin=$cache/$3; else same= bin=$cache/token-max-v$4-$arch-$abi; fi; if [ ! -x "$bin" ]; then bin=; if [ -z "$same" ] || [ "$4" != 0.0.0 ]; then found=$(command -v token-max) && [ "$("$found" --version 2>/dev/null)" = "$4" ] && bin=$found; fi; fi; if [ -z "$bin" ]; then if [ -n "$same" ]; then echo copy; else echo download $arch-$abi; fi; exit 0; fi; echo run; shift 4; exec "$bin" "$@""#;
+/// Installed ones are searched on `PATH`, then in the release installers' directory, the first
+/// of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`, then in `cargo install`'s
+/// `~/.cargo/bin`; non-interactive shells often leave these off `PATH`.
+const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; echo run; shift 4; exec "$bin" "$@""#;
 
 /// Picks a SHA-256 command, since Linux and macOS ship different ones.
 const SUM: &str = r#"if command -v sha256sum >/dev/null; then sum=sha256sum; elif command -v shasum >/dev/null; then sum="shasum -a 256"; else exit 5; fi; mkdir -p "$cache" || exit 1; "#;
@@ -347,7 +347,7 @@ fn provision(destination: &str, found: &Found) -> Result<(), ScanError> {
         Some(DOES_NOT_RUN) => match found {
             // Most often a Linux build linked against this host's C library.
             Found::Copy if cfg!(target_os = "linux") => format!(
-                "a copy of this token-max does not run there; run a statically linked build, such as one for {}-unknown-linux-musl, or a release",
+                "a copy of this token-max does not run there; run a statically linked build here, such as the release installers' or one for {}-unknown-linux-musl",
                 std::env::consts::ARCH
             ),
             Found::Copy => "a copy of this token-max does not run there".to_string(),
@@ -436,7 +436,7 @@ pub fn audit(
         let remote = terminal_text(&header.token_max_scan);
         return Err(session.fail(true, |_| {
             format!(
-                "the token-max installed there is build {remote} but this is {local}; build this one there with {BUILD}"
+                "the token-max {VERSION} there is build {remote}, not this build {local}; run a released token-max here, or build this one there with {BUILD}"
             )
         }));
     }
@@ -696,17 +696,20 @@ mod tests {
         // Nothing there yet.
         assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
         assert_eq!(run("plan9", "0.0.1"), (Some(0), download.clone()));
-        // An installed release of this version runs on any platform; another version or an
-        // installed development build on this one does not.
-        let installed = home.join(".local/bin/token-max");
+        // Only on another platform does an installed binary of this version stand in for
+        // this build, the first that reports it, even past one that does not.
+        let installed = home.join(".cargo/bin/token-max");
         release(&installed, "0.0.1");
-        assert_eq!(run(os, "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        release(&home.join(".local/bin/token-max"), "0.0.2");
+        assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
         assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
-        assert_eq!(run(os, "0.0.2"), (Some(0), "copy\n".into()));
+        assert_eq!(run("plan9", "0.0.2"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.3"), (Some(0), download.clone()));
         release(&installed, "0.0.0");
         assert_eq!(run(os, "0.0.0"), (Some(0), "copy\n".into()));
         assert_eq!(run("plan9", "0.0.0"), (Some(0), "run\nran doctor\n".into()));
         std::fs::remove_file(&installed).unwrap();
+        std::fs::remove_file(home.join(".local/bin/token-max")).unwrap();
         // Cached binaries: the copy on this platform, the release on another.
         script(&cache(home).join("token-max-copy"), r#"echo "copy $*""#);
         release(

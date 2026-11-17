@@ -883,27 +883,30 @@ sends it. Only its finished report comes back, so its transcripts and scan
 never leave it, and this host never holds more than its own scan.
 
 Each run first asks the destination its OS and architecture, over the
-connection that then runs the audit, and uses the first of these it finds:
+connection that then runs the audit:
 
-1. A copy of this binary, when the destination's platform matches this host's.
-   Without one, token-max copies itself there over SSH, checked by its SHA-256.
-2. This version's release for the destination's platform. Without one,
-   the destination downloads it from GitHub and checks it against the
-   release's published checksum, which needs `curl`, `tar` and `xz` there.
-3. A `token-max` installed there whose `--version` matches this one, on the
-   non-interactive `PATH`, then in the release installers' directory (the
-   first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`), then
-   in `~/.cargo/bin`. An installed development build may be any commit, so on
-   this host's platform its copy is used instead.
+- **On this host's platform**, it runs a copy of this exact binary. Without
+  one, token-max copies itself there over SSH, checked by its SHA-256. An
+  installed token-max is not used, since every build after a release reports
+  that release's version.
+- **On another platform**, it runs this version's release. Failing that, it
+  runs the first installed `token-max` whose `--version` matches, on the
+  non-interactive `PATH`, then in the release installers' directory (the
+  first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`),
+  then in `~/.cargo/bin`. With neither, the destination downloads the
+  release from GitHub and checks it against its published checksum, which
+  needs `curl`, `tar` and `xz` there. Matching the version is not matching
+  the build, so a destination whose build differs from this one fails with
+  what to run instead. A development build has no release, so it fails with
+  the `cargo install` command to run there.
 
 Copies and downloads are cached in `~/.cache/token-max/ssh` there (or under
-`$XDG_CACHE_HOME`), named by the binary's digest or by version and target,
-so later runs reuse them and another build never runs in their place. Each
-new one replaces the binaries cached there before it. Either step checks that
-the binary runs there before caching it: a development build linked against
-this host's libraries fails with the build to copy instead, and a
-development build has no release, so on another platform it fails with the
-`cargo install` command to run there.
+`$XDG_CACHE_HOME`): a copy named by its digest, a release by version and
+target. Later runs reuse them, and each new one replaces the binaries cached
+there before it. Either step checks that the binary runs there before caching
+it. A copy linked against this host's libraries fails with a statically
+linked build to run here instead, such as the release installers'.
+
 `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 

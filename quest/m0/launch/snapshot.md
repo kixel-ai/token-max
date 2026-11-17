@@ -1,4 +1,4 @@
-# [S] Retake the results snapshot across every host
+# [M] Retake the results snapshot across every host
 
 ## Goal
 
@@ -28,7 +28,10 @@ days: $60,391.31, 23,285 sessions · API estimate"):
   decided for its total; until that total exists, add the four reports by
   hand and say so in `docs/results.md`.
 
-Recommended: run the same main commit on each host with `nix run`, as the
+Recommended: doctor's header line already gives requests and API cost but
+no session count, so add sessions there (one per Claude Code session and
+Codex rollout, subagents counted with their parent), and read all three
+totals from doctor rather than counting by hand. Then run the same main commit on each host with `nix run`, as the
 desktop snapshot did, with `--since` set 30 days back; check the summed
 spend against T3 Code's $60,391.31 over the same 30 days and explain any gap
 in `docs/results.md`; keep private skill, MCP server and path names out, and

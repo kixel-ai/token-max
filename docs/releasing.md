@@ -55,8 +55,9 @@ unless the page changes. `_headers` forbids scripts and other origins, which
 the page promises. `tests/run_script.rs` runs the run script for the host
 (`run.ps1` on the Windows CI job) against fixture releases on a local server.
 
-The page copies the README's pitch, install lines, pre-release notice and
-"On the maintainer's workstation" snapshot; change them together. Its
+The page copies the README's top: the headline, the run line, the
+pre-release notice, the two cache findings from `docs/results.md` and "How it
+knows"; change them together. Its
 recording, `walk.gif`, is the README's too, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
 page's top in dark mode, from the logo through the first install block;

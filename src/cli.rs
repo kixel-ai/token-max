@@ -90,8 +90,9 @@ Examples:
 Dollars are public API prices, not an invoice: the closest public measure of what a request
 uses of a Claude or ChatGPT plan's limits, and what Claude's usage credits bill past them. A
 line notes where a provider documents that a plan counts something differently, such as fast
-mode. Which plan a profile is signed in to is never read. Never retains or prints prompt, reply
-or component text. Color is automatic on terminals; NO_COLOR disables it. Progress goes to
+mode. Which plan a profile is signed in to is never read; on a terminal, doctor asks how each
+Claude profile pays, to price its main-agent cache TTL against the one default that applies.
+Never retains or prints prompt, reply or component text. Color is automatic on terminals; NO_COLOR disables it. Progress goes to
 stderr only on interactive terminals, never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
 the list of accepted changes is confirmed.

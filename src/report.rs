@@ -12,11 +12,11 @@ use crate::controls::CAPPED_SHARED;
 use crate::discovery::{TTL_API_DEFAULT, TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
-    Action, BackgroundCheck, Billing, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
-    EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, MemoryCheck, Millis,
-    ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share,
-    SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
+    Action, BackgroundCheck, BackgroundFeature, BashCapCheck, Billing, CacheReplayEvidence,
+    CheckBase, CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck,
+    EffortRun, EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck,
+    MemoryCheck, Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming,
+    Scalar, Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{Sum, TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -535,7 +535,8 @@ fn plan_note(
 }
 
 /// Where Claude Code documents which TTL each request gets.
-const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets";
+const TTL_SOURCE: &str =
+    "https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets";
 
 /// How the profile pays, when a check is the main TTL left unset at the default that billing,
 /// as answered in doctor, picks.
@@ -8530,7 +8531,10 @@ mod tests {
                 "{summary}"
             );
             assert!(!line.head.contains("up to"), "{summary}");
-            assert!(line.evidence.contains("which you answered pay"), "{summary}");
+            assert!(
+                line.evidence.contains("which you answered pay"),
+                "{summary}"
+            );
             if winner == default {
                 assert_eq!(ttl.base.action, Action::Keep, "{billing:?}");
             } else {
@@ -8547,11 +8551,9 @@ mod tests {
             let other = if default == Ttl::OneHour { "5m" } else { "1h" };
             let report = answered_report(&format!(r#"{{"promptCacheTtl":"{other}"}}"#), billing);
             let profile = &report.scan.profiles[0];
-            let baseline = crate::defaults::check(
-                &CheckResult::Ttl(main_ttl(&report).clone()),
-                Some(profile),
-            )
-            .unwrap();
+            let baseline =
+                crate::defaults::check(&CheckResult::Ttl(main_ttl(&report).clone()), Some(profile))
+                    .unwrap();
             assert_eq!(baseline.default, default.as_str(), "{billing:?}");
             assert!(
                 !matches!(baseline.saving, crate::defaults::Saving::UpTo(_)),

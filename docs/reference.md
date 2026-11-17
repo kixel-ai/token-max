@@ -244,7 +244,7 @@ publishes a plan's limits in tokens or dollars, so it measures with public API
 prices, the closest public measure of what a request uses of those limits, and
 the report's first line says so. It never reads which plan a profile is signed
 in to, so a fact that differs by plan is stated conditionally, as in "on a
-Claude plan".
+Claude plan", except where `doctor` asks (see [How a profile pays](#how-a-profile-pays)).
 
 What the providers document, checked 2026-11-14:
 
@@ -267,7 +267,7 @@ changes it, and the list ends with the source:
 
 | Line | On a plan |
 | --- | --- |
-| Main-agent prompt cache TTL, while unset | Claude Code [requests 1h](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets) for the main conversation on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. Since token-max can't tell which applies, the line shows `unset` and names both. When the replay picks a winner, setting it is the cheaper choice either way, so the line recommends `unset -> 1h` (or `5m`) and `doctor` offers to set it; it shows the replay's gap as "saves up to", saved only while the other default would apply. |
+| Main-agent prompt cache TTL, while unset | Claude Code [requests 1h](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets) for the main conversation on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. When `doctor` asked how the profile pays, the line shows that default, such as `1h (default)`, and prices against it alone. Otherwise token-max can't tell which applies, so the line shows `unset` and names both. When the replay picks a winner, setting it is the cheaper choice either way, so the line recommends `unset -> 1h` (or `5m`) and `doctor` offers to set it; it shows the replay's gap as "saves up to", saved only while the other default would apply. |
 | Claude fast mode | A Claude plan [pays fast mode only from usage credits](https://code.claude.com/docs/en/fast-mode#requirements), at its API rates, even with plan usage left. |
 | Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is 2x for Fast on GPT-6 and GPT-5.6 and 6x for Ultrafast, so included usage can draw faster than it shows. |
 | Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
@@ -276,6 +276,23 @@ changes it, and the list ends with the source:
 
 Every other line's dollars are API prices with no documented plan rule beside
 them.
+
+### How a profile pays
+
+On a terminal, before the report, `doctor` asks how each of this host's Claude
+profiles on the Anthropic API pays: a Claude plan, or an API key or usage
+credits. It asks once per profile root that has transcripts, including one T3
+Code shares, and skips profiles under Bedrock, Vertex or Foundry, whose
+default is 5m. Answer `p`, `a` or `s` to skip. A plan answer prices the
+main-agent TTL against 1h and an API answer against 5m, in its line, the
+comparison with the defaults and `--defaults`. A skip, end of input, a run
+without a terminal, or an SSH destination's profiles keep naming both
+defaults. Nothing is stored: the next run asks again, so a profile that
+changes how it pays is never priced from a stale answer.
+
+A plan's requests past its included usage are paid with usage credits and get
+5m, and the transcripts don't mark which ones those were. A plan answer prices
+them at 1h too, and the line and its `--details` uncertainty say so.
 
 ## Window
 
@@ -434,7 +451,7 @@ its kind of claim: auto memory's note sits on an Opinion line.
 | Setting | Default | What the current value saves |
 | --- | --- | --- |
 | Subagent prompt cache TTL | 5m | The TTL replay's gap, when the line has a verdict; otherwise not measured. |
-| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
+| Main-agent prompt cache TTL | 1h on a Claude plan within its included usage, 5m on usage credits or an API key; 5m under Bedrock, Vertex or Foundry | The replay's gap as "up to", saved only while the default would be the other value; against the answered default alone when `doctor` asked [how the profile pays](#how-a-profile-pays); under a cloud provider, the replay's gap against 5m. "Up to" savings and costs are bounded apart, never netted. |
 | Compaction window | The model's tuned window (see [Compaction window](#compaction-window)), or Codex's per-model limit | Not measured: a window smaller than the default can't be replayed at the default, since the detail its summaries dropped is gone. |
 | Idle compaction | On | The on and off replay under the current settings. |
 | T3 idle compaction | `onReturn` | The difference between the two modes' replays. |

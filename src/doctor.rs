@@ -16,7 +16,8 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report, Verdict,
+    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Profile,
+    Report, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, recommendations,
@@ -3218,6 +3219,43 @@ mod tests {
         )
         .unwrap();
         (plan, String::from_utf8(printed).unwrap())
+    }
+
+    #[test]
+    fn billing_is_asked_per_root_until_answered_and_end_of_input_skips_the_rest() {
+        let w = Workspace::new();
+        let home = w.home.to_string_lossy().into_owned();
+        let roots: Vec<String> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|n| format!("{home}/.claude-{n}"))
+            .collect();
+        let mut printed = vec![];
+        let answers = ask_billing(
+            &roots,
+            &style(&w),
+            &mut "maybe\nP\nskip\napi\n".as_bytes(),
+            &mut printed,
+        )
+        .unwrap();
+        let printed = String::from_utf8(printed).unwrap();
+        assert_eq!(
+            answers.into_iter().collect::<Vec<_>>(),
+            [
+                (roots[0].clone(), Billing::Plan),
+                (roots[2].clone(), Billing::Api)
+            ]
+        );
+        // The unrecognized answer asks the same profile again, shown from home.
+        assert_eq!(printed.matches("How is ~/.claude-a paid for?").count(), 2);
+        let answers = ask_billing(&roots, &style(&w), &mut "a\n".as_bytes(), &mut vec![]).unwrap();
+        assert_eq!(answers.len(), 1);
+        let mut printed = vec![];
+        assert!(
+            ask_billing(&[], &style(&w), &mut "p\n".as_bytes(), &mut printed)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(printed.is_empty(), "nothing to ask prints nothing");
     }
 
     #[test]

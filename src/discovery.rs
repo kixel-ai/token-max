@@ -14,9 +14,9 @@ use crate::controls::{
 };
 use crate::effort::{claude_effort, codex_catalog, codex_effort, latest_model};
 use crate::model::{
-    Agent, BackgroundControl, Control, ControlValue, Harness, IdleControl, Location, MemoryControl,
-    PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar, Snapshot, SpeedControl,
-    Billing, Ttl, TtlControl,
+    Agent, BackgroundControl, Billing, Control, ControlValue, Harness, IdleControl, Location,
+    MemoryControl, PerBucket, Profile, Request, RootOrigin, RootState, RootStatus, Scalar,
+    Snapshot, SpeedControl, Ttl, TtlControl,
 };
 use crate::safe::{ScanError, identity, label};
 
@@ -3331,6 +3331,41 @@ mod tests {
     }
 
     // Ported from the discovery half of reader.test.ts: "a custom ANTHROPIC_BASE_URL proxy is priced as the public Anthropic API".
+    #[test]
+    fn an_answered_billing_sets_only_an_unset_main_ttl_on_the_anthropic_api() {
+        let w = Workspace::new();
+        let answered = |settings: &str, billing| {
+            write(w.claude.join("settings.json"), settings);
+            let mut o = options(&w);
+            o.billing.insert(canonical(&w.claude), billing);
+            claude(&discover(&o).unwrap()).clone()
+        };
+        let p = answered("{}", Billing::Plan);
+        assert_eq!(p.billing, Some(Billing::Plan));
+        assert_eq!(p.ttl.main.value, Some(Ttl::OneHour));
+        assert_eq!(p.ttl.main.reason, TTL_PLAN_DEFAULT);
+        assert_eq!(p.ttl.subagent.value, Some(Ttl::FiveMinutes));
+        let p = answered("{}", Billing::Api);
+        assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
+        assert_eq!(p.ttl.main.reason, TTL_API_DEFAULT);
+        // A setting outranks the default, and the answer still picks the default compared.
+        let p = answered(r#"{"promptCacheTtl":"5m"}"#, Billing::Plan);
+        assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
+        assert_eq!(p.ttl.main.reason, "current user/managed setting");
+        assert_eq!(p.billing, Some(Billing::Plan));
+        // A cloud provider bills per token, whatever was answered.
+        let p = answered(r#"{"env":{"CLAUDE_CODE_USE_BEDROCK":"1"}}"#, Billing::Plan);
+        assert_eq!(p.billing, None);
+        assert_eq!(p.ttl.main.reason, "explicit cloud-provider billing default");
+        // An answer for another root changes nothing.
+        write(w.claude.join("settings.json"), "{}");
+        let mut o = options(&w);
+        o.billing.insert("/elsewhere".into(), Billing::Plan);
+        let p = claude(&discover(&o).unwrap()).clone();
+        assert_eq!((p.billing, p.ttl.main.value), (None, None));
+        assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
+    }
+
     #[test]
     fn custom_base_urls_keep_the_public_provider_while_cloud_flags_set_one() {
         let w = Workspace::new();

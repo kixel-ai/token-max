@@ -8,6 +8,10 @@
 
 ## Plan
 
+Kept 2026-11-17 (maintainer, /quest-run at the pick of
+[kixel-ai/token-max#155](https://github.com/kixel-ai/token-max/pull/155)): ✅
+keep this follow-up (rejected: drop it and redeploy by hand).
+
 Deploy `site/` from main as `docs/releasing.md`
 describes (`nix shell nixpkgs#wrangler -c wrangler deploy` from `site/`;
 wrangler is logged in on fedora), then load the page and check that its

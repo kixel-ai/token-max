@@ -546,7 +546,8 @@ fn answered_main_ttl(result: &CheckResult, r: &Common<'_>, out: &Out<'_>) -> Opt
     }
     let profile = out.profiles.get(r.profile)?;
     let reason = profile.ttl.main.reason.as_str();
-    (reason == TTL_PLAN_DEFAULT || reason == TTL_API_DEFAULT)
+    // A T3 instance whose ownership is unresolved keeps the reason but loses the value.
+    (profile.ttl.main.value.is_some() && (reason == TTL_PLAN_DEFAULT || reason == TTL_API_DEFAULT))
         .then_some(profile.billing)
         .flatten()
 }

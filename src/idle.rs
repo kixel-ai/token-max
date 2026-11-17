@@ -21,8 +21,8 @@ use crate::model::{
     CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
     IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
     PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar,
-    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
-    WindowControl,
+    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl, Usage, UsageEstimate,
+    Usd, WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sum, add_costs, price_components, price_part, server_cost,
@@ -279,20 +279,22 @@ impl<'p> Scopes<'p> {
     }
 
     /// The scenario TTLs where the profile owns them; a project-owned TTL keeps its value.
+    /// A scenario at the profile's current value keeps the project's own default too, such
+    /// as a cloud provider's 5m under a root answered as paid by a plan, while a scenario that
+    /// sets the profile's setting applies everywhere that setting reaches.
     pub(crate) fn ttls(&self, scope: Scope, ttls: &Ttls) -> Ttls {
         let profile = &self.profile.ttl;
         let current = self.control(scope).ttl.as_ref().unwrap_or(profile);
+        let pick = |current: &TtlControl, profile: &TtlControl, scenario: Option<Ttl>| {
+            if current.owner != profile.owner || scenario == profile.value {
+                current.value
+            } else {
+                scenario
+            }
+        };
         PerBucket {
-            main: if current.main.owner == profile.main.owner {
-                ttls.main
-            } else {
-                current.main.value
-            },
-            subagent: if current.subagent.owner == profile.subagent.owner {
-                ttls.subagent
-            } else {
-                current.subagent.value
-            },
+            main: pick(&current.main, &profile.main, ttls.main),
+            subagent: pick(&current.subagent, &profile.subagent, ttls.subagent),
         }
     }
 
@@ -3669,6 +3671,42 @@ mod tests {
             memory: None,
             t3: None,
         }
+    }
+
+    #[test]
+    fn a_scenario_at_the_current_ttl_keeps_a_projects_own_default() {
+        // A root answered as paid by a plan defaults to 1h; a project that sends its requests
+        // to Bedrock defaults to 5m under the same unset setting.
+        let mut p = profile();
+        p.ttl.main.value = Some(Ttl::OneHour);
+        let mut bedrock = p.idle.clone().unwrap();
+        let mut ttl = p.ttl.clone();
+        ttl.main.value = Some(Ttl::FiveMinutes);
+        bedrock.ttl = Some(ttl);
+        p.idle_directories = Some(IndexMap::from_iter([("/bedrock".to_string(), bedrock)]));
+        let group = crate::rows::Group::one(&p);
+        let scopes = Scopes::new(&group);
+        let scenario = |main| PerBucket {
+            main: Some(main),
+            subagent: Some(Ttl::FiveMinutes),
+        };
+        // The current settings keep the project's 5m; the lead scope takes any scenario.
+        assert_eq!(
+            scopes.ttls(Some(0), &scenario(Ttl::OneHour)).main,
+            Some(Ttl::FiveMinutes)
+        );
+        assert_eq!(
+            scopes.ttls(Some(0), &scenario(Ttl::FiveMinutes)).main,
+            Some(Ttl::FiveMinutes)
+        );
+        assert_eq!(
+            scopes.ttls(None, &scenario(Ttl::OneHour)).main,
+            Some(Ttl::OneHour)
+        );
+        assert_eq!(
+            scopes.ttls(None, &scenario(Ttl::FiveMinutes)).main,
+            Some(Ttl::FiveMinutes)
+        );
     }
 
     /// The target requests beside one calibration sample: a linked summary and its resume.

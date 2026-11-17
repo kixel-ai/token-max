@@ -3180,8 +3180,28 @@ fn t3_comparison(
             .map(|r| &*r.id)
             .collect(),
     };
+    let idle_ids: HashSet<&Id> = events
+        .iter()
+        .filter(|e| e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id))
+        .map(|e| &e.id)
+        .collect();
+    let idle_requests: HashSet<&str> = options
+        .summaries
+        .iter()
+        .filter(|s| idle_ids.contains(&s.event))
+        .filter_map(|s| s.request.as_deref())
+        .collect();
+    let unlinked: Vec<&Request> = requests
+        .iter()
+        .copied()
+        .filter(|r| {
+            r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+                && !idle_requests.contains(&*r.id)
+                && !kept.requests.contains(&*r.id)
+        })
+        .collect();
     // Sessions where some mode could act: a gap it could compact, or a recorded idle
-    // compaction every mode undoes.
+    // compaction every mode undoes, linked or not.
     let acting: HashSet<&str> = gaps
         .iter()
         .filter(|g| {
@@ -3190,6 +3210,7 @@ fn t3_comparison(
                 || g.boundary.is_some()
         })
         .map(|g| &*g.previous.session)
+        .chain(unlinked.iter().map(|r| &*r.session))
         .collect();
     // Every session the window changes or could change, the same for every mode.
     let sessions: IndexSet<&str> = requests
@@ -3215,6 +3236,8 @@ fn t3_comparison(
                 replay,
                 kept: &kept,
                 sessions: &sessions,
+                idle_requests: &idle_requests,
+                unlinked: &unlinked,
             },
             &gaps,
             &mut detail,
@@ -3289,6 +3312,10 @@ struct T3Replay<'a> {
     kept: &'a Kept<'a>,
     /// Sessions with a request or gap in the window, which each mode is extrapolated over.
     sessions: &'a IndexSet<&'a str>,
+    /// Summary requests of the recorded idle compactions every mode removes.
+    idle_requests: &'a HashSet<&'a str>,
+    /// Recorded idle runs with no linked boundary, whose replacement no mode can undo.
+    unlinked: &'a [&'a Request],
 }
 
 /// One T3 mode's changed charges in total and per session.
@@ -3340,6 +3367,8 @@ fn t3_replay(
         replay,
         kept,
         sessions: population,
+        idle_requests,
+        unlinked,
     } = input;
     let requests = *requests;
     let events = *events;
@@ -3351,17 +3380,6 @@ fn t3_replay(
         Generate(usize),
     }
     let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
-    let idle_ids: HashSet<&Id> = events
-        .iter()
-        .filter(|e| e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id))
-        .map(|e| &e.id)
-        .collect();
-    let idle_requests: HashSet<&str> = options
-        .summaries
-        .iter()
-        .filter(|s| idle_ids.contains(&s.event))
-        .filter_map(|s| s.request.as_deref())
-        .collect();
     for &r in requests {
         sessions
             .entry(&r.session)
@@ -3393,11 +3411,7 @@ fn t3_replay(
     for (&session, reason) in &replay.failed {
         ledger.charge(session, unknown_cost(reason.clone()));
     }
-    for r in requests.iter().filter(|r| {
-        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
-            && !idle_requests.contains(&*r.id)
-            && !kept.requests.contains(&*r.id)
-    }) {
+    for r in unlinked.iter() {
         ledger.charge(&r.session, unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
     }
     let mut count = 0;
@@ -5229,6 +5243,49 @@ mod tests {
             now: (now * MINUTE as f64) as Millis,
         };
         Checked::new(detailed_t3_checks(&options, true).remove(0))
+    }
+
+    #[test]
+    fn t3_an_unlinked_recorded_idle_run_leaves_its_session_unpriced() {
+        use crate::model::T3IdleMode::*;
+        let sessions = |ids: &[&str]| -> Vec<Request> {
+            ids.iter()
+                .flat_map(|id| {
+                    // Below T3's 200,000-token floor, no gap of the last session can compact.
+                    let tokens = if *id == "four" { 100_000 } else { 300_000 };
+                    [
+                        request(&format!("{id}-a"), 0.0, tokens),
+                        request(&format!("{id}-b"), 10.0, tokens + 20_000),
+                    ]
+                    .map(|r| in_session(r, id))
+                })
+                .collect()
+        };
+        let two = t3_check(
+            &t3_data(sessions(&["one", "two"]), Ttl::FiveMinutes, Off),
+            10.0,
+        );
+        let mut scan = t3_data(sessions(&["one", "two", "four"]), Ttl::FiveMinutes, Off);
+        // T3 recorded an idle run there that no boundary links, so it can't be undone.
+        let run = scan
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "four-b")
+            .unwrap();
+        let mut t3 = (**run.t3.as_ref().unwrap()).clone();
+        t3.idle_mode = Some(BeforeCacheExpires);
+        run.t3 = Some(std::sync::Arc::new(t3));
+        let check = t3_check(&scan, 10.0);
+        // It counts as a session T3 acted on, unpriced, rather than an exact zero.
+        assert_eq!(
+            check.base.coverage,
+            Some(Coverage {
+                priced: 3,
+                total: 4
+            })
+        );
+        near(check.base.savings_usd, two.base.savings_usd.unwrap() * 1.5);
+        assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
     }
 
     #[test]

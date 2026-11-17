@@ -1493,6 +1493,34 @@ pub enum Action {
     Advisory,
 }
 
+/// A dollar figure, extrapolated from the items that could be priced when some could not.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Estimate {
+    pub usd: f64,
+    /// How far an extrapolated figure may be off; None when every item was priced.
+    pub margin: Option<Margin>,
+}
+
+/// How far a figure extrapolated over unpriced items may be off, assuming they resemble the
+/// priced ones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Margin {
+    /// A 95% interval's half-width, in dollars.
+    Usd(f64),
+    /// One priced item leaves no spread to measure it from.
+    Unmeasured,
+}
+
+impl Margin {
+    /// The margin scaled like the figure it belongs to, such as from the window to 30 days.
+    pub fn scale(self, factor: f64) -> Self {
+        match self {
+            Margin::Usd(usd) => Margin::Usd(usd * factor),
+            Margin::Unmeasured => Margin::Unmeasured,
+        }
+    }
+}
+
 /// Request parts priced in both compared scenarios.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Coverage {
@@ -1521,6 +1549,10 @@ pub struct CheckBase<V> {
     /// Request parts priced in both compared scenarios; None when the check is not a per-part replay.
     pub coverage: Option<Coverage>,
     pub savings_usd: Option<f64>,
+    /// How far the line's measured figure, such as `savings_usd` or the gap a kept TTL
+    /// shows, may be off when extrapolated over unpriced requests; None when priced in full
+    /// or not measured.
+    pub margin: Option<Margin>,
     pub monthly_savings_usd: Option<f64>,
     pub break_even: Option<String>,
     pub assumptions: Vec<String>,
@@ -1561,6 +1593,9 @@ pub struct TtlCheck {
     pub summary_cost: PerTtl<Cost>,
     /// Cache charges used to compare TTLs; ordinary input/output are fixed.
     pub comparison_cost: PerTtl<Cost>,
+    /// `comparison_cost` over the parts both replays price, extrapolated to every part;
+    /// None when none was priced.
+    pub comparison_estimate: PerTtl<Option<Estimate>>,
     /// Ordinary input, output, server fees and proxies held identical in both scenarios.
     pub fixed_cost: Cost,
     pub usage_estimates: Vec<UsageEstimate>,
@@ -1602,6 +1637,8 @@ pub struct WindowScenario {
     pub baseline_comparison_cost: Cost,
     pub comparison_cost: Cost,
     pub savings_usd: Option<f64>,
+    /// How far `savings_usd` may be off when extrapolated over unpriced parts.
+    pub margin: Option<Margin>,
     /// Changed request parts priced under both windows.
     pub coverage: Coverage,
     pub added: Vec<AddedCompaction>,

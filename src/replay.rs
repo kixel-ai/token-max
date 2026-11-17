@@ -689,14 +689,13 @@ fn ttl_check(
         _ => None,
     };
     let current = profile.ttl.get(bucket);
-    let recommended = if !paired.decided {
-        None
-    } else if paired.usd > Usd::ZERO {
-        Some(Ttl::OneHour)
-    } else if paired.usd < Usd::ZERO {
-        Some(Ttl::FiveMinutes)
-    } else {
-        current.value
+    // Extrapolated over unpriced parts, so a few of them never leave the winner unknown.
+    let gap = paired.usd();
+    let recommended = match gap {
+        None => None,
+        Some(usd) if usd > 0.0 => Some(Ttl::OneHour),
+        Some(usd) if usd < 0.0 => Some(Ttl::FiveMinutes),
+        Some(_) => current.value,
     };
     // Each source's current client must honor the setting, since one file sets it for all.
     fn latest<'r>(list: &[&'r Request], id: &String) -> Option<&'r str> {
@@ -727,8 +726,8 @@ fn ttl_check(
     };
     let savings = match (current.value, recommended) {
         (Some(current), Some(recommended)) if current == recommended => Some(0.0),
-        (Some(Ttl::FiveMinutes), Some(_)) => Some(paired.usd.to_f64()),
-        (Some(_), Some(_)) => Some(-paired.usd.to_f64()),
+        (Some(Ttl::FiveMinutes), Some(_)) => gap,
+        (Some(_), Some(_)) => gap.map(|usd| -usd),
         _ => None,
     };
     let profiles: IndexSet<&str> = relevant
@@ -809,6 +808,7 @@ fn ttl_check(
                 total: paired.total,
             }),
             savings_usd: savings,
+            margin: paired.savings.and_then(|s| s.margin),
             monthly_savings_usd: savings
                 .filter(|_| now > since)
                 .map(|s| s * 30.0 * 24.0 * 60.0 * MINUTE as f64 / (now - since) as f64),
@@ -846,7 +846,11 @@ fn ttl_check(
             WindowBasisKind::Available
         },
         bucket,
-        one_hour_savings_usd: paired.usd.to_f64(),
+        one_hour_savings_usd: gap.unwrap_or(0.0),
+        comparison_estimate: PerTtl {
+            five_minutes: paired.baseline,
+            one_hour: paired.alternative,
+        },
         cost,
         summary_cost,
         comparison_cost,

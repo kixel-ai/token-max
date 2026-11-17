@@ -10,7 +10,7 @@ use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
-    Harness, Id, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
+    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
     StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
     WindowControl, WindowScenario, WindowSensitivity,
 };
@@ -1155,6 +1155,7 @@ struct Run {
     baseline_comparison_cost: Cost,
     comparison_cost: Cost,
     savings_usd: Option<f64>,
+    margin: Option<Margin>,
     coverage: Coverage,
     added: Vec<AddedCompaction>,
     affected: usize,
@@ -1617,16 +1618,17 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     let comparison_cost = alternative_sum.cost();
                     // Per-session failures are unpriced pairs; an unknown current control still blocks a price.
                     let paired = pairs.savings(skipped);
-                    let savings_usd = if control.comparison_unknown.is_some() || !paired.decided {
-                        None
+                    let (savings_usd, margin) = if control.comparison_unknown.is_some() {
+                        (None, None)
                     } else {
-                        Some(paired.usd.to_f64())
+                        (paired.usd(), paired.savings.and_then(|s| s.margin))
                     };
                     runs.push(Run {
                         cost,
                         baseline_comparison_cost,
                         comparison_cost,
                         savings_usd,
+                        margin,
                         coverage: Coverage {
                             priced: paired.priced,
                             total: paired.total,
@@ -1648,6 +1650,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     baseline_comparison_cost: point.baseline_comparison_cost,
                     comparison_cost: point.comparison_cost,
                     savings_usd: point.savings_usd,
+                    margin: point.margin,
                     coverage: point.coverage,
                     added: point.added,
                     affected_requests: point.affected as u64,
@@ -1715,6 +1718,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .and_then(|w| w.savings_usd)
                 .or(recommended.map(|_| 0.0))
                 .filter(|_| !conditional);
+            let margin = winning.and_then(|w| w.margin).filter(|_| !conditional);
             let mut uncertainty: IndexSet<String> = [
                 "compaction loses detail; re-reading files, repeated tool calls or changed reasoning may erase savings; that work is unmeasured, not priced at zero",
                 "observed boundary timestamps, precomputed flags and durations do not prove summary generation time or idle attribution; unlogged/discarded summaries remain unknown",
@@ -1789,6 +1793,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     requests: selected.iter().filter(|r| r.time >= since).count() as u64,
                     coverage,
                     savings_usd: savings,
+                    margin,
                     monthly_savings_usd: savings
                         .filter(|_| now > since)
                         .map(|s| (s * 30.0 * 86400000.0) / (now - since) as f64),

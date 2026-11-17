@@ -258,6 +258,7 @@ fn check(
             requests: requests.len() as u64,
             coverage: None,
             savings_usd: None,
+            margin: None,
             monthly_savings_usd: None,
             break_even: None,
             assumptions: [

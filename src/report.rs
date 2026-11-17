@@ -13,7 +13,7 @@ use crate::discovery::TTL_BILLING_UNKNOWN;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
+    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun, Margin,
     EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, MemoryCheck, Millis,
     ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share,
     SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
@@ -222,6 +222,7 @@ struct Common<'a> {
     requests: u64,
     coverage: Option<Coverage>,
     savings_usd: Option<f64>,
+    margin: Option<Margin>,
     monthly_savings_usd: Option<f64>,
     break_even: Option<&'a str>,
     assumptions: &'a [String],
@@ -255,6 +256,7 @@ fn base<'a, V>(
         requests: b.requests,
         coverage: b.coverage,
         savings_usd: b.savings_usd,
+        margin: b.margin,
         monthly_savings_usd: b.monthly_savings_usd,
         break_even: b.break_even.as_deref(),
         assumptions: &b.assumptions,
@@ -5781,6 +5783,7 @@ mod tests {
                 total: 2000,
             }),
             savings_usd: Some(150.0),
+            margin: None,
             monthly_savings_usd: Some(150.0),
             break_even: None,
             assumptions: vec!["synthetic assumption".into()],
@@ -5795,6 +5798,7 @@ mod tests {
             window_basis_kind: WindowBasisKind::Explicit,
             bucket,
             one_hour_savings_usd: one_hour,
+            comparison_estimate: PerTtl::default(),
             cost: PerTtl {
                 five_minutes: cost(Some(300.0), 300.0),
                 one_hour: cost(Some(150.0), 150.0),
@@ -5869,6 +5873,7 @@ mod tests {
                     ..cost(None, 2.675)
                 },
                 savings_usd: Some(0.375),
+                margin: None,
                 coverage: Coverage {
                     priced: 3,
                     total: 4,

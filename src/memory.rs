@@ -344,6 +344,7 @@ fn check(
                 total: mine.len() as u64,
             }),
             savings_usd: total,
+            margin: None,
             monthly_savings_usd: monthly,
             break_even: None,
             assumptions: [

@@ -12,7 +12,9 @@ use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::model::{Api, BillingPart, Cost, Harness, PartKind, Request, TierScenario, Usd};
+use crate::model::{
+    Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, TierScenario, Usd,
+};
 use crate::safe::{ScanError, iso, label, object};
 
 const PRICE_URL: &str = "https://models.dev/api.json";
@@ -696,19 +698,113 @@ impl Sum {
     }
 }
 
-/// Baseline-minus-alternative savings over the items both scenarios price.
+/// The z-score of a two-sided 95% normal interval.
+const Z95: f64 = 1.959_963_984_540_054;
+
+/// Per-item dollar figures summed over the items that could be priced, so their total over
+/// every item can be extrapolated with a margin of error.
+///
+/// An item may carry a weight, such as a session's idle periods, so the total is
+/// extrapolated per unit of weight rather than per item: a ratio estimator. With every
+/// weight 1 it is the plain mean times the item count.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sample {
+    priced: u64,
+    weight: f64,
+    /// Summed exactly, so a total priced in full doesn't depend on the order of its items.
+    sum: Usd,
+    squares: f64,
+    cross: f64,
+    weights: f64,
+}
+
+impl Sample {
+    /// Add one priced item's figure.
+    pub fn add(&mut self, usd: Usd) {
+        self.add_weighted(usd, 1.0);
+    }
+
+    /// Add one priced item's figure and its weight.
+    pub fn add_weighted(&mut self, exact: Usd, weight: f64) {
+        let usd = exact.to_f64();
+        self.priced += 1;
+        self.weight += weight;
+        self.sum += exact;
+        self.squares += usd * usd;
+        self.cross += usd * weight;
+        self.weights += weight * weight;
+    }
+
+    /// How many items were priced.
+    pub fn priced(&self) -> u64 {
+        self.priced
+    }
+
+    /// The figure over `total` items, `total` at least the priced ones, extrapolated from the
+    /// priced items' mean under the assumption that the rest resemble them; None when some
+    /// item exists and none was priced.
+    pub fn estimate(&self, total: u64) -> Option<Estimate> {
+        self.estimate_weighted(total, total as f64)
+    }
+
+    /// The figure over `total` items weighing `weight` in all, extrapolated per unit of the
+    /// priced items' weight; None when some item exists and none was priced.
+    ///
+    /// The margin is a 95% interval's half-width for a total estimated from a simple random
+    /// sample of the items, with the finite-population correction, so it shrinks to nothing
+    /// as the priced share reaches every item. It is a statistical estimate, not a bound: an
+    /// unpriced item has no price to bound it by.
+    pub fn estimate_weighted(&self, total: u64, weight: f64) -> Option<Estimate> {
+        assert!(total >= self.priced, "every priced item is one of the total");
+        if self.priced == 0 && total > 0 {
+            return None;
+        }
+        if total == self.priced {
+            return Some(Estimate {
+                usd: self.sum.to_f64(),
+                margin: None,
+            });
+        }
+        let ratio = self.sum.to_f64() / self.weight;
+        let usd = ratio * weight;
+        let margin = if self.priced < 2 {
+            Margin::Unmeasured
+        } else {
+            let (n, total) = (self.priced as f64, total as f64);
+            // The residuals' spread around the ratio; rounding can leave it a hair below zero.
+            let residuals = self.squares - 2.0 * ratio * self.cross + ratio * ratio * self.weights;
+            let variance = (residuals / (n - 1.0)).max(0.0);
+            Margin::Usd(Z95 * total * ((1.0 - n / total) * variance / n).sqrt())
+        };
+        Some(Estimate {
+            usd,
+            margin: Some(margin),
+        })
+    }
+}
+
+/// Baseline-minus-alternative savings over the items both scenarios price, and each
+/// scenario's cost over them, every figure extrapolated to all the items.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PairedSavings {
-    pub usd: Usd,
+    /// Baseline minus alternative; None when no item was priced in both.
+    pub savings: Option<Estimate>,
+    pub baseline: Option<Estimate>,
+    pub alternative: Option<Estimate>,
     pub priced: u64,
     pub total: u64,
-    /// True when the unpriced items cannot flip the sign, each bounded by the largest priced difference.
-    pub decided: bool,
+}
+
+impl PairedSavings {
+    /// The extrapolated savings in dollars, positive when the alternative is cheaper.
+    pub fn usd(&self) -> Option<f64> {
+        self.savings.map(|s| s.usd)
+    }
 }
 
 /// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
 /// cannot hide a clear winner. `unknown` counts further items that could differ but left no
-/// evidence, such as unreadable transcript lines.
+/// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
 pub fn paired_savings<'a>(
     pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
     unknown: u64,
@@ -723,10 +819,10 @@ pub fn paired_savings<'a>(
 /// [`paired_savings`] taken one pair at a time, so a whole history's pairs need not be kept.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pairs {
-    usd: Usd,
-    priced: u64,
     count: u64,
-    largest: Usd,
+    savings: Sample,
+    baseline: Sample,
+    alternative: Sample,
 }
 
 impl Pairs {
@@ -737,26 +833,20 @@ impl Pairs {
         else {
             return;
         };
-        let delta = baseline - alternative;
-        self.usd += delta;
-        self.priced += 1;
-        self.largest = self.largest.max(delta.abs());
+        self.savings.add(baseline - alternative);
+        self.baseline.add(baseline);
+        self.alternative.add(alternative);
     }
 
     /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
     pub fn savings(&self, unknown: u64) -> PairedSavings {
-        let Self {
-            usd,
-            priced,
-            count,
-            largest,
-        } = *self;
-        let unpriced = count - priced + unknown;
+        let total = self.count + unknown;
         PairedSavings {
-            usd,
-            priced,
-            total: count + unknown,
-            decided: unpriced == 0 || (priced > 0 && usd.abs() > largest.saturating_mul(unpriced)),
+            savings: self.savings.estimate(total),
+            baseline: self.baseline.estimate(total),
+            alternative: self.alternative.estimate(total),
+            priced: self.savings.priced(),
+            total,
         }
     }
 }
@@ -1835,7 +1925,7 @@ mod tests {
     }
 
     #[test]
-    fn paired_savings_decide_only_when_unpriced_parts_cannot_flip_the_sign() {
+    fn paired_savings_extrapolate_over_unpriced_parts() {
         let known = |usd: f64| Cost {
             known_usd: Usd::from_f64(usd),
             total_usd: Some(Usd::from_f64(usd)),
@@ -1846,20 +1936,91 @@ mod tests {
         let a = (&three, &one);
         let b = (&two, &one);
         let gap = (&missing, &missing);
+        let exact = |usd| Some(Estimate { usd, margin: None });
         assert_eq!(
             paired_savings([a, b], 0),
             PairedSavings {
-                usd: Usd::from_f64(3.0),
+                savings: exact(3.0),
+                baseline: exact(5.0),
+                alternative: exact(2.0),
                 priced: 2,
                 total: 2,
-                decided: true
             }
         );
-        // Each unpriced part may differ by up to the largest priced difference (2).
-        assert!(paired_savings([a, b, gap], 0).decided);
-        assert!(!paired_savings([a, b, gap, gap], 0).decided);
-        assert!(!paired_savings([gap], 0).decided);
-        assert!(paired_savings([], 0).decided);
+        // Savings of 2 and 1 average 1.5 over three parts, with a sample variance of 0.5.
+        let partial = paired_savings([a, b, gap], 0);
+        let savings = partial.savings.unwrap();
+        assert_eq!(savings.usd, 4.5);
+        let Some(Margin::Usd(margin)) = savings.margin else {
+            panic!("two priced parts measure a spread");
+        };
+        assert!((margin - Z95 * 3.0 * (1.0f64 / 12.0).sqrt()).abs() < 1e-12);
+        // Both priced parts cost 1 under the alternative, so its cost has no spread.
+        assert_eq!(
+            partial.alternative,
+            Some(Estimate {
+                usd: 3.0,
+                margin: Some(Margin::Usd(0.0))
+            })
+        );
+        // An unreadable line counts as one more unpriced part.
+        assert_eq!(paired_savings([a, b], 1).savings, partial.savings);
+        assert_eq!(
+            paired_savings([a, gap], 0).savings,
+            Some(Estimate {
+                usd: 4.0,
+                margin: Some(Margin::Unmeasured)
+            })
+        );
+        assert_eq!(paired_savings([gap], 0).savings, None);
+        assert_eq!(paired_savings([], 0).savings, exact(0.0));
+    }
+
+    /// Draws from a fixed linear congruential generator, so the check is deterministic.
+    struct Draws(u64);
+
+    impl Draws {
+        fn next(&mut self) -> f64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    #[test]
+    fn extrapolation_margins_cover_the_true_total_about_95_percent_of_the_time() {
+        // Skewed per-request costs, as cache writes make them: most small, a few large.
+        let mut draws = Draws(7);
+        let population: Vec<f64> = (0..400)
+            .map(|_| {
+                let x = draws.next();
+                if x < 0.9 { x } else { 40.0 * x }
+            })
+            .collect();
+        let truth: f64 = population.iter().sum();
+        let trials = 4000;
+        let mut covered = 0;
+        for _ in 0..trials {
+            // Price a random 95% of the requests, leaving 20 unpriced.
+            let mut order: Vec<usize> = (0..population.len()).collect();
+            for i in (1..order.len()).rev() {
+                let j = (draws.next() * (i + 1) as f64) as usize;
+                order.swap(i, j);
+            }
+            let mut sample = Sample::default();
+            for &i in &order[20..] {
+                sample.add(Usd::from_f64(population[i]));
+            }
+            let estimate = sample.estimate(population.len() as u64).unwrap();
+            let Some(Margin::Usd(margin)) = estimate.margin else {
+                panic!("a partial sample has a margin");
+            };
+            covered += usize::from((estimate.usd - truth).abs() <= margin);
+        }
+        let rate = covered as f64 / trials as f64;
+        assert!((0.92..=0.975).contains(&rate), "covered {rate}");
     }
 
     #[test]

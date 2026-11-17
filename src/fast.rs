@@ -315,6 +315,7 @@ fn check(
             requests: requests.len() as u64,
             coverage: None,
             savings_usd: if change { current_usd } else { None },
+            margin: None,
             monthly_savings_usd: if change { month(current_usd) } else { None },
             break_even: None,
             assumptions: [

@@ -8,6 +8,10 @@ announce token-max.
 
 ## Plan
 
+Kept 2026-11-17 (maintainer, /quest-run, at the review of
+[kixel-ai/token-max#140](https://github.com/kixel-ai/token-max/pull/140)): ✅
+keep this follow-up (rejected: drop it).
+
 The page is `site/public/index.html`; `docs/releasing.md` says how to
 preview it with `wrangler dev` and what to change together with the README.
 Its link preview is `og.png`, so a shared link shows the logo, the question

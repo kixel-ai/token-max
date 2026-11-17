@@ -1979,6 +1979,24 @@ mod tests {
         assert_eq!(paired_savings([], 0).savings, exact(0.0));
     }
 
+    #[test]
+    fn weighted_samples_extrapolate_per_unit_of_weight() {
+        // Sessions that save $2 per idle period, one of them with three periods.
+        let mut sample = Sample::default();
+        sample.add_weighted(Usd::from_f64(2.0), 1.0);
+        sample.add_weighted(Usd::from_f64(6.0), 3.0);
+        // Two more sessions with six periods between them were unpriced: 10 periods in all.
+        let estimate = sample.estimate_weighted(4, 10.0).unwrap();
+        assert!((estimate.usd - 20.0).abs() < 1e-12);
+        // Every priced session saved exactly $2 a period, so the residuals leave no spread.
+        assert_eq!(estimate.margin, Some(Margin::Usd(0.0)));
+        sample.add_weighted(Usd::from_f64(1.0), 1.0);
+        let Some(Margin::Usd(margin)) = sample.estimate_weighted(5, 12.0).unwrap().margin else {
+            panic!("three priced sessions measure a spread");
+        };
+        assert!(margin > 0.0);
+    }
+
     /// Draws from a fixed linear congruential generator, so the check is deterministic.
     struct Draws(u64);
 

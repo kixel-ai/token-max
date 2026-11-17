@@ -3611,6 +3611,27 @@ mod tests {
             "Accepted: 2 changes whose savings were not measured."
         );
         assert_eq!(total(&[]), "");
+        // Extrapolated savings carry a ~, their margins added since they may share requests,
+        // and one with no spread to measure leaves the total's margin unknown.
+        let extrapolated = |usd, margin| Fix {
+            margin: Some(margin),
+            ..fix("saves", usd)
+        };
+        assert_eq!(
+            total(&[
+                fix("saves", 10.0),
+                extrapolated(20.0, Margin::Usd(2.0)),
+                extrapolated(5.0, Margin::Usd(1.0))
+            ]),
+            "Accepted: ~$35/mo ± $3, 35% of this host's spend; overlapping changes may save less."
+        );
+        assert_eq!(
+            total(&[
+                extrapolated(20.0, Margin::Usd(2.0)),
+                extrapolated(5.0, Margin::Unmeasured)
+            ]),
+            "Accepted: ~$25/mo, margin unknown, 25% of this host's spend; overlapping changes may save less."
+        );
         // A group's heading sums its members the same way.
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");

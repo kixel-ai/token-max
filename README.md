@@ -82,7 +82,10 @@ Transcripts are only read, and no prompt, reply, tool argument or tool output
 text is kept or printed. The only network request downloads public prices from
 `https://models.dev/api.json`, unless you name other machines with `--ssh`.
 Settings files change only after you accept a change and then confirm the
-list of edits; the only other file written is that price cache.
+list of edits, and each is first copied to a
+[`.token-max.bak` backup](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#backups)
+unless git already keeps its previous version. Besides those, the only file
+written is the price cache.
 
 ## Install
 

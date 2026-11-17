@@ -16,7 +16,7 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report, Verdict,
+    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Profile, Report, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, recommendations,
@@ -1714,6 +1714,51 @@ fn answer(
             _ => {}
         }
     }
+}
+
+/// Ask how each Claude profile at `roots` pays, before the report, so its main conversation's
+/// cache TTL is priced against the one default that applies. A skip leaves a profile naming
+/// both defaults, and end of input skips the rest. Nothing is stored: the next run asks again.
+pub fn ask_billing(
+    roots: &[String],
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<IndexMap<String, Billing>> {
+    let mut answers = IndexMap::default();
+    if roots.is_empty() {
+        return Ok(answers);
+    }
+    write!(
+        output,
+        "\n{}{}",
+        style.line("Claude Code caches the main conversation for 1h on a Claude plan and 5m on an API key or usage credits. Which pays can't be read from the transcripts, so say which to price each profile against its own default."),
+        style.dim("Nothing is saved; the next run asks again."),
+    )?;
+    for root in roots {
+        let question = format!("How is {} paid for?", home_in(root, style.home.as_deref()));
+        let prompt = style.ask(&question, "[p]lan, [a]PI key or usage credits, [s]kip");
+        loop {
+            write!(output, "{prompt}")?;
+            output.flush()?;
+            let mut line = String::new();
+            if input.read_line(&mut line)? == 0 {
+                writeln!(output)?;
+                return Ok(answers);
+            }
+            let billing = match line.trim().to_ascii_lowercase().as_str() {
+                "p" | "plan" => Some(Billing::Plan),
+                "a" | "api" | "api key" | "usage credits" => Some(Billing::Api),
+                "s" | "skip" => None,
+                _ => continue,
+            };
+            if let Some(billing) = billing {
+                answers.insert(root.clone(), billing);
+            }
+            break;
+        }
+    }
+    Ok(answers)
 }
 
 /// What the walk has accepted so far.

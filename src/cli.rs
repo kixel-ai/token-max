@@ -11,9 +11,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::ser::Formatter;
 
-use crate::discovery::DiscoveryOptions;
-use crate::doctor::{Fix, Style, ask, confirm, finish, write};
-use crate::model::{Location, Millis, Scan, Verdict};
+use crate::collections::IndexSet;
+use crate::discovery::{DiscoveryOptions, discover};
+use crate::doctor::{Fix, Style, ask, ask_billing, confirm, finish, write};
+use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
@@ -1047,9 +1048,10 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         discovery.pretend_defaults();
     }
     let stdout = io::stdout().is_terminal();
+    let terminal = stdout && io::stdin().is_terminal();
     // Only this host's changes can be made here, so a run of destinations alone lists them,
     // and a report with the settings files pretended away has none to make.
-    let walk = discovery.is_some() && stdout && io::stdin().is_terminal() && !values.defaults;
+    let walk = discovery.is_some() && terminal && !values.defaults;
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let unicode_locale = env_nonempty("LC_ALL")
         .or_else(|| env_nonempty("LC_CTYPE"))
@@ -1068,6 +1070,37 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         host: None,
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
+    let style = Style {
+        color,
+        unicode,
+        width: width(),
+        home: home.clone(),
+    };
+    // This host's Claude profiles on the Anthropic API whose billing picks the main TTL's
+    // default, asked before the scan; without a terminal the report names both defaults.
+    if terminal && let Some(discovery) = &mut discovery {
+        // T3 Code's instances share a native root, and so its account and answer.
+        let roots: Vec<String> = discover(discovery)?
+            .profiles
+            .into_iter()
+            .filter(|p| {
+                p.harness == Harness::Claude && p.provider.is_none() && !p.histories.is_empty()
+            })
+            .map(|p| p.root)
+            .collect::<IndexSet<_>>()
+            .into_iter()
+            .collect();
+        let failed = |_| ScanError::new("cannot use the terminal; no report produced");
+        enter(Phase::Asking);
+        discovery.billing = ask_billing(
+            &roots,
+            &style,
+            &mut io::stdin().lock(),
+            &mut io::stdout().lock(),
+        )
+        .map_err(failed)?;
+        enter(Phase::Running);
+    }
     let replies = gather(Gather {
         since,
         defaults: values.defaults,
@@ -1121,12 +1154,6 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         );
     }
     if walk {
-        let style = Style {
-            color,
-            unicode,
-            width: width(),
-            home,
-        };
         let listing = listing.expect("a walk has this host's report");
         return Ok((
             Output::Walk(Walk {

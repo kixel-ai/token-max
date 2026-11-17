@@ -8489,6 +8489,88 @@ mod tests {
         (report, file.to_string_lossy().into_owned())
     }
 
+    /// The synthetic report with `settings`, the profile's billing answered as `billing`.
+    fn answered_report(settings: &str, billing: Billing) -> Report {
+        let w = Workspace::new();
+        w.fixture(w.claude.join("projects/project/main.jsonl"), "claude.jsonl");
+        std::fs::write(w.claude.join("settings.json"), settings).unwrap();
+        let mut options = w.scan_options();
+        let root = w.claude.to_string_lossy().into_owned();
+        options.discovery.claude_dirs = vec![root];
+        let canonical = std::fs::canonicalize(&w.claude).unwrap();
+        options
+            .discovery
+            .billing
+            .insert(canonical.to_string_lossy().into_owned(), billing);
+        analyze(AnalyzeOptions {
+            scan: scan(&options).unwrap(),
+            catalog: &prices(),
+            since: None,
+            now: instant("2026-11-02T00:00:00Z"),
+            max_cost_per_use_usd: 1.0,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_answered_billing_prices_the_main_ttl_against_its_one_default() {
+        for billing in [Billing::Plan, Billing::Api] {
+            let default = billing.main_ttl();
+            let report = answered_report("{}", billing);
+            let ttl = main_ttl(&report);
+            assert_eq!(ttl.base.current, Some(default), "{billing:?}");
+            let winner = ttl.base.recommended.unwrap();
+            let summary = text(&report, None, true);
+            let line = report_line(&summary, "Main-agent prompt cache TTL");
+            assert!(
+                line.head.starts_with(&format!(
+                    "Main-agent prompt cache TTL {} (default)",
+                    default.as_str()
+                )),
+                "{summary}"
+            );
+            assert!(!line.head.contains("up to"), "{summary}");
+            assert!(line.evidence.contains("which you answered pay"), "{summary}");
+            if winner == default {
+                assert_eq!(ttl.base.action, Action::Keep, "{billing:?}");
+            } else {
+                assert_eq!(ttl.base.action, Action::Change, "{billing:?}");
+                assert!(ttl.base.savings_usd.is_some(), "{billing:?}");
+            }
+            let overflow = ttl
+                .base
+                .uncertainty
+                .iter()
+                .any(|u| u == crate::discovery::TTL_PLAN_DEFAULT);
+            assert_eq!(overflow, billing == Billing::Plan);
+            // A pinned TTL is compared with the answered default alone.
+            let other = if default == Ttl::OneHour { "5m" } else { "1h" };
+            let report = answered_report(&format!(r#"{{"promptCacheTtl":"{other}"}}"#), billing);
+            let profile = &report.scan.profiles[0];
+            let baseline = crate::defaults::check(
+                &CheckResult::Ttl(main_ttl(&report).clone()),
+                Some(profile),
+            )
+            .unwrap();
+            assert_eq!(baseline.default, default.as_str(), "{billing:?}");
+            assert!(
+                !matches!(baseline.saving, crate::defaults::Saving::UpTo(_)),
+                "{billing:?}"
+            );
+        }
+    }
+
+    fn main_ttl(report: &Report) -> &TtlCheck {
+        report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t),
+                _ => None,
+            })
+            .unwrap()
+    }
+
     #[test]
     fn an_unset_main_ttl_is_pinned_to_the_replay_winner() {
         use crate::doctor::{Edit, How, Patch, fixes};

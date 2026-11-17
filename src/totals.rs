@@ -59,3 +59,60 @@ impl Totals {
         self.savings.set_share(self.monthly);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::spend_text;
+
+    fn host(requests: u64, spend: f64, margin: Option<Margin>, monthly: f64) -> Totals {
+        Totals {
+            requests,
+            spend,
+            margin,
+            monthly,
+            ..Totals::default()
+        }
+    }
+
+    #[test]
+    fn hosts_sum_as_they_are_with_independent_margins() {
+        let mut total = host(100, 1000.0, Some(Margin::Usd(30.0)), 600.0);
+        total.merge(&host(50, 500.0, Some(Margin::Usd(40.0)), 200.0));
+        // A host priced in full adds no margin of its own.
+        total.merge(&host(1, 10.0, None, 5.0));
+        assert_eq!(total.requests, 151);
+        assert_eq!(total.spend, 1510.0);
+        assert_eq!(total.monthly, 805.0);
+        // 30 and 40 combine as 3-4-5.
+        assert_eq!(total.margin, Some(Margin::Usd(50.0)));
+        assert_eq!(
+            spend_text(total.spend, total.margin, total.floor, total.partial),
+            "~$1,510 ± $50"
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_spread_leaves_the_margin_unknown_and_a_floor_stays_a_floor() {
+        let mut total = host(10, 100.0, Some(Margin::Usd(5.0)), 10.0);
+        total.merge(&host(10, 20.0, Some(Margin::Unmeasured), 10.0));
+        assert_eq!(total.margin, Some(Margin::Unmeasured));
+        let mut priced_none = host(5, 7.0, None, 1.0);
+        priced_none.floor = 7.0;
+        priced_none.partial = true;
+        let mut total = host(10, 100.0, None, 10.0);
+        total.merge(&priced_none);
+        assert_eq!(
+            spend_text(total.spend, total.margin, total.floor, total.partial),
+            "$100 plus at least $7"
+        );
+    }
+
+    #[test]
+    fn a_history_on_two_hosts_counts_on_each() {
+        let one = host(7, 12.5, None, 12.5);
+        let mut total = one.clone();
+        total.merge(&one);
+        assert_eq!((total.requests, total.spend), (14, 25.0));
+    }
+}

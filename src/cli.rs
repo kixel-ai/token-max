@@ -78,7 +78,8 @@ Without profile flags, discover local Claude/Codex profiles and T3 instances. Ex
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
 and needs this same version installed there; it prices its own history with this host's
-prices, and only its report crosses SSH, never its scan. Its changes are listed to make there. Current
+prices, and only its report and its totals cross SSH, never its scan. Several hosts get one
+total, their figures added as they are. Its changes are listed to make there. Current
 settings are applied to the selected history; checks can use different windows and
 baselines. Independent savings do not add.
 
@@ -631,7 +632,7 @@ pub struct Rendered {
     pub text: String,
     pub change: bool,
     /// What the report adds to a total across hosts.
-    pub totals: Totals,
+    pub totals: Box<Totals>,
     /// Empty for a destination's report, whose changes are listed in its text.
     pub fixes: Vec<Fix>,
     /// The report, to print again after the walk; None for a destination's.
@@ -676,7 +677,7 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     Ok(Rendered {
         text: listing.text(),
         change,
-        totals: Totals::new(&report, &fixes),
+        totals: Box::new(Totals::new(&report, &fixes)),
         fixes,
         listing: Some(Box::new(listing)),
         turned_off: crate::mcp::turned_off(&report.scan.profiles),
@@ -1145,7 +1146,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         fixes.extend(local);
         match &mut sum {
             Some(sum) => sum.merge(&totals),
-            None => sum = Some(totals),
+            None => sum = Some(*totals),
         }
         // This host's report comes first; the walk prints it after the questions.
         if walk && ssh.is_none() {

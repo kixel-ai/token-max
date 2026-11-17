@@ -333,6 +333,7 @@ fn a_remote_report_matches_running_there() {
         text.starts_with("token-max: total over 2 hosts  4 requests, "),
         "{text}"
     );
+    assert!(text.contains("\n  Changes offered: "), "{text}");
     assert!(text.contains("\ntoken-max: this host  "), "{text}");
     assert!(text.contains("\ntoken-max: devbox  "), "{text}");
     assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");

@@ -276,7 +276,7 @@ pub fn audit(
             Reply::Report(Rendered {
                 text,
                 change,
-                totals,
+                totals: Box::new(totals),
                 fixes: vec![],
                 listing: None,
                 turned_off: vec![],
@@ -397,7 +397,7 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
             since,
             text,
             change,
-            totals,
+            totals: *totals,
         })
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));

@@ -1162,8 +1162,9 @@ run there.
 Every host is analyzed separately against one price catalog, so cache replay,
 profile ownership, coverage and settings never mix between hosts, and paths
 keep each host's meaning. A history copied between hosts is billed in each
-host's report, which is why amounts across hosts must not be added; no
-cross-host total is reported. The first failure, of a host or of loading
+host's report, and the one total that heads a run of several hosts adds their
+figures as they are, so it counts that history on each. Each host sends beside
+its report only its own sums, never its scan. The first failure, of a host or of loading
 prices, stops the run at once: every `ssh` process is killed and reaped, a
 destination stops when its stdin closes, and a partial price download is
 deleted. SIGINT and SIGTERM do the same before exiting 2.

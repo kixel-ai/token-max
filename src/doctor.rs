@@ -3708,6 +3708,40 @@ mod tests {
     }
 
     #[test]
+    fn savings_across_hosts_add_with_independent_margins_and_a_share_of_all_their_spend() {
+        let file = Path::new("/synthetic/settings.json");
+        let fix = |usd: Option<f64>, margin| Fix {
+            saving: usd,
+            margin,
+            ..change("A", file, Harness::Claude, vec![])
+        };
+        // Each host's own changes add their margins, since they may share requests.
+        let host = |fixes: &[Fix], monthly| {
+            let mut total = Total::of(fixes);
+            total.set_share(monthly);
+            total
+        };
+        let mut total = host(
+            &[
+                fix(Some(30.0), Some(Margin::Usd(3.0))),
+                fix(Some(10.0), Some(Margin::Usd(1.0))),
+            ],
+            400.0,
+        );
+        total.merge(&host(
+            &[fix(Some(60.0), Some(Margin::Usd(3.0))), fix(None, None)],
+            600.0,
+        ));
+        total.set_share(1000.0);
+        // 4 and 3 combine in quadrature; the share is of both hosts' spend together.
+        assert_eq!(
+            total.text("Changes offered", "these hosts'"),
+            "Changes offered: ~$100/mo ± $5, 10% of these hosts' spend, plus 1 change whose saving was not measured; overlapping changes may save less."
+        );
+        assert_eq!(total.changes(), 4);
+    }
+
+    #[test]
     fn the_total_keeps_savings_that_depend_on_a_default_or_were_priced_in_part_qualified() {
         let file = Path::new("/synthetic/settings.json");
         let fix = |verb: &'static str, usd: f64| Fix {

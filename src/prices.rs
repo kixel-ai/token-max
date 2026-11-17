@@ -755,7 +755,10 @@ impl Sample {
     /// as the priced share reaches every item. It is a statistical estimate, not a bound: an
     /// unpriced item has no price to bound it by.
     pub fn estimate_weighted(&self, total: u64, weight: f64) -> Option<Estimate> {
-        assert!(total >= self.priced, "every priced item is one of the total");
+        assert!(
+            total >= self.priced,
+            "every priced item is one of the total"
+        );
         if self.priced == 0 && total > 0 {
             return None;
         }

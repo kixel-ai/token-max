@@ -22,8 +22,8 @@ use crate::model::{
     Usage, UsageEstimate, Usd, WindowBasisKind,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sample, Sum, add_costs, conditional_tier, price_part,
-    price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
+    Catalog, PRICE_SOURCES, PairedSavings, Pairs, Sample, Sum, add_costs, conditional_tier,
+    price_part, price_request, server_cost, tier_sensitivity, unknown_cost, zero_cost,
 };
 use crate::rows::Group;
 use crate::safe::{ScanError, identity, iso};
@@ -1456,7 +1456,11 @@ mod tests {
             lines: 0,
         }];
         let c = check(&s, None, 1_200_000);
-        let whole = check(&data(vec![make_request(), next.clone()], vec![]), None, 1_200_000);
+        let whole = check(
+            &data(vec![make_request(), next.clone()], vec![]),
+            None,
+            1_200_000,
+        );
         // The same winner, its gap scaled to every part, now with a margin of error.
         assert_eq!(c.base.recommended, whole.base.recommended);
         assert!(c.base.recommended.is_some());
@@ -2250,7 +2254,11 @@ mod tests {
                 _ => c.base.margin.filter(|m| matches!(m, Margin::Usd(_))),
             };
             assert_eq!(c.base.margin, margin, "{layout}");
-            assert_eq!(c.base.recommended.is_none(), coverage.priced == 0, "{layout}");
+            assert_eq!(
+                c.base.recommended.is_none(),
+                coverage.priced == 0,
+                "{layout}"
+            );
             assert_eq!(coverage.priced == 0, layout == "first", "{layout}");
             if layout == "mixed" {
                 assert_eq!(c.base.recommended, Some(H1));

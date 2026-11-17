@@ -927,7 +927,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         1.0
     };
     let mut margins = vec![];
-    for ((s, [avoided, ping, closed]), sample) in scenarios.iter_mut().zip(totals).zip(&extrapolations) {
+    for ((s, [avoided, ping, closed]), sample) in
+        scenarios.iter_mut().zip(totals).zip(&extrapolations)
+    {
         s.avoided_usd = avoided.to_f64() * scale;
         s.ping_cost_usd = ping.to_f64() * scale;
         s.closed_savings_usd = closed.to_f64() * scale;
@@ -972,9 +974,8 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.savings_usd.total_cmp(&b.savings_usd));
-    let comparable = !conditional
-        && priced > 0
-        && (profile.harness == Harness::Codex || idle_savings.is_some());
+    let comparable =
+        !conditional && priced > 0 && (profile.harness == Harness::Codex || idle_savings.is_some());
     if conditional {
         uncertainty.push(TIER_SENSITIVITY.into());
     }

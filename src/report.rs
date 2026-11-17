@@ -13,10 +13,10 @@ use crate::discovery::TTL_BILLING_UNKNOWN;
 use crate::keepalive::duration as keepalive_duration;
 use crate::model::{
     Action, BackgroundCheck, BackgroundFeature, BashCapCheck, CacheReplayEvidence, CheckBase,
-    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun, Margin,
-    EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, MemoryCheck, Millis,
-    ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar, Share,
-    SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
+    CheckResult, ContextCost, ContextKind, ControlValue, Cost, Coverage, EffortCheck, EffortRun,
+    EstimateEvidence, Evidence, FableUse, FableWeek, Harness, KeepaliveCheck, Margin, MemoryCheck,
+    Millis, ModelSource, PeriodStatus, Profile, Report, RequestEvidence, ReturnTiming, Scalar,
+    Share, SubagentCost, T3IdleCheck, T3TextGeneration, Ttl, UsageEstimate, Usd, Verdict,
 };
 use crate::prices::{Sum, TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
@@ -2694,8 +2694,11 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
         return format!(
             "Pinging idle sessions {policy} would save {}, but {}.",
             approx(
-                r.monthly_savings_usd
-                    .unwrap_or_else(|| monthly(r.savings_usd.unwrap_or(0.0), r.since, r.until)),
+                r.monthly_savings_usd.unwrap_or_else(|| monthly(
+                    r.savings_usd.unwrap_or(0.0),
+                    r.since,
+                    r.until
+                )),
                 margin,
                 ""
             ),
@@ -6248,6 +6251,8 @@ mod tests {
         let mut ttl_main = check_base(Action::Change, Some(Ttl::FiveMinutes), Some(Ttl::OneHour));
         ttl_main.savings_usd = Some(12.34);
         ttl_main.monthly_savings_usd = Some(24.68);
+        // Ten of its requests unpriced, so its saving is extrapolated with a margin.
+        ttl_main.margin = Some(Margin::Usd(1.25));
         let mut ttl_sub = check_base(Action::Keep, Some(Ttl::OneHour), Some(Ttl::OneHour));
         ttl_sub.coverage = Some(Coverage {
             priced: 2000,
@@ -6360,10 +6365,11 @@ mod tests {
                 priced_requests: 1000,
                 conditional_requests: 0,
                 tier_sensitivity: vec![],
-                cost: cost(None, 1500.0),
+                // Half the requests priced, extrapolated to twice what they cost.
+                cost: cost(None, 750.0),
                 estimate: Some(Estimate {
-                    usd: 3000.0,
-                    margin: Some(Margin::Usd(120.0)),
+                    usd: 1500.0,
+                    margin: Some(Margin::Usd(60.0)),
                 }),
             }],
             compactions: vec![CompactionCharge {
@@ -6979,10 +6985,10 @@ mod tests {
         };
         assert!(text.contains("\n  2 changes recommended and 4 worth considering.\n"));
         has(
-            "Main-agent prompt cache TTL 5m -> 1h saves $25/mo 2%",
+            "Main-agent prompt cache TTL 5m -> 1h saves ~$25/mo ± $1.25 2%",
             "change",
             "Measured",
-            "Replayed at 5m and 1h, assuming the same sessions, using the 99.5% of requests with measured usage; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
+            "Replayed at 5m and 1h, assuming the same sessions, extrapolated from the 99.5% of requests with measured usage to the rest, assuming they resemble each other; 1h costs less. Set in /synthetic/home/.claude/settings.json:promptCacheTtl.",
         );
         // A change names the edit `doctor` offers for it.
         assert_eq!(
@@ -8600,27 +8606,79 @@ mod tests {
     }
 
     #[test]
-    fn an_undecided_ttl_gives_its_gap_relative_to_the_cost() {
-        let mut report = synthetic_report();
-        let ttl = ttl_mut(&mut report);
-        ttl.base.action = Action::Advisory;
-        ttl.base.recommended = None;
-        ttl.base.coverage = Some(Coverage {
-            priced: 93,
-            total: 100,
-        });
-        // A gap that reads as large in dollars but is small against what the requests cost.
-        ttl.one_hour_savings_usd = 1_177.0;
-        ttl.cost.five_minutes.known_usd = Usd::from_f64(294_250.0);
-        let summary = text(&report, None, true);
-        let line = report_line(&summary, "Main-agent prompt cache TTL");
-        assert_eq!(line.mark, "unknown", "{summary}");
+    fn unpriced_requests_are_extrapolated_over_with_a_margin() {
+        // A second session of three cache writes ten minutes apart, one on a model with no
+        // public price, so its replay and the host's spend extrapolate over that one.
+        let line = |n: u32, minute: u32, model: &str, tokens: u32| {
+            format!(
+                r#"{{"type":"assistant","sessionId":"session-b","timestamp":"2026-11-01T01:{minute:02}:00Z","version":"2.1.314","entrypoint":"sdk-ts","message":{{"id":"message-b{n}","model":"{model}","usage":{{"input_tokens":0,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":{tokens},"cache_creation":{{"ephemeral_5m_input_tokens":{tokens},"ephemeral_1h_input_tokens":0}},"service_tier":"standard","speed":"standard","inference_geo":"global","server_tool_use":{{"web_search_requests":0,"web_fetch_requests":0}}}}}}}}"#
+            )
+        };
+        let run = |unpriced: bool| {
+            let w = Workspace::new();
+            let file = w.claude.join("projects/project/main.jsonl");
+            w.fixture(&file, "claude.jsonl");
+            let mut text = std::fs::read_to_string(&file).unwrap();
+            text += &line(1, 0, "claude-opus-5-5", 2000);
+            text += "\n";
+            text += &line(2, 10, "claude-opus-5-5", 2400);
+            text += "\n";
+            if unpriced {
+                text += &line(3, 20, "private-internal", 2800);
+                text += "\n";
+            }
+            std::fs::write(&file, text).unwrap();
+            std::fs::write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#).unwrap();
+            let mut options = w.scan_options();
+            options.discovery.claude_dirs = vec![w.claude.to_string_lossy().into_owned()];
+            analyze(AnalyzeOptions {
+                scan: scan(&options).unwrap(),
+                catalog: &prices(),
+                since: None,
+                now: instant("2026-11-02T00:00:00Z"),
+                max_cost_per_use_usd: 1.0,
+            })
+            .unwrap()
+        };
+        let (whole, partial) = (run(false), run(true));
+        let (whole_ttl, ttl) = (ttl_ref(&whole), ttl_ref(&partial));
+        let coverage = ttl.base.coverage.unwrap();
+        assert!(coverage.priced >= 2 && coverage.priced < coverage.total);
+        // The unpriced part is not left out of the verdict, and the figure is marked.
+        assert_eq!(ttl.base.recommended, whole_ttl.base.recommended);
+        assert!(matches!(ttl.base.margin, Some(Margin::Usd(m)) if m > 0.0));
+        assert_eq!(whole_ttl.base.margin, None);
+        let spend = Spend::new(&partial);
+        assert!(spend.complete && matches!(spend.margin, Some(Margin::Usd(_))));
+        assert_eq!(Spend::new(&whole).margin, None);
+        let summary = text(&partial, None, true);
+        let title = summary.lines().next().unwrap();
+        assert!(title.contains(", ~$") && title.contains(" ± "), "{title}");
         assert!(
-            line.evidence.contains(
-                "Not enough evidence: 1h cost 0.4% less than 5m ($1,177 over 1 day) on the 93% of requests that could be priced, too little to rule out the 7 that could not."
-            ),
+            summary.contains("A ~ marks a figure extrapolated"),
             "{summary}"
         );
+        let row = report_line(&summary, "Main-agent prompt cache TTL");
+        assert!(
+            row.head.contains("~$") && row.head.contains(" ± "),
+            "{row:?}"
+        );
+        assert!(!row.evidence.contains("Not enough evidence"), "{row:?}");
+        assert!(row.evidence.contains("extrapolated from the"), "{row:?}");
+        let full = text(&whole, None, true);
+        assert!(!full.contains("~$") && !full.contains('±'), "{full}");
+    }
+
+    /// The report's main-agent TTL check.
+    fn ttl_ref(report: &Report) -> &TtlCheck {
+        report
+            .checks
+            .iter()
+            .find_map(|c| match c {
+                CheckResult::Ttl(t) if t.bucket == Bucket::Main => Some(t),
+                _ => None,
+            })
+            .expect("a main-agent claude-cache-ttl check")
     }
 
     #[test]
@@ -8664,19 +8722,32 @@ mod tests {
     }
 
     #[test]
-    fn percents_of_partly_priced_spend_say_their_base_is_the_priced_part() {
+    fn percents_of_partly_priced_spend_say_their_base() {
         let mut report = synthetic_report();
         let priced = text(&report, None, false);
         assert!(priced.contains("each percent is of this host's spend over the window, $"));
         for group in &mut report.historical {
             group.cost.total_usd = None;
+            group.estimate = Some(Estimate {
+                usd: 2.0,
+                margin: Some(Margin::Usd(0.5)),
+            });
         }
         let summary = text(&report, None, false);
         assert!(
-            summary.contains(" this host's priced requests cost over the window, since the rest could not be priced, so a line's true share may be smaller."),
+            summary.contains(" this host's spend over the window, ~$2 ± $0.50, extrapolated from the requests that could be priced."),
             "{summary}"
         );
-        assert!(!summary.contains("each percent is of this host's spend"));
+        // A profile with no priced request adds only its known part, a lower bound.
+        for group in &mut report.historical {
+            group.estimate = None;
+        }
+        let summary = text(&report, None, false);
+        assert!(
+            summary.contains(", since a profile that priced none of its requests adds only what could be priced, so a line's true share may be smaller."),
+            "{summary}"
+        );
+        assert!(summary.lines().next().unwrap().contains(", at least $"));
     }
 
     #[test]

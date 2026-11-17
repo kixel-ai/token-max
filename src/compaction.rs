@@ -10,8 +10,8 @@ use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
-    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar, Scan,
-    StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
+    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar,
+    Scan, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
     WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{

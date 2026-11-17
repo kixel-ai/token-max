@@ -28,12 +28,13 @@ Recommended:
 
 - Extrapolate by dividing the priced requests' figure by the priced share,
   so $950 measured on 95% of requests reads ~$1,000.
-- Give each figure its own margin, measured from the extrapolated estimate:
-  each scenario's cost and each saving bound the unpriced requests by that
-  same figure's smallest and largest per-request value among the priced
-  ones. A difference bound alone can't bound a cost, since two scenarios
-  can cost the same and still be large, and a bound around the measured sum
-  rather than the estimate can miss the true value.
+- The margin of error is a statistical estimate, not a bound: no hard bound
+  exists for a request with no price. Under the extrapolation's own
+  assumption that unpriced requests resemble priced ones, give each figure,
+  each scenario's cost and each signed saving, its own interval around the
+  extrapolated estimate from the spread of that figure's per-request values
+  among the priced requests, such as a 95% interval, and say so under
+  `--details`.
 - Apply it to every replay that leaves requests unpriced, not only the cache
   TTLs, and to the walk's and headline's totals, which then carry the `~`
   when any part does.

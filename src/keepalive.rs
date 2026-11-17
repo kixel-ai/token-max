@@ -15,9 +15,9 @@ use crate::compaction::{
 use crate::idle::{Scopes, recommended_windows};
 use crate::model::{
     Action, Agent, BillingPart, Bucket, CheckBase, CompactionCharge, CompactionCheck, Coverage,
-    EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck, KeepaliveMargins,
-    KeepaliveScenario, Millis, PartKind, PerBucket, Profile, Request, Scan, ScenarioWindow,
-    StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
+    Estimate, EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck,
+    KeepaliveMargins, KeepaliveScenario, Margin, Millis, PartKind, PerBucket, Profile, Request,
+    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Sample, TIER_SENSITIVITY, price_part, tier_sensitive, write_billing,
@@ -973,18 +973,25 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         .iter()
         .all(|c| c.base.profiles.iter().all(|p| line.ids.contains(p)));
     // A partial keepalive replay cannot be compared to an all-session idle aggregate.
+    // Each idle saving that counts brings its own margin when extrapolated.
     let idle_savings = if profile.harness == Harness::Claude && same_population {
-        idle_checks.iter().try_fold(0.0_f64, |sum, c| {
-            let scenario = &c.after_recommendations;
-            if !scenario.applicable {
-                return Some(sum);
-            }
-            Some(sum + (-scenario.delta_usd?).max(0.0))
-        })
+        idle_checks
+            .iter()
+            .try_fold((0.0_f64, None), |(sum, margin), c| {
+                let scenario = &c.after_recommendations;
+                if !scenario.applicable {
+                    return Some((sum, margin));
+                }
+                let delta = scenario.delta?;
+                if delta.usd >= 0.0 {
+                    return Some((sum, margin));
+                }
+                Some((sum - delta.usd, Margin::plus(margin, delta.margin)))
+            })
     } else {
         None
     };
-    let alternative = idle_savings.unwrap_or(0.0);
+    let (alternative, idle_margin) = idle_savings.unwrap_or((0.0, None));
     let best = scenarios
         .iter()
         .enumerate()
@@ -1001,9 +1008,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         .filter(|_| comparable)
         .map(|(_, s)| s.savings_usd - alternative);
     let savings = margin.map(|s| s.max(0.0));
-    // The best cap's own margin, which every figure built on it shares, since the idle
-    // alternative's figure is priced in full or not at all.
-    let error = best.and_then(|(i, _)| margins[i]);
+    // The best cap's own margin, which every figure built on it shares, plus the idle
+    // alternative's when extrapolated; they come from the same sessions, so they add.
+    let error = best.and_then(|(i, _)| Margin::plus(margins[i], idle_margin));
     let recommended = margin.map(|m| {
         if m > 0.0 {
             policy(interval.unwrap(), best.unwrap().1.cap_ms)
@@ -1052,7 +1059,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             ], uncertainty, sources: SOURCES.into_iter().map(String::from).chain(PRICE_SOURCES.into_iter().map(String::from)).collect(),
         }, bucket: "main", lifetime_ms: lifetime.as_ref().map(|l| l.ms), interval_ms: interval,
         ping_input_tokens: new_tokens, ping_output_tokens: output_tokens,
-        returns, finals, unpriced, idle_compaction_savings_usd: idle_savings, margin_usd: margin, scenarios,
+        returns, finals, unpriced, idle_compaction_savings: idle_savings.map(|(usd, margin)| Estimate { usd, margin }), margin_usd: margin, scenarios,
     })
 }
 
@@ -1263,7 +1270,7 @@ mod tests {
         assert_eq!(check.lifetime_ms, Some(30 * MINUTE));
         assert_eq!(check.interval_ms, Some(25 * MINUTE));
         assert_eq!((check.returns, check.finals, check.unpriced), (1, 2, 1));
-        assert_eq!(check.idle_compaction_savings_usd, None);
+        assert_eq!(check.idle_compaction_savings, None);
         // Pings at 25m and 50m keep the cache warm past the 1h return.
         assert_eq!(check.scenarios[1].cap_ms, 50 * MINUTE);
 
@@ -1899,7 +1906,7 @@ mod tests {
             now: 3 * HOUR,
         });
         assert!(idle[0].after_recommendations.applicable);
-        assert_eq!(idle[0].after_recommendations.delta_usd, None);
+        assert_eq!(idle[0].after_recommendations.delta, None);
         let refs: Vec<_> = idle.iter().collect();
         let check = keepalive_checks(&KeepaliveOptions {
             scan: &scan,
@@ -1915,7 +1922,7 @@ mod tests {
         .remove(0);
         assert_eq!(check.unpriced, 0);
         assert!(!check.scenarios.is_empty());
-        assert_eq!(check.idle_compaction_savings_usd, None);
+        assert_eq!(check.idle_compaction_savings, None);
         assert_eq!(check.margin_usd, None);
         assert_eq!(check.base.recommended, None);
         assert!(

@@ -474,11 +474,13 @@ pub fn audit(
             since,
             text,
             change,
+            totals,
         }) => (
             since,
             Reply::Report(Rendered {
                 text,
                 change,
+                totals: Box::new(totals),
                 fixes: vec![],
                 listing: None,
                 turned_off: vec![],
@@ -579,7 +581,12 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
             }
         };
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-        let Rendered { text, change, .. } = render(
+        let Rendered {
+            text,
+            change,
+            totals,
+            ..
+        } = render(
             scan,
             Render {
                 catalog: &request.catalog,
@@ -594,6 +601,7 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
             since,
             text,
             change,
+            totals: *totals,
         })
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));

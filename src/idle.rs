@@ -18,14 +18,14 @@ use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
-    CompactionCheck, ContextDelta, Cost, EventKind, Evidence, Harness, Id, IdleAttribution,
-    IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
-    PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar,
-    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl, Usage, UsageEstimate,
-    Usd, WindowControl,
+    CompactionCheck, ContextDelta, Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id,
+    IdleAttribution, IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff,
+    PartKind, PerBucket, PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request,
+    ReturnTiming, Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl,
+    Usage, UsageEstimate, Usd, WindowControl,
 };
 use crate::prices::{
-    Catalog, PRICE_SOURCES, Sum, add_costs, price_components, price_part, server_cost,
+    Catalog, PRICE_SOURCES, Pairs, Sum, add_costs, price_components, price_part, server_cost,
     unknown_cost, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
@@ -40,6 +40,40 @@ const SOURCES: [&str; 2] = [
     "https://code.claude.com/docs/en/prompt-caching#compacting-the-conversation (2026-11-07)",
 ];
 const POLICY_CHANGE: &str = "effective project TTL/window policy changes within a conversation; its counterfactual is unresolved";
+
+/// A comparison of two runs session by session, as (baseline, alternative, acting): baseline
+/// minus alternative, extrapolated over the unpriced sessions, with how many were priced.
+///
+/// Only sessions where idle compaction could act, `acting`, stand for the unpriced ones. One
+/// where it could not counts exactly, so its zero doesn't dilute them; unpriced, such as when
+/// its replay failed, it still changes nothing, since no run acts on it.
+fn paired<'c>(
+    sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool)>,
+) -> (Option<Estimate>, Coverage) {
+    let mut pairs = Pairs::default();
+    let mut exact = Usd::ZERO;
+    let mut known = 0;
+    for (baseline, alternative, acting) in sessions {
+        if acting {
+            pairs.add(baseline, alternative);
+            continue;
+        }
+        if let (Some(b), Some(a)) = (baseline.total_usd, alternative.total_usd) {
+            exact += b - a;
+        }
+        known += 1;
+    }
+    let paired = pairs.savings(0);
+    let estimate = paired.savings.map(|e| Estimate {
+        usd: e.usd + exact.to_f64(),
+        margin: e.margin,
+    });
+    let coverage = Coverage {
+        priced: paired.priced + known,
+        total: paired.total + known,
+    };
+    (estimate, coverage)
+}
 
 /// Inputs to the idle checks, which run after the TTL and window decisions.
 pub struct IdleOptions<'a> {
@@ -378,6 +412,11 @@ struct Stretch {
 /// Requests after one TTL/window configuration, with their replayed parts.
 struct Replay<'a> {
     errors: Vec<String>,
+    /// Sessions whose replay failed, with the first reason; the rest stay priced.
+    failed: HashMap<&'a str, String>,
+    /// Whether an error that is no one session's, such as an unresolved window, leaves
+    /// every session unpriced.
+    blocked: bool,
     /// Summary charges of added window compactions.
     added: Vec<Cost>,
     /// Modeled window compaction boundaries.
@@ -879,9 +918,14 @@ fn changed_cost(
 /// One run's charges so far, carried from session to session in replay order.
 struct RunState<'r> {
     total: Sum,
+    /// The session in progress's charges, and each finished session's.
+    session: Sum,
+    sessions: Vec<Cost>,
+    /// Expected resumed summaries in the session in progress, and in each finished one.
+    resumed: f64,
+    resumed_sessions: Vec<f64>,
     /// Charges per context size; only point runs, which report them, keep any.
     by_size: Option<Vec<Option<Sum>>>,
-    resumed: f64,
     /// Boundaries already charged, which another session sharing them must not charge again.
     charged: HashSet<&'r Id>,
 }
@@ -891,8 +935,11 @@ impl RunState<'_> {
     fn new(sizes: Option<usize>) -> Self {
         Self {
             total: Sum::new(),
-            by_size: sizes.map(|n| vec![None; n]),
+            session: Sum::new(),
+            sessions: vec![],
             resumed: 0.0,
+            resumed_sessions: vec![],
+            by_size: sizes.map(|n| vec![None; n]),
             charged: HashSet::default(),
         }
     }
@@ -900,6 +947,7 @@ impl RunState<'_> {
     /// Charge a canonical period, and each context size whose periods share its request.
     fn charge(&mut self, sizes: &SizeGroups, period: Option<usize>, cost: &Cost, weight: f64) {
         self.total.add_scaled(cost, weight);
+        self.session.add_scaled(cost, weight);
         if let (Some(period), Some(by_size)) = (period, &mut self.by_size) {
             let shared = sizes.shared.get(&period).into_iter().flatten();
             for &size in std::iter::once(&sizes.of[period]).chain(shared) {
@@ -910,8 +958,18 @@ impl RunState<'_> {
         }
     }
 
+    /// Close the session in progress, unpriced when its replay `failed`.
+    fn end_session(&mut self, failed: Option<&String>) {
+        let session = std::mem::take(&mut self.session).cost();
+        self.sessions
+            .push(failed.map_or(session, |reason| unknown_cost(reason.clone())));
+        self.resumed_sessions
+            .push(std::mem::take(&mut self.resumed));
+    }
+
     fn finish(self) -> Run {
         Run {
+            sessions: self.sessions,
             adjustment: self.total.cost(),
             by_size: self
                 .by_size
@@ -919,7 +977,7 @@ impl RunState<'_> {
                 .into_iter()
                 .map(|s| s.map(Sum::cost))
                 .collect(),
-            resumed: self.resumed,
+            resumed: self.resumed_sessions,
         }
     }
 }
@@ -927,9 +985,12 @@ impl RunState<'_> {
 /// One run's changed charges relative to the shared baseline.
 struct Run {
     adjustment: Cost,
+    /// Each session's charges, in replay order.
+    sessions: Vec<Cost>,
     /// Charges per context size; only point runs, which report them, keep any.
     by_size: Vec<Option<Cost>>,
-    resumed: f64,
+    /// Each session's expected resumed summaries.
+    resumed: Vec<f64>,
 }
 
 impl Run {
@@ -1534,6 +1595,8 @@ impl<'a> Profiled<'a> {
     fn replay(&self, ttls: &Ttls, windows: &[ScenarioWindow], parts: bool) -> Replay<'a> {
         let mut result = Replay {
             errors: vec![],
+            failed: HashMap::default(),
+            blocked: false,
             added: vec![],
             modeled: vec![],
             selected: if parts {
@@ -1545,7 +1608,7 @@ impl<'a> Profiled<'a> {
         };
         let mut others = Sum::new();
         let no_estimates = IndexMap::default();
-        for group in self.groups.values() {
+        for (&session, group) in &self.groups {
             let source = group
                 .iter()
                 .copied()
@@ -1569,6 +1632,7 @@ impl<'a> Profiled<'a> {
                         .any(|w| w.models.iter().any(|m| owned(s, m) != w.owner))
             }) {
                 result.errors.push(POLICY_CHANGE.to_string());
+                result.failed.insert(session, POLICY_CHANGE.to_string());
             }
             let settings: Vec<WindowSetting> = keys
                 .iter()
@@ -1670,6 +1734,9 @@ impl<'a> Profiled<'a> {
                             r
                         }),
                 );
+            if let Some(&error) = simulation.errors.first() {
+                result.failed.entry(session).or_insert_with(|| error.into());
+            }
             result.modeled.extend(simulation.events);
             result
                 .added
@@ -1921,9 +1988,11 @@ impl<'a> Profiled<'a> {
                 .conversations
                 .iter()
                 .map(|(&session, group)| {
-                    self.session_periods(index, (session, group), ttls, &lookup, owner)
+                    let periods =
+                        self.session_periods(index, (session, group), ttls, &lookup, owner);
+                    (replay.failed.get(session), periods)
                 })
-                .filter(|periods| !periods.is_empty())
+                .filter(|(_, periods)| !periods.is_empty())
         };
         // The first pass finds what needs every period but not their activation.
         let mut cohorts = Cohorts::default();
@@ -1932,7 +2001,7 @@ impl<'a> Profiled<'a> {
         let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
         let mut idle_events: HashSet<&Id> = HashSet::default();
         let mut applicable = false;
-        for periods in sessions() {
+        for (_, periods) in sessions() {
             count_cohorts(&periods, &mut cohorts);
             for p in &periods {
                 counts.add(p.kind, p.confirmed);
@@ -2001,7 +2070,16 @@ impl<'a> Profiled<'a> {
         let mut states =
             MODES.map(|(_, mode)| RunState::new((mode == Mode::Point).then_some(sizes.len())));
         let mut detail: Vec<IdlePeriod> = vec![];
-        for mut periods in sessions() {
+        // Whether idle compaction could change each session: a period that could trigger, or
+        // an applied one that off undoes.
+        let mut acting: Vec<bool> = vec![];
+        for (failed, mut periods) in sessions() {
+            acting.push(periods.iter().any(|p| {
+                matches!(
+                    p.kind.status,
+                    PeriodStatus::Eligible | PeriodStatus::Unknown
+                ) || p.boundary.is_some()
+            }));
             activate(&mut periods, &cohorts);
             let first = detail.len();
             if self.detail {
@@ -2010,28 +2088,33 @@ impl<'a> Profiled<'a> {
             let runner = Runner::new(self, index, &periods, &sizes, ttls);
             for (state, mode) in states.iter_mut().zip(MODES) {
                 runner.run(self, ttls, mode, &mut detail[first..], state);
+                state.end_session(failed);
             }
         }
         let [off, on, closed, open, larger, late] = states.map(RunState::finish);
         // A fraction's run needs every session again, so it builds them again.
         let run = |mode: Mode| {
             let mut state = RunState::new(None);
-            for mut periods in sessions() {
+            for (failed, mut periods) in sessions() {
                 activate(&mut periods, &cohorts);
                 let runner = Runner::new(self, index, &periods, &sizes, ttls);
                 runner.run(self, ttls, (true, mode), &mut [], &mut state);
+                state.end_session(failed);
             }
             state.finish()
         };
-        let delta = |r: &Run| {
-            difference(&r.adjustment, &off.adjustment)
-                .total_usd
-                .map(Usd::to_f64)
+        // Each run is paired with off session by session, so a few unpriced sessions are
+        // extrapolated over instead of hiding the comparison.
+        let pair = |r: &Run| {
+            let sessions = r.sessions.iter().zip(&off.sessions).zip(&acting);
+            let (delta, coverage) = paired(sessions.map(|((on, off), &a)| (on, off, a)));
+            (delta.filter(|_| !replay.blocked), coverage)
         };
+        let delta = |r: &Run| pair(r).0;
         let closed = delta(&closed);
         let open = delta(&open);
         let mut lifetime_break_even_fraction = None;
-        if let (Some(closed), Some(open)) = (closed, open) {
+        if let (Some(closed), Some(open)) = (closed.map(|e| e.usd), open.map(|e| e.usd)) {
             if closed == 0.0 {
                 lifetime_break_even_fraction = Some(0.0);
             } else if open == 0.0 {
@@ -2045,7 +2128,7 @@ impl<'a> Profiled<'a> {
                         lifetime_break_even_fraction = Some(middle);
                         break;
                     }
-                    let Some(value) = delta(&run(Mode::Fraction(middle))) else {
+                    let Some(value) = delta(&run(Mode::Fraction(middle))).map(|e| e.usd) else {
                         break;
                     };
                     if value == 0.0 {
@@ -2060,8 +2143,8 @@ impl<'a> Profiled<'a> {
                 }
             }
         }
-        let larger_summary_delta_usd = delta(&larger);
-        let late_trigger_delta_usd = delta(&late);
+        let larger_summary_delta = delta(&larger);
+        let late_trigger_delta = delta(&late);
         let unknown: IndexSet<&String> = replay
             .errors
             .iter()
@@ -2069,7 +2152,20 @@ impl<'a> Profiled<'a> {
             .chain(&off.adjustment.unknown)
             .collect();
         let unknown: Vec<String> = unknown.into_iter().cloned().collect();
-        let delta_usd = if unknown.is_empty() { delta(&on) } else { None };
+        let (delta, coverage) = pair(&on);
+        let delta_usd = delta.map(|d| d.usd);
+        // Priced in full, the pairs add up to the aggregate difference.
+        debug_assert!(
+            coverage.priced < coverage.total
+                || replay.blocked
+                || (delta_usd.unwrap()
+                    - difference(&on.adjustment, &off.adjustment)
+                        .total_usd
+                        .expect("every session priced")
+                        .to_f64())
+                .abs()
+                    < 1e-6
+        );
         let by_context = sizes
             .into_iter()
             .enumerate()
@@ -2092,21 +2188,22 @@ impl<'a> Profiled<'a> {
                 off: add_costs([&common, &off.adjustment]),
                 on: add_costs([&common, &on.adjustment]),
             },
-            delta_usd,
-            monthly_delta_usd: delta_usd
+            delta,
+            coverage,
+            monthly_delta: delta
                 .filter(|_| elapsed > 0)
-                .map(|d| d * 30.0 * 86_400_000.0 / elapsed as f64),
+                .map(|d| d.scale(30.0 * 86_400_000.0 / elapsed as f64)),
             by_context,
             activation_cohorts,
             sensitivity: IdleSensitivity {
-                closed_delta_usd: closed,
-                open_delta_usd: open,
-                larger_summary_delta_usd,
-                late_trigger_delta_usd,
+                closed_delta: closed,
+                open_delta: open,
+                larger_summary_delta,
+                late_trigger_delta,
                 lifetime_break_even_fraction,
                 reread_break_even_usd_per_resumed_summary: delta_usd
-                    .filter(|&d| d < 0.0 && on.resumed > 0.0)
-                    .map(|d| -d / on.resumed),
+                    .filter(|&d| d < 0.0)
+                    .and_then(|_| saving_per_resumed(&on, &off)),
             },
             adjustment: OnOff {
                 on: on.adjustment,
@@ -2116,6 +2213,21 @@ impl<'a> Profiled<'a> {
         };
         (scenario, detail)
     }
+}
+
+/// What on saves per expected resumed summary over the sessions priced both ways, so the
+/// summaries counted match the saving; None when none resumed or on saves nothing there.
+fn saving_per_resumed(on: &Run, off: &Run) -> Option<f64> {
+    let mut saving = Usd::ZERO;
+    let mut resumed = 0.0;
+    for ((on, off), r) in on.sessions.iter().zip(&off.sessions).zip(&on.resumed) {
+        if let (Some(on), Some(off)) = (on.total_usd, off.total_usd) {
+            saving += off - on;
+            resumed += r;
+        }
+    }
+    let saving = saving.to_f64();
+    (resumed > 0.0 && saving > 0.0).then(|| saving / resumed)
 }
 
 /// Profile events followed by modeled window boundaries, in stable time order.
@@ -2374,7 +2486,7 @@ fn profile_checks<'a>(
             &recommended_windows,
             "idle on/off after applicable TTL and compaction-window changes; independent savings are not additive",
         );
-        let delta = after.delta_usd;
+        let delta = after.delta.map(|d| d.usd);
         // Equal costs are not evidence for either value, such as when no idle gap
         // was long enough to trigger a summary.
         let winner = delta.filter(|&d| d != 0.0).map(|d| d < 0.0);
@@ -2394,6 +2506,10 @@ fn profile_checks<'a>(
             (Some(delta), Some(_)) => Some(if winner == c.value { 0.0 } else { delta.abs() }),
             _ => None,
         };
+        let margin = after
+            .delta
+            .and_then(|d| d.margin)
+            .filter(|_| savings.is_some_and(|s| s != 0.0));
         let break_even = after.sensitivity.lifetime_break_even_fraction.map(|f| {
             let f = Number::from_f64(f).expect("a fraction is finite");
             format!(
@@ -2403,7 +2519,8 @@ fn profile_checks<'a>(
         });
         let mut uncertainty: IndexSet<String> = [
             "missing applied boundaries do not prove that unlogged or discarded summaries never ran; their unobserved charges are not measured or included as known zero, and can change this conditional API-price estimate",
-            "native transcripts do not establish historical idle settings, feature-flag fetch state or closed/asleep client lifetime; precomputed alone is not idle attribution; unknown eligibility or missing full-prefix calibration remains unpriced",
+            "native transcripts do not establish historical idle settings, feature-flag fetch state or closed/asleep client lifetime; precomputed alone is not idle attribution",
+            "sessions where unknown eligibility, missing full-prefix calibration or a failed replay leaves on or off unpriced are extrapolated from the priced sessions idle compaction could act on, assuming they resemble each other; sessions it could not act on count exactly",
             "Desktop labels alone do not establish local execution; CLI labels require REPL provenance; T3 proactive policies are outside this native check",
         ]
         .into_iter()
@@ -2453,9 +2570,9 @@ fn profile_checks<'a>(
                 .into(),
                 baseline: after.baseline.clone(),
                 requests: main.iter().filter(|r| r.time >= since).count() as u64,
-                coverage: None,
+                coverage: Some(after.coverage),
                 savings_usd: savings,
-                margin: None,
+                margin,
                 monthly_savings_usd: savings
                     .filter(|_| elapsed > 0)
                     .map(|s| s * 30.0 * 86_400_000.0 / elapsed as f64),
@@ -2596,6 +2713,7 @@ fn detailed_t3_checks(
         current_replay
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
+        current_replay.blocked = !unresolved_windows.is_empty();
         let (current, current_periods) = t3_comparison(
             options,
             profile,
@@ -2632,6 +2750,7 @@ fn detailed_t3_checks(
         after_replay
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
+        after_replay.blocked = !unresolved_windows.is_empty();
         let (after, after_periods) = t3_comparison(
             options,
             profile,
@@ -2641,34 +2760,6 @@ fn detailed_t3_checks(
             &after_ttls,
             "T3 modes after applicable TTL/window recommendations using the shared window/cache replay; independent savings do not add",
         );
-        let all_priced = requests
-            .iter()
-            .any(|r| r.agent == Agent::Main && r.parts.iter().any(is_message))
-            && after.scenarios.iter().all(|s| s.cost.total_usd.is_some());
-        let best = all_priced.then(|| {
-            after
-                .scenarios
-                .iter()
-                .min_by(|a, b| {
-                    a.cost
-                        .total_usd
-                        .unwrap()
-                        .cmp(&b.cost.total_usd.unwrap())
-                        .then_with(|| {
-                            (b.mode == instance.idle_mode).cmp(&(a.mode == instance.idle_mode))
-                        })
-                })
-                .unwrap()
-        });
-        let winner = best.map(|s| s.mode);
-        let baseline_cost = after
-            .scenarios
-            .iter()
-            .find(|s| s.mode == instance.idle_mode)
-            .and_then(|s| s.cost.total_usd);
-        let savings = baseline_cost
-            .zip(best.and_then(|s| s.cost.total_usd))
-            .map(|(a, b)| (a - b).to_f64());
         let history: Vec<String> = requests
             .iter()
             .flat_map(|r| r.profiles.iter().cloned())
@@ -2676,6 +2767,34 @@ fn detailed_t3_checks(
             .into_iter()
             .collect();
         let applicable = crate::t3::settled(&options.scan.profiles, &group.ids, &history);
+        // Every mode's saving over the current one, extrapolated where some sessions were
+        // unpriced; the largest wins.
+        let all_priced = requests
+            .iter()
+            .any(|r| r.agent == Agent::Main && r.parts.iter().any(is_message))
+            && after.scenarios.iter().all(|s| s.savings.is_some());
+        let best = all_priced.then(|| {
+            after
+                .scenarios
+                .iter()
+                // The first of the largest savings, the current mode first among them.
+                .min_by(|a, b| {
+                    let usd = |s: &crate::model::T3IdleScenario| {
+                        s.savings.expect("every mode is priced").usd
+                    };
+                    usd(b).total_cmp(&usd(a)).then_with(|| {
+                        (b.mode == instance.idle_mode).cmp(&(a.mode == instance.idle_mode))
+                    })
+                })
+                .expect("three modes")
+        });
+        let winner = best.map(|s| s.mode);
+        let savings = best.and_then(|s| s.savings);
+        let margin = savings
+            .filter(|s| s.usd != 0.0)
+            .and_then(|s| s.margin)
+            .filter(|_| applicable);
+        let savings = savings.map(|s| s.usd);
         let check = T3IdleCheck {
             base: CheckBase {
                 profile: profile.id.clone(), profiles: group.ids.clone(), history_profiles: history,
@@ -2689,9 +2808,9 @@ fn detailed_t3_checks(
                     "captured native requests plus a separately bounded T3 SQLite snapshot"
                 }.into(),
                 baseline: format!("{}; onReturn assumes accepting the offered summary, beforeCacheExpires assumes the server remains running until its observed-expiry timer fires",instance.idle_mode.as_str()),
-                requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: None,
-                savings_usd: savings.filter(|_|applicable), margin: None, monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
-                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence stay unpriced".into()],
+                requests: requests.iter().filter(|r|since.is_none_or(|s|r.time>=s)).count() as u64, coverage: best.map(|s| s.coverage),
+                savings_usd: savings.filter(|_|applicable), margin, monthly_savings_usd: savings.filter(|_|applicable).zip(since).filter(|(_,s)| options.now>*s).map(|(v,s)|v*30.0*86_400_000.0/(options.now-s) as f64), break_even: None,
+                assumptions: vec!["T3 beforeCacheExpires uses observed promptCacheExpiresAt minus two minutes, at least 200000 tokens, a completed listed main thread, no pending/background work, and the active Claude session, rebuilt from T3's event log at each completed-run event and when the timer fires; 5m and 1h caches both apply".into(), "T3 keeps about one day of its event log, so the window starts where it becomes complete; gaps that open earlier stay as recorded in every mode".into(), "onReturn is conditional on the SDK offering its resume dialog when a new run resumes a cold session of at least 200000 tokens, and on user acceptance; off also suppresses that dialog".into(), "Proactive timers live in memory and disappear on restart; configured mode alone does not prove summary generation. Final eligible periods pay for a summary with no resumed-prefix benefit".into(), "Summary output and the full resumed prefix use the existing compatible native compaction calibration; absent calibration and lifecycle evidence leave a session unpriced, and each mode is extrapolated over such sessions from the priced ones some mode could act on, assuming they resemble each other; sessions no mode acts on count exactly".into()],
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
         };
@@ -2773,7 +2892,7 @@ fn t3_comparison(
     baseline: &str,
 ) -> (crate::model::T3IdleComparison, Vec<IdlePeriod>) {
     let samples = &profiled.calibration;
-    use crate::model::{T3IdleComparison, T3IdleMode};
+    use crate::model::{T3IdleComparison, T3IdleMode, T3IdleScenario};
     let ttl = ttls.main;
     let requests: Vec<&Request> = replay.requests.iter().map(AsRef::as_ref).collect();
     let events = all_events(events, &replay.modeled);
@@ -3061,7 +3180,46 @@ fn t3_comparison(
             .map(|r| &*r.id)
             .collect(),
     };
-    let scenarios = [
+    let idle_ids: HashSet<&Id> = events
+        .iter()
+        .filter(|e| e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id))
+        .map(|e| &e.id)
+        .collect();
+    let idle_requests: HashSet<&str> = options
+        .summaries
+        .iter()
+        .filter(|s| idle_ids.contains(&s.event))
+        .filter_map(|s| s.request.as_deref())
+        .collect();
+    let unlinked: Vec<&Request> = requests
+        .iter()
+        .copied()
+        .filter(|r| {
+            r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
+                && !idle_requests.contains(&*r.id)
+                && !kept.requests.contains(&*r.id)
+        })
+        .collect();
+    // Sessions where some mode could act: a gap it could compact, or a recorded idle
+    // compaction every mode undoes, linked or not.
+    let acting: HashSet<&str> = gaps
+        .iter()
+        .filter(|g| {
+            matches!(g.status, PeriodStatus::Eligible | PeriodStatus::Unknown)
+                || matches!(g.on_return, OnReturn::Generate | OnReturn::Unknown(_))
+                || g.boundary.is_some()
+        })
+        .map(|g| &*g.previous.session)
+        .chain(unlinked.iter().map(|r| &*r.session))
+        .collect();
+    // Every session the window changes or could change, the same for every mode.
+    let sessions: IndexSet<&str> = requests
+        .iter()
+        .filter(|r| options.since.is_none_or(|s| r.time >= s))
+        .map(|r| &*r.session)
+        .chain(gaps.iter().map(|g| &*g.previous.session))
+        .collect();
+    let runs: Vec<T3Run> = [
         T3IdleMode::Off,
         T3IdleMode::OnReturn,
         T3IdleMode::BeforeCacheExpires,
@@ -3077,6 +3235,9 @@ fn t3_comparison(
                 ttls,
                 replay,
                 kept: &kept,
+                sessions: &sessions,
+                idle_requests: &idle_requests,
+                unlinked: &unlinked,
             },
             &gaps,
             &mut detail,
@@ -3084,6 +3245,52 @@ fn t3_comparison(
         )
     })
     .collect();
+    let mode = profile.t3.as_ref().expect("a T3 instance").idle_mode;
+    let run = runs
+        .iter()
+        .find(|r| r.mode == mode)
+        .expect("every mode is replayed");
+    let (current, current_total) = (run.sessions.clone(), run.cost.total_usd);
+    // Each mode is paired with the current one session by session, so a few unpriced
+    // sessions are extrapolated over instead of hiding the comparison. An error that is no
+    // one session's leaves every mode unpriced.
+    let zero = zero_cost();
+    let scenarios = runs
+        .into_iter()
+        .map(|run| {
+            let acting = sessions.iter().map(|s| acting.contains(s));
+            let (estimate, _) = paired(
+                run.sessions
+                    .iter()
+                    .zip(acting.clone())
+                    .map(|(cost, a)| (cost, &zero, a)),
+            );
+            let (savings, coverage) = paired(
+                current
+                    .iter()
+                    .zip(&run.sessions)
+                    .zip(acting)
+                    .map(|((current, cost), a)| (current, cost, a)),
+            );
+            let unblocked = |e: Option<Estimate>| e.filter(|_| !replay.blocked);
+            // Priced in full, the pairs add up to the totals' difference.
+            debug_assert!(
+                coverage.priced < coverage.total
+                    || savings
+                        .zip(current_total.zip(run.cost.total_usd))
+                        .is_none_or(|(s, (c, m))| (s.usd - (c - m).to_f64()).abs() < 1e-6)
+            );
+            T3IdleScenario {
+                mode: run.mode,
+                cost: run.cost,
+                estimate: unblocked(estimate),
+                savings: unblocked(savings),
+                coverage,
+                summaries: run.summaries,
+                final_summaries: run.final_summaries,
+            }
+        })
+        .collect();
     // All values are changed charges against the same native request baseline.
     let comparison = T3IdleComparison {
         baseline: baseline.into(),
@@ -3103,6 +3310,40 @@ struct T3Replay<'a> {
     ttls: &'a Ttls,
     replay: &'a Replay<'a>,
     kept: &'a Kept<'a>,
+    /// Sessions with a request or gap in the window, which each mode is extrapolated over.
+    sessions: &'a IndexSet<&'a str>,
+    /// Summary requests of the recorded idle compactions every mode removes.
+    idle_requests: &'a HashSet<&'a str>,
+    /// Recorded idle runs with no linked boundary, whose replacement no mode can undo.
+    unlinked: &'a [&'a Request],
+}
+
+/// One T3 mode's changed charges in total and per session.
+struct T3Run {
+    mode: crate::model::T3IdleMode,
+    cost: Cost,
+    /// Each of [`T3Replay::sessions`]'s charges, in order.
+    sessions: Vec<Cost>,
+    summaries: u64,
+    final_summaries: u64,
+}
+
+/// A mode's charges as they are made, in total and by session.
+struct T3Ledger<'s> {
+    costs: Vec<Cost>,
+    index: &'s IndexSet<&'s str>,
+    sessions: Vec<Sum>,
+}
+
+impl T3Ledger<'_> {
+    /// Charge `cost` to `session`; one outside the window adds to the total only, since no
+    /// mode changes what it is extrapolated over there.
+    fn charge(&mut self, session: &str, cost: Cost) {
+        if let Some(i) = self.index.get_index_of(session) {
+            self.sessions[i].add(&cost);
+        }
+        self.costs.push(cost);
+    }
 }
 
 /// Recorded idle runs and boundaries in gaps outside the window, which stay as recorded.
@@ -3117,7 +3358,7 @@ fn t3_replay(
     gaps: &[T3Gap<'_>],
     detail: &mut [IdlePeriod],
     mode: crate::model::T3IdleMode,
-) -> crate::model::T3IdleScenario {
+) -> T3Run {
     let T3Replay {
         requests,
         events,
@@ -3125,28 +3366,20 @@ fn t3_replay(
         ttls,
         replay,
         kept,
+        sessions: population,
+        idle_requests,
+        unlinked,
     } = input;
     let requests = *requests;
     let events = *events;
     let ttl = ttls.main;
-    use crate::model::{T3IdleMode, T3IdleScenario};
+    use crate::model::T3IdleMode;
     enum Tick<'a> {
         Request(&'a Request),
         Boundary(&'a StructuralEvent),
         Generate(usize),
     }
     let mut sessions: IndexMap<&str, Vec<(Millis, u8, Tick<'_>)>> = IndexMap::default();
-    let idle_ids: HashSet<&Id> = events
-        .iter()
-        .filter(|e| e.idle_attribution == IdleAttribution::T3 && !kept.events.contains(&e.id))
-        .map(|e| &e.id)
-        .collect();
-    let idle_requests: HashSet<&str> = options
-        .summaries
-        .iter()
-        .filter(|s| idle_ids.contains(&s.event))
-        .filter_map(|s| s.request.as_deref())
-        .collect();
     for &r in requests {
         sessions
             .entry(&r.session)
@@ -3169,13 +3402,17 @@ fn t3_replay(
     // Each mode charges only what it changes. Charges every mode shares, including the
     // window replay's added summaries, server fees and the removal of recorded idle runs,
     // cancel in the comparison, so their missing usage cannot block it.
-    let mut costs: Vec<Cost> = replay.errors.iter().cloned().map(unknown_cost).collect();
-    if requests.iter().any(|r| {
-        r.t3.as_ref().is_some_and(|t| t.idle_mode.is_some())
-            && !idle_requests.contains(&*r.id)
-            && !kept.requests.contains(&*r.id)
-    }) {
-        costs.push(unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
+    let mut ledger = T3Ledger {
+        costs: replay.errors.iter().cloned().map(unknown_cost).collect(),
+        index: population,
+        sessions: vec![Sum::new(); population.len()],
+    };
+    // A session whose shared replay failed is unpriced in every mode.
+    for (&session, reason) in &replay.failed {
+        ledger.charge(session, unknown_cost(reason.clone()));
+    }
+    for r in unlinked.iter() {
+        ledger.charge(&r.session, unknown_cost("recorded T3 idle generation has no uniquely linked applied native boundary; its history replacement cannot be undone"));
     }
     let mut count = 0;
     let mut final_count = 0;
@@ -3185,7 +3422,7 @@ fn t3_replay(
                 match (gap.on_return, gap.next) {
                     (OnReturn::Generate, Some(next)) => next.time,
                     (OnReturn::Unknown(reason), _) => {
-                        costs.push(unknown_cost(reason));
+                        ledger.charge(&gap.previous.session, unknown_cost(reason));
                         continue;
                     }
                     _ => continue,
@@ -3194,7 +3431,7 @@ fn t3_replay(
                 match gap.status {
                     PeriodStatus::Eligible => {}
                     PeriodStatus::Unknown => {
-                        costs.push(unknown_cost(gap.reason));
+                        ledger.charge(&gap.previous.session, unknown_cost(gap.reason));
                         continue;
                     }
                     _ => continue,
@@ -3208,7 +3445,8 @@ fn t3_replay(
                 .push((at, 1, Tick::Generate(i)));
         }
     }
-    for ticks in sessions.values_mut() {
+    for (&session, ticks) in &mut sessions {
+        let mut add = |cost: Cost| ledger.charge(session, cost);
         ticks.sort_by_key(|(time, priority, _)| (*time, *priority));
         let mut offset = 0i64;
         let mut context = None;
@@ -3283,9 +3521,13 @@ fn t3_replay(
                                 })
                             };
                             if selected && (offset != 0 || changed) {
-                                costs.push(match (altered.as_ref(), baseline.get(&(&*r.id, part))) {
-                                    (None, _) => unknown_cost("T3 counterfactual carried prefix or effective TTL is unavailable"),
-                                    (_, None) => unknown_cost("shared cache replay did not price this native part"),
+                                add(match (altered.as_ref(), baseline.get(&(&*r.id, part))) {
+                                    (None, _) => unknown_cost(
+                                        "T3 counterfactual carried prefix or effective TTL is unavailable",
+                                    ),
+                                    (_, None) => unknown_cost(
+                                        "shared cache replay did not price this native part",
+                                    ),
                                     (Some(altered), _) if altered == p => zero_cost(),
                                     // Equal unknown prices of changed usage are not a known zero.
                                     (Some(altered), Some(before)) => {
@@ -3324,7 +3566,12 @@ fn t3_replay(
                         });
                         if let Some(next) = next {
                             let full = next.parts.iter().find(|p| is_message(p)).and_then(prefix);
-                            match e.pre_tokens.zip(full) {Some((pre,full))=>offset+=pre-full,_=>costs.push(unknown_cost("applied T3 idle boundary lacks the pre-context or full resumed native prefix needed to undo it"))}
+                            match e.pre_tokens.zip(full) {
+                                Some((pre, full)) => offset += pre - full,
+                                _ => add(unknown_cost(
+                                    "applied T3 idle boundary lacks the pre-context or full resumed native prefix needed to undo it",
+                                )),
+                            }
                         }
                         changed = true;
                         // The recorded summary is removed from every scenario. A generated
@@ -3334,7 +3581,7 @@ fn t3_replay(
                             && charge.is_some_and(|s| s.request.is_none())
                             && options.since.is_none_or(|s| e.time >= s)
                         {
-                            costs.push(unknown_cost(
+                            add(unknown_cost(
                                 "changed input to a later unlinked summary is unavailable",
                             ));
                         }
@@ -3373,7 +3620,9 @@ fn t3_replay(
                         })
                     });
                     if !uniform {
-                        costs.push(unknown_cost("T3 summary needs compatible linked native output and full resumed-prefix calibration"));
+                        add(unknown_cost(
+                            "T3 summary needs compatible linked native output and full resumed-prefix calibration",
+                        ));
                         continue;
                     }
                     let sample = matches[0];
@@ -3394,14 +3643,14 @@ fn t3_replay(
                             .collect(),
                     );
                     if full >= input {
-                        costs.push(unknown_cost(
+                        add(unknown_cost(
                             "T3 calibrated full resumed prefix does not shrink this context",
                         ));
                         continue;
                     }
                     let summary_ttl = ttls.subagent;
                     let Some(ttl) = summary_ttl else {
-                        costs.push(unknown_cost(
+                        add(unknown_cost(
                             "T3 effective outside-main summary/cache TTL is unavailable",
                         ));
                         continue;
@@ -3430,7 +3679,7 @@ fn t3_replay(
                     };
                     let cost = price_part(options.catalog, sample.summary_request, &summary);
                     if options.since.is_none_or(|s| *time >= s) {
-                        costs.push(cost.clone());
+                        add(cost.clone());
                     }
                     if mode == T3IdleMode::BeforeCacheExpires
                         && let Some(d) = detail.get_mut(*i)
@@ -3459,9 +3708,10 @@ fn t3_replay(
             }
         }
     }
-    T3IdleScenario {
+    T3Run {
         mode,
-        cost: add_costs(&costs),
+        cost: add_costs(&ledger.costs),
+        sessions: ledger.sessions.into_iter().map(Sum::cost).collect(),
         summaries: count,
         final_summaries: final_count,
     }
@@ -3473,7 +3723,7 @@ mod tests {
     use crate::controls::{CompactionSources, compaction_controls};
     use crate::model::{
         CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan, Location,
-        Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
+        Margin, Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
     };
     use crate::reader::{ScanOptions, scan};
     use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
@@ -3848,6 +4098,160 @@ mod tests {
         }
     }
 
+    /// Sessions like the convergence test's, each saving 2.196 with idle on, under `ids`.
+    fn sessions_saving(ids: &[&str]) -> Vec<Request> {
+        ids.iter()
+            .flat_map(|id| {
+                let mut follow = request(&format!("{id}-follow"), 201.0, 1000);
+                follow.parts[0].usage = usage(1000, 301_000, 0, Ttl::OneHour);
+                [
+                    request(&format!("{id}-before"), 100.0, 300_000),
+                    request(&format!("{id}-return"), 200.0, 301_000),
+                    follow,
+                ]
+                .map(|r| in_session(r, id))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pairs_extrapolate_only_from_sessions_idle_could_act_on() {
+        let usd = |v: f64| Cost {
+            known_usd: Usd::from_f64(v),
+            total_usd: Some(Usd::from_f64(v)),
+            unknown: vec![],
+            assumptions: vec![],
+        };
+        let (zero, unknown) = (zero_cost(), unknown_cost("synthetic"));
+        // A priced session no mode acts on counts exactly, beside the extrapolated ones.
+        let (estimate, coverage) = paired([
+            (&usd(3.0), &zero, true),
+            (&usd(5.0), &zero, true),
+            (&unknown, &zero, true),
+            (&usd(1.0), &zero, false),
+        ]);
+        let estimate = estimate.unwrap();
+        near(Some(estimate.usd), 4.0 * 3.0 + 1.0);
+        assert!(matches!(estimate.margin, Some(Margin::Usd(m)) if m > 0.0));
+        assert_eq!(
+            coverage,
+            Coverage {
+                priced: 3,
+                total: 4
+            }
+        );
+        // Nothing priced where idle could act leaves nothing to extrapolate from.
+        let (estimate, _) = paired([(&unknown, &zero, true), (&usd(1.0), &zero, false)]);
+        assert_eq!(estimate, None);
+        // Every session priced is exact.
+        let (estimate, coverage) =
+            paired([(&usd(2.0), &usd(0.5), true), (&usd(1.0), &zero, false)]);
+        assert_eq!(
+            estimate,
+            Some(Estimate {
+                usd: 2.5,
+                margin: None
+            })
+        );
+        assert_eq!(
+            coverage,
+            Coverage {
+                priced: 2,
+                total: 2
+            }
+        );
+    }
+
+    #[test]
+    fn an_unpriced_session_is_extrapolated_from_those_idle_could_act_on() {
+        let mut target = sessions_saving(&["one", "two", "three"]);
+        // Its idle period's size is unrecorded, so on cannot be priced there.
+        target[6].parts[0].usage.input = None;
+        // Never idle long enough to trigger, so it changes nothing and counts exactly.
+        target.push(in_session(request("short", 199.0, 300_000), "short"));
+        target.push(in_session(request("short-return", 200.0, 301_000), "short"));
+        let scan = data(target, vec![]);
+        let c = check(&scan, 202.0);
+        let a = &c.after_recommendations;
+        // The calibration sample's session is idle too, never long enough to trigger.
+        assert_eq!(
+            a.coverage,
+            Coverage {
+                priced: 4,
+                total: 5
+            }
+        );
+        // Two priced sessions of three that idle could act on, scaled to all three; the
+        // session it could not act on adds its exact zero rather than diluting them.
+        near(a.delta.map(|d| d.usd), -2.196 * 3.0);
+        assert_eq!(a.delta.unwrap().margin, Some(Margin::Usd(0.0)));
+        assert!(a.cost.on.total_usd.is_none(), "the total keeps its unknown");
+        assert_eq!(c.base.action, Action::Change);
+        assert_eq!(c.base.recommended, Some(true));
+        assert_eq!(c.base.evidence, Evidence::Estimated);
+        near(c.base.savings_usd, 2.196 * 3.0);
+        assert_eq!(c.base.margin, Some(Margin::Usd(0.0)));
+        assert_eq!(c.base.coverage, Some(a.coverage));
+        // Each sensitivity run is paired the same way.
+        assert!(a.sensitivity.open_delta.and_then(|d| d.margin).is_some());
+        // The re-read break-even counts only the priced sessions' resumed summaries, so it
+        // matches one priced session's.
+        let one = check(&data(sessions_saving(&["one"]), vec![]), 202.0);
+        let per_summary = |c: &Checked<IdleCheck>| {
+            c.after_recommendations
+                .sensitivity
+                .reread_break_even_usd_per_resumed_summary
+        };
+        assert!(per_summary(&one).is_some());
+        near(per_summary(&c), per_summary(&one).unwrap());
+        // Doctor's full run recommends the 5m TTL these requests favor, which leaves idle
+        // compaction inapplicable, but the current-settings comparison keeps its margin.
+        let rendered = format_report(&report(scan, 202.0), ReportOptions::default());
+        assert!(
+            rendered.contains("default on, costs ~$1,430/mo ± $0 more"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn a_failed_session_replay_is_unpriced_but_the_rest_still_decide() {
+        let mut target = sessions_saving(&["one", "two"]);
+        // A project policy that changes within one conversation leaves its replay unresolved.
+        target[1].cwd = Some("/elsewhere".into());
+        // So it does in a session never idle long enough to trigger, which changes nothing.
+        let mut short = in_session(request("short-return", 200.0, 301_000), "short");
+        short.cwd = Some("/elsewhere".into());
+        target.extend([in_session(request("short", 199.0, 300_000), "short"), short]);
+        let mut s = data(target, vec![]);
+        let profile = &mut s.profiles[0];
+        let mut ttl = profile.ttl.clone();
+        ttl.main.value = Some(Ttl::FiveMinutes);
+        profile.idle_directories = Some(IndexMap::from_iter([(
+            "/elsewhere".to_string(),
+            IdleControl {
+                ttl: Some(ttl),
+                ..profile.idle.clone().unwrap()
+            },
+        )]));
+        let c = check(&s, 202.0);
+        let a = &c.after_recommendations;
+        assert!(
+            a.unknown.iter().any(|u| u == POLICY_CHANGE),
+            "{:?}",
+            a.unknown
+        );
+        assert_eq!(
+            a.coverage,
+            Coverage {
+                priced: 3,
+                total: 4
+            }
+        );
+        near(a.delta.map(|d| d.usd), -2.196 * 2.0);
+        assert_eq!(a.delta.unwrap().margin, Some(Margin::Unmeasured));
+        assert_eq!(c.base.recommended, Some(true));
+    }
+
     #[test]
     fn on_wins_with_full_prefix_warm_summary_and_expired_resume_until_convergence() {
         let mut follow = request("follow", 201.0, 1000);
@@ -3871,10 +4275,10 @@ mod tests {
         assert_eq!(calibration.summary_tokens, 2000);
         // First replaced prefix: 21k cold writes; following 22k reads 21k and writes 1k.
         // Off: 301k cold writes; following 302k reads 301k and writes 1k.
-        near(a.delta_usd, -2.196);
+        near(a.delta.map(|d| d.usd), -2.196);
         near(
             Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
-            a.delta_usd.unwrap(),
+            a.delta.map(|d| d.usd).unwrap(),
         );
         assert!(
             a.sensitivity
@@ -3894,19 +4298,19 @@ mod tests {
         assert_eq!(c.base.recommended, Some(false));
         assert_eq!(c.base.action, Action::Keep);
         let a = &c.after_recommendations;
-        near(a.delta_usd, 0.1);
+        near(a.delta.map(|d| d.usd), 0.1);
         let last = period(&c.after, "final");
         assert_eq!(last.resume, None);
         near(last.summary_cost.total_usd.map(Usd::to_f64), 0.1);
-        near(a.sensitivity.closed_delta_usd, 0.0);
-        near(a.sensitivity.open_delta_usd, 0.1);
+        near(a.sensitivity.closed_delta.map(|d| d.usd), 0.0);
+        near(a.sensitivity.open_delta.map(|d| d.usd), 0.1);
         let recent = check(&s, 150.0);
         assert_eq!(
             period(&recent.after, "final").status,
             PeriodStatus::Censored
         );
         let recent = &recent.after_recommendations;
-        near(recent.delta_usd, 0.0);
+        near(recent.delta.map(|d| d.usd), 0.0);
         s.profiles[0].idle.as_mut().unwrap().value = Some(true);
         let off = check(&s, 200.0);
         assert_eq!(off.base.action, Action::Change);
@@ -3922,7 +4326,7 @@ mod tests {
         let mut s = data(target, vec![]);
         s.profiles[0].idle.as_mut().unwrap().value = Some(true);
         let c = check(&s, 140.0);
-        near(c.after_recommendations.delta_usd, 0.0);
+        near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
         assert!(
             c.after
                 .iter()
@@ -3955,7 +4359,7 @@ mod tests {
             );
             assert_eq!(c.base.recommended, Some(false));
             let a = &c.after_recommendations;
-            near(a.delta_usd, 0.161);
+            near(a.delta.map(|d| d.usd), 0.161);
             let expected = if minute == 158.0 {
                 ReturnTiming::NearExpiry
             } else {
@@ -3963,7 +4367,7 @@ mod tests {
             };
             assert_eq!(period(&c.after, "before").return_timing, expected);
             if minute == 158.0 {
-                near(a.sensitivity.late_trigger_delta_usd, 0.0);
+                near(a.sensitivity.late_trigger_delta.map(|d| d.usd), 0.0);
             }
         }
     }
@@ -3980,7 +4384,7 @@ mod tests {
         }
         let c = check(&data(target, vec![]), 201.0);
         assert_eq!(c.base.recommended, Some(true));
-        near(c.after_recommendations.delta_usd, -1.84);
+        near(c.after_recommendations.delta.map(|d| d.usd), -1.84);
         let mut targets = vec![
             request("before", 100.0, 300_000),
             request("return", 200.0, 21_000),
@@ -3992,8 +4396,8 @@ mod tests {
         let observed = notice("observed-idle", "target", 199.0, None);
         let mixed = check(&data(targets, vec![observed]), 201.0);
         let sensitivity = &mixed.after_recommendations.sensitivity;
-        assert!(sensitivity.closed_delta_usd.unwrap() < 0.0);
-        assert!(sensitivity.open_delta_usd.unwrap() > 0.0);
+        assert!(sensitivity.closed_delta.map(|d| d.usd).unwrap() < 0.0);
+        assert!(sensitivity.open_delta.map(|d| d.usd).unwrap() > 0.0);
         assert_eq!(mixed.base.recommended, Some(false));
         assert_eq!(mixed.base.action, Action::Keep);
         let fraction = sensitivity.lifetime_break_even_fraction.unwrap();
@@ -4023,7 +4427,7 @@ mod tests {
                 _ => s.requests[last].parts[0].usage.input = None,
             }
             let c = check(&s, 200.0);
-            assert_eq!(c.after_recommendations.delta_usd, None, "{mode}");
+            assert_eq!(c.after_recommendations.delta.map(|d| d.usd), None, "{mode}");
             assert_eq!(c.base.recommended, None, "{mode}");
             assert_eq!(c.base.action, Action::Advisory, "{mode}");
         }
@@ -4054,7 +4458,7 @@ mod tests {
         let current = &c.current_settings;
         assert_eq!(c.current[0].context_tokens, Some(300_000));
         near(Some(current.cost.off.known_usd.to_f64()), 2.4);
-        assert_eq!(current.delta_usd, None);
+        assert_eq!(current.delta.map(|d| d.usd), None);
         assert_eq!(c.usage_estimates.len(), 1);
     }
 
@@ -4134,7 +4538,7 @@ mod tests {
                 let c = check(&s, 200.0);
                 let a = &c.after_recommendations;
                 assert_eq!(period(&c.after, "final").status, PeriodStatus::Eligible);
-                near(a.delta_usd, 0.1);
+                near(a.delta.map(|d| d.usd), 0.1);
             }
         }
     }
@@ -4168,7 +4572,7 @@ mod tests {
             let c = check(&s, 200.0);
             assert_ne!(c.base.action, Action::Change, "{mode}");
             if mode != "old" {
-                near(c.after_recommendations.delta_usd, 0.0);
+                near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
             }
         }
     }
@@ -4224,7 +4628,7 @@ mod tests {
             },
         ] {
             let c = check_with(&s, 200.0, &policies);
-            near(c.current_settings.delta_usd, 0.1);
+            near(c.current_settings.delta.map(|d| d.usd), 0.1);
             assert!(!c.after_recommendations.applicable);
             assert_eq!(c.base.action, Action::Advisory);
             assert_eq!(c.base.recommended, None);
@@ -4247,10 +4651,13 @@ mod tests {
         let p = period(&c.after, "before");
         assert_eq!(p.outcome, PeriodOutcome::Applied);
         near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
-        near(a.delta_usd, 0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6);
+        near(
+            a.delta.map(|d| d.usd),
+            0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6,
+        );
         near(
             Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
-            a.delta_usd.unwrap(),
+            a.delta.map(|d| d.usd).unwrap(),
         );
     }
 
@@ -4354,7 +4761,7 @@ mod tests {
             s.since = Some(100 * MINUTE);
             s.profiles[0].idle.as_mut().unwrap().value = Some(current);
             let c = check(&s, 201.0);
-            near(c.after_recommendations.delta_usd, 0.0);
+            near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
             assert_eq!(c.base.recommended, None);
             assert_eq!(c.base.action, Action::Advisory);
             let mut report = report(s, 201.0);
@@ -4398,7 +4805,7 @@ mod tests {
         );
         let c = check(&s, 222.0);
         let a = &c.after_recommendations;
-        near(a.delta_usd, -2.252);
+        near(a.delta.map(|d| d.usd), -2.252);
         near(
             Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
             -2.252,
@@ -4416,7 +4823,7 @@ mod tests {
             vec![applied],
         );
         let c = check(&s, 200.0);
-        near(c.after_recommendations.delta_usd, 0.1);
+        near(c.after_recommendations.delta.map(|d| d.usd), 0.1);
         assert_eq!(c.base.recommended, Some(false));
         assert_eq!(period(&c.after, "final").outcome, PeriodOutcome::Applied);
     }
@@ -4437,10 +4844,10 @@ mod tests {
             let c = check(&data(vec![before, back], vec![]), 201.0);
             let a = &c.after_recommendations;
             if mode == "active" {
-                near(a.delta_usd, 0.0);
+                near(a.delta.map(|d| d.usd), 0.0);
                 assert_eq!(period(&c.after, "before").status, PeriodStatus::Ineligible);
             } else {
-                assert_eq!(a.delta_usd, None, "{mode}");
+                assert_eq!(a.delta.map(|d| d.usd), None, "{mode}");
                 assert_eq!(c.base.action, Action::Advisory, "{mode}");
             }
         }
@@ -4457,7 +4864,7 @@ mod tests {
         );
         s.since = Some(160 * MINUTE);
         let c = check(&s, 201.0);
-        near(c.after_recommendations.delta_usd, 0.0);
+        near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
         assert!(!c.after.iter().any(|p| &*p.request == "before"));
     }
 
@@ -4836,6 +5243,102 @@ mod tests {
             now: (now * MINUTE as f64) as Millis,
         };
         Checked::new(detailed_t3_checks(&options, true).remove(0))
+    }
+
+    #[test]
+    fn t3_an_unlinked_recorded_idle_run_leaves_its_session_unpriced() {
+        use crate::model::T3IdleMode::*;
+        let sessions = |ids: &[&str]| -> Vec<Request> {
+            ids.iter()
+                .flat_map(|id| {
+                    // Below T3's 200,000-token floor, no gap of the last session can compact.
+                    let tokens = if *id == "four" { 100_000 } else { 300_000 };
+                    [
+                        request(&format!("{id}-a"), 0.0, tokens),
+                        request(&format!("{id}-b"), 10.0, tokens + 20_000),
+                    ]
+                    .map(|r| in_session(r, id))
+                })
+                .collect()
+        };
+        let two = t3_check(
+            &t3_data(sessions(&["one", "two"]), Ttl::FiveMinutes, Off),
+            10.0,
+        );
+        let mut scan = t3_data(sessions(&["one", "two", "four"]), Ttl::FiveMinutes, Off);
+        // T3 recorded an idle run there that no boundary links, so it can't be undone.
+        let run = scan
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "four-b")
+            .unwrap();
+        let mut t3 = (**run.t3.as_ref().unwrap()).clone();
+        t3.idle_mode = Some(BeforeCacheExpires);
+        run.t3 = Some(std::sync::Arc::new(t3));
+        let check = t3_check(&scan, 10.0);
+        // It counts as a session T3 acted on, unpriced, rather than an exact zero.
+        assert_eq!(
+            check.base.coverage,
+            Some(Coverage {
+                priced: 3,
+                total: 4
+            })
+        );
+        near(check.base.savings_usd, two.base.savings_usd.unwrap() * 1.5);
+        assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
+    }
+
+    #[test]
+    fn t3_extrapolates_over_a_session_no_t3_turn_joins() {
+        use crate::model::T3IdleMode::*;
+        let target: Vec<Request> = ["one", "two", "three"]
+            .iter()
+            .flat_map(|id| {
+                [
+                    request(&format!("{id}-a"), 0.0, 300_000),
+                    request(&format!("{id}-b"), 10.0, 320_000),
+                ]
+                .map(|r| in_session(r, id))
+            })
+            .collect();
+        let mut scan = t3_data(target, Ttl::FiveMinutes, Off);
+        let full = t3_check(&scan, 10.0);
+        let all = full.base.savings_usd.unwrap();
+        assert!(all > 0.0);
+        assert_eq!(full.base.margin, None);
+        // No T3 turn joins this gap, so neither generating mode can be priced there.
+        let three = scan
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "three-a")
+            .unwrap();
+        three.t3 = None;
+        let check = t3_check(&scan, 10.0);
+        assert_eq!(check.base.action, Action::Change);
+        assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
+        // The two priced sessions save the same, so the third is extrapolated exactly.
+        near(check.base.savings_usd, all);
+        assert_eq!(check.base.margin, Some(Margin::Usd(0.0)));
+        // The calibration sample's session is in the window but no mode acts on it.
+        assert_eq!(
+            check.base.coverage,
+            Some(Coverage {
+                priced: 3,
+                total: 4
+            })
+        );
+        let s = &check.after_recommendations.scenarios;
+        assert!(s[2].cost.total_usd.is_none(), "the total keeps its unknown");
+        let estimate = s[2].estimate.unwrap();
+        near(
+            Some(estimate.usd),
+            full.after_recommendations.scenarios[2]
+                .cost
+                .total_usd
+                .unwrap()
+                .to_f64(),
+        );
+        assert_eq!(s[0].savings.unwrap().usd, 0.0);
     }
 
     #[test]

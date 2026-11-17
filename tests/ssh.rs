@@ -260,11 +260,7 @@ fn section<'a>(text: &'a str, host: &str) -> &'a str {
     let heading = format!("token-max: {host}  ");
     let start = text.find(&heading).unwrap_or_else(|| panic!("{text}")) + heading.len();
     let rest = &text[start..];
-    let end = ["\ntoken-max: ", "\n  Each host is analyzed on its own."]
-        .iter()
-        .filter_map(|marker| rest.find(marker))
-        .min()
-        .unwrap_or(rest.len());
+    let end = rest.find("\ntoken-max: ").unwrap_or(rest.len());
     &rest[..end]
 }
 
@@ -377,13 +373,19 @@ fn a_remote_report_matches_running_there() {
 
     let (status, text, _) = hosts.run(&["--ssh", "devbox", "--include-local"]);
     assert_eq!(status, 0);
-    assert!(text.starts_with("token-max: this host  "), "{text}");
+    // One total heads the report, beside each host's own section.
+    assert!(
+        text.starts_with("token-max: total over 2 hosts  4 requests, "),
+        "{text}"
+    );
+    assert!(text.contains("\n  Changes offered: "), "{text}");
+    assert!(text.contains("\ntoken-max: this host  "), "{text}");
     assert!(text.contains("\ntoken-max: devbox  "), "{text}");
     assert!(text.contains("  Profiles: claude ~/.claude.\n"), "{text}");
-    assert!(text.contains("don't add amounts across hosts"), "{text}");
+    assert!(!text.contains("don't add amounts across hosts"), "{text}");
     let (_, alone, _) = hosts.run(&["--ssh", "devbox"]);
     assert!(alone.starts_with("token-max: devbox  "), "{alone}");
-    assert!(!alone.contains("token-max: this host") && !alone.contains("across hosts"));
+    assert!(!alone.contains("token-max: this host") && !alone.contains("total over"));
     assert_eq!(
         timeless(section(&alone, "devbox")),
         timeless(section(&text, "devbox"))

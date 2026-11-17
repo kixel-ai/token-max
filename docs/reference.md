@@ -890,13 +890,16 @@ directory (the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
 
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A run of several hosts heads its report with one
-total: the hosts' requests, their spend at API prices, and what the changes
-they offer save every 30 days, with each saving's percent of the hosts' spend
-together. The hosts' figures are added as they are, so a history copied between
+total: the hosts' requests, their spend at API prices, and the sum of what the
+changes they offer save every 30 days, with each saving's percent of the hosts'
+spend together. Offered changes may overlap, within a host or between hosts, so
+applying them all can save less than that sum, as the total says. The hosts' figures are added as they are, so a history copied between
 hosts counts on each, and the total counts it twice; token-max does not
 compare request IDs across hosts. A figure marked `~` on any host keeps its `~`
-in the total, and the hosts' margins of error combine in quadrature, since each
-host's history is its own sample. Any failed
+in the total, and the hosts' margins of error combine in quadrature, which
+assumes each host's history is an independent sample; where histories are
+copied between hosts the errors are correlated, so the total's margin can be
+too small. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination. A destination's changes are listed in its
 section to make there; `doctor` offers only this host's. Each host's percents

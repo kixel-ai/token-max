@@ -36,6 +36,12 @@ these totals are its four header lines added by hand:
   `dataviz` skill, the Workflow tool, the ScheduleWakeup tool and the
   `code-review` skill.
 
+Against the defaults, the maintainer's settings already save ~$515/mo: ~$387
+on the workstation and $128 on the server, nearly all from a 1h main-agent
+cache on the usage credits profiles. The other settings that differ from
+their defaults, 8 to 14 per machine, differ by amounts doctor could not
+measure.
+
 doctor asked how each Claude profile pays, and each answer came from the
 profile's account (`oauthAccount.billingType` in its `.claude.json`): every
 machine's `~/.claude` is on a plan, and the usage credits profiles, plus an
@@ -63,6 +69,22 @@ recommends going back, a change the totals include.
 ## Against T3 Code's count
 
 T3 Code's usage page showed **$60,391.31 over 23,285 sessions** for the same
-30 days, as an API estimate.
+30 days, as an API estimate. `token-max sessions`, run on each machine over the
+same window, accounts for most of the difference:
 
-TODO
+- **Sessions.** T3 Code counts every transcript's session ID and every Codex
+  rollout, so a Codex subagent or review thread is a session of its own. The
+  export lists each session and subagent on its own line: 22,785 across the
+  four machines, within 2% of T3 Code's count. doctor counts a subagent with
+  the session that spawned it, which gives 11,797; the export's lines without a
+  parent, plus the parents that ran before the window, agree with it exactly on
+  three machines and within 3% on the server.
+- **Cost.** T3 Code adds $0 for a request it cannot price; doctor extrapolates
+  over them. The export's priced requests alone come to $64,588, 7% above
+  T3 Code. The rest is how each prices and windows: T3 Code prices from
+  LiteLLM's table and doctor from models.dev, and T3 Code's 30 days are local
+  calendar days ending today, a few hours shorter than doctor's 30 days back
+  from the run.
+
+Neither is an invoice: on a plan, both measure what the usage would cost at
+API prices.

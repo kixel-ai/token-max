@@ -24,6 +24,8 @@ skills; replace private skill names, MCP servers and paths, such as the
 maintainer's own `quest-*` and `verify-*` skills and worktree paths, with
 generic labels (rejected: everything verbatim, which publishes private names;
 aggregates only, which convinces less). Never publish prompt or reply text.
-`docs/results.md` holds the snapshot, taken 2026-11-17 on `desktop`; the
-README's top and [max.kixel.ai](https://max.kixel.ai) lead with its two cache
-TTL findings.
+`docs/results.md` holds the snapshot, retaken 2026-11-17 over the last 30
+days on all four hosts; the README's top and
+[max.kixel.ai](https://max.kixel.ai) lead with its totals (API cost, sessions
+and potential savings, as T3 Code's usage view does) and its two cache TTL
+findings.

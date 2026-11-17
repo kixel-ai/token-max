@@ -2546,7 +2546,8 @@ mod tests {
         let claude = instance("claudeAgent");
         let t3 = claude.t3.as_ref().unwrap();
         assert_eq!(t3.idle_mode, T3IdleMode::OnReturn);
-        assert!(t3.inherited_window.is_some());
+        // Unread machine policy, as on Windows, leaves the instance unresolved.
+        assert_eq!(t3.inherited_window.is_some(), !managed_policy_unresolved());
         let speed = claude.speed.as_ref().unwrap();
         assert_eq!(
             (speed.value.as_deref(), speed.resolved),

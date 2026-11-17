@@ -33,24 +33,26 @@ These work from the first release on; until then, see [Install](#install).
 
 ## On the maintainer's workstation
 
-On 2026-11-16, `token-max doctor` read 55 days of the maintainer's own use:
-**1,084,868 requests, at least $66,151 at API prices**, across two Claude Code
+On 2026-11-17, `token-max doctor` read 56 days of the maintainer's own use:
+**1,085,092 requests, at least $66,166 at API prices**, across two Claude Code
 profiles (one on a plan, one on API usage credits), Codex and T3 Code.
 
-- **Its settings already save up to $514/mo, 1% of the spend, against the
-  defaults.** The usage credits profile keeps its prompt cache for 1h instead
-  of the 5m default for API keys and credits. 13 more settings differ from
-  their defaults by amounts it could not measure, and it says so instead of
-  guessing.
-- **It still found 55 changes**: 28 recommended, because a tool or skill was
-  never used, and 27 worth considering, because one cost more than $1 per use.
-  They are 37 skills and 18 built-in tools, each saving $31/mo or less, led by
-  the `dataviz` skill ($31/mo), the Workflow tool ($30/mo), the ScheduleWakeup
-  tool ($25/mo) and the `code-review` skill ($22/mo).
-- **It shows where the money went**: in the main Claude profile,
-  general-purpose subagents cost at least $34,543 (52%), Bash output with no
-  size cap $10,790 (16%), and main sessions at `high` effort at least $7,206
-  (11%).
+- **A default user would save about $230/mo or more, plus up to $509/mo from the
+  cache TTL.** `token-max doctor --defaults` replays this same history as if no
+  settings file existed. It then recommends 29 changes and suggests 31 more:
+  38 skills and 18 built-in tools to turn off or make typed-only, a 1h prompt
+  cache on the usage credits profile (up to $509/mo, 1% of the spend), and auto
+  memory and Codex's effort, whose savings it could not measure and says so.
+- **The maintainer's settings already save up to $509/mo against the
+  defaults**, from that same 1h cache. 13 more settings differ from their
+  defaults by amounts it could not measure.
+- **It still finds 55 changes**: 28 recommended, because a tool or skill was
+  never used, and 27 worth considering, because one cost more than $1 per use:
+  37 skills and 18 built-in tools, led by the `dataviz` skill ($31/mo), the
+  Workflow tool ($30/mo), the ScheduleWakeup tool ($25/mo) and the
+  `code-review` skill ($22/mo). It also shows where the money went:
+  general-purpose subagents cost at least $34,543 (52%), and Bash output with
+  no size cap $10,794 (16%).
 
 The savings are small against this spend; the point is that each one is
 measured on this host instead of promised. The figures are a dated snapshot,

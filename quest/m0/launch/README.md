@@ -25,5 +25,5 @@ maintainer's own `quest-*` and `verify-*` skills and worktree paths, with
 generic labels (rejected: everything verbatim, which publishes private names;
 aggregates only, which convinces less). Never publish prompt or reply text.
 The README's "On the maintainer's workstation" section holds the snapshot,
-taken 2026-11-16 on `desktop`, and the [site](/quest/m0/launch/site.md)
+taken 2026-11-17 on `desktop`, and the [site](/quest/m0/launch/site.md)
 reuses it.

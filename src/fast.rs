@@ -384,6 +384,7 @@ mod tests {
             coverage: ScanCoverage::default(),
             t3: vec![],
             sessions: Default::default(),
+            defaults: false,
         }
     }
 
@@ -661,6 +662,7 @@ mod tests {
                 managed_settings_file: text(&w.managed_settings_file()),
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
+                defaults: false,
             }
         }
 
@@ -980,6 +982,7 @@ mod tests {
             let speed = || {
                 scanned(DiscoveryOptions {
                     codex_requirements_file: text(&requirements),
+                    defaults: false,
                     ..codex_dirs(&w)
                 })
                 .profiles[0]
@@ -1183,6 +1186,7 @@ mod tests {
             let speed = || {
                 scanned(DiscoveryOptions {
                     codex_requirements_file: text(&requirements),
+                    defaults: false,
                     ..codex_dirs(&w)
                 })
                 .profiles[0]

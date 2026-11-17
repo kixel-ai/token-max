@@ -184,6 +184,7 @@ impl Workspace {
                 managed_settings_file: text(self.managed_settings_file()),
                 codex_system_config_file: text(self.home.join("system.toml")),
                 codex_requirements_file: text(self.home.join("requirements.toml")),
+                defaults: false,
             },
             since: None,
         }
@@ -239,6 +240,8 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         claude_config: None,
         codex_system_config: None,
         switched_off: vec![],
+        pretended_on: vec![],
+        policy_off: vec![],
         id: id.into(),
         harness: Harness::Claude,
         root: root.into(),

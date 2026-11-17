@@ -226,7 +226,7 @@ pub fn same_switch(a: &Control, b: &Control) -> bool {
 
 /// Whether turning `switch` off also turns off what `control` would: the same switch, or an
 /// MCP server's switch over one of its tools.
-fn covers(switch: &Control, control: &Control) -> bool {
+pub(crate) fn covers(switch: &Control, control: &Control) -> bool {
     if same_switch(switch, control) {
         return true;
     }
@@ -241,19 +241,55 @@ fn covers(switch: &Control, control: &Control) -> bool {
     ) {
         (
             ["permissions", "deny"],
-            ControlValue::Text(server),
+            ControlValue::Text(rule),
             ["permissions", "deny"],
             ControlValue::Text(tool),
+        ) => denied_server(rule).is_some_and(|server| tool_of(tool, server)),
+        // A server turned off with `/mcp` in a project, against its rule or its tools'.
+        (
+            ["projects", _, "disabledMcpServers"],
+            ControlValue::Text(name),
+            ["permissions", "deny"],
+            ControlValue::Text(rule),
+        ) => tool_of(rule, &crate::mcp::tool_name(name)),
+        // And a rule over the server turns off what `/mcp` would.
+        (
+            ["permissions", "deny"],
+            ControlValue::Text(rule),
+            ["projects", _, "disabledMcpServers"],
+            ControlValue::Text(name),
         ) => {
-            server.starts_with("mcp__")
-                && !server[5..].contains("__")
-                && tool.starts_with(&format!("{server}__"))
+            let server = format!("mcp__{}", crate::mcp::tool_name(name));
+            *rule == server || *rule == format!("{server}__*")
         }
         (["mcp_servers", id, "enabled"], _, ["mcp_servers", tool_id, "disabled_tools"], _) => {
             id == tool_id
         }
+        // An allowlist turns off every tool it leaves out.
+        (
+            ["mcp_servers", id, "enabled_tools"],
+            ControlValue::Text(kept),
+            ["mcp_servers", tool_id, "disabled_tools"],
+            ControlValue::Text(tool),
+        ) => id == tool_id && !kept.lines().any(|k| k == tool),
         _ => false,
     }
+}
+
+/// The server a Claude deny rule turns every tool of off: `mcp__<server>` or
+/// `mcp__<server>__*`.
+fn denied_server(rule: &str) -> Option<&str> {
+    let server = rule.strip_prefix("mcp__")?;
+    let server = server.strip_suffix("__*").unwrap_or(server);
+    (!server.is_empty() && !server.contains("__")).then_some(server)
+}
+
+/// Whether the deny rule `rule` names the server `server` (as its tools carry it) or one of
+/// its tools, wildcard included.
+fn tool_of(rule: &str, server: &str) -> bool {
+    rule.strip_prefix("mcp__")
+        .and_then(|rest| rest.strip_prefix(server))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with("__"))
 }
 
 /// The value a switch that is off shows, such as `off` or `typed only`.
@@ -280,12 +316,18 @@ pub fn switch_name(control: &Control) -> String {
         (["features", "apps"], _) => "ChatGPT apps".into(),
         (["mcp_servers", id, _], _) => format!("MCP server {id}"),
         (["skillOverrides", name], _) => format!("Skill {name}"),
+        (["projects", _, "disabledMcpServers"], ControlValue::Text(name)) => {
+            format!("MCP server {name}")
+        }
         (_, ControlValue::Skill { path, .. }) => {
             let dir = path.rsplit_once(['/', '\\']).map_or("", |(dir, _)| dir);
             let name = dir.rsplit_once(['/', '\\']).map_or(dir, |(_, name)| name);
             format!("Skill {name}")
         }
         (_, ControlValue::Text(rule)) => match rule.strip_prefix("mcp__") {
+            Some(rest) if denied_server(rule).is_some() => {
+                format!("MCP server {}", rest.trim_end_matches("__*"))
+            }
             Some(rest) if rest.contains("__") => format!("MCP tool {rule}"),
             Some(server) => format!("MCP server {server}"),
             None => format!("{rule} tool"),
@@ -316,11 +358,14 @@ pub fn switch_what(control: &Control) -> String {
         (["mcp_servers", _, "disabled_tools"], ControlValue::Text(_)) => {
             kind(ContextKind::McpTool).into()
         }
-        (["mcp_servers", ..], _) => kind(ContextKind::McpServer).into(),
+        (["mcp_servers", ..], _) | (["projects", _, "disabledMcpServers"], _) => {
+            kind(ContextKind::McpServer).into()
+        }
         (["skillOverrides", _], _) | (_, ControlValue::Skill { .. }) => {
             kind(ContextKind::Skill).into()
         }
         (_, ControlValue::Text(rule)) => match rule.strip_prefix("mcp__") {
+            Some(_) if denied_server(rule).is_some() => kind(ContextKind::McpServer).into(),
             Some(rest) if rest.contains("__") => kind(ContextKind::McpTool).into(),
             Some(_) => kind(ContextKind::McpServer).into(),
             None => tool(rule),
@@ -505,6 +550,34 @@ mod tests {
             default: "5m".into(),
             saving,
         }
+    }
+
+    #[test]
+    fn a_server_rule_wildcard_or_mcp_toggle_covers_the_server_and_its_tools() {
+        let rule = |path: &[&str], value: &str| Control {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            value: ControlValue::Text(value.into()),
+            append: true,
+        };
+        let deny = |value: &str| rule(&["permissions", "deny"], value);
+        let toggle = |name: &str| rule(&["projects", "/repo", "disabledMcpServers"], name);
+        for switch in [deny("mcp__docs"), deny("mcp__docs__*"), toggle("docs")] {
+            assert!(covers(&switch, &deny("mcp__docs")), "{switch:?}");
+            assert!(covers(&switch, &deny("mcp__docs__read")), "{switch:?}");
+            assert!(
+                !covers(&switch, &deny("mcp__docs_extra__read")),
+                "{switch:?}"
+            );
+            assert!(!covers(&switch, &deny("WebFetch")), "{switch:?}");
+        }
+        assert!(covers(&deny("mcp__docs__*"), &toggle("docs")));
+        assert!(!covers(&deny("mcp__docs__read"), &toggle("docs")));
+        assert_eq!(switch_name(&deny("mcp__docs__*")), "MCP server docs");
+        assert_eq!(switch_name(&toggle("my docs")), "MCP server my docs");
+        assert!(covers(&toggle("my docs"), &deny("mcp__my_docs__read")));
+        // A server name may hold `__` itself.
+        assert!(covers(&deny("mcp__docs__api__*"), &toggle("docs__api")));
+        assert!(covers(&deny("mcp__docs__api"), &toggle("docs__api")));
     }
 
     #[test]

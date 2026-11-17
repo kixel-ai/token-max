@@ -123,6 +123,32 @@ that cannot take the edit, such as a `permissions` that is not an object, makes
 the change a step by hand naming the resolved path. Ctrl-C at any question,
 the last included, exits 2 with no settings changed.
 
+### Backups
+
+Before replacing a settings file, `doctor` copies it as it was to
+`<file>.token-max.bak` beside it (beside the target of a symlink), so the last
+accepted change is undone by copying the backup back. There is one backup per
+file, overwritten on each write; an older change is not kept. The copy has the
+file's owner and permissions, since these files can hold secrets such as an MCP
+server's `env`. The confirm names each backup before the question, and the
+closing line names each one written.
+
+A file git tracks with no uncommitted changes gets no backup, since a `.bak`
+beside a project's `.claude/settings.json` would show up to be committed; the
+confirm says git keeps its previous version. A tracked file with uncommitted
+changes, a tracked one marked `skip-worktree` or `assume-unchanged` (whose
+changes git does not show), an untracked one, or any file when `git` is not
+installed is backed up. A file that does not exist yet has nothing to back up.
+
+Every backup is staged as a temporary sibling before any settings file is
+written, and each replaces the earlier `.bak` only once its own file is
+written. A failure to stage one writes nothing and leaves every earlier backup
+as it was; the run fails with the reason. If the last step fails after its file
+was written, such as a directory sitting at the `.bak` path, the error names the
+staged copy, which is kept as the file's previous text. For `~/.claude.json`, the backup
+holds the text re-read under Claude Code's lock, the text the removal was made
+to, not what the walk read at the start.
+
 ### Removing MCP servers
 
 Turning a never-used MCP server off leaves it configured. After a yes to
@@ -154,11 +180,10 @@ also declares, since that layer may turn it back on. The confirm's diff shows ev
 line it removes, with secret values masked. Claude Code rewrites `~/.claude.json` while it runs, so that file is
 not refused when it changed during the walk, unless an entry it would remove
 now holds something other than what the diff showed. It is written before any other
-file, under Claude Code's own lock (`~/.claude.json.lock`), held only while it
-is read again and replaced, and the removal is made to its current text. A
-lock held for over 5 seconds stops the run, and the error names any file
-already written, which happens only when more than one Claude Code state file
-is locked. A stale lock, one not refreshed for 10 seconds, is not taken over:
+file, under Claude Code's own lock (`~/.claude.json.lock`), taken before any
+backup is staged and held until it is replaced and its backup committed, and the removal is made to its
+current text. A lock held for over 5 seconds stops the run before anything is
+written. A stale lock, one not refreshed for 10 seconds, is not taken over:
 the error asks to remove it if no Claude Code is running, since Claude Code
 takes it over itself. Claude Code re-reads the file under that lock before each save,
 so the removal survives sessions already running, which keep the server until
@@ -438,6 +463,59 @@ line says what it costs. Any outranking file that sets it otherwise counts,
 even when a file above that one sets it off again, so in that case doctor
 may offer the switch again rather than call a feature off that might still
 be on.
+
+## As a default user sees it
+
+`token-max doctor --defaults` prints the report a user with no settings files
+would get on this host's own transcripts. Every user, project and local
+Claude Code and Codex settings file, Codex's named profile files, T3 Code's
+`settings.json` and the shell's setting variables, such as
+`CLAUDE_CODE_PROMPT_CACHE_TTL`, read as unset, so each setting is at its
+documented default. Managed and system policy (`managed-settings.json`,
+`/etc/codex/config.toml`, `/etc/codex/requirements.toml`) still apply, since a
+user can't change them. What says where each CLI keeps its files stays:
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `T3CODE_HOME` and each T3 instance's home.
+So does where its requests went, which sets their prices:
+`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and
+`CLAUDE_CODE_USE_FOUNDRY`, from the shell or a settings file's `env`, and
+Codex's `model_provider` and `model_providers`.
+Each MCP server a Codex file declares stays declared, without its `enabled`,
+`enabled_tools` or `disabled_tools`, since a server is something installed
+rather than a setting's value. A T3 thread's model selection is T3's default,
+so fast mode is off.
+
+Every check then runs as it would for that user, and the headline counts the
+changes they would make. The line under it sums what those changes save from
+the defaults, as the walk's running total does, and says overlapping changes
+may save less; the [savings against the defaults](#savings-against-the-defaults)
+line would only restate that everything matches, so it is left out.
+
+One rule decides whether each tool, skill or MCP server is on, before any
+verdict. One that managed or system policy turns off stays off, whatever the
+latest request carried, including a tool a system MCP `enabled_tools`
+allowlist leaves out, and its `info` line says policy keeps it off. Otherwise
+one that a user, project, local or named profile file turns off is on,
+including a tool a Codex `enabled_tools` allowlist leaves out, a server a
+`mcp__<server>__*` rule denies, and a Claude Code server turned off with `/mcp`
+in the project, which `.claude.json` records. A named profile file counts only
+for a server the files a default user reads declare, and a T3 instance reads
+the project files where its requests ran, as its CLI does.
+While it was off no request carried it, so its cost is scaled from the
+requests that did carry it to every request its line made in the window,
+while its verdict and cost per use come from the uses recorded while it was
+sent; its evidence says how many requests carried it. An MCP server's total is
+its own part, scaled on the requests that carried the server, plus each of its
+tools' totals, scaled on their own. One that no request in the window carried
+gets an `unknown` line costing unknown, never zero. Claude Code's auto memory is
+scaled the same way, from the main-agent requests that carried it. When it is
+on but no recorded request carried it, as for a user who turned it off before
+the window, its cost is unknown on any run, not zero.
+
+The report is read-only: it offers nothing and writes nothing, even on a
+terminal, and each change still names the edit a default user would make.
+Exit codes are those of a run without a terminal, so a script can still tell
+whether a default user would have anything to change. With `--ssh`, each
+destination reads its own files the same way.
 
 ## MCP servers and instruction budgets
 

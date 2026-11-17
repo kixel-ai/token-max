@@ -984,6 +984,16 @@ pub struct Profile {
     /// does it, so the report can show them though no request records them.
     #[serde(skip)]
     pub switched_off: Vec<Control>,
+    /// Under `doctor --defaults`, each switch a user, project or local file turns off and
+    /// policy does not, with that file: features the report shows on. A Codex MCP server's
+    /// `enabled_tools` allowlist is one too, turning off every tool it leaves out. Empty
+    /// otherwise.
+    #[serde(skip)]
+    pub pretended_on: Vec<(String, Control)>,
+    /// Under `doctor --defaults`, the switches policy turns off, with the policy file, which
+    /// keep a feature off whatever `pretended_on` restores; empty otherwise.
+    #[serde(skip)]
+    pub policy_off: Vec<(String, Control)>,
 }
 
 /// A setting's current value and the file or variable that sets it.
@@ -2659,6 +2669,9 @@ pub struct ContextCost {
     pub description: Option<String>,
     /// The line's requests and their cost by the profiles that recorded them.
     pub shares: Vec<ProfileShare>,
+    /// Under `doctor --defaults`, for a feature the settings files turn off: every request on
+    /// its line, which `estimated_usd` is scaled to from the requests that carried it.
+    pub pretended_requests: Option<u64>,
 }
 
 /// The requests on a line that one set of profiles recorded, and what the piece cost in them.
@@ -2818,6 +2831,9 @@ pub struct Scan {
     /// Native session identities, which only the local session export prints.
     #[serde(skip)]
     pub sessions: crate::sessions::Sessions,
+    /// Read for `doctor --defaults`, with the settings files pretended away.
+    #[serde(skip)]
+    pub defaults: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

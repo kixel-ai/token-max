@@ -1156,6 +1156,7 @@ mod tests {
             subagents: vec![],
             t3: vec![],
             sessions: Default::default(),
+            defaults: false,
             snapshot_started_at: iso(0),
             snapshot_finished_at: iso(0),
             since: None,

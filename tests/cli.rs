@@ -205,6 +205,7 @@ fn analysis(
         managed_settings_file: text(&w.home.join("managed-settings.json")),
         codex_system_config_file: text(&w.home.join("system.toml")),
         codex_requirements_file: text(&w.home.join("requirements.toml")),
+        defaults: false,
     };
     select(&mut discovery);
     let catalog = load_prices(&PriceOptions {
@@ -833,6 +834,7 @@ fn explicit_windows_match_the_library_replay() {
                 managed_settings_file: text(&w.home.join("managed-settings.json")),
                 codex_system_config_file: text(&w.home.join("system.toml")),
                 codex_requirements_file: text(&w.home.join("requirements.toml")),
+                defaults: false,
             },
             since: Some(since),
         })
@@ -1342,13 +1344,23 @@ mod unix {
         let diff = at(
             "\n  ~/.claude/settings.json\n  @@ -1,3 +1,3 @@\n    {\n  -   \"promptCacheTtl\": \"5m\"\n  +   \"promptCacheTtl\": \"1h\"\n    }\n",
         );
+        let backup = at(
+            "\n  Backs up ~/.claude/settings.json to ~/.claude/settings.json.token-max.bak\n  first.\n",
+        );
         let confirm =
             at("\n  Write the 1 accepted change to ~/.claude/settings.json? [y]es, [n]o: ");
-        let wrote = at("\n  Wrote 1 edit to ~/.claude/settings.json.\n");
+        let wrote = at(
+            "\n  Wrote 1 edit to ~/.claude/settings.json. Backed up the old file to\n  ~/.claude/settings.json.token-max.bak.\n",
+        );
         assert!(report < accepted && accepted < declined, "{stdout}");
         assert!(
-            declined < diff && diff < confirm && confirm < wrote,
+            declined < diff && diff < backup && backup < confirm && confirm < wrote,
             "{stdout}"
+        );
+        // The backup is the file as it was, so copying it back undoes the change.
+        assert_eq!(
+            std::fs::read_to_string(w.claude.join("settings.json.token-max.bak")).unwrap(),
+            "{\n  \"promptCacheTtl\": \"5m\"\n}\n"
         );
         assert_eq!(
             std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
@@ -1584,4 +1596,169 @@ fn t3_cli_keeps_native_usage_and_reports_optional_and_auxiliary_gaps() {
         assert!(!output.contains("SYNTHETIC_PRIVATE") && !output.contains("PRIVATE_CONFIG"));
     }
     assert!(!Path::new(&state).join("statev2.sqlite").exists());
+}
+
+#[test]
+fn defaults_report_pretends_the_settings_files_away_and_writes_nothing() {
+    let w = Workspace::new();
+    // The user turned WebFetch off after its first request, Glob after its last, and
+    // WebSearch before any; the project turned NotebookEdit off after its first.
+    let settings =
+        r#"{"promptCacheTtl":"1h","permissions":{"deny":["WebFetch","WebSearch","Glob"]}}"#;
+    w.settings(settings);
+    let repo = w.home.join("repo");
+    std::fs::create_dir_all(repo.join(".claude")).unwrap();
+    std::fs::write(
+        repo.join(".claude/settings.local.json"),
+        r#"{"permissions":{"deny":["NotebookEdit"]}}"#,
+    )
+    .unwrap();
+    let tool = |name: &str| json!({"name": name, "description": "synthetic schema ".repeat(50), "input_schema": {"type": "object"}});
+    let mut records = vec![];
+    for i in 0..3 {
+        let mut tools = vec![tool("Bash")];
+        match i {
+            0 => tools.extend([tool("WebFetch"), tool("NotebookEdit")]),
+            2 => tools.push(tool("Glob")),
+            _ => {}
+        }
+        let input = 1000 * tools.len();
+        records.push(json!({"type": "api-request", "id": format!("api-{i}"), "cwd": text(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:00Z", i + 1), "params": {
+            "model": "claude-opus-5-5", "system": "synthetic system", "messages": [], "tools": tools
+        }}));
+        records.push(json!({"type": "assistant", "uuid": format!("block-{i}"), "cwd": text(&repo), "sessionId": format!("session-{i}"), "timestamp": format!("2026-11-0{}T00:00:01Z", i + 1), "entrypoint": "sdk-ts", "requestRef": format!("api-{i}"), "message": {
+            "id": format!("message-{i}"), "model": "claude-opus-5-5", "content": [{"type": "tool_use", "id": format!("call-{i}"), "name": "Bash", "input": {}}], "usage": {
+                "input_tokens": input, "output_tokens": 100, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard", "speed": "standard", "inference_geo": "global"
+            }
+        }}));
+    }
+    let lines: Vec<String> = records.iter().map(Value::to_string).collect();
+    std::fs::write(w.transcript(), lines.join("\n") + "\n").unwrap();
+    let base = prices_args(&w);
+    let report = |extra: &[&str]| {
+        let mut c = command(&w, &args(&base, extra));
+        // A setting variable in the shell is pretended away with the files.
+        c.env("CLAUDE_CODE_PROMPT_CACHE_TTL", "1h");
+        run(&mut c)
+    };
+
+    let (_, normal, stderr) = report(&["--details"]);
+    assert!(
+        normal.contains("Compared with defaults"),
+        "{stderr}{normal}"
+    );
+    let (word, heading, _) = report_line(&normal, "WebFetch tool");
+    assert_eq!(
+        (word.as_str(), heading.as_str()),
+        ("info", "WebFetch tool off")
+    );
+
+    let (status, stdout, stderr) = report(&["--details", "--defaults"]);
+    assert_eq!(status, 1, "{stderr}{stdout}");
+    assert!(stdout.contains("(--defaults): every user, project and local settings file"));
+    assert!(!stdout.contains("Compared with defaults"), "{stdout}");
+    assert!(
+        stdout.contains("From the defaults, these changes save"),
+        "{stdout}"
+    );
+    // Carried by one of three requests and never used: on, priced over all three.
+    let (word, heading, evidence) = report_line(&stdout, "WebFetch tool");
+    assert_eq!(word, "change", "{heading}");
+    assert!(
+        heading.starts_with("WebFetch tool on -> off saves"),
+        "{heading}"
+    );
+    assert!(
+        evidence.contains("so 1 of this line's 3 requests carried it"),
+        "{evidence}"
+    );
+    // Turned off in a project file, or after the latest request: scaled the same way.
+    // Glob, first sent mid-window, can't be proven unused.
+    for (name, verdict) in [("NotebookEdit tool", "change"), ("Glob tool", "consider")] {
+        let (word, _, evidence) = report_line(&stdout, name);
+        assert_eq!(word, verdict, "{name}");
+        assert!(
+            evidence.contains("so 1 of this line's 3 requests carried it"),
+            "{evidence}"
+        );
+    }
+    // Never carried in the window: on, at a cost no transcript shows.
+    let (word, heading, evidence) = report_line(&stdout, "WebSearch tool");
+    assert_eq!(
+        (word.as_str(), heading.as_str()),
+        ("unknown", "WebSearch tool on costs unknown")
+    );
+    assert!(
+        evidence.contains("turns it off, so no request"),
+        "{evidence}"
+    );
+    // The file's and the shell's 1h are both pretended away.
+    let (_, heading, _) = report_line(&stdout, "Main-agent prompt cache TTL");
+    assert!(!heading.contains(" 1h"), "{heading}");
+    assert_eq!(
+        std::fs::read_to_string(w.claude.join("settings.json")).unwrap(),
+        settings
+    );
+
+    // The cost while it was sent, scaled from its one request to all three.
+    let fetch = |defaults: bool| {
+        let report = analysis(
+            &w,
+            |d| {
+                d.claude_dirs = vec![text(&w.claude)];
+                if defaults {
+                    d.pretend_defaults();
+                }
+            },
+            1.0,
+        );
+        let c = report
+            .context
+            .iter()
+            .find(|c| c.name == "WebFetch")
+            .unwrap();
+        (
+            c.requests,
+            c.current,
+            c.pretended_requests,
+            c.estimated_usd.unwrap(),
+            c.verdict,
+        )
+    };
+    let (requests, current, pretended, sent, verdict) = fetch(false);
+    assert_eq!(
+        (requests, current, pretended, verdict),
+        (1, false, None, None)
+    );
+    let (requests, current, pretended, on, verdict) = fetch(true);
+    assert_eq!(
+        (requests, current, pretended, verdict),
+        (1, true, Some(3), Some(Verdict::Off))
+    );
+    assert!((on - 3.0 * sent).abs() < 1e-12, "{on} {sent}");
+
+    // Policy keeps a feature off, though the latest request carried it.
+    std::fs::write(
+        w.home.join("managed-settings.json"),
+        r#"{"permissions":{"deny":["Glob"]}}"#,
+    )
+    .unwrap();
+    let report = analysis(
+        &w,
+        |d| {
+            d.claude_dirs = vec![text(&w.claude)];
+            d.pretend_defaults();
+        },
+        1.0,
+    );
+    let glob = report.context.iter().find(|c| c.name == "Glob").unwrap();
+    assert_eq!(
+        (glob.current, glob.verdict, glob.pretended_requests),
+        (false, None, None)
+    );
+
+    // The flag only shapes doctor's report.
+    let (status, _, stderr) = run(&mut command(&w, &["sessions", "--defaults"]));
+    assert_eq!(status, 2, "{stderr}");
 }

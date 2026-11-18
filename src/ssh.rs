@@ -655,19 +655,58 @@ mod tests {
         );
     }
 
-    /// Run `script` as a destination's `sh` does, with `home` and only the system's commands.
-    fn sh(home: &Path, script: &str, args: &[&str]) -> (Option<i32>, String) {
-        let output = Command::new("sh")
+    /// A `PATH` holding only the commands the scripts run, linked from this one wherever they
+    /// are, such as NixOS's store, so an installed `token-max` can't stand in for a test's. Its
+    /// leading empty entry is the current directory.
+    fn tools(home: &Path) -> String {
+        let tools = home.join("tools");
+        if !tools.exists() {
+            std::fs::create_dir(&tools).unwrap();
+            let path = std::env::var_os("PATH").unwrap();
+            // Linux ships sha256sum and macOS shasum; either checks a binary.
+            let sums = ["sha256sum", "shasum"];
+            for tool in [
+                "sh", "uname", "cat", "mkdir", "mktemp", "chmod", "mv", "rm", "curl", "tar", "xz",
+            ]
+            .into_iter()
+            .chain(sums)
+            {
+                let Some(found) = std::env::split_paths(&path)
+                    .map(|dir| dir.join(tool))
+                    .find(|file| file.is_file())
+                else {
+                    // macOS's tar unpacks xz itself.
+                    assert!(
+                        sums.contains(&tool) || tool == "xz",
+                        "{tool} is not on PATH"
+                    );
+                    continue;
+                };
+                let found = std::env::current_dir().unwrap().join(found);
+                std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+            }
+        }
+        format!(":{}", tools.display())
+    }
+
+    /// `script` as a destination's `sh` runs it, with `home` and only [`tools`].
+    fn command(home: &Path, script: &str, args: &[&str]) -> Command {
+        let mut command = Command::new("sh");
+        command
             .arg("-c")
             .arg(format!("{PLATFORM}{script}"))
             .arg("sh")
             .args(args)
             .env_clear()
             .env("HOME", home)
-            .env("PATH", "/usr/bin::/bin:/usr/sbin:/sbin")
-            .current_dir(home)
-            .output()
-            .unwrap();
+            .env("PATH", tools(home))
+            .current_dir(home);
+        command
+    }
+
+    /// Run `script` as a destination's `sh` does, returning its status and stdout.
+    fn sh(home: &Path, script: &str, args: &[&str]) -> (Option<i32>, String) {
+        let output = command(home, script, args).output().unwrap();
         (
             output.status.code(),
             String::from_utf8(output.stdout).unwrap(),
@@ -813,13 +852,7 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         let copy = |sha256: &str| {
-            let output = Command::new("sh")
-                .arg("-c")
-                .arg(format!("{PLATFORM}{SUM}{COPY}"))
-                .args(["sh", "token-max-copy", sha256])
-                .env_clear()
-                .env("HOME", home)
-                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            let output = command(home, &format!("{SUM}{COPY}"), &["token-max-copy", sha256])
                 .stdin(std::fs::File::open(&binary).unwrap())
                 .output()
                 .unwrap();

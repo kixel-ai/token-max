@@ -215,6 +215,12 @@ host already wrote, and the error names the host that failed and the hosts left
 unwritten. If the connection drops while a destination writes, its files may or
 may not have changed, and the error says to check them and their backups.
 
+Ctrl-C before the confirm stops every destination with nothing written. After
+the yes, Ctrl-C starts no further host's write and exits 2, naming the hosts
+left unwritten. A write already under way on this host finishes. A
+destination's write may still finish there after this host stops waiting for
+it, so the error says to check that host's files and backups.
+
 ## Profiles
 
 Without directory flags, discovery includes `~/.claude`, `~/.codex`,
@@ -957,7 +963,8 @@ assumes each host's history is an independent sample; where histories are
 copied between hosts the errors are correlated, so the total's margin can be
 too small. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
-Ctrl-C stops every destination. On a terminal, `doctor` walks through every
+Ctrl-C stops every destination, unless a walk is already writing, as
+[On SSH hosts](#on-ssh-hosts) describes. On a terminal, `doctor` walks through every
 host's changes and writes each on its own host, as
 [On SSH hosts](#on-ssh-hosts) describes. Each host's percents
 are of that host's own spend, and the total's of the hosts' spend together.

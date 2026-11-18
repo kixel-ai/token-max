@@ -1367,9 +1367,26 @@ impl Terminal {
 
     /// Wait for the run to end, returning its exit code, everything it printed and stderr.
     fn finish(&mut self) -> (i32, String, String) {
-        let mut stderr = String::new();
-        std::io::Read::read_to_string(&mut self.child.stderr.take().unwrap(), &mut stderr).unwrap();
-        let code = self.child.wait().unwrap().code().unwrap();
+        let mut pipe = self.child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut pipe, &mut stderr).unwrap();
+            stderr
+        });
+        // A run that never ends fails here, with what it printed.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                let printed = self.output.0.lock().unwrap().clone();
+                panic!("still running: {}", String::from_utf8_lossy(&printed));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let code = status.code().unwrap();
         // The reader stops once the child's side closes.
         let deadline = Instant::now() + Duration::from_secs(10);
         while std::sync::Arc::strong_count(&self.output) > 1 && Instant::now() < deadline {
@@ -1377,7 +1394,7 @@ impl Terminal {
         }
         let output = self.output.0.lock().unwrap().clone();
         let output = String::from_utf8_lossy(&output).replace("\r\n", "\n");
-        (code, output, stderr)
+        (code, output, stderr.join().unwrap())
     }
 }
 
@@ -1401,6 +1418,11 @@ impl Hosts {
     fn walk(&self) -> Terminal {
         self.host("devbox");
         self.host("laptop");
+        self.walk_ready()
+    }
+
+    /// The walk of [`Hosts::walk`] with its destinations already set up.
+    fn walk_ready(&self) -> Terminal {
         let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop", "--include-local"]);
         command.env("NO_COLOR", "1");
         let mut terminal = Terminal::spawn(command);
@@ -1558,5 +1580,62 @@ fn a_failed_write_never_reads_as_nothing_written() {
     assert!(
         flat(&stderr).contains("; nothing was written on devbox, laptop"),
         "{stderr}"
+    );
+}
+
+#[test]
+fn ctrl_c_while_a_destination_writes_stops_waiting_and_starts_no_other_host() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    hosts.host("laptop");
+    // devbox's token-max runs behind a relay of its stdin that holds the write back, so the
+    // coordinator waits on that write until it is cancelled.
+    for name in ["devbox.fifo", "never"] {
+        let fifo = std::ffi::CString::new(hosts.root.join(name).to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo creates a named pipe at a path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    }
+    hosts.fake(
+        "devbox",
+        &format!(
+            r#"'{BIN}' "$@" < "$TEST_ROOT/devbox.fifo" &
+exec 3>"$TEST_ROOT/devbox.fifo"
+while IFS= read -r line; do
+  [ "$line" = '"write"' ] && : > "$TEST_ROOT/writing" && read -r never < "$TEST_ROOT/never"
+  printf '%s\n' "$line" >&3
+done"#
+        ),
+    );
+    let mut terminal = hosts.walk_ready();
+    for _ in 0..3 {
+        terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    }
+    terminal.answer("[n]o:", "y");
+    let writing = hosts.root.join("writing");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !writing.exists() {
+        assert!(Instant::now() < deadline, "devbox never started writing");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: kill only signals the child this test spawned.
+    assert_eq!(
+        unsafe { libc::kill(terminal.child.id() as i32, libc::SIGINT) },
+        0
+    );
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 2, "{output}{stderr}");
+    assert!(
+        flat(&output).contains("Wrote 1 edit to ~/.claude/settings.json."),
+        "{output}"
+    );
+    let stderr = flat(&stderr);
+    assert!(
+        stderr.contains("devbox: cancelled while it was writing, so it may have changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("nothing was written on laptop"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("laptop")).unwrap(),
+        r#"{"promptCacheTtl":"1h"}"#
     );
 }

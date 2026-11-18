@@ -1213,7 +1213,12 @@ figures as they are, so it counts that history on each. Each host sends beside
 its report only its own sums, never its scan. The first failure, of a host or of loading
 prices, stops the run at once: every `ssh` process is killed and reaped, a
 destination stops when its stdin closes, and a partial price download is
-deleted. SIGINT and SIGTERM do the same before exiting 2.
+deleted. SIGINT and SIGTERM do the same before exiting 2. Each `ssh` client runs in
+its own process group, so the terminal's Ctrl-C reaches only the coordinator,
+which stops the clients itself. After a walk's confirm, a signal stops only the
+destination whose write the coordinator is waiting for. That destination no
+longer reads stdin, so the write it started may still finish. A write already
+under way on this host finishes, and no later host's write starts.
 
 ## Bash timeout cap
 

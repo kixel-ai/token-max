@@ -174,6 +174,11 @@ fn children() -> std::sync::MutexGuard<'static, Children> {
     CHILDREN.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether [`cancel`] ran.
+pub fn cancelled() -> bool {
+    children().cancelled
+}
+
 /// Stop and reap every SSH audit, and refuse to start more.
 pub fn cancel() {
     let mut children = children();
@@ -273,6 +278,11 @@ fn spawn(
         .stdout(Stdio::piped())
         // Login scripts may print anything; failures are reported from exit statuses.
         .stderr(Stdio::null());
+    // In its own process group, so the terminal's Ctrl-C reaches only this process, which
+    // decides what each client stops: every one before the confirm, and after it only a
+    // destination's write it stops waiting for. Batch mode never reads the terminal.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut ssh, 0);
     let mut children = children();
     if children.cancelled {
         return Err(ScanError::new("cancelled; no report produced"));
@@ -608,6 +618,8 @@ impl Remote {
                 })
             }
             Ok(outcome) => Ok(outcome),
+            // Cancelled from the terminal, which stopped this client.
+            Err(_) if cancelled() => Err(self.session.fail(true, |_| format!("cancelled {doing}"))),
             Err(error) if error.is_eof() || error.is_io() => Err(self
                 .session
                 .fail(true, |_| format!("SSH connection lost {doing}"))),
@@ -637,30 +649,36 @@ impl Remote {
         }
     }
 
-    /// Write the reviewed changes there, returning each file written.
-    pub fn write(mut self) -> Result<Vec<Written>, ScanError> {
-        let doing = "while writing; check its settings files and their .token-max.bak backups";
-        let written = match self.exchange(&Answer::Write, doing)? {
-            Outcome::Wrote { written } => written,
-            _ => {
-                return Err(self.session.fail(true, |_| {
+    /// Write the reviewed changes there, returning each file it reported written, and how the
+    /// audit failed, before or after that report.
+    pub fn write(mut self) -> (Vec<Written>, Option<ScanError>) {
+        let doing = "while it was writing, so it may have changed its settings files; check them and their .token-max.bak backups";
+        let written = match self.exchange(&Answer::Write, doing) {
+            Ok(Outcome::Wrote { written }) => written,
+            Ok(_) => {
+                let error = self.session.fail(true, |_| {
                     format!("token-max sent a different result than requested {doing}")
-                }));
+                });
+                return (vec![], Some(error));
+            }
+            Err(error) => return (vec![], Some(error)),
+        };
+        // Its report stands: the files it names were written, whatever follows.
+        let error = if self.stream.end().is_err() {
+            Some(self.session.fail(true, |_| {
+                "token-max sent more than its result after writing".into()
+            }))
+        } else {
+            match self.session.stop(false).and_then(|s| s.code()) {
+                Some(0) => None,
+                status => Some(ScanError::new(format!(
+                    "{}: token-max failed after writing ({})",
+                    self.session.destination,
+                    exit(status)
+                ))),
             }
         };
-        if self.stream.end().is_err() {
-            return Err(self.session.fail(true, |_| {
-                format!("token-max sent more than its result after writing {doing}")
-            }));
-        }
-        match self.session.stop(false).and_then(|s| s.code()) {
-            Some(0) => Ok(written),
-            status => Err(ScanError::new(format!(
-                "{}: token-max failed after writing ({})",
-                self.session.destination,
-                exit(status)
-            ))),
-        }
+        (written, error)
     }
 }
 

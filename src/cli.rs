@@ -1330,23 +1330,25 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
             written.push(vec![]);
             continue;
         }
+        // Ctrl-C while writing lets the write under way finish and starts no other.
+        if error.is_none() && ssh::cancelled() {
+            error = Some(ScanError::new("cancelled while writing"));
+        }
         if error.is_some() {
             skipped.push(host.label.unwrap_or_else(|| "this host".into()));
             written.push(vec![]);
             continue;
         }
-        let result = match (host.side, plan) {
-            (Side::Here { .. }, Some(plan)) => write(&plan),
+        let (files, failed) = match (host.side, plan) {
+            (Side::Here { .. }, Some(plan)) => match write(&plan) {
+                Ok(files) => (files, None),
+                Err(e) => (vec![], Some(e)),
+            },
             (Side::There { remote, .. }, None) => remote.write(),
             _ => unreachable!("a plan for each host here"),
         };
-        match result {
-            Ok(files) => written.push(files),
-            Err(e) => {
-                error = Some(e);
-                written.push(vec![]);
-            }
-        }
+        written.push(files);
+        error = failed;
     }
     let done: Vec<_> = summaries
         .iter()
@@ -1393,8 +1395,13 @@ pub fn main() -> ExitCode {
     let handler = ctrlc::set_handler(move || {
         let phase = PHASE.lock().unwrap_or_else(PoisonError::into_inner);
         let message = match *phase {
-            // The report, a settings file or a diagnostic is already being written whole.
-            Phase::Writing => return,
+            // This host's files and the output are written whole. A destination's write
+            // finishes or not without this host, which stops waiting for it and starts no
+            // other host's write.
+            Phase::Writing => {
+                ssh::cancel();
+                return;
+            }
             Phase::Asking => "cancelled; no settings were changed",
             Phase::Running => "cancelled; no report produced",
         };

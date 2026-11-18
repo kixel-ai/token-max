@@ -87,9 +87,8 @@ distribution in m0 (npm then; crates.io since the Rust rewrite). The crate
 and the command are both `token-max`. Keep the report
 usable in scripts and avoid a second analysis implementation.
 
-The end-to-end first-release validation, the 0.0.1 version change,
-publishing the crate and clearing Quest's release handoff are
-[their own quest](/quest/m0/release.md).
+0.0.1 was published on 2026-11-18. Adding the crates.io trusted publisher for
+later releases is [its own quest](/quest/m1/trusted-publisher.md), in m1 since only the next release needs it.
 
 Expanded 2026-11-07 (/quest-plan, then "afk spawn and merge whatever you want"):
 ✅ include T3-aware Claude/Codex profiles/settings and explicit SSH host audits

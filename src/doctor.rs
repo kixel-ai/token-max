@@ -3788,6 +3788,47 @@ mod tests {
     }
 
     #[test]
+    fn a_host_replays_only_answers_to_the_changes_it_offered() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        std::fs::write(&settings, "{}\n").unwrap();
+        let fix = change(
+            "A",
+            &settings,
+            Harness::Claude,
+            vec![edit("a", true, false)],
+        );
+        let owner = Owner::new(vec![fix.clone()], vec![], None, 0.0);
+        // As another host's walk reads them.
+        let json = serde_json::to_string(owner.offers()).unwrap();
+        let offers: Offers = serde_json::from_str(&json).unwrap();
+        assert_eq!(offers.offers[0].fix, fix);
+        assert_eq!(offers.files, [settings.to_string_lossy()]);
+        for event in [
+            Event::Choose {
+                offer: 1,
+                yes: true,
+            },
+            Event::Remove { offer: 0, entry: 0 },
+            Event::Cleanup { entry: 0 },
+        ] {
+            let error = owner.plan(&[event]).unwrap_err().message;
+            assert!(error.contains("not offered"), "{error}");
+        }
+        let plan = owner
+            .plan(&[Event::Choose {
+                offer: 0,
+                yes: true,
+            }])
+            .unwrap();
+        assert_eq!(plan.summary().files, [settings.to_string_lossy()]);
+        assert_eq!(*choice(&plan, "A"), Choice::Accepted);
+        // A claim or verb this build never prints is refused.
+        let forged = json.replace("\"Measured\"", "\"Proven\"");
+        assert!(serde_json::from_str::<Offers>(&forged).is_err());
+    }
+
+    #[test]
     fn the_walk_writes_each_file_once_with_its_accepted_edits() {
         let w = Workspace::new();
         let settings = w.claude.join("settings.json");

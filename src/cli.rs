@@ -103,7 +103,7 @@ never with redirected output.
 SIGINT/SIGTERM cancel with exit 2 and no success report; settings are written only after
 the list of accepted changes is confirmed.
 
-When it offers this host's changes on a terminal: exit 0, or 2 on failure or cancellation.
+When it walks through the changes on a terminal: exit 0, or 2 on failure or cancellation.
 Otherwise: exit 0 for no applicable change (advisory findings may remain), 1 for a
 recommended change, 2 for a scan, pricing, argument or cancellation failure.
 ";
@@ -1047,8 +1047,8 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         .collect())
 }
 
-/// `token-max doctor`: audit the selected hosts, then walk through this host's changes when
-/// stdin and stdout are a terminal.
+/// `token-max doctor`: audit the selected hosts, then walk through their changes when stdin
+/// and stdout are a terminal.
 fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let invalid = || ScanError::new("invalid arguments; use token-max doctor --help");
     let mut values = parse(args).ok_or_else(invalid)?;

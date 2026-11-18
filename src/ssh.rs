@@ -532,7 +532,6 @@ pub fn audit(
         }
         Err(error) => return Err(invalid(&mut session, error)),
     };
-    let walk = requested.flatten() == Some(true);
     if scanned != since {
         return Err(session.fail(true, |_| {
             "token-max scanned a different window than requested".into()
@@ -561,7 +560,6 @@ pub fn audit(
             }));
         }
     }
-    debug_assert!(!walk);
     if let Err(error) = stream.end() {
         return Err(invalid(&mut session, error));
     }
@@ -824,9 +822,13 @@ fn walk_here(
             ));
         };
         let plan = walked.owner.plan(&events)?;
-        let report = walked
-            .listing
-            .review(plan.choices(), &plan.total("Accepted"));
+        // Under its own header, which this host prints only for its own report.
+        let listing = &walked.listing;
+        let report = format!(
+            "{}{}",
+            listing.title(),
+            listing.review(plan.choices(), &plan.total("Accepted"))
+        );
         let preview = preview(&plan, &walked.style);
         Ok((plan, Outcome::Reviewed { report, preview }))
     }))

@@ -1177,7 +1177,23 @@ report, with `--max-cost-per-use` and the report format (this terminal's
 width, color and Unicode settings, `--details` and the host's label); for
 `sessions` it is the session export. The destination then writes its printed
 report and whether it recommends a change, or its session lines, either with
-its window, or its safe diagnostic, then ends the stream. Any other build, a
+its window, or its safe diagnostic, then ends the stream.
+
+When `doctor` walks on a terminal, the job says so and the stream stays open.
+The destination checks its changes against its own files, as a local walk
+does, and sends them with its report: each change and the target index it
+edits, the MCP entries it may remove, its steps by hand, each target's file
+name, its home and its spend every 30 days. It keeps every file's text as it
+read it. The coordinator asks the questions and sends back the answers, each by
+its index among the destination's offers, never an edit or a path. The
+destination replays them, rejecting an index it never offered, and replies with
+its report marked with the answers and the masked diff of each file it would
+write. After the confirm, the coordinator sends the write; the destination
+stops reading stdin, so the write finishes even if the coordinator goes, writes
+its files as a local write does, and replies with each file written or its
+diagnostic. A coordinator that does not confirm closes the connection, and the
+destination exits without writing. Remote reports, diffs and file names are
+printed with terminal controls escaped as reports are. Any other build, a
 truncated or trailing value, a result for another window or job than
 requested, or a nonzero exit fails the run. The coordinator sets each session
 line's `host` and orders every host's lines by first request. The coordinator

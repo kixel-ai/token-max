@@ -4,9 +4,10 @@
 
 The compaction window check replays from the trigger Claude Code actually
 uses when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is set, and a recommendation that
-changes the trigger removes the override and sets `autoCompactWindow` (or the
-environment window that owns it) to the target, so one setting owns the
-trigger. The doctor walk shows both edits before applying them.
+changes the trigger removes the override and sets an `autoCompactWindow` to
+the target (the environment window only when it covers no other model), so
+one setting owns the trigger. The doctor walk shows every edit before
+applying it.
 
 ## Plan
 
@@ -45,6 +46,15 @@ equivalent) at its current effective trigger, so its trigger doesn't move.
 When any of those models' current trigger is unresolved, the row stays
 advisory.
 
+Since `CLAUDE_CODE_AUTO_COMPACT_WINDOW` outranks every
+`modelSettings.<model>.autoCompactWindow` row, the target window goes in
+the target model's `modelSettings` row (or the T3 instance's equivalent)
+whenever the owner runs other models, never in the environment window. If
+the environment window is set, the edit also removes it, pinning each model
+it covered to its current trigger with its own row; when the walk can't
+edit the scope that sets it, such as the shell environment, the row stays
+advisory and names that owner.
+
 The edit removes the override from every scope that sets it, not only the
 winning one, since a lower-precedence value would otherwise take over (a 50%
 user override left behind a removed project one fires at half the new
@@ -56,7 +66,3 @@ the current one only when it postdates the override's last change: use only
 observations from sessions that started after the owning settings file was
 last modified, and leave the row advisory when the owner has no such time,
 such as the shell environment.
-
-## Related
-
-- [Extrapolate the idle compaction replays](/quest/m0/launch/extrapolate-idle.md) - the neighbouring compaction replay

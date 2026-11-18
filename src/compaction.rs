@@ -1228,6 +1228,19 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
         scan, catalog, now, ..
     } = *options;
     let selected_ids: HashSet<&str> = scan.requests.iter().map(|r| &*r.id).collect();
+    // Every model ID each profile's history ran, as recorded, which a window plan must keep.
+    let mut ran: HashMap<&str, IndexSet<Option<Text>>> = HashMap::default();
+    for request in scan.cache_context.requests.iter().chain(&scan.requests) {
+        for profile in request.profiles.iter() {
+            ran.entry(profile.as_str()).or_default().extend(
+                request
+                    .parts
+                    .iter()
+                    .filter(|p| is_conversation(p))
+                    .map(|p| p.model.clone()),
+            );
+        }
+    }
     let mut checks = Vec::new();
     for group in crate::rows::groups(&scan.profiles, crate::rows::compaction_owner) {
         let profile = group.lead;
@@ -1763,6 +1776,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     reowned(
                         &group.members,
                         &outside,
+                        &ran,
                         percent,
                         target,
                         models,
@@ -1920,6 +1934,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
 fn reowned<'m>(
     members: &[&Profile],
     outside: &[&Profile],
+    ran: &HashMap<&str, IndexSet<Option<Text>>>,
     percent: &PercentOverride,
     target: i64,
     group: &[Option<Text>],
@@ -2039,10 +2054,17 @@ fn reowned<'m>(
                 unkept.push(format!("the changed settings{place} do not resolve"));
                 continue;
             };
-            let mut models: IndexSet<&str> = before.tuned.keys().map(String::as_str).collect();
-            if member {
-                models.extend(line.iter().copied().flatten().map(|m| &**m));
-            }
+            // Each model as recorded; a line keeps the models its own history ran.
+            let models: IndexSet<&str> = if member {
+                line.iter().copied().flatten().map(|m| &**m).collect()
+            } else {
+                ran.get(profile.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .map(|m| &**m)
+                    .collect()
+            };
             for model in models {
                 let now = window_control(before, Some(model)).value;
                 let then = window_control(&after, Some(model)).value;
@@ -3451,6 +3473,7 @@ mod tests {
         let reowned = super::reowned(
             &[profile],
             &[],
+            &HashMap::default(),
             percent,
             100_000,
             std::slice::from_ref(&opus),
@@ -3550,11 +3573,16 @@ mod tests {
             Some(Text::from("claude-opus-5-5")),
             Some(Text::from("claude-haiku-5-5")),
         ];
+        let ran = HashMap::from_iter([(
+            "t3-instance",
+            IndexSet::from_iter([Some(Text::from("claude-opus-5-5"))]),
+        )]);
         let plan = |other: &Profile| {
             let profile = &scan.profiles[0];
             super::reowned(
                 &[profile],
                 &[other],
+                &ran,
                 profile.compaction.percent.as_ref().unwrap(),
                 100_000,
                 &line[..1],
@@ -3565,20 +3593,12 @@ mod tests {
         let mut other = scan.profiles[0].clone();
         other.id = "t3-instance".into();
         let read = |file: &str| {
-            let mut compaction = controls(
+            controls(
                 Harness::Claude,
                 json!({"env": {window: "400000"}}),
                 &Env::default(),
                 file,
-            );
-            compaction.tuned.insert(
-                "claude-opus-5-5".into(),
-                crate::model::TunedWindow {
-                    value: Some(967_000),
-                    reason: String::new(),
-                },
-            );
-            compaction
+            )
         };
         other.compaction = read("settings.json");
         assert!(other.compaction.percent.is_none());
@@ -3594,6 +3614,54 @@ mod tests {
         // One whose window comes from its own file is left alone.
         other.compaction = read("other.json");
         assert!(plan(&other).unkept.is_empty());
+    }
+
+    #[test]
+    fn a_line_that_ran_only_a_dated_id_is_checked_on_that_id() {
+        let key = crate::controls::PERCENT_KEY;
+        let dated = Some(Text::from("claude-opus-5-5-20261101"));
+        let mut scan = data(4);
+        scan.profiles[0].settings_file = "settings.json".into();
+        let mut compaction = controls(
+            Harness::Claude,
+            json!({
+                "env": {key: "50"},
+                "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}},
+            }),
+            &Env::default(),
+            "settings.json",
+        );
+        // Tuned windows are keyed by the undated ID, which never ran and needs no keeping.
+        compaction.tuned.insert(
+            "claude-opus-5-5".into(),
+            crate::model::TunedWindow {
+                value: Some(967_000),
+                reason: String::new(),
+            },
+        );
+        scan.profiles[0].compaction = compaction;
+        let profile = &scan.profiles[0];
+        let line = std::slice::from_ref(&dated);
+        let reowned = super::reowned(
+            &[profile],
+            &[],
+            &HashMap::default(),
+            profile.compaction.percent.as_ref().unwrap(),
+            100_000,
+            line,
+            line.iter(),
+        );
+        assert!(reowned.unkept.is_empty(), "{:?}", reowned.unkept);
+        assert_eq!(
+            planned(&reowned),
+            [
+                (
+                    "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow".into(),
+                    Some(100_000)
+                ),
+                (format!("settings.json:env.{key}"), None),
+            ]
+        );
     }
 
     /// A recorded project's controls: the home file, then the project's own.
@@ -3642,11 +3710,20 @@ mod tests {
         );
         let opus = Some(Text::from("claude-opus-5-5"));
         let haiku = Some(Text::from("claude-haiku-5-5"));
+        let ran = HashMap::from_iter([("t3-instance", IndexSet::from_iter([opus.clone()]))]);
         let plan =
             |scan: &Scan, outside: &[&Profile], group: &[Option<Text>], line: &[Option<Text>]| {
                 let profile = &scan.profiles[0];
                 let percent = profile.compaction.percent.as_ref().unwrap();
-                super::reowned(&[profile], outside, percent, 100_000, group, line.iter())
+                super::reowned(
+                    &[profile],
+                    outside,
+                    &ran,
+                    percent,
+                    100_000,
+                    group,
+                    line.iter(),
+                )
             };
         let alone = std::slice::from_ref(&opus);
         assert!(plan(&scan, &[], alone, alone).unkept.is_empty());
@@ -3654,18 +3731,8 @@ mod tests {
         let unkept = plan(&scan, &[], alone, &[opus.clone(), None]).unkept;
         assert!(unkept[0].contains("no recorded model"), "{unkept:?}");
         // Another line that reads the same file moves with it.
-        let ran = |compaction: &mut CompactionControls| {
-            compaction.tuned.insert(
-                "claude-opus-5-5".into(),
-                crate::model::TunedWindow {
-                    value: Some(967_000),
-                    reason: String::new(),
-                },
-            );
-        };
         let mut other = scan.profiles[0].clone();
         other.id = "t3-instance".into();
-        ran(&mut other.compaction);
         let moved = "does not keep claude-opus-5-5: it would compact at 100000 on t3-instance instead of 200000";
         let unkept = plan(&scan, &[&other], alone, alone).unkept;
         assert!(unkept.iter().any(|u| u.contains(moved)), "{unkept:?}");
@@ -3690,7 +3757,6 @@ mod tests {
                 &Env::default(),
                 &link.display().to_string(),
             );
-            ran(&mut other.compaction);
             let unkept = plan(&linked, &[&other], alone, alone).unkept;
             assert!(unkept.iter().any(|u| u.contains(moved)), "{unkept:?}");
         }

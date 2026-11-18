@@ -1264,6 +1264,10 @@ fn lowered(
     match control.value {
         // Recorded triggers differ by model, so only the model's own row holds one.
         Some(_) => {
+            // An unset window lacked only its trigger, which the recorded one now gives.
+            if control.unset {
+                control.applicable = true;
+            }
             if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
                 control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
             } else if !control.owner.contains(":modelSettings.") {
@@ -2083,6 +2087,21 @@ mod tests {
         let p = compaction_controls(&claude_sources(&fraction, &empty, &none)).unwrap();
         assert_eq!(p.percent.as_ref().unwrap().value, None);
         assert_eq!(window_control(&p, Some("claude-opus-4-6")).value, None);
+    }
+
+    #[test]
+    fn a_recorded_trigger_makes_an_unset_custom_window_applicable() {
+        let user = map(json!({"env": {PERCENT_KEY: "50"}}));
+        let empty = Map::new();
+        let mut p = compaction_controls(&claude_sources(&user, &empty, &Env::default())).unwrap();
+        // No documented default covers the ID, so only a recorded trigger resolves it.
+        assert!(!window_control(&p, Some("gateway-model")).applicable);
+        let percent = p.percent.as_mut().unwrap();
+        percent.since = Some(0);
+        percent.observed.insert("gateway-model".into(), 120_000);
+        let control = window_control(&p, Some("gateway-model"));
+        assert_eq!(control.value, Some(120_000));
+        assert!(control.applicable);
     }
 
     #[test]

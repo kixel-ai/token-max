@@ -69,21 +69,20 @@ pub(crate) fn profile_key(state: &str, instance: &str) -> String {
     format!("t3:{state}:{instance}")
 }
 
-/// Whether a line's T3 instances can take guidance: each is enabled with resolved settings,
-/// and T3 settled which profile ran each request, or left it open only between the line's
-/// own profiles, which share its owner.
-pub(crate) fn settled(profiles: &[Profile], line: &[String], history: &[String]) -> bool {
-    let confined = history.iter().all(|p| line.contains(p));
+/// Whether a line's T3 instances can take guidance: each is enabled with resolved settings.
+/// A request T3 could not settle opens the control it reads instead, on the control itself
+/// (see [`Control`]), so each check decides it by the control it applies.
+pub(crate) fn settled(profiles: &[Profile], line: &[String]) -> bool {
     profiles
         .iter()
         .filter(|p| line.contains(&p.id))
         .filter_map(|p| p.t3.as_ref())
-        .all(|t| t.enabled && !t.settings_unresolved && (t.ownership_resolved || confined))
+        .all(|t| t.enabled && !t.settings_unresolved)
 }
 
 /// Retained history is still priced when a current instance cannot receive guidance.
 pub(crate) fn constrain<T>(base: &mut CheckBase<T>, profiles: &[Profile]) {
-    if !settled(profiles, &base.profiles, &base.history_profiles) {
+    if !settled(profiles, &base.profiles) {
         base.action = Action::Advisory;
         base.recommended = None;
         base.savings_usd = None;
@@ -2244,11 +2243,12 @@ pub(crate) fn enrich(
         crate::discovery::settle_ttls(p, directories.iter().copied());
     }
     let open = |control: Control| unsettled_for(profiles, &unsettled, control);
-    let [speed, main_ttl, subagent_ttl, compaction] = [
+    let [speed, main_ttl, subagent_ttl, compaction, bash] = [
         Control::Speed,
         Control::Ttl(Bucket::Main),
         Control::Ttl(Bucket::Subagent),
         Control::Compaction,
+        Control::Bash,
     ]
     .map(open);
     const REASON: &str = "shared native history has unresolved T3 control ownership";
@@ -2278,6 +2278,9 @@ pub(crate) fn enrich(
                 ttl.reason = REASON.into();
             }
         }
+        if let Some(cap) = p.bash.as_mut().filter(|_| bash.contains(&p.id)) {
+            cap.unresolved = Some(REASON.into());
+        }
     }
 }
 
@@ -2290,6 +2293,8 @@ enum Control {
     Ttl(Bucket),
     /// The compaction windows, with both TTLs their replay applies.
     Compaction,
+    /// The Bash cap, with the main TTL its check compares it with.
+    Bash,
 }
 
 impl Control {
@@ -2300,6 +2305,7 @@ impl Control {
             Control::Speed => p.speed.as_ref().map(|s| s.owner.clone()),
             Control::Ttl(bucket) => Some(crate::rows::ttl_owner(p, bucket)),
             Control::Compaction => Some(crate::rows::compaction_owner(p)),
+            Control::Bash => crate::bash::owner(p),
         }
     }
 }
@@ -2571,6 +2577,56 @@ mod tests {
             open(&["native", "gone"]),
             ["compaction", "main ttl", "speed", "subagent ttl"]
         );
+    }
+
+    #[test]
+    fn a_bash_cap_only_one_owner_sets_stays_advisory_for_requests_t3_left_open() {
+        for env in [false, true] {
+            let w = Workspace::new();
+            let mut instance = json!({"driver":"claudeAgent"});
+            if env {
+                instance["environment"] = json!([{"name":"BASH_MAX_TIMEOUT_MS","value":"3600000"}]);
+            }
+            let root = state(&w, json!({"providerInstances":{"claudeAgent":instance}}));
+            let database = db(&root);
+            seed(&database, "claudeAgent", "claudeAgent");
+            // Dates when T3 began recording turn items, after the session below.
+            database.execute("INSERT INTO orchestration_v2_projection_turn_items VALUES(?1,'thread','turn','assistant_message','completed','{}','2026-01-01T00:00:00Z',NULL)",[format!("{ITEM_PREFIX}other-uuid")]).unwrap();
+            let row = json!({"type":"assistant","uuid":"early-uuid","sessionId":"early","timestamp":"2025-12-31T00:00:00Z","entrypoint":"sdk-ts","message":{"id":"early-message","model":"claude-opus-5-5","content":[],"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
+            write(w.claude.join("projects/p/early.jsonl"), format!("{row}\n"));
+            let data = scan(&w.scan_options()).unwrap();
+            assert_eq!(data.requests[0].profiles.len(), 2, "{env}");
+            let checks = crate::bash::bash_checks(&crate::bash::BashInput {
+                scan: &data,
+                catalog: &crate::test_support::prices(),
+                ttls: &[],
+                since: None,
+                now: timestamp(&json!("2026-01-02T00:00:00Z")).unwrap(),
+            });
+            // One file's cap is the cap whichever owner ran the request; the instance's own
+            // cap leaves both lines' requests to an unknown cap.
+            let open = env || managed_policy_unresolved();
+            for p in data
+                .profiles
+                .iter()
+                .filter(|p| p.harness == Harness::Claude)
+            {
+                let bash = p.bash.as_ref().unwrap();
+                assert_eq!(bash.unresolved.is_some(), open, "{env} {}", p.id);
+            }
+            for c in &checks {
+                if open {
+                    assert_eq!(c.base.action, Action::Advisory, "{env}");
+                    assert_eq!(c.base.recommended, None);
+                    assert!(
+                        c.base
+                            .uncertainty
+                            .iter()
+                            .any(|u| u.contains("unresolved T3 control ownership"))
+                    );
+                }
+            }
+        }
     }
 
     #[test]

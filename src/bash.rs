@@ -44,20 +44,23 @@ pub struct BashInput<'a> {
 /// One check per line of Claude profiles that share the cap's owners, comparing the current
 /// cap with the main-agent cache TTL.
 pub fn bash_checks(input: &BashInput<'_>) -> Vec<BashCapCheck> {
-    let owner = |p: &Profile| {
-        let bash = p.bash.as_ref().expect("filtered on a cap");
-        format!(
-            "{}\n{}\n{}",
-            bash.owner,
-            bash.default_owner,
-            crate::rows::ttl_owner(p, crate::model::Bucket::Main)
-        )
-    };
     let capped = input.scan.profiles.iter().filter(|p| p.bash.is_some());
-    crate::rows::groups(capped, owner)
+    crate::rows::groups(capped, |p| owner(p).expect("filtered on a cap"))
         .iter()
         .map(|line| check(input, line, line.lead.bash.as_ref().expect("a cap")))
         .collect()
+}
+
+/// The owners that put a profile on a Bash cap line: both timeout variables' and the main
+/// TTL's the cap is compared with. None without a cap.
+pub(crate) fn owner(p: &Profile) -> Option<String> {
+    let bash = p.bash.as_ref()?;
+    Some(format!(
+        "{}\n{}\n{}",
+        bash.owner,
+        bash.default_owner,
+        crate::rows::ttl_owner(p, crate::model::Bucket::Main)
+    ))
 }
 
 /// The main-agent TTL the cap must stay under, and where it came from.
@@ -228,6 +231,8 @@ fn check(
     let miss_estimate = sample.estimate(costs.len() as u64);
 
     let (action, recommended) = match ttl {
+        // A request T3 could not settle may have run under another owner's cap.
+        _ if control.unresolved.is_some() => (Action::Advisory, None),
         None => (Action::Advisory, None),
         Some(t) if control.value >= ttl_milliseconds(t) => (Action::Change, Some(safe_cap(t))),
         Some(_) => (Action::Keep, Some(control.value)),
@@ -247,6 +252,7 @@ fn check(
     if ttl.is_none() {
         uncertainty.push(ttl_basis.into());
     }
+    uncertainty.extend(control.unresolved.clone());
     uncertainty.extend(miss_cost.unknown.iter().cloned());
     BashCapCheck {
         base: CheckBase {

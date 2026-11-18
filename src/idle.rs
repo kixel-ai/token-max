@@ -2806,7 +2806,7 @@ fn detailed_t3_checks(
             .collect::<IndexSet<_>>()
             .into_iter()
             .collect();
-        let applicable = crate::t3::settled(&options.scan.profiles, &group.ids, &history);
+        let applicable = crate::t3::settled(&options.scan.profiles, &group.ids);
         // Every mode's saving over the current one, extrapolated where some sessions were
         // unpriced; the largest wins.
         let all_priced = requests

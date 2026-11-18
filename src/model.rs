@@ -948,6 +948,10 @@ pub struct BashCapControl {
     /// The effective `BASH_DEFAULT_TIMEOUT_MS` (default 120000).
     pub default_timeout: Millis,
     pub default_owner: String,
+    /// Why the cap stays advisory: a request T3 could not settle may have run under another
+    /// owner's cap.
+    #[serde(skip)]
+    pub unresolved: Option<String>,
 }
 
 /// A selected profile's current settings and their owning controls.

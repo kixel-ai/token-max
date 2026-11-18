@@ -966,7 +966,10 @@ fn any_failed_destination_fails_the_whole_report() {
     let bare = format!(
         "bare: needs curl and tar to download the token-max {version} release for {target}\n"
     );
-    let other = format!("other: the token-max {version} there is build 9.9.9+");
+    let other = format!(
+        "other: the token-max {version} there, {}, is build 9.9.9+",
+        hosts.cache("other").join(copy_name()).display()
+    );
     for (host, expected) in [
         (
             "unreachable",
@@ -1000,12 +1003,9 @@ fn any_failed_destination_fails_the_whole_report() {
             "{host}: {stderr}"
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
-        // The cached release runs before an installed build, so the fix names it.
+        // The binary that ran is the one to replace.
         if host == "other" {
-            assert!(
-                stderr.contains(&format!("/token-max/ssh/token-max-v{version}-*`")),
-                "{stderr}"
-            );
+            assert!(stderr.contains("; run a released token-max here, or delete it there and build this one with `cargo install"), "{stderr}");
         }
     }
     // A failed copy leaves nothing behind.

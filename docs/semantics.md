@@ -1215,10 +1215,11 @@ prices, stops the run at once: every `ssh` process is killed and reaped, a
 destination stops when its stdin closes, and a partial price download is
 deleted. SIGINT and SIGTERM do the same before exiting 2. Each `ssh` client runs in
 its own process group, so the terminal's Ctrl-C reaches only the coordinator,
-which stops the clients itself. After a walk's confirm, a signal stops only the
-destination whose write the coordinator is waiting for. That destination no
-longer reads stdin, so the write it started may still finish. A write already
-under way on this host finishes, and no later host's write starts.
+which stops the clients itself. After a walk's confirm, a signal closes every
+remaining SSH session. Only the destination that was already sent the write can
+still change its files: it no longer reads stdin, so the write it started may
+still finish. The others exit without writing. A write already under way on
+this host finishes, and no later host's write starts.
 
 ## Bash timeout cap
 

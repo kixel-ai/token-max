@@ -1956,7 +1956,10 @@ impl Selection {
     /// What the walk came to on the host whose changes are `offers`.
     pub fn summary(&self, offers: &Offers) -> Summary {
         Summary {
-            answered: !self.choices.is_empty() || !offers.steps.is_empty() || offers.offered() > 0,
+            answered: !self.choices.is_empty()
+                || !offers.steps.is_empty()
+                || !offers.cleanup_by_hand.is_empty()
+                || offers.offered() > 0,
             offered: offers.offered(),
             files: self
                 .accepted

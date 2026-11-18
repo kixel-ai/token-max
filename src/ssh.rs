@@ -671,6 +671,9 @@ impl Remote {
         } else {
             match self.session.stop(false).and_then(|s| s.code()) {
                 Some(0) => None,
+                // Ctrl-C stopped the client after its report and clean end, which already
+                // confirm the write; the signal cut nothing short.
+                None if cancelled() => None,
                 status => Some(ScanError::new(format!(
                     "{}: token-max failed after writing ({})",
                     self.session.destination,

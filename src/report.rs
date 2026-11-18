@@ -7679,6 +7679,7 @@ mod tests {
         let alone = Reowned {
             overrides: overrides.clone(),
             environment_window: None,
+            targets: vec!["claude-opus-5-5".into()],
             pins: vec![],
         };
         assert_eq!(

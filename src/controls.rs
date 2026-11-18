@@ -1143,21 +1143,25 @@ fn observe(
             &e.model,
             e.pre_tokens,
         ) && mine(&e.profiles)
-            && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+            && tokens > 0
         {
             let at = scope(&e.profiles, e.cwd.as_deref());
+            // A percentage can lower a trigger below the smallest window a setting may name.
             if let Some(percent) = &at.percent
                 && let Some(since) = percent.since
                 && started.get(&*e.session).is_some_and(|&start| start > since)
             {
-                let key = (undated(model), percent_key(percent));
-                let latest = percented.entry(key).or_insert((e.time, tokens));
+                let model = undated(model);
+                let key = percent_key(at, percent, &model);
+                let latest = percented.entry((model, key)).or_insert((e.time, tokens));
                 if e.time >= latest.0 {
                     *latest = (e.time, tokens);
                 }
             }
             // A trigger under an explicit window does not show the default.
-            if !window_setting(at, Some(model)).unset {
+            if !(CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+                || !window_setting(at, Some(model)).unset
+            {
                 continue;
             }
             let model = undated(model);
@@ -1171,12 +1175,34 @@ fn observe(
     (largest, observed, percented)
 }
 
-/// A model, and the override and the time its settings last changed, which recorded triggers
-/// must share to show its trigger under another directory's controls.
-type PercentKey = (String, (Option<u64>, Option<Millis>));
+/// A model, and what decides its trigger under an override, which a recorded trigger must
+/// share to show the trigger under another directory's controls.
+type PercentKey = (String, PercentScope);
 
-fn percent_key(percent: &PercentOverride) -> (Option<u64>, Option<Millis>) {
-    (percent.value.map(f64::to_bits), percent.since)
+/// The override's value, when its settings last changed, the window a setting names (or none)
+/// and its owner, and what sizes the model's context.
+type PercentScope = (Option<u64>, Option<Millis>, Option<(i64, String)>, Sizing);
+
+fn percent_key(
+    compaction: &CompactionControls,
+    percent: &PercentOverride,
+    model: &str,
+) -> PercentScope {
+    let control = window_setting(compaction, Some(model));
+    // A capped window keeps the setting it caps, and owners carry notes after " (".
+    let window = (!control.unset).then(|| {
+        let owner = control.owner.split(" (").next().unwrap_or(&control.owner);
+        (
+            control.setting.or(control.value).unwrap_or(0),
+            owner.to_string(),
+        )
+    });
+    (
+        percent.value.map(f64::to_bits),
+        percent.since,
+        window,
+        Sizing::of(compaction, model),
+    )
 }
 
 /// Fill the tuned window of every model a Claude profile used, in the profile's controls and in
@@ -1231,13 +1257,13 @@ pub fn tune_windows(scan: &mut Scan) {
         for compaction in std::iter::once(&mut profile.compaction)
             .chain(directories.filter_map(|(_, idle)| idle.compaction.as_mut()))
         {
-            if let Some(percent) = &mut compaction.percent {
-                let key = percent_key(percent);
-                percent.observed = percented
+            if let Some(percent) = &compaction.percent {
+                let observed = percented
                     .iter()
-                    .filter(|((_, k), _)| *k == key)
+                    .filter(|((model, key), _)| *key == percent_key(compaction, percent, model))
                     .map(|((model, _), &(_, tokens))| (model.clone(), tokens))
                     .collect();
+                compaction.percent.as_mut().expect("checked above").observed = observed;
             }
             // Directories share the profile's history, so its largest requests stand for each.
             compaction.contexts = largest

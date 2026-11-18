@@ -967,18 +967,11 @@ fn reown(c: &CompactionCheck, reowned: &Reowned, window: i64, profile: &Profile)
             }
         }
     } else {
-        let mut targets: Vec<&str> = vec![];
-        for model in c.models.iter().flatten() {
-            let model = crate::controls::strip_dated(model, 8).unwrap_or(model);
-            if !targets.contains(&model) {
-                targets.push(model);
-            }
-        }
         if !rowed(&c.base.owner) {
             let to = format!("set {} to {window}", base(&c.base.owner));
             foreign.push((&c.base.owner, to));
         }
-        edits.extend(targets.iter().map(|m| row(m, window)));
+        edits.extend(reowned.targets.iter().map(|m| row(m, window)));
         for pin in &reowned.pins {
             match pin.trigger {
                 Some(trigger) if rowed(&pin.owner) => edits.push(row(&pin.model, trigger)),

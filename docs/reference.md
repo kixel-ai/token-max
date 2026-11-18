@@ -799,14 +799,16 @@ such time, or no such compaction leaves the model's line advisory. A value of
 advisory.
 
 A recommended window under the override makes one setting own the trigger: the
-change removes the override from every scope that sets it. When the profile
+change removes the override from every scope that sets it, recorded projects
+included. When the profile
 runs other models, the target goes in its own `modelSettings` row, every other
 model the transcripts show is pinned at its current trigger in its own row, and
 a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the settings `env` comes out, since it
 outranks every row. The walk shows each of these edits before applying them. An
 owner the walk cannot edit, such as the shell, a project file or a T3 instance,
-leaves the whole change as a step by hand naming it, and another model whose
-current trigger is unresolved keeps the line advisory.
+leaves the whole change as a step by hand naming it. Another model whose
+current trigger is unresolved, or lowered below the 100,000-token smallest
+window a setting can name, keeps the line advisory.
 
 Candidates come from current controls, price-tier boundaries, provider limits,
 and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching

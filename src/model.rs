@@ -1798,6 +1798,8 @@ pub struct Reowned {
     /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW`'s owner when it is set and other models run, so the
     /// window it gives them moves to their own rows.
     pub environment_window: Option<String>,
+    /// The `modelSettings` keys of the models the recommendation is for.
+    pub targets: Vec<Text>,
     /// Every other model the line runs, pinned at its current trigger in its own row.
     pub pins: Vec<Pin>,
 }
@@ -1805,8 +1807,9 @@ pub struct Reowned {
 /// A model held at its current trigger by its own window row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pin {
+    /// The `modelSettings` key that holds its window.
     pub model: Text,
-    /// The current trigger, or None when it is unresolved.
+    /// The current trigger, or None when it is unresolved or no window setting can name it.
     pub trigger: Option<i64>,
     /// The setting that owns its window now.
     pub owner: String,

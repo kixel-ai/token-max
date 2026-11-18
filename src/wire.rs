@@ -5,12 +5,17 @@
 //! [`Request`] on the destination's stdin, carrying the price catalog and the [`Job`], and the
 //! destination analyzes its own scan and writes one [`Outcome`]: its finished report, its
 //! priced session lines, or a diagnostic, never the scan. Each value is one JSON line.
+//!
+//! A report for a walk also carries the destination's offers and leaves the stream open: this
+//! host walks through them, sends the [`Answer`]s, and the destination replies to each with
+//! another [`Outcome`], so its files are read and written only there.
 
 use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::doctor::{Event, Offers, Written};
 use crate::model::{Location, Millis};
 use crate::prices::Catalog;
 use crate::sessions::Session;
@@ -30,8 +35,11 @@ pub fn build() -> String {
             include_str!("sessions.rs"),
             include_str!("repository.rs"),
             include_str!("totals.rs"),
-            // Its `Total` is a field of the totals a report carries.
+            // Its `Total` is a field of the totals a report carries, and its offers and
+            // answers cross for a walk, with `mcp.rs`'s entries and `report.rs`'s choices.
             include_str!("doctor.rs"),
+            include_str!("mcp.rs"),
+            include_str!("report.rs"),
         ]
         .concat(),
     );
@@ -64,6 +72,8 @@ pub enum Job {
     Report {
         max_cost_per_use_usd: f64,
         format: Format,
+        /// Whether this host walks through the report's changes, which keeps the stream open.
+        walk: bool,
     },
     /// `token-max sessions`' lines.
     Sessions,
@@ -95,7 +105,19 @@ pub enum Outcome {
         change: bool,
         /// What the report adds to a total across hosts.
         totals: Totals,
+        /// The changes the destination offers, when this host walks through them.
+        offers: Option<Box<Offers>>,
     },
+    /// The destination's answer to [`Answer::Review`].
+    #[serde(rename_all = "camelCase")]
+    Reviewed {
+        /// The report again, each change marked as the walk answered it.
+        report: String,
+        /// Each file's text as the accepted changes would change it, for the confirm.
+        preview: String,
+    },
+    /// The destination's answer to [`Answer::Write`]: the files it wrote.
+    Wrote { written: Vec<Written> },
     #[serde(rename_all = "camelCase")]
     Sessions {
         /// The window the destination scanned, which must be the one requested.
@@ -107,6 +129,16 @@ pub enum Outcome {
         message: String,
         location: Option<Location>,
     },
+}
+
+/// What this host sends a destination after its report for a walk.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Answer {
+    /// How the person answered the destination's offers, in order.
+    Review { events: Vec<Event> },
+    /// The person confirmed: write the reviewed changes.
+    Write,
 }
 
 /// Write one JSON value followed by a newline.
@@ -140,8 +172,18 @@ impl<R: Read> Stream<R> {
 
     /// The outcome, which must end the stream.
     pub fn outcome(&mut self) -> Result<Outcome, serde_json::Error> {
-        let outcome = Outcome::deserialize(&mut self.json)?;
-        self.json.end().map(|()| outcome)
+        let outcome = self.value()?;
+        self.end().map(|()| outcome)
+    }
+
+    /// The next value, where more may follow.
+    pub fn value<T: for<'de> Deserialize<'de>>(&mut self) -> Result<T, serde_json::Error> {
+        T::deserialize(&mut self.json)
+    }
+
+    /// Check that nothing but whitespace follows.
+    pub fn end(&mut self) -> Result<(), serde_json::Error> {
+        self.json.end()
     }
 }
 
@@ -162,6 +204,7 @@ mod tests {
                     details: true,
                     host: Some("devbox".into()),
                 },
+                walk: false,
             },
         }
     }
@@ -177,6 +220,7 @@ mod tests {
             Job::Report {
                 max_cost_per_use_usd: 0.5,
                 format: Format { host: Some(host), width: Some(80), .. },
+                walk: false,
             } if host == "devbox"
         ));
     }
@@ -198,6 +242,7 @@ mod tests {
                 text: "report\n".into(),
                 change: true,
                 totals: Totals::default(),
+                offers: None,
             },
         )
         .unwrap();

@@ -2707,7 +2707,7 @@ pub struct Control {
     pub append: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextKind {
     Tool,
     McpServer,

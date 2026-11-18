@@ -1238,7 +1238,7 @@ pub struct Listing {
 }
 
 /// What became of a change in `doctor`'s walk, for the list printed after it.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Choice {
     /// Accepted, to be written once the person confirms.
     Accepted,
@@ -4248,7 +4248,7 @@ fn check_target(result: &CheckResult, r: &Common<'_>, mark: Mark) -> String {
 }
 
 /// Which line of a report a change comes from, so the list can name the edit offered for it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Origin {
     /// A check, by its index in the report's checks.
     Check(usize),

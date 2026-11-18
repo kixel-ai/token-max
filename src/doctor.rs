@@ -26,18 +26,19 @@ use crate::report::{
 use crate::safe::{ScanError, terminal_text};
 use crate::terminal::{WrapOptions, wrap_spans};
 
-/// Whose spend a share is of, in a walk, which only offers this host's changes.
+/// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
 
 /// One recommendation and how to carry it out.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Fix {
     /// The report line's name, such as "Main-agent prompt cache TTL".
     pub name: String,
     /// The current value and the one to change to, such as "5m -> 1h".
     pub value: String,
     /// The kind of claim it rests on: Measured, Official or Opinion.
-    pub claim: &'static str,
+    #[serde(deserialize_with = "known")]
+    pub claim: Known,
     /// Worth considering, rather than a recommended change.
     pub suggested: bool,
     /// What it saves every 30 days, when measured.
@@ -45,7 +46,8 @@ pub struct Fix {
     /// How far `saving` may be off when extrapolated over unpriced requests.
     pub margin: Option<Margin>,
     /// How the saving reads, such as "saves up to".
-    pub verb: &'static str,
+    #[serde(deserialize_with = "known")]
+    pub verb: Known,
     /// The saving's share of this host's spend every 30 days.
     pub share: Option<f64>,
     /// What the setting or feature does, from the report line.
@@ -63,9 +65,23 @@ pub struct Fix {
     pub removal: Vec<Definition>,
 }
 
+/// A claim or saving verb. Named apart from `&'static str`, which serde would borrow from
+/// the input it reads.
+pub type Known = &'static str;
+
+/// A claim or saving verb read back from another host, which must be one this build prints.
+fn known<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<&'static str, D::Error> {
+    const KNOWN: [&str; 6] = ["Measured", "Official", "Opinion", "saves", UP_TO, AT_LEAST];
+    let text = String::deserialize(deserializer)?;
+    KNOWN
+        .into_iter()
+        .find(|k| *k == text)
+        .ok_or_else(|| serde::de::Error::custom("unknown claim or verb"))
+}
+
 /// Small changes the walk offers together: features of one kind changed for one reason,
 /// such as never-used MCP servers turned off.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub kind: ContextKind,
     pub reason: Reason,
@@ -87,7 +103,7 @@ impl Group {
 }
 
 /// Why a feature is offered off.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reason {
     /// Never used across a window that would have recorded a use.
     Unused,
@@ -100,7 +116,7 @@ pub enum Reason {
 }
 
 /// Whether the doctor can make a change, and what it is.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum How {
     /// Edits to a profile's own settings file.
     Edit(Patch),
@@ -109,7 +125,7 @@ pub enum How {
 }
 
 /// Edits to one settings file.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Patch {
     pub file: String,
     /// Claude's `settings.json` is JSON; Codex's `config.toml` is TOML.
@@ -118,7 +134,7 @@ pub struct Patch {
 }
 
 /// Set `path` to `value`, or add `value` to the list at `path`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edit {
     pub path: Vec<String>,
     pub value: Value,
@@ -968,6 +984,7 @@ pub fn setting(fix: &Fix, home: Option<&str>) -> String {
 }
 
 /// How the walk prints.
+#[derive(Clone)]
 pub struct Style {
     pub color: bool,
     /// Use Unicode decorations such as arrows.
@@ -975,6 +992,8 @@ pub struct Style {
     pub width: Option<usize>,
     /// The home directory, which paths are shown from as `~`.
     pub home: Option<String>,
+    /// The SSH destination whose files these are, which names them; none for this host's.
+    pub host: Option<String>,
 }
 
 /// Cells every line of the walk is indented by, as the report's are.
@@ -1162,8 +1181,11 @@ impl Style {
 
     /// A change as the walk offers it, its counter `counter`: what it does and the evidence
     /// behind it, or the step to take by hand when it cannot be made here.
-    fn entry(&self, fix: &Fix, counter: &str) -> String {
+    fn entry(&self, fix: &Fix, counter: &str, host: Option<&str>) -> String {
         let mut rows = vec![];
+        if let Some(host) = host {
+            rows.push(("Host", host.to_string()));
+        }
         if !fix.what.is_empty() {
             rows.push(("What", fix.what.clone()));
         }
@@ -1186,6 +1208,15 @@ impl Style {
     /// A file as the person knows it, from `~`.
     fn path(&self, path: &str) -> String {
         crate::report::home_path(self.home.as_deref(), path)
+    }
+
+    /// A file to write, from `~` and after its host's name as `scp` names it, such as
+    /// `devbox:~/.claude/settings.json`.
+    fn file(&self, path: &str) -> String {
+        match &self.host {
+            Some(host) => format!("{host}:{}", self.path(path)),
+            None => self.path(path),
+        }
     }
 }
 
@@ -1560,6 +1591,17 @@ impl Plan {
     pub fn total(&self, label: &str) -> String {
         self.total.text(label, THIS_HOST)
     }
+
+    /// What the walk came to, as the confirm and the closing lines name it.
+    pub fn summary(&self) -> Summary {
+        Summary {
+            answered: !self.choices.is_empty() || self.offered > 0,
+            offered: self.offered,
+            files: self.files.iter().map(|p| p.target.file.clone()).collect(),
+            changes: self.total.changes(),
+            removals: self.files.iter().map(|p| p.removals.len()).sum(),
+        }
+    }
 }
 
 /// The accepted changes' own savings: those measured, summed apart from those that hold only
@@ -1823,16 +1865,37 @@ pub fn ask_billing(
     Ok(answers)
 }
 
-/// What the walk has accepted so far.
-#[derive(Default)]
-struct Selection {
-    /// Each target with accepted changes, by its index among the walk's targets.
+/// One answer in the walk, by its place in a host's [`Offers`], so the host that owns the
+/// files can replay the walk and make exactly the changes it offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Event {
+    /// An offered change, answered yes or no.
+    Choose { offer: usize, yes: bool },
+    /// After a yes, also remove one of the entries the offer named.
+    Remove { offer: usize, entry: usize },
+    /// Remove the configuration of an MCP server that is off already.
+    Cleanup { entry: usize },
+}
+
+/// What one host's walk accepted so far, and the answers that accepted it.
+#[derive(Debug, Default)]
+pub struct Selection {
+    /// Each target with accepted changes, by its index among the host's targets.
     accepted: Vec<(usize, Vec<Edit>, Vec<Entry>)>,
     choices: Vec<(Origin, Choice)>,
     total: Total,
+    events: Vec<Event>,
+    /// The offers answered yes, whose entries a removal may name.
+    yes: Vec<usize>,
 }
 
 impl Selection {
+    /// The answers, in the order given.
+    pub fn events(&self) -> &[Event] {
+        &self.events
+    }
+
     /// The accepted changes for `target`, empty until one is accepted.
     fn at(&mut self, target: usize) -> &mut (usize, Vec<Edit>, Vec<Entry>) {
         let found = self.accepted.iter().position(|(i, _, _)| *i == target);
@@ -1843,22 +1906,50 @@ impl Selection {
         &mut self.accepted[at]
     }
 
-    fn choose(&mut self, target: usize, fix: &Fix, yes: bool) {
-        let choice = if yes {
-            Choice::Accepted
-        } else {
-            Choice::Declined
-        };
-        self.choices
-            .extend(fix.origins.iter().map(|o| (*o, choice.clone())));
-        if !yes {
-            return;
+    /// Record `event`, one of `offers`' changes, or why it names none.
+    fn apply(&mut self, offers: &Offers, event: Event) -> Result<(), String> {
+        let missing = || format!("the walk answered a change it was not offered ({event:?})");
+        match event {
+            Event::Choose { offer: index, yes } => {
+                let offer = offers.offers.get(index).ok_or_else(missing)?;
+                if yes {
+                    self.yes.push(index);
+                }
+                let choice = if yes {
+                    Choice::Accepted
+                } else {
+                    Choice::Declined
+                };
+                self.choices
+                    .extend(offer.fix.origins.iter().map(|o| (*o, choice.clone())));
+                if yes {
+                    self.total.add(&offer.fix);
+                    let How::Edit(patch) = &offer.fix.how else {
+                        unreachable!("offers are edits")
+                    };
+                    self.at(offer.target).1.extend(patch.edits.iter().cloned());
+                }
+            }
+            Event::Remove { offer, entry } => {
+                if !self.yes.contains(&offer) {
+                    return Err(format!(
+                        "the walk removed an entry of a change it did not accept ({event:?})"
+                    ));
+                }
+                let (target, entry) = offers
+                    .offers
+                    .get(offer)
+                    .and_then(|o| o.entries.get(entry))
+                    .ok_or_else(missing)?;
+                self.remove(*target, entry);
+            }
+            Event::Cleanup { entry } => {
+                let (target, entry) = offers.cleanup.get(entry).ok_or_else(missing)?;
+                self.remove(*target, entry);
+            }
         }
-        self.total.add(fix);
-        let How::Edit(patch) = &fix.how else {
-            unreachable!("offers are edits")
-        };
-        self.at(target).1.extend(patch.edits.iter().cloned());
+        self.events.push(event);
+        Ok(())
     }
 
     fn remove(&mut self, target: usize, entry: &Entry) {
@@ -1868,25 +1959,49 @@ impl Selection {
         }
     }
 
-    /// Record `answer` to `fix`, printing the running total after a yes; whether the walk
-    /// goes on.
-    fn take(
-        &mut self,
-        target: usize,
-        fix: &Fix,
-        answer: Answer,
-        style: &Style,
-        output: &mut impl Write,
-    ) -> io::Result<bool> {
-        self.choose(target, fix, answer == Answer::Yes);
-        if answer == Answer::Yes {
-            write!(
-                output,
-                "{}",
-                style.dim(&self.total.text("Accepted so far", THIS_HOST))
-            )?;
+    /// What the walk came to on the host whose changes are `offers`.
+    pub fn summary(&self, offers: &Offers) -> Summary {
+        Summary {
+            answered: !self.choices.is_empty()
+                || !offers.steps.is_empty()
+                || !offers.cleanup_by_hand.is_empty()
+                || offers.offered() > 0,
+            offered: offers.offered(),
+            files: self
+                .accepted
+                .iter()
+                .map(|(target, _, _)| offers.files[*target].clone())
+                .collect(),
+            changes: self.total.changes(),
+            removals: self.accepted.iter().map(|(_, _, r)| r.len()).sum(),
         }
-        Ok(answer != Answer::Quit)
+    }
+}
+
+/// What one host's walk came to, as the confirm and the closing lines name it.
+#[derive(Debug)]
+pub struct Summary {
+    /// Whether the report had any change to offer or make by hand.
+    answered: bool,
+    /// How many changes the walk offered.
+    offered: usize,
+    /// Each file with accepted changes, as its profile names it, in the order first accepted.
+    files: Vec<String>,
+    /// How many changes were accepted.
+    changes: usize,
+    /// How many MCP server entries are to be removed.
+    removals: usize,
+}
+
+impl Summary {
+    /// Whether the walk had any change to offer or make by hand.
+    pub fn answered(&self) -> bool {
+        self.answered
+    }
+
+    /// Whether anything is to be written.
+    pub fn accepted(&self) -> bool {
+        !self.files.is_empty()
     }
 }
 
@@ -1944,6 +2059,8 @@ impl Targets {
 }
 
 /// An offered change, with the MCP server entries it may also remove.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Offer {
     target: usize,
     fix: Fix,
@@ -1953,17 +2070,248 @@ struct Offer {
     manual: Vec<(String, String)>,
 }
 
-/// One question of the walk: a change, or a group of small ones.
-struct Question {
-    members: Vec<Offer>,
+/// One host's changes as its walk offers them, checked against its own files, so the walk
+/// reads no file and may run on another host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Offers {
+    offers: Vec<Offer>,
+    /// What became of each change that is a step by hand.
+    steps: Vec<(Origin, Choice)>,
+    /// The entries of MCP servers that are off already, each with its target, which the
+    /// walk's last question offers to remove.
+    cleanup: Vec<(usize, Entry)>,
+    /// How to look for servers that are off by hand: the step, and why.
+    cleanup_by_hand: Vec<(String, String)>,
+    /// Each target's file as a profile names it, by index.
+    files: Vec<String>,
+    /// The host's home directory, which its paths are shown from as `~`.
+    pub home: Option<String>,
+    /// The host's spend every 30 days, which a share of several hosts' spend adds up.
+    monthly: f64,
 }
 
-impl Question {
+impl Offers {
+    /// How many changes the walk offers.
+    fn offered(&self) -> usize {
+        self.offers.len() + self.cleanup.len()
+    }
+
+    /// Check offers another host sent: each is an edit, and names one of its targets.
+    pub fn check(&self) -> Result<(), String> {
+        let targets = self
+            .offers
+            .iter()
+            .flat_map(|o| std::iter::once(o.target).chain(o.entries.iter().map(|(t, _)| *t)))
+            .chain(self.cleanup.iter().map(|(t, _)| *t));
+        let edits = self
+            .offers
+            .iter()
+            .all(|o| matches!(o.fix.how, How::Edit(_)));
+        match targets.max() {
+            _ if !edits => Err("offered a change it cannot make".into()),
+            Some(max) if max >= self.files.len() => Err("offered a change to no file".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The host whose files the walk's changes are for: its targets, read once, and the
+/// changes it offers.
+pub struct Owner {
+    targets: Vec<Result<Target, Refused>>,
+    offers: Offers,
+}
+
+impl Owner {
+    /// Check each change in `fixes` against its file, turning any the doctor cannot make
+    /// into a step by hand, and find where each MCP server in `turned_off`, whose tools are
+    /// off already, can be removed. `home` and `monthly` are this host's.
+    pub fn new(
+        fixes: Vec<Fix>,
+        turned_off: Vec<Definition>,
+        home: Option<String>,
+        monthly: f64,
+    ) -> Owner {
+        let mut targets = Targets::default();
+        let mut offers = vec![];
+        let by_hand = |step: &str, reason: &str| {
+            Choice::Manual(home_in(
+                &format!("by hand, since {reason}: {step}"),
+                home.as_deref(),
+            ))
+        };
+        let manual = |fix: &Fix| {
+            let How::Manual { step, reason } = &fix.how else {
+                unreachable!("only steps by hand")
+            };
+            let step = by_hand(step, reason);
+            fix.origins
+                .iter()
+                .map(|o| (*o, step.clone()))
+                .collect::<Vec<_>>()
+        };
+        let mut steps = vec![];
+        // Every entry a never-used server's question may remove, so the last question leaves
+        // them out.
+        let mut offered_entries: Vec<Entry> = vec![];
+        for mut fix in fixes {
+            let How::Edit(patch) = &fix.how else {
+                steps.extend(manual(&fix));
+                continue;
+            };
+            let index = targets.open(&patch.file, patch.harness);
+            // Check the edit applies before offering it.
+            let refused = match &targets.all[index] {
+                Err(refused) => Some((refused.reason.clone(), refused.file.clone())),
+                Ok(target) => apply(target, &patch.edits, &[])
+                    .err()
+                    .map(|reason| (reason, target.resolved.display().to_string())),
+            };
+            if let Some((reason, file)) = refused {
+                fix.how = How::Manual {
+                    step: steps_in(patch, &file),
+                    reason,
+                };
+                steps.extend(manual(&fix));
+                continue;
+            }
+            let mut entries = vec![];
+            let mut by_hand = vec![];
+            for definition in &fix.removal {
+                let definition = match definition {
+                    Definition::Entry(entry) => {
+                        offered_entries.push(entry.clone());
+                        match targets.entry(entry) {
+                            Ok(target) => {
+                                entries.push((target, entry.clone()));
+                                continue;
+                            }
+                            Err(manual) => manual,
+                        }
+                    }
+                    manual => manual.clone(),
+                };
+                if let Definition::Manual { step, reason } = definition {
+                    by_hand.push((step, reason));
+                }
+            }
+            offers.push(Offer {
+                target: index,
+                fix,
+                entries,
+                manual: by_hand,
+            });
+        }
+        // Servers that are off already, apart from those a question above may remove.
+        let mut cleanup = vec![];
+        let mut cleanup_by_hand = vec![];
+        for definition in turned_off {
+            let definition = match definition {
+                Definition::Entry(entry) if offered_entries.contains(&entry) => continue,
+                Definition::Entry(entry) => match targets.entry(&entry) {
+                    Ok(target) => {
+                        cleanup.push((target, entry));
+                        continue;
+                    }
+                    Err(manual) => manual,
+                },
+                manual => manual,
+            };
+            if let Definition::Manual { step, reason } = definition {
+                cleanup_by_hand.push((step, reason));
+            }
+        }
+        let mut files = vec![String::new(); targets.all.len()];
+        // Each target under the first name that opened it.
+        for (file, index) in targets.files.iter().rev() {
+            files[*index] = file.clone();
+        }
+        Owner {
+            targets: targets.all,
+            offers: Offers {
+                offers,
+                steps,
+                cleanup,
+                cleanup_by_hand,
+                files,
+                home,
+                monthly,
+            },
+        }
+    }
+
+    /// The changes this host offers.
+    pub fn offers(&self) -> &Offers {
+        &self.offers
+    }
+
+    /// The plan the walk's `events` make of this host's changes, the files as they were read
+    /// when the changes were offered.
+    pub fn plan(&self, events: &[Event]) -> Result<Plan, ScanError> {
+        let mut selection = Selection::default();
+        for event in events {
+            selection
+                .apply(&self.offers, *event)
+                .map_err(|e| ScanError::new(format!("{e}; no settings were changed")))?;
+        }
+        let Selection {
+            accepted,
+            mut choices,
+            total,
+            ..
+        } = selection;
+        choices.extend(self.offers.steps.iter().cloned());
+        let files = accepted
+            .into_iter()
+            .map(|(index, edits, removals)| {
+                // Only a target that opened has an offer or an entry to accept.
+                let target = self.targets[index]
+                    .as_ref()
+                    .expect("offered targets opened");
+                Pending {
+                    target: target.clone(),
+                    edits,
+                    removals,
+                }
+            })
+            .collect();
+        Ok(Plan {
+            files,
+            choices,
+            offered: self.offers.offered(),
+            total,
+        })
+    }
+}
+
+/// One host's changes in the walk.
+pub struct Walking<'a> {
+    /// The host's name, when the walk covers another host than this one.
+    pub label: Option<&'a str>,
+    pub offers: &'a Offers,
+    /// How the host's changes print: its paths from its own home.
+    pub style: &'a Style,
+}
+
+/// An offered change, with the host it is for.
+struct Member<'a> {
+    host: usize,
+    index: usize,
+    offer: &'a Offer,
+}
+
+/// One question of the walk: a change, or a group of one host's small ones.
+struct Question<'a> {
+    members: Vec<Member<'a>>,
+}
+
+impl Question<'_> {
     /// The members' savings summed as the running total sums them.
     fn together(&self) -> Total {
         let mut total = Total::default();
-        for offer in &self.members {
-            total.add(&offer.fix);
+        for member in &self.members {
+            total.add(&member.offer.fix);
         }
         total
     }
@@ -1996,13 +2344,13 @@ impl Question {
     /// A group as the walk offers it, its counter `counter`: what its kind of feature is,
     /// then every member's name. Each member says what it does when the person goes
     /// through them one at a time.
-    fn card(&self, counter: &str, style: &Style) -> String {
-        let first = &self.members[0].fix;
+    fn card(&self, counter: &str, host: Option<&str>, style: &Style) -> String {
+        let first = &self.members[0].offer.fix;
         let group = first.group.as_ref().expect("only groups share a question");
         let groups: Vec<&Group> = self
             .members
             .iter()
-            .filter_map(|o| o.fix.group.as_ref())
+            .filter_map(|m| m.offer.fix.group.as_ref())
             .collect();
         // A name two members share, such as a duplicate skill's, is followed by its location.
         let names: Vec<String> = groups
@@ -2015,6 +2363,12 @@ impl Question {
                 }
             })
             .collect();
+        let mut rows = vec![];
+        if let Some(host) = host {
+            rows.push(("Host", host.to_string()));
+        }
+        rows.push(("What", crate::descriptions::kind(group.kind).to_string()));
+        rows.push(("Which", format!("{}.", names.join(", "))));
         style.card(&Card {
             counter: counter.into(),
             name: &group.label,
@@ -2023,169 +2377,255 @@ impl Question {
             value: first.value.clone(),
             suggested: first.suggested,
             claim: first.claim,
-            rows: vec![
-                ("What", crate::descriptions::kind(group.kind).to_string()),
-                ("Which", format!("{}.", names.join(", "))),
-            ],
+            rows,
         })
     }
 }
 
-/// After a yes to turning never-used MCP servers off, offer to remove their configuration
-/// too, which the confirm then lists; whether the walk goes on. Removals only by hand are
-/// named without a question.
-fn offer_removal(
-    offers: &[&Offer],
-    selection: &mut Selection,
-    style: &Style,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> io::Result<bool> {
-    let entries: Vec<&(usize, Entry)> = offers.iter().flat_map(|o| &o.entries).collect();
-    let mut text = String::new();
-    if !entries.is_empty() {
-        let stays = if offers.len() == 1 {
-            "It stays"
-        } else {
-            "They stay"
-        };
-        text += &style.line(&format!("{stays} configured; token-max can also remove:"));
-        for (_, entry) in &entries {
-            let place = format!("{} in {}", entry.text(), style.path(&entry.file));
-            text += &style.raw(&place, MARGIN + 2, DIM);
-        }
-    }
-    for (step, reason) in offers.iter().flat_map(|o| &o.manual) {
-        text += &style.line(&home_in(
-            &format!("To remove it by hand, since {reason}: {step}."),
-            style.home.as_deref(),
-        ));
-    }
-    write!(output, "{text}")?;
-    if entries.is_empty() {
-        return Ok(true);
-    }
-    let question = if entries.len() == 1 {
-        "Remove it too?".to_string()
-    } else {
-        format!("Remove all {} too?", entries.len())
-    };
-    let answer = answer(&style.prompt(&question, false), input, output)?;
-    if answer == Answer::Yes {
-        for (target, entry) in entries {
-            selection.remove(*target, entry);
-        }
-    }
-    Ok(answer != Answer::Quit)
+/// What the walk has accepted on every host so far.
+struct Walk<'a, 'b> {
+    hosts: &'a [Walking<'b>],
+    selections: Vec<Selection>,
 }
 
-/// Walk through each change the doctor can make, biggest saving first, and return what
-/// the person accepted. Changes saving under $5/mo each are offered in groups of one kind
-/// and reason, and a group saving under $1/mo in total is not asked. A yes to turning a
-/// never-used MCP server off is followed by an offer to remove its configuration, and the
-/// last question offers to remove the servers in `turned_off`, which are off already.
-/// Nothing is written here; end of input is a quit, which leaves the rest unaccepted.
+impl Walk<'_, '_> {
+    /// Record `event` for host `host`.
+    fn record(&mut self, host: usize, event: Event) {
+        self.selections[host]
+            .apply(self.hosts[host].offers, event)
+            .expect("the walk answers only what it offers");
+    }
+
+    fn choose(&mut self, member: &Member<'_>, yes: bool) {
+        let offer = member.index;
+        self.record(member.host, Event::Choose { offer, yes });
+    }
+
+    /// The accepted changes' summed saving across hosts after `label`.
+    fn total(&self, label: &str) -> String {
+        if let [host] = self.hosts {
+            let whose = host
+                .label
+                .map_or(THIS_HOST.to_string(), |l| format!("{l}'s"));
+            return self.selections[0].total.text(label, &whose);
+        }
+        let mut total = Total::default();
+        let mut monthly = 0.0;
+        for (host, selection) in self.hosts.iter().zip(&self.selections) {
+            total.merge(&selection.total);
+            monthly += host.offers.monthly;
+        }
+        total.set_share(monthly);
+        total.text(label, "these hosts'")
+    }
+
+    /// Record `answer` to `member`, printing the running total after a yes; whether the walk
+    /// goes on.
+    fn take(
+        &mut self,
+        member: &Member<'_>,
+        answer: Answer,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
+        self.choose(member, answer == Answer::Yes);
+        if answer == Answer::Yes {
+            let style = self.hosts[member.host].style;
+            write!(output, "{}", style.dim(&self.total("Accepted so far")))?;
+        }
+        Ok(answer != Answer::Quit)
+    }
+
+    /// After a yes to turning never-used MCP servers off, offer to remove their configuration
+    /// too, which the confirm then lists; whether the walk goes on. Removals only by hand are
+    /// named without a question.
+    fn offer_removal(
+        &mut self,
+        members: &[&Member<'_>],
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
+        let style = self.hosts[members[0].host].style;
+        let entries: Vec<(&Member<'_>, usize, &Entry)> = members
+            .iter()
+            .flat_map(|m| {
+                m.offer
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (_, e))| (*m, i, e))
+            })
+            .collect();
+        let mut text = String::new();
+        if !entries.is_empty() {
+            let stays = if members.len() == 1 {
+                "It stays"
+            } else {
+                "They stay"
+            };
+            text += &style.line(&format!("{stays} configured; token-max can also remove:"));
+            for (_, _, entry) in &entries {
+                let place = format!("{} in {}", entry.text(), style.path(&entry.file));
+                text += &style.raw(&place, MARGIN + 2, DIM);
+            }
+        }
+        for (step, reason) in members.iter().flat_map(|m| &m.offer.manual) {
+            text += &style.line(&home_in(
+                &format!("To remove it by hand, since {reason}: {step}."),
+                style.home.as_deref(),
+            ));
+        }
+        write!(output, "{text}")?;
+        if entries.is_empty() {
+            return Ok(true);
+        }
+        let question = if entries.len() == 1 {
+            "Remove it too?".to_string()
+        } else {
+            format!("Remove all {} too?", entries.len())
+        };
+        let answer = answer(&style.prompt(&question, false), input, output)?;
+        if answer == Answer::Yes {
+            for (member, entry, _) in entries {
+                let offer = member.index;
+                self.record(member.host, Event::Remove { offer, entry });
+            }
+        }
+        Ok(answer != Answer::Quit)
+    }
+
+    /// A host's last question: remove the configuration of MCP servers that are off already,
+    /// all at once or one at a time; whether the walk goes on.
+    fn ask_cleanup(
+        &mut self,
+        host: usize,
+        counter: &str,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
+        let Walking {
+            label,
+            offers,
+            style,
+        } = self.hosts[host];
+        let cleanup = &offers.cleanup;
+        let place = |entry: &Entry| format!("{} in {}", entry.text(), style.path(&entry.file));
+        let card = |counter: String, name: &str, why: &str, places: Vec<String>| {
+            let mut rows = vec![];
+            if let Some(label) = label {
+                rows.push(("Host", label.to_string()));
+            }
+            if !why.is_empty() {
+                rows.push(("Why", why.to_string()));
+            }
+            rows.push(("Where", places.join(", ")));
+            style.card(&Card {
+                counter,
+                name,
+                saving: None,
+                no_saving: "saves nothing",
+                value: format!("off {} removed", style.arrow()),
+                suggested: true,
+                claim: "Opinion",
+                rows,
+            })
+        };
+        let why = "Their tools are off already, so no session uses this configuration.";
+        let size = cleanup.len();
+        if let [(_, entry)] = cleanup.as_slice() {
+            let name = format!("MCP server {}", entry.server);
+            let text = card(
+                format!("[{counter}]"),
+                &name,
+                &why.replace("Their tools are", "Its tools are"),
+                vec![place(entry)],
+            );
+            write!(output, "\n{text}")?;
+            let answer = answer(&style.prompt("Remove it?", false), input, output)?;
+            if answer == Answer::Yes {
+                self.record(host, Event::Cleanup { entry: 0 });
+            }
+            return Ok(answer != Answer::Quit);
+        }
+        let places = cleanup.iter().map(|(_, e)| place(e)).collect();
+        let text = card(
+            format!("[{counter}]"),
+            "Turned-off MCP servers",
+            why,
+            places,
+        );
+        write!(output, "\n{text}")?;
+        let prompt = style.prompt(&format!("Remove all {size}?"), true);
+        match answer(&prompt, input, output)? {
+            Answer::Each => {
+                for (i, (_, entry)) in cleanup.iter().enumerate() {
+                    let name = format!("MCP server {}", entry.server);
+                    let text = card(
+                        format!("[{counter}, {}/{size}]", i + 1),
+                        &name,
+                        "",
+                        vec![place(entry)],
+                    );
+                    write!(output, "\n{text}")?;
+                    match answer(&style.prompt("Remove it?", false), input, output)? {
+                        Answer::Yes => self.record(host, Event::Cleanup { entry: i }),
+                        Answer::Quit => return Ok(false),
+                        _ => {}
+                    }
+                }
+                Ok(true)
+            }
+            Answer::Yes => {
+                for entry in 0..size {
+                    self.record(host, Event::Cleanup { entry });
+                }
+                Ok(true)
+            }
+            other => Ok(other != Answer::Quit),
+        }
+    }
+}
+
+/// Walk through each host's changes, biggest saving first across hosts, and return what the
+/// person accepted on each, in the order of `hosts`. Changes saving under $5/mo each are
+/// offered in groups of one host's changes of one kind and reason, and a group saving under
+/// $1/mo in total is not asked. A yes to turning a never-used MCP server off is followed by
+/// an offer to remove its configuration, and each host's last question offers to remove the
+/// servers that are off already. Nothing is read or written here; end of input is a quit,
+/// which leaves the rest unaccepted.
 pub fn ask(
-    fixes: Vec<Fix>,
-    turned_off: Vec<Definition>,
+    hosts: &[Walking<'_>],
     style: &Style,
     input: &mut impl BufRead,
     output: &mut impl Write,
-) -> io::Result<Plan> {
-    let mut targets = Targets::default();
-    let mut offers = vec![];
-    let mut selection = Selection::default();
-    let by_hand = |step: &str, reason: &str| {
-        Choice::Manual(home_in(
-            &format!("by hand, since {reason}: {step}"),
-            style.home.as_deref(),
-        ))
-    };
-    let manual = |fix: &Fix| {
-        let How::Manual { step, reason } = &fix.how else {
-            unreachable!("only steps by hand")
-        };
-        let step = by_hand(step, reason);
-        fix.origins
-            .iter()
-            .map(|o| (*o, step.clone()))
-            .collect::<Vec<_>>()
-    };
-    let mut steps = vec![];
-    // Every entry a never-used server's question may remove, so the last question leaves
-    // them out.
-    let mut offered_entries: Vec<Entry> = vec![];
-    for mut fix in fixes {
-        let How::Edit(patch) = &fix.how else {
-            steps.extend(manual(&fix));
-            continue;
-        };
-        let index = targets.open(&patch.file, patch.harness);
-        // Check the edit applies before offering it.
-        let refused = match &targets.all[index] {
-            Err(refused) => Some((refused.reason.clone(), refused.file.clone())),
-            Ok(target) => apply(target, &patch.edits, &[])
-                .err()
-                .map(|reason| (reason, target.resolved.display().to_string())),
-        };
-        if let Some((reason, file)) = refused {
-            fix.how = How::Manual {
-                step: steps_in(patch, &file),
-                reason,
-            };
-            steps.extend(manual(&fix));
-            continue;
-        }
-        let mut entries = vec![];
-        let mut by_hand = vec![];
-        for definition in &fix.removal {
-            let definition = match definition {
-                Definition::Entry(entry) => {
-                    offered_entries.push(entry.clone());
-                    match targets.entry(entry) {
-                        Ok(target) => {
-                            entries.push((target, entry.clone()));
-                            continue;
-                        }
-                        Err(manual) => manual,
-                    }
-                }
-                manual => manual.clone(),
-            };
-            if let Definition::Manual { step, reason } = definition {
-                by_hand.push((step, reason));
-            }
-        }
-        offers.push(Offer {
-            target: index,
-            fix,
-            entries,
-            manual: by_hand,
-        });
-    }
+) -> io::Result<Vec<Selection>> {
     // A change saving $5/mo or more is asked alone; a smaller one joins the others of its
-    // kind and reason, measured apart from unmeasured.
+    // host, kind and reason, measured apart from unmeasured.
     let mut questions: Vec<Question> = vec![];
-    for offer in offers {
-        let fix = &offer.fix;
-        let small = |f: &Fix| f.group.is_some() && f.saving.is_none_or(|usd| usd < SMALL_USD);
-        let joins = |q: &Question| {
-            let first = &q.members[0].fix;
-            small(fix)
-                && small(first)
-                && first.value == fix.value
-                && first.saving.is_some() == fix.saving.is_some()
-                && first
-                    .group
-                    .as_ref()
-                    .zip(fix.group.as_ref())
-                    .is_some_and(|(a, b)| a.joins(b))
-        };
-        match questions.iter_mut().find(|q| joins(q)) {
-            Some(question) => question.members.push(offer),
-            None => questions.push(Question {
-                members: vec![offer],
-            }),
+    for (host, walking) in hosts.iter().enumerate() {
+        for (index, offer) in walking.offers.offers.iter().enumerate() {
+            let fix = &offer.fix;
+            let small = |f: &Fix| f.group.is_some() && f.saving.is_none_or(|usd| usd < SMALL_USD);
+            let joins = |q: &Question| {
+                let first = &q.members[0];
+                let first_fix = &first.offer.fix;
+                first.host == host
+                    && small(fix)
+                    && small(first_fix)
+                    && first_fix.value == fix.value
+                    && first_fix.saving.is_some() == fix.saving.is_some()
+                    && first_fix
+                        .group
+                        .as_ref()
+                        .zip(fix.group.as_ref())
+                        .is_some_and(|(a, b)| a.joins(b))
+            };
+            let member = Member { host, index, offer };
+            match questions.iter_mut().find(|q| joins(q)) {
+                Some(question) => question.members.push(member),
+                None => questions.push(Question {
+                    members: vec![member],
+                }),
+            }
         }
     }
     // Biggest saving first, then those whose saving was not measured, in the report's order.
@@ -2195,32 +2635,19 @@ pub fn ask(
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
-    let changes = questions.iter().map(|q| q.members.len()).sum::<usize>();
     let (questions, skipped): (Vec<_>, Vec<_>) = questions
         .into_iter()
         .partition(|q| q.usd().is_none_or(|usd| usd >= ASKED_USD));
-    // Servers that are off already, apart from those a question above may remove.
-    let mut cleanup: Vec<(usize, Entry)> = vec![];
-    let mut cleanup_by_hand = vec![];
-    for definition in turned_off {
-        let definition = match definition {
-            Definition::Entry(entry) if offered_entries.contains(&entry) => continue,
-            Definition::Entry(entry) => match targets.entry(&entry) {
-                Ok(target) => {
-                    cleanup.push((target, entry));
-                    continue;
-                }
-                Err(manual) => manual,
-            },
-            manual => manual,
-        };
-        if let Definition::Manual { step, reason } = definition {
-            cleanup_by_hand.push((step, reason));
-        }
-    }
-    let count = questions.len() + usize::from(!cleanup.is_empty());
+    let cleanups: Vec<usize> = (0..hosts.len())
+        .filter(|h| !hosts[*h].offers.cleanup.is_empty())
+        .collect();
+    let count = questions.len() + cleanups.len();
     if count > 0 {
-        let asked: usize = questions.iter().map(|q| q.members.len()).sum::<usize>() + cleanup.len();
+        let asked: usize = questions.iter().map(|q| q.members.len()).sum::<usize>()
+            + cleanups
+                .iter()
+                .map(|h| hosts[*h].offers.cleanup.len())
+                .sum::<usize>();
         let about = if asked == count {
             String::new()
         } else {
@@ -2235,59 +2662,72 @@ pub fn ask(
             ))
         )?;
     }
+    let mut walk = Walk {
+        hosts,
+        selections: hosts.iter().map(|_| Selection::default()).collect(),
+    };
     let mut going = true;
     for (n, question) in questions.iter().enumerate() {
         if !going {
-            for offer in &question.members {
-                selection.choose(offer.target, &offer.fix, false);
+            for member in &question.members {
+                walk.choose(member, false);
             }
             continue;
         }
-        if let [offer] = question.members.as_slice() {
+        let host = &hosts[question.members[0].host];
+        let style = host.style;
+        if let [member] = question.members.as_slice() {
             write!(
                 output,
                 "\n{}",
-                style.entry(&offer.fix, &format!("[{}/{count}]", n + 1))
+                style.entry(
+                    &member.offer.fix,
+                    &format!("[{}/{count}]", n + 1),
+                    host.label
+                )
             )?;
             let answer = answer(&style.prompt("Accept?", false), input, output)?;
-            going = selection.take(offer.target, &offer.fix, answer, style, output)?;
+            going = walk.take(member, answer, output)?;
             if answer == Answer::Yes {
-                going = offer_removal(&[offer], &mut selection, style, input, output)?;
+                going = walk.offer_removal(&[member], input, output)?;
             }
             continue;
         }
         write!(
             output,
             "\n{}",
-            question.card(&format!("[{}/{count}]", n + 1), style)
+            question.card(&format!("[{}/{count}]", n + 1), host.label, style)
         )?;
         let size = question.members.len();
         let prompt = style.prompt(&format!("Accept all {size}?"), true);
         match answer(&prompt, input, output)? {
             Answer::Each => {
-                for (i, offer) in question.members.iter().enumerate() {
+                for (i, member) in question.members.iter().enumerate() {
                     if !going {
-                        selection.choose(offer.target, &offer.fix, false);
+                        walk.choose(member, false);
                         continue;
                     }
                     let counter = format!("[{}/{count}, {}/{size}]", n + 1, i + 1);
-                    write!(output, "\n{}", style.entry(&offer.fix, &counter))?;
+                    write!(
+                        output,
+                        "\n{}",
+                        style.entry(&member.offer.fix, &counter, host.label)
+                    )?;
                     let answer = answer(&style.prompt("Accept?", false), input, output)?;
-                    going = selection.take(offer.target, &offer.fix, answer, style, output)?;
+                    going = walk.take(member, answer, output)?;
                     if answer == Answer::Yes {
-                        going = offer_removal(&[offer], &mut selection, style, input, output)?;
+                        going = walk.offer_removal(&[member], input, output)?;
                     }
                 }
             }
             batch => {
-                for offer in &question.members {
-                    selection.choose(offer.target, &offer.fix, batch == Answer::Yes);
+                for member in &question.members {
+                    walk.choose(member, batch == Answer::Yes);
                 }
                 if batch == Answer::Yes {
-                    let total = selection.total.text("Accepted so far", THIS_HOST);
-                    write!(output, "{}", style.dim(&total))?;
-                    let all: Vec<&Offer> = question.members.iter().collect();
-                    going = offer_removal(&all, &mut selection, style, input, output)?;
+                    write!(output, "{}", style.dim(&walk.total("Accepted so far")))?;
+                    let all: Vec<&Member> = question.members.iter().collect();
+                    going = walk.offer_removal(&all, input, output)?;
                 } else {
                     going = batch != Answer::Quit;
                 }
@@ -2295,19 +2735,29 @@ pub fn ask(
         }
     }
     // Removing servers that are off saves nothing, so it is asked after every saving.
-    if going && !cleanup.is_empty() {
-        ask_cleanup(&cleanup, count, &mut selection, style, input, output)?;
+    for (i, host) in cleanups.iter().enumerate() {
+        if !going {
+            break;
+        }
+        let n = questions.len() + i + 1;
+        going = walk.ask_cleanup(*host, &format!("{n}/{count}"), input, output)?;
     }
-    for (step, reason) in &cleanup_by_hand {
-        let text = home_in(
-            &format!("To look for MCP servers that are off by hand, since {reason}: {step}."),
-            style.home.as_deref(),
-        );
-        write!(output, "\n{}", style.dim(&text))?;
+    for walking in hosts {
+        for (step, reason) in &walking.offers.cleanup_by_hand {
+            let look =
+                format!("look for MCP servers that are off by hand, since {reason}: {step}.");
+            // Its step names a path on that host.
+            let look = match walking.label {
+                Some(host) => format!("On {host}, to {look}"),
+                None => format!("To {look}"),
+            };
+            let text = home_in(&look, walking.style.home.as_deref());
+            write!(output, "\n{}", walking.style.dim(&text))?;
+        }
     }
     // Not accepted, so the list shows them with the changes answered no.
-    for offer in skipped.iter().flat_map(|q| &q.members) {
-        selection.choose(offer.target, &offer.fix, false);
+    for member in skipped.iter().flat_map(|q| &q.members) {
+        walk.choose(member, false);
     }
     let left: usize = skipped.iter().map(|q| q.members.len()).sum();
     if left > 0 {
@@ -2324,150 +2774,18 @@ pub fn ask(
         );
         write!(output, "\n{}", style.dim(&text))?;
     }
-    let Selection {
-        accepted,
-        mut choices,
-        total,
-    } = selection;
-    choices.extend(steps);
-    let mut all: Vec<Option<Target>> = targets.all.into_iter().map(Result::ok).collect();
-    let files = accepted
-        .into_iter()
-        .map(|(index, edits, removals)| Pending {
-            target: all[index].take().expect("accepted changes have a target"),
-            edits,
-            removals,
-        })
-        .collect();
-    Ok(Plan {
-        files,
-        choices,
-        offered: changes + cleanup.len(),
-        total,
-    })
+    Ok(walk.selections)
 }
 
-/// The last question: remove the configuration of MCP servers that are off already, all
-/// at once or one at a time; whether the walk goes on.
-fn ask_cleanup(
-    cleanup: &[(usize, Entry)],
-    count: usize,
-    selection: &mut Selection,
-    style: &Style,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> io::Result<bool> {
-    let place = |entry: &Entry| format!("{} in {}", entry.text(), style.path(&entry.file));
-    let card = |counter: String, name: &str, why: &str, places: Vec<String>| {
-        let mut rows = vec![];
-        if !why.is_empty() {
-            rows.push(("Why", why.to_string()));
-        }
-        rows.push(("Where", places.join(", ")));
-        style.card(&Card {
-            counter,
-            name,
-            saving: None,
-            no_saving: "saves nothing",
-            value: format!("off {} removed", style.arrow()),
-            suggested: true,
-            claim: "Opinion",
-            rows,
-        })
-    };
-    let why = "Their tools are off already, so no session uses this configuration.";
-    let size = cleanup.len();
-    if let [(target, entry)] = cleanup {
-        let name = format!("MCP server {}", entry.server);
-        let text = card(
-            format!("[{count}/{count}]"),
-            &name,
-            &why.replace("Their tools are", "Its tools are"),
-            vec![place(entry)],
-        );
-        write!(output, "\n{text}")?;
-        let answer = answer(&style.prompt("Remove it?", false), input, output)?;
-        if answer == Answer::Yes {
-            selection.remove(*target, entry);
-        }
-        return Ok(answer != Answer::Quit);
-    }
-    let places = cleanup.iter().map(|(_, e)| place(e)).collect();
-    let text = card(
-        format!("[{count}/{count}]"),
-        "Turned-off MCP servers",
-        why,
-        places,
-    );
-    write!(output, "\n{text}")?;
-    let prompt = style.prompt(&format!("Remove all {size}?"), true);
-    match answer(&prompt, input, output)? {
-        Answer::Each => {
-            for (i, (target, entry)) in cleanup.iter().enumerate() {
-                let name = format!("MCP server {}", entry.server);
-                let counter = format!("[{count}/{count}, {}/{size}]", i + 1);
-                let text = card(counter, &name, "", vec![place(entry)]);
-                write!(output, "\n{text}")?;
-                match answer(&style.prompt("Remove it?", false), input, output)? {
-                    Answer::Yes => selection.remove(*target, entry),
-                    Answer::Quit => return Ok(false),
-                    _ => {}
-                }
-            }
-            Ok(true)
-        }
-        Answer::Yes => {
-            for (target, entry) in cleanup {
-                selection.remove(*target, entry);
-            }
-            Ok(true)
-        }
-        other => Ok(other != Answer::Quit),
-    }
-}
-
-/// Ask once whether to write the accepted changes, after showing each file's text as it
-/// would change; end of input is a no. With nothing accepted, there is nothing to ask.
-pub fn confirm(
-    plan: &Plan,
-    style: &Style,
-    input: &mut impl BufRead,
-    output: &mut impl Write,
-) -> io::Result<bool> {
-    if plan.files.is_empty() {
-        return Ok(false);
-    }
+/// Each file's text as `plan` would change it, then where each is backed up first, for the
+/// confirm to show before anything is written.
+pub fn preview(plan: &Plan, style: &Style) -> String {
     let mut text = String::new();
     for pending in &plan.files {
         // Every accepted edit was checked to apply when it was offered.
         let after = apply(&pending.target, &pending.edits, &pending.removals)
             .expect("accepted changes apply");
         text += &diff(pending, &after, style);
-    }
-    write!(output, "{text}")?;
-    let names: Vec<String> = plan
-        .files
-        .iter()
-        .map(|p| style.path(&p.target.file))
-        .collect();
-    let files = match names.split_last() {
-        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
-        _ => names.concat(),
-    };
-    let mut what = vec![];
-    let changes = plan.total.changes();
-    if changes > 0 {
-        what.push(format!(
-            "{changes} accepted change{}",
-            if changes == 1 { "" } else { "s" }
-        ));
-    }
-    let removals: usize = plan.files.iter().map(|p| p.removals.len()).sum();
-    if removals > 0 {
-        what.push(format!(
-            "{removals} removal{}",
-            if removals == 1 { "" } else { "s" }
-        ));
     }
     // Each file's backup, or why it has none, so nothing is written that the person
     // wasn't told would be.
@@ -2477,13 +2795,13 @@ pub fn confirm(
         let line = if let Some(bak) = target.backup() {
             format!(
                 "Backs up {} to {} first.",
-                style.path(&target.file),
-                style.path(&bak.display().to_string())
+                style.file(&target.file),
+                style.file(&bak.display().to_string())
             )
         } else if target.kept_by_git() {
             format!(
                 "Git keeps the previous version of {}, so it gets no backup.",
-                style.path(&target.file)
+                style.file(&target.file)
             )
         } else {
             continue;
@@ -2491,7 +2809,54 @@ pub fn confirm(
         kept += &style.line(&line);
     }
     if !kept.is_empty() {
-        write!(output, "\n{kept}")?;
+        text += &format!("\n{kept}");
+    }
+    text
+}
+
+/// What the confirm asks to write: every host's previews, and what each host's walk came to.
+pub struct Confirm<'a> {
+    /// Every host's [`preview`], in order.
+    pub preview: &'a str,
+    /// Each host's summary, with the style that names its files.
+    pub hosts: Vec<(&'a Summary, &'a Style)>,
+}
+
+/// Ask once whether to write the accepted changes, after showing each file's text as it
+/// would change; end of input is a no. With nothing accepted, there is nothing to ask.
+pub fn confirm(
+    confirm: &Confirm<'_>,
+    style: &Style,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> io::Result<bool> {
+    let names: Vec<String> = confirm
+        .hosts
+        .iter()
+        .flat_map(|(summary, style)| summary.files.iter().map(|f| style.file(f)))
+        .collect();
+    if names.is_empty() {
+        return Ok(false);
+    }
+    write!(output, "{}", confirm.preview)?;
+    let files = match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => names.concat(),
+    };
+    let mut what = vec![];
+    let changes: usize = confirm.hosts.iter().map(|(s, _)| s.changes).sum();
+    if changes > 0 {
+        what.push(format!(
+            "{changes} accepted change{}",
+            if changes == 1 { "" } else { "s" }
+        ));
+    }
+    let removals: usize = confirm.hosts.iter().map(|(s, _)| s.removals).sum();
+    if removals > 0 {
+        what.push(format!(
+            "{removals} removal{}",
+            if removals == 1 { "" } else { "s" }
+        ));
     }
     let question = format!("Write the {} to {files}?", what.join(" and "));
     let prompt = style.ask(&question, "[y]es, [n]o");
@@ -2527,7 +2892,7 @@ fn diff(pending: &Pending, after: &str, style: &Style) -> String {
         Harness::Codex => mask_toml(text, mask),
     };
     let (before, after) = (hide(target.before.as_deref().unwrap_or("")), hide(after));
-    let path = style.path(&target.file);
+    let path = style.file(&target.file);
     let mut text = format!(
         "\n{}",
         style.spans(&[(&path, BOLD)], style.width, MARGIN, None)
@@ -2683,7 +3048,7 @@ fn mask_toml(text: &str, mask: &str) -> String {
 }
 
 /// A file the doctor wrote.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Written {
     pub file: String,
     /// Where the edits landed, when the file is a symlink.
@@ -2857,32 +3222,47 @@ pub fn write(plan: &Plan) -> Result<Vec<Written>, ScanError> {
     Ok(written)
 }
 
-/// What the doctor did: the files it wrote, or that it wrote nothing.
-pub fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
-    let mut text = String::from("\n");
+/// The closing lines for one host: each file it wrote.
+pub fn wrote(written: &[Written], style: &Style) -> String {
+    let mut text = String::new();
     for w in written {
         let landed = w.resolved.as_ref().map_or_else(String::new, |r| {
-            format!(", through its symlink to {}", style.path(r))
+            format!(", through its symlink to {}", style.file(r))
         });
         let kept = w.backup.as_ref().map_or_else(String::new, |b| {
-            format!(" Backed up the old file to {}.", style.path(b))
+            format!(" Backed up the old file to {}.", style.file(b))
         });
         let wrote = format!(
             "Wrote {} edit{} to {}{landed}.{kept}",
             w.edits,
             if w.edits == 1 { "" } else { "s" },
-            style.path(&w.file)
+            style.file(&w.file)
         );
         text += &style.spans(&[(&wrote, GREEN)], style.width, MARGIN, None);
     }
-    if !written.is_empty() {
+    text
+}
+
+/// What the doctor did on every host in `hosts`, each with what it wrote: the files, or
+/// that it wrote nothing.
+pub fn finish(hosts: &[(&Summary, &[Written], &Style)], style: &Style) -> String {
+    let mut text = String::from("\n");
+    for (_, written, style) in hosts {
+        text += &wrote(written, style);
+    }
+    if hosts.iter().any(|(_, written, _)| !written.is_empty()) {
         return text;
     }
-    text += &style.line(if plan.choices.is_empty() {
-        "Nothing to change on this host."
-    } else if plan.offered == 0 {
+    let summaries = || hosts.iter().map(|(summary, _, _)| summary);
+    text += &style.line(if !summaries().any(|s| s.answered) {
+        if hosts.len() > 1 {
+            "Nothing to change on these hosts."
+        } else {
+            "Nothing to change on this host."
+        }
+    } else if summaries().all(|s| s.offered == 0) {
         "token-max cannot make these changes; the steps by hand are listed above."
-    } else if plan.files.is_empty() {
+    } else if summaries().all(|s| s.files.is_empty()) {
         "Nothing was accepted, so nothing was written."
     } else {
         "Nothing was written."
@@ -3271,7 +3651,47 @@ mod tests {
             unicode: false,
             width: None,
             home: Some(w.home.to_string_lossy().into_owned()),
+            host: None,
         }
+    }
+
+    /// Walk this host's `fixes` and `turned_off` servers as `doctor` does, returning its plan.
+    fn ask(
+        fixes: Vec<Fix>,
+        turned_off: Vec<Definition>,
+        style: &Style,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> io::Result<Plan> {
+        let owner = Owner::new(fixes, turned_off, style.home.clone(), 100.0);
+        let hosts = [Walking {
+            label: None,
+            offers: owner.offers(),
+            style,
+        }];
+        let selections = super::ask(&hosts, style, input, output)?;
+        Ok(owner.plan(selections[0].events()).unwrap())
+    }
+
+    /// Confirm one host's plan as `doctor` does.
+    fn confirm(
+        plan: &Plan,
+        style: &Style,
+        input: &mut impl BufRead,
+        output: &mut impl Write,
+    ) -> io::Result<bool> {
+        let summary = plan.summary();
+        let preview = preview(plan, style);
+        let request = Confirm {
+            preview: &preview,
+            hosts: vec![(&summary, style)],
+        };
+        super::confirm(&request, style, input, output)
+    }
+
+    /// The closing lines for one host.
+    fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
+        super::finish(&[(&plan.summary(), written, style)], style)
     }
 
     /// Walk `fixes` answering with `answers`, returning the plan and what was printed.
@@ -3411,6 +3831,59 @@ mod tests {
             apply_toml("[tui]\n", &[edit("tui", false, false)]),
             Err("tui is a table".into())
         );
+    }
+
+    #[test]
+    fn a_host_replays_only_answers_to_the_changes_it_offered() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        std::fs::write(&settings, "{}\n").unwrap();
+        let fix = change(
+            "A",
+            &settings,
+            Harness::Claude,
+            vec![edit("a", true, false)],
+        );
+        let owner = Owner::new(vec![fix.clone()], vec![], None, 0.0);
+        // As another host's walk reads them.
+        let json = serde_json::to_string(owner.offers()).unwrap();
+        let offers: Offers = serde_json::from_str(&json).unwrap();
+        assert_eq!(offers.offers[0].fix, fix);
+        assert_eq!(offers.files, [settings.to_string_lossy()]);
+        let choose = |offer, yes| Event::Choose { offer, yes };
+        let remove = Event::Remove { offer: 0, entry: 0 };
+        for (events, refused) in [
+            (vec![choose(1, true)], "not offered"),
+            (vec![Event::Cleanup { entry: 0 }], "not offered"),
+            // A removal follows only a yes to its change, and names one of its entries.
+            (vec![remove], "did not accept"),
+            (vec![choose(0, false), remove], "did not accept"),
+            (vec![choose(0, true), remove], "not offered"),
+        ] {
+            let error = owner.plan(&events).unwrap_err().message;
+            assert!(error.contains(refused), "{events:?}: {error}");
+        }
+        let plan = owner
+            .plan(&[Event::Choose {
+                offer: 0,
+                yes: true,
+            }])
+            .unwrap();
+        assert_eq!(plan.summary().files, [settings.to_string_lossy()]);
+        assert_eq!(*choice(&plan, "A"), Choice::Accepted);
+        assert_eq!(offers.check(), Ok(()));
+        let mut stray = offers.clone();
+        stray.offers[0].target = 1;
+        assert!(stray.check().is_err());
+        let mut manual = offers.clone();
+        manual.offers[0].fix.how = How::Manual {
+            step: "edit it".into(),
+            reason: "why".into(),
+        };
+        assert!(manual.check().is_err());
+        // A claim or verb this build never prints is refused.
+        let forged = json.replace("\"Measured\"", "\"Proven\"");
+        assert!(serde_json::from_str::<Offers>(&forged).is_err());
     }
 
     #[test]
@@ -3840,6 +4313,7 @@ mod tests {
             unicode: true,
             width,
             home: None,
+            host: None,
         };
         let card = Card {
             counter: "[1/4]".into(),

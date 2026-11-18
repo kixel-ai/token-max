@@ -64,8 +64,8 @@ over the window.
 
 | Setting | Profiles | 5m | 1h | 1h against 5m |
 | --- | --- | --- | --- | --- |
-| `subagentPromptCacheTtl` | plan, unset (5m) | ~$23,878 | ~$19,929 | ~17% less, ~$3,950 ± $29 |
-| `promptCacheTtl` (main agent) | usage credits, unset (5m) | ~$1,393 | ~$874 | ~37% less, ~$519 ± $2.08 |
+| `subagentPromptCacheTtl` | plan; `--defaults` baseline unset (5m) | ~$23,878 | ~$19,929 | ~17% less, ~$3,950 ± $29 |
+| `promptCacheTtl` (main agent) | usage credits; `--defaults` baseline unset (5m) | ~$1,393 | ~$874 | ~37% less, ~$519 ± $2.08 |
 
 The plan profiles' subagent line is now priced, so its ~$3,940/mo is in the
 savings above. The previous snapshot left it out as "not enough evidence": T3

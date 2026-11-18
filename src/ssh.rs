@@ -453,7 +453,7 @@ pub fn audit(
         let remote = terminal_text(&header.token_max_scan);
         return Err(session.fail(true, |_| {
             format!(
-                "the token-max {VERSION} there is build {remote}, not this build {local}; run a released token-max here, or build this one there with {BUILD}"
+                "the token-max {VERSION} there is build {remote}, not this build {local}; run a released token-max here, or build this one there with {BUILD} after deleting the cached release it would run first, with `rm -f \"${{XDG_CACHE_HOME:-$HOME/.cache}}\"/token-max/ssh/token-max-v{VERSION}-*`"
             )
         }));
     }

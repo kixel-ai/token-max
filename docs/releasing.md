@@ -105,7 +105,7 @@ and crate ownership still belong to the owner. Do not send credentials in chat.
 
 ## Publish
 
-A release's PR sets its version in `Cargo.toml` through the protected,
+A release's PR sets its version in `Cargo.toml` and `Cargo.lock` through the protected,
 reviewed squash path, after running `token-max doctor` end to end on a real
 host. Redeploy the site once the release is public if that PR changed
 `site/`.

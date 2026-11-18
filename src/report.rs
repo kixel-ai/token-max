@@ -7475,6 +7475,11 @@ mod tests {
             "Measured",
             "Used 310 times, $0.13 each; it cost $40 over the window. Turn off: \"permissions\": {\"deny\": [\"Agent\"]}.",
         );
+        // One use's share would repeat the total, so it is left out.
+        assert_eq!(
+            line("MCP server docs").evidence,
+            "Used once; it cost $7.50 over the window. Turn off: \"permissions\": {\"deny\": [\"mcp__docs\"]}. Server override: mcpServers.docs.alwaysLoad in the MCP configuration that declares it (.mcp.json or that scope's configuration)."
+        );
         // A setting that is not changed names where it is set.
         assert_eq!(
             line("Agent tool").setting,

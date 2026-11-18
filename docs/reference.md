@@ -957,8 +957,9 @@ connection that then runs the audit:
   release from GitHub and checks it against its published checksum, which
   needs `curl`, `tar` and `xz` there. Matching the version is not matching
   the build, so a destination whose build differs from this one fails with
-  what to run instead, such as the `cargo install` command for this build's
-  commit.
+  what to run instead: a released token-max here, or the `cargo install`
+  command for this build's commit there, after deleting the cached release
+  there, which runs before any installed one.
 
 Copies and downloads are cached in `~/.cache/token-max/ssh` there (or under
 `$XDG_CACHE_HOME`): a copy named by its digest, a release by version and

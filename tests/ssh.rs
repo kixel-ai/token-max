@@ -1000,6 +1000,13 @@ fn any_failed_destination_fails_the_whole_report() {
             "{host}: {stderr}"
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
+        // The cached release runs before an installed build, so the fix names it.
+        if host == "other" {
+            assert!(
+                stderr.contains(&format!("/token-max/ssh/token-max-v{version}-*`")),
+                "{stderr}"
+            );
+        }
     }
     // A failed copy leaves nothing behind.
     for host in ["static", "damaged"] {

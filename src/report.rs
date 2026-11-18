@@ -7700,7 +7700,7 @@ mod tests {
         let shared = format!("{file}:autoCompactWindow");
         let alone = Reowned {
             overrides: overrides.clone(),
-            environment_window: None,
+            environment_windows: vec![],
             targets: vec!["claude-opus-5-5".into()],
             pins: vec![],
         };
@@ -7740,7 +7740,7 @@ mod tests {
         let how_lifted = how(
             lifted.clone(),
             Reowned {
-                environment_window: Some(lifted.clone()),
+                environment_windows: vec![lifted.clone()],
                 pins: vec![pin(&format!("{lifted} (recorded on claude-haiku-5-5)"))],
                 ..alone.clone()
             },
@@ -7755,6 +7755,25 @@ mod tests {
                 edits: with_window,
             })
         );
+
+        // A copy the shell exports would take over once the file's is gone, so the whole
+        // change is by hand.
+        let How::Manual { step, reason } = how(
+            lifted.clone(),
+            Reowned {
+                environment_windows: vec![variable.to_string(), lifted.clone()],
+                pins: vec![pin(&format!("{lifted} (recorded on claude-haiku-5-5)"))],
+                ..alone.clone()
+            },
+        ) else {
+            panic!("expected a step by hand");
+        };
+        assert!(
+            reason.contains(&format!("the {variable} environment variable sets it")),
+            "{reason}"
+        );
+        assert!(step.contains(&format!("remove env.{variable}")), "{step}");
+        assert!(step.contains(&format!("; remove {variable}")), "{step}");
 
         // The shell's override is left by hand, naming every step.
         let shell = Reowned {

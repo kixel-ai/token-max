@@ -940,12 +940,12 @@ fn reown(c: &CompactionCheck, reowned: &Reowned, window: i64, profile: &Profile)
     let mut foreign: Vec<(&str, String)> = vec![];
     let mut edits = vec![];
     let base = |owner: &str| owner.split(" (").next().unwrap_or(owner).to_string();
-    let window_key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+    let window_key = crate::controls::WINDOW_KEY;
     // A removed environment window no longer outranks the rows that replace it.
-    let lifted = reowned.environment_window.as_deref();
+    let lifted = &reowned.environment_windows;
     let rowed = |owner: &str| {
         let owner = base(owner);
-        owner.starts_with(&format!("{file}:")) || lifted == Some(&*owner)
+        owner.starts_with(&format!("{file}:")) || lifted.contains(&owner)
     };
     let row = |model: &str, value: i64| Edit {
         path: vec![
@@ -981,7 +981,7 @@ fn reown(c: &CompactionCheck, reowned: &Reowned, window: i64, profile: &Profile)
                 None => return unknown(&pin.owner),
             }
         }
-        if let Some(owner) = lifted {
+        for owner in lifted {
             if names(owner, file, &format!("env.{window_key}")) {
                 edits.push(Edit::remove(&["env", window_key]));
             } else {

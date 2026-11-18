@@ -687,10 +687,13 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
 /// The variable that lowers every model's trigger to a percentage of its window.
 pub const PERCENT_KEY: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
 
+/// The variable that sets every model's window, above each settings row.
+pub const WINDOW_KEY: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+
 /// Variables that decide a model's trigger, besides the window settings.
 const TRIGGER_KEYS: [&str; 4] = [
     PERCENT_KEY,
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    WINDOW_KEY,
     "CLAUDE_CODE_DISABLE_1M_CONTEXT",
     "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
 ];
@@ -714,14 +717,19 @@ fn percent_override(
         return None;
     }
     let mut owners = vec![];
-    if env.contains_key(PERCENT_KEY) {
-        owners.push(PERCENT_KEY.to_string());
+    let mut windows = vec![];
+    for (key, owners) in [(PERCENT_KEY, &mut owners), (WINDOW_KEY, &mut windows)] {
+        if env.contains_key(key) {
+            owners.push(key.to_string());
+        }
     }
     let mut files: Vec<String> = vec![];
     for scope in scopes {
         let variables = members(scope.config.get("env"));
-        if variables.contains_key(PERCENT_KEY) {
-            owners.push(format!("{}:env.{PERCENT_KEY}", scope.file));
+        for (key, owners) in [(PERCENT_KEY, &mut owners), (WINDOW_KEY, &mut windows)] {
+            if variables.contains_key(key) {
+                owners.push(format!("{}:env.{key}", scope.file));
+            }
         }
         let windowed = scope.config.contains_key("autoCompactWindow")
             || members(scope.config.get("modelSettings"))
@@ -736,6 +744,7 @@ fn percent_override(
     Some(PercentOverride {
         value: value.filter(|v| *v > 0.0),
         owners,
+        windows,
         files,
         timeless: TRIGGER_KEYS
             .iter()
@@ -759,7 +768,7 @@ pub fn t3_percent(
     let Some(percent) = &mut compaction.percent else {
         return;
     };
-    for owner in &mut percent.owners {
+    for owner in percent.owners.iter_mut().chain(&mut percent.windows) {
         if environment.contains(owner) {
             *owner = format!("{file}:providerInstances.{instance}.environment.{owner}");
         }

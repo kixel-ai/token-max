@@ -803,8 +803,8 @@ change removes the override from every scope that sets it, recorded projects
 included. When the profile
 runs other models, the target goes in its own `modelSettings` row, every other
 model the transcripts show is pinned at its current trigger in its own row, and
-a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the settings `env` comes out, since it
-outranks every row. The walk shows each of these edits before applying them. An
+every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` comes out, since it outranks
+every row and a copy left behind, such as the shell's, would take over. The walk shows each of these edits before applying them. An
 owner the walk cannot edit, such as the shell, a project file or a T3 instance,
 leaves the whole change as a step by hand naming it. Another model whose
 current trigger is unresolved, or lowered below the 100,000-token smallest

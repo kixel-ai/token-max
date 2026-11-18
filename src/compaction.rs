@@ -6,7 +6,8 @@ use std::collections::BTreeSet;
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, CacheBoundaries, ttl_milliseconds};
 use crate::controls::{
-    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, strip_dated, window_control,
+    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, WINDOW_KEY, strip_dated,
+    window_control,
 };
 use crate::discovery::locale_compare;
 use crate::model::{
@@ -1880,17 +1881,23 @@ fn reowned<'m>(
     line: impl Iterator<Item = &'m Option<Text>>,
 ) -> Reowned {
     let compaction = &members[0].compaction;
-    let mut overrides = percent.owners.clone();
-    for member in members {
-        let directories = member.idle_directories.iter().flatten();
-        let scopes = std::iter::once(&member.compaction)
-            .chain(directories.filter_map(|(_, idle)| idle.compaction.as_ref()));
-        for owner in scopes.flat_map(|c| c.percent.iter().flat_map(|p| &p.owners)) {
-            if !overrides.contains(owner) {
-                overrides.push(owner.clone());
+    // Every scope a lifted variable is set in, home and recorded projects alike, since a copy
+    // left in any of them takes over.
+    let every = |of: fn(&PercentOverride) -> &Vec<String>| {
+        let mut all: Vec<String> = of(percent).clone();
+        for member in members {
+            let directories = member.idle_directories.iter().flatten();
+            let scopes = std::iter::once(&member.compaction)
+                .chain(directories.filter_map(|(_, idle)| idle.compaction.as_ref()));
+            for owner in scopes.flat_map(|c| c.percent.iter().flat_map(of)) {
+                if !all.contains(owner) {
+                    all.push(owner.clone());
+                }
             }
         }
-    }
+        all
+    };
+    let overrides = every(|p| &p.owners);
     let mut targets: Vec<Text> = vec![];
     for model in group.iter().flatten() {
         let key = row_key(&window_control(compaction, Some(model)).owner, model);
@@ -1915,19 +1922,17 @@ fn reowned<'m>(
         });
     }
     // The variable outranks every row, so with other models it cannot hold the target alone.
-    let environment_window = (!pins.is_empty())
-        .then(|| {
-            let control = window_control(compaction, group.iter().flatten().next().map(|m| &**m));
-            [control.owner]
-                .into_iter()
-                .chain(pins.iter().map(|p| p.owner.clone()))
-                .map(|o| o.split(" (").next().unwrap_or(&o).to_string())
-                .find(|o| o.ends_with("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
-        })
-        .flatten();
+    let held = !pins.is_empty() && {
+        let control = window_control(compaction, group.iter().flatten().next().map(|m| &**m));
+        [control.owner]
+            .iter()
+            .chain(pins.iter().map(|p| &p.owner))
+            .any(|o| o.split(" (").next().unwrap_or(o).ends_with(WINDOW_KEY))
+    };
+    let environment_windows = if held { every(|p| &p.windows) } else { vec![] };
     Reowned {
         overrides,
-        environment_window,
+        environment_windows,
         targets,
         pins,
     }
@@ -3163,7 +3168,7 @@ mod tests {
         assert_eq!(opus.base.current, Some(200_000));
         let reowned = opus.reowned.as_ref().unwrap();
         assert_eq!(reowned.overrides, [format!("settings.json:env.{key}")]);
-        assert_eq!(reowned.environment_window, None);
+        assert!(reowned.environment_windows.is_empty());
         assert_eq!(
             reowned.pins,
             [Pin {
@@ -3220,6 +3225,36 @@ mod tests {
         assert_eq!(
             (pins[0].trigger, opus.base.action),
             (None, Action::Advisory)
+        );
+
+        // Lifting the window variable collects every copy, the shell's included.
+        let window = crate::controls::WINDOW_KEY;
+        let mut shell = Env::default();
+        shell.insert(window.into(), "400000".into());
+        let mut lift = scan.clone();
+        lift.profiles[0].compaction = controls(
+            Harness::Claude,
+            json!({"env": {key: "50", window: "300000"}}),
+            &shell,
+            "settings.json",
+        );
+        crate::controls::tune_windows(&mut lift);
+        let profile = &lift.profiles[0];
+        let percent = profile.compaction.percent.as_ref().unwrap();
+        let (opus, haiku) = (
+            Some(Text::from("claude-opus-5-5")),
+            Some(Text::from("claude-haiku-5-5")),
+        );
+        let reowned = super::reowned(
+            &[profile],
+            percent,
+            std::slice::from_ref(&opus),
+            [&opus, &haiku].into_iter(),
+        );
+        assert_eq!(reowned.pins[0].trigger, Some(150_000));
+        assert_eq!(
+            reowned.environment_windows,
+            [window.to_string(), format!("settings.json:env.{window}")]
         );
 
         // A recorded project's override comes out too.

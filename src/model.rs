@@ -893,6 +893,9 @@ pub struct PercentOverride {
     pub value: Option<f64>,
     /// Every setting of the variable, highest precedence last, which removing it clears.
     pub owners: Vec<String>,
+    /// Every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, highest precedence last, which
+    /// lifting it from under per-model rows clears.
+    pub windows: Vec<String>,
     /// The files whose last change bounds which recorded triggers show the current one: those
     /// that set the variable, a window, or what sizes the context.
     pub files: Vec<String>,
@@ -1795,9 +1798,10 @@ pub struct CompactionCheck {
 pub struct Reowned {
     /// Every setting of the variable, each removed.
     pub overrides: Vec<String>,
-    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW`'s owner when it is set and other models run, so the
-    /// window it gives them moves to their own rows.
-    pub environment_window: Option<String>,
+    /// Every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` when it holds a window and other
+    /// models run, each removed so the window it gives them moves to their own rows: any copy
+    /// left behind, such as the shell's, would take over and outrank those rows.
+    pub environment_windows: Vec<String>,
     /// The `modelSettings` keys of the models the recommendation is for.
     pub targets: Vec<Text>,
     /// Every other model the line runs, pinned at its current trigger in its own row.

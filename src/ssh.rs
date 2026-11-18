@@ -5,6 +5,10 @@
 //! histories and settings, prices them with the coordinator's catalog, and sends back only its
 //! printed report or its session lines (see [`crate::wire`]); its scan never leaves it.
 //!
+//! For a walk through a report's changes, the audit stays open: the destination keeps the
+//! settings files it read, and this host sends it the person's answers and their confirm, so
+//! each destination writes its own files with the same checks, locks and backups as this host.
+//!
 //! A destination without this build gets one first, cached there for later runs: a copy of this
 //! binary when its platform matches, or else this version's release, checked against its
 //! published checksum.
@@ -18,11 +22,12 @@ use sha2::{Digest, Sha256};
 
 use crate::cli::{Render, Rendered, render};
 use crate::discovery::DiscoveryOptions;
+use crate::doctor::{Event, Offers, Owner, Style, Written, preview, write};
 use crate::model::Millis;
 use crate::reader::{ScanOptions, scan};
 use crate::safe::{ScanError, iso, terminal_text};
 use crate::sessions::{self, export};
-use crate::wire::{self, Header, Job, Outcome, Request, Stream};
+use crate::wire::{self, Answer, Header, Job, Outcome, Request, Stream};
 
 /// Reject a destination OpenSSH would read as an option or that cannot be printed whole.
 pub fn destination(value: &str) -> Result<(), ScanError> {
@@ -186,8 +191,12 @@ enum Step {
     Request(Request),
     /// This host failed before sending a request.
     Cancelled,
-    /// The destination's outcome, which may come before the request when it fails.
-    Outcome(Result<Outcome, serde_json::Error>),
+    /// The destination's outcome, which may come before the request when it fails, and the
+    /// stream it came on, which a walk goes on reading.
+    Outcome(
+        Result<Outcome, serde_json::Error>,
+        Box<Stream<BufReader<ChildStdout>>>,
+    ),
 }
 
 /// A running audit; dropping it kills the child unless [`Session::stop`] already reaped it.
@@ -230,6 +239,12 @@ impl Drop for Session {
 /// What a destination sent back for its [`Job`].
 pub enum Reply {
     Report(Rendered),
+    /// A report for a walk, with the changes the destination offers and its open audit.
+    Walk {
+        rendered: Rendered,
+        offers: Box<Offers>,
+        remote: Remote,
+    },
     /// Its sessions, ordered by first request, each without a host.
     Sessions(Vec<sessions::Session>),
 }
@@ -450,31 +465,46 @@ pub fn audit(
         let _ = forward.send(request.recv().map_or(Step::Cancelled, Step::Request));
     });
     std::thread::spawn(move || {
-        let _ = steps.send(Step::Outcome(stream.outcome()));
+        let outcome = stream.value();
+        let _ = steps.send(Step::Outcome(outcome, Box::new(stream)));
     });
-    // Whether the job asked for sessions, once it is sent.
+    // What the job asked for, once it is sent: sessions, or a report and whether it is walked.
     let mut requested = None;
-    let outcome = loop {
+    let (outcome, mut stream) = loop {
         match arrived.recv() {
             Ok(Step::Request(request)) => {
-                requested = Some(matches!(request.job, Job::Sessions));
+                requested = Some(match request.job {
+                    Job::Sessions => None,
+                    Job::Report { walk, .. } => Some(walk),
+                });
                 if let Some(stdin) = session.stdin.as_mut() {
                     // A destination that already failed has stopped reading; its outcome says why.
                     let _ = wire::write(&mut BufWriter::new(stdin), &request);
                 }
             }
-            Ok(Step::Outcome(outcome)) => break outcome,
+            Ok(Step::Outcome(outcome, stream)) => break (outcome, stream),
             Ok(Step::Cancelled) | Err(_) => {
                 return Err(ScanError::new("cancelled; no report produced"));
             }
         }
     };
-    let (scanned, reply) = match outcome {
+    let invalid = |session: &mut Session, error: serde_json::Error| {
+        let (line, column) = (error.line(), error.column());
+        session.fail(true, |status| match status {
+            Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
+            _ => format!(
+                "invalid SSH audit stream at line {line}, column {column} ({})",
+                exit(status)
+            ),
+        })
+    };
+    let (scanned, reply, offers) = match outcome {
         Ok(Outcome::Report {
             since,
             text,
             change,
             totals,
+            offers,
         }) => (
             since,
             Reply::Report(Rendered {
@@ -485,8 +515,14 @@ pub fn audit(
                 listing: None,
                 turned_off: vec![],
             }),
+            offers,
         ),
-        Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions)),
+        Ok(Outcome::Sessions { since, sessions }) => (since, Reply::Sessions(sessions), None),
+        Ok(Outcome::Reviewed { .. } | Outcome::Wrote { .. }) => {
+            return Err(session.fail(true, |_| {
+                "token-max sent a different result than requested".into()
+            }));
+        }
         Ok(Outcome::Error { message, location }) => {
             session.stop(true);
             return Err(ScanError {
@@ -494,17 +530,41 @@ pub fn audit(
                 location,
             });
         }
-        Err(error) => {
-            let (line, column) = (error.line(), error.column());
-            return Err(session.fail(true, |status| match status {
-                Some(SSH_FAILED) => "SSH connection lost during the audit".into(),
-                _ => format!(
-                    "invalid SSH audit stream at line {line}, column {column} ({})",
-                    exit(status)
-                ),
+        Err(error) => return Err(invalid(&mut session, error)),
+    };
+    let walk = requested.flatten() == Some(true);
+    if scanned != since {
+        return Err(session.fail(true, |_| {
+            "token-max scanned a different window than requested".into()
+        }));
+    }
+    match (requested, &reply, offers) {
+        (None, _, _) => {
+            return Err(session.fail(true, |_| {
+                "token-max sent its result before its request".into()
             }));
         }
-    };
+        (Some(Some(true)), Reply::Report(_), Some(offers)) => {
+            let Reply::Report(rendered) = reply else {
+                unreachable!("matched a report")
+            };
+            return Ok(Reply::Walk {
+                rendered,
+                offers,
+                remote: Remote { session, stream },
+            });
+        }
+        (Some(None), Reply::Sessions(_), None) | (Some(Some(false)), Reply::Report(_), None) => {}
+        _ => {
+            return Err(session.fail(true, |_| {
+                "token-max sent a different result than requested".into()
+            }));
+        }
+    }
+    debug_assert!(!walk);
+    if let Err(error) = stream.end() {
+        return Err(invalid(&mut session, error));
+    }
     let status = session.stop(false).and_then(|s| s.code());
     if status != Some(0) {
         return Err(ScanError::new(format!(
@@ -512,19 +572,94 @@ pub fn audit(
             exit(status)
         )));
     }
-    if scanned != since {
-        return Err(ScanError::new(format!(
-            "{destination}: token-max scanned a different window than requested"
-        )));
+    Ok(reply)
+}
+
+/// A destination's audit kept open for this host's walk through its changes.
+pub struct Remote {
+    session: Session,
+    stream: Box<Stream<BufReader<ChildStdout>>>,
+}
+
+impl Remote {
+    /// Send `answer` and read the destination's reply to it, failing with what `doing` was
+    /// cut short when the stream breaks.
+    fn exchange(&mut self, answer: &Answer, doing: &str) -> Result<Outcome, ScanError> {
+        let sent = self
+            .session
+            .stdin
+            .as_mut()
+            .map(|stdin| wire::write(&mut BufWriter::new(stdin), answer));
+        let outcome = match sent {
+            Some(Ok(())) => self.stream.value(),
+            _ => {
+                return Err(self
+                    .session
+                    .fail(true, |_| format!("SSH connection lost {doing}")));
+            }
+        };
+        match outcome {
+            Ok(Outcome::Error { message, location }) => {
+                self.session.stop(true);
+                Err(ScanError {
+                    message: format!("{}: {}", self.session.destination, terminal_text(&message)),
+                    location,
+                })
+            }
+            Ok(outcome) => Ok(outcome),
+            Err(error) if error.is_eof() || error.is_io() => Err(self
+                .session
+                .fail(true, |_| format!("SSH connection lost {doing}"))),
+            Err(error) => {
+                let (line, column) = (error.line(), error.column());
+                Err(self.session.fail(true, |status| {
+                    format!(
+                        "invalid SSH audit stream at line {line}, column {column} ({}) {doing}",
+                        exit(status)
+                    )
+                }))
+            }
+        }
     }
-    match requested {
-        None => Err(ScanError::new(format!(
-            "{destination}: token-max sent its result before its request"
-        ))),
-        Some(sessions) if sessions != matches!(reply, Reply::Sessions(_)) => Err(ScanError::new(
-            format!("{destination}: token-max sent a different result than requested"),
-        )),
-        Some(_) => Ok(reply),
+
+    /// The destination's report with the walk's `events` marked on it, and its preview of
+    /// each file the accepted changes would write; nothing is written there yet.
+    pub fn review(&mut self, events: &[Event]) -> Result<(String, String), ScanError> {
+        let answer = Answer::Review {
+            events: events.to_vec(),
+        };
+        match self.exchange(&answer, "during the walk; no settings were changed there")? {
+            Outcome::Reviewed { report, preview } => Ok((report, preview)),
+            _ => Err(self.session.fail(true, |_| {
+                "token-max sent a different result than requested".into()
+            })),
+        }
+    }
+
+    /// Write the reviewed changes there, returning each file written.
+    pub fn write(mut self) -> Result<Vec<Written>, ScanError> {
+        let doing = "while writing; check its settings files and their .token-max.bak backups";
+        let written = match self.exchange(&Answer::Write, doing)? {
+            Outcome::Wrote { written } => written,
+            _ => {
+                return Err(self.session.fail(true, |_| {
+                    format!("token-max sent a different result than requested {doing}")
+                }));
+            }
+        };
+        if self.stream.end().is_err() {
+            return Err(self.session.fail(true, |_| {
+                format!("token-max sent more than its result after writing {doing}")
+            }));
+        }
+        match self.session.stop(false).and_then(|s| s.code()) {
+            Some(0) => Ok(written),
+            status => Err(ScanError::new(format!(
+                "{}: token-max failed after writing ({})",
+                self.session.destination,
+                exit(status)
+            ))),
+        }
     }
 }
 
@@ -535,23 +670,53 @@ fn exit(status: Option<i32>) -> String {
     }
 }
 
+/// What reaches a destination on stdin.
+enum Incoming {
+    Request(Request),
+    Answer(Answer),
+}
+
+/// A destination's side of a walk: its files as it read them, its report, and how to print.
+struct Walked {
+    owner: Owner,
+    listing: Box<crate::report::Listing>,
+    style: Style,
+}
+
 /// Run as an SSH audit destination: scan this host, stream what the coordinator's job asks for
-/// to stdout and return the exit code.
+/// to stdout and return the exit code. For a walk, then answer the coordinator's review and
+/// write the changes it confirms.
 ///
 /// Diagnostics travel in the stream, since the coordinator discards this host's stderr. The
 /// coordinator's request arrives on stdin while this host scans, and the audit stops when stdin
-/// closes, which happens when the coordinator or its connection ends.
+/// closes, which happens when the coordinator or its connection ends, unless it already asked
+/// this host to write.
 pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
-    let (sender, requests) = mpsc::channel();
+    let (sender, incoming) = mpsc::channel();
     std::thread::spawn(move || {
         let mut stdin = BufReader::new(io::stdin());
-        match Stream::new(&mut stdin).request() {
-            Ok(request) => {
-                let _ = sender.send(request);
-            }
+        let mut stream = Stream::new(&mut stdin);
+        let Ok(request) = stream.request() else {
             // Not this build's coordinator, or it is gone.
-            Err(_) => std::process::exit(2),
+            std::process::exit(2);
+        };
+        let walk = matches!(request.job, Job::Report { walk: true, .. });
+        let _ = sender.send(Incoming::Request(request));
+        if walk {
+            // Ends with the write, or exits once stdin closes.
+            loop {
+                let Ok(answer) = stream.value::<Answer>() else {
+                    std::process::exit(2);
+                };
+                // Once asked to write, the write finishes even if the coordinator goes.
+                let write = matches!(answer, Answer::Write);
+                let _ = sender.send(Incoming::Answer(answer));
+                if write {
+                    return;
+                }
+            }
         }
+        drop(stream);
         let _ = io::copy(&mut stdin, &mut io::sink());
         std::process::exit(2);
     });
@@ -569,15 +734,18 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
         }
         let scan = scan(&ScanOptions { discovery, since })?;
         // The stdin thread keeps the sender until it exits this process.
-        let request: Request = requests.recv().expect("the request or an exit");
-        let (max_cost_per_use_usd, format) = match &request.job {
+        let Ok(Incoming::Request(request)) = incoming.recv() else {
+            unreachable!("the request comes first")
+        };
+        let (max_cost_per_use_usd, format, walk) = match &request.job {
             Job::Report {
                 max_cost_per_use_usd,
                 format,
-            } => (*max_cost_per_use_usd, format),
+                walk,
+            } => (*max_cost_per_use_usd, format, *walk),
             Job::Sessions => {
                 let sessions = export(&scan, &request.catalog)?;
-                return Ok(Outcome::Sessions { since, sessions });
+                return Ok((Outcome::Sessions { since, sessions }, None));
             }
         };
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
@@ -585,7 +753,9 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
             text,
             change,
             totals,
-            ..
+            fixes,
+            listing,
+            turned_off,
         } = render(
             scan,
             Render {
@@ -597,27 +767,95 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
                 home: home.as_deref(),
             },
         )?;
-        Ok(Outcome::Report {
+        let walked = walk.then(|| Walked {
+            owner: Owner::new(fixes, turned_off, home.clone(), totals.monthly),
+            listing: listing.expect("this host's report has its listing"),
+            style: Style {
+                color: format.color,
+                unicode: format.unicode,
+                width: format.width,
+                home,
+                host: format.host.clone(),
+            },
+        });
+        let offers = walked.as_ref().map(|w| Box::new(w.owner.offers().clone()));
+        let outcome = Outcome::Report {
             since,
             text,
             change,
             totals: *totals,
-        })
+            offers,
+        };
+        Ok((outcome, walked))
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
-    let (outcome, code) = match result {
-        Ok(outcome) => (outcome, 0),
-        Err(error) => (
-            Outcome::Error {
-                message: error.message,
-                location: error.location,
-            },
-            2,
-        ),
+    let (outcome, walked) = match result {
+        Ok((outcome, walked)) => (outcome, walked),
+        Err(error) => (failure(error), None),
     };
-    match wire::write(&mut stdout, &outcome) {
-        Ok(()) => code,
-        Err(_) => 2,
+    let failed = matches!(outcome, Outcome::Error { .. });
+    if wire::write(&mut stdout, &outcome).is_err() || failed {
+        return 2;
+    }
+    match walked {
+        Some(walked) => walk_here(&walked, &incoming, &mut stdout),
+        None => 0,
+    }
+}
+
+/// An error as the stream carries it.
+fn failure(error: ScanError) -> Outcome {
+    Outcome::Error {
+        message: error.message,
+        location: error.location,
+    }
+}
+
+/// Answer the coordinator's review of this host's changes, then write them once it confirms.
+fn walk_here(
+    walked: &Walked,
+    incoming: &mpsc::Receiver<Incoming>,
+    stdout: &mut impl io::Write,
+) -> u8 {
+    let reviewed = panic::catch_unwind(AssertUnwindSafe(|| {
+        let Ok(Incoming::Answer(Answer::Review { events })) = incoming.recv() else {
+            return Err(ScanError::new(
+                "the walk sent no answers; no settings were changed",
+            ));
+        };
+        let plan = walked.owner.plan(&events)?;
+        let report = walked
+            .listing
+            .review(plan.choices(), &plan.total("Accepted"));
+        let preview = preview(&plan, &walked.style);
+        Ok((plan, Outcome::Reviewed { report, preview }))
+    }))
+    .unwrap_or_else(|_| Err(ScanError::new("doctor failed while reviewing changes")));
+    let plan = match reviewed {
+        Ok((plan, outcome)) => {
+            if wire::write(stdout, &outcome).is_err() {
+                return 2;
+            }
+            plan
+        }
+        Err(error) => {
+            let _ = wire::write(stdout, &failure(error));
+            return 2;
+        }
+    };
+    // A coordinator that does not confirm closes stdin, which exits this process.
+    let Ok(Incoming::Answer(Answer::Write)) = incoming.recv() else {
+        let error = ScanError::new("the walk sent another answer than a confirm");
+        let _ = wire::write(stdout, &failure(error));
+        return 2;
+    };
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| write(&plan)))
+        .unwrap_or_else(|_| Err(ScanError::new("doctor failed while applying changes")))
+        .map_or_else(failure, |written| Outcome::Wrote { written });
+    let failed = matches!(outcome, Outcome::Error { .. });
+    match wire::write(stdout, &outcome) {
+        Ok(()) if !failed => 0,
+        _ => 2,
     }
 }
 

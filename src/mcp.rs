@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::collections::IndexSet;
@@ -21,7 +22,7 @@ use crate::discovery::{join, realpath, settings};
 use crate::model::{Control, Harness, Profile};
 
 /// One place an MCP server is configured.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Definition {
     /// An entry token-max can delete.
     Entry(Entry),
@@ -30,7 +31,7 @@ pub enum Definition {
 }
 
 /// A server's entry in a configuration file: the key at `path`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Entry {
     /// The server's name as its file declares it.
     pub server: String,

@@ -13,7 +13,9 @@ use serde_json::ser::Formatter;
 
 use crate::collections::IndexSet;
 use crate::discovery::{DiscoveryOptions, discover};
-use crate::doctor::{Fix, Style, ask, ask_billing, confirm, finish, write};
+use crate::doctor::{
+    Confirm, Fix, Offers, Owner, Style, Walking, ask, ask_billing, confirm, finish, preview, write,
+};
 use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
@@ -593,16 +595,41 @@ enum Output {
     Walk(Walk),
 }
 
-/// This host's report and the changes it offers, then any other hosts' reports.
+/// Every host's changes, to walk through on this terminal.
 struct Walk {
-    listing: Box<Listing>,
-    fixes: Vec<Fix>,
-    turned_off: Vec<crate::mcp::Definition>,
+    hosts: Vec<WalkHost>,
     /// The total across hosts, printed first; empty for one host.
     head: String,
-    /// What follows this host's report: other hosts' reports.
-    rest: String,
     style: Style,
+}
+
+/// One host in the walk.
+struct WalkHost {
+    /// Its name, when the walk covers another host than this one.
+    label: Option<String>,
+    side: Side,
+    /// How its changes print: its paths from its own home.
+    style: Style,
+}
+
+/// Where a host's files are read and written.
+enum Side {
+    /// This host's own, with its report.
+    Here { owner: Owner, listing: Box<Listing> },
+    /// A destination's, through its open audit.
+    There {
+        offers: Box<Offers>,
+        remote: ssh::Remote,
+    },
+}
+
+impl WalkHost {
+    fn offers(&self) -> &Offers {
+        match &self.side {
+            Side::Here { owner, .. } => owner.offers(),
+            Side::There { offers, .. } => offers,
+        }
+    }
 }
 
 /// One host before its job runs here: this host's scan, or a destination's reply.
@@ -893,12 +920,14 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
         Job::Report {
             max_cost_per_use_usd,
             format,
+            walk,
         } => Job::Report {
             max_cost_per_use_usd: *max_cost_per_use_usd,
             format: Format {
                 host: host.map(str::to_string),
                 ..format.clone()
             },
+            walk: *walk,
         },
         Job::Sessions => Job::Sessions,
     };
@@ -986,6 +1015,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                         Job::Report {
                             max_cost_per_use_usd,
                             format,
+                            ..
                         } => Reply::Report(render(
                             *scan,
                             Render {
@@ -1059,9 +1089,8 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     }
     let stdout = io::stdout().is_terminal();
     let terminal = stdout && io::stdin().is_terminal();
-    // Only this host's changes can be made here, so a run of destinations alone lists them,
-    // and a report with the settings files pretended away has none to make.
-    let walk = discovery.is_some() && terminal && !values.defaults;
+    // A report with the settings files pretended away has no changes to make.
+    let walk = terminal && !values.defaults;
     let term_dumb = env("TERM").as_deref() == Some("dumb");
     let unicode_locale = env_nonempty("LC_ALL")
         .or_else(|| env_nonempty("LC_CTYPE"))
@@ -1085,6 +1114,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         unicode,
         width: width(),
         home: home.clone(),
+        host: None,
     };
     // This host's Claude profiles on the Anthropic API whose billing picks the main TTL's
     // default, asked before the scan; without a terminal the report names both defaults.
@@ -1120,6 +1150,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         job: Job::Report {
             max_cost_per_use_usd,
             format,
+            walk,
         },
         home: home.clone(),
         progress: stdout && io::stderr().is_terminal() && !term_dumb,
@@ -1127,35 +1158,65 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let sections = replies.len();
     let mut code = 0;
     let mut text = String::new();
-    let mut fixes = vec![];
-    let mut listing = None;
-    let mut turned_off = vec![];
+    let mut hosts = vec![];
     let mut sum: Option<Totals> = None;
     for (ssh, reply) in replies {
-        let Reply::Report(Rendered {
+        let (rendered, there) = match reply {
+            Reply::Report(rendered) => (rendered, None),
+            Reply::Walk {
+                rendered,
+                offers,
+                remote,
+            } => (rendered, Some((offers, remote))),
+            Reply::Sessions(_) => unreachable!("a report job gets reports"),
+        };
+        let Rendered {
             text: report,
             change,
             totals,
-            fixes: local,
-            listing: local_listing,
-            turned_off: local_off,
-        }) = reply
-        else {
-            unreachable!("a report job gets reports");
-        };
+            fixes,
+            listing,
+            turned_off,
+        } = rendered;
         code = code.max(u8::from(change));
-        fixes.extend(local);
         match &mut sum {
             Some(sum) => sum.merge(&totals),
-            None => sum = Some(*totals),
+            None => sum = Some(*totals.clone()),
         }
-        // This host's report comes first; the walk prints it after the questions.
-        if walk && ssh.is_none() {
-            listing = local_listing;
-            turned_off = local_off;
+        // Each host's report follows the walk, marked with its answers.
+        if walk {
+            let side = match there {
+                Some((offers, remote)) => Side::There { offers, remote },
+                None => Side::Here {
+                    owner: Owner::new(fixes, turned_off, home.clone(), totals.monthly),
+                    listing: listing.expect("this host's report has its listing"),
+                },
+            };
+            let (label, host_style) = match &side {
+                Side::Here { .. } => (
+                    (sections > 1).then(|| "this host".to_string()),
+                    Style {
+                        home: home.clone(),
+                        ..style.clone()
+                    },
+                ),
+                Side::There { offers, .. } => (
+                    ssh.clone(),
+                    Style {
+                        home: offers.home.clone(),
+                        host: ssh.clone(),
+                        ..style.clone()
+                    },
+                ),
+            };
+            hosts.push(WalkHost {
+                label,
+                side,
+                style: host_style,
+            });
             continue;
         }
-        if !text.is_empty() || listing.is_some() {
+        if !text.is_empty() {
             text.push('\n');
         }
         // A destination's report is its own text, so escape all but our own styles.
@@ -1183,50 +1244,126 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         _ => String::new(),
     };
     if walk {
-        let listing = listing.expect("a walk has this host's report");
-        return Ok((
-            Output::Walk(Walk {
-                listing,
-                fixes,
-                turned_off,
-                head,
-                rest: text,
-                style,
-            }),
-            0,
-        ));
+        return Ok((Output::Walk(Walk { hosts, head, style }), 0));
     }
     Ok((Output::Text(format!("{head}{text}")), code))
 }
 
-/// Walk through the changes, print the report with the accepted ones first, then write
-/// them once the person confirms.
+/// Walk through every host's changes, print each host's report with the accepted ones first,
+/// then write them once the person confirms: this host's first, then each destination's
+/// there, stopping at the first host that fails.
 fn walk(walk: Walk) -> Result<(), ScanError> {
     let Walk {
-        listing,
-        fixes,
-        turned_off,
+        mut hosts,
         head,
-        rest,
         style,
     } = walk;
     let failed = |_| ScanError::new("cannot use the terminal; no settings were changed");
     let mut stdout = io::stdout().lock();
     let mut stdin = io::stdin().lock();
-    write!(stdout, "{head}{}", listing.title()).map_err(failed)?;
-    let plan = ask(fixes, turned_off, &style, &mut stdin, &mut stdout).map_err(failed)?;
-    let report = listing.review(plan.choices(), &plan.total("Accepted"));
-    // The report reads as its own section after the questions.
-    let gap = if plan.choices().is_empty() { "" } else { "\n" };
-    write!(stdout, "{gap}{report}{rest}").map_err(failed)?;
+    let title = hosts.iter().find_map(|h| match &h.side {
+        Side::Here { listing, .. } => Some(listing.title()),
+        Side::There { .. } => None,
+    });
+    write!(stdout, "{head}{}", title.unwrap_or_default()).map_err(failed)?;
+    let walking: Vec<Walking> = hosts
+        .iter()
+        .map(|h| Walking {
+            label: h.label.as_deref(),
+            offers: h.offers(),
+            style: &h.style,
+        })
+        .collect();
+    let selections = ask(&walking, &style, &mut stdin, &mut stdout).map_err(failed)?;
+    let summaries: Vec<_> = walking
+        .iter()
+        .zip(&selections)
+        .map(|(w, s)| s.summary(w.offers))
+        .collect();
+    drop(walking);
+    // Each host makes its own plan from the answers, and the report reads as its own section
+    // after the questions.
+    let mut plans = vec![];
+    let mut previews = String::new();
+    let mut gap = selections.iter().any(|s| !s.events().is_empty());
+    for (host, selection) in hosts.iter_mut().zip(&selections) {
+        let (report, preview) = match &mut host.side {
+            Side::Here { owner, listing } => {
+                let plan = owner.plan(selection.events())?;
+                let report = listing.review(plan.choices(), &plan.total("Accepted"));
+                let shown = preview(&plan, &host.style);
+                plans.push(Some(plan));
+                (report, shown)
+            }
+            Side::There { remote, .. } => {
+                let (report, shown) = remote.review(selection.events())?;
+                plans.push(None);
+                (
+                    crate::safe::remote_text(&report, style.color),
+                    crate::safe::remote_text(&shown, style.color),
+                )
+            }
+        };
+        let gap = if std::mem::replace(&mut gap, true) {
+            "\n"
+        } else {
+            ""
+        };
+        write!(stdout, "{gap}{report}").map_err(failed)?;
+        previews += &preview;
+    }
     stdout.flush().map_err(failed)?;
-    let yes = confirm(&plan, &style, &mut stdin, &mut stdout).map_err(failed)?;
+    let styles: Vec<Style> = hosts.iter().map(|h| h.style.clone()).collect();
+    let request = Confirm {
+        preview: &previews,
+        hosts: summaries.iter().zip(&styles).collect(),
+    };
+    let yes = confirm(&request, &style, &mut stdin, &mut stdout).map_err(failed)?;
     enter(Phase::Writing);
-    let written = if yes { write(&plan)? } else { vec![] };
+    let mut written = vec![];
+    let mut error = None;
+    // Hosts left unwritten after one fails.
+    let mut skipped = vec![];
+    for ((host, plan), summary) in hosts.into_iter().zip(plans).zip(&summaries) {
+        if !yes || !summary.accepted() {
+            written.push(vec![]);
+            continue;
+        }
+        if error.is_some() {
+            skipped.push(host.label.unwrap_or_else(|| "this host".into()));
+            written.push(vec![]);
+            continue;
+        }
+        let result = match (host.side, plan) {
+            (Side::Here { .. }, Some(plan)) => write(&plan),
+            (Side::There { remote, .. }, None) => remote.write(),
+            _ => unreachable!("a plan for each host here"),
+        };
+        match result {
+            Ok(files) => written.push(files),
+            Err(e) => {
+                error = Some(e);
+                written.push(vec![]);
+            }
+        }
+    }
+    let done: Vec<_> = summaries
+        .iter()
+        .zip(&written)
+        .zip(&request.hosts)
+        .map(|((summary, written), (_, style))| (summary, written.as_slice(), *style))
+        .collect();
     // The settings are written, so a failure to say so must not read as nothing changed.
-    let _ = stdout.write_all(finish(&plan, &written, &style).as_bytes());
+    let _ = stdout.write_all(finish(&done, &style).as_bytes());
     let _ = stdout.flush();
-    Ok(())
+    match error {
+        Some(mut error) if !skipped.is_empty() => {
+            error.message += &format!("; nothing was written on {}", skipped.join(", "));
+            Err(error)
+        }
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Run the command line and return its exit code: 0 no change, or done on a terminal; 1 change

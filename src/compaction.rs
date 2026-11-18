@@ -3538,11 +3538,13 @@ mod tests {
             "{unkept:?}"
         );
         // A recorded project that resolves each model's window as the home does needs no
-        // row of its own, even though its controls are a separate copy.
+        // row of its own, even with an empty row of its own.
         let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
+        let mut empty = rows.clone();
+        empty["modelSettings"]["claude-haiku-5-5"] = json!({});
         idle.compaction = Some(controls(
             Harness::Claude,
-            rows.clone(),
+            empty,
             &Env::default(),
             "settings.json",
         ));

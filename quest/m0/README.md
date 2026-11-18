@@ -104,8 +104,8 @@ version fails with the command to run (rejected: copy the local binary over
 SSH to a temporary path, run it and delete it). As built, each SSH host is
 analyzed in its own section of the report, so a history copied between hosts
 counts on each and amounts across hosts are not added. Amended 2026-11-17:
-[the hosts epic](/quest/m1/hosts/README.md) sums hosts and copies or
-downloads token-max onto each.
+a run of several hosts is summed in one total, copies or downloads token-max
+onto each, and its walk writes each host's changes on that host.
 
 Recommendations for every check:
 

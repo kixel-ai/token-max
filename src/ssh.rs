@@ -544,6 +544,9 @@ pub fn audit(
             }));
         }
         (Some(Some(true)), Reply::Report(_), Some(offers)) => {
+            if let Err(error) = offers.check() {
+                return Err(session.fail(true, |_| format!("token-max there {error}")));
+            }
             let Reply::Report(rendered) = reply else {
                 unreachable!("matched a report")
             };

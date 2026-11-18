@@ -1285,7 +1285,7 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
     // after the questions.
     let mut plans = vec![];
     let mut previews = String::new();
-    let mut gap = selections.iter().any(|s| !s.events().is_empty());
+    let mut gap = summaries.iter().any(|s| s.answered());
     for (host, selection) in hosts.iter_mut().zip(&selections) {
         let (report, preview) = match &mut host.side {
             Side::Here { owner, listing } => {

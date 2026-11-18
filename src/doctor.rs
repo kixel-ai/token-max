@@ -1975,6 +1975,11 @@ pub struct Summary {
 }
 
 impl Summary {
+    /// Whether the walk had any change to answer or make by hand.
+    pub fn answered(&self) -> bool {
+        self.answered
+    }
+
     /// Whether anything is to be written.
     pub fn accepted(&self) -> bool {
         !self.files.is_empty()
@@ -2071,6 +2076,24 @@ impl Offers {
     /// How many changes the walk offers.
     fn offered(&self) -> usize {
         self.offers.len() + self.cleanup.len()
+    }
+
+    /// Check offers another host sent: each is an edit, and names one of its targets.
+    pub fn check(&self) -> Result<(), String> {
+        let targets = self
+            .offers
+            .iter()
+            .flat_map(|o| std::iter::once(o.target).chain(o.entries.iter().map(|(t, _)| *t)))
+            .chain(self.cleanup.iter().map(|(t, _)| *t));
+        let edits = self
+            .offers
+            .iter()
+            .all(|o| matches!(o.fix.how, How::Edit(_)));
+        match targets.max() {
+            _ if !edits => Err("offered a change it cannot make".into()),
+            Some(max) if max >= self.files.len() => Err("offered a change to no file".into()),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -3823,6 +3846,16 @@ mod tests {
             .unwrap();
         assert_eq!(plan.summary().files, [settings.to_string_lossy()]);
         assert_eq!(*choice(&plan, "A"), Choice::Accepted);
+        assert_eq!(offers.check(), Ok(()));
+        let mut stray = offers.clone();
+        stray.offers[0].target = 1;
+        assert!(stray.check().is_err());
+        let mut manual = offers.clone();
+        manual.offers[0].fix.how = How::Manual {
+            step: "edit it".into(),
+            reason: "why".into(),
+        };
+        assert!(manual.check().is_err());
         // A claim or verb this build never prints is refused.
         let forged = json.replace("\"Measured\"", "\"Proven\"");
         assert!(serde_json::from_str::<Offers>(&forged).is_err());

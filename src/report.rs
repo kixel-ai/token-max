@@ -7631,6 +7631,136 @@ mod tests {
     }
 
     #[test]
+    fn a_window_change_under_the_percent_override_makes_one_setting_own_each_trigger() {
+        use crate::doctor::{Edit, How, Op, Patch, fixes};
+        use crate::model::{Pin, Reowned};
+        use serde_json::json;
+        let file = format!("{ROOT}/settings.json");
+        let key = crate::controls::PERCENT_KEY;
+        let variable = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+        let edit = |path: &[&str], value: serde_json::Value, op: Op| Edit {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            value,
+            op,
+        };
+        let row = |model: &str, window: i64| {
+            edit(
+                &["modelSettings", model, "autoCompactWindow"],
+                json!(window),
+                Op::Set,
+            )
+        };
+        let remove = |variable: &str| edit(&["env", variable], json!(null), Op::Remove);
+        let how = |owner: String, reowned: Reowned| {
+            let mut report = synthetic();
+            let mut window = check_base(Action::Change, Some(200_000), Some(300_000));
+            window.owner = owner;
+            let mut check = compaction_check(window);
+            if let CheckResult::Compaction(c) = &mut check {
+                c.reowned = Some(reowned);
+            }
+            report.checks = vec![check];
+            report.context.clear();
+            fixes(&report, false)
+                .into_iter()
+                .find(|f| f.name.starts_with("Auto-compact window"))
+                .expect("a window fix")
+                .how
+        };
+        let overrides = vec![format!("{file}:env.{key}")];
+        let pin = |owner: &str| Pin {
+            model: "claude-haiku-5-5".into(),
+            trigger: Some(150_000),
+            owner: owner.into(),
+        };
+
+        // Alone on its line, the window stays where its owner holds it.
+        let shared = format!("{file}:autoCompactWindow");
+        let alone = Reowned {
+            overrides: overrides.clone(),
+            environment_window: None,
+            pins: vec![],
+        };
+        assert_eq!(
+            how(shared.clone(), alone.clone()),
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: vec![
+                    edit(&["autoCompactWindow"], json!(300_000), Op::Set),
+                    remove(key),
+                ],
+            })
+        );
+
+        // Beside another model, the target and the other model each get their own row.
+        let beside = Reowned {
+            pins: vec![pin(&shared)],
+            ..alone.clone()
+        };
+        let edits = vec![
+            row("claude-opus-5-5", 300_000),
+            row("claude-haiku-5-5", 150_000),
+            remove(key),
+        ];
+        assert_eq!(
+            how(shared.clone(), beside.clone()),
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: edits.clone(),
+            })
+        );
+
+        // A window variable in the file comes out too, since it outranks every row.
+        let lifted = format!("{file}:env.{variable}");
+        let how_lifted = how(
+            lifted.clone(),
+            Reowned {
+                environment_window: Some(lifted.clone()),
+                pins: vec![pin(&format!("{lifted} (recorded on claude-haiku-5-5)"))],
+                ..alone.clone()
+            },
+        );
+        let mut with_window = edits.clone();
+        with_window.insert(2, remove(variable));
+        assert_eq!(
+            how_lifted,
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: with_window,
+            })
+        );
+
+        // The shell's override is left by hand, naming every step.
+        let shell = Reowned {
+            overrides: vec![key.to_string(), format!("{file}:env.{key}")],
+            ..beside.clone()
+        };
+        let How::Manual { step, reason } = how(shared.clone(), shell) else {
+            panic!("expected a step by hand");
+        };
+        assert!(reason.contains(&format!("the {key} environment variable sets it")), "{reason}");
+        assert!(step.contains("set \"modelSettings\""), "{step}");
+        assert!(step.contains(&format!("remove env.{key}")), "{step}");
+        assert!(step.ends_with(&format!("; remove {key}")), "{step}");
+
+        // A model whose trigger a project file owns is pinned there by hand.
+        let project = "/synthetic/project/.claude/settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow";
+        let How::Manual { step, .. } = how(
+            shared,
+            Reowned {
+                pins: vec![pin(project)],
+                ..alone
+            },
+        ) else {
+            panic!("expected a step by hand");
+        };
+        assert!(step.ends_with(&format!("; set {project} to 150000")), "{step}");
+    }
+
+    #[test]
     fn doctor_edits_the_owning_setting_and_leaves_other_owners_by_hand() {
         use crate::doctor::{Edit, How, Patch, fixes};
         use serde_json::json;

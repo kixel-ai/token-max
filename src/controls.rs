@@ -1557,6 +1557,37 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn a_t3_instance_owns_and_dates_the_override_its_environment_sets() {
+        let w = crate::test_support::Workspace::new();
+        let state = w.home.join("settings.json");
+        std::fs::write(&state, "{}").unwrap();
+        let state = state.display().to_string();
+        let empty = Map::new();
+        let mut env = Env::default();
+        env.insert(PERCENT_KEY.into(), "60".into());
+        env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &env)).unwrap();
+        let shell = controls.percent.clone().unwrap();
+        assert_eq!(shell.owners, [PERCENT_KEY]);
+        assert_eq!(shell.since, None);
+        // The instance sets the override, but the 1M opt-out still comes from the shell.
+        t3_percent(&mut controls, &[PERCENT_KEY.into()], &state, "claudeAgent", false);
+        let percent = controls.percent.clone().unwrap();
+        assert_eq!(
+            percent.owners,
+            [format!("{state}:providerInstances.claudeAgent.environment.{PERCENT_KEY}")]
+        );
+        assert_eq!(percent.files, [state.clone()]);
+        assert_eq!(percent.timeless, ["CLAUDE_CODE_DISABLE_1M_CONTEXT"]);
+        assert_eq!(percent.since, None);
+        let environment = [PERCENT_KEY.into(), "CLAUDE_CODE_DISABLE_1M_CONTEXT".into()];
+        t3_percent(&mut controls, &environment, &state, "claudeAgent", false);
+        let percent = controls.percent.unwrap();
+        assert!(percent.timeless.is_empty());
+        assert!(percent.since.is_some_and(|t| t > 0));
+    }
+
     fn claude_sources<'a>(
         user: &'a Map<String, Value>,
         managed: &'a Map<String, Value>,

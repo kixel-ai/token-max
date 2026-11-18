@@ -3510,6 +3510,20 @@ mod tests {
             apply_json("", &[edit("a", 1, false)]).unwrap(),
             "{\n  \"a\": 1\n}\n"
         );
+        // A removal deletes the key, keeping its parent, and is a no-op where nothing is set.
+        let remove = |path: &[&str]| Edit::remove(path);
+        assert_eq!(
+            apply_json(
+                "{\n  \"env\": {\n    \"A\": \"50\",\n    \"B\": \"1\"\n  }\n}\n",
+                &[remove(&["env", "A"]), remove(&["env", "C"]), remove(&["x", "y"])],
+            )
+            .unwrap(),
+            "{\n  \"env\": {\n    \"B\": \"1\"\n  }\n}\n"
+        );
+        assert_eq!(
+            apply_toml("a = 1 # keep\nb = 2\n", &[remove(&["b"]), remove(&["c", "d"])]).unwrap(),
+            "a = 1 # keep\n"
+        );
         for (text, error) in [
             (r#"{"permissions": "x"}"#, "permissions is not an object"),
             (

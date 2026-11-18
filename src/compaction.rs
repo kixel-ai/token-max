@@ -2914,6 +2914,160 @@ mod tests {
     }
 
     #[test]
+    fn the_percent_override_lowers_each_trigger_where_it_resolves() {
+        let key = crate::controls::PERCENT_KEY;
+        let mut scan = data(4);
+        let mut haiku = at("haiku", "haiku", HOUR);
+        haiku.model = Some("claude-haiku-5-5".into());
+        haiku.parts[0].model = Some("claude-haiku-5-5".into());
+        scan.requests.push(haiku);
+        let tuned = |user: Value, env: &Env, since: Option<Millis>| {
+            let mut scan = scan.clone();
+            let mut compaction = controls(Harness::Claude, user, env, "settings.json");
+            if let Some(percent) = &mut compaction.percent {
+                percent.since = since;
+            }
+            scan.profiles[0].compaction = compaction;
+            crate::controls::tune_windows(&mut scan);
+            scan
+        };
+        let window = |scan: &Scan, model| window_control(&scan.profiles[0].compaction, Some(model));
+        let rows = json!({
+            "env": {key: "50"},
+            "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}},
+        });
+
+        // An explicit window below the context compacts at the percentage of it.
+        let explicit = tuned(rows.clone(), &Env::default(), None);
+        let percent = explicit.profiles[0].compaction.percent.as_ref().unwrap();
+        assert_eq!(percent.owners, [format!("settings.json:env.{key}")]);
+        assert_eq!(percent.files, ["settings.json"]);
+        // The synthetic file has no modification time, so no recorded trigger counts.
+        assert_eq!(percent.since, None);
+        let opus = window(&explicit, "claude-opus-5-5");
+        assert_eq!(opus.value, Some(200_000));
+        assert!(opus.applicable);
+        assert_eq!(
+            opus.owner,
+            "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow"
+        );
+        assert!(opus.reason.contains("compacts at 200000 tokens"));
+        // An unset window rests on the undocumented default percentage.
+        let unset = window(&explicit, "claude-haiku-5-5");
+        assert_eq!(unset.value, None);
+        assert!(!unset.applicable);
+        assert!(unset.reason.contains("undocumented default percentage"));
+
+        // A recorded trigger counts only from a session that started after the settings changed.
+        let unset_rows = json!({"env": {key: "50"}});
+        let observed = tuned(unset_rows.clone(), &Env::default(), Some(999));
+        let opus = window(&observed, "claude-opus-5-5");
+        assert_eq!(opus.value, Some(300_000));
+        assert!(opus.applicable);
+        assert_eq!(
+            opus.owner,
+            "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow"
+        );
+        let stale = tuned(unset_rows.clone(), &Env::default(), Some(1000));
+        assert_eq!(window(&stale, "claude-opus-5-5").value, None);
+        // A window above the context also compacts where only a recording shows.
+        let capped = tuned(
+            json!({"env": {key: "50"}, "autoCompactWindow": 400000}),
+            &{
+                let mut env = Env::default();
+                env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+                env
+            },
+            Some(999),
+        );
+        let percent = capped.profiles[0].compaction.percent.as_ref().unwrap();
+        assert_eq!(percent.timeless, ["CLAUDE_CODE_DISABLE_1M_CONTEXT"]);
+        assert_eq!(window(&capped, "claude-opus-5-5").value, Some(300_000));
+
+        // The shell's value is outranked by a file's, and both come out.
+        let mut shell = Env::default();
+        shell.insert(key.into(), "70".into());
+        let both = tuned(rows.clone(), &shell, None);
+        let percent = both.profiles[0].compaction.percent.as_ref().unwrap();
+        assert_eq!(percent.owners, [key.to_string(), format!("settings.json:env.{key}")]);
+        assert_eq!(percent.value, Some(50.0));
+        assert_eq!(percent.timeless, [key]);
+        // A percentage at or above the default never lowers a trigger.
+        shell.insert(key.into(), "100".into());
+        let ignored = tuned(json!({}), &shell, None);
+        assert_eq!(ignored.profiles[0].compaction.percent, None);
+        // An undocumented value leaves every trigger unresolved.
+        shell.insert(key.into(), "half".into());
+        let unknown = tuned(json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}}), &shell, None);
+        let opus = window(&unknown, "claude-opus-5-5");
+        assert_eq!(opus.value, None);
+        assert!(opus.reason.contains("not a percentage"));
+    }
+
+    #[test]
+    fn a_window_change_under_the_percent_override_pins_every_other_model() {
+        let key = crate::controls::PERCENT_KEY;
+        let mut scan = data(4);
+        let mut haiku = at("haiku", "haiku", HOUR);
+        haiku.model = Some("claude-haiku-5-5".into());
+        haiku.parts[0].model = Some("claude-haiku-5-5".into());
+        scan.requests.push(haiku);
+        let rows = |haiku: Option<i64>| {
+            let mut rows = json!({
+                "env": {key: "50"},
+                "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}},
+            });
+            if let Some(window) = haiku {
+                rows["modelSettings"]["claude-haiku-5-5"] = json!({"autoCompactWindow": window});
+            }
+            rows
+        };
+        scan.profiles[0].compaction =
+            controls(Harness::Claude, rows(Some(300000)), &Env::default(), "settings.json");
+        crate::controls::tune_windows(&mut scan);
+        let all = checks(&scan);
+        let opus = all
+            .iter()
+            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+            .unwrap();
+        assert_eq!(opus.base.current, Some(200_000));
+        let reowned = opus.reowned.as_ref().unwrap();
+        assert_eq!(reowned.overrides, [format!("settings.json:env.{key}")]);
+        assert_eq!(reowned.environment_window, None);
+        assert_eq!(
+            reowned.pins,
+            [Pin {
+                model: "claude-haiku-5-5".into(),
+                trigger: Some(150_000),
+                owner: "settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow".into(),
+            }]
+        );
+        assert_eq!(opus.base.recommended, Some(100_000));
+        assert_eq!(opus.base.action, Action::Change);
+
+        // A model whose trigger is unresolved keeps a change advisory, since removing the
+        // override would move it.
+        scan.profiles[0].compaction =
+            controls(Harness::Claude, rows(None), &Env::default(), "settings.json");
+        crate::controls::tune_windows(&mut scan);
+        let all = checks(&scan);
+        let opus = all
+            .iter()
+            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+            .unwrap();
+        let pins = &opus.reowned.as_ref().unwrap().pins;
+        assert_eq!(pins[0].trigger, None);
+        assert_eq!(opus.base.recommended, Some(100_000));
+        assert_eq!(opus.base.action, Action::Advisory);
+        assert!(
+            opus.base
+                .uncertainty
+                .iter()
+                .any(|u| u.contains("claude-haiku-5-5"))
+        );
+    }
+
+    #[test]
     fn an_unset_window_is_priced_against_its_tuned_default() {
         let mut scan = data(4);
         scan.profiles[0].compaction =

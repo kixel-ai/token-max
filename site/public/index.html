@@ -42,14 +42,14 @@
 <section class="findings" aria-labelledby="found">
   <h2 id="found">On the maintainer's last 30 days, across four machines</h2>
   <dl class="totals">
-    <div><dt>API cost</dt><dd>~$69,222</dd></div>
-    <div><dt>Sessions</dt><dd>11,797</dd></div>
-    <div><dt>Potential savings</dt><dd>~$1,604/mo</dd></div>
+    <div><dt>API cost</dt><dd>~$70,009</dd></div>
+    <div><dt>Sessions</dt><dd>12,076</dd></div>
+    <div><dt>Potential savings</dt><dd>~$1,689/mo</dd></div>
   </dl>
-  <p class="small">1,166,636 Claude Code, Codex and T3 Code requests at public API
+  <p class="small">1,181,845 Claude Code, Codex and T3 Code requests at public API
   prices. The savings are every change <code>token-max doctor --defaults</code>
   would make for a user with no settings files, 2% of the spend: a third from the
-  main agent's cache, the rest mostly auto memory and unused skills and tools. The subagent
+  main agent's cache, the rest auto memory and unused skills and tools. The subagent
   cache saving is left out: on the plan profiles doctor can't yet tell which
   settings T3 Code's sessions ran with.</p>
   <div class="cards">
@@ -57,14 +57,14 @@
       <h3 class="who">Subagent cache, 1h instead of 5m</h3>
       <p class="big">~17% cheaper</p>
       <p>Every Claude Code user's subagents cache for 5 minutes. An hour would have
-      cost ~$4,143 less over the 30 days, not yet counted in the savings.</p>
+      cost ~$4,146 less over the 30 days, not yet counted in the savings.</p>
       <code class="setting">subagentPromptCacheTtl</code>
     </article>
     <article class="card">
       <h3 class="who">API-key main agent, 1h instead of 5m</h3>
       <p class="big">~37% cheaper</p>
       <p>A plan's included usage gets 1 hour, but API keys and usage credits get 5
-      minutes. An hour saves ~$515/mo.</p>
+      minutes. An hour saves ~$519/mo.</p>
       <code class="setting">promptCacheTtl</code>
     </article>
   </div>

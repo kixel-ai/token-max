@@ -1595,7 +1595,7 @@ impl Plan {
     /// What the walk came to, as the confirm and the closing lines name it.
     pub fn summary(&self) -> Summary {
         Summary {
-            answered: !self.choices.is_empty(),
+            answered: !self.choices.is_empty() || self.offered > 0,
             offered: self.offered,
             files: self.files.iter().map(|p| p.target.file.clone()).collect(),
             changes: self.total.changes(),
@@ -1880,6 +1880,8 @@ pub struct Selection {
     choices: Vec<(Origin, Choice)>,
     total: Total,
     events: Vec<Event>,
+    /// The offers answered yes, whose entries a removal may name.
+    yes: Vec<usize>,
 }
 
 impl Selection {
@@ -1902,8 +1904,11 @@ impl Selection {
     fn apply(&mut self, offers: &Offers, event: Event) -> Result<(), String> {
         let missing = || format!("the walk answered a change it was not offered ({event:?})");
         match event {
-            Event::Choose { offer, yes } => {
-                let offer = offers.offers.get(offer).ok_or_else(missing)?;
+            Event::Choose { offer: index, yes } => {
+                let offer = offers.offers.get(index).ok_or_else(missing)?;
+                if yes {
+                    self.yes.push(index);
+                }
                 let choice = if yes {
                     Choice::Accepted
                 } else {
@@ -1920,6 +1925,11 @@ impl Selection {
                 }
             }
             Event::Remove { offer, entry } => {
+                if !self.yes.contains(&offer) {
+                    return Err(format!(
+                        "the walk removed an entry of a change it did not accept ({event:?})"
+                    ));
+                }
                 let (target, entry) = offers
                     .offers
                     .get(offer)
@@ -1946,7 +1956,7 @@ impl Selection {
     /// What the walk came to on the host whose changes are `offers`.
     pub fn summary(&self, offers: &Offers) -> Summary {
         Summary {
-            answered: !self.choices.is_empty() || !offers.steps.is_empty(),
+            answered: !self.choices.is_empty() || !offers.steps.is_empty() || offers.offered() > 0,
             offered: offers.offered(),
             files: self
                 .accepted
@@ -1962,7 +1972,7 @@ impl Selection {
 /// What one host's walk came to, as the confirm and the closing lines name it.
 #[derive(Debug)]
 pub struct Summary {
-    /// Whether the report had any change to answer or make by hand.
+    /// Whether the report had any change to offer or make by hand.
     answered: bool,
     /// How many changes the walk offered.
     offered: usize,
@@ -1975,7 +1985,7 @@ pub struct Summary {
 }
 
 impl Summary {
-    /// Whether the walk had any change to answer or make by hand.
+    /// Whether the walk had any change to offer or make by hand.
     pub fn answered(&self) -> bool {
         self.answered
     }
@@ -2240,7 +2250,7 @@ impl Owner {
             accepted,
             mut choices,
             total,
-            events: _,
+            ..
         } = selection;
         choices.extend(self.offers.steps.iter().cloned());
         let files = accepted
@@ -2725,10 +2735,14 @@ pub fn ask(
     }
     for walking in hosts {
         for (step, reason) in &walking.offers.cleanup_by_hand {
-            let text = home_in(
-                &format!("To look for MCP servers that are off by hand, since {reason}: {step}."),
-                walking.style.home.as_deref(),
-            );
+            let look =
+                format!("look for MCP servers that are off by hand, since {reason}: {step}.");
+            // Its step names a path on that host.
+            let look = match walking.label {
+                Some(host) => format!("On {host}, to {look}"),
+                None => format!("To {look}"),
+            };
+            let text = home_in(&look, walking.style.home.as_deref());
             write!(output, "\n{}", walking.style.dim(&text))?;
         }
     }
@@ -3827,16 +3841,18 @@ mod tests {
         let offers: Offers = serde_json::from_str(&json).unwrap();
         assert_eq!(offers.offers[0].fix, fix);
         assert_eq!(offers.files, [settings.to_string_lossy()]);
-        for event in [
-            Event::Choose {
-                offer: 1,
-                yes: true,
-            },
-            Event::Remove { offer: 0, entry: 0 },
-            Event::Cleanup { entry: 0 },
+        let choose = |offer, yes| Event::Choose { offer, yes };
+        let remove = Event::Remove { offer: 0, entry: 0 };
+        for (events, refused) in [
+            (vec![choose(1, true)], "not offered"),
+            (vec![Event::Cleanup { entry: 0 }], "not offered"),
+            // A removal follows only a yes to its change, and names one of its entries.
+            (vec![remove], "did not accept"),
+            (vec![choose(0, false), remove], "did not accept"),
+            (vec![choose(0, true), remove], "not offered"),
         ] {
-            let error = owner.plan(&[event]).unwrap_err().message;
-            assert!(error.contains("not offered"), "{error}");
+            let error = owner.plan(&events).unwrap_err().message;
+            assert!(error.contains(refused), "{events:?}: {error}");
         }
         let plan = owner
             .plan(&[Event::Choose {

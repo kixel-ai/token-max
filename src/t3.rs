@@ -2666,7 +2666,14 @@ mod tests {
                 }
                 _ => None,
             });
-            assert_eq!(bash.is_some_and(|b| b.ttl.is_some()), open, "{env}");
+            // An unresolved machine policy, as on Windows, opens the TTL too, so the cap has no
+            // TTL there; only the instance's own variable leaves the TTL known and opens the cap.
+            let ownership_only = env && !managed_policy_unresolved();
+            assert_eq!(
+                bash.is_some_and(|b| b.ttl.is_some()),
+                ownership_only,
+                "{env}"
+            );
             for details in [false, true] {
                 let text = crate::report::rendered(
                     &report,
@@ -2677,7 +2684,7 @@ mod tests {
                 );
                 assert_eq!(
                     text.contains("may have run under another owner's cap"),
-                    open && details,
+                    ownership_only && details,
                     "{env} {details}"
                 );
             }

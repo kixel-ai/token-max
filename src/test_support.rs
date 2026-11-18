@@ -276,6 +276,7 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
             tuned: IndexMap::default(),
             contexts: IndexMap::default(),
             percent: None,
+            layers: None,
         },
         idle: None,
         speed: None,

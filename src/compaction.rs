@@ -6,17 +6,16 @@ use std::collections::BTreeSet;
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, CacheBoundaries, ttl_milliseconds};
 use crate::controls::{
-    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, WINDOW_KEY, owner_setting,
-    strip_dated, window_control,
+    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, owner_setting, strip_dated,
+    window_control,
 };
 use crate::discovery::locale_compare;
 use crate::model::{
-    Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
+    Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, Change, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, CompactionControls, Cost, Coverage,
     EventKind, Evidence, Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, PercentOverride,
-    Pin, Profile, Reowned, Request, RequestEvidence, Scalar, Scan, StructuralEvent, Text, Ttl,
-    TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario,
-    WindowSensitivity,
+    Profile, Reowned, Request, RequestEvidence, Scalar, Scan, StructuralEvent, Text, Ttl, TtlCheck,
+    Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Sum, TIER_SENSITIVITY, add_costs, price_components, price_part,
@@ -1754,36 +1753,27 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .percent
                 .as_ref()
                 .filter(|_| claude)
-                .map(|percent| {
+                .zip(recommended.filter(|r| Some(*r) != control.value))
+                .map(|(percent, target)| {
                     let outside: Vec<&Profile> = scan
                         .profiles
                         .iter()
                         .filter(|p| !group.ids.contains(&p.id))
                         .collect();
-                    reowned(&group.members, &outside, percent, models, inventory.iter())
-                });
-            // Removing the override moves every other trigger it lowers, so each must be known
-            // to be kept.
-            let unpinned = reowned.as_ref().and_then(|r| {
-                let models: Vec<&str> = r
-                    .pins
-                    .iter()
-                    .filter(|p| p.trigger.is_none())
-                    .map(|p| &*p.model)
-                    .collect();
-                let mut reasons = r.unkept.clone();
-                if !models.is_empty() {
-                    reasons.insert(0, format!(
-                        "it moves the trigger of {}, and where it compacts now is unresolved or outside the {CLAUDE_WINDOW_MINIMUM}-{CLAUDE_WINDOW_MAXIMUM} tokens a window setting can hold",
-                        models.join(", ")
-                    ));
-                }
-                (!reasons.is_empty() && recommended != control.value).then(|| {
-                    format!(
-                        "changing this window removes {PERCENT_KEY}, and {}",
-                        reasons.join("; ")
+                    reowned(
+                        &group.members,
+                        &outside,
+                        percent,
+                        target,
+                        models,
+                        inventory.iter(),
                     )
-                })
+                });
+            let unpinned = reowned.as_ref().filter(|r| !r.unkept.is_empty()).map(|r| {
+                format!(
+                    "changing this window removes {PERCENT_KEY}, and {}",
+                    r.unkept.join("; ")
+                )
             });
             let applicable = control.applicable
                 && per_model_supported
@@ -1920,28 +1910,36 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
 
 /// What a window change under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must also change so one
 /// setting owns each trigger: every setting of the variable comes out, in the home and in each
-/// recorded project of every profile on the line, and every other model the line ran keeps its
-/// current trigger in its own row, as does each model a removed environment window covered.
-/// What the plan cannot keep, such as another line that reads the same override, is `unkept`.
+/// recorded project of every profile on the line. When other models run, the target goes in its
+/// own row, every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` comes out, since it outranks every
+/// row, and every other model the line ran keeps its current trigger in its own row.
+///
+/// The change is then checked, not argued: every scope that reads a changed setting, on this
+/// line or another, resolves again with the changes applied, and each model must land on its
+/// target or keep its trigger. Each that does not is `unkept`.
 fn reowned<'m>(
     members: &[&Profile],
     outside: &[&Profile],
     percent: &PercentOverride,
+    target: i64,
     group: &[Option<Text>],
     line: impl Iterator<Item = &'m Option<Text>>,
 ) -> Reowned {
-    let compaction = &members[0].compaction;
-    fn scopes(member: &Profile) -> impl Iterator<Item = &CompactionControls> {
+    let home = &members[0];
+    let compaction = &home.compaction;
+    fn scopes(member: &Profile) -> impl Iterator<Item = (Option<&str>, &CompactionControls)> {
         let directories = member.idle_directories.iter().flatten();
-        std::iter::once(&member.compaction)
-            .chain(directories.filter_map(|(_, idle)| idle.compaction.as_ref()))
+        std::iter::once((None, &member.compaction)).chain(
+            directories
+                .filter_map(|(cwd, idle)| Some((Some(cwd.as_str()), idle.compaction.as_ref()?))),
+        )
     }
     // Every scope a lifted variable is set in, home and recorded projects alike, since a copy
     // left in any of them takes over.
     let every = |of: fn(&PercentOverride) -> &Vec<String>| {
         let mut all: Vec<String> = of(percent).clone();
         for member in members {
-            for owner in scopes(member).flat_map(|c| c.percent.iter().flat_map(of)) {
+            for owner in scopes(member).flat_map(|(_, c)| c.percent.iter().flat_map(of)) {
                 if !all.contains(owner) {
                     all.push(owner.clone());
                 }
@@ -1949,7 +1947,6 @@ fn reowned<'m>(
         }
         all
     };
-    let overrides = every(|p| &p.owners);
     let mut unkept = vec![];
     let line: Vec<&Option<Text>> = line.collect();
     if line.iter().any(|m| m.is_none()) {
@@ -1958,98 +1955,126 @@ fn reowned<'m>(
                 .to_string(),
         );
     }
-    // A home row holds a model in a recorded project only where the project resolves its
-    // trigger as the home does: the same value from the same setting.
-    let effective = |c: &CompactionControls, model: &str| {
-        let control = window_control(c, Some(model));
-        (control.value, owner_setting(&control.owner).to_string())
-    };
-    let differs: Vec<&str> = line
+    let targets: Vec<&str> = group.iter().flatten().map(|m| &**m).collect();
+    let others: Vec<&str> = line
         .iter()
         .copied()
         .flatten()
-        .filter(|model| {
-            members
-                .iter()
-                .flat_map(|m| scopes(m))
-                .any(|c| effective(c, model) != effective(compaction, model))
-        })
-        .map(|model| &**model)
+        .map(|m| &**m)
+        .filter(|m| !targets.contains(m))
         .collect();
-    if !differs.is_empty() {
+    let mut changes: Vec<Change> = vec![];
+    let mut push =
+        |unkept: &mut Vec<String>, owner: &str, value: Option<i64>| match crate::controls::locate(
+            owner,
+        ) {
+            Some((source, setting)) => {
+                let change = Change {
+                    source,
+                    setting,
+                    value,
+                };
+                if !changes.contains(&change) {
+                    changes.push(change);
+                }
+            }
+            None => unkept.push(format!("no change can be made to {}", owner_setting(owner))),
+        };
+    let file = &home.settings_file;
+    // The row a model reads: its own when one exists, such as an exact dated row, else the one
+    // its window's owner names, else its undated ID's.
+    let row = |model: &str| {
+        let key = if compaction.models.contains_key(model) {
+            Text::from(model)
+        } else {
+            row_key(&window_control(compaction, Some(model)).owner, model)
+        };
+        format!("{file}:modelSettings.{key}.autoCompactWindow")
+    };
+    if others.is_empty() {
+        // Alone on its line, the target's window goes where its owner holds it.
+        for model in &targets {
+            let owner = window_control(compaction, Some(model)).owner;
+            push(&mut unkept, &owner, Some(target));
+        }
+    } else {
+        for model in &targets {
+            push(&mut unkept, &row(model), Some(target));
+        }
+        for owner in every(|p| &p.windows) {
+            push(&mut unkept, &owner, None);
+        }
+        for model in &others {
+            // A trigger no window setting can name cannot be kept without the override, which
+            // the check below reports.
+            if let Some(trigger) = window_control(compaction, Some(model))
+                .value
+                .filter(|t| (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(t))
+            {
+                push(&mut unkept, &row(model), Some(trigger));
+            }
+        }
+    }
+    for owner in every(|p| &p.owners) {
+        push(&mut unkept, &owner, None);
+    }
+    // Resolve every scope that reads a changed setting again, and compare each model there.
+    let mut missed: IndexMap<String, Vec<String>> = IndexMap::default();
+    let checked = members
+        .iter()
+        .map(|m| (true, *m))
+        .chain(outside.iter().map(|o| (false, *o)));
+    for (member, profile) in checked {
+        for (cwd, before) in scopes(profile) {
+            let Some(after) = crate::controls::reresolve(before, &changes) else {
+                continue;
+            };
+            let place = match (member, cwd) {
+                (true, None) => String::new(),
+                (true, Some(cwd)) => format!(" in {cwd}"),
+                (false, None) => format!(" on {}", profile.id),
+                (false, Some(cwd)) => format!(" on {} in {cwd}", profile.id),
+            };
+            let Ok(after) = after else {
+                unkept.push(format!("the changed settings{place} do not resolve"));
+                continue;
+            };
+            let mut models: IndexSet<&str> = before.tuned.keys().map(String::as_str).collect();
+            if member {
+                models.extend(line.iter().copied().flatten().map(|m| &**m));
+            }
+            for model in models {
+                let now = window_control(before, Some(model)).value;
+                let then = window_control(&after, Some(model)).value;
+                let wanted = if member && targets.contains(&model) {
+                    Some(target)
+                } else {
+                    now
+                };
+                let trigger =
+                    |t: Option<i64>| t.map_or("an unresolved trigger".into(), |t| t.to_string());
+                if wanted.is_none() {
+                    missed
+                        .entry(model.to_string())
+                        .or_default()
+                        .push(format!("its trigger{place} is unresolved now"));
+                } else if then != wanted {
+                    missed.entry(model.to_string()).or_default().push(format!(
+                        "it would compact at {}{place} instead of {}",
+                        trigger(then),
+                        trigger(wanted)
+                    ));
+                }
+            }
+        }
+    }
+    for (model, why) in missed {
         unkept.push(format!(
-            "a recorded project compacts {} elsewhere than the home does, which a row in the home file cannot hold",
-            differs.join(", ")
+            "the change does not keep {model}: {}",
+            why.join(", ")
         ));
     }
-    let mut targets: Vec<Text> = vec![];
-    for model in group.iter().flatten() {
-        let key = row_key(&window_control(compaction, Some(model)).owner, model);
-        if !targets.contains(&key) {
-            targets.push(key);
-        }
-    }
-    let mut pins: Vec<Pin> = vec![];
-    for model in line.into_iter().flatten() {
-        let control = window_control(compaction, Some(model));
-        let key = row_key(&control.owner, model);
-        if targets.contains(&key) || pins.iter().any(|p| p.model == key) {
-            continue;
-        }
-        pins.push(Pin {
-            model: key,
-            // A trigger no window setting can name cannot be kept without the override.
-            trigger: control
-                .value
-                .filter(|t| (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(t)),
-            owner: control.owner,
-        });
-    }
-    // The variable outranks every row, so with other models it cannot hold the target alone.
-    let held = !pins.is_empty() && {
-        let control = window_control(compaction, group.iter().flatten().next().map(|m| &**m));
-        [control.owner]
-            .iter()
-            .chain(pins.iter().map(|p| &p.owner))
-            .any(|o| owner_setting(o).ends_with(WINDOW_KEY))
-    };
-    let environment_windows = if held { every(|p| &p.windows) } else { vec![] };
-    // Another line that reads a lifted setting moves with it. Two names for one settings file,
-    // such as a symlink, are one owner.
-    let canonical = |owners: &[String]| -> Vec<String> {
-        owners.iter().map(|o| crate::rows::canonical(o)).collect()
-    };
-    let (removed, lifted) = (canonical(&overrides), canonical(&environment_windows));
-    for other in outside {
-        fn reads<'o>(removed: &[String], mut owners: impl Iterator<Item = &'o String>) -> bool {
-            owners.any(|o| removed.contains(&crate::rows::canonical(owner_setting(o))))
-        }
-        let percents = || scopes(other).flat_map(|c| c.percent.iter());
-        if reads(&removed, percents().flat_map(|p| &p.owners)) {
-            unkept.push(format!(
-                "{} reads the same override on another line, whose triggers this plan does not pin",
-                other.id
-            ));
-        }
-        // A line without the override still reads a window variable this plan lifts.
-        let windows = scopes(other)
-            .flat_map(|c| std::iter::once(&c.default).chain(c.models.values()))
-            .map(|w| &w.owner)
-            .chain(percents().flat_map(|p| &p.windows));
-        if reads(&lifted, windows) {
-            unkept.push(format!(
-                "{} reads a {WINDOW_KEY} this plan lifts on another line, whose triggers this plan does not pin",
-                other.id
-            ));
-        }
-    }
-    Reowned {
-        overrides,
-        environment_windows,
-        targets,
-        pins,
-        unkept,
-    }
+    Reowned { changes, unkept }
 }
 
 /// The `modelSettings` key that holds a model's window: the row its owner names, such as an
@@ -3288,10 +3313,20 @@ mod tests {
         assert!(opus.reason.contains("not a percentage"));
     }
 
+    /// A plan's changes as each owner and the value it sets, None for a removal.
+    fn planned(reowned: &Reowned) -> Vec<(String, Option<i64>)> {
+        reowned
+            .changes
+            .iter()
+            .map(|c| (c.owner(), c.value))
+            .collect()
+    }
+
     #[test]
     fn a_window_change_under_the_percent_override_pins_every_other_model() {
         let key = crate::controls::PERCENT_KEY;
         let mut scan = data(4);
+        scan.profiles[0].settings_file = "settings.json".into();
         let mut haiku = at("haiku", "haiku", HOUR);
         haiku.model = Some("claude-haiku-5-5".into());
         haiku.parts[0].model = Some("claude-haiku-5-5".into());
@@ -3313,34 +3348,41 @@ mod tests {
             "settings.json",
         );
         crate::controls::tune_windows(&mut scan);
-        let all = checks(&scan);
-        let opus = all
-            .iter()
-            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
-            .unwrap();
+        let opus_check = |scan: &Scan, since: Option<Millis>| {
+            checks_since(scan, since)
+                .into_iter()
+                .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+                .unwrap()
+        };
+        let opus = opus_check(&scan, None);
         assert_eq!(opus.base.current, Some(200_000));
-        let reowned = opus.reowned.as_ref().unwrap();
-        assert_eq!(reowned.overrides, [format!("settings.json:env.{key}")]);
-        assert!(reowned.environment_windows.is_empty());
-        assert_eq!(
-            reowned.pins,
-            [Pin {
-                model: "claude-haiku-5-5".into(),
-                trigger: Some(150_000),
-                owner: "settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow".into(),
-            }]
-        );
         assert_eq!(opus.base.recommended, Some(100_000));
+        let reowned = opus.reowned.as_ref().unwrap();
+        assert_eq!(
+            planned(reowned),
+            [
+                (
+                    "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow".into(),
+                    Some(100_000)
+                ),
+                (
+                    "settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow".into(),
+                    Some(150_000)
+                ),
+                (format!("settings.json:env.{key}"), None),
+            ]
+        );
+        assert!(reowned.unkept.is_empty(), "{:?}", reowned.unkept);
         assert_eq!(opus.base.action, Action::Change);
         // A model that ran only before the window started still moves with the override.
-        let all = checks_since(&scan, Some(2 * HOUR + 1));
-        let opus = all
-            .iter()
-            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
-            .unwrap();
-        let pins = &opus.reowned.as_ref().unwrap().pins;
-        assert_eq!(pins.len(), 1);
-        assert_eq!(&*pins[0].model, "claude-haiku-5-5");
+        let opus = opus_check(&scan, Some(2 * HOUR + 1));
+        assert!(
+            planned(opus.reowned.as_ref().unwrap())
+                .iter()
+                .any(|(owner, value)| {
+                    owner.contains("claude-haiku-5-5") && *value == Some(150_000)
+                })
+        );
 
         // A model whose trigger is unresolved keeps a change advisory, since removing the
         // override would move it.
@@ -3351,29 +3393,23 @@ mod tests {
             "settings.json",
         );
         crate::controls::tune_windows(&mut scan);
-        let all = checks(&scan);
-        let opus = all
-            .iter()
-            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
-            .unwrap();
-        let pins = &opus.reowned.as_ref().unwrap().pins;
-        assert_eq!(pins[0].trigger, None);
+        let opus = opus_check(&scan, None);
         assert_eq!(opus.base.recommended, Some(100_000));
         assert_eq!(opus.base.action, Action::Advisory);
         assert!(
             opus.base
                 .uncertainty
                 .iter()
-                .any(|u| u.contains("claude-haiku-5-5"))
+                .any(|u| u.contains("does not keep claude-haiku-5-5")),
+            "{:?}",
+            opus.base.uncertainty
         );
         // Even when that model last ran before the window: the override still lowers its
         // trigger, and removing it would move that trigger unseen.
-        let all = checks_since(&scan, Some(2 * HOUR + 1));
-        let opus = all
-            .iter()
-            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
-            .unwrap();
-        assert_eq!(opus.base.action, Action::Advisory);
+        assert_eq!(
+            opus_check(&scan, Some(2 * HOUR + 1)).base.action,
+            Action::Advisory
+        );
 
         // A trigger below the smallest window a setting may name cannot be pinned either.
         let low = |scan: &mut Scan| {
@@ -3386,16 +3422,13 @@ mod tests {
             crate::controls::tune_windows(scan);
         };
         low(&mut scan);
-        let all = checks(&scan);
-        let opus = all
-            .iter()
-            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
-            .unwrap();
-        let pins = &opus.reowned.as_ref().unwrap().pins;
-        assert_eq!(
-            (pins[0].trigger, opus.base.action),
-            (None, Action::Advisory)
+        let opus = opus_check(&scan, None);
+        let unkept = &opus.reowned.as_ref().unwrap().unkept;
+        assert!(
+            unkept[0].contains("claude-haiku-5-5: it would compact at 150000 instead of 75000"),
+            "{unkept:?}"
         );
+        assert_eq!(opus.base.action, Action::Advisory);
 
         // Lifting the window variable collects every copy, the shell's included.
         let window = crate::controls::WINDOW_KEY;
@@ -3419,14 +3452,19 @@ mod tests {
             &[profile],
             &[],
             percent,
+            100_000,
             std::slice::from_ref(&opus),
             [&opus, &haiku].into_iter(),
         );
-        assert_eq!(reowned.pins[0].trigger, Some(150_000));
-        assert_eq!(
-            reowned.environment_windows,
-            [window.to_string(), format!("settings.json:env.{window}")]
-        );
+        let changes = planned(&reowned);
+        for lifted in [window.to_string(), format!("settings.json:env.{window}")] {
+            assert!(changes.contains(&(lifted, None)), "{changes:?}");
+        }
+        assert!(changes.contains(&(
+            "settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow".into(),
+            Some(150_000)
+        )));
+        assert!(reowned.unkept.is_empty(), "{:?}", reowned.unkept);
 
         // A recorded project's override comes out too.
         let mut project = controls(
@@ -3440,18 +3478,14 @@ mod tests {
         idle.compaction = Some(project);
         scan.profiles[0].idle_directories = Some(IndexMap::from_iter([("/project".into(), idle)]));
         low(&mut scan);
-        let all = checks(&scan);
-        let opus = all
-            .iter()
-            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
-            .unwrap();
-        assert_eq!(
-            opus.reowned.as_ref().unwrap().overrides,
-            [
-                format!("settings.json:env.{key}"),
-                format!("project.json:env.{key}")
-            ]
-        );
+        let opus = opus_check(&scan, None);
+        let changes = planned(opus.reowned.as_ref().unwrap());
+        for owner in [
+            format!("settings.json:env.{key}"),
+            format!("project.json:env.{key}"),
+        ] {
+            assert!(changes.contains(&(owner, None)), "{changes:?}");
+        }
     }
 
     #[test]
@@ -3505,6 +3539,7 @@ mod tests {
     fn a_plan_names_another_line_that_reads_a_window_variable_it_lifts() {
         let (key, window) = (crate::controls::PERCENT_KEY, crate::controls::WINDOW_KEY);
         let mut scan = data(4);
+        scan.profiles[0].settings_file = "settings.json".into();
         scan.profiles[0].compaction = controls(
             Harness::Claude,
             json!({"env": {key: "50", window: "400000"}}),
@@ -3521,6 +3556,7 @@ mod tests {
                 &[profile],
                 &[other],
                 profile.compaction.percent.as_ref().unwrap(),
+                100_000,
                 &line[..1],
                 line.iter(),
             )
@@ -3528,40 +3564,72 @@ mod tests {
         // Another line without the override reads the same file's window variable.
         let mut other = scan.profiles[0].clone();
         other.id = "t3-instance".into();
-        other.compaction = controls(
-            Harness::Claude,
-            json!({"env": {window: "400000"}}),
-            &Env::default(),
-            "settings.json",
-        );
+        let read = |file: &str| {
+            let mut compaction = controls(
+                Harness::Claude,
+                json!({"env": {window: "400000"}}),
+                &Env::default(),
+                file,
+            );
+            compaction.tuned.insert(
+                "claude-opus-5-5".into(),
+                crate::model::TunedWindow {
+                    value: Some(967_000),
+                    reason: String::new(),
+                },
+            );
+            compaction
+        };
+        other.compaction = read("settings.json");
         assert!(other.compaction.percent.is_none());
         let reowned = plan(&other);
-        assert_eq!(
-            reowned.environment_windows,
-            [format!("settings.json:env.{window}")]
-        );
+        assert!(planned(&reowned).contains(&(format!("settings.json:env.{window}"), None)));
         assert!(
-            reowned
-                .unkept
-                .iter()
-                .any(|u| u.contains("t3-instance reads a CLAUDE_CODE_AUTO_COMPACT_WINDOW")),
+            reowned.unkept.iter().any(|u| u.contains(
+                "does not keep claude-opus-5-5: it would compact at 100000 on t3-instance instead of 400000"
+            )),
             "{:?}",
             reowned.unkept
         );
         // One whose window comes from its own file is left alone.
-        other.compaction = controls(
-            Harness::Claude,
-            json!({"env": {window: "400000"}}),
-            &Env::default(),
-            "other.json",
-        );
+        other.compaction = read("other.json");
         assert!(plan(&other).unkept.is_empty());
+    }
+
+    /// A recorded project's controls: the home file, then the project's own.
+    fn layered(home: &Value, project: &Value) -> CompactionControls {
+        let (home, project) = (
+            home.as_object().cloned().unwrap_or_default(),
+            project.as_object().cloned().unwrap_or_default(),
+        );
+        let scopes = [
+            crate::controls::SettingsScope {
+                config: &home,
+                file: "settings.json",
+            },
+            crate::controls::SettingsScope {
+                config: &project,
+                file: "project.json",
+            },
+        ];
+        compaction_controls(&CompactionSources {
+            harness: Harness::Claude,
+            user: &home,
+            managed: &Map::new(),
+            env: &Env::default(),
+            file: "settings.json",
+            managed_file: "managed.json",
+            scopes: Some(&scopes),
+        })
+        .unwrap()
     }
 
     #[test]
     fn a_plan_names_the_triggers_it_cannot_keep_and_projects_that_diverge() {
         let key = crate::controls::PERCENT_KEY;
+        let window = crate::controls::WINDOW_KEY;
         let mut scan = data(4);
+        scan.profiles[0].settings_file = "settings.json".into();
         let rows = json!({
             "env": {key: "50"},
             "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}},
@@ -3573,33 +3641,34 @@ mod tests {
             "settings.json",
         );
         let opus = Some(Text::from("claude-opus-5-5"));
-        let plan = |scan: &Scan, outside: &[&Profile], line: &[Option<Text>]| {
-            let profile = &scan.profiles[0];
-            let percent = profile.compaction.percent.as_ref().unwrap();
-            super::reowned(
-                &[profile],
-                outside,
-                percent,
-                std::slice::from_ref(&opus),
-                line.iter(),
-            )
-        };
-        assert!(
-            plan(&scan, &[], std::slice::from_ref(&opus))
-                .unkept
-                .is_empty()
-        );
+        let haiku = Some(Text::from("claude-haiku-5-5"));
+        let plan =
+            |scan: &Scan, outside: &[&Profile], group: &[Option<Text>], line: &[Option<Text>]| {
+                let profile = &scan.profiles[0];
+                let percent = profile.compaction.percent.as_ref().unwrap();
+                super::reowned(&[profile], outside, percent, 100_000, group, line.iter())
+            };
+        let alone = std::slice::from_ref(&opus);
+        assert!(plan(&scan, &[], alone, alone).unkept.is_empty());
         // Requests with no recorded model may sit under the override too.
-        let unkept = plan(&scan, &[], &[opus.clone(), None]).unkept;
+        let unkept = plan(&scan, &[], alone, &[opus.clone(), None]).unkept;
         assert!(unkept[0].contains("no recorded model"), "{unkept:?}");
-        // Another line that reads the same override would move with it.
+        // Another line that reads the same file moves with it.
+        let ran = |compaction: &mut CompactionControls| {
+            compaction.tuned.insert(
+                "claude-opus-5-5".into(),
+                crate::model::TunedWindow {
+                    value: Some(967_000),
+                    reason: String::new(),
+                },
+            );
+        };
         let mut other = scan.profiles[0].clone();
         other.id = "t3-instance".into();
-        let unkept = plan(&scan, &[&other], std::slice::from_ref(&opus)).unkept;
-        assert!(
-            unkept[0].contains("t3-instance reads the same override"),
-            "{unkept:?}"
-        );
+        ran(&mut other.compaction);
+        let moved = "does not keep claude-opus-5-5: it would compact at 100000 on t3-instance instead of 200000";
+        let unkept = plan(&scan, &[&other], alone, alone).unkept;
+        assert!(unkept.iter().any(|u| u.contains(moved)), "{unkept:?}");
         // Even when it names the file through a symlink.
         #[cfg(unix)]
         {
@@ -3609,68 +3678,103 @@ mod tests {
             let link = w.home.join("linked.json");
             std::os::unix::fs::symlink(&real, &link).unwrap();
             let mut linked = scan.clone();
-            linked.profiles[0]
-                .compaction
-                .percent
-                .as_mut()
-                .unwrap()
-                .owners = vec![format!("{}:env.{key}", real.display())];
-            other.compaction.percent.as_mut().unwrap().owners =
-                vec![format!("{}:env.{key}", link.display())];
-            let unkept = plan(&linked, &[&other], std::slice::from_ref(&opus)).unkept;
-            assert!(
-                unkept[0].contains("t3-instance reads the same override"),
-                "{unkept:?}"
+            linked.profiles[0].compaction = controls(
+                Harness::Claude,
+                rows.clone(),
+                &Env::default(),
+                &real.display().to_string(),
             );
+            other.compaction = controls(
+                Harness::Claude,
+                rows.clone(),
+                &Env::default(),
+                &link.display().to_string(),
+            );
+            ran(&mut other.compaction);
+            let unkept = plan(&linked, &[&other], alone, alone).unkept;
+            assert!(unkept.iter().any(|u| u.contains(moved)), "{unkept:?}");
         }
+        let project = |home: &Value, own: Value| {
+            let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
+            idle.compaction = Some(layered(home, &own));
+            Some(IndexMap::from_iter([("/project".into(), idle)]))
+        };
         // A recorded project that resolves each model's window as the home does needs no
         // row of its own, even with an empty row of its own.
-        let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
-        let mut empty = rows.clone();
-        empty["modelSettings"]["claude-haiku-5-5"] = json!({});
-        idle.compaction = Some(controls(
+        scan.profiles[0].idle_directories =
+            project(&rows, json!({"modelSettings": {"claude-haiku-5-5": {}}}));
+        assert!(plan(&scan, &[], alone, alone).unkept.is_empty());
+        // A recorded project's own window outranks the home file's rows.
+        scan.profiles[0].idle_directories = project(&rows, json!({"autoCompactWindow": 500000}));
+        let unkept = plan(&scan, &[], alone, alone).unkept;
+        assert!(
+            unkept
+                .iter()
+                .any(|u| u.contains("it would compact at 500000 in /project instead of 100000")),
+            "{unkept:?}"
+        );
+        // Lifting a window variable can uncover a project's own window it hid.
+        let lifted = json!({
+            "env": {key: "50", window: "400000"},
+            "modelSettings": {"claude-haiku-5-5": {"autoCompactWindow": 300000}},
+        });
+        scan.profiles[0].compaction = controls(
             Harness::Claude,
-            empty,
+            lifted.clone(),
             &Env::default(),
             "settings.json",
-        ));
-        scan.profiles[0].idle_directories =
-            Some(IndexMap::from_iter([("/project".into(), idle.clone())]));
-        assert!(
-            plan(&scan, &[], std::slice::from_ref(&opus))
-                .unkept
-                .is_empty()
         );
-        // A recorded project's own window outranks any row in the home file.
-        idle.compaction = Some(controls(
-            Harness::Claude,
-            json!({"env": {key: "50"}, "autoCompactWindow": 500000}),
-            &Env::default(),
-            "project.json",
-        ));
-        scan.profiles[0].idle_directories =
-            Some(IndexMap::from_iter([("/project".into(), idle.clone())]));
-        let unkept = plan(&scan, &[], std::slice::from_ref(&opus)).unkept;
+        let both = [opus.clone(), haiku.clone()];
+        scan.profiles[0].idle_directories = None;
+        assert!(plan(&scan, &[], alone, &both).unkept.is_empty());
+        scan.profiles[0].idle_directories = project(&lifted, json!({"autoCompactWindow": 500000}));
+        let unkept = plan(&scan, &[], alone, &both).unkept;
         assert!(
-            unkept[0].contains("compacts claude-opus-5-5 elsewhere"),
+            unkept
+                .iter()
+                .any(|u| u.contains("claude-opus-5-5: it would compact at 500000 in /project")),
             "{unkept:?}"
         );
-        // So does one that sets the same window through another setting.
-        idle.compaction = Some(controls(
+        scan.profiles[0].idle_directories = None;
+        // A model that shares the target's row cannot keep its trigger.
+        scan.profiles[0].compaction = controls(
             Harness::Claude,
-            json!({"env": {key: "50", crate::controls::WINDOW_KEY: "400000"}}),
+            rows.clone(),
             &Env::default(),
-            "project.json",
-        ));
-        scan.profiles[0].idle_directories =
-            Some(IndexMap::from_iter([("/project".into(), idle.clone())]));
-        let unkept = plan(&scan, &[], std::slice::from_ref(&opus)).unkept;
+            "settings.json",
+        );
+        let dated = Some(Text::from("claude-opus-5-5-20261101"));
+        let unkept = plan(
+            &scan,
+            &[],
+            std::slice::from_ref(&dated),
+            &[dated.clone(), opus.clone()],
+        )
+        .unkept;
         assert!(
-            unkept[0].contains("compacts claude-opus-5-5 elsewhere"),
+            unkept
+                .iter()
+                .any(|u| u.contains("does not keep claude-opus-5-5-20261101")),
             "{unkept:?}"
         );
+        // A model with an exact row of its own is pinned there, even an empty one.
+        let exact = json!({
+            "env": {key: "50"},
+            "autoCompactWindow": 300000,
+            "modelSettings": {"claude-haiku-5-5-20261101": {}},
+        });
+        scan.profiles[0].compaction =
+            controls(Harness::Claude, exact, &Env::default(), "settings.json");
+        let dated_haiku = Some(Text::from("claude-haiku-5-5-20261101"));
+        let reowned = plan(&scan, &[], alone, &[opus.clone(), dated_haiku]);
+        assert!(reowned.unkept.is_empty(), "{:?}", reowned.unkept);
+        assert!(planned(&reowned).contains(&(
+            "settings.json:modelSettings.claude-haiku-5-5-20261101.autoCompactWindow".into(),
+            Some(150_000)
+        )));
 
         // A project whose override differs from the home's leaves the comparison unpriced.
+        let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
         idle.compaction = Some(controls(
             Harness::Claude,
             json!({"env": {key: "30"}}),

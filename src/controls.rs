@@ -5,9 +5,9 @@ use crate::collections::{HashMap, IndexMap};
 use serde_json::{Map, Value};
 
 use crate::model::{
-    BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, EventKind, Harness,
-    IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan,
-    SpeedControl, TunedWindow, WindowControl,
+    BackgroundControl, BackgroundFeature, BashCapControl, Change, CompactionControls, EventKind,
+    Harness, IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan,
+    Setting, Source, SpeedControl, TunedWindow, WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -573,6 +573,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             tuned: IndexMap::default(),
             contexts: IndexMap::default(),
             percent: None,
+            layers: None,
         });
     }
     let env_key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -679,9 +680,284 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
         tuned: IndexMap::default(),
         contexts: IndexMap::default(),
         percent: percent_override(scopes, env, &environment),
+        layers: Some(Box::new(WindowLayers {
+            file: file.to_string(),
+            managed_file: managed_file.to_string(),
+            scopes: scopes
+                .iter()
+                .map(|scope| (scope.file.to_string(), window_settings(scope.config)))
+                .collect(),
+            shell: window_environment(env),
+            instance: None,
+        })),
     };
     date_percent(&mut controls);
     Ok(controls)
+}
+
+/// The variables a Claude window resolves from; no other value is kept.
+const WINDOW_ENVIRONMENT: [&str; 5] = [
+    WINDOW_KEY,
+    PERCENT_KEY,
+    "DISABLE_AUTO_COMPACT",
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+];
+
+fn window_environment(env: &Env) -> Env {
+    env.iter()
+        .filter(|(key, _)| WINDOW_ENVIRONMENT.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// The part of a settings file a Claude window resolves from.
+fn window_settings(config: &Map<String, Value>) -> Map<String, Value> {
+    let mut kept = Map::new();
+    for key in ["autoCompactWindow", "autoCompactEnabled"] {
+        if let Some(value) = config.get(key) {
+            kept.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(env) = config.get("env") {
+        kept.insert(
+            "env".into(),
+            match env {
+                Value::Object(env) => Value::Object(
+                    env.iter()
+                        .filter(|(key, _)| WINDOW_ENVIRONMENT.contains(&key.as_str()))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+                other => other.clone(),
+            },
+        );
+    }
+    if let Some(rows) = config.get("modelSettings") {
+        kept.insert(
+            "modelSettings".into(),
+            match rows {
+                // A row's presence matters even when it names no window.
+                Value::Object(rows) => Value::Object(
+                    rows.iter()
+                        .map(|(model, row)| {
+                            let row = match row {
+                                Value::Object(row) => Value::Object(
+                                    row.iter()
+                                        .filter(|(key, _)| *key == "autoCompactWindow")
+                                        .map(|(key, value)| (key.clone(), value.clone()))
+                                        .collect(),
+                                ),
+                                other => other.clone(),
+                            };
+                            (model.clone(), row)
+                        })
+                        .collect(),
+                ),
+                other => other.clone(),
+            },
+        );
+    }
+    kept
+}
+
+/// The raw settings a profile's or directory's Claude windows resolve from: each settings
+/// file's window settings in precedence order, the shell's variables, and a T3 instance's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowLayers {
+    file: String,
+    managed_file: String,
+    scopes: Vec<(String, Map<String, Value>)>,
+    shell: Env,
+    instance: Option<InstanceLayer>,
+}
+
+/// What a T3 instance sets above the settings files: its own variables and its own window.
+#[derive(Clone, Debug, PartialEq)]
+struct InstanceLayer {
+    file: String,
+    id: String,
+    env: Env,
+    window: Option<i64>,
+}
+
+/// The setting an owner names, or None when it names no window setting a change can make.
+pub fn locate(owner: &str) -> Option<(Source, Setting)> {
+    let owner = owner_setting(owner);
+    if !owner.contains(':') {
+        return [WINDOW_KEY, PERCENT_KEY]
+            .contains(&owner)
+            .then(|| (Source::Shell, Setting::Env(owner.to_string())));
+    }
+    let end = [".json:", ".toml:"]
+        .iter()
+        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len() - 1))
+        .min()?;
+    let (file, rest) = (&owner[..end], &owner[end + 1..]);
+    if rest == "autoCompactWindow" {
+        return Some((Source::File(file.into()), Setting::Window));
+    }
+    if let Some(model) = rest
+        .strip_prefix("modelSettings.")
+        .and_then(|r| r.strip_suffix(".autoCompactWindow"))
+    {
+        return Some((Source::File(file.into()), Setting::Row(model.into())));
+    }
+    if let Some(key) = rest.strip_prefix("env.") {
+        return Some((Source::File(file.into()), Setting::Env(key.into())));
+    }
+    let (id, tail) = rest.strip_prefix("providerInstances.")?.split_once('.')?;
+    let source = Source::Instance {
+        file: file.into(),
+        id: id.into(),
+    };
+    match tail {
+        "config.autoCompactWindow" => Some((source, Setting::Window)),
+        _ => Some((
+            source,
+            Setting::Env(tail.strip_prefix("environment.")?.into()),
+        )),
+    }
+}
+
+/// The controls with `changes` applied to the settings they resolve from, or None when no
+/// change touches them. Nothing recorded shows a trigger under the changed settings, so no
+/// observation carries over; tuned defaults and context sizes do, since no change moves them.
+pub fn reresolve(
+    compaction: &CompactionControls,
+    changes: &[Change],
+) -> Option<Result<CompactionControls, ScanError>> {
+    let mut layers = (**compaction.layers.as_ref()?).clone();
+    let real = |file: &str| crate::discovery::realpath(file).unwrap_or_else(|_| file.to_string());
+    let mut touched = false;
+    for change in changes {
+        match &change.source {
+            Source::Shell => {
+                if let Setting::Env(key) = &change.setting
+                    && layers.shell.contains_key(key)
+                {
+                    touched = true;
+                    match change.value {
+                        Some(value) => layers.shell.insert(key.clone(), value.to_string()),
+                        None => layers.shell.remove(key),
+                    };
+                }
+            }
+            Source::File(file) => {
+                let file = real(file);
+                for (scope, config) in &mut layers.scopes {
+                    if real(scope) == file {
+                        touched = true;
+                        apply(config, &change.setting, change.value);
+                    }
+                }
+            }
+            Source::Instance { file, id } => {
+                if let Some(instance) = &mut layers.instance
+                    && &instance.id == id
+                    && real(&instance.file) == real(file)
+                {
+                    touched = true;
+                    match &change.setting {
+                        Setting::Env(key) => match change.value {
+                            Some(value) => instance.env.insert(key.clone(), value.to_string()),
+                            None => instance.env.remove(key),
+                        },
+                        _ => {
+                            instance.window = change.value;
+                            None
+                        }
+                    };
+                }
+            }
+        }
+    }
+    if !touched {
+        return None;
+    }
+    let configs: Vec<(String, Map<String, Value>)> = layers.scopes.clone();
+    let scopes: Vec<SettingsScope> = configs
+        .iter()
+        .map(|(file, config)| SettingsScope { config, file })
+        .collect();
+    let mut env = layers.shell.clone();
+    if let Some(instance) = &layers.instance {
+        env.extend(instance.env.clone());
+    }
+    let empty = Map::new();
+    let result = compaction_controls(&CompactionSources {
+        harness: Harness::Claude,
+        user: scopes.first().map_or(&empty, |s| s.config),
+        managed: &empty,
+        env: &env,
+        file: &layers.file,
+        managed_file: &layers.managed_file,
+        scopes: Some(&scopes),
+    })
+    .map(|mut changed| {
+        if let Some(instance) = &layers.instance
+            && let Some(window) = instance.window
+        {
+            changed.models.clear();
+            changed.default = WindowControl {
+                value: Some(window),
+                owner: format!(
+                    "{}:providerInstances.{}.config.autoCompactWindow",
+                    instance.file, instance.id
+                ),
+                unset: false,
+                setting: None,
+                ..changed.default.clone()
+            };
+        }
+        if let Some(percent) = &mut changed.percent {
+            percent.observed.clear();
+        }
+        changed.tuned = compaction.tuned.clone();
+        changed.contexts = compaction.contexts.clone();
+        changed.layers = Some(Box::new(layers));
+        changed
+    });
+    Some(result)
+}
+
+/// Set or remove one window setting in a settings file's window settings.
+fn apply(config: &mut Map<String, Value>, setting: &Setting, value: Option<i64>) {
+    match (setting, value) {
+        (Setting::Window, Some(value)) => {
+            config.insert("autoCompactWindow".into(), value.into());
+        }
+        (Setting::Window, None) => {
+            config.remove("autoCompactWindow");
+        }
+        (Setting::Row(model), value) => {
+            let rows = config
+                .entry("modelSettings")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(rows) = rows.as_object_mut() {
+                let row = rows
+                    .entry(model.to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(row) = row.as_object_mut() {
+                    match value {
+                        Some(value) => row.insert("autoCompactWindow".into(), value.into()),
+                        None => row.remove("autoCompactWindow"),
+                    };
+                }
+            }
+        }
+        (Setting::Env(key), value) => {
+            let env = config
+                .entry("env")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(env) = env.as_object_mut() {
+                match value {
+                    Some(value) => env.insert(key.clone(), value.to_string().into()),
+                    None => env.remove(key),
+                };
+            }
+        }
+    }
 }
 
 /// The variable that lowers every model's trigger to a percentage of its window.
@@ -767,6 +1043,28 @@ pub fn t3_percent(
     window: bool,
     shell: &Env,
 ) {
+    // Split the merged environment back into the shell's and the instance's own.
+    let own_window = window.then_some(compaction.default.value).flatten();
+    if let Some(layers) = &mut compaction.layers {
+        let mut own = Env::default();
+        for key in environment {
+            if let Some(value) = layers.shell.remove(key) {
+                own.insert(key.clone(), value);
+            }
+            if let Some(value) = shell
+                .get(key)
+                .filter(|_| WINDOW_ENVIRONMENT.contains(&key.as_str()))
+            {
+                layers.shell.insert(key.clone(), value.clone());
+            }
+        }
+        layers.instance = Some(InstanceLayer {
+            file: file.to_string(),
+            id: instance.to_string(),
+            env: own,
+            window: own_window,
+        });
+    }
     // The window variable the instance sets is the effective one, so its own entry owns it.
     if environment.iter().any(|k| k == WINDOW_KEY) {
         let own = format!("{file}:providerInstances.{instance}.environment.{WINDOW_KEY}");

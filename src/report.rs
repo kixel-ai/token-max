@@ -7670,7 +7670,7 @@ mod tests {
     #[test]
     fn a_window_change_under_the_percent_override_makes_one_setting_own_each_trigger() {
         use crate::doctor::{Edit, How, Op, Patch, fixes};
-        use crate::model::{Pin, Reowned};
+        use crate::model::{Change, Reowned};
         use serde_json::json;
         let file = format!("{ROOT}/settings.json");
         let key = crate::controls::PERCENT_KEY;
@@ -7688,6 +7688,18 @@ mod tests {
             )
         };
         let remove = |variable: &str| edit(&["env", variable], json!(null), Op::Remove);
+        let change = |owner: &str, value: Option<i64>| {
+            let (source, setting) = crate::controls::locate(owner).expect("a window setting");
+            Change {
+                source,
+                setting,
+                value,
+            }
+        };
+        let plan = |changes: Vec<Change>| Reowned {
+            changes,
+            unkept: vec![],
+        };
         let how = |owner: String, reowned: Reowned| {
             let mut report = synthetic();
             let mut window = check_base(Action::Change, Some(200_000), Some(300_000));
@@ -7704,24 +7716,16 @@ mod tests {
                 .expect("a window fix")
                 .how
         };
-        let overrides = vec![format!("{file}:env.{key}")];
-        let pin = |owner: &str| Pin {
-            model: "claude-haiku-5-5".into(),
-            trigger: Some(150_000),
-            owner: owner.into(),
-        };
+        let row_of = |model: &str| format!("{file}:modelSettings.{model}.autoCompactWindow");
+        let removed = change(&format!("{file}:env.{key}"), None);
 
         // Alone on its line, the window stays where its owner holds it.
         let shared = format!("{file}:autoCompactWindow");
-        let alone = Reowned {
-            overrides: overrides.clone(),
-            environment_windows: vec![],
-            targets: vec!["claude-opus-5-5".into()],
-            pins: vec![],
-            unkept: vec![],
-        };
         assert_eq!(
-            how(shared.clone(), alone.clone()),
+            how(
+                shared.clone(),
+                plan(vec![change(&shared, Some(300_000)), removed.clone()])
+            ),
             How::Edit(Patch {
                 file: file.clone(),
                 harness: Harness::Claude,
@@ -7733,55 +7737,46 @@ mod tests {
         );
 
         // Beside another model, the target and the other model each get their own row.
-        let beside = Reowned {
-            pins: vec![pin(&shared)],
-            ..alone.clone()
-        };
-        let edits = vec![
-            row("claude-opus-5-5", 300_000),
-            row("claude-haiku-5-5", 150_000),
-            remove(key),
+        let beside = vec![
+            change(&row_of("claude-opus-5-5"), Some(300_000)),
+            change(&row_of("claude-haiku-5-5"), Some(150_000)),
+            removed.clone(),
         ];
         assert_eq!(
-            how(shared.clone(), beside.clone()),
+            how(shared.clone(), plan(beside.clone())),
             How::Edit(Patch {
                 file: file.clone(),
                 harness: Harness::Claude,
-                edits: edits.clone(),
+                edits: vec![
+                    row("claude-opus-5-5", 300_000),
+                    row("claude-haiku-5-5", 150_000),
+                    remove(key),
+                ],
             })
         );
 
-        // A window variable in the file comes out too, since it outranks every row.
+        // A window variable in the file comes out as a removal there.
         let lifted = format!("{file}:env.{variable}");
-        let how_lifted = how(
-            lifted.clone(),
-            Reowned {
-                environment_windows: vec![lifted.clone()],
-                pins: vec![pin(&format!("{lifted} (recorded on claude-haiku-5-5)"))],
-                ..alone.clone()
-            },
-        );
-        let mut with_window = edits.clone();
-        with_window.insert(2, remove(variable));
+        let mut with_window = beside.clone();
+        with_window.insert(1, change(&lifted, None));
         assert_eq!(
-            how_lifted,
+            how(lifted.clone(), plan(with_window.clone())),
             How::Edit(Patch {
                 file: file.clone(),
                 harness: Harness::Claude,
-                edits: with_window,
+                edits: vec![
+                    row("claude-opus-5-5", 300_000),
+                    remove(variable),
+                    row("claude-haiku-5-5", 150_000),
+                    remove(key),
+                ],
             })
         );
 
-        // A copy the shell exports would take over once the file's is gone, so the whole
-        // change is by hand.
-        let How::Manual { step, reason } = how(
-            lifted.clone(),
-            Reowned {
-                environment_windows: vec![variable.to_string(), lifted.clone()],
-                pins: vec![pin(&format!("{lifted} (recorded on claude-haiku-5-5)"))],
-                ..alone.clone()
-            },
-        ) else {
+        // A copy the shell exports is by hand, so the whole change is.
+        let mut shell_window = with_window.clone();
+        shell_window.insert(1, change(variable, None));
+        let How::Manual { step, reason } = how(lifted.clone(), plan(shell_window)) else {
             panic!("expected a step by hand");
         };
         assert!(
@@ -7794,36 +7789,24 @@ mod tests {
         // Two plans that pin each other's target leave the second by hand, so accepting both
         // never reverts the first.
         let mut report = synthetic();
-        let plan = |model: &str, other: &str, owner: String| {
+        let pinned = |model: &str, other: &str| {
             let mut window = check_base(Action::Change, Some(200_000), Some(100_000));
-            window.owner = owner;
+            window.owner = row_of(model);
             let mut check = compaction_check(window);
             if let CheckResult::Compaction(c) = &mut check {
                 c.model = Some(model.into());
                 c.models = vec![Some(model.into())];
-                c.reowned = Some(Reowned {
-                    targets: vec![model.into()],
-                    pins: vec![Pin {
-                        model: other.into(),
-                        trigger: Some(150_000),
-                        owner: format!("{file}:modelSettings.{other}.autoCompactWindow"),
-                    }],
-                    ..alone.clone()
-                });
+                c.reowned = Some(plan(vec![
+                    change(&row_of(model), Some(100_000)),
+                    change(&row_of(other), Some(150_000)),
+                    removed.clone(),
+                ]));
             }
             check
         };
         report.checks = vec![
-            plan(
-                "claude-opus-5-5",
-                "claude-haiku-5-5",
-                format!("{file}:modelSettings.claude-opus-5-5.autoCompactWindow"),
-            ),
-            plan(
-                "claude-haiku-5-5",
-                "claude-opus-5-5",
-                format!("{file}:modelSettings.claude-haiku-5-5.autoCompactWindow"),
-            ),
+            pinned("claude-opus-5-5", "claude-haiku-5-5"),
+            pinned("claude-haiku-5-5", "claude-opus-5-5"),
         ];
         report.context.clear();
         let windows: Vec<How> = fixes(&report, false)
@@ -7838,11 +7821,9 @@ mod tests {
         );
 
         // The shell's override is left by hand, naming every step.
-        let shell = Reowned {
-            overrides: vec![key.to_string(), format!("{file}:env.{key}")],
-            ..beside.clone()
-        };
-        let How::Manual { step, reason } = how(shared.clone(), shell) else {
+        let mut shell = beside.clone();
+        shell.insert(2, change(key, None));
+        let How::Manual { step, reason } = how(shared.clone(), plan(shell)) else {
             panic!("expected a step by hand");
         };
         assert!(
@@ -7857,10 +7838,11 @@ mod tests {
         let project = "/synthetic/project/.claude/settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow";
         let How::Manual { step, .. } = how(
             shared,
-            Reowned {
-                pins: vec![pin(project)],
-                ..alone
-            },
+            plan(vec![
+                change(&row_of("claude-opus-5-5"), Some(300_000)),
+                change(project, Some(150_000)),
+                removed,
+            ]),
         ) else {
             panic!("expected a step by hand");
         };

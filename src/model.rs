@@ -882,6 +882,9 @@ pub struct CompactionControls {
     /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, when it can lower a trigger.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub percent: Option<PercentOverride>,
+    /// The raw settings these controls resolve from, which a plan's changes re-resolve.
+    #[serde(skip)]
+    pub layers: Option<Box<crate::controls::WindowLayers>>,
 }
 
 /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which lowers each model's trigger to a percentage of its
@@ -1796,30 +1799,64 @@ pub struct CompactionCheck {
 /// comes out of every scope, and every other model the line runs keeps its trigger.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reowned {
-    /// Every setting of the variable, each removed.
-    pub overrides: Vec<String>,
-    /// Every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` when it holds a window and other
-    /// models run, each removed so the window it gives them moves to their own rows: any copy
-    /// left behind, such as the shell's, would take over and outrank those rows.
-    pub environment_windows: Vec<String>,
-    /// The `modelSettings` keys of the models the recommendation is for.
-    pub targets: Vec<Text>,
-    /// Every other model the line runs, pinned at its current trigger in its own row.
-    pub pins: Vec<Pin>,
-    /// Triggers removing the variable would move that no edit here keeps, such as another
-    /// line's that reads the same setting; any keeps the change advisory.
+    /// Every setting the change sets or removes, in the order they apply.
+    pub changes: Vec<Change>,
+    /// Why the settings with these changes applied would not give every target its target and
+    /// every other model its current trigger; any keeps the change advisory.
     pub unkept: Vec<String>,
 }
 
-/// A model held at its current trigger by its own window row.
+/// One setting a plan sets to a window, or removes.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Pin {
-    /// The `modelSettings` key that holds its window.
-    pub model: Text,
-    /// The current trigger, or None when it is unresolved or no window setting can name it.
-    pub trigger: Option<i64>,
-    /// The setting that owns its window now.
-    pub owner: String,
+pub struct Change {
+    pub source: Source,
+    pub setting: Setting,
+    /// The window to set, or None to remove the setting.
+    pub value: Option<i64>,
+}
+
+/// Where a setting lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The environment that launched Claude Code.
+    Shell,
+    /// A settings file.
+    File(String),
+    /// A T3 provider instance in T3's settings file.
+    Instance { file: String, id: String },
+}
+
+/// Which window setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Setting {
+    /// The window every model without its own row reads.
+    Window,
+    /// A `modelSettings` row's window.
+    Row(Text),
+    /// An environment variable.
+    Env(String),
+}
+
+impl Change {
+    /// The setting as the report names an owner.
+    pub fn owner(&self) -> String {
+        let setting = match &self.setting {
+            Setting::Window => "autoCompactWindow".to_string(),
+            Setting::Row(model) => format!("modelSettings.{model}.autoCompactWindow"),
+            Setting::Env(key) => format!("env.{key}"),
+        };
+        match (&self.source, &self.setting) {
+            (Source::Shell, Setting::Env(key)) => key.clone(),
+            (Source::Shell, _) => setting,
+            (Source::File(file), _) => format!("{file}:{setting}"),
+            (Source::Instance { file, id }, Setting::Env(key)) => {
+                format!("{file}:providerInstances.{id}.environment.{key}")
+            }
+            (Source::Instance { file, id }, _) => {
+                format!("{file}:providerInstances.{id}.config.autoCompactWindow")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

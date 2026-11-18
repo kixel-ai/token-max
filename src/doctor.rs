@@ -17,7 +17,7 @@ use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
     BackgroundFeature, Billing, Bucket, CheckResult, CompactionCheck, ContextKind, Control,
-    Harness, Margin, Profile, Reowned, Report, Verdict,
+    Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
@@ -689,9 +689,7 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 return unknown(&c.base.owner);
             };
             match &c.reowned {
-                Some(reowned) if c.base.current != Some(window) => {
-                    reown(c, reowned, window, profile)
-                }
+                Some(reowned) if c.base.current != Some(window) => reown(reowned, profile),
                 _ => window_how(c, window, profile),
             }
         }
@@ -947,71 +945,46 @@ fn window_how(c: &CompactionCheck, window: i64, profile: &Profile) -> How {
 }
 
 /// The edits that change a window under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` so one setting owns
-/// every trigger: the variable comes out of each scope, the target window goes in each target
-/// model's own row when other models run, and each of those keeps its current trigger in its
-/// own row. Any owner outside the profile's settings file leaves the whole change by hand.
-fn reown(c: &CompactionCheck, reowned: &Reowned, window: i64, profile: &Profile) -> How {
+/// every trigger: each change the plan checked, as an edit to the profile's settings file, or a
+/// step by hand for any other owner, which leaves the whole change by hand.
+fn reown(reowned: &Reowned, profile: &Profile) -> How {
     let file = profile.settings_file.as_str();
-    // Each owner outside the file, and what to do there.
-    let mut foreign: Vec<(&str, String)> = vec![];
+    let mut foreign: Vec<(String, String)> = vec![];
     let mut edits = vec![];
-    let base = |owner: &str| crate::controls::owner_setting(owner).to_string();
-    let window_key = crate::controls::WINDOW_KEY;
-    // A removed environment window no longer outranks the rows that replace it.
-    let lifted = &reowned.environment_windows;
-    let rowed = |owner: &str| {
-        let owner = base(owner);
-        owner.starts_with(&format!("{file}:")) || lifted.contains(&owner)
-    };
-    let row = |model: &str, value: i64| Edit {
-        path: vec![
-            "modelSettings".into(),
-            model.into(),
-            "autoCompactWindow".into(),
-        ],
-        value: value.into(),
-        op: Op::Set,
-    };
-    if reowned.pins.is_empty() {
-        match window_how(c, window, profile) {
-            How::Edit(patch) => edits.extend(patch.edits),
-            How::Manual { .. } => {
-                foreign.push((
-                    &c.base.owner,
-                    format!("set {} to {window}", base(&c.base.owner)),
-                ));
-            }
+    for change in &reowned.changes {
+        let owner = change.owner();
+        let mine = matches!(&change.source, crate::model::Source::File(f) if f == file);
+        if !mine {
+            let step = match change.value {
+                Some(value) => format!("set {owner} to {value}"),
+                None => format!("remove {owner}"),
+            };
+            foreign.push((owner, step));
+            continue;
         }
-    } else {
-        if !rowed(&c.base.owner) {
-            let to = format!("set {} to {window}", base(&c.base.owner));
-            foreign.push((&c.base.owner, to));
-        }
-        edits.extend(reowned.targets.iter().map(|m| row(m, window)));
-        for pin in &reowned.pins {
-            match pin.trigger {
-                Some(trigger) if rowed(&pin.owner) => edits.push(row(&pin.model, trigger)),
-                Some(trigger) => {
-                    foreign.push((&pin.owner, format!("set {} to {trigger}", base(&pin.owner))));
-                }
-                None => return unknown(&pin.owner),
-            }
-        }
-        for owner in lifted {
-            if names(owner, file, &format!("env.{window_key}")) {
-                edits.push(Edit::remove(&["env", window_key]));
-            } else {
-                foreign.push((owner, format!("remove {owner}")));
-            }
-        }
-    }
-    let key = crate::controls::PERCENT_KEY;
-    for owner in &reowned.overrides {
-        if names(owner, file, &format!("env.{key}")) {
-            edits.push(Edit::remove(&["env", key]));
-        } else {
-            foreign.push((owner, format!("remove {owner}")));
-        }
+        let path: Vec<String> = match &change.setting {
+            Setting::Window => vec!["autoCompactWindow".into()],
+            Setting::Row(model) => vec![
+                "modelSettings".into(),
+                model.to_string(),
+                "autoCompactWindow".into(),
+            ],
+            Setting::Env(key) => vec!["env".into(), key.clone()],
+        };
+        edits.push(match (change.value, &change.setting) {
+            (None, _) => Edit::remove(&path.iter().map(String::as_str).collect::<Vec<_>>()),
+            // A Claude settings file's `env` block holds strings.
+            (Some(value), Setting::Env(_)) => Edit {
+                path,
+                value: value.to_string().into(),
+                op: Op::Set,
+            },
+            (Some(value), _) => Edit {
+                path,
+                value: value.into(),
+                op: Op::Set,
+            },
+        });
     }
     let patch = Patch {
         file: file.into(),

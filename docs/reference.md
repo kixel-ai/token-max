@@ -831,21 +831,24 @@ documented minimum of 1, leaves every line that reads it advisory.
 
 A recommended window under the override makes one setting own the trigger: the
 change removes the override from every scope that sets it, recorded projects
-included. When the profile
-runs other models, the target goes in its own `modelSettings` row, every other
-model the transcripts show, before the window's evidence starts too, is pinned at its current trigger in its own row, and
-every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` comes out, since it outranks
-every row and a copy left behind, such as the shell's under a T3 instance's,
-would take over. The walk shows each of these edits before applying them. An
-owner the walk cannot edit, such as the shell, a project file or a T3 instance,
-leaves the whole change as a step by hand naming it. Anything the change would
-move but cannot pin keeps the line advisory: another model
-whose current trigger is unresolved or below the 100,000-token smallest window
-a setting can name, requests with no recorded model, a model a recorded project
-compacts at another trigger or through another setting than the home does,
-or another line, such as a T3 instance's, that reads the same override or a
-`CLAUDE_CODE_AUTO_COMPACT_WINDOW` the change lifts. A model counts whenever the line's
-history shows it, even one that last ran before the window.
+included. Alone on its line, the target's window changes where its owner holds
+it. When the line runs other models, the target goes in its own `modelSettings`
+row, every other model the line's history shows, even one that last ran before
+the window, is pinned at its current trigger in its own row (an exact dated row
+when one exists), and every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` comes
+out, since it outranks every row. The walk shows each of these edits before
+applying them. An owner the walk cannot edit, such as the shell, a project file
+or a T3 instance, leaves the whole change as a step by hand naming it.
+
+The change is checked, not argued. Every scope that reads a changed setting is
+resolved again with the changes applied: the home, each recorded project, and
+any other line, such as a T3 instance's, that reads the same file or
+environment. Each target must land on its target and every other model on its
+current trigger. Any model that would not, or whose current trigger is
+unresolved, keeps the line advisory, and the line names the model and where its
+trigger would move. Requests with no recorded model keep it advisory too, since
+no row holds their trigger. No recorded compaction shows a trigger under the
+changed settings, so an unset window there rests on the tuned default.
 
 Candidates come from current controls, price-tier boundaries, provider limits,
 and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching

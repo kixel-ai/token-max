@@ -1279,7 +1279,10 @@ pub fn discover_claude_controls(
             continue;
         };
         let inherited = t3.inherited_window;
-        let t3_file = std::path::Path::new(&t3.state).join("settings.json").display().to_string();
+        let t3_file = std::path::Path::new(&t3.state)
+            .join("settings.json")
+            .display()
+            .to_string();
         let (instance, environment) = (t3.instance.clone(), t3.environment.clone());
         let env = &env;
         let ttls = directory_ttls(options, profile, env, requests)?;
@@ -1341,13 +1344,7 @@ pub fn discover_claude_controls(
                 managed_file,
                 scopes: Some(&scopes),
             })?;
-            crate::controls::t3_percent(
-                &mut compaction,
-                &environment,
-                &t3_file,
-                &instance,
-                false,
-            );
+            crate::controls::t3_percent(&mut compaction, &environment, &t3_file, &instance, false);
             directories_controls.insert(
                 cwd.to_string(),
                 IdleControl {

@@ -11,11 +11,10 @@ use crate::controls::{
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
-    CompactionBasis, CompactionCharge, CompactionCheck, CompactionControls, Cost, Coverage, EventKind, Evidence,
-    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, PercentOverride, Pin, Reowned,
-    Request, RequestEvidence, Scalar,
-    Scan, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
-    WindowControl, WindowScenario, WindowSensitivity,
+    CompactionBasis, CompactionCharge, CompactionCheck, CompactionControls, Cost, Coverage,
+    EventKind, Evidence, Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, PercentOverride,
+    Pin, Reowned, Request, RequestEvidence, Scalar, Scan, StructuralEvent, Text, Ttl, TtlCheck,
+    Usage, UsageEstimate, Usd, WindowBasisKind, WindowControl, WindowScenario, WindowSensitivity,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Sum, TIER_SENSITIVITY, add_costs, price_components, price_part,
@@ -2989,7 +2988,10 @@ mod tests {
         shell.insert(key.into(), "70".into());
         let both = tuned(rows.clone(), &shell, None);
         let percent = both.profiles[0].compaction.percent.as_ref().unwrap();
-        assert_eq!(percent.owners, [key.to_string(), format!("settings.json:env.{key}")]);
+        assert_eq!(
+            percent.owners,
+            [key.to_string(), format!("settings.json:env.{key}")]
+        );
         assert_eq!(percent.value, Some(50.0));
         assert_eq!(percent.timeless, [key]);
         // A percentage at or above the default never lowers a trigger.
@@ -2998,7 +3000,11 @@ mod tests {
         assert_eq!(ignored.profiles[0].compaction.percent, None);
         // An undocumented value leaves every trigger unresolved.
         shell.insert(key.into(), "half".into());
-        let unknown = tuned(json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}}), &shell, None);
+        let unknown = tuned(
+            json!({"modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}}),
+            &shell,
+            None,
+        );
         let opus = window(&unknown, "claude-opus-5-5");
         assert_eq!(opus.value, None);
         assert!(opus.reason.contains("not a percentage"));
@@ -3022,8 +3028,12 @@ mod tests {
             }
             rows
         };
-        scan.profiles[0].compaction =
-            controls(Harness::Claude, rows(Some(300000)), &Env::default(), "settings.json");
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            rows(Some(300000)),
+            &Env::default(),
+            "settings.json",
+        );
         crate::controls::tune_windows(&mut scan);
         let all = checks(&scan);
         let opus = all
@@ -3047,8 +3057,12 @@ mod tests {
 
         // A model whose trigger is unresolved keeps a change advisory, since removing the
         // override would move it.
-        scan.profiles[0].compaction =
-            controls(Harness::Claude, rows(None), &Env::default(), "settings.json");
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            rows(None),
+            &Env::default(),
+            "settings.json",
+        );
         crate::controls::tune_windows(&mut scan);
         let all = checks(&scan);
         let opus = all

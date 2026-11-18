@@ -7741,7 +7741,10 @@ mod tests {
         let How::Manual { step, reason } = how(shared.clone(), shell) else {
             panic!("expected a step by hand");
         };
-        assert!(reason.contains(&format!("the {key} environment variable sets it")), "{reason}");
+        assert!(
+            reason.contains(&format!("the {key} environment variable sets it")),
+            "{reason}"
+        );
         assert!(step.contains("set \"modelSettings\""), "{step}");
         assert!(step.contains(&format!("remove env.{key}")), "{step}");
         assert!(step.ends_with(&format!("; remove {key}")), "{step}");
@@ -7757,7 +7760,10 @@ mod tests {
         ) else {
             panic!("expected a step by hand");
         };
-        assert!(step.ends_with(&format!("; set {project} to 150000")), "{step}");
+        assert!(
+            step.ends_with(&format!("; set {project} to 150000")),
+            "{step}"
+        );
     }
 
     #[test]

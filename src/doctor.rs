@@ -16,8 +16,8 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Billing, Bucket, CheckResult, CompactionCheck, ContextKind, Control, Harness,
-    Margin, Profile, Reowned, Report, Verdict,
+    BackgroundFeature, Billing, Bucket, CheckResult, CompactionCheck, ContextKind, Control,
+    Harness, Margin, Profile, Reowned, Report, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
@@ -225,15 +225,12 @@ fn conflicts(how: &How, patch: &Patch) -> bool {
     (other.file == patch.file
         || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
         && other.edits.iter().any(|a| {
-            patch
-                .edits
-                .iter()
-                .any(|b| {
-                    a.op != Op::Append
-                        && b.op != Op::Append
-                        && a.path == b.path
-                        && (a.op != b.op || a.value != b.value)
-                })
+            patch.edits.iter().any(|b| {
+                a.op != Op::Append
+                    && b.op != Op::Append
+                    && a.path == b.path
+                    && (a.op != b.op || a.value != b.value)
+            })
         })
 }
 
@@ -886,7 +883,6 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
     }
 }
 
-
 /// The edit that sets a compaction window where its owner holds it.
 fn window_how(c: &CompactionCheck, window: i64, profile: &Profile) -> How {
     let file = profile.settings_file.as_str();
@@ -964,7 +960,10 @@ fn reown(c: &CompactionCheck, reowned: &Reowned, window: i64, profile: &Profile)
         match window_how(c, window, profile) {
             How::Edit(patch) => edits.extend(patch.edits),
             How::Manual { .. } => {
-                foreign.push((&c.base.owner, format!("set {} to {window}", base(&c.base.owner))));
+                foreign.push((
+                    &c.base.owner,
+                    format!("set {} to {window}", base(&c.base.owner)),
+                ));
             }
         }
     } else {
@@ -3515,13 +3514,21 @@ mod tests {
         assert_eq!(
             apply_json(
                 "{\n  \"env\": {\n    \"A\": \"50\",\n    \"B\": \"1\"\n  }\n}\n",
-                &[remove(&["env", "A"]), remove(&["env", "C"]), remove(&["x", "y"])],
+                &[
+                    remove(&["env", "A"]),
+                    remove(&["env", "C"]),
+                    remove(&["x", "y"])
+                ],
             )
             .unwrap(),
             "{\n  \"env\": {\n    \"B\": \"1\"\n  }\n}\n"
         );
         assert_eq!(
-            apply_toml("a = 1 # keep\nb = 2\n", &[remove(&["b"]), remove(&["c", "d"])]).unwrap(),
+            apply_toml(
+                "a = 1 # keep\nb = 2\n",
+                &[remove(&["b"]), remove(&["c", "d"])]
+            )
+            .unwrap(),
             "a = 1 # keep\n"
         );
         for (text, error) in [

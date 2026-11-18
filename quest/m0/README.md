@@ -249,4 +249,4 @@ prefix overhead, which is confounded by each client's settings and work).
 ✅ don't tune `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` (rejected: replay
 thresholds from the 100K floor up and recommend the cheapest; the study's
 100K advice is modeled, not measured). Its one settings gap is
-[the autocompact percent override](/quest/m0/autocompact-pct.md).
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which [kixel-ai/token-max#165](https://github.com/kixel-ai/token-max/pull/165) resolves.

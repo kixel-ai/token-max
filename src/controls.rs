@@ -6,8 +6,8 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, EventKind, Harness,
-    IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan, SpeedControl,
-    TunedWindow, WindowControl,
+    IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan,
+    SpeedControl, TunedWindow, WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -765,7 +765,10 @@ pub fn t3_percent(
         }
     }
     percent.timeless.retain(|key| !environment.contains(key));
-    let decides = window || environment.iter().any(|k| TRIGGER_KEYS.contains(&k.as_str()));
+    let decides = window
+        || environment
+            .iter()
+            .any(|k| TRIGGER_KEYS.contains(&k.as_str()));
     if decides && !percent.files.iter().any(|f| f == file) {
         percent.files.push(file.to_string());
     }
@@ -1572,13 +1575,21 @@ mod tests {
         assert_eq!(shell.owners, [PERCENT_KEY]);
         assert_eq!(shell.since, None);
         // The instance sets the override, but the 1M opt-out still comes from the shell.
-        t3_percent(&mut controls, &[PERCENT_KEY.into()], &state, "claudeAgent", false);
+        t3_percent(
+            &mut controls,
+            &[PERCENT_KEY.into()],
+            &state,
+            "claudeAgent",
+            false,
+        );
         let percent = controls.percent.clone().unwrap();
         assert_eq!(
             percent.owners,
-            [format!("{state}:providerInstances.claudeAgent.environment.{PERCENT_KEY}")]
+            [format!(
+                "{state}:providerInstances.claudeAgent.environment.{PERCENT_KEY}"
+            )]
         );
-        assert_eq!(percent.files, [state.clone()]);
+        assert_eq!(percent.files, std::slice::from_ref(&state));
         assert_eq!(percent.timeless, ["CLAUDE_CODE_DISABLE_1M_CONTEXT"]);
         assert_eq!(percent.since, None);
         let environment = [PERCENT_KEY.into(), "CLAUDE_CODE_DISABLE_1M_CONTEXT".into()];

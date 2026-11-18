@@ -785,7 +785,28 @@ model's latest observed automatic-compaction trigger, else Claude Code's
 documented default. A window larger than the model's context window replays
 at that context window, as Claude Code caps it. Unresolved defaults, disabled
 compaction, unsupported versions/scopes, and ambiguous named Codex profiles stay
-advisory. No settings are edited.
+advisory.
+
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
+environment the window reads, a T3 instance's included. An explicit window
+below the model's context compacts at that percentage of it. Elsewhere, as under
+an unset or capped window, the trigger rests on Claude Code's undocumented
+default percentage, so the latest automatic compaction on the model counts
+only from a session that started after every file setting the override, a
+window or the context size last changed. A setting in the shell, which keeps no
+such time, or no such compaction leaves the model's line advisory. A value of
+100 or more never lowers a trigger; one that is not a number leaves every line
+advisory.
+
+A recommended window under the override makes one setting own the trigger: the
+change removes the override from every scope that sets it. When the profile
+runs other models, the target goes in its own `modelSettings` row, every other
+model the transcripts show is pinned at its current trigger in its own row, and
+a `CLAUDE_CODE_AUTO_COMPACT_WINDOW` in the settings `env` comes out, since it
+outranks every row. The walk shows each of these edits before applying them. An
+owner the walk cannot edit, such as the shell, a project file or a T3 instance,
+leaves the whole change as a step by hand naming it, and another model whose
+current trigger is unresolved keeps the line advisory.
 
 Candidates come from current controls, price-tier boundaries, provider limits,
 and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching

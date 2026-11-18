@@ -61,8 +61,9 @@ user override left behind a removed project one fires at half the new
 window). An owner the walk can't edit, such as the shell environment that
 launched Claude Code, keeps the row advisory and names that owner.
 
-Transcripts don't record the override, so an observed trigger is evidence of
-the current one only when it postdates the override's last change: use only
-observations from sessions that started after the owning settings file was
-last modified, and leave the row advisory when the owner has no such time,
-such as the shell environment.
+Transcripts record neither the override nor the window, so an observed
+trigger is evidence of the current one only when it postdates the last change
+of everything it depends on: use only observations from sessions that started
+after every settings file that sets the override or the model's window, in
+any scope, was last modified, and leave the row advisory when one of those
+owners has no such time, such as the shell environment.

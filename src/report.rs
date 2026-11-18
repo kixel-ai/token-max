@@ -6278,6 +6278,7 @@ mod tests {
             }],
             usage_estimates: vec![],
             cache_evidence: vec![],
+            reowned: None,
         })
     }
 
@@ -7641,7 +7642,7 @@ mod tests {
                 edits: vec![Edit {
                     path: path.iter().map(|p| p.to_string()).collect(),
                     value,
-                    append: false,
+                    op: crate::doctor::Op::Set,
                 }],
             })
         };
@@ -7801,7 +7802,7 @@ mod tests {
                 edits: vec![Edit {
                     path: path.iter().map(|p| p.to_string()).collect(),
                     value: value.into(),
-                    append: false,
+                    op: crate::doctor::Op::Set,
                 }],
             })
         };
@@ -9287,7 +9288,7 @@ mod tests {
                 edits: vec![Edit {
                     path: vec!["promptCacheTtl".into()],
                     value: serde_json::json!(winner),
-                    append: false,
+                    op: crate::doctor::Op::Set,
                 }],
             })
         );

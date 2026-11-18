@@ -2590,6 +2590,7 @@ fn claude_auto_memory_turned_off_is_kept_off() {
             limitations: vec![],
             env: None,
             inherited_window: true,
+            environment: vec![],
             retained_since: None,
         });
     }

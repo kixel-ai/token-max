@@ -4696,6 +4696,7 @@ mod tests {
             scenarios: vec![],
             usage_estimates: vec![],
             cache_evidence: vec![],
+            reowned: None,
         };
         for policies in [
             Policies {

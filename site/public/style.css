@@ -133,6 +133,28 @@ h2 {
 	letter-spacing: -0.01em;
 }
 
+.totals {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+	gap: 1rem;
+	margin: 0 0 1rem;
+}
+
+.totals dt {
+	font-size: 0.9rem;
+	font-weight: 600;
+	color: var(--muted);
+}
+
+.totals dd {
+	margin: 0.25rem 0 0;
+	font-size: 2.2rem;
+	font-weight: 700;
+	line-height: 1.1;
+	letter-spacing: -0.02em;
+	font-variant-numeric: tabular-nums;
+}
+
 .cards {
 	display: grid;
 	grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
@@ -221,4 +243,8 @@ footer {
 	padding-bottom: 3rem;
 	border-top: 1px solid var(--rule);
 	font-size: 0.95rem;
+}
+
+.totals + .small {
+	margin-bottom: 1.25rem;
 }

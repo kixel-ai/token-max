@@ -19,18 +19,31 @@ without a yes. These work from the first release on; until then, see
 
 ## What it found
 
-On the maintainer's 56 days of Claude Code, replayed 2026-11-17:
+On the maintainer's last 30 days across four machines, replayed 2026-11-17:
 
-- **Subagents: a 1h prompt cache cost ~15% less than the default 5m**, ~$6,105.
-  Every Claude Code user's subagents get 5m. The setting is
-  `subagentPromptCacheTtl` in `~/.claude/settings.json`.
-- **Main agent on an API key or usage credits: 1h cost ~36% less than 5m**,
-  ~$7,383. A plan's included usage already gets 1h; API keys and usage credits
-  get 5m. The setting is `promptCacheTtl`.
+| API cost | Sessions | Potential savings |
+| --- | --- | --- |
+| ~$70,009 | 12,076 | ~$1,689/mo |
 
-~ marks figures from the requests that could be priced: 95.1% for subagents,
-97.9% for the main agent. [The full results](https://github.com/kixel-ai/token-max/blob/main/docs/results.md) have the rest.
-Your sessions differ: run it to see yours.
+That is 1,181,845 Claude Code, Codex and T3 Code requests at public API
+prices. The savings are what `token-max doctor --defaults` finds for a user
+with no settings files on the same history: every change it would make, 2%
+of the spend. A third of it is a 1h main-agent cache on the usage credits
+profiles; the rest is auto memory and unused skills and tools.
+
+- **Main agent on an API key or usage credits: 1h cost ~37% less than 5m**,
+  ~$519/mo of those savings. A plan's included usage already gets 1h; API keys
+  and usage credits get 5m. The setting is `promptCacheTtl`.
+- **Subagents: a 1h prompt cache cost ~17% less than the default 5m**, ~$4,146
+  over the 30 days, but it is left out of the savings. On the plan profiles
+  doctor can't yet tell which settings T3 Code's sessions ran with, so it
+  calls this "not enough evidence" until that is fixed. Every Claude Code
+  user's subagents get 5m. The setting is `subagentPromptCacheTtl`.
+
+~ marks figures extrapolated over requests that could not be priced.
+[The full results](https://github.com/kixel-ai/token-max/blob/main/docs/results.md)
+have each machine, the margins and how this compares with T3 Code's own
+count. Your sessions differ: run it to see yours.
 
 ![token-max doctor walking through three changes on synthetic transcripts](https://raw.githubusercontent.com/kixel-ai/token-max/main/site/public/walk.gif)
 

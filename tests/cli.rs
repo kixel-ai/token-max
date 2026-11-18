@@ -325,7 +325,7 @@ fn exit_codes_and_no_partial_findings_or_transcript_content() {
     assert_eq!(status, 1, "{stderr}");
     assert_eq!(stderr, "");
     assert!(
-        stdout.starts_with("token-max  2 requests from "),
+        stdout.starts_with("token-max  2 requests in 1 session from "),
         "{stdout}"
     );
     assert!(!stdout.contains("SYNTHETIC_PRIVATE"));
@@ -962,7 +962,10 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
         head.contains("saves $") || head.contains("saves <$"),
         "{text}"
     );
-    assert!(text.starts_with("token-max  2 requests from "), "{text}");
+    assert!(
+        text.starts_with("token-max  2 requests in 1 session from "),
+        "{text}"
+    );
     assert_eq!(report_line(&text, "Idle compaction").0, "unknown", "{text}");
     let all = format!("{text}{text_err}");
     assert!(!all.contains("SYNTHETIC_PRIVATE"));
@@ -1316,7 +1319,7 @@ mod unix {
         // The answer echoes on the input terminal, so a separate stdout shows only the
         // blank line that ends the questions.
         at(
-            "\n  How is ~/.claude paid for? [p]lan, [a]PI key or usage credits, [s]kip: \ntoken-max  2 requests from ",
+            "\n  How is ~/.claude paid for? [p]lan, [a]PI key or usage credits, [s]kip: \ntoken-max  2 requests in 1 session from ",
         );
         let headline = at(
             "\n\n  2 questions, biggest saving first.\n  Nothing is written until you confirm the list at the end.\n",

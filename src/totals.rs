@@ -1,4 +1,5 @@
-//! What the hosts of one `doctor` run add up to: their requests, spend and offered savings.
+//! What the hosts of one `doctor` run add up to: their requests, sessions, spend and offered
+//! savings.
 //!
 //! Each host sums its own figures beside its report, so a destination's text still never
 //! carries its scan. The hosts' figures are added as they are: a history copied between hosts
@@ -15,6 +16,8 @@ use crate::report::Spend;
 #[serde(rename_all = "camelCase")]
 pub struct Totals {
     pub requests: u64,
+    /// Sessions, each subagent counted with the session that spawned it.
+    pub sessions: u64,
     /// What the requests cost at API prices, extrapolated over unpriced ones, plus `floor`.
     pub spend: f64,
     /// How far `spend` may be off; None when nothing was extrapolated.
@@ -37,6 +40,7 @@ impl Totals {
         savings.set_share(spend.monthly());
         Totals {
             requests: report.scan.coverage.requests,
+            sessions: crate::report::sessions(&report.scan),
             spend: spend.usd,
             margin: spend.margin,
             floor: spend.floor,
@@ -50,6 +54,7 @@ impl Totals {
     /// combine in quadrature.
     pub fn merge(&mut self, other: &Totals) {
         self.requests += other.requests;
+        self.sessions += other.sessions;
         self.spend += other.spend;
         self.margin = Margin::independent(self.margin, other.margin);
         self.floor += other.floor;
@@ -68,6 +73,7 @@ mod tests {
     fn host(requests: u64, spend: f64, margin: Option<Margin>, monthly: f64) -> Totals {
         Totals {
             requests,
+            sessions: requests / 10,
             spend,
             margin,
             monthly,
@@ -82,6 +88,7 @@ mod tests {
         // A host priced in full adds no margin of its own.
         total.merge(&host(1, 10.0, None, 5.0));
         assert_eq!(total.requests, 151);
+        assert_eq!(total.sessions, 15);
         assert_eq!(total.spend, 1510.0);
         assert_eq!(total.monthly, 805.0);
         // 30 and 40 combine as 3-4-5.
@@ -113,6 +120,6 @@ mod tests {
         let one = host(7, 12.5, None, 12.5);
         let mut total = one.clone();
         total.merge(&one);
-        assert_eq!((total.requests, total.spend), (14, 25.0));
+        assert_eq!((total.requests, total.sessions, total.spend), (14, 0, 25.0));
     }
 }

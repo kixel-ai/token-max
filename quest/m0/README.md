@@ -238,3 +238,15 @@ profiles a row covers). This amends "Resolve settings and recommendations
 per profile" above: settings and recommendations resolve per settings file,
 as [#114](https://github.com/kixel-ai/token-max/pull/114) delivered.
 Profiles are still discovered and deduplicated as before.
+
+Decided 2026-11-17 (maintainer, /quest-plan after comparing
+[inevolin/claude-code-usage-analysis](https://github.com/inevolin/claude-code-usage-analysis),
+a study of habits that throw away the prompt cache, with a Python analyzer
+and a paste-in prompt): ✅ take only what changes a setting token-max can
+measure or cite (rejected: also report habits). ✅ no habit lines (rejected:
+a Measured cold-resume cost line, which has no setting to apply; per-client
+prefix overhead, which is confounded by each client's settings and work).
+✅ don't tune `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS` (rejected: replay
+thresholds from the 100K floor up and recommend the cheapest; the study's
+100K advice is modeled, not measured). Its one settings gap is
+[the autocompact percent override](/quest/m0/autocompact-pct.md).

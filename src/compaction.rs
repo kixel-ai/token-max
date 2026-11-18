@@ -3518,25 +3518,28 @@ mod tests {
             "{unkept:?}"
         );
         // Even when it names the file through a symlink.
-        let w = crate::test_support::Workspace::new();
-        let real = w.home.join("settings.json");
-        std::fs::write(&real, "{}").unwrap();
-        let link = w.home.join("linked.json");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        let mut linked = scan.clone();
-        linked.profiles[0]
-            .compaction
-            .percent
-            .as_mut()
-            .unwrap()
-            .owners = vec![format!("{}:env.{key}", real.display())];
-        other.compaction.percent.as_mut().unwrap().owners =
-            vec![format!("{}:env.{key}", link.display())];
-        let unkept = plan(&linked, &[&other], std::slice::from_ref(&opus)).unkept;
-        assert!(
-            unkept[0].contains("t3-instance reads the same override"),
-            "{unkept:?}"
-        );
+        #[cfg(unix)]
+        {
+            let w = crate::test_support::Workspace::new();
+            let real = w.home.join("settings.json");
+            std::fs::write(&real, "{}").unwrap();
+            let link = w.home.join("linked.json");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let mut linked = scan.clone();
+            linked.profiles[0]
+                .compaction
+                .percent
+                .as_mut()
+                .unwrap()
+                .owners = vec![format!("{}:env.{key}", real.display())];
+            other.compaction.percent.as_mut().unwrap().owners =
+                vec![format!("{}:env.{key}", link.display())];
+            let unkept = plan(&linked, &[&other], std::slice::from_ref(&opus)).unkept;
+            assert!(
+                unkept[0].contains("t3-instance reads the same override"),
+                "{unkept:?}"
+            );
+        }
         // A recorded project that resolves each model's window as the home does needs no
         // row of its own, even with an empty row of its own.
         let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();

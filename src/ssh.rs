@@ -431,15 +431,6 @@ pub fn audit(
             }
         };
         session.stop(true);
-        if let Found::Download(target) = found
-            && VERSION == "0.0.0"
-        {
-            return Err(ScanError::new(format!(
-                "{destination}: runs on {target}, and this development build for {} {} has no release to download; build it with {BUILD}",
-                std::env::consts::OS,
-                std::env::consts::ARCH,
-            )));
-        }
         provision(destination, &found)?;
         provisioned = true;
     };

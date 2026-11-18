@@ -2,11 +2,8 @@
 
 token-max ships as the `token-max` crate on crates.io and as prebuilt
 binaries on a GitHub Release with the same `v<version>` tag. Nothing is
-published by a PR, tag, or merge. m0 owns the 0.0.1 version change, full
-end-to-end validation, publication after every child merges, and
-verification of the published first-use commands. `Cargo.toml` is the only
-version source, `--version` reports it, and the development version stays
-0.0.0, which the release preflight refuses.
+published by a PR, tag, or merge. `Cargo.toml` is the only version source
+and `--version` reports it.
 
 The read-only `Check` workflow runs `just check` (formatting, clippy with
 warnings as errors, the synthetic tests and `quest check`) on Linux, and the
@@ -56,7 +53,7 @@ the page promises. `tests/run_script.rs` runs the run script for the host
 (`run.ps1` on the Windows CI job) against fixture releases on a local server.
 
 The page copies the README's top: the headline, the run line, the
-pre-release notice, the two cache findings from `docs/results.md` and "How it
+two cache findings from `docs/results.md` and "How it
 knows"; change them together. Its
 recording, `walk.gif`, is the README's too, and `assets/demo/walk.tape`
 regenerates it. `og.png`, the link preview, is a 1200x630 screenshot of the
@@ -108,10 +105,10 @@ and crate ownership still belong to the owner. Do not send credentials in chat.
 
 ## Publish
 
-After all m0 children merge, m0 sets the version in `Cargo.toml` to 0.0.1
-through the protected, reviewed squash path, validates the complete tool, and
-updates the README's and the site's pre-release notices in that change;
-redeploy the site once the release is public.
+A release's PR sets its version in `Cargo.toml` through the protected,
+reviewed squash path, after running `token-max doctor` end to end on a real
+host. Redeploy the site once the release is public if that PR changed
+`site/`.
 
 Dispatch **Release** on protected `main` with that exact version. Preflight
 refuses 0.0.0, a prerelease (the release is always marked latest, which the
@@ -142,8 +139,7 @@ After publication, run both installers through max.kixel.ai, and both run
 scripts, from a clean home without a Rust
 toolchain, and `cargo binstall token-max` and `cargo install --locked
 token-max` from a clean `CARGO_HOME`; verify help, version and a synthetic
-priced analysis for each. Then clear m0's publication wait and Quest's
-release handoff. A failed publish is a release failure, never permission to
+priced analysis for each. A failed publish is a release failure, never permission to
 publish an incomplete placeholder.
 
 Sources checked 2026-11-08: [crates.io trusted publishing RFC 3691](https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html),

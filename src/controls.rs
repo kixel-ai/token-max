@@ -742,7 +742,8 @@ fn percent_override(
         }
     }
     Some(PercentOverride {
-        value: value.filter(|v| *v > 0.0),
+        // Claude Code documents 1 to 100; below 1 is no percentage it defines.
+        value: value.filter(|v| *v >= 1.0),
         owners,
         windows,
         files,
@@ -757,7 +758,7 @@ fn percent_override(
 }
 
 /// Credit the variables a T3 instance's own environment sets, and its own window, to T3's
-/// settings file, which dates them, rather than to the shell.
+/// settings file, which dates them, rather than to the shell, with or without the override.
 pub fn t3_percent(
     compaction: &mut CompactionControls,
     environment: &[String],
@@ -766,6 +767,17 @@ pub fn t3_percent(
     window: bool,
     shell: &Env,
 ) {
+    // The window variable the instance sets is the effective one, so its own entry owns it.
+    if environment.iter().any(|k| k == WINDOW_KEY) {
+        let own = format!("{file}:providerInstances.{instance}.environment.{WINDOW_KEY}");
+        for control in
+            std::iter::once(&mut compaction.default).chain(compaction.models.values_mut())
+        {
+            if control.owner == WINDOW_KEY {
+                control.owner = own.clone();
+            }
+        }
+    }
     let Some(percent) = &mut compaction.percent else {
         return;
     };
@@ -906,6 +918,11 @@ fn lowered(
                 && native_million(canonical) == Some(true))
             .then_some(CLAUDE_WINDOW_MAXIMUM));
     let percentage = format!("{PERCENT_KEY}={value}");
+    // An unresolved alias selection leaves no window to lower, and a recorded trigger cannot
+    // show which setting owned it.
+    if control.value.is_none() && !control.unset {
+        return control;
+    }
     if let Some(window) = control.value
         && !control.unset
         && control.setting.is_none()
@@ -1741,6 +1758,68 @@ mod tests {
         assert_eq!(percent.owners, [PERCENT_KEY.to_string(), own(PERCENT_KEY)]);
         assert_eq!(percent.windows, [WINDOW_KEY.to_string(), own(WINDOW_KEY)]);
         assert_eq!(percent.owners.last().unwrap(), &own(PERCENT_KEY));
+    }
+
+    #[test]
+    fn an_override_neither_lowers_an_unresolved_alias_nor_accepts_a_fraction_of_a_percent() {
+        let user = map(json!({
+            "env": {PERCENT_KEY: "50"},
+            "modelSettings": {
+                "opus[1m]": { "autoCompactWindow": 400000 },
+                "claude-opus-4-6[1m]": { "autoCompactWindow": 300000 },
+            },
+        }));
+        let empty = Map::new();
+        let none = Env::default();
+        let mut p = compaction_controls(&claude_sources(&user, &empty, &none)).unwrap();
+        // A recorded trigger cannot say which alias owned the window.
+        let percent = p.percent.as_mut().unwrap();
+        percent.since = Some(0);
+        percent.observed.insert("claude-opus-4-6".into(), 150_000);
+        let aliased = window_control(&p, Some("claude-opus-4-6"));
+        assert_eq!(aliased.value, None);
+        assert!(aliased.reason.contains("alias"));
+
+        // Claude Code documents 1 to 100.
+        let fraction = map(json!({"env": {PERCENT_KEY: "0.5"}, "autoCompactWindow": 400000}));
+        let p = compaction_controls(&claude_sources(&fraction, &empty, &none)).unwrap();
+        assert_eq!(p.percent.as_ref().unwrap().value, None);
+        assert_eq!(window_control(&p, Some("claude-opus-4-6")).value, None);
+    }
+
+    #[test]
+    fn a_t3_instance_owns_the_window_variable_it_sets_without_the_override() {
+        let empty = Map::new();
+        let mut env = Env::default();
+        env.insert(WINDOW_KEY.into(), "300000".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &env)).unwrap();
+        assert!(controls.percent.is_none());
+        assert_eq!(controls.default.owner, WINDOW_KEY);
+        t3_percent(
+            &mut controls,
+            &[WINDOW_KEY.into()],
+            "t3.json",
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
+        assert_eq!(
+            controls.default.owner,
+            format!("t3.json:providerInstances.claudeAgent.environment.{WINDOW_KEY}")
+        );
+        // A settings file's own variable outranks the instance's and keeps its owner.
+        let file = map(json!({"env": {WINDOW_KEY: "300000"}}));
+        let mut controls = compaction_controls(&claude_sources(&file, &empty, &env)).unwrap();
+        let owner = controls.default.owner.clone();
+        t3_percent(
+            &mut controls,
+            &[WINDOW_KEY.into()],
+            "t3.json",
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
+        assert_eq!(controls.default.owner, owner);
     }
 
     fn claude_sources<'a>(

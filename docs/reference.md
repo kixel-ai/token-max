@@ -826,8 +826,8 @@ default percentage, so the latest automatic compaction on the model counts
 only from a session that started after every file setting the override, a
 window or the context size last changed. A setting in the shell, which keeps no
 such time, or no such compaction leaves the model's line advisory. A value of
-100 or more never lowers a trigger; one that is not a number leaves every line
-advisory.
+100 or more never lowers a trigger; one that is not a number, or is below the
+documented minimum of 1, leaves every line that reads it advisory.
 
 A recommended window under the override makes one setting own the trigger: the
 change removes the override from every scope that sets it, recorded projects

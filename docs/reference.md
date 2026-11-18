@@ -965,8 +965,9 @@ assumes each host's history is an independent sample; where histories are
 copied between hosts the errors are correlated, so the total's margin can be
 too small. Any failed
 host, connection or stream before the reports are printed fails the whole run
-with exit 2 and no report, and Ctrl-C then stops every destination. A failure
-or Ctrl-C during a walk, after the reports, also exits 2, as
+with exit 2 and no report, and Ctrl-C then stops every destination. After
+the reports, a failure during the walk, a Ctrl-C during its questions, or a
+Ctrl-C after the yes that leaves a host unwritten also exits 2, as
 [On SSH hosts](#on-ssh-hosts) describes. On a terminal, `doctor` walks through every
 host's changes and writes each on its own host, as
 [On SSH hosts](#on-ssh-hosts) describes. Each host's percents

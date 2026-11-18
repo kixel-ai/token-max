@@ -60,7 +60,7 @@ const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linu
 /// coordinator's OS, architecture, copy name and version, then token-max's arguments.
 ///
 /// Prints `run` and the path of the binary it execs, or prints `copy` or `download <target>`
-/// and exits. On the coordinator's own platform only its copy runs, since every build from a
+/// and exits. The path goes through `printf %s`, since dash's `echo` would act on a `\c` in it. On the coordinator's own platform only its copy runs, since every build from a
 /// commit after a release reports that release's version. On another platform nothing else
 /// can, so a binary of this version stands in, checked by the stream's header: this version's
 /// cached release, else the first installed `token-max` reporting it.
@@ -69,7 +69,7 @@ const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linu
 /// of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`, then in `cargo install`'s
 /// `~/.cargo/bin`; non-interactive shells often leave these off `PATH`. An empty `PATH` entry
 /// is the current directory, as POSIX has it.
-const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do dir=${dir:-.}; if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; echo "run $bin"; shift 4; exec "$bin" "$@""#;
+const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do dir=${dir:-.}; if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; printf "run %s" "$bin"; echo; shift 4; exec "$bin" "$@""#;
 
 /// Picks a SHA-256 command, since Linux and macOS ship different ones.
 const SUM: &str = r#"if command -v sha256sum >/dev/null; then sum=sha256sum; elif command -v shasum >/dev/null; then sum="shasum -a 256"; else exit 5; fi; mkdir -p "$cache" || exit 1; "#;
@@ -1051,6 +1051,25 @@ mod tests {
             ran(&cache(home).join(format!("token-max-v0.0.1-{}", target())))
         );
         assert_eq!(run("plan9", "0.0.2"), (Some(0), download));
+    }
+
+    #[test]
+    fn the_run_line_keeps_a_path_that_echo_would_cut() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        // dash's `echo`, the `sh` of Debian and Ubuntu, stops output at a `\c`.
+        let cache = home.join("x\\cy");
+        let copy = cache.join("token-max/ssh/token-max-copy");
+        script(&copy, r#"echo "copy $*""#);
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let output = command(home, RUN, &[os, arch, "token-max-copy", "0.0.1", "doctor"])
+            .env("XDG_CACHE_HOME", &cache)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("run {}\ncopy doctor\n", copy.display())
+        );
     }
 
     /// Releases of `version` for this host under a `file:` URL, with a checksum that lies when

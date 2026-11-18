@@ -66,6 +66,13 @@ fn evaluation_ttl(
     profile: &Profile,
     requests: &[&Request],
 ) -> (Option<Ttl>, &'static str) {
+    // No one TTL holds across projects that set it differently, so no fallback stands in.
+    if profile.ttl.main.varies {
+        return (
+            None,
+            "recorded projects set the main-agent cache TTL differently",
+        );
+    }
     let verdict = ttls
         .iter()
         .find(|t| t.base.profiles.contains(&profile.id) && t.bucket == Bucket::Main)
@@ -428,6 +435,16 @@ mod tests {
                 _ => None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_main_ttl_projects_set_differently_has_no_fallback() {
+        let mut profile = crate::test_support::make_profile("p", "root");
+        profile.ttl.main.value = Some(Ttl::OneHour);
+        profile.ttl.main.varies = true;
+        let (ttl, basis) = evaluation_ttl(&[], &profile, &[]);
+        assert_eq!(ttl, None);
+        assert!(basis.contains("differently"));
     }
 
     #[test]

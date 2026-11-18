@@ -2345,6 +2345,14 @@ fn unsettled_for(
             open.extend(owners.iter().cloned());
         }
     }
+    // A check reads its line's lead, so an opened profile opens every profile on its line.
+    let opened: HashSet<String> = open.iter().filter_map(line).collect();
+    open.extend(
+        profiles
+            .iter()
+            .filter(|p| line(&p.id).is_some_and(|l| opened.contains(&l)))
+            .map(|p| p.id.clone()),
+    );
     open
 }
 
@@ -2584,6 +2592,21 @@ mod tests {
             open(&["native", "env"]),
             ["compaction", "speed", "subagent ttl"]
         );
+        // A request open between a line's member and T3 opens the whole line, whose
+        // check reads the lead.
+        let mut lines = profiles.to_vec();
+        let mut member = make_profile("member", root);
+        member.speed = lines[0].speed.clone();
+        lines.push(member);
+        let open_speed = unsettled_for(
+            &lines,
+            &HashSet::from_iter([Profiles::from_iter([
+                "member".to_string(),
+                "agent".to_string(),
+            ])]),
+            Control::Speed,
+        );
+        assert!(open_speed.contains("native"), "{open_speed:?}");
         // A removed instance's controls are gone, so nothing it could share is known.
         assert_eq!(
             open(&["native", "gone"]),
@@ -2600,6 +2623,8 @@ mod tests {
                 instance["environment"] = json!([{"name":"BASH_MAX_TIMEOUT_MS","value":"3600000"}]);
             }
             let root = state(&w, json!({"providerInstances":{"claudeAgent":instance}}));
+            // A known TTL, so the cap has a TTL to compare with and only ownership is open.
+            write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"1h"}"#);
             let database = db(&root);
             seed(&database, "claudeAgent", "claudeAgent");
             // Dates when T3 began recording turn items, after the session below.
@@ -2637,6 +2662,43 @@ mod tests {
                             .any(|u| u.contains("unresolved T3 control ownership"))
                     );
                 }
+            }
+            // The whole doctor report renders an advisory cap that still has a TTL.
+            let report = crate::replay::analyze(crate::replay::AnalyzeOptions {
+                scan: data,
+                catalog: &crate::test_support::prices(),
+                since: None,
+                now: timestamp(&json!("2026-01-02T00:00:00Z")).unwrap(),
+                max_cost_per_use_usd: 1.0,
+            })
+            .unwrap();
+            let bash = report.checks.iter().find_map(|c| match c {
+                crate::model::CheckResult::BashCap(b) if b.base.action == Action::Advisory => {
+                    Some(b)
+                }
+                _ => None,
+            });
+            // An unresolved machine policy, as on Windows, opens the TTL too, so the cap has no
+            // TTL there; only the instance's own variable leaves the TTL known and opens the cap.
+            let ownership_only = env && !managed_policy_unresolved();
+            assert_eq!(
+                bash.is_some_and(|b| b.ttl.is_some()),
+                ownership_only,
+                "{env}"
+            );
+            for details in [false, true] {
+                let text = crate::report::rendered(
+                    &report,
+                    crate::report::ReportOptions {
+                        details,
+                        ..Default::default()
+                    },
+                );
+                assert_eq!(
+                    text.contains("may have run under another owner's cap"),
+                    ownership_only && details,
+                    "{env} {details}"
+                );
             }
         }
     }

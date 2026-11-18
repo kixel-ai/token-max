@@ -610,6 +610,7 @@ mod tests {
         for check in &mut report.checks {
             if let CheckResult::BashCap(c) = check {
                 c.ttl = None;
+                c.ttl_basis = "the main-agent cache TTL is unresolved".into();
                 c.base.action = Action::Advisory;
                 c.base.recommended = None;
             }

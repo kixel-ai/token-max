@@ -900,7 +900,7 @@ pub struct PercentOverride {
     pub timeless: Vec<String>,
     /// When the last of `files` changed; None until dated, and whenever `timeless` is not empty.
     pub since: Option<Millis>,
-    /// The latest automatic trigger by undated model, from sessions that started after `since`.
+    /// The latest automatic trigger by recorded model ID, from sessions that started after `since`.
     pub observed: IndexMap<String, i64>,
 }
 

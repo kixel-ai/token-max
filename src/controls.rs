@@ -872,7 +872,11 @@ fn lowered(
         );
         return control;
     }
-    control.value = percent.observed.get(canonical).copied();
+    control.value = percent
+        .observed
+        .get(model)
+        .or_else(|| percent.observed.get(canonical))
+        .copied();
     let evidence = match (control.value, percent.since) {
         (Some(trigger), _) => format!(
             "the latest automatic compaction on this model since the settings that decide it last changed triggered at {trigger} tokens"
@@ -1151,9 +1155,11 @@ fn observe(
                 && let Some(since) = percent.since
                 && started.get(&*e.session).is_some_and(|&start| start > since)
             {
-                let model = undated(model);
-                let key = percent_key(at, percent, &model);
-                let latest = percented.entry((model, key)).or_insert((e.time, tokens));
+                // The recorded ID, since an exact dated row may set its window.
+                let key = percent_key(at, percent, model);
+                let latest = percented
+                    .entry((model.to_string(), key))
+                    .or_insert((e.time, tokens));
                 if e.time >= latest.0 {
                     *latest = (e.time, tokens);
                 }

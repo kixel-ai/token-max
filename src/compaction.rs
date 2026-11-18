@@ -3046,6 +3046,20 @@ mod tests {
                 .get("claude-opus-5-5"),
             Some(&300_000)
         );
+        // So does one under an exact dated row the undated ID would not find.
+        let id = "claude-opus-5-5-20261101";
+        apart.events[0].meta = std::sync::Arc::new(crate::model::EventMeta {
+            model: Some(id.into()),
+            ..(*apart.events[0].meta).clone()
+        });
+        let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
+        let exact =
+            json!({"env": {key: "50"}, "modelSettings": {id: {"autoCompactWindow": 400000}}});
+        idle.compaction = Some(dated(exact, "settings.json"));
+        apart.profiles[0].idle_directories = Some(IndexMap::from_iter([("/project".into(), idle)]));
+        crate::controls::tune_windows(&mut apart);
+        assert_eq!(window(&apart, id).value, None);
+        assert_eq!(window(&apart, "claude-opus-5-5").value, None);
         // A window above the context also compacts where only a recording shows.
         let capped = tuned(
             json!({"env": {key: "50"}, "autoCompactWindow": 400000}),

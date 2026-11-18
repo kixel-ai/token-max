@@ -872,11 +872,15 @@ fn lowered(
         );
         return control;
     }
-    control.value = percent
-        .observed
-        .get(model)
-        .or_else(|| percent.observed.get(canonical))
-        .copied();
+    // A dated ID borrows its undated ID's recorded trigger only under the same settings.
+    let borrowed = || {
+        (canonical != model
+            && percent_key(compaction, percent, model)
+                == percent_key(compaction, percent, canonical))
+        .then(|| percent.observed.get(canonical))
+        .flatten()
+    };
+    control.value = percent.observed.get(model).or_else(borrowed).copied();
     let evidence = match (control.value, percent.since) {
         (Some(trigger), _) => format!(
             "the latest automatic compaction on this model since the settings that decide it last changed triggered at {trigger} tokens"

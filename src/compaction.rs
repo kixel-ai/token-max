@@ -3060,6 +3060,35 @@ mod tests {
         crate::controls::tune_windows(&mut apart);
         assert_eq!(window(&apart, id).value, None);
         assert_eq!(window(&apart, "claude-opus-5-5").value, None);
+        // A dated ID borrows its undated ID's recorded trigger only under the same settings.
+        let undated_rows = json!({"env": {key: "50"}, "modelSettings": {"claude-opus-5-5": {"autoCompactWindow": 400000}}});
+        let shared = tuned(undated_rows.clone(), &Env::default(), Some(999));
+        assert_eq!(window(&shared, id).value, Some(200_000));
+        let mut unset = scan.clone();
+        let mut c = controls(
+            Harness::Claude,
+            unset_rows.clone(),
+            &Env::default(),
+            "settings.json",
+        );
+        c.percent.as_mut().unwrap().since = Some(999);
+        unset.profiles[0].compaction = c;
+        crate::controls::tune_windows(&mut unset);
+        assert_eq!(window(&unset, id).value, Some(300_000));
+        let mut apart_rows = undated_rows.clone();
+        apart_rows["modelSettings"][id] = json!({"autoCompactWindow": "auto"});
+        let mut split = scan.clone();
+        let mut c = controls(
+            Harness::Claude,
+            apart_rows,
+            &Env::default(),
+            "settings.json",
+        );
+        c.percent.as_mut().unwrap().since = Some(999);
+        split.profiles[0].compaction = c;
+        crate::controls::tune_windows(&mut split);
+        assert_eq!(window(&split, "claude-opus-5-5").value, Some(200_000));
+        assert_eq!(window(&split, id).value, None);
         // A window above the context also compacts where only a recording shows.
         let capped = tuned(
             json!({"env": {key: "50"}, "autoCompactWindow": 400000}),

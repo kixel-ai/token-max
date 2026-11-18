@@ -132,12 +132,19 @@ struct Lifetime {
     reason: String,
 }
 
+/// Why a keepalive line leaves its winner open when idle compaction left T3's sessions out.
+pub const KEEPALIVE_SPLIT: &str = "the idle-compaction alternative counts sessions T3 could not settle at this line's share, while pings price them in full, so the aggregate winner is unresolved";
+
 /// The cache lifetime pings must beat: the recommended main TTL, else the current or observed one.
 fn claude_lifetime(
     profile: &Profile,
     ttls: &[&TtlCheck],
     requests: &[&Request],
 ) -> Option<Lifetime> {
+    // No one TTL holds across projects that set it differently, so no fallback stands in.
+    if profile.ttl.main.varies {
+        return None;
+    }
     let check = ttls
         .iter()
         .find(|c| c.base.profiles.contains(&profile.id) && c.bucket == Bucket::Main);
@@ -146,7 +153,7 @@ fn claude_lifetime(
         .and_then(|c| c.base.recommended)
     {
         (t, "recommended main TTL")
-    } else if let Some(t) = profile.ttl.main.value {
+    } else if let Some(t) = profile.ttl.main.one().value {
         (t, "current main TTL")
     } else if let Some(t) = check.and_then(|c| c.base.recommended) {
         (t, "main TTL the replay favors")
@@ -972,9 +979,14 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     let same_population = idle_checks
         .iter()
         .all(|c| c.base.profiles.iter().all(|p| line.ids.contains(p)));
+    // Idle counts sessions T3 could not settle at the line's share, while pings price every
+    // covered session in full, so the two savings would not describe the same sessions.
+    let split = idle_checks.iter().any(|c| {
+        c.after_recommendations.applicable && c.after_recommendations.coverage.left_out > 0
+    });
     // A partial keepalive replay cannot be compared to an all-session idle aggregate.
     // Each idle saving that counts brings its own margin when extrapolated.
-    let idle_savings = if profile.harness == Harness::Claude && same_population {
+    let idle_savings = if profile.harness == Harness::Claude && same_population && !split {
         idle_checks
             .iter()
             .try_fold((0.0_f64, None), |(sum, margin), c| {
@@ -1001,7 +1013,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     if conditional {
         uncertainty.push(TIER_SENSITIVITY.into());
     }
-    if profile.harness == Harness::Claude && idle_savings.is_none() {
+    if profile.harness == Harness::Claude && split {
+        uncertainty.push(KEEPALIVE_SPLIT.into());
+    } else if profile.harness == Harness::Claude && idle_savings.is_none() {
         uncertainty.push("an applicable idle-compaction alternative is unpriced, so the aggregate winner is unresolved".into());
     }
     let margin = best
@@ -1045,10 +1059,10 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             since: Some(since), until: Some(options.now),
             window_basis: if options.since.is_some() {"explicit --since window"} else {"available transcript window"}.into(),
             baseline: if alternative > 0.0 {"idle compaction as recommended, with no pings"} else {"sessions left idle, with no pings"}.into(),
-            requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced}),
+            requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced, ..Default::default()}),
             savings_usd: savings, margin: error, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| s * 30.0 * DAY as f64 / elapsed as f64), break_even,
             assumptions: vec![
-                lifetime.as_ref().map_or_else(|| "cache lifetime unknown".into(), |l| format!("cache lifetime: {}", l.reason)),
+                lifetime.as_ref().map_or_else(|| if profile.ttl.main.varies {"cache lifetime unknown: recorded projects set the main TTL differently".into()} else {"cache lifetime unknown".into()}, |l| format!("cache lifetime: {}", l.reason)),
                 "each session is replayed sequentially at each cap and with no pings, carrying cache warmth and ping context; all policies use the same recommended compaction windows and their modeled summary costs".into(),
                 "unchanged recorded context retains measured cache reads, including external warmth; rewritten context uses the modeled session-local cache without assuming unrelated activity warms the changed prefix".into(),
                 "Codex requests retain a measured uniform 12h write lifetime and inherited long coverage; mixed write lifetimes have unresolved prefix geometry".into(),
@@ -1880,6 +1894,59 @@ mod tests {
         let check = run(&scan, 8 * HOUR);
         assert_eq!(check.ping_input_tokens, None);
         assert_eq!(check.base.recommended, None);
+    }
+
+    #[test]
+    fn a_main_ttl_projects_set_differently_leaves_the_lifetime_unknown() {
+        let mut profile = one_hour();
+        profile.ttl.main.varies = true;
+        // The latest write is 1h, but it is one project's TTL, not the profile's.
+        let check = run(&scan(profile, vec![turn("a", 0)]), HOUR);
+        assert_eq!(check.lifetime_ms, None);
+        assert_eq!(check.base.recommended, None);
+        assert!(check.base.assumptions[0].contains("projects set the main TTL differently"));
+    }
+
+    #[test]
+    fn an_idle_alternative_with_left_out_sessions_leaves_the_winner_open() {
+        let scan = scan(one_hour(), vec![turn("a", 0), turn("a", 2 * HOUR)]);
+        let catalog = prices();
+        let estimates = IndexMap::default();
+        let mut idle = crate::idle::idle_checks(&crate::idle::IdleOptions {
+            scan: &scan,
+            catalog: &catalog,
+            summaries: &[],
+            estimates: &estimates,
+            ttls: &[],
+            windows: &[],
+            since: Some(0),
+            now: 3 * HOUR,
+        });
+        idle[0].after_recommendations.coverage.left_out = 1;
+        let keepalive = |idle: &[IdleCheck]| {
+            let refs: Vec<_> = idle.iter().collect();
+            keepalive_checks(&KeepaliveOptions {
+                scan: &scan,
+                catalog: &catalog,
+                ttls: &[],
+                windows: &[],
+                summaries: &[],
+                estimates: &estimates,
+                idle: &refs,
+                since: Some(0),
+                now: 3 * HOUR,
+            })
+            .remove(0)
+        };
+        let check = keepalive(&idle);
+        assert_eq!(check.idle_compaction_savings, None);
+        assert_eq!(check.base.recommended, None);
+        assert!(check.base.uncertainty.iter().any(|s| s == KEEPALIVE_SPLIT));
+        // An idle policy that does not apply offers no alternative to split.
+        idle[0].after_recommendations.applicable = false;
+        let check = keepalive(&idle);
+        assert!(check.base.uncertainty.iter().all(|s| s != KEEPALIVE_SPLIT));
+        assert_eq!(check.idle_compaction_savings.map(|e| e.usd), Some(0.0));
     }
 
     #[test]

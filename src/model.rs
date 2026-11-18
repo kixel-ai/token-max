@@ -840,9 +840,25 @@ pub struct TunedWindow {
 /// A current TTL control for one bucket.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TtlControl {
+    /// The home's value, which a recorded project may override; see `varies`.
     pub value: Option<Ttl>,
     pub owner: String,
     pub reason: String,
+    /// Whether recorded projects get the TTL from another owner or at another value, so
+    /// `value` does not hold for every request; replays that resolve each directory still
+    /// read it there.
+    #[serde(skip)]
+    pub varies: bool,
+}
+
+impl TtlControl {
+    /// The control as one value for the whole profile: unknown where projects differ.
+    pub fn one(&self) -> TtlControl {
+        TtlControl {
+            value: self.value.filter(|_| !self.varies),
+            ..self.clone()
+        }
+    }
 }
 
 /// Window controls for the default and per-model overrides.
@@ -932,6 +948,10 @@ pub struct BashCapControl {
     /// The effective `BASH_DEFAULT_TIMEOUT_MS` (default 120000).
     pub default_timeout: Millis,
     pub default_owner: String,
+    /// Why the cap stays advisory: a request T3 could not settle may have run under another
+    /// owner's cap.
+    #[serde(skip)]
+    pub unresolved: Option<String>,
 }
 
 /// A selected profile's current settings and their owning controls.
@@ -995,6 +1015,10 @@ pub struct Profile {
     /// the same switch in `settings_file`. Only files that hold settings are listed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outranking_files: Vec<String>,
+    /// Each existing recorded directory's cache TTLs, from which the profile's are settled
+    /// once T3 attributes its requests.
+    #[serde(skip)]
+    pub ttl_directories: IndexMap<String, PerBucket<TtlControl>>,
     /// Claude Code's own state file for this root, such as `~/.claude.json`, which holds
     /// its user- and local-scope MCP servers; none for Codex.
     #[serde(skip)]
@@ -1104,10 +1128,13 @@ pub struct T3Instance {
     /// override native settings in ways discovery does not resolve.
     pub settings_unresolved: bool,
     pub limitations: Vec<String>,
-    /// The instance's environment when it inherits the native settings window, which
-    /// discovery resolves at each recorded project like a native profile's.
+    /// A Claude instance's environment when its settings resolve, under which discovery
+    /// reads each recorded project's settings as it does a native profile's.
     #[serde(skip)]
-    pub inherited_window: Option<crate::controls::Env>,
+    pub env: Option<crate::controls::Env>,
+    /// Whether T3 passes no window, so Claude Code reads the native user, project and local ones.
+    #[serde(skip)]
+    pub inherited_window: bool,
     /// When T3's pruned event log becomes complete, which starts its idle check's window;
     /// None when it never pruned or was not read.
     pub retained_since: Option<Millis>,
@@ -1575,10 +1602,16 @@ impl Margin {
 }
 
 /// Request parts priced in both compared scenarios.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Coverage {
     pub priced: u64,
     pub total: u64,
+    /// Sessions or turns T3 could not settle between this line and another owner, left out
+    /// of the comparison; `stand_ins` of them count in `total`, at the line's settled share.
+    /// None when none were left out, or when some had no share, which leaves the comparison
+    /// unestimated.
+    pub left_out: u64,
+    pub stand_ins: Option<u64>,
 }
 
 /// Shared recommendation metadata; savings are relative to the named baseline.

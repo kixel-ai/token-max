@@ -41,19 +41,30 @@ const SOURCES: [&str; 2] = [
 ];
 const POLICY_CHANGE: &str = "effective project TTL/window policy changes within a conversation; its counterfactual is unresolved";
 
-/// A comparison of two runs session by session, as (baseline, alternative, acting): baseline
-/// minus alternative, extrapolated over the unpriced sessions, with how many were priced.
+/// A comparison of two runs session by session, as (baseline, alternative, acting, left
+/// out): baseline minus alternative, extrapolated over the unpriced sessions, with how many
+/// were priced.
 ///
 /// Only sessions where idle compaction could act, `acting`, stand for the unpriced ones. One
 /// where it could not counts exactly, so its zero doesn't dilute them; unpriced, such as when
-/// its replay failed, it still changes nothing, since no run acts on it.
+/// its replay failed, it still changes nothing, since no run acts on it. A session left out,
+/// since T3 could not settle whether this line's owner ran it, stands in at its share of an
+/// unpriced acting one (see [`crate::t3::Split`]), and one with no share leaves nothing
+/// estimated.
 fn paired<'c>(
-    sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool)>,
+    sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool, Option<Option<f64>>)>,
 ) -> (Option<Estimate>, Coverage) {
     let mut pairs = Pairs::default();
     let mut exact = Usd::ZERO;
     let mut known = 0;
-    for (baseline, alternative, acting) in sessions {
+    let mut shares = vec![];
+    for (baseline, alternative, acting, out) in sessions {
+        if let Some(share) = out {
+            if acting {
+                shares.push(share);
+            }
+            continue;
+        }
         if acting {
             pairs.add(baseline, alternative);
             continue;
@@ -63,14 +74,21 @@ fn paired<'c>(
         }
         known += 1;
     }
-    let paired = pairs.savings(0);
-    let estimate = paired.savings.map(|e| Estimate {
-        usd: e.usd + exact.to_f64(),
-        margin: e.margin,
-    });
+    let left_out = shares.len() as u64;
+    let stand_ins = crate::t3::stand_ins(shares);
+    let paired = pairs.savings(stand_ins.unwrap_or(0));
+    let estimate = paired
+        .savings
+        .filter(|_| stand_ins.is_some())
+        .map(|e| Estimate {
+            usd: e.usd + exact.to_f64(),
+            margin: e.margin,
+        });
     let coverage = Coverage {
         priced: paired.priced + known,
         total: paired.total + known,
+        left_out,
+        stand_ins: stand_ins.filter(|_| left_out > 0),
     };
     (estimate, coverage)
 }
@@ -1585,6 +1603,8 @@ struct Profiled<'a> {
     /// Profile events indexed once for every window simulation and cache replay.
     window_events: WindowEvents<'a>,
     calibration: CompactionSamples<'a>,
+    /// The sessions T3 could not settle to this line, which comparisons leave out.
+    split: crate::t3::Split<'a>,
     /// Whether scenarios also keep single periods, which only tests read.
     detail: bool,
 }
@@ -1990,9 +2010,9 @@ impl<'a> Profiled<'a> {
                 .map(|(&session, group)| {
                     let periods =
                         self.session_periods(index, (session, group), ttls, &lookup, owner);
-                    (replay.failed.get(session), periods)
+                    (session, replay.failed.get(session), periods)
                 })
-                .filter(|(_, periods)| !periods.is_empty())
+                .filter(|(_, _, periods)| !periods.is_empty())
         };
         // The first pass finds what needs every period but not their activation.
         let mut cohorts = Cohorts::default();
@@ -2001,7 +2021,7 @@ impl<'a> Profiled<'a> {
         let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
         let mut idle_events: HashSet<&Id> = HashSet::default();
         let mut applicable = false;
-        for (_, periods) in sessions() {
+        for (_, _, periods) in sessions() {
             count_cohorts(&periods, &mut cohorts);
             for p in &periods {
                 counts.add(p.kind, p.confirmed);
@@ -2073,7 +2093,9 @@ impl<'a> Profiled<'a> {
         // Whether idle compaction could change each session: a period that could trigger, or
         // an applied one that off undoes.
         let mut acting: Vec<bool> = vec![];
-        for (failed, mut periods) in sessions() {
+        let mut left_out: Vec<Option<Option<f64>>> = vec![];
+        for (session, failed, mut periods) in sessions() {
+            left_out.push(self.split.left_out(session));
             acting.push(periods.iter().any(|p| {
                 matches!(
                     p.kind.status,
@@ -2095,7 +2117,7 @@ impl<'a> Profiled<'a> {
         // A fraction's run needs every session again, so it builds them again.
         let run = |mode: Mode| {
             let mut state = RunState::new(None);
-            for (failed, mut periods) in sessions() {
+            for (_, failed, mut periods) in sessions() {
                 activate(&mut periods, &cohorts);
                 let runner = Runner::new(self, index, &periods, &sizes, ttls);
                 runner.run(self, ttls, (true, mode), &mut [], &mut state);
@@ -2107,7 +2129,9 @@ impl<'a> Profiled<'a> {
         // extrapolated over instead of hiding the comparison.
         let pair = |r: &Run| {
             let sessions = r.sessions.iter().zip(&off.sessions).zip(&acting);
-            let (delta, coverage) = paired(sessions.map(|((on, off), &a)| (on, off, a)));
+            let sessions = sessions.zip(&left_out);
+            let (delta, coverage) =
+                paired(sessions.map(|(((on, off), &a), &out)| (on, off, a, out)));
             (delta.filter(|_| !replay.blocked), coverage)
         };
         let delta = |r: &Run| pair(r).0;
@@ -2157,6 +2181,7 @@ impl<'a> Profiled<'a> {
         // Priced in full, the pairs add up to the aggregate difference.
         debug_assert!(
             coverage.priced < coverage.total
+                || coverage.left_out > 0
                 || replay.blocked
                 || (delta_usd.unwrap()
                     - difference(&on.adjustment, &off.adjustment)
@@ -2410,6 +2435,7 @@ fn profile_checks<'a>(
         groups,
         window_events: WindowEvents::new(events.iter().copied()),
         calibration: compaction_samples(&requests, &events, options.summaries),
+        split: crate::t3::Split::new(&scan.profiles, &scan.requests, &group.ids, Some(since)),
         detail,
     };
     let scopes = &profiled.scopes;
@@ -2685,6 +2711,12 @@ fn detailed_t3_checks(
             groups,
             window_events: WindowEvents::new(events.iter().copied()),
             calibration: samples,
+            split: crate::t3::Split::new(
+                &options.scan.profiles,
+                &options.scan.requests,
+                &group.ids,
+                since,
+            ),
             detail,
         };
         let current_windows = current_windows(&profiled.scopes, &requests);
@@ -2704,9 +2736,17 @@ fn detailed_t3_checks(
                     })
             })
             .collect();
+        // T3's replay applies one TTL to every project, so one that varies leaves it unpriced.
+        let mut unresolved_windows = unresolved_windows;
+        unresolved_windows.extend(
+            [&profile.ttl.main, &profile.ttl.subagent]
+                .into_iter()
+                .filter(|t| t.varies)
+                .map(|t| t.reason.clone()),
+        );
         let current_ttls = PerBucket {
-            main: profile.ttl.main.value,
-            subagent: profile.ttl.subagent.value,
+            main: profile.ttl.main.one().value,
+            subagent: profile.ttl.subagent.one().value,
         };
         let mut current_replay = profiled.replay(&current_ttls, &current_windows, true);
         // The unresolved window causes the replay's own errors, so it is named first.
@@ -2732,7 +2772,7 @@ fn detailed_t3_checks(
                     && c.base.action == Action::Change
             })
             .and_then(|c| c.base.recommended)
-            .or(profile.ttl.main.value);
+            .or(profile.ttl.main.one().value);
         let after_ttls = PerBucket {
             main: ttl,
             subagent: options
@@ -2744,7 +2784,7 @@ fn detailed_t3_checks(
                         && c.base.action == Action::Change
                 })
                 .and_then(|c| c.base.recommended)
-                .or(profile.ttl.subagent.value),
+                .or(profile.ttl.subagent.one().value),
         };
         let mut after_replay = profiled.replay(&after_ttls, &after_windows, true);
         after_replay
@@ -2766,7 +2806,7 @@ fn detailed_t3_checks(
             .collect::<IndexSet<_>>()
             .into_iter()
             .collect();
-        let applicable = crate::t3::settled(&options.scan.profiles, &group.ids, &history);
+        let applicable = crate::t3::settled(&options.scan.profiles, &group.ids);
         // Every mode's saving over the current one, extrapolated where some sessions were
         // unpriced; the largest wins.
         let all_priced = requests
@@ -2968,7 +3008,7 @@ fn t3_comparison(
             };
             // T3 dates expiry from the request start, so the timer is relative to `r.time`.
             let expires = meta.and_then(|t| t.cache_expires_at).and_then(|expiry| {
-                if ttl == profile.ttl.main.value {
+                if ttl == profile.ttl.main.one().value {
                     return Some(expiry);
                 }
                 let old =
@@ -2998,7 +3038,7 @@ fn t3_comparison(
                 .and_then(|t| t.idle_mode);
             // A recorded compaction shows when T3 fired under the current TTL; another TTL
             // moves the timer, so that gap is judged like any other.
-            let (status, reason) = if observed.is_some() && ttl == profile.ttl.main.value {
+            let (status, reason) = if observed.is_some() && ttl == profile.ttl.main.one().value {
                 (
                     PeriodStatus::Eligible,
                     "explicit idle run identity and native applied compaction boundary",
@@ -3258,24 +3298,27 @@ fn t3_comparison(
     let scenarios = runs
         .into_iter()
         .map(|run| {
-            let acting = sessions.iter().map(|s| acting.contains(s));
+            let acting = sessions
+                .iter()
+                .map(|s| (acting.contains(s), profiled.split.left_out(s)));
             let (estimate, _) = paired(
                 run.sessions
                     .iter()
                     .zip(acting.clone())
-                    .map(|(cost, a)| (cost, &zero, a)),
+                    .map(|(cost, (a, out))| (cost, &zero, a, out)),
             );
             let (savings, coverage) = paired(
                 current
                     .iter()
                     .zip(&run.sessions)
                     .zip(acting)
-                    .map(|((current, cost), a)| (current, cost, a)),
+                    .map(|((current, cost), (a, out))| (current, cost, a, out)),
             );
             let unblocked = |e: Option<Estimate>| e.filter(|_| !replay.blocked);
             // Priced in full, the pairs add up to the totals' difference.
             debug_assert!(
                 coverage.priced < coverage.total
+                    || coverage.left_out > 0
                     || savings
                         .zip(current_total.zip(run.cost.total_usd))
                         .is_none_or(|(s, (c, m))| (s.usd - (c - m).to_f64()).abs() < 1e-6)
@@ -3866,12 +3909,14 @@ mod tests {
             value: Some(value),
             owner: owner.into(),
             reason: "explicit".into(),
+            varies: false,
         };
         Profile {
             agents: Default::default(),
             instruction_budget_file: None,
             instruction_budget_unresolved: None,
             outranking_files: vec![],
+            ttl_directories: IndexMap::default(),
             claude_config: None,
             codex_system_config: None,
             switched_off: vec![],
@@ -4125,10 +4170,10 @@ mod tests {
         let (zero, unknown) = (zero_cost(), unknown_cost("synthetic"));
         // A priced session no mode acts on counts exactly, beside the extrapolated ones.
         let (estimate, coverage) = paired([
-            (&usd(3.0), &zero, true),
-            (&usd(5.0), &zero, true),
-            (&unknown, &zero, true),
-            (&usd(1.0), &zero, false),
+            (&usd(3.0), &zero, true, None),
+            (&usd(5.0), &zero, true, None),
+            (&unknown, &zero, true, None),
+            (&usd(1.0), &zero, false, None),
         ]);
         let estimate = estimate.unwrap();
         near(Some(estimate.usd), 4.0 * 3.0 + 1.0);
@@ -4137,15 +4182,47 @@ mod tests {
             coverage,
             Coverage {
                 priced: 3,
-                total: 4
+                total: 4,
+                ..Default::default()
             }
         );
+        // Sessions T3 left open stand in at the line's share; one idle could not act on
+        // stands for nothing.
+        let half = Some(Some(0.5));
+        let (estimate, coverage) = paired([
+            (&usd(3.0), &zero, true, None),
+            (&usd(5.0), &zero, true, None),
+            (&usd(9.0), &zero, true, half),
+            (&unknown, &zero, true, half),
+            (&usd(1.0), &zero, false, half),
+        ]);
+        near(estimate.map(|e| e.usd), 4.0 * 3.0);
+        assert_eq!(
+            coverage,
+            Coverage {
+                priced: 2,
+                total: 3,
+                left_out: 2,
+                stand_ins: Some(1),
+            }
+        );
+        // A left-out session with no share leaves nothing estimated.
+        let (estimate, _) = paired([
+            (&usd(3.0), &zero, true, None),
+            (&usd(9.0), &zero, true, Some(None)),
+        ]);
+        assert_eq!(estimate, None);
         // Nothing priced where idle could act leaves nothing to extrapolate from.
-        let (estimate, _) = paired([(&unknown, &zero, true), (&usd(1.0), &zero, false)]);
+        let (estimate, _) = paired([
+            (&unknown, &zero, true, None),
+            (&usd(1.0), &zero, false, None),
+        ]);
         assert_eq!(estimate, None);
         // Every session priced is exact.
-        let (estimate, coverage) =
-            paired([(&usd(2.0), &usd(0.5), true), (&usd(1.0), &zero, false)]);
+        let (estimate, coverage) = paired([
+            (&usd(2.0), &usd(0.5), true, None),
+            (&usd(1.0), &zero, false, None),
+        ]);
         assert_eq!(
             estimate,
             Some(Estimate {
@@ -4157,7 +4234,8 @@ mod tests {
             coverage,
             Coverage {
                 priced: 2,
-                total: 2
+                total: 2,
+                ..Default::default()
             }
         );
     }
@@ -4178,7 +4256,8 @@ mod tests {
             a.coverage,
             Coverage {
                 priced: 4,
-                total: 5
+                total: 5,
+                ..Default::default()
             }
         );
         // Two priced sessions of three that idle could act on, scaled to all three; the
@@ -4244,7 +4323,8 @@ mod tests {
             a.coverage,
             Coverage {
                 priced: 3,
-                total: 4
+                total: 4,
+                ..Default::default()
             }
         );
         near(a.delta.map(|d| d.usd), -2.196 * 2.0);
@@ -5178,7 +5258,8 @@ mod tests {
             ownership_resolved: true,
             settings_unresolved: false,
             limitations: vec![],
-            inherited_window: None,
+            env: None,
+            inherited_window: true,
             retained_since: None,
         });
         for r in &mut scan.requests {
@@ -5281,7 +5362,8 @@ mod tests {
             check.base.coverage,
             Some(Coverage {
                 priced: 3,
-                total: 4
+                total: 4,
+                ..Default::default()
             })
         );
         near(check.base.savings_usd, two.base.savings_usd.unwrap() * 1.5);
@@ -5324,7 +5406,8 @@ mod tests {
             check.base.coverage,
             Some(Coverage {
                 priced: 3,
-                total: 4
+                total: 4,
+                ..Default::default()
             })
         );
         let s = &check.after_recommendations.scenarios;

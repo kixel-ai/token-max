@@ -748,6 +748,19 @@ cross only in a destination's session lines.
 
 ## Cache TTL
 
+A profile's TTL resolves to one value only when every request in it, across all
+of its recorded projects, gets that value from the same owner. The projects are
+those its own requests ran in, once T3 has attributed them, so a project only a T3
+instance used never unsettles native Claude Code's TTL. Where a project's own
+settings file sets it, or a project defaults differently, the TTL line stays
+unresolved for the profile, since no one edit to the user file covers every
+project, and so do the checks that apply one TTL across the profile: the Bash
+cap, keepalive pings, compaction windows and T3's idle modes. Native idle
+compaction resolves each directory's TTL instead. A project directory that no
+longer exists runs nothing more and decides nothing. An unset main TTL
+whose billing is unknown stays pinnable while every project leaves it to the same
+setting.
+
 Unlinked API attempts stay in coverage. A TTL comparison may estimate input from
 matching adjacent measured requests, including growing-context retry geometry
 within one five-minute cache lifetime, with their IDs and assumptions reported;
@@ -844,9 +857,9 @@ and every tool, skill and MCP server (see [Profiles](#profiles)). The settings
 T3 itself decides, such as thread fast mode and effort and an instance's
 window override, are the instance's own lines. Instances whose idle compaction
 inherits the global `idleCompaction` share one idle line naming T3's
-`settings.json`. A line shared with an instance whose ownership T3 could not
-settle stays advisory unless the requests it could not settle all lie within
-that line.
+`settings.json`. A request T3 could not settle leaves open only the
+controls its possible owners read on different lines; lines that act for one
+owner alone extrapolate over it instead (see [T3 evidence](t3.md#requests-t3-cannot-settle)).
 
 Optional SQLite metadata uses the bundled SQLite library; no system SQLite
 executable is needed. One read-only transaction supplies a consistent WAL view,

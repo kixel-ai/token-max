@@ -16,7 +16,3 @@ lands (rejected: holding #155 for the fix).
 Recommended: rerun #155's procedure (the same four hosts, a fresh 30-day
 window, `--defaults`, billing answered as recorded in #155, every change
 declined), and redeploy the site once it merges.
-
-## Required
-
-- [Read shared settings for controls T3 leaves alone](/quest/m0/launch/t3-shared-controls.md) - the TTL lines that count toward the savings

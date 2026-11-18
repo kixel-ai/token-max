@@ -44,20 +44,23 @@ pub struct BashInput<'a> {
 /// One check per line of Claude profiles that share the cap's owners, comparing the current
 /// cap with the main-agent cache TTL.
 pub fn bash_checks(input: &BashInput<'_>) -> Vec<BashCapCheck> {
-    let owner = |p: &Profile| {
-        let bash = p.bash.as_ref().expect("filtered on a cap");
-        format!(
-            "{}\n{}\n{}",
-            bash.owner,
-            bash.default_owner,
-            crate::rows::ttl_owner(p, crate::model::Bucket::Main)
-        )
-    };
     let capped = input.scan.profiles.iter().filter(|p| p.bash.is_some());
-    crate::rows::groups(capped, owner)
+    crate::rows::groups(capped, |p| owner(p).expect("filtered on a cap"))
         .iter()
         .map(|line| check(input, line, line.lead.bash.as_ref().expect("a cap")))
         .collect()
+}
+
+/// The owners that put a profile on a Bash cap line: both timeout variables' and the main
+/// TTL's the cap is compared with. None without a cap.
+pub(crate) fn owner(p: &Profile) -> Option<String> {
+    let bash = p.bash.as_ref()?;
+    Some(format!(
+        "{}\n{}\n{}",
+        bash.owner,
+        bash.default_owner,
+        crate::rows::ttl_owner(p, crate::model::Bucket::Main)
+    ))
 }
 
 /// The main-agent TTL the cap must stay under, and where it came from.
@@ -66,6 +69,13 @@ fn evaluation_ttl(
     profile: &Profile,
     requests: &[&Request],
 ) -> (Option<Ttl>, &'static str) {
+    // No one TTL holds across projects that set it differently, so no fallback stands in.
+    if profile.ttl.main.varies {
+        return (
+            None,
+            "recorded projects set the main-agent cache TTL differently",
+        );
+    }
     let verdict = ttls
         .iter()
         .find(|t| t.base.profiles.contains(&profile.id) && t.bucket == Bucket::Main)
@@ -74,7 +84,7 @@ fn evaluation_ttl(
     if let Some(ttl) = verdict {
         return (Some(ttl), "the main-agent cache TTL this report recommends");
     }
-    if let Some(ttl) = profile.ttl.main.value {
+    if let Some(ttl) = profile.ttl.main.one().value {
         return (Some(ttl), "the current main-agent cache TTL setting");
     }
     let observed = requests
@@ -221,6 +231,8 @@ fn check(
     let miss_estimate = sample.estimate(costs.len() as u64);
 
     let (action, recommended) = match ttl {
+        // A request T3 could not settle may have run under another owner's cap.
+        _ if control.unresolved.is_some() => (Action::Advisory, None),
         None => (Action::Advisory, None),
         Some(t) if control.value >= ttl_milliseconds(t) => (Action::Change, Some(safe_cap(t))),
         Some(_) => (Action::Keep, Some(control.value)),
@@ -240,6 +252,7 @@ fn check(
     if ttl.is_none() {
         uncertainty.push(ttl_basis.into());
     }
+    uncertainty.extend(control.unresolved.clone());
     uncertainty.extend(miss_cost.unknown.iter().cloned());
     BashCapCheck {
         base: CheckBase {
@@ -428,6 +441,16 @@ mod tests {
                 _ => None,
             })
             .unwrap()
+    }
+
+    #[test]
+    fn a_main_ttl_projects_set_differently_has_no_fallback() {
+        let mut profile = crate::test_support::make_profile("p", "root");
+        profile.ttl.main.value = Some(Ttl::OneHour);
+        profile.ttl.main.varies = true;
+        let (ttl, basis) = evaluation_ttl(&[], &profile, &[]);
+        assert_eq!(ttl, None);
+        assert!(basis.contains("differently"));
     }
 
     #[test]

@@ -232,12 +232,14 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
         value: Some(Ttl::FiveMinutes),
         owner: format!("{root}/settings.json:promptCacheTtl"),
         reason: "explicit setting".into(),
+        varies: false,
     };
     Profile {
         agents: Default::default(),
         instruction_budget_file: None,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        ttl_directories: IndexMap::default(),
         claude_config: None,
         codex_system_config: None,
         switched_off: vec![],
@@ -301,7 +303,8 @@ pub fn make_t3_profile(id: &str, root: &str) -> Profile {
         ownership_resolved: true,
         settings_unresolved: false,
         limitations: vec![],
-        inherited_window: None,
+        env: None,
+        inherited_window: true,
         retained_since: None,
     });
     p

@@ -140,7 +140,7 @@ pub fn window_owner(profile: &Profile) -> String {
 /// conversation, how the profile was answered to pay. A profile whose TTL another owner sets,
 /// that caching is off for, or whose default differs replays or compares differently.
 pub fn ttl_owner(profile: &Profile, bucket: Bucket) -> String {
-    let ttl = profile.ttl.get(bucket);
+    let ttl = &profile.ttl.get(bucket).one();
     let pinnable = ttl.value.is_none() && ttl.reason == crate::discovery::TTL_BILLING_UNKNOWN;
     let billing = (bucket == Bucket::Main)
         .then_some(profile.billing)

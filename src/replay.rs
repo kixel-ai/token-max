@@ -688,7 +688,8 @@ fn ttl_check(
         }
         _ => None,
     };
-    let current = profile.ttl.get(bucket);
+    // One value for every project, else unknown.
+    let current = &profile.ttl.get(bucket).one();
     // Extrapolated over unpriced parts, so a few of them never leave the winner unknown.
     let gap = paired.usd();
     let recommended = match gap {
@@ -807,6 +808,7 @@ fn ttl_check(
             coverage: Some(Coverage {
                 priced: paired.priced,
                 total: paired.total,
+                ..Default::default()
             }),
             savings_usd: savings,
             margin: paired.savings.and_then(|s| s.margin),

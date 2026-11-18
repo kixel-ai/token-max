@@ -2811,6 +2811,9 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
     if b.base.current.is_none() {
         return "Cost unknown: current scope or launch selection is unresolved.";
     }
+    if no_share(b.base.coverage) {
+        return "Cost unknown: T3 settled none of the requests between this line's owner and the others that could have run its open sessions, so they have no share to count.";
+    }
     match b.feature {
         BackgroundFeature::GoalCheckIns => {
             "Cost unknown: check-in turns are not marked in transcripts."
@@ -3028,6 +3031,10 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         }
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
+            let a = &i.after_recommendations;
+            if a.delta.is_none() && no_share(Some(a.coverage)) {
+                return IDLE_NO_SHARE.into();
+            }
             let periods = &i.after_recommendations.periods;
             if periods.total() > 0
                 && periods.with_status(PeriodStatus::Censored)
@@ -3057,9 +3064,24 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     }
 }
 
+/// Whether a comparison left out sessions T3 could not settle with no share to count them
+/// at, which leaves it unestimated.
+fn no_share(coverage: Option<Coverage>) -> bool {
+    coverage.is_some_and(|c| c.left_out > 0 && c.stand_ins.is_none())
+}
+
+/// Why an idle line has no estimate when it left out sessions with no share to count.
+const IDLE_NO_SHARE: &str = "T3 settled none of the requests between this line's owner and the others that could have run its open sessions, so they have no share to count.";
+
 /// The modes T3 could price, and the first input the others lack.
 fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     let scenarios = &c.after_recommendations.scenarios;
+    if scenarios
+        .iter()
+        .any(|s| s.savings.is_none() && no_share(Some(s.coverage)))
+    {
+        return IDLE_NO_SHARE.into();
+    }
     let priced: Vec<String> = scenarios
         .iter()
         .filter_map(|s| {
@@ -3594,14 +3616,30 @@ fn context_sizes(report: &Report, result: &CheckResult, profile: &str) -> String
 /// How a replay's figure was extrapolated over the `items` it priced, such as "requests with
 /// measured usage", when some were not.
 fn coverage_note(r: &Common<'_>, items: &str) -> String {
-    match r.coverage {
-        // Percent, because one request can bill several parts.
-        Some(c) if c.priced != c.total => format!(
+    let Some(c) = r.coverage else {
+        return String::new();
+    };
+    let mut note = String::new();
+    // Percent, because one request can bill several parts.
+    if c.priced != c.total {
+        note += &format!(
             ", extrapolated from the {}% of {items} to the rest, assuming they resemble each other",
             percent(c.priced, c.total)
-        ),
-        _ => String::new(),
+        );
     }
+    if c.left_out > 0 {
+        let units = items.split(' ').next().unwrap_or(items);
+        let (unit, verb) = match c.left_out {
+            1 => (units.strip_suffix('s').unwrap_or(units), "counts"),
+            _ => (units, "count"),
+        };
+        note += &format!(
+            "; {} {unit} T3 could not settle between this line's owner and another {verb} as {}, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover",
+            count(c.left_out),
+            count(c.stand_ins.unwrap_or(0))
+        );
+    }
+    note
 }
 
 /// What most replays extrapolate from.
@@ -6111,6 +6149,7 @@ mod tests {
             coverage: Some(Coverage {
                 priced: 1990,
                 total: 2000,
+                ..Default::default()
             }),
             savings_usd: Some(150.0),
             margin: None,
@@ -6207,6 +6246,7 @@ mod tests {
                 coverage: Coverage {
                     priced: 3,
                     total: 4,
+                    ..Default::default()
                 },
                 added: vec![AddedCompaction {
                     request: "synthetic-added".into(),
@@ -6285,6 +6325,7 @@ mod tests {
             coverage: Coverage {
                 priced: 1,
                 total: 1,
+                ..Default::default()
             },
             monthly_delta: delta.map(|usd| Estimate { usd, margin: None }),
             by_context: vec![ContextDelta {
@@ -6531,6 +6572,7 @@ mod tests {
         ttl_sub.coverage = Some(Coverage {
             priced: 2000,
             total: 2000,
+            ..Default::default()
         });
         let mut window = check_base(Action::Advisory, Some(200_000), None);
         window.owner = format!("{ROOT}/settings.json:autoCompactWindow");
@@ -7206,13 +7248,66 @@ mod tests {
         base.coverage = Some(Coverage {
             priced: 4,
             total: 5,
+            ..Default::default()
         });
         report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
-        let text = text(&report, None, true);
-        let row = report_line(&text, "Idle compaction");
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
         assert!(row.head.contains("saves ~$30/mo ± $6"), "{row:?}");
         assert!(
             row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 80% of sessions that could be priced to the rest, assuming they resemble each other."),
+            "{row:?}"
+        );
+        // Sessions T3 could not settle stand in at the line's share, an assumption the
+        // margin leaves out.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.base.coverage = Some(Coverage {
+                priced: 4,
+                total: 6,
+                left_out: 4,
+                stand_ins: Some(1),
+            });
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 66.6% of sessions that could be priced to the rest, assuming they resemble each other; 4 sessions T3 could not settle between this line's owner and another count as 1, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover."),
+            "{row:?}"
+        );
+        // One open session reads in the singular.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.base.coverage.as_mut().unwrap().left_out = 1;
+            c.base.coverage.as_mut().unwrap().stand_ins = Some(0);
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence.contains(
+                "; 1 session T3 could not settle between this line's owner and another counts as 0,"
+            ),
+            "{row:?}"
+        );
+        // With no share to count the open sessions at, the line names that gap rather than
+        // missing usage.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.after_recommendations.delta = None;
+            c.after_recommendations.coverage = Coverage {
+                priced: 4,
+                total: 4,
+                left_out: 2,
+                stand_ins: None,
+            };
+            c.base.action = Action::Advisory;
+            c.base.recommended = None;
+            c.base.savings_usd = None;
+            c.base.monthly_savings_usd = None;
+            c.base.margin = None;
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence
+                .starts_with("Not enough evidence: T3 settled none of the requests"),
             "{row:?}"
         );
     }
@@ -7432,6 +7527,7 @@ mod tests {
             value: None,
             owner: format!("{ROOT}/settings.json:promptCacheTtl"),
             reason: TTL_BILLING_UNKNOWN.into(),
+            varies: false,
         };
         let ttl = ttl_mut(&mut report);
         ttl.base.current = None;

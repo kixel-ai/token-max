@@ -464,6 +464,7 @@ pub fn bash_cap_control(scopes: &[SettingsScope], env: &Env) -> BashCapControl {
         owner,
         default_timeout,
         default_owner,
+        unresolved: None,
     }
 }
 

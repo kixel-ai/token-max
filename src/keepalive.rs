@@ -981,9 +981,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         .all(|c| c.base.profiles.iter().all(|p| line.ids.contains(p)));
     // Idle counts sessions T3 could not settle at the line's share, while pings price every
     // covered session in full, so the two savings would not describe the same sessions.
-    let split = idle_checks
-        .iter()
-        .any(|c| c.after_recommendations.coverage.left_out > 0);
+    let split = idle_checks.iter().any(|c| {
+        c.after_recommendations.applicable && c.after_recommendations.coverage.left_out > 0
+    });
     // A partial keepalive replay cannot be compared to an all-session idle aggregate.
     // Each idle saving that counts brings its own margin when extrapolated.
     let idle_savings = if profile.harness == Harness::Claude && same_population && !split {
@@ -1923,22 +1923,30 @@ mod tests {
             now: 3 * HOUR,
         });
         idle[0].after_recommendations.coverage.left_out = 1;
-        let refs: Vec<_> = idle.iter().collect();
-        let check = keepalive_checks(&KeepaliveOptions {
-            scan: &scan,
-            catalog: &catalog,
-            ttls: &[],
-            windows: &[],
-            summaries: &[],
-            estimates: &estimates,
-            idle: &refs,
-            since: Some(0),
-            now: 3 * HOUR,
-        })
-        .remove(0);
+        let keepalive = |idle: &[IdleCheck]| {
+            let refs: Vec<_> = idle.iter().collect();
+            keepalive_checks(&KeepaliveOptions {
+                scan: &scan,
+                catalog: &catalog,
+                ttls: &[],
+                windows: &[],
+                summaries: &[],
+                estimates: &estimates,
+                idle: &refs,
+                since: Some(0),
+                now: 3 * HOUR,
+            })
+            .remove(0)
+        };
+        let check = keepalive(&idle);
         assert_eq!(check.idle_compaction_savings, None);
         assert_eq!(check.base.recommended, None);
         assert!(check.base.uncertainty.iter().any(|s| s == KEEPALIVE_SPLIT));
+        // An idle policy that does not apply offers no alternative to split.
+        idle[0].after_recommendations.applicable = false;
+        let check = keepalive(&idle);
+        assert!(check.base.uncertainty.iter().all(|s| s != KEEPALIVE_SPLIT));
+        assert_eq!(check.idle_compaction_savings.map(|e| e.usd), Some(0.0));
     }
 
     #[test]

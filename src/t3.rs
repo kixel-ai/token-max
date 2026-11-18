@@ -2661,7 +2661,8 @@ mod tests {
                 .unwrap();
             // `ownership_resolved` also reflects platform policy (always unresolved on
             // Windows), so check the native speed T3 overrides, which shared-history
-            // ambiguity leaves unresolved, while the TTL both owners read stays known.
+            // ambiguity leaves unresolved, while the TTL both owners read stays known,
+            // unless a machine policy may replace the instance's settings.
             let native = scan
                 .profiles
                 .iter()
@@ -2672,7 +2673,11 @@ mod tests {
                 !removed,
                 "{owner}"
             );
-            assert!(!current.ttl.main.reason.contains("shared native history"));
+            assert_eq!(
+                current.ttl.main.reason.contains("shared native history"),
+                !removed && managed_policy_unresolved(),
+                "{owner}"
+            );
             if removed {
                 assert_eq!(*r.profiles, [profile_key(&t3.path, "gone")]);
                 assert!(r.t3.is_some(), "joined evidence still applies");
@@ -3687,7 +3692,8 @@ mod tests {
         assert!(r.profiles.len() == 1 && t3(&r.profiles[0]), "{r:?}");
         // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
         // so check the native speed T3 overrides, which shared-history ambiguity leaves
-        // unresolved, while the TTL every possible owner reads from one file stays known.
+        // unresolved, while the TTL every possible owner reads from one file stays known,
+        // unless a machine policy may replace T3's settings and so its line.
         let ambiguous = |s: &Scan| {
             s.profiles
                 .iter()
@@ -3695,12 +3701,15 @@ mod tests {
                 .any(|p| p.speed.as_ref().is_some_and(|s| !s.resolved))
         };
         assert!(ambiguous(&data));
-        assert!(data.profiles.iter().all(|p| {
-            !p.ttl
-                .main
-                .reason
-                .contains("unresolved T3 control ownership")
-        }));
+        assert_eq!(
+            data.profiles.iter().any(|p| {
+                p.ttl
+                    .main
+                    .reason
+                    .contains("unresolved T3 control ownership")
+            }),
+            managed_policy_unresolved()
+        );
         // History before the window leaves current ownership alone.
         let mut options = w.scan_options();
         options.since = timestamp(&json!("2026-01-02T00:00:00Z"));

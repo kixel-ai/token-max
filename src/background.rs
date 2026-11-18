@@ -1107,8 +1107,31 @@ mod tests {
     fn turns_t3_left_open_stand_in_at_the_line_share() {
         let mut s = turns(&[(BackgroundFeature::PromptSuggestions, true)]);
         let t3 = "t3:/state:agent".to_string();
-        s.requests[1].profiles = vec!["profile".into(), t3.clone()].into();
-        // T3 settled one request of four to itself, so the line's share is three in four.
+        // A second copy of the four turns in a session T3 left open with the line.
+        let open: Vec<Request> = s
+            .requests
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                r.id = format!("open-{}", r.id).into();
+                r.session = "open".into();
+                r.profiles = vec!["profile".into(), t3.clone()].into();
+                r
+            })
+            .collect();
+        let prompts: Vec<StructuralEvent> = s
+            .events
+            .iter()
+            .map(|e| {
+                let mut e = e.clone();
+                e.id = format!("open-{}", e.id).into();
+                e.session = "open".into();
+                e
+            })
+            .collect();
+        s.requests.extend(open);
+        s.events.extend(prompts);
+        // T3 settled one request to itself against the line's four: a share of 4 in 5.
         let mut settled = response(20, 100_000);
         settled.id = "t3".into();
         settled.session = "t3".into();
@@ -1116,6 +1139,7 @@ mod tests {
         s.requests.push(settled);
         let c = &run(&s, 100.0)[0];
         let coverage = c.base.coverage.unwrap();
+        // Three turns would run it in the open session; 2.4 of them count, rounded to 2.
         assert_eq!(
             (
                 coverage.priced,
@@ -1123,7 +1147,7 @@ mod tests {
                 coverage.left_out,
                 coverage.stand_ins
             ),
-            (2, 3, 1, 1)
+            (3, 5, 3, 2)
         );
         let one = fork_cost(
             &prices(),
@@ -1131,7 +1155,7 @@ mod tests {
             BackgroundFeature::PromptSuggestions,
         );
         assert!(
-            (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 3.0).abs() < 1e-12
+            (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 5.0).abs() < 1e-12
         );
         // With nothing settled to estimate a share from, nothing is priced.
         for r in &mut s.requests {

@@ -764,14 +764,27 @@ pub fn t3_percent(
     file: &str,
     instance: &str,
     window: bool,
+    shell: &Env,
 ) {
     let Some(percent) = &mut compaction.percent else {
         return;
     };
-    for owner in percent.owners.iter_mut().chain(&mut percent.windows) {
-        if environment.contains(owner) {
-            *owner = format!("{file}:providerInstances.{instance}.environment.{owner}");
-        }
+    for owners in [&mut percent.owners, &mut percent.windows] {
+        // The instance's copy outranks the shell's, which stays listed so a plan lifts both.
+        *owners = std::mem::take(owners)
+            .into_iter()
+            .flat_map(|owner| {
+                if !environment.contains(&owner) {
+                    return vec![owner];
+                }
+                let own = format!("{file}:providerInstances.{instance}.environment.{owner}");
+                if shell.contains_key(&owner) {
+                    vec![owner, own]
+                } else {
+                    vec![own]
+                }
+            })
+            .collect();
     }
     percent.timeless.retain(|key| !environment.contains(key));
     let decides = window
@@ -787,12 +800,20 @@ pub fn t3_percent(
 /// A window owner without its trailing note, such as ` (capped at 200000)`; a settings path
 /// may itself hold ` (`, so the owner ends at its key.
 pub fn owner_setting(owner: &str) -> &str {
+    // The key follows the file's path, which may itself hold a key's name.
+    let start = [".json:", ".toml:"]
+        .iter()
+        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len()))
+        .min()
+        .unwrap_or(0);
+    let setting = &owner[start..];
     for key in [".autoCompactWindow", WINDOW_KEY] {
-        if let Some(at) = owner.rfind(key) {
-            return &owner[..at + key.len()];
+        if let Some(at) = setting.find(key) {
+            return &owner[..start + at + key.len()];
         }
     }
-    owner.split(" (").next().unwrap_or(owner)
+    let end = setting.find(" (").map_or(owner.len(), |at| start + at);
+    &owner[..end]
 }
 
 /// Date a resolved override by when the last file that decides a trigger changed.
@@ -1674,6 +1695,7 @@ mod tests {
             &state,
             "claudeAgent",
             false,
+            &Env::default(),
         );
         let percent = controls.percent.clone().unwrap();
         assert_eq!(
@@ -1686,10 +1708,42 @@ mod tests {
         assert_eq!(percent.timeless, ["CLAUDE_CODE_DISABLE_1M_CONTEXT"]);
         assert_eq!(percent.since, None);
         let environment = [PERCENT_KEY.into(), "CLAUDE_CODE_DISABLE_1M_CONTEXT".into()];
-        t3_percent(&mut controls, &environment, &state, "claudeAgent", false);
+        t3_percent(
+            &mut controls,
+            &environment,
+            &state,
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
         let percent = controls.percent.unwrap();
         assert!(percent.timeless.is_empty());
         assert!(percent.since.is_some_and(|t| t > 0));
+    }
+
+    #[test]
+    fn a_t3_instance_copy_keeps_the_shell_copy_it_outranks() {
+        let empty = Map::new();
+        let mut env = Env::default();
+        env.insert(PERCENT_KEY.into(), "60".into());
+        env.insert(WINDOW_KEY.into(), "150000".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &env)).unwrap();
+        // The shell exports both; the instance sets both again.
+        let shell = env.clone();
+        let environment = [PERCENT_KEY.into(), WINDOW_KEY.into()];
+        t3_percent(
+            &mut controls,
+            &environment,
+            "t3.json",
+            "claudeAgent",
+            true,
+            &shell,
+        );
+        let percent = controls.percent.unwrap();
+        let own = |key: &str| format!("t3.json:providerInstances.claudeAgent.environment.{key}");
+        assert_eq!(percent.owners, [PERCENT_KEY.to_string(), own(PERCENT_KEY)]);
+        assert_eq!(percent.windows, [WINDOW_KEY.to_string(), own(WINDOW_KEY)]);
+        assert_eq!(percent.owners.last().unwrap(), &own(PERCENT_KEY));
     }
 
     fn claude_sources<'a>(

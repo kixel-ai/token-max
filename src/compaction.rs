@@ -1336,6 +1336,13 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             }
             position += 1;
         });
+        // Every model the line's history ran, before the window too: removing an override
+        // moves each one's trigger, whether or not its requests are priced here.
+        let inventory: IndexSet<Option<Text>> = requests
+            .iter()
+            .flat_map(|r| r.parts.iter().filter(|p| is_conversation(p)))
+            .map(|p| p.model.clone())
+            .collect();
         let summary_ids: HashSet<&Id> = events
             .iter()
             .filter(|e| e.time >= since)
@@ -1753,7 +1760,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                         .iter()
                         .filter(|p| !group.ids.contains(&p.id))
                         .collect();
-                    reowned(&group.members, &outside, percent, models, observed.keys())
+                    reowned(&group.members, &outside, percent, models, inventory.iter())
                 });
             // Removing the override moves every other trigger it lowers, so each must be known
             // to be kept.
@@ -1951,28 +1958,39 @@ fn reowned<'m>(
                 .to_string(),
         );
     }
-    // A home row cannot hold a model whose window a recorded project sets.
-    let windows = |c: &CompactionControls| {
-        std::iter::once(&c.default)
-            .chain(c.models.values())
-            .map(|w| (w.owner.clone(), w.value))
-            .collect::<Vec<_>>()
+    // A home row holds a model in a recorded project only where the project resolves its
+    // trigger as the home does: the same value from the same setting.
+    let effective = |c: &CompactionControls, model: &str| {
+        let control = window_control(c, Some(model));
+        (control.value, owner_setting(&control.owner).to_string())
     };
-    let home = windows(compaction);
-    if members
+    let differs: Vec<&str> = line
         .iter()
-        .flat_map(|m| scopes(m))
-        .any(|c| windows(c) != home)
-    {
-        unkept.push(
-            "a recorded project sets its own window, which a row in the home file cannot pin"
-                .to_string(),
-        );
+        .copied()
+        .flatten()
+        .filter(|model| {
+            members
+                .iter()
+                .flat_map(|m| scopes(m))
+                .any(|c| effective(c, model) != effective(compaction, model))
+        })
+        .map(|model| &**model)
+        .collect();
+    if !differs.is_empty() {
+        unkept.push(format!(
+            "a recorded project compacts {} elsewhere than the home does, which a row in the home file cannot hold",
+            differs.join(", ")
+        ));
     }
+    // Two names for one settings file, such as a symlink, are one owner.
+    let removed: Vec<String> = overrides
+        .iter()
+        .map(|o| crate::rows::canonical(o))
+        .collect();
     for other in outside {
         let shared = scopes(other)
             .flat_map(|c| c.percent.iter().flat_map(|p| &p.owners))
-            .any(|o| overrides.contains(o));
+            .any(|o| removed.contains(&crate::rows::canonical(o)));
         if shared {
             unkept.push(format!(
                 "{} reads the same override on another line, whose triggers this plan does not pin",
@@ -3301,6 +3319,15 @@ mod tests {
         );
         assert_eq!(opus.base.recommended, Some(100_000));
         assert_eq!(opus.base.action, Action::Change);
+        // A model that ran only before the window started still moves with the override.
+        let all = checks_since(&scan, Some(2 * HOUR + 1));
+        let opus = all
+            .iter()
+            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+            .unwrap();
+        let pins = &opus.reowned.as_ref().unwrap().pins;
+        assert_eq!(pins.len(), 1);
+        assert_eq!(&*pins[0].model, "claude-haiku-5-5");
 
         // A model whose trigger is unresolved keeps a change advisory, since removing the
         // override would move it.
@@ -3431,9 +3458,19 @@ mod tests {
         ] {
             assert_eq!(&*row_key(owner, dated), "claude-opus-5-5");
         }
-        // A settings path may itself hold " (".
+        // A settings path may itself hold " (" or a key's name.
         let owner = format!(
             "/home/a/Claude (work)/settings.json:modelSettings.{dated}.autoCompactWindow (capped at 200000)"
+        );
+        assert_eq!(&*row_key(&owner, dated), dated);
+        let owner = format!(
+            "/home/a.autoCompactWindow/settings.json:modelSettings.{dated}.autoCompactWindow (capped at 200000)"
+        );
+        assert_eq!(
+            crate::controls::owner_setting(&owner),
+            format!(
+                "/home/a.autoCompactWindow/settings.json:modelSettings.{dated}.autoCompactWindow"
+            )
         );
         assert_eq!(&*row_key(&owner, dated), dated);
     }
@@ -3480,8 +3517,43 @@ mod tests {
             unkept[0].contains("t3-instance reads the same override"),
             "{unkept:?}"
         );
-        // A recorded project's own window outranks any row in the home file.
+        // Even when it names the file through a symlink.
+        let w = crate::test_support::Workspace::new();
+        let real = w.home.join("settings.json");
+        std::fs::write(&real, "{}").unwrap();
+        let link = w.home.join("linked.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let mut linked = scan.clone();
+        linked.profiles[0]
+            .compaction
+            .percent
+            .as_mut()
+            .unwrap()
+            .owners = vec![format!("{}:env.{key}", real.display())];
+        other.compaction.percent.as_mut().unwrap().owners =
+            vec![format!("{}:env.{key}", link.display())];
+        let unkept = plan(&linked, &[&other], std::slice::from_ref(&opus)).unkept;
+        assert!(
+            unkept[0].contains("t3-instance reads the same override"),
+            "{unkept:?}"
+        );
+        // A recorded project that resolves each model's window as the home does needs no
+        // row of its own, even though its controls are a separate copy.
         let mut idle = crate::controls::idle_controls(&[], &Env::default()).unwrap();
+        idle.compaction = Some(controls(
+            Harness::Claude,
+            rows.clone(),
+            &Env::default(),
+            "settings.json",
+        ));
+        scan.profiles[0].idle_directories =
+            Some(IndexMap::from_iter([("/project".into(), idle.clone())]));
+        assert!(
+            plan(&scan, &[], std::slice::from_ref(&opus))
+                .unkept
+                .is_empty()
+        );
+        // A recorded project's own window outranks any row in the home file.
         idle.compaction = Some(controls(
             Harness::Claude,
             json!({"env": {key: "50"}, "autoCompactWindow": 500000}),
@@ -3491,7 +3563,24 @@ mod tests {
         scan.profiles[0].idle_directories =
             Some(IndexMap::from_iter([("/project".into(), idle.clone())]));
         let unkept = plan(&scan, &[], std::slice::from_ref(&opus)).unkept;
-        assert!(unkept[0].contains("sets its own window"), "{unkept:?}");
+        assert!(
+            unkept[0].contains("compacts claude-opus-5-5 elsewhere"),
+            "{unkept:?}"
+        );
+        // So does one that sets the same window through another setting.
+        idle.compaction = Some(controls(
+            Harness::Claude,
+            json!({"env": {key: "50", crate::controls::WINDOW_KEY: "400000"}}),
+            &Env::default(),
+            "project.json",
+        ));
+        scan.profiles[0].idle_directories =
+            Some(IndexMap::from_iter([("/project".into(), idle.clone())]));
+        let unkept = plan(&scan, &[], std::slice::from_ref(&opus)).unkept;
+        assert!(
+            unkept[0].contains("compacts claude-opus-5-5 elsewhere"),
+            "{unkept:?}"
+        );
 
         // A project whose override differs from the home's leaves the comparison unpriced.
         idle.compaction = Some(controls(

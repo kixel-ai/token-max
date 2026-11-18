@@ -1344,7 +1344,14 @@ pub fn discover_claude_controls(
                 managed_file,
                 scopes: Some(&scopes),
             })?;
-            crate::controls::t3_percent(&mut compaction, &environment, &t3_file, &instance, false);
+            crate::controls::t3_percent(
+                &mut compaction,
+                &environment,
+                &t3_file,
+                &instance,
+                false,
+                &options.env,
+            );
             directories_controls.insert(
                 cwd.to_string(),
                 IdleControl {

@@ -804,15 +804,17 @@ A recommended window under the override makes one setting own the trigger: the
 change removes the override from every scope that sets it, recorded projects
 included. When the profile
 runs other models, the target goes in its own `modelSettings` row, every other
-model the transcripts show is pinned at its current trigger in its own row, and
+model the transcripts show, before the window's evidence starts too, is pinned at its current trigger in its own row, and
 every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` comes out, since it outranks
-every row and a copy left behind, such as the shell's, would take over. The walk shows each of these edits before applying them. An
+every row and a copy left behind, such as the shell's under a T3 instance's,
+would take over. The walk shows each of these edits before applying them. An
 owner the walk cannot edit, such as the shell, a project file or a T3 instance,
 leaves the whole change as a step by hand naming it. Anything the change would
 move but cannot pin keeps the line advisory: another model
 whose current trigger is unresolved or below the 100,000-token smallest window
-a setting can name, requests with no recorded model, a recorded project's own
-window, or another line, such as a T3 instance's, that reads the same override.
+a setting can name, requests with no recorded model, a model a recorded project
+compacts at another trigger or through another setting than the home does,
+or another line, such as a T3 instance's, that reads the same override.
 
 Candidates come from current controls, price-tier boundaries, provider limits,
 and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching

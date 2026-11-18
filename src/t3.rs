@@ -814,6 +814,7 @@ pub(crate) fn discover(
                     &file.display().to_string(),
                     &id,
                     !config.auto_compact_window.is_empty(),
+                    &options.env,
                 );
             }
             let resolved = enabled && !unresolved_env && !launch_unresolved && !policy_unresolved;

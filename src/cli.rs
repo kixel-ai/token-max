@@ -15,6 +15,7 @@ use crate::collections::IndexSet;
 use crate::discovery::{DiscoveryOptions, discover};
 use crate::doctor::{
     Confirm, Fix, Offers, Owner, Style, Walking, ask, ask_billing, confirm, finish, preview, write,
+    wrote,
 };
 use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
@@ -1353,8 +1354,20 @@ fn walk(walk: Walk) -> Result<(), ScanError> {
         .zip(&request.hosts)
         .map(|((summary, written), (_, style))| (summary, written.as_slice(), *style))
         .collect();
+    // After a failure, only what was written for certain: the failed host may have written
+    // some of its files, which its error names, so nothing may read as nothing written.
+    let closing = if error.is_some() {
+        let lines: String = done.iter().map(|(_, w, style)| wrote(w, style)).collect();
+        if lines.is_empty() {
+            lines
+        } else {
+            format!("\n{lines}")
+        }
+    } else {
+        finish(&done, &style)
+    };
     // The settings are written, so a failure to say so must not read as nothing changed.
-    let _ = stdout.write_all(finish(&done, &style).as_bytes());
+    let _ = stdout.write_all(closing.as_bytes());
     let _ = stdout.flush();
     match error {
         Some(mut error) if !skipped.is_empty() => {

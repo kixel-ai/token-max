@@ -1536,3 +1536,27 @@ fn a_walk_that_is_not_confirmed_writes_no_host() {
         }
     }
 }
+
+#[test]
+fn a_failed_write_never_reads_as_nothing_written() {
+    let hosts = Hosts::new();
+    let mut terminal = hosts.walk();
+    for _ in 0..3 {
+        terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    }
+    terminal.wait("Write the 3 accepted changes");
+    // This host's file changes while the confirm waits, so the first write fails.
+    std::fs::write(hosts.settings("local"), "{}").unwrap();
+    terminal.answer("[n]o:", "y");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 2, "{output}{stderr}");
+    let closing = &output[output.rfind("[n]o:").unwrap()..];
+    assert!(
+        !closing.contains("Wrote") && !closing.contains("Nothing"),
+        "{output}"
+    );
+    assert!(
+        flat(&stderr).contains("; nothing was written on devbox, laptop"),
+        "{stderr}"
+    );
+}

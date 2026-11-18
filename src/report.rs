@@ -2894,8 +2894,20 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
             r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
         );
     }
-    if k.lifetime_ms.is_none() {
-        "The main cache TTL is unknown, so pings could not be priced.".into()
+    if r.uncertainty
+        .iter()
+        .any(|u| u == crate::keepalive::KEEPALIVE_SPLIT)
+    {
+        capitalize(crate::keepalive::KEEPALIVE_SPLIT) + "."
+    } else if k.lifetime_ms.is_none() {
+        k.base
+            .assumptions
+            .first()
+            .and_then(|a| a.strip_prefix("cache lifetime unknown: "))
+            .map_or_else(
+                || "The main cache TTL is unknown, so pings could not be priced.".into(),
+                |why| format!("{}, so pings could not be priced.", capitalize(why)),
+            )
     } else if k.ping_input_tokens.is_none() || k.ping_output_tokens.is_none() {
         "No consecutive request geometry establishes a ping input size.".into()
     } else if r.coverage.is_none_or(|c| c.priced == 0) {
@@ -2969,11 +2981,22 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
         return "The T3 instance is disabled or the file that owns this setting for it is unresolved, so its past costs do not establish a setting to change.".into();
     }
-    if let CheckResult::BashCap(b) = result
-        && b.ttl.is_none()
-    {
-        return "The main-agent cache TTL is unresolved, so the cap has nothing to compare with."
-            .into();
+    if let CheckResult::BashCap(b) = result {
+        // Advisory with no recommendation either for want of a TTL or for an unsettled owner.
+        return match b.ttl {
+            None => format!(
+                "{}, so the cap has nothing to compare with.",
+                capitalize(&b.ttl_basis)
+            ),
+            Some(_) => r
+                .uncertainty
+                .iter()
+                .find(|u| u.contains("unresolved T3 control ownership"))
+                .map_or_else(
+                    || "The cap could not be compared with the cache TTL.".into(),
+                    |_| "Requests T3 could not settle may have run under another owner's cap, so the cap's line is unresolved.".into(),
+                ),
+        };
     }
     if let CheckResult::Keepalive(k) = result {
         return keepalive_unresolved(k, r);
@@ -3053,14 +3076,13 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             "Idle summaries or resumed sessions could not be priced in any session it could act on."
                 .into()
         }
+        // Handled above; a doctor run never panics on a combination nothing names.
         CheckResult::Speed(_)
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
         | CheckResult::Keepalive(_)
         | CheckResult::Memory(_)
-        | CheckResult::Effort(_) => {
-            unreachable!("handled above")
-        }
+        | CheckResult::Effort(_) => "No verdict could be reached.".into(),
     }
 }
 

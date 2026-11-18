@@ -14,8 +14,7 @@ curl -LsSf https://max.kixel.ai/run.sh | sh
 ```
 
 On Windows, `irm https://max.kixel.ai/run.ps1 | iex`. It changes nothing
-without a yes. These work from the first release on; until then, see
-[Install](#install).
+without a yes.
 
 ## What it found
 
@@ -78,7 +77,7 @@ On Windows, in PowerShell:
 irm https://max.kixel.ai/install.ps1 | iex
 ```
 
-From the first release on, each GitHub release has prebuilt binaries for
+Each GitHub release has prebuilt binaries for
 Linux (x86_64 and arm64, statically linked), macOS (Apple silicon and Intel)
 and Windows (x86_64). `install.sh` and `install.ps1` are the release's
 installers, which put `token-max` in `~/.local/bin` by default. `run.sh` and
@@ -93,12 +92,6 @@ Nix builds it from source:
 
 ```sh
 nix run github:kixel-ai/token-max -- doctor
-```
-
-Until that release, install from GitHub with a Rust toolchain:
-
-```sh
-cargo install --locked --git https://github.com/kixel-ai/token-max
 ```
 
 ## Run
@@ -140,7 +133,7 @@ for how to read each line, and its sections for each check.
   repositories, from this host or over SSH.
 - [Replay semantics](https://github.com/kixel-ai/token-max/blob/main/docs/semantics.md):
   the accounting, assumptions, sources and limits.
-- [First-release plan](https://github.com/kixel-ai/token-max/blob/main/quest/m0/README.md):
-  the checks still to come.
+- [Plans](https://github.com/kixel-ai/token-max/tree/main/quest):
+  the work still to come.
 - To work on it, run `nix develop`, then `just check`. See
   [CONTRIBUTING.md](https://github.com/kixel-ai/token-max/blob/main/CONTRIBUTING.md).

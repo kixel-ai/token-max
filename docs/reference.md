@@ -990,9 +990,10 @@ connection that then runs the audit:
   then in `~/.cargo/bin`. With neither, the destination downloads the
   release from GitHub and checks it against its published checksum, which
   needs `curl`, `tar` and `xz` there. Matching the version is not matching
-  the build, so a destination whose build differs from this one fails with
-  what to run instead. A development build has no release, so it fails with
-  the `cargo install` command to run there.
+  the build, so a destination whose build differs from this one fails,
+  naming the binary that ran there: run a released token-max here, or delete
+  that binary there and build this commit with the `cargo install` command it
+  gives, since the first binary of this version found is the one that runs.
 
 Copies and downloads are cached in `~/.cache/token-max/ssh` there (or under
 `$XDG_CACHE_HOME`): a copy named by its digest, a release by version and

@@ -59,8 +59,8 @@ const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linu
 /// Finds this build on the destination and runs it, or says how to put it there. Takes the
 /// coordinator's OS, architecture, copy name and version, then token-max's arguments.
 ///
-/// Prints `run` and execs a binary of this build, or prints `copy` or `download <target>` and
-/// exits. On the coordinator's own platform only its copy runs, since every build from a
+/// Prints `run` and the path of the binary it execs, or prints `copy` or `download <target>`
+/// and exits. The path goes through `printf %s`, since dash's `echo` would act on a `\c` in it. On the coordinator's own platform only its copy runs, since every build from a
 /// commit after a release reports that release's version. On another platform nothing else
 /// can, so a binary of this version stands in, checked by the stream's header: this version's
 /// cached release, else the first installed `token-max` reporting it.
@@ -69,7 +69,7 @@ const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linu
 /// of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`, then in `cargo install`'s
 /// `~/.cargo/bin`; non-interactive shells often leave these off `PATH`. An empty `PATH` entry
 /// is the current directory, as POSIX has it.
-const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do dir=${dir:-.}; if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; echo run; shift 4; exec "$bin" "$@""#;
+const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do dir=${dir:-.}; if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; printf "run %s" "$bin"; echo; shift 4; exec "$bin" "$@""#;
 
 /// Picks a SHA-256 command, since Linux and macOS ship different ones.
 const SUM: &str = r#"if command -v sha256sum >/dev/null; then sum=sha256sum; elif command -v shasum >/dev/null; then sum="shasum -a 256"; else exit 5; fi; mkdir -p "$cache" || exit 1; "#;
@@ -82,6 +82,9 @@ const COPY: &str = r#"tmp=$(mktemp "$cache/.copy.XXXXXX") || exit 1; clean() { r
 /// Caches release `$1` from the releases at `$2` for the destination's platform, as the run
 /// script names it, once its archive matches the published checksum and it runs there.
 const DOWNLOAD: &str = r#"for tool in curl tar; do command -v $tool >/dev/null || exit 7; done; tmp=$(mktemp -d "$cache/.download.XXXXXX") || exit 1; clean() { rm -rf "$tmp"; }; trap clean EXIT; target=$arch-$abi; archive=token-max-$target.tar.xz; curl -LsSf -o "$tmp/$archive" "$2/download/v$1/$archive" && curl -LsSf -o "$tmp/sum" "$2/download/v$1/$archive.sha256" || exit 8; read -r expected rest <"$tmp/sum"; actual=$($sum <"$tmp/$archive") || exit 1; [ -n "$expected" ] && [ "${actual%% *}" = "$expected" ] || exit 6; tar -xf "$tmp/$archive" -C "$tmp" || exit 9; bin=$tmp/token-max-$target/token-max; [ "$("$bin" --version 2>/dev/null)" = "$1" ] || exit 4; mv -f "$bin" "$cache/token-max-v$1-$target" || exit 1; for old in "$cache"/token-max-*; do [ "$old" = "$cache/token-max-v$1-$target" ] || rm -f "$old"; done"#;
+
+/// The longest path Linux allows, and more than macOS does.
+const PATH_MAX: u64 = 4096;
 
 /// Exit statuses the scripts and OpenSSH report.
 const UNSUPPORTED: i32 = 3;
@@ -307,23 +310,26 @@ fn spawn(
 
 /// How the run script answered.
 enum Found {
-    Run,
+    /// The binary the script runs, as a path there.
+    Run(String),
     Copy,
     Download(&'static str),
 }
 
-/// Read the run script's first line, which is short, so a destination cannot make this host
-/// hold more. An error says whether stdout was empty, as it is when `ssh` or the script failed.
+/// Read the run script's first line, at most a word and a path as long as Linux and macOS
+/// allow, so a destination cannot make this host hold more. An error says whether stdout was empty, as it is when `ssh` or the script failed.
 fn found(stdout: &mut BufReader<ChildStdout>) -> Result<Found, bool> {
     let mut line = String::new();
-    match stdout.take(64).read_line(&mut line) {
+    match stdout.take(PATH_MAX + 16).read_line(&mut line) {
         Ok(0) => return Err(true),
         Ok(_) => {}
         Err(_) => return Err(false),
     }
     let found = match line.strip_suffix('\n') {
-        Some("run") => Some(Found::Run),
         Some("copy") => Some(Found::Copy),
+        Some(other) if other.starts_with("run ") && other.len() > 4 => {
+            Some(Found::Run(other[4..].to_string()))
+        }
         Some(other) => other.strip_prefix("download ").and_then(|target| {
             TARGETS
                 .iter()
@@ -356,7 +362,7 @@ fn provision(destination: &str, found: &Found) -> Result<(), ScanError> {
             remote(&format!("{SUM}{DOWNLOAD}"), &[VERSION, RELEASES]),
             Stdio::null(),
         ),
-        Found::Run => return Ok(()),
+        Found::Run(_) => return Ok(()),
     };
     let (mut session, mut stdout) = spawn(destination, command, stdin)?;
     // Reading to the end, rather than waiting, keeps the child registered so cancellation can
@@ -406,11 +412,11 @@ pub fn audit(
 ) -> Result<Reply, ScanError> {
     let command = run_command(binary()?, since, defaults);
     let mut provisioned = false;
-    let (mut session, stdout) = loop {
+    let (mut session, stdout, ran) = loop {
         let (mut session, mut stdout) = spawn(destination, command.clone(), Stdio::piped())?;
         let found = found(&mut stdout);
         let found = match found {
-            Ok(Found::Run) => break (session, stdout),
+            Ok(Found::Run(ran)) => break (session, stdout, ran),
             // Only once: a binary just put there that the script still cannot find means the
             // cache does not keep it.
             Ok(found) if !provisioned => found,
@@ -431,15 +437,6 @@ pub fn audit(
             }
         };
         session.stop(true);
-        if let Found::Download(target) = found
-            && VERSION == "0.0.0"
-        {
-            return Err(ScanError::new(format!(
-                "{destination}: runs on {target}, and this development build for {} {} has no release to download; build it with {BUILD}",
-                std::env::consts::OS,
-                std::env::consts::ARCH,
-            )));
-        }
         provision(destination, &found)?;
         provisioned = true;
     };
@@ -460,9 +457,12 @@ pub fn audit(
     let local = wire::build();
     if header.token_max_scan != local {
         let remote = terminal_text(&header.token_max_scan);
+        let ran = terminal_text(&ran);
+        // On another platform the script runs the first binary of this version it finds, so
+        // removing that one is what lets a build of this commit run instead.
         return Err(session.fail(true, |_| {
             format!(
-                "the token-max {VERSION} there is build {remote}, not this build {local}; run a released token-max here, or build this one there with {BUILD}"
+                "the token-max {VERSION} there, {ran}, is build {remote}, not this build {local}; run a released token-max here, or delete it there and build this one with {BUILD}"
             )
         }));
     }
@@ -1006,6 +1006,8 @@ mod tests {
             sh(home, RUN, &[os, arch, "token-max-copy", version, "doctor"])
         };
         let download = format!("download {}\n", target());
+        // The run line names the binary it runs.
+        let ran = |path: &Path| (Some(0), format!("run {}\nran doctor\n", path.display()));
         // Nothing there yet.
         assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
         assert_eq!(run("plan9", "0.0.1"), (Some(0), download.clone()));
@@ -1015,18 +1017,21 @@ mod tests {
         release(&installed, "0.0.1");
         release(&home.join(".local/bin/token-max"), "0.0.2");
         assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
-        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
-        assert_eq!(run("plan9", "0.0.2"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), ran(&installed));
+        assert_eq!(
+            run("plan9", "0.0.2"),
+            ran(&home.join(".local/bin/token-max"))
+        );
         assert_eq!(run("plan9", "0.0.3"), (Some(0), download.clone()));
         release(&installed, "0.0.0");
         assert_eq!(run(os, "0.0.0"), (Some(0), "copy\n".into()));
-        assert_eq!(run("plan9", "0.0.0"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.0"), ran(&installed));
         std::fs::remove_file(&installed).unwrap();
         std::fs::remove_file(home.join(".local/bin/token-max")).unwrap();
         // The empty entry in this `PATH` is the current directory, the home here.
         let current = home.join("token-max");
         release(&current, "0.0.1");
-        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), ran(Path::new("./token-max")));
         std::fs::remove_file(&current).unwrap();
         // Cached binaries: the copy on this platform, the release on another.
         script(&cache(home).join("token-max-copy"), r#"echo "copy $*""#);
@@ -1034,9 +1039,37 @@ mod tests {
             &cache(home).join(format!("token-max-v0.0.1-{}", target())),
             "0.0.1",
         );
-        assert_eq!(run(os, "0.0.1"), (Some(0), "run\ncopy doctor\n".into()));
-        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        let copy = cache(home).join("token-max-copy");
+        assert_eq!(
+            run(os, "0.0.1"),
+            (Some(0), format!("run {}\ncopy doctor\n", copy.display()))
+        );
+        // A cached release runs before an installed one of the same version.
+        release(&installed, "0.0.1");
+        assert_eq!(
+            run("plan9", "0.0.1"),
+            ran(&cache(home).join(format!("token-max-v0.0.1-{}", target())))
+        );
         assert_eq!(run("plan9", "0.0.2"), (Some(0), download));
+    }
+
+    #[test]
+    fn the_run_line_keeps_a_path_that_echo_would_cut() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        // dash's `echo`, the `sh` of Debian and Ubuntu, stops output at a `\c`.
+        let cache = home.join("x\\cy");
+        let copy = cache.join("token-max/ssh/token-max-copy");
+        script(&copy, r#"echo "copy $*""#);
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let output = command(home, RUN, &[os, arch, "token-max-copy", "0.0.1", "doctor"])
+            .env("XDG_CACHE_HOME", &cache)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("run {}\ncopy doctor\n", copy.display())
+        );
     }
 
     /// Releases of `version` for this host under a `file:` URL, with a checksum that lies when
@@ -1096,11 +1129,14 @@ mod tests {
             (Some(0), "".into())
         );
         let name = format!("token-max-v0.0.1-{}", target());
-        assert_eq!(cached(home), [name]);
+        assert_eq!(cached(home), [name.as_str()]);
         let (os, arch) = ("plan9", std::env::consts::ARCH);
         assert_eq!(
             sh(home, RUN, &[os, arch, "token-max-copy", "0.0.1", "doctor"]),
-            (Some(0), "run\nran doctor\n".into())
+            (
+                Some(0),
+                format!("run {}/{name}\nran doctor\n", cache(home).display())
+            )
         );
     }
 

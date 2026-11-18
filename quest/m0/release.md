@@ -1,4 +1,4 @@
-# [M] Publish token-max 0.0.1
+# [S] Publish token-max 0.0.1
 
 ## Goal
 
@@ -15,18 +15,24 @@ quest. m0's Plan holds the decisions behind it, such as 0.0.1 rather than
 0.1.0 and publishing only after a rerun on the maintainer's host reads well
 (2026-11-14).
 
-- Validate end to end: rerun `token-max doctor` on the maintainer's host and
-  confirm the report and the walk read well.
-- Change the version to 0.0.1, drop the README's and the site's pre-release
-  notices, and publish the crate through the protected
-  release path, then redeploy the site.
-- Verify the README's install commands against the published crate and
-  release, including both curl lines.
-- Clear Quest's release handoff.
+[kixel-ai/token-max#169](https://github.com/kixel-ai/token-max/pull/169)
+validated `token-max doctor` on fedora, set the version to 0.0.1, dropped the
+README's and the site's pre-release notices, and dry-ran the Release
+workflow from its branch. What remains, in order, once it merges:
 
-No crate has been published; `token-max` was unclaimed on crates.io on
-2026-11-08, which does not prove it can be published.
+- Bootstrap crates.io: create a short-lived `publish-new` token, store it as
+  the `crates-io` environment secret `CARGO_BOOTSTRAP_TOKEN`, and dispatch
+  **Release** on `main` with version `0.0.1` and `bootstrap`.
+- Revoke the token, delete the secret, and add the crate's trusted publisher
+  (owner `kixel-ai`, repository `token-max`, workflow `release.yml`,
+  environment `crates-io`), so later releases use `trusted`.
+- Redeploy max.kixel.ai from `site/`, which drops its pre-release notice.
+- Verify both installers and both run scripts from a clean home without a
+  Rust toolchain, and `cargo binstall token-max` and `cargo install --locked
+  token-max` from a clean `CARGO_HOME`: help, version and a synthetic priced
+  analysis for each.
+- Clear Quest's release handoff in moq-dev/quest's `SETUP.md`.
 
 ## Waiting
 
-- Maintainer: publish the first crates.io release with a short-lived token, since crates.io creates trusted publishers only for an existing crate, then add the trusted publisher for later releases. Follow [release preparation](../../docs/releasing.md); the `crates-io` GitHub environment restricted to `main` exists (created 2026-11-10 by /quest-unblock). The maintainer offered browser control, so an agent drives Chrome through the token and trusted-publisher steps at release time. An agent can automate the protected workflow and drive Chrome through crates.io setup, but cannot sign in as the owner. No release was attempted.
+- Maintainer: confirm publishing 0.0.1, which cannot be undone, then sign in to crates.io and Cloudflare in the agent Chrome so an agent can drive the token, secret, trusted-publisher and deploy steps above. An agent can dispatch the workflow and drive Chrome, but cannot sign in as the owner or decide to publish; [release preparation](../../docs/releasing.md) has the details. The `crates-io` and `github-releases` environments, each restricted to `main`, exist.

@@ -957,17 +957,19 @@ fn any_failed_destination_fails_the_whole_report() {
 "#,
     )
     .unwrap();
-    let build = "`cargo install --locked --git https://github.com/kixel-ai/token-max --rev <commit>` there, from this build's commit";
-    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let version = env!("CARGO_PKG_VERSION");
     let target = if cfg!(target_os = "linux") {
         "aarch64-apple-darwin"
     } else {
         "x86_64-unknown-linux-musl"
     };
     let bare = format!(
-        "bare: runs on {target}, and this development build for {os} {arch} has no release to download; build it with {build}\n"
+        "bare: needs curl and tar to download the token-max {version} release for {target}\n"
     );
-    let other = "other: the token-max 0.0.0 there is build 9.9.9+";
+    let other = format!(
+        "other: the token-max {version} there, {}, is build 9.9.9+",
+        hosts.cache("other").join(copy_name()).display()
+    );
     for (host, expected) in [
         (
             "unreachable",
@@ -987,7 +989,7 @@ fn any_failed_destination_fails_the_whole_report() {
             "old",
             "old: token-max there did not start an SSH audit (exit 2)\n",
         ),
-        ("other", other),
+        ("other", other.as_str()),
         ("corrupt", "corrupt: invalid SSH audit stream at line "),
         ("silent", "silent: invalid SSH audit stream at line 2"),
         ("broken", "broken: "),
@@ -1001,6 +1003,10 @@ fn any_failed_destination_fails_the_whole_report() {
             "{host}: {stderr}"
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
+        // The binary that ran is the one to replace.
+        if host == "other" {
+            assert!(stderr.contains("; run a released token-max here, or delete it there and build this one with `cargo install"), "{stderr}");
+        }
     }
     // A failed copy leaves nothing behind.
     for host in ["static", "damaged"] {

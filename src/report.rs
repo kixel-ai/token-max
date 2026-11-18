@@ -3290,11 +3290,12 @@ fn uses(c: &ContextCost) -> String {
         Some(calls) if c.skill.is_some() => format!("{} observed skill turns", count(calls)),
         Some(0) if typed => "the model never used it".into(),
         Some(0) => "never used".into(),
+        Some(1) if typed => "the model used it once".into(),
+        Some(1) => "used once".into(),
         Some(calls) => format!(
-            "{} {} time{}",
+            "{} {} times",
             if typed { "the model used it" } else { "used" },
             count(calls),
-            if calls == 1 { "" } else { "s" }
         ),
     }
 }
@@ -5195,9 +5196,11 @@ fn summary(
         } else {
             row.costs(c.estimate(), false, &spend);
         }
-        // A share of the figure beside it, which carries the line's ~ and margin.
+        // A share of the figure beside it, which carries the line's ~ and margin. One use's
+        // share is that figure, so it is left out.
         let each = c
             .cost_per_use_usd
+            .filter(|_| c.calls != Some(1))
             .map_or_else(String::new, |usd| format!(", {} each", about(usd)));
         let mut text = format!(
             "{}{each}; it cost {} over the window",
@@ -7472,6 +7475,11 @@ mod tests {
             "keep",
             "Measured",
             "Used 310 times, $0.13 each; it cost $40 over the window. Turn off: \"permissions\": {\"deny\": [\"Agent\"]}.",
+        );
+        // One use's share would repeat the total, so it is left out.
+        assert_eq!(
+            line("MCP server docs").evidence,
+            "Used once; it cost $7.50 over the window. Turn off: \"permissions\": {\"deny\": [\"mcp__docs\"]}. Server override: mcpServers.docs.alwaysLoad in the MCP configuration that declares it (.mcp.json or that scope's configuration)."
         );
         // A setting that is not changed names where it is set.
         assert_eq!(

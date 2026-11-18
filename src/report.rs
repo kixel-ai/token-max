@@ -3627,9 +3627,13 @@ fn coverage_note(r: &Common<'_>, items: &str) -> String {
         );
     }
     if c.left_out > 0 {
-        let unit = items.split(' ').next().unwrap_or(items);
+        let units = items.split(' ').next().unwrap_or(items);
+        let (unit, verb) = match c.left_out {
+            1 => (units.strip_suffix('s').unwrap_or(units), "counts"),
+            _ => (units, "count"),
+        };
         note += &format!(
-            "; {} {unit} T3 could not settle between this line's owner and another count as {}, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover",
+            "; {} {unit} T3 could not settle between this line's owner and another {verb} as {}, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover",
             count(c.left_out),
             count(c.stand_ins.unwrap_or(0))
         );
@@ -7227,6 +7231,19 @@ mod tests {
         let row = report_line(&rendered, "Idle compaction");
         assert!(
             row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 66.6% of sessions that could be priced to the rest, assuming they resemble each other; 4 sessions T3 could not settle between this line's owner and another count as 1, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover."),
+            "{row:?}"
+        );
+        // One open session reads in the singular.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.base.coverage.as_mut().unwrap().left_out = 1;
+            c.base.coverage.as_mut().unwrap().stand_ins = Some(0);
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence.contains(
+                "; 1 session T3 could not settle between this line's owner and another counts as 0,"
+            ),
             "{row:?}"
         );
         // With no share to count the open sessions at, the line names that gap rather than

@@ -1644,8 +1644,8 @@ pub struct Coverage {
     pub total: u64,
     /// Sessions or turns T3 could not settle between this line and another owner, left out
     /// of the comparison; `stand_ins` of them count in `total`, at the line's settled share.
-    /// None when none were left out, or when some had no share, which leaves the comparison
-    /// unestimated.
+    /// None when none were left out, or when nothing settled can stand for them: some had no
+    /// share, or none of the line's settled items is like them. That leaves it unestimated.
     pub left_out: u64,
     pub stand_ins: Option<u64>,
 }
@@ -1901,8 +1901,12 @@ pub struct BackgroundCheck {
     pub generations: Option<u64>,
     /// Estimated cost of its requests over the window.
     pub cost: Cost,
+    /// `cost` extrapolated over every turn in `generations`; None when it cannot be.
+    pub cost_estimate: Option<Estimate>,
     /// Later input costs its cache reads avoided, including recaps and cache rewrites.
     pub lost_warming: Cost,
+    /// `lost_warming` extrapolated as `cost_estimate` is.
+    pub lost_estimate: Option<Estimate>,
 }
 
 /// Auto memory's cost over the window. It is advised off whatever it cost, since
@@ -2809,7 +2813,7 @@ pub struct Control {
     pub append: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextKind {
     Tool,
     McpServer,

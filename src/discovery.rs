@@ -677,17 +677,27 @@ fn unanswer_mixed_defaults(profile: &mut Profile) {
 /// Each existing recorded directory's cache TTLs for a Claude profile under `env`: the user,
 /// project, local and managed settings Claude Code reads there. Subagents count, since they
 /// read the same files. A missing directory runs nothing more, so it decides no current value.
+/// `known` holds directories already read, which keep that one observation.
 fn directory_ttls(
     options: &DiscoveryOptions,
     profile: &Profile,
     env: &Env,
     requests: &[Request],
+    known: IndexMap<String, PerBucket<TtlControl>>,
 ) -> Result<IndexMap<String, PerBucket<TtlControl>>, ScanError> {
+    let mut result = known;
+    let unread: Vec<&str> =
+        directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)))
+            .into_iter()
+            .filter(|cwd| !result.contains_key(*cwd))
+            .collect();
+    if unread.is_empty() {
+        return Ok(result);
+    }
     let managed_file = options.managed_settings_file.as_str();
     let user = options.settings(&profile.settings_file, Harness::Claude)?;
     let managed = settings(managed_file, Harness::Claude)?;
-    let mut result = IndexMap::default();
-    for cwd in directories(requests.iter().filter(|r| r.profiles.contains(&profile.id))) {
+    for cwd in unread {
         if !existing_directory(cwd)? {
             continue;
         }
@@ -1056,6 +1066,8 @@ pub fn discover_claude_controls(
         }
         let mut speed_directories = IndexMap::default();
         let mut idle_directories = IndexMap::default();
+        // Existing directories whose settings the idle controls read.
+        let mut read: Vec<&str> = vec![];
         let relevant: Vec<&Request> = requests
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
@@ -1209,6 +1221,7 @@ pub fn discover_claude_controls(
                     .insert(request.id.clone(), controls.clone());
             }
             let config = merged(&[&user, &project, &legacy, &local, &managed]);
+            read.push(cwd);
             idle.ttl = Some(ttl_controls(&TtlSources {
                 config: &config,
                 env: local_env,
@@ -1236,7 +1249,16 @@ pub fn discover_claude_controls(
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
         unanswer_mixed_defaults(profile);
-        profile.ttl_directories = directory_ttls(options, profile, local_env, requests)?;
+        // The main-agent directories keep the TTLs idle compaction read, so both see one
+        // observation of each file.
+        let known = read
+            .into_iter()
+            .filter_map(|cwd| {
+                let idle = profile.idle_directories.as_ref()?.get(cwd)?;
+                Some((cwd.to_string(), idle.ttl.clone()?))
+            })
+            .collect();
+        profile.ttl_directories = directory_ttls(options, profile, local_env, requests, known)?;
         profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
@@ -1285,7 +1307,7 @@ pub fn discover_claude_controls(
             .to_string();
         let (instance, environment) = (t3.instance.clone(), t3.environment.clone());
         let env = &env;
-        let ttls = directory_ttls(options, profile, env, requests)?;
+        let ttls = directory_ttls(options, profile, env, requests, IndexMap::default())?;
         profile.ttl_directories = ttls.clone();
         if !inherited {
             continue;

@@ -1282,3 +1282,360 @@ fn a_failed_host_fails_the_whole_session_export() {
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
     }
 }
+
+/// A coordinator run on a pseudo-terminal, as a person runs the walk.
+struct Terminal {
+    master: std::fs::File,
+    output: std::sync::Arc<(std::sync::Mutex<Vec<u8>>, std::sync::Condvar)>,
+    child: std::process::Child,
+    /// How much of the output earlier prompts consumed.
+    seen: usize,
+}
+
+impl Terminal {
+    fn spawn(mut command: Command) -> Self {
+        use std::os::fd::FromRawFd;
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: openpty writes two new descriptors this test then owns.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        // SAFETY: each descriptor is owned once, by the File made from it.
+        let (master, slave) = unsafe {
+            (
+                std::fs::File::from_raw_fd(master),
+                std::fs::File::from_raw_fd(slave),
+            )
+        };
+        let child = command
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave)
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let output =
+            std::sync::Arc::new((std::sync::Mutex::new(vec![]), std::sync::Condvar::new()));
+        let mut reader = master.try_clone().unwrap();
+        let shared = output.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            // Ends with EIO once the child closes its side.
+            while let Ok(n @ 1..) = std::io::Read::read(&mut reader, &mut buffer) {
+                shared.0.lock().unwrap().extend_from_slice(&buffer[..n]);
+                shared.1.notify_all();
+            }
+        });
+        Self {
+            master,
+            output,
+            child,
+            seen: 0,
+        }
+    }
+
+    /// Wait for `text` after the last text waited for.
+    fn wait(&mut self, text: &str) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let (lock, ready) = &*self.output;
+        let mut output = lock.lock().unwrap();
+        loop {
+            // Whole, with the terminal's line breaks folded, so `seen` indexes the same text
+            // each time; only an incomplete tail can differ, and a match ends before it.
+            let printed = String::from_utf8_lossy(&output).replace("\r\n", "\n");
+            if let Some(at) = printed[self.seen..].find(text) {
+                self.seen += at + text.len();
+                return;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(!left.is_zero(), "no {text:?} in {}", &printed[self.seen..]);
+            output = ready.wait_timeout(output, left).unwrap().0;
+        }
+    }
+
+    /// Wait for `text`, then type `answer` and Enter.
+    fn answer(&mut self, text: &str, answer: &str) {
+        self.wait(text);
+        std::io::Write::write_all(&mut self.master, format!("{answer}\n").as_bytes()).unwrap();
+    }
+
+    /// Wait for the run to end, returning its exit code, everything it printed and stderr.
+    fn finish(&mut self) -> (i32, String, String) {
+        let mut pipe = self.child.stderr.take().unwrap();
+        let stderr = std::thread::spawn(move || {
+            let mut stderr = String::new();
+            std::io::Read::read_to_string(&mut pipe, &mut stderr).unwrap();
+            stderr
+        });
+        // A run that never ends fails here, with what it printed.
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let status = loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                let printed = self.output.0.lock().unwrap().clone();
+                panic!("still running: {}", String::from_utf8_lossy(&printed));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let code = status.code().unwrap();
+        // The reader stops once the child's side closes.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::sync::Arc::strong_count(&self.output) > 1 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        let output = self.output.0.lock().unwrap().clone();
+        let output = String::from_utf8_lossy(&output).replace("\r\n", "\n");
+        (code, output, stderr.join().unwrap())
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// `text` with its wrapping undone: every run of whitespace as one space.
+fn flat(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Settings that turn auto memory off, as accepting its change writes them.
+const MEMORY_OFF: &str = "{\n  \"promptCacheTtl\": \"1h\",\n  \"autoMemoryEnabled\": false\n}";
+
+impl Hosts {
+    /// `doctor` on this host, devbox and laptop, walked on a terminal after the billing question.
+    fn walk(&self) -> Terminal {
+        self.host("devbox");
+        self.host("laptop");
+        self.walk_ready()
+    }
+
+    /// The walk of [`Hosts::walk`] with its destinations already set up.
+    fn walk_ready(&self) -> Terminal {
+        let mut command = self.command(&["--ssh", "devbox", "--ssh", "laptop", "--include-local"]);
+        command.env("NO_COLOR", "1");
+        let mut terminal = Terminal::spawn(command);
+        terminal.answer("[s]kip:", "a");
+        terminal
+    }
+
+    fn settings(&self, host: &str) -> PathBuf {
+        self.root
+            .join("homes")
+            .join(host)
+            .join(".claude/settings.json")
+    }
+
+    fn backup(&self, host: &str) -> Option<String> {
+        std::fs::read_to_string(
+            self.root
+                .join("homes")
+                .join(host)
+                .join(".claude/settings.json.token-max.bak"),
+        )
+        .ok()
+    }
+}
+
+#[test]
+fn the_walk_offers_every_hosts_changes_and_writes_each_on_its_host() {
+    let hosts = Hosts::new();
+    let mut terminal = hosts.walk();
+    // Unmeasured, so asked in the order the hosts were given.
+    terminal.wait("Host  this host");
+    terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    terminal.wait("Host  devbox");
+    terminal.answer("Accept? [y]es, [n]o, [q]uit:", "n");
+    terminal.wait("Host  laptop");
+    terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    terminal.wait("token-max: devbox  ");
+    terminal.wait("laptop:~/.claude/settings.json\n  @@");
+    terminal.answer("[n]o:", "y");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 0, "{output}{stderr}");
+    assert!(flat(&output).contains("Write the 2 accepted changes to ~/.claude/settings.json and laptop:~/.claude/settings.json?"), "{output}");
+    assert!(flat(&output).contains("Wrote 1 edit to laptop:~/.claude/settings.json. Backed up the old file to laptop:~/.claude/settings.json.token-max.bak."), "{output}");
+    for host in ["local", "laptop"] {
+        assert_eq!(
+            std::fs::read_to_string(hosts.settings(host)).unwrap(),
+            MEMORY_OFF
+        );
+        assert_eq!(hosts.backup(host).unwrap(), r#"{"promptCacheTtl":"1h"}"#);
+    }
+    // Declined, so its file is as it was.
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("devbox")).unwrap(),
+        r#"{"promptCacheTtl":"1h"}"#
+    );
+    assert_eq!(hosts.backup("devbox"), None);
+}
+
+#[test]
+fn a_host_that_fails_to_write_stops_the_run_before_later_hosts() {
+    let hosts = Hosts::new();
+    let mut terminal = hosts.walk();
+    for _ in 0..3 {
+        terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    }
+    terminal.wait("Write the 3 accepted changes");
+    // Another tool writes devbox's settings while the confirm waits.
+    std::fs::write(hosts.settings("devbox"), "{}").unwrap();
+    terminal.answer("[n]o:", "y");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 2, "{output}{stderr}");
+    assert!(
+        output.contains("Wrote 1 edit to ~/.claude/settings.json."),
+        "{output}"
+    );
+    assert!(!output.contains("Wrote 1 edit to devbox"), "{output}");
+    assert!(stderr.contains("devbox: "), "{stderr}");
+    assert!(
+        flat(&stderr).contains("changed while token-max doctor was running; nothing was written"),
+        "{stderr}"
+    );
+    assert!(
+        flat(&stderr).contains("; nothing was written on laptop"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("local")).unwrap(),
+        MEMORY_OFF
+    );
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("devbox")).unwrap(),
+        "{}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("laptop")).unwrap(),
+        r#"{"promptCacheTtl":"1h"}"#
+    );
+    for host in ["devbox", "laptop"] {
+        assert_eq!(hosts.backup(host), None);
+    }
+}
+
+#[test]
+fn a_walk_that_is_not_confirmed_writes_no_host() {
+    let hosts = Hosts::new();
+    let mut terminal = hosts.walk();
+    for _ in 0..3 {
+        terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    }
+    terminal.answer("[n]o:", "n");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 0, "{output}{stderr}");
+    assert!(output.ends_with("Nothing was written.\n"), "{output}");
+    for host in ["local", "devbox", "laptop"] {
+        assert_eq!(
+            std::fs::read_to_string(hosts.settings(host)).unwrap(),
+            r#"{"promptCacheTtl":"1h"}"#
+        );
+        assert_eq!(hosts.backup(host), None);
+    }
+    // Each destination exits once its connection closes.
+    for host in ["devbox", "laptop"] {
+        let pid: i32 = std::fs::read_to_string(hosts.root.join(format!("{host}.pid")))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        // SAFETY: signal 0 only checks whether the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(Instant::now() < deadline, "{host} still running");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[test]
+fn a_failed_write_never_reads_as_nothing_written() {
+    let hosts = Hosts::new();
+    let mut terminal = hosts.walk();
+    for _ in 0..3 {
+        terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    }
+    terminal.wait("Write the 3 accepted changes");
+    // This host's file changes while the confirm waits, so the first write fails.
+    std::fs::write(hosts.settings("local"), "{}").unwrap();
+    terminal.answer("[n]o:", "y");
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 2, "{output}{stderr}");
+    let closing = &output[output.rfind("[n]o:").unwrap()..];
+    assert!(
+        !closing.contains("Wrote") && !closing.contains("Nothing"),
+        "{output}"
+    );
+    assert!(
+        flat(&stderr).contains("; nothing was written on devbox, laptop"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn ctrl_c_while_a_destination_writes_stops_waiting_and_starts_no_other_host() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    hosts.host("laptop");
+    // devbox's token-max runs behind a relay of its stdin that holds the write back, so the
+    // coordinator waits on that write until it is cancelled.
+    for name in ["devbox.fifo", "never"] {
+        let fifo = std::ffi::CString::new(hosts.root.join(name).to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo creates a named pipe at a path this test owns.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+    }
+    hosts.fake(
+        "devbox",
+        &format!(
+            r#"'{BIN}' "$@" < "$TEST_ROOT/devbox.fifo" &
+exec 3>"$TEST_ROOT/devbox.fifo"
+while IFS= read -r line; do
+  [ "$line" = '"write"' ] && : > "$TEST_ROOT/writing" && read -r never < "$TEST_ROOT/never"
+  printf '%s\n' "$line" >&3
+done"#
+        ),
+    );
+    let mut terminal = hosts.walk_ready();
+    for _ in 0..3 {
+        terminal.answer("Accept? [y]es, [n]o, [q]uit:", "y");
+    }
+    terminal.answer("[n]o:", "y");
+    let writing = hosts.root.join("writing");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !writing.exists() {
+        assert!(Instant::now() < deadline, "devbox never started writing");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // SAFETY: kill only signals the child this test spawned.
+    assert_eq!(
+        unsafe { libc::kill(terminal.child.id() as i32, libc::SIGINT) },
+        0
+    );
+    let (code, output, stderr) = terminal.finish();
+    assert_eq!(code, 2, "{output}{stderr}");
+    assert!(
+        flat(&output).contains("Wrote 1 edit to ~/.claude/settings.json."),
+        "{output}"
+    );
+    let stderr = flat(&stderr);
+    assert!(
+        stderr.contains("devbox: cancelled while it was writing, so it may have changed"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("nothing was written on laptop"), "{stderr}");
+    assert_eq!(
+        std::fs::read_to_string(hosts.settings("laptop")).unwrap(),
+        r#"{"promptCacheTtl":"1h"}"#
+    );
+}

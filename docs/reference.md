@@ -191,9 +191,38 @@ so the removal survives sessions already running, which keep the server until
 they restart.
 
 Without a terminal, `doctor` changes nothing: each change's line ends with its
-edit and file, or its step by hand. A destination of `--ssh`
-lists its changes the same way, to make on that host, and a run of `--ssh`
-destinations alone only lists them.
+edit and file, or its step by hand.
+
+### On SSH hosts
+
+With `--ssh`, the walk offers every host's changes in one list, biggest saving
+first across hosts. A card for another host's change, or any card when the run
+covers several hosts, names its host under `Host`, and a group only gathers one
+host's changes. Each host's last question offers to remove its servers that are
+off already. The running total sums the accepted changes of every host, as a
+percent of the hosts' spend together. Each host's report follows the walk,
+marked with its answers, and the confirm shows every host's diffs and names
+each file as `host:path`, such as `devbox:~/.claude/settings.json`.
+
+Each destination's own token-max reads, checks and writes its files, so the
+rules above hold there as they do here: which edits apply, the masked diff,
+the check that a file did not change during the walk, Claude Code's lock and
+the `.token-max.bak` backups. The destination sends the changes it can make and
+keeps its files; this host sends back only which ones were accepted, and the
+destination makes those and nothing else. After the yes, this host's files are
+written first, then each destination's in the order given. A host that fails
+stops the run before any later host is written: the summary names what each
+host already wrote, and the error names the host that failed and the hosts left
+unwritten. If the connection drops while a destination writes, its files may or
+may not have changed, and the error says to check them and their backups.
+
+Ctrl-C before the confirm stops every destination with nothing written. After
+the yes, Ctrl-C starts no further host's write. A write already under way on
+this host finishes. A destination's write may still finish there after this
+host stops waiting for it, so the error says to check that host's files and
+backups. The run exits 2 when the Ctrl-C left a host unwritten or stopped
+waiting for one, naming each. A Ctrl-C that lands as the last write finishes
+cuts nothing short, so the run reports what it wrote and exits 0.
 
 ## Profiles
 
@@ -312,7 +341,7 @@ setting or environment override.
 
 ## Exit codes and unreadable lines
 
-When `doctor` walks through this host's changes on a terminal, it exits `0`, or
+When `doctor` walks through the changes on a terminal, it exits `0`, or
 `2` for a failure or cancellation. Otherwise exit codes are `0` for no applicable
 change, `1` for a recommended setting or feature change, and `2`
 for a failed scan, price fetch, invalid argument, or cancellation. A failed run emits no
@@ -982,9 +1011,13 @@ in the total, and the hosts' margins of error combine in quadrature, which
 assumes each host's history is an independent sample; where histories are
 copied between hosts the errors are correlated, so the total's margin can be
 too small. Any failed
-host, connection or stream fails the whole run with exit 2 and no report;
-Ctrl-C stops every destination. A destination's changes are listed in its
-section to make there; `doctor` offers only this host's. Each host's percents
+host, connection or stream before the reports are printed fails the whole run
+with exit 2 and no report, and Ctrl-C then stops every destination. After
+the reports, a failure during the walk, a Ctrl-C during its questions, or a
+Ctrl-C after the yes that leaves a host unwritten also exits 2, as
+[On SSH hosts](#on-ssh-hosts) describes. On a terminal, `doctor` walks through every
+host's changes and writes each on its own host, as
+[On SSH hosts](#on-ssh-hosts) describes. Each host's percents
 are of that host's own spend, and the total's of the hosts' spend together.
 
 ## Keepalive pings

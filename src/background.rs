@@ -12,8 +12,8 @@ use crate::collections::IndexSet;
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BackgroundCheck, BackgroundControl, BackgroundFeature, BillingPart, CheckBase, Cost,
-    Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
-    Scan, Text, Ttl, Usage, Usd,
+    Coverage, Estimate, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request,
+    RequestEvidence, Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
     Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
@@ -484,7 +484,10 @@ fn check(
         Generations::default()
     };
     // Turns T3 could not settle to this line stand in at its share of those it did.
-    let (left_out, stand_ins) = (left_out.len() as u64, crate::t3::stand_ins(left_out));
+    let (left_out, stand_ins) = (
+        left_out.len() as u64,
+        crate::t3::stand_ins(left_out, pairs.count()),
+    );
     let paired = pairs.savings(stand_ins.unwrap_or(0));
     // Extrapolate the measured net cost to every turn where it ran, as context costs do.
     let estimate = paired.usd().filter(|_| stand_ins.is_some());
@@ -532,8 +535,22 @@ fn check(
         });
         (unknown.clone(), unknown)
     } else {
-        (on.cost(), off.cost())
+        let mut costs = (on.cost(), off.cost());
+        // The settled turns' subtotals are not the line's whole cost.
+        if left_out > 0 {
+            let reason = match left_out {
+                1 => "1 turn T3 could not settle to this line is left out".to_string(),
+                n => format!("{n} turns T3 could not settle to this line are left out"),
+            };
+            for cost in [&mut costs.0, &mut costs.1] {
+                cost.total_usd = None;
+                cost.unknown.push(reason.clone());
+            }
+        }
+        costs
     };
+    // Each extrapolated over the same turns as the estimated requests.
+    let whole = |e: Option<Estimate>| e.filter(|_| stand_ins.is_some() && measurable && enabled);
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
     let uncertainty: IndexSet<String> = uncertainty.into_iter().collect();
@@ -626,7 +643,9 @@ fn check(
         off_file: control.off_file.clone(),
         generations: (measurable && resolved).then_some(paired.total),
         cost,
+        cost_estimate: whole(paired.baseline),
         lost_warming: lost,
+        lost_estimate: whole(paired.alternative),
     }
 }
 
@@ -1158,6 +1177,40 @@ mod tests {
         assert!(
             (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 5.0).abs() < 1e-12
         );
+        // The costs cover the same five turns, not just the three settled ones.
+        assert_eq!(c.cost.total_usd, None);
+        assert_eq!(
+            c.cost.unknown,
+            ["3 turns T3 could not settle to this line are left out"]
+        );
+        assert!(
+            (c.cost_estimate.unwrap().usd - one.total_usd.unwrap().to_f64() * 5.0).abs() < 1e-12
+        );
+        assert_eq!(c.lost_estimate.map(|e| e.usd), Some(0.0));
+        // A share that rounds to no turn still needs a settled turn like it to count it by.
+        let mut rounded = s.clone();
+        for r in rounded
+            .requests
+            .iter_mut()
+            .filter(|r| &*r.session == "session")
+        {
+            r.client = Some("sdk".into());
+        }
+        // 36 more settled to T3 leave the line a share of 4 in 40: 0.3 of the three turns.
+        for i in 0..36 {
+            let mut settled = response(30 + i, 100_000);
+            settled.id = format!("t3-{i}").into();
+            settled.session = "t3".into();
+            settled.profiles = vec!["t3:/state:agent".into()].into();
+            rounded.requests.push(settled);
+        }
+        let c = &run(&rounded, 100.0)[0];
+        assert_eq!(
+            (c.base.action, c.base.savings_usd, c.cost_estimate),
+            (Action::Advisory, None, None)
+        );
+        let coverage = c.base.coverage.unwrap();
+        assert_eq!((coverage.left_out, coverage.stand_ins), (3, None));
         // With nothing settled to estimate a share from, nothing is priced.
         for r in &mut s.requests {
             r.profiles = vec!["profile".into(), "t3:/state:agent".into()].into();

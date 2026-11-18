@@ -939,7 +939,7 @@ fn reown(c: &CompactionCheck, reowned: &Reowned, window: i64, profile: &Profile)
     // Each owner outside the file, and what to do there.
     let mut foreign: Vec<(&str, String)> = vec![];
     let mut edits = vec![];
-    let base = |owner: &str| owner.split(" (").next().unwrap_or(owner).to_string();
+    let base = |owner: &str| crate::controls::owner_setting(owner).to_string();
     let window_key = crate::controls::WINDOW_KEY;
     // A removed environment window no longer outranks the rows that replace it.
     let lifted = &reowned.environment_windows;

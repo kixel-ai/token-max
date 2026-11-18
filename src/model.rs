@@ -1806,6 +1806,9 @@ pub struct Reowned {
     pub targets: Vec<Text>,
     /// Every other model the line runs, pinned at its current trigger in its own row.
     pub pins: Vec<Pin>,
+    /// Triggers removing the variable would move that no edit here keeps, such as another
+    /// line's that reads the same setting; any keeps the change advisory.
+    pub unkept: Vec<String>,
 }
 
 /// A model held at its current trigger by its own window row.

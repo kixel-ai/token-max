@@ -784,6 +784,17 @@ pub fn t3_percent(
     date_percent(compaction);
 }
 
+/// A window owner without its trailing note, such as ` (capped at 200000)`; a settings path
+/// may itself hold ` (`, so the owner ends at its key.
+pub fn owner_setting(owner: &str) -> &str {
+    for key in [".autoCompactWindow", WINDOW_KEY] {
+        if let Some(at) = owner.rfind(key) {
+            return &owner[..at + key.len()];
+        }
+    }
+    owner.split(" (").next().unwrap_or(owner)
+}
+
 /// Date a resolved override by when the last file that decides a trigger changed.
 pub fn date_percent(compaction: &mut CompactionControls) {
     let Some(percent) = &mut compaction.percent else {
@@ -793,13 +804,18 @@ pub fn date_percent(compaction: &mut CompactionControls) {
     if !percent.timeless.is_empty() {
         return;
     }
-    let mut since = 0;
+    let mut since = Millis::MIN;
     for file in &percent.files {
+        // A time before 1970 is still a time.
         let modified = std::fs::metadata(file)
             .and_then(|m| m.modified())
             .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .and_then(|d| Millis::try_from(d.as_millis()).ok());
+            .and_then(|t| match t.duration_since(std::time::UNIX_EPOCH) {
+                Ok(after) => Millis::try_from(after.as_millis()).ok(),
+                Err(before) => Millis::try_from(before.duration().as_millis())
+                    .ok()
+                    .map(|m| -m),
+            });
         let Some(modified) = modified else {
             return;
         };
@@ -862,16 +878,20 @@ fn lowered(
         return control;
     };
     let canonical = strip_dated(model, 8).unwrap_or(model);
-    let context = compaction
-        .contexts
-        .get(canonical)
-        .copied()
-        .unwrap_or(CLAUDE_WINDOW_MAXIMUM);
+    // The context is known when Claude Code holds the model below 1M, or documents it at 1M.
+    let context =
+        compaction
+            .contexts
+            .get(canonical)
+            .copied()
+            .or((Sizing::of(compaction, canonical) == Sizing::Native
+                && native_million(canonical) == Some(true))
+            .then_some(CLAUDE_WINDOW_MAXIMUM));
     let percentage = format!("{PERCENT_KEY}={value}");
     if let Some(window) = control.value
         && !control.unset
         && control.setting.is_none()
-        && window < context
+        && context.is_some_and(|context| window < context)
     {
         let trigger = (window as f64 * value / 100.0).floor() as i64;
         control.value = Some(trigger);
@@ -1177,8 +1197,10 @@ fn observe(
                     *latest = (e.time, tokens);
                 }
             }
-            // A trigger under an explicit window does not show the default.
-            if !(CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+            // A trigger under an explicit window, or one an override may have lowered, does
+            // not show the default.
+            if at.percent.is_some()
+                || !(CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
                 || !window_setting(at, Some(model)).unset
             {
                 continue;
@@ -1208,9 +1230,9 @@ fn percent_key(
     model: &str,
 ) -> PercentScope {
     let control = window_setting(compaction, Some(model));
-    // A capped window keeps the setting it caps, and owners carry notes after " (".
+    // A capped window keeps the setting it caps, and owners carry notes after their key.
     let window = (!control.unset).then(|| {
-        let owner = control.owner.split(" (").next().unwrap_or(&control.owner);
+        let owner = owner_setting(&control.owner);
         (
             control.setting.or(control.value).unwrap_or(0),
             owner.to_string(),
@@ -1220,7 +1242,8 @@ fn percent_key(
         percent.value.map(f64::to_bits),
         percent.since,
         window,
-        Sizing::of(compaction, model),
+        // Sizing reads the documented table, which knows only undated IDs.
+        Sizing::of(compaction, strip_dated(model, 8).unwrap_or(model)),
     )
 }
 
@@ -1603,6 +1626,31 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_settings_file_changed_before_1970_still_dates_the_override() {
+        let w = crate::test_support::Workspace::new();
+        let file = w.home.join("settings.json");
+        std::fs::write(&file, "{}").unwrap();
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(before)
+            .unwrap();
+        let mut controls = CompactionControls {
+            percent: Some(PercentOverride {
+                value: Some(50.0),
+                files: vec![file.display().to_string()],
+                ..Default::default()
+            }),
+            ..compaction_controls(&claude_sources(&Map::new(), &Map::new(), &Env::default()))
+                .unwrap()
+        };
+        date_percent(&mut controls);
+        assert_eq!(controls.percent.unwrap().since, Some(-86_400_000));
     }
 
     #[test]

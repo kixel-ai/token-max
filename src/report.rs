@@ -7703,6 +7703,7 @@ mod tests {
             environment_windows: vec![],
             targets: vec!["claude-opus-5-5".into()],
             pins: vec![],
+            unkept: vec![],
         };
         assert_eq!(
             how(shared.clone(), alone.clone()),
@@ -7774,6 +7775,52 @@ mod tests {
         );
         assert!(step.contains(&format!("remove env.{variable}")), "{step}");
         assert!(step.contains(&format!("; remove {variable}")), "{step}");
+
+        // Two plans that pin each other's target leave the second by hand, so accepting both
+        // never reverts the first.
+        let mut report = synthetic();
+        let plan = |model: &str, other: &str, owner: String| {
+            let mut window = check_base(Action::Change, Some(200_000), Some(100_000));
+            window.owner = owner;
+            let mut check = compaction_check(window);
+            if let CheckResult::Compaction(c) = &mut check {
+                c.model = Some(model.into());
+                c.models = vec![Some(model.into())];
+                c.reowned = Some(Reowned {
+                    targets: vec![model.into()],
+                    pins: vec![Pin {
+                        model: other.into(),
+                        trigger: Some(150_000),
+                        owner: format!("{file}:modelSettings.{other}.autoCompactWindow"),
+                    }],
+                    ..alone.clone()
+                });
+            }
+            check
+        };
+        report.checks = vec![
+            plan(
+                "claude-opus-5-5",
+                "claude-haiku-5-5",
+                format!("{file}:modelSettings.claude-opus-5-5.autoCompactWindow"),
+            ),
+            plan(
+                "claude-haiku-5-5",
+                "claude-opus-5-5",
+                format!("{file}:modelSettings.claude-haiku-5-5.autoCompactWindow"),
+            ),
+        ];
+        report.context.clear();
+        let windows: Vec<How> = fixes(&report, false)
+            .into_iter()
+            .filter(|f| f.name.starts_with("Auto-compact window"))
+            .map(|f| f.how)
+            .collect();
+        assert!(matches!(windows[0], How::Edit(_)), "{windows:?}");
+        assert!(
+            matches!(&windows[1], How::Manual { reason, .. } if reason.contains("wants a different value for the same setting")),
+            "{windows:?}"
+        );
 
         // The shell's override is left by hand, naming every step.
         let shell = Reowned {

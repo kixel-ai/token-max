@@ -789,7 +789,9 @@ advisory.
 
 `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` resolves into the replayed trigger from every
 environment the window reads, a T3 instance's included. An explicit window
-below the model's context compacts at that percentage of it. Elsewhere, as under
+below a context Claude Code establishes for the model compacts at that
+percentage of it. A recorded project whose override differs from the home's
+leaves the comparison unpriced, since its sessions compact elsewhere. Elsewhere, as under
 an unset or capped window, the trigger rests on Claude Code's undocumented
 default percentage, so the latest automatic compaction on the model counts
 only from a session that started after every file setting the override, a
@@ -806,9 +808,11 @@ model the transcripts show is pinned at its current trigger in its own row, and
 every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW` comes out, since it outranks
 every row and a copy left behind, such as the shell's, would take over. The walk shows each of these edits before applying them. An
 owner the walk cannot edit, such as the shell, a project file or a T3 instance,
-leaves the whole change as a step by hand naming it. Another model whose
-current trigger is unresolved, or lowered below the 100,000-token smallest
-window a setting can name, keeps the line advisory.
+leaves the whole change as a step by hand naming it. Anything the change would
+move but cannot pin keeps the line advisory: another model
+whose current trigger is unresolved or below the 100,000-token smallest window
+a setting can name, requests with no recorded model, a recorded project's own
+window, or another line, such as a T3 instance's, that reads the same override.
 
 Candidates come from current controls, price-tier boundaries, provider limits,
 and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching

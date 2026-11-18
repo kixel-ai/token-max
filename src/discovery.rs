@@ -758,6 +758,13 @@ pub(crate) fn settle_ttls<'d>(
             let ttl = profile.ttl.get_mut(bucket);
             ttl.varies = true;
             ttl.reason = TTL_PROJECTS_DIFFER.into();
+            // The window replay applies one TTL across the profile, so its comparison is
+            // unknown too, as under unresolved T3 ownership.
+            let compaction = &mut profile.compaction;
+            compaction.default.comparison_unknown = Some(TTL_PROJECTS_DIFFER.into());
+            for c in compaction.models.values_mut() {
+                c.comparison_unknown = Some(TTL_PROJECTS_DIFFER.into());
+            }
         }
     }
 }
@@ -4199,6 +4206,7 @@ mod tests {
         // A deleted project runs nothing more, so it decides no current value.
         let p = settled(&[&plain, &gone]);
         assert_eq!(p.ttl.main.one().value, Some(Ttl::FiveMinutes));
+        assert_eq!(p.compaction.default.comparison_unknown, None);
         // A project's own file decides its sessions, which the user file cannot change.
         for projects in [&[pinned.as_path()][..], &[&plain, &pinned]] {
             let p = settled(projects);
@@ -4208,6 +4216,11 @@ mod tests {
             assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
             assert_eq!(p.ttl.main.reason, TTL_PROJECTS_DIFFER);
             assert!(!p.ttl.subagent.varies);
+            // Every check that applies one TTL across the profile goes unknown with it.
+            assert_eq!(
+                p.compaction.default.comparison_unknown.as_deref(),
+                Some(TTL_PROJECTS_DIFFER)
+            );
             let directories = p.idle_directories.as_ref().unwrap();
             let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.value;
             assert_eq!(main(&pinned), Some(Ttl::OneHour));

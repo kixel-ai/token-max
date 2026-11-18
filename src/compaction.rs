@@ -1261,18 +1261,12 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .copied()
             .filter(|t| t.base.profiles.contains(&profile.id))
             .collect();
-        // The window replay applies one TTL to every project, so a TTL projects set
-        // differently leaves it unpriced rather than replayed at any one value.
         let recommended_ttl = |bucket: Bucket| {
-            let current = profile.ttl.get(bucket);
-            if current.varies {
-                return None;
-            }
             ttl_results
                 .iter()
                 .find(|t| t.bucket == bucket)
                 .and_then(|t| t.base.recommended)
-                .or(current.value)
+                .or(profile.ttl.get(bucket).one().value)
         };
         let ttls = PerBucket {
             main: recommended_ttl(Bucket::Main),

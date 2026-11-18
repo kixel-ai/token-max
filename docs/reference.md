@@ -30,7 +30,8 @@ in PowerShell,
 ## Applying changes
 
 On a terminal, `doctor` opens with one header line naming what it read: the
-requests, the window and their cost. It then walks through each change it can
+requests, the sessions they ran in (each subagent counted with the session
+that spawned it), the window and their cost. It then walks through each change it can
 make, after a headline counting its questions and the changes they cover,
 across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such
@@ -67,8 +68,8 @@ overlapping changes may save less, since each saving holds every other setting
 constant. An accepted change whose saving was not measured is counted beside
 the total, not in it, and so is one that saves only when an unset default would
 otherwise be the other value, such as an unset main-agent cache TTL, as an "up
-to" figure. A saving priced from only part of its requests counts what was
-priced, and the total says so. A `q`, or end of input, ends the walk and leaves the rest
+to" figure. A saving that leaves part of its cost unmeasured, such as Codex
+memory generation, counts what was measured, and the total says so. A `q`, or end of input, ends the walk and leaves the rest
 unaccepted.
 
 The report follows, its list grouped: the accepted changes first with the
@@ -370,7 +371,11 @@ nothing else changes. **Everything else** follows, ranked by what it costs,
 biggest first, with lines whose cost is unknown or that have no figure after.
 When several profiles were read, each line also names the settings file that
 owns it, or the profile when no file does (see [Profiles](#profiles)).
-The headline counts both kinds of change. A dot's color carries the verdict:
+The headline counts both kinds of change. The line under it sums what they
+save together, as the walk's running total would if every change were
+accepted, such as "Together, these changes save about $40/mo, 9% of this
+host's spend; overlapping changes may save less", since each saving holds
+every other setting constant. A dot's color carries the verdict:
 red, yellow, green for a value already at its recommendation, and a dim hollow
 dot for no verdict, either for lack of evidence or because nothing can be set.
 Without color a word replaces the dot: `change`, `consider`, `keep`,
@@ -391,8 +396,14 @@ $120`, so a share can read high; the line explaining the percents says so.
 A `~` marks any figure extrapolated over requests that could not be priced, such
 as a saving of `~$3,270/mo ± $410`, followed by its 95% margin of error under the
 assumption that the unpriced requests resemble the priced ones. A figure priced
-in full has neither. The walk's and `--defaults` headline's totals add their
-changes' margins, since savings from overlapping requests can err the same way.
+in full has neither. Costs read the same way: what a tool, skill, MCP server,
+subagent type, main-session effort or Fable week cost is extrapolated from its
+own priced requests to all of them, such as `~$2,880 ± $40`, and one with no
+priced request is unknown. A line summing pieces of context, such as System
+prompt and core tools, adds their margins, and reads `at least` only beside a
+piece none of whose requests could be priced. The walk's and `--defaults`
+headline's totals add their changes' margins, since savings from overlapping
+requests can err the same way.
 
 Comparisons between setting values are per 30 days at the window's rate; what
 features, context and long Bash waits cost, and how often they were used, are
@@ -449,7 +460,7 @@ no applicable changes does not imply complete visibility or optimal settings.
 
 ## Savings against the defaults
 
-Under the headline, one line sums what this host's current settings save
+Under the headline and its total, one line sums what this host's current settings save
 against the Claude Code and Codex defaults, such as "Compared with defaults,
 your settings save about $945/mo, 2% of this host's spend". Every line whose
 setting differs from its default gets a note under it naming the default and
@@ -599,8 +610,10 @@ ratio measured from the same transcripts. It is priced at the cache position it
 occupied in that request: cached read, 1h write, 5m write, then ordinary input.
 Attachments have no recorded position, so one is priced only when every
 position its history allows pays the same rate. Requests that could not be
-priced are estimated from those that could, and a piece with none is shown as
-unknown.
+priced are extrapolated from those that could, with a `~` and a 95% margin from
+the priced requests' spread, and a piece with none is shown as unknown. An MCP
+server's tools ride on its requests, so its total keeps its own margin rather
+than adding its tools'.
 Removing a piece can also shift later cache writes and compaction, which this
 does not model. Claude requests without a recorded shape cannot price their
 context pieces. Codex prices rendered chronological context with a quarter-token
@@ -786,8 +799,11 @@ feature availability. The threshold defaults to 200,000 tokens, with a 100,000
 floor for `CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS`. This check does not tune it.
 Current user, project/local, managed and active-profile environment owners are
 read separately from historical metadata. Missing directories, unknown execution
-mode/version/flags or unresolved controls remain advisory and unpriced where they
-affect the comparison. Native CLI interactivity needs REPL provenance; Desktop
+mode/version/flags or unresolved controls leave the sessions they affect
+unpriced. On and off are paired session by session, and a session that cannot be
+priced both ways is extrapolated from the priced sessions where idle compaction
+could act, marked with `~` and a 95% margin; a session it could not act on
+counts exactly, even when its replay failed. With no such session priced, the line is not enough evidence. Native CLI interactivity needs REPL provenance; Desktop
 labels alone do not establish local/SSH execution. T3's proactive policies are
 outside this native check.
 
@@ -858,20 +874,21 @@ The lifecycle guards for each gap are rebuilt from T3's event log at every
 completed-run event and when the timer would fire. T3 keeps about one day of
 that log, so the check's window starts where the log is complete, and gaps
 that open earlier stay as recorded in every mode. Unknown lifecycle or missing
-compatible full-prefix calibration stays unpriced, and the report names the
-first missing input. See [T3 evidence and sources](t3.md) for supported schema
+compatible full-prefix calibration leaves that session unpriced; each mode is
+paired with the current one session by session and extrapolated over such
+sessions, as the native check does. A mode no session prices, or an unresolved
+window, leaves the line unpriced, and the report names the first missing input. See [T3 evidence and sources](t3.md) for supported schema
 and limits.
 
 ## Other hosts over SSH
 
 `--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
 SSH configuration, keys and known hosts without prompting. Add
-`--include-local` to audit this host in the same run. Each destination needs
-the same version of token-max installed; token-max installs nothing there
-itself. A missing or different version fails with the
-command to run. Linux and macOS destinations are supported. `token-max
-sessions` takes the same flags, and each destination sends only its priced
-session lines.
+`--include-local` to audit this host in the same run. You install nothing
+there: each destination runs this build of token-max, which token-max puts
+there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
+`token-max sessions` takes the same flags, and each destination sends only its
+priced session lines.
 
 ```sh
 token-max doctor --ssh devbox --ssh user@laptop --include-local
@@ -881,20 +898,52 @@ The destination runs `token-max doctor --ssh-scan`, which discovers that host's 
 profiles from its home and environment, reads its transcripts and settings,
 and runs every check there, priced from the one catalog this host loads and
 sends it. Only its finished report comes back, so its transcripts and scan
-never leave it, and this host never holds more than its own scan. It looks for
-`token-max` on the non-interactive `PATH`, then in the release installers'
-directory (the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
-`~/.local/bin`), then in `~/.cargo/bin`.
+never leave it, and this host never holds more than its own scan.
+
+Each run first asks the destination its OS and architecture, over the
+connection that then runs the audit:
+
+- **On this host's platform**, it runs a copy of this exact binary. Without
+  one, token-max copies itself there over SSH, checked by its SHA-256. An
+  installed token-max is not used, since every build after a release reports
+  that release's version.
+- **On another platform**, it runs this version's release. Failing that, it
+  runs the first installed `token-max` whose `--version` matches, on the
+  non-interactive `PATH`, then in the release installers' directory (the
+  first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`),
+  then in `~/.cargo/bin`. With neither, the destination downloads the
+  release from GitHub and checks it against its published checksum, which
+  needs `curl`, `tar` and `xz` there. Matching the version is not matching
+  the build, so a destination whose build differs from this one fails with
+  what to run instead. A development build has no release, so it fails with
+  the `cargo install` command to run there.
+
+Copies and downloads are cached in `~/.cache/token-max/ssh` there (or under
+`$XDG_CACHE_HOME`): a copy named by its digest, a release by version and
+target. Later runs reuse them, and each new one replaces the binaries cached
+there before it. Either step checks that the binary runs there before caching
+it. A copy linked against this host's libraries fails with a statically
+linked build to run here instead, such as the release installers'.
+
 `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 
 Each host is analyzed on its own and gets its own section, labeled with the
-destination, or `this host`. A history copied between hosts
-counts in each host's report, so don't add amounts across hosts. Any failed
+destination, or `this host`. A run of several hosts heads its report with one
+total: the hosts' requests and sessions, their spend at API prices, and the sum of what the
+changes they offer save every 30 days, with each saving's percent of the hosts'
+spend together. Offered changes may overlap, within a host or between hosts, so
+applying them all can save less than that sum, as the total says. The hosts' figures are added as they are, so a history copied between
+hosts counts on each, and the total counts it twice; token-max does not
+compare request IDs across hosts. A figure marked `~` on any host keeps its `~`
+in the total, and the hosts' margins of error combine in quadrature, which
+assumes each host's history is an independent sample; where histories are
+copied between hosts the errors are correlated, so the total's margin can be
+too small. Any failed
 host, connection or stream fails the whole run with exit 2 and no report;
 Ctrl-C stops every destination. A destination's changes are listed in its
 section to make there; `doctor` offers only this host's. Each host's percents
-are of that host's own spend.
+are of that host's own spend, and the total's of the hosts' spend together.
 
 ## Keepalive pings
 

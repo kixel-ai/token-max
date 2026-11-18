@@ -1,14 +1,20 @@
-//! Audits of selected SSH destinations, each run by the `token-max` installed there.
+//! Audits of selected SSH destinations, each run by this build of `token-max` there.
 //!
 //! The coordinator runs `token-max doctor --ssh-scan` on each destination through the local OpenSSH
 //! client, with its configuration, authentication and host keys. The destination reads its own
 //! histories and settings, prices them with the coordinator's catalog, and sends back only its
 //! printed report or its session lines (see [`crate::wire`]); its scan never leaves it.
+//!
+//! A destination without this build gets one first, cached there for later runs: a copy of this
+//! binary when its platform matches, or else this version's release, checked against its
+//! published checksum.
 
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufRead, BufReader, BufWriter, Read};
 use std::panic::{self, AssertUnwindSafe};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, PoisonError, mpsc};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock, PoisonError, mpsc};
+
+use sha2::{Digest, Sha256};
 
 use crate::cli::{Render, Rendered, render};
 use crate::discovery::DiscoveryOptions;
@@ -31,42 +37,119 @@ pub fn destination(value: &str) -> Result<(), ScanError> {
     Ok(())
 }
 
-/// The command a destination needs to match this build.
-fn install() -> String {
-    // Until the first release every build is 0.0.0, so only a fresh install of the same
-    // source matches, on both hosts.
-    match env!("CARGO_PKG_VERSION") {
-        "0.0.0" => {
-            "`cargo install --locked --git https://github.com/kixel-ai/token-max` on both hosts"
-                .into()
-        }
-        version => format!(
-            "`curl -LsSf https://max.kixel.ai/install.sh | sh` on both hosts, or `cargo install --locked token-max --version {version}` there"
-        ),
-    }
-}
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Runs on the destination through its login shell, which may not be POSIX: only `sh` reads
-/// the script, and the script holds no single quotes or backslashes. The release installers
-/// put the command in the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
-/// `~/.local/bin`, searched first since they are the documented install, and `cargo install`
-/// in `~/.cargo/bin`; non-interactive shells often leave these off `PATH`.
-const SCRIPT: &str = r#"case "$(uname -s)" in Linux|Darwin) ;; *) exit 3 ;; esac; PATH="$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin"; command -v token-max >/dev/null || exit 127; exec token-max "$@""#;
+/// Where this version's release archives are published.
+const RELEASES: &str = "https://github.com/kixel-ai/token-max/releases";
 
-/// Exit statuses the script and OpenSSH report before a stream starts.
+/// The command that builds a development build on a destination of another platform.
+const BUILD: &str = "`cargo install --locked --git https://github.com/kixel-ai/token-max --rev <commit>` there, from this build's commit";
+
+/// The scripts run on the destination through its login shell, which may not be POSIX: only
+/// `sh` reads them, and they hold no single quotes or backslashes. Each starts by naming the
+/// destination's platform as Rust's `std::env::consts` does, exiting 3 on any other, and its
+/// cache directory, which holds only binaries these scripts put there.
+const PLATFORM: &str = r#"case "$(uname -s)" in Linux) os=linux abi=unknown-linux-musl ;; Darwin) os=macos abi=apple-darwin ;; *) exit 3 ;; esac; case "$(uname -m)" in x86_64|amd64) arch=x86_64 ;; aarch64|arm64) arch=aarch64 ;; *) exit 3 ;; esac; cache=${XDG_CACHE_HOME:-$HOME/.cache}/token-max/ssh; "#;
+
+/// Finds this build on the destination and runs it, or says how to put it there. Takes the
+/// coordinator's OS, architecture, copy name and version, then token-max's arguments.
+///
+/// Prints `run` and execs a binary of this build, or prints `copy` or `download <target>` and
+/// exits. On the coordinator's own platform only its copy runs, since every build from a
+/// commit after a release reports that release's version. On another platform nothing else
+/// can, so a binary of this version stands in, checked by the stream's header: this version's
+/// cached release, else the first installed `token-max` reporting it.
+///
+/// Installed ones are searched on `PATH`, then in the release installers' directory, the first
+/// of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`, then in `cargo install`'s
+/// `~/.cargo/bin`; non-interactive shells often leave these off `PATH`. An empty `PATH` entry
+/// is the current directory, as POSIX has it.
+const RUN: &str = r#"if [ "$os $arch" = "$1 $2" ]; then bin=$cache/$3; [ -x "$bin" ] || { echo copy; exit 0; }; else bin=$cache/token-max-v$4-$arch-$abi; if [ ! -x "$bin" ]; then bin=; dirs=$PATH:${XDG_BIN_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/../bin}:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin; set -f; IFS=:; for dir in $dirs; do dir=${dir:-.}; if [ -x "$dir/token-max" ] && [ "$("$dir/token-max" --version 2>/dev/null)" = "$4" ]; then bin=$dir/token-max; break; fi; done; unset IFS; set +f; [ -n "$bin" ] || { echo download $arch-$abi; exit 0; }; fi; fi; echo run; shift 4; exec "$bin" "$@""#;
+
+/// Picks a SHA-256 command, since Linux and macOS ship different ones.
+const SUM: &str = r#"if command -v sha256sum >/dev/null; then sum=sha256sum; elif command -v shasum >/dev/null; then sum="shasum -a 256"; else exit 5; fi; mkdir -p "$cache" || exit 1; "#;
+
+/// Caches the binary on stdin under the name `$1` once its SHA-256 is `$2` and it runs there.
+/// Each step writes beside the cache so the final move is an atomic rename, and then removes
+/// every other binary there, so repeated builds don't pile up.
+const COPY: &str = r#"tmp=$(mktemp "$cache/.copy.XXXXXX") || exit 1; clean() { rm -f "$tmp"; }; trap clean EXIT; cat >"$tmp" || exit 1; actual=$($sum <"$tmp") || exit 1; [ "${actual%% *}" = "$2" ] || exit 6; chmod 755 "$tmp" && "$tmp" --version >/dev/null 2>&1 || exit 4; mv -f "$tmp" "$cache/$1" || exit 1; for old in "$cache"/token-max-*; do [ "$old" = "$cache/$1" ] || rm -f "$old"; done"#;
+
+/// Caches release `$1` from the releases at `$2` for the destination's platform, as the run
+/// script names it, once its archive matches the published checksum and it runs there.
+const DOWNLOAD: &str = r#"for tool in curl tar; do command -v $tool >/dev/null || exit 7; done; tmp=$(mktemp -d "$cache/.download.XXXXXX") || exit 1; clean() { rm -rf "$tmp"; }; trap clean EXIT; target=$arch-$abi; archive=token-max-$target.tar.xz; curl -LsSf -o "$tmp/$archive" "$2/download/v$1/$archive" && curl -LsSf -o "$tmp/sum" "$2/download/v$1/$archive.sha256" || exit 8; read -r expected rest <"$tmp/sum"; actual=$($sum <"$tmp/$archive") || exit 1; [ -n "$expected" ] && [ "${actual%% *}" = "$expected" ] || exit 6; tar -xf "$tmp/$archive" -C "$tmp" || exit 9; bin=$tmp/token-max-$target/token-max; [ "$("$bin" --version 2>/dev/null)" = "$1" ] || exit 4; mv -f "$bin" "$cache/token-max-v$1-$target" || exit 1; for old in "$cache"/token-max-*; do [ "$old" = "$cache/token-max-v$1-$target" ] || rm -f "$old"; done"#;
+
+/// Exit statuses the scripts and OpenSSH report.
 const UNSUPPORTED: i32 = 3;
-const NOT_INSTALLED: i32 = 127;
+const DOES_NOT_RUN: i32 = 4;
+const NO_CHECKSUM: i32 = 5;
+const MISMATCH: i32 = 6;
+const NO_DOWNLOADER: i32 = 7;
+const NOT_DOWNLOADED: i32 = 8;
+const NOT_UNPACKED: i32 = 9;
 const SSH_FAILED: i32 = 255;
 
-fn remote_command(since: Option<Millis>, defaults: bool) -> String {
-    let mut command = format!("sh -c '{SCRIPT}' sh doctor --ssh-scan");
-    if let Some(since) = since {
-        command.push_str(&format!(" --since '{}'", iso(since)));
-    }
-    if defaults {
-        command.push_str(" --defaults");
+/// The release targets the run script names.
+const TARGETS: [&str; 4] = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+];
+
+/// This running binary as the run script caches it.
+struct Binary {
+    /// Its cache name, from its digest, so another build never runs in its place.
+    name: String,
+    sha256: String,
+}
+
+fn binary() -> Result<&'static Binary, ScanError> {
+    static BINARY: OnceLock<Result<Binary, String>> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            let bytes = std::env::current_exe()
+                .and_then(std::fs::read)
+                .map_err(|_| "cannot read this token-max binary to copy it".to_string())?;
+            let sha256: String = Sha256::digest(&bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            Ok(Binary {
+                name: format!("token-max-{}", &sha256[..16]),
+                sha256,
+            })
+        })
+        .as_ref()
+        .map_err(|message| ScanError::new(message.clone()))
+}
+
+/// `script` run by the destination's `sh` with `args`, each already free of single quotes.
+fn remote(script: &str, args: &[&str]) -> String {
+    let mut command = format!("sh -c '{PLATFORM}{script}' sh");
+    for arg in args {
+        debug_assert!(!arg.contains('\''));
+        command.push_str(&format!(" '{arg}'"));
     }
     command
+}
+
+fn run_command(binary: &Binary, since: Option<Millis>, defaults: bool) -> String {
+    let since = since.map(iso);
+    let mut args = vec![
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        &binary.name,
+        VERSION,
+        "doctor",
+        "--ssh-scan",
+    ];
+    if let Some(since) = &since {
+        args.extend(["--since", since]);
+    }
+    if defaults {
+        args.push("--defaults");
+    }
+    remote(RUN, &args)
 }
 
 /// Children still running, so cancellation can stop them; once cancelled, none may start.
@@ -151,20 +234,14 @@ pub enum Reply {
     Sessions(Vec<sessions::Session>),
 }
 
-/// Audit one destination with its installed `token-max`, failing on any error there.
-///
-/// The destination scans while this host loads prices; once `request` delivers the catalog and
-/// job, it analyzes and sends back what the job asks for. A destination that fails first is
-/// reported at once, without waiting for the request.
-pub fn audit(
+/// Start `command` on `destination` with `stdin`, registered so cancellation can stop it.
+fn spawn(
     destination: &str,
-    since: Option<Millis>,
-    defaults: bool,
-    request: mpsc::Receiver<Request>,
-) -> Result<Reply, ScanError> {
-    let mut command = Command::new("ssh");
-    command
-        .args(["-T", "-x", "-a"])
+    command: String,
+    stdin: Stdio,
+) -> Result<(Session, BufReader<ChildStdout>), ScanError> {
+    let mut ssh = Command::new("ssh");
+    ssh.args(["-T", "-x", "-a"])
         .args(["-o", "BatchMode=yes"])
         .args(["-o", "ClearAllForwardings=yes"])
         .args(["-o", "PermitLocalCommand=no"])
@@ -176,53 +253,181 @@ pub fn audit(
         .args(["-o", "ControlPersist=no"])
         .arg("--")
         .arg(destination)
-        .arg(remote_command(since, defaults))
-        .stdin(Stdio::piped())
+        .arg(command)
+        .stdin(stdin)
         .stdout(Stdio::piped())
         // Login scripts may print anything; failures are reported from exit statuses.
         .stderr(Stdio::null());
-    let (mut session, stdout) = {
-        let mut children = children();
-        if children.cancelled {
-            return Err(ScanError::new("cancelled; no report produced"));
-        }
-        let mut child = command
-            .spawn()
-            .map_err(|_| ScanError::new("cannot run ssh; SSH audits need an OpenSSH client"))?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take().expect("piped stdout");
-        children.next += 1;
-        let id = children.next;
-        children.running.push((id, child));
-        (
-            Session {
-                destination: destination.to_string(),
-                id,
-                stdin,
-            },
-            stdout,
-        )
+    let mut children = children();
+    if children.cancelled {
+        return Err(ScanError::new("cancelled; no report produced"));
+    }
+    let mut child = ssh
+        .spawn()
+        .map_err(|_| ScanError::new("cannot run ssh; SSH audits need an OpenSSH client"))?;
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take().expect("piped stdout");
+    children.next += 1;
+    let id = children.next;
+    children.running.push((id, child));
+    Ok((
+        Session {
+            destination: destination.to_string(),
+            id,
+            stdin,
+        },
+        BufReader::new(stdout),
+    ))
+}
+
+/// How the run script answered.
+enum Found {
+    Run,
+    Copy,
+    Download(&'static str),
+}
+
+/// Read the run script's first line, which is short, so a destination cannot make this host
+/// hold more. An error says whether stdout was empty, as it is when `ssh` or the script failed.
+fn found(stdout: &mut BufReader<ChildStdout>) -> Result<Found, bool> {
+    let mut line = String::new();
+    match stdout.take(64).read_line(&mut line) {
+        Ok(0) => return Err(true),
+        Ok(_) => {}
+        Err(_) => return Err(false),
+    }
+    let found = match line.strip_suffix('\n') {
+        Some("run") => Some(Found::Run),
+        Some("copy") => Some(Found::Copy),
+        Some(other) => other.strip_prefix("download ").and_then(|target| {
+            TARGETS
+                .iter()
+                .find(|t| **t == target)
+                .map(|t| Found::Download(t))
+        }),
+        None => None,
     };
-    let mut stream = Stream::new(BufReader::new(stdout));
+    found.ok_or(false)
+}
+
+fn connection_failed(destination: &str) -> String {
+    format!("SSH connection failed; check that `ssh {destination} true` works without a prompt")
+}
+
+/// Put this build on `destination`, by copying this binary or downloading its release there.
+fn provision(destination: &str, found: &Found) -> Result<(), ScanError> {
+    let (command, stdin) = match found {
+        Found::Copy => {
+            let binary = binary()?;
+            let file = std::env::current_exe()
+                .and_then(std::fs::File::open)
+                .map_err(|_| ScanError::new("cannot read this token-max binary to copy it"))?;
+            (
+                remote(&format!("{SUM}{COPY}"), &[&binary.name, &binary.sha256]),
+                Stdio::from(file),
+            )
+        }
+        Found::Download(_) => (
+            remote(&format!("{SUM}{DOWNLOAD}"), &[VERSION, RELEASES]),
+            Stdio::null(),
+        ),
+        Found::Run => return Ok(()),
+    };
+    let (mut session, mut stdout) = spawn(destination, command, stdin)?;
+    // Reading to the end, rather than waiting, keeps the child registered so cancellation can
+    // stop it; nothing it prints is kept.
+    let _ = io::copy(&mut stdout, &mut io::sink());
+    let status = session.stop(false).and_then(|s| s.code());
+    let what = match found {
+        Found::Download(target) => format!("the token-max {VERSION} release for {target}"),
+        _ => "this token-max".to_string(),
+    };
+    let message = match status {
+        Some(0) => return Ok(()),
+        Some(SSH_FAILED) => connection_failed(destination),
+        Some(DOES_NOT_RUN) => match found {
+            // Most often a Linux build linked against this host's C library.
+            Found::Copy if cfg!(target_os = "linux") => format!(
+                "a copy of this token-max does not run there; run a statically linked build here, such as the release installers' or one for {}-unknown-linux-musl",
+                std::env::consts::ARCH
+            ),
+            Found::Copy => "a copy of this token-max does not run there".to_string(),
+            _ => format!("{what} does not run there"),
+        },
+        Some(NO_CHECKSUM) => format!("needs sha256sum or shasum to check {what}"),
+        Some(MISMATCH) => match found {
+            Found::Copy => "the copy of this token-max arrived damaged".to_string(),
+            _ => format!("{what} does not match its published checksum"),
+        },
+        Some(NO_DOWNLOADER) => format!("needs curl and tar to download {what}"),
+        Some(NOT_DOWNLOADED) => format!("could not download {what} from {RELEASES}"),
+        Some(NOT_UNPACKED) => format!("could not unpack {what}; tar there needs xz"),
+        status => format!("could not put {what} there ({})", exit(status)),
+    };
+    Err(ScanError::new(format!("{destination}: {message}")))
+}
+
+/// Audit one destination with this build of `token-max`, putting it there first if needed,
+/// and failing on any error there.
+///
+/// The destination scans while this host loads prices; once `request` delivers the catalog and
+/// job, it analyzes and sends back what the job asks for. A destination that fails first is
+/// reported at once, without waiting for the request.
+pub fn audit(
+    destination: &str,
+    since: Option<Millis>,
+    defaults: bool,
+    request: mpsc::Receiver<Request>,
+) -> Result<Reply, ScanError> {
+    let command = run_command(binary()?, since, defaults);
+    let mut provisioned = false;
+    let (mut session, stdout) = loop {
+        let (mut session, mut stdout) = spawn(destination, command.clone(), Stdio::piped())?;
+        let found = found(&mut stdout);
+        let found = match found {
+            Ok(Found::Run) => break (session, stdout),
+            // Only once: a binary just put there that the script still cannot find means the
+            // cache does not keep it.
+            Ok(found) if !provisioned => found,
+            Ok(_) => {
+                return Err(session.fail(true, |_| {
+                    "token-max was put in its cache there but is still missing; another build may have replaced it, so run again".into()
+                }));
+            }
+            // Anything but an empty stdout is not the script, which may never end.
+            Err(empty) => {
+                return Err(session.fail(!empty, |status| match status {
+                    Some(SSH_FAILED) => connection_failed(destination),
+                    Some(UNSUPPORTED) => {
+                        "unsupported platform; SSH audits support Linux and macOS destinations on x86_64 or arm64".into()
+                    }
+                    status => format!("could not look for token-max there ({})", exit(status)),
+                }));
+            }
+        };
+        session.stop(true);
+        if let Found::Download(target) = found
+            && VERSION == "0.0.0"
+        {
+            return Err(ScanError::new(format!(
+                "{destination}: runs on {target}, and this development build for {} {} has no release to download; build it with {BUILD}",
+                std::env::consts::OS,
+                std::env::consts::ARCH,
+            )));
+        }
+        provision(destination, &found)?;
+        provisioned = true;
+    };
+    let mut stream = Stream::new(stdout);
     let header = match stream.header() {
         Ok(header) => header,
         Err(error) => {
             // Anything but an empty stdout is not a token-max stream, which may never end.
             return Err(session.fail(!error.is_eof(), |status| match status {
-                Some(SSH_FAILED) => format!(
-                    "SSH connection failed; check that `ssh {destination} true` works without a prompt"
-                ),
-                Some(NOT_INSTALLED) => format!(
-                    "token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with {}",
-                    install()
-                ),
-                Some(UNSUPPORTED) => {
-                    "unsupported platform; SSH audits support Linux and macOS destinations".into()
-                }
+                Some(SSH_FAILED) => connection_failed(destination),
                 status => format!(
-                    "token-max there did not start an SSH audit ({}); install the same version with {}",
-                    exit(status),
-                    install()
+                    "token-max there did not start an SSH audit ({})",
+                    exit(status)
                 ),
             }));
         }
@@ -232,8 +437,7 @@ pub fn audit(
         let remote = terminal_text(&header.token_max_scan);
         return Err(session.fail(true, |_| {
             format!(
-                "runs token-max {remote} but this is {local}; install the same version with {}",
-                install()
+                "the token-max {VERSION} there is build {remote}, not this build {local}; run a released token-max here, or build this one there with {BUILD}"
             )
         }));
     }
@@ -270,11 +474,13 @@ pub fn audit(
             since,
             text,
             change,
+            totals,
         }) => (
             since,
             Reply::Report(Rendered {
                 text,
                 change,
+                totals: Box::new(totals),
                 fixes: vec![],
                 listing: None,
                 turned_off: vec![],
@@ -375,7 +581,12 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
             }
         };
         let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-        let Rendered { text, change, .. } = render(
+        let Rendered {
+            text,
+            change,
+            totals,
+            ..
+        } = render(
             scan,
             Render {
                 catalog: &request.catalog,
@@ -390,6 +601,7 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
             since,
             text,
             change,
+            totals: *totals,
         })
     }))
     .unwrap_or_else(|_| Err(ScanError::new("analysis failed; no report produced")));
@@ -406,5 +618,253 @@ pub fn serve(since: Option<Millis>, defaults: bool) -> u8 {
     match wire::write(&mut stdout, &outcome) {
         Ok(()) => code,
         Err(_) => 2,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use sha2::{Digest, Sha256};
+
+    use super::{COPY, DOWNLOAD, PLATFORM, RUN, SUM};
+    use crate::test_support::Workspace;
+
+    /// This host's release target, as the run script names it.
+    fn target() -> String {
+        let abi = match std::env::consts::OS {
+            "linux" => "unknown-linux-musl",
+            _ => "apple-darwin",
+        };
+        format!("{}-{abi}", std::env::consts::ARCH)
+    }
+
+    fn script(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A stand-in release binary of `version`.
+    fn release(path: &Path, version: &str) {
+        script(
+            path,
+            &format!(r#"[ "$1" = --version ] && echo {version} && exit; echo "ran $*""#),
+        );
+    }
+
+    /// A `PATH` holding only the commands the scripts run, linked from this one wherever they
+    /// are, such as NixOS's store, so an installed `token-max` can't stand in for a test's. Its
+    /// leading empty entry is the current directory.
+    fn tools(home: &Path) -> String {
+        let tools = home.join("tools");
+        if !tools.exists() {
+            std::fs::create_dir(&tools).unwrap();
+            let path = std::env::var_os("PATH").unwrap();
+            // Linux ships sha256sum and macOS shasum; either checks a binary.
+            let sums = ["sha256sum", "shasum"];
+            for tool in [
+                "sh", "uname", "cat", "mkdir", "mktemp", "chmod", "mv", "rm", "curl", "tar", "xz",
+            ]
+            .into_iter()
+            .chain(sums)
+            {
+                let Some(found) = std::env::split_paths(&path)
+                    .map(|dir| dir.join(tool))
+                    .find(|file| file.is_file())
+                else {
+                    // macOS's tar unpacks xz itself.
+                    assert!(
+                        sums.contains(&tool) || tool == "xz",
+                        "{tool} is not on PATH"
+                    );
+                    continue;
+                };
+                let found = std::env::current_dir().unwrap().join(found);
+                std::os::unix::fs::symlink(found, tools.join(tool)).unwrap();
+            }
+        }
+        format!(":{}", tools.display())
+    }
+
+    /// `script` as a destination's `sh` runs it, with `home` and only [`tools`].
+    fn command(home: &Path, script: &str, args: &[&str]) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!("{PLATFORM}{script}"))
+            .arg("sh")
+            .args(args)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", tools(home))
+            .current_dir(home);
+        command
+    }
+
+    /// Run `script` as a destination's `sh` does, returning its status and stdout.
+    fn sh(home: &Path, script: &str, args: &[&str]) -> (Option<i32>, String) {
+        let output = command(home, script, args).output().unwrap();
+        (
+            output.status.code(),
+            String::from_utf8(output.stdout).unwrap(),
+        )
+    }
+
+    fn cache(home: &Path) -> PathBuf {
+        home.join(".cache/token-max/ssh")
+    }
+
+    fn cached(home: &Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(cache(home))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn scripts_survive_single_quoting() {
+        for script in [PLATFORM, RUN, SUM, COPY, DOWNLOAD] {
+            assert!(!script.contains(['\'', '\\']), "{script}");
+        }
+    }
+
+    #[test]
+    fn the_run_script_picks_this_build_or_says_how_to_get_it() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+        let run = |os: &str, version: &str| {
+            sh(home, RUN, &[os, arch, "token-max-copy", version, "doctor"])
+        };
+        let download = format!("download {}\n", target());
+        // Nothing there yet.
+        assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), download.clone()));
+        // Only on another platform does an installed binary of this version stand in for
+        // this build, the first that reports it, even past one that does not.
+        let installed = home.join(".cargo/bin/token-max");
+        release(&installed, "0.0.1");
+        release(&home.join(".local/bin/token-max"), "0.0.2");
+        assert_eq!(run(os, "0.0.1"), (Some(0), "copy\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.2"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.3"), (Some(0), download.clone()));
+        release(&installed, "0.0.0");
+        assert_eq!(run(os, "0.0.0"), (Some(0), "copy\n".into()));
+        assert_eq!(run("plan9", "0.0.0"), (Some(0), "run\nran doctor\n".into()));
+        std::fs::remove_file(&installed).unwrap();
+        std::fs::remove_file(home.join(".local/bin/token-max")).unwrap();
+        // The empty entry in this `PATH` is the current directory, the home here.
+        let current = home.join("token-max");
+        release(&current, "0.0.1");
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        std::fs::remove_file(&current).unwrap();
+        // Cached binaries: the copy on this platform, the release on another.
+        script(&cache(home).join("token-max-copy"), r#"echo "copy $*""#);
+        release(
+            &cache(home).join(format!("token-max-v0.0.1-{}", target())),
+            "0.0.1",
+        );
+        assert_eq!(run(os, "0.0.1"), (Some(0), "run\ncopy doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.1"), (Some(0), "run\nran doctor\n".into()));
+        assert_eq!(run("plan9", "0.0.2"), (Some(0), download));
+    }
+
+    /// Releases of `version` for this host under a `file:` URL, with a checksum that lies when
+    /// `corrupt`.
+    fn publish(root: &Path, version: &str, corrupt: bool) -> String {
+        let folder = format!("token-max-{}", target());
+        let stage = root.join("stage");
+        release(&stage.join(&folder).join("token-max"), version);
+        let dir = root.join(format!("releases/download/v{version}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let archive = dir.join(format!("{folder}.tar.xz"));
+        let status = Command::new("tar")
+            .arg("-cJf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&stage)
+            .arg(&folder)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut hash: String = Sha256::digest(std::fs::read(&archive).unwrap())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if corrupt {
+            hash = hash.replace(|c: char| c != '0', "0");
+        }
+        let name = archive.file_name().unwrap().to_str().unwrap();
+        std::fs::write(
+            dir.join(format!("{name}.sha256")),
+            format!("{hash}  {name}\n"),
+        )
+        .unwrap();
+        format!("file://{}", root.join("releases").display())
+    }
+
+    #[test]
+    fn the_download_script_caches_only_a_checked_release() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        let releases = publish(&home.join("good"), "0.0.1", false);
+        let corrupt = publish(&home.join("bad"), "0.0.2", true);
+        let stale = cache(home).join("token-max-0000000000000000");
+        script(&stale, "exit 2");
+        let download = format!("{SUM}{DOWNLOAD}");
+        assert_eq!(sh(home, &download, &["0.0.2", &corrupt]).0, Some(6));
+        assert_eq!(sh(home, &download, &["0.0.3", &releases]).0, Some(8));
+        // A release that names another version is not this one.
+        let renamed = home.join("good/releases/download/v0.0.4");
+        std::fs::rename(home.join("good/releases/download/v0.0.1"), &renamed).unwrap();
+        assert_eq!(sh(home, &download, &["0.0.4", &releases]).0, Some(4));
+        std::fs::rename(&renamed, home.join("good/releases/download/v0.0.1")).unwrap();
+        // Failures leave the cache as it was.
+        assert_eq!(cached(home), ["token-max-0000000000000000"]);
+        assert_eq!(
+            sh(home, &download, &["0.0.1", &releases]),
+            (Some(0), "".into())
+        );
+        let name = format!("token-max-v0.0.1-{}", target());
+        assert_eq!(cached(home), [name]);
+        let (os, arch) = ("plan9", std::env::consts::ARCH);
+        assert_eq!(
+            sh(home, RUN, &[os, arch, "token-max-copy", "0.0.1", "doctor"]),
+            (Some(0), "run\nran doctor\n".into())
+        );
+    }
+
+    #[test]
+    fn the_copy_script_caches_only_an_intact_binary_that_runs() {
+        let workspace = Workspace::new();
+        let home = &workspace.home;
+        let binary = home.join("binary");
+        release(&binary, "0.0.1");
+        let bytes = std::fs::read(&binary).unwrap();
+        let hash: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let copy = |sha256: &str| {
+            let output = command(home, &format!("{SUM}{COPY}"), &["token-max-copy", sha256])
+                .stdin(std::fs::File::open(&binary).unwrap())
+                .output()
+                .unwrap();
+            output.status.code()
+        };
+        assert_eq!(copy(&"0".repeat(64)), Some(6));
+        assert_eq!(cached(home), Vec::<String>::new());
+        assert_eq!(copy(&hash), Some(0));
+        assert_eq!(cached(home), ["token-max-copy"]);
+        assert_eq!(
+            std::fs::read(cache(home).join("token-max-copy")).unwrap(),
+            bytes
+        );
     }
 }

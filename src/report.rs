@@ -2066,8 +2066,12 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 &b.generations
                     .map_or_else(|| "unknown".into(), |n| n.to_string()),
             );
-            out.cost("Estimated request cost", &b.cost);
-            out.cost("Later input costs its reads avoided", &b.lost_warming);
+            out.estimate("Estimated request cost", &b.cost, b.cost_estimate);
+            out.estimate(
+                "Later input costs its reads avoided",
+                &b.lost_warming,
+                b.lost_estimate,
+            );
         }
         CheckResult::Ttl(t) => {
             out.field(
@@ -2814,7 +2818,7 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
         return "Cost unknown: current scope or launch selection is unresolved.";
     }
     if no_share(b.base.coverage) {
-        return "Cost unknown: T3 settled none of the requests between this line's owner and the others that could have run its open sessions, so they have no share to count.";
+        return NO_SHARE_COST;
     }
     match b.feature {
         BackgroundFeature::GoalCheckIns => {
@@ -3058,7 +3062,7 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         CheckResult::Idle(i) => {
             let a = &i.after_recommendations;
             if a.delta.is_none() && no_share(Some(a.coverage)) {
-                return IDLE_NO_SHARE.into();
+                return NO_SHARE.into();
             }
             let periods = &i.after_recommendations.periods;
             if periods.total() > 0
@@ -3088,14 +3092,21 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     }
 }
 
-/// Whether a comparison left out sessions T3 could not settle with no share to count them
-/// at, which leaves it unestimated.
+/// Whether a comparison left out sessions T3 could not settle with nothing settled to stand
+/// for them, which leaves it unestimated.
 fn no_share(coverage: Option<Coverage>) -> bool {
     coverage.is_some_and(|c| c.left_out > 0 && c.stand_ins.is_none())
 }
 
-/// Why an idle line has no estimate when it left out sessions with no share to count.
-const IDLE_NO_SHARE: &str = "T3 settled none of the requests between this line's owner and the others that could have run its open sessions, so they have no share to count.";
+/// Why a line has no estimate when it left out sessions nothing settled can stand for.
+macro_rules! no_share {
+    () => {
+        "T3 could not settle some sessions between this line's owner and another, and nothing it did settle can stand for them: no request between their possible owners, or no session like them on this line."
+    };
+}
+const NO_SHARE: &str = no_share!();
+/// [`NO_SHARE`] as the reason a cost is unknown.
+const NO_SHARE_COST: &str = concat!("Cost unknown: ", no_share!());
 
 /// The modes T3 could price, and the first input the others lack.
 fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
@@ -3104,7 +3115,7 @@ fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
         .iter()
         .any(|s| s.savings.is_none() && no_share(Some(s.coverage)))
     {
-        return IDLE_NO_SHARE.into();
+        return NO_SHARE.into();
     }
     let priced: Vec<String> = scenarios
         .iter()
@@ -7331,7 +7342,7 @@ mod tests {
         let row = report_line(&rendered, "Idle compaction");
         assert!(
             row.evidence
-                .starts_with("Not enough evidence: T3 settled none of the requests"),
+                .starts_with("Not enough evidence: T3 could not settle some sessions"),
             "{row:?}"
         );
     }
@@ -7570,7 +7581,9 @@ mod tests {
                 off_file: Some(format!("{ROOT}/settings.json")),
                 generations: Some(0),
                 cost: cost(Some(0.0), 0.0),
+                cost_estimate: None,
                 lost_warming: cost(Some(0.0), 0.0),
+                lost_estimate: None,
             })
         };
         report.checks.extend([

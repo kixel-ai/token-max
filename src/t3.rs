@@ -1926,7 +1926,7 @@ pub(crate) fn enrich(
             .map(|t| t.state.clone())
     };
     // The possible owners of each selected request T3 could not settle.
-    let mut unsettled: HashSet<Profiles> = HashSet::default();
+    let mut unsettled: HashSet<Unsettled> = HashSet::default();
     let mut unresolved: HashMap<(String, &'static str), u64> = HashMap::default();
     // How each root session's own requests resolved, which its subagents inherit: one
     // profile, or why not. Requests inside the window decide; earlier ones only fill in.
@@ -2150,7 +2150,18 @@ pub(crate) fn enrich(
                         for state in states {
                             *unresolved.entry((state, c)).or_default() += 1;
                         }
-                        unsettled.insert(r.profiles.clone());
+                        // T3's database may name an owner none of these profiles is,
+                        // such as an instance now under another home.
+                        let outside = session_owners
+                            .into_iter()
+                            .flatten()
+                            .filter(|o| !r.profiles.contains(o))
+                            .cloned()
+                            .collect();
+                        unsettled.insert(Unsettled {
+                            profiles: r.profiles.clone(),
+                            outside,
+                        });
                     }
                 }
             }
@@ -2310,13 +2321,23 @@ impl Control {
     }
 }
 
+/// A request T3 could not settle between its possible owners.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Unsettled {
+    /// The profiles it stays billed to.
+    profiles: Profiles,
+    /// Owners T3's database names that none of `profiles` is; it is billed to none of them,
+    /// but whichever ran it read that owner's controls.
+    outside: Vec<String>,
+}
+
 /// The profiles whose current value of `control` stays unknown: those an unsettled request
-/// could belong to when its possible owners fall on more than one of the control's lines. A
+/// is billed to when its possible owners fall on more than one of the control's lines. A
 /// request left open only between profiles that read the control from one file and key gets
 /// that file's value whichever of them ran it.
 fn unsettled_for(
     profiles: &[Profile],
-    unsettled: &HashSet<Profiles>,
+    unsettled: &HashSet<Unsettled>,
     control: Control,
 ) -> HashSet<String> {
     let line = |id: &String| {
@@ -2328,9 +2349,14 @@ fn unsettled_for(
     let mut open = HashSet::default();
     for owners in unsettled {
         // A removed instance, or one no line of the control covers, is a line of its own.
-        let lines: HashSet<Option<String>> = owners.iter().map(line).collect();
+        let lines: HashSet<Option<String>> = owners
+            .profiles
+            .iter()
+            .chain(&owners.outside)
+            .map(line)
+            .collect();
         if lines.len() > 1 {
-            open.extend(owners.iter().cloned());
+            open.extend(owners.profiles.iter().cloned());
         }
     }
     // A check reads its line's lead, so an opened profile opens every profile on its line.
@@ -2419,14 +2445,18 @@ impl<'a> Split<'a> {
     }
 }
 
-/// How many left-out sessions or turns, each with its share, stand in for the line, or None
-/// when any has no share.
-pub(crate) fn stand_ins(shares: impl IntoIterator<Item = Option<f64>>) -> Option<u64> {
+/// How many left-out sessions or turns, each with its share, stand in for the line beside
+/// the `settled` ones they are extrapolated from; None when any has no share, or when some
+/// share is positive but nothing settled stands for them, even if it rounds to none.
+pub(crate) fn stand_ins(
+    shares: impl IntoIterator<Item = Option<f64>>,
+    settled: u64,
+) -> Option<u64> {
     let mut sum = 0.0;
     for share in shares {
         sum += share?;
     }
-    Some(sum.round() as u64)
+    (settled > 0 || sum == 0.0).then(|| sum.round() as u64)
 }
 
 #[cfg(test)]
@@ -2556,9 +2586,11 @@ mod tests {
         let mut env = make_t3_profile("env", root);
         env.ttl.subagent.owner = "T3 instance env: CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL".into();
         let profiles = [native, agent, windowed, env];
-        let open = |owners: &[&str]| {
-            let owners: Profiles = owners.iter().map(|o| o.to_string()).collect();
-            let unsettled = HashSet::from_iter([owners]);
+        let open_with = |owners: &[&str], outside: &[&str]| {
+            let unsettled = HashSet::from_iter([Unsettled {
+                profiles: owners.iter().map(|o| o.to_string()).collect(),
+                outside: outside.iter().map(|o| o.to_string()).collect(),
+            }]);
             let mut open: Vec<&str> = [
                 ("speed", Control::Speed),
                 ("main ttl", Control::Ttl(Bucket::Main)),
@@ -2572,6 +2604,7 @@ mod tests {
             open.sort_unstable();
             open
         };
+        let open = |owners: &[&str]| open_with(owners, &[]);
         // Both read the TTLs and windows from one file; only T3 sets the speed.
         assert_eq!(open(&["native", "agent"]), ["speed"]);
         assert_eq!(open(&["native", "windowed"]), ["compaction", "speed"]);
@@ -2588,13 +2621,37 @@ mod tests {
         lines.push(member);
         let open_speed = unsettled_for(
             &lines,
-            &HashSet::from_iter([Profiles::from_iter([
-                "member".to_string(),
-                "agent".to_string(),
-            ])]),
+            &HashSet::from_iter([Unsettled {
+                profiles: Profiles::from_iter(["member".to_string(), "agent".to_string()]),
+                outside: vec![],
+            }]),
             Control::Speed,
         );
         assert!(open_speed.contains("native"), "{open_speed:?}");
+        // An owner T3 names beyond the request's profiles counts by its own lines. One under
+        // another home reads the TTL elsewhere, though only these profiles are opened.
+        lines.push(make_t3_profile("elsewhere", "/work/.claude"));
+        let unsettled = HashSet::from_iter([Unsettled {
+            profiles: Profiles::from_iter(["native".to_string(), "agent".to_string()]),
+            outside: vec!["elsewhere".into()],
+        }]);
+        let opened = unsettled_for(&lines, &unsettled, Control::Ttl(Bucket::Main));
+        assert!(
+            opened.contains("native") && !opened.contains("elsewhere"),
+            "{opened:?}"
+        );
+        // One no profile names is a line of its own.
+        assert_eq!(
+            open_with(&["native", "agent"], &[""]),
+            ["compaction", "main ttl", "speed", "subagent ttl"]
+        );
+        // One on the same line changes nothing.
+        let member = Unsettled {
+            profiles: Profiles::from_iter(["native".to_string(), "agent".to_string()]),
+            outside: vec!["member".into()],
+        };
+        let ttl = Control::Ttl(Bucket::Main);
+        assert!(unsettled_for(&lines, &HashSet::from_iter([member]), ttl).is_empty());
         // A removed instance's controls are gone, so nothing it could share is known.
         assert_eq!(
             open(&["native", "gone"]),
@@ -2725,7 +2782,11 @@ mod tests {
         assert_eq!(split.sessions.len(), 1);
         assert_eq!(split.left_out("open"), Some(Some(0.75)));
         assert_eq!(split.left_out("native-1"), None);
-        assert_eq!(stand_ins([Some(0.75); 4]), Some(3));
+        assert_eq!(stand_ins([Some(0.75); 4], 1), Some(3));
+        // Even a share that rounds to none needs a settled item to count it by.
+        assert_eq!(stand_ins([Some(0.25)], 1), Some(0));
+        assert_eq!(stand_ins([Some(0.25)], 0), None);
+        assert_eq!(stand_ins([Some(0.0)], 0), Some(0));
         // T3's line sees the same requests from its side.
         let t3 = ["agent".to_string()];
         let split = Split::new(&profiles, &requests, &t3, None);
@@ -2747,8 +2808,8 @@ mod tests {
         let open = [request("e", "open", &["native", "agent"])];
         let split = Split::new(&profiles, &open, &line, None);
         assert_eq!(split.left_out("open"), Some(None));
-        assert_eq!(stand_ins([None]), None);
-        assert_eq!(stand_ins([]), Some(0));
+        assert_eq!(stand_ins([None], 1), None);
+        assert_eq!(stand_ins([], 0), Some(0));
     }
 
     #[test]
@@ -2784,8 +2845,8 @@ mod tests {
                 .unwrap();
             // `ownership_resolved` also reflects platform policy (always unresolved on
             // Windows), so check the native speed T3 overrides, which shared-history
-            // ambiguity leaves unresolved, while the TTL both owners read stays known,
-            // unless a machine policy may replace the instance's settings.
+            // ambiguity leaves unresolved. So does the TTL: T3 names `elsewhere`, which
+            // reads it from another home, as the session's owner.
             let native = scan
                 .profiles
                 .iter()
@@ -2798,7 +2859,7 @@ mod tests {
             );
             assert_eq!(
                 current.ttl.main.reason.contains("shared native history"),
-                !removed && managed_policy_unresolved(),
+                !removed,
                 "{owner}"
             );
             if removed {

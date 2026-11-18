@@ -49,8 +49,8 @@ const POLICY_CHANGE: &str = "effective project TTL/window policy changes within 
 /// where it could not counts exactly, so its zero doesn't dilute them; unpriced, such as when
 /// its replay failed, it still changes nothing, since no run acts on it. A session left out,
 /// since T3 could not settle whether this line's owner ran it, stands in at its share of an
-/// unpriced acting one (see [`crate::t3::Split`]), and one with no share leaves nothing
-/// estimated.
+/// unpriced acting one (see [`crate::t3::Split`]). One with no share, or with no settled
+/// acting session to stand for it, leaves nothing estimated.
 fn paired<'c>(
     sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool, Option<Option<f64>>)>,
 ) -> (Option<Estimate>, Coverage) {
@@ -75,7 +75,7 @@ fn paired<'c>(
         known += 1;
     }
     let left_out = shares.len() as u64;
-    let stand_ins = crate::t3::stand_ins(shares);
+    let stand_ins = crate::t3::stand_ins(shares, pairs.count());
     let paired = pairs.savings(stand_ins.unwrap_or(0));
     let estimate = paired
         .savings
@@ -2021,8 +2021,12 @@ impl<'a> Profiled<'a> {
         let mut sizes: IndexMap<Option<i64>, u64> = IndexMap::default();
         let mut idle_events: HashSet<&Id> = HashSet::default();
         let mut applicable = false;
-        for (_, _, periods) in sessions() {
-            count_cohorts(&periods, &mut cohorts);
+        for (session, _, periods) in sessions() {
+            // A session T3 could not settle may be another owner's, so it calibrates none of
+            // this line's activation, as the pairing leaves its cost out.
+            if self.split.left_out(session).is_none() {
+                count_cohorts(&periods, &mut cohorts);
+            }
             for p in &periods {
                 counts.add(p.kind, p.confirmed);
                 *sizes.entry(p.context_tokens).or_default() += 1;
@@ -4212,6 +4216,14 @@ mod tests {
             (&usd(9.0), &zero, true, Some(None)),
         ]);
         assert_eq!(estimate, None);
+        // A share, even one that rounds to no session, needs a settled acting session to
+        // stand for it.
+        let quarter = Some(Some(0.25));
+        let (estimate, coverage) = paired([
+            (&usd(9.0), &zero, true, quarter),
+            (&usd(1.0), &zero, false, None),
+        ]);
+        assert_eq!((estimate, coverage.stand_ins), (None, None));
         // Nothing priced where idle could act leaves nothing to extrapolate from.
         let (estimate, _) = paired([
             (&unknown, &zero, true, None),
@@ -4823,6 +4835,16 @@ mod tests {
                 .join(" ")
                 .contains("discarded summaries never ran")
         );
+        // A session T3 left open with another owner calibrates no activation for this line.
+        let mut s = s;
+        for r in s.requests.iter_mut().filter(|r| &*r.session == "no") {
+            r.profiles = vec![profile().id, "t3:/state:agent".into()].into();
+        }
+        let c = check(&s, 201.0);
+        let a = &c.after_recommendations;
+        assert_eq!(a.coverage.left_out, 1);
+        assert_eq!(a.activation_cohorts[0].fraction, 1.0);
+        near(period(&c.after, "final").activation, 1.0);
     }
 
     #[test]

@@ -88,7 +88,7 @@ fn paired<'c>(
         priced: paired.priced + known,
         total: paired.total + known,
         left_out,
-        stand_ins: stand_ins.unwrap_or(0),
+        stand_ins: stand_ins.filter(|_| left_out > 0),
     };
     (estimate, coverage)
 }
@@ -4203,7 +4203,7 @@ mod tests {
                 priced: 2,
                 total: 3,
                 left_out: 2,
-                stand_ins: 1,
+                stand_ins: Some(1),
             }
         );
         // A left-out session with no share leaves nothing estimated.

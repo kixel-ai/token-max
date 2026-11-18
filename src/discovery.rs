@@ -744,12 +744,15 @@ pub(crate) fn settle_ttls<'d>(
         let ttl = profile.ttl.get(bucket);
         let pinnable = ttl.value.is_none() && ttl.reason == TTL_BILLING_UNKNOWN;
         let owner = crate::rows::canonical(&ttl.owner);
+        // Pinning a TTL covers another default, but not a project that turns caching off.
         let varies = directories
             .clone()
             .filter_map(|cwd| profile.ttl_directories.get(cwd))
             .map(|d| d.get(bucket))
             .any(|d| {
-                crate::rows::canonical(&d.owner) != owner || (d.value != ttl.value && !pinnable)
+                crate::rows::canonical(&d.owner) != owner
+                    || (d.value != ttl.value && !pinnable)
+                    || (pinnable && d.value.is_none() && d.reason != ttl.reason)
             });
         if varies {
             let ttl = profile.ttl.get_mut(bucket);
@@ -4209,6 +4212,36 @@ mod tests {
             let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.value;
             assert_eq!(main(&pinned), Some(Ttl::OneHour));
         }
+        // An unset main TTL with unknown billing stays pinnable across another default, such
+        // as a cloud provider's, but not across a project that turns caching off.
+        write(w.claude.join("settings.json"), "{}");
+        let (cloud, off) = (w.home.join("cloud"), w.home.join("off"));
+        for (project, env) in [
+            (&cloud, "CLAUDE_CODE_USE_BEDROCK"),
+            (&off, "DISABLE_PROMPT_CACHING"),
+        ] {
+            fs::create_dir_all(project.join(".git")).unwrap();
+            write(
+                project.join(".claude/settings.json"),
+                &format!(r#"{{"env":{{"{env}":"1"}}}}"#),
+            );
+        }
+        let mut data = discover(&o).unwrap();
+        let requests: Vec<Request> = [&plain, &cloud, &off]
+            .iter()
+            .map(|p| request(claude(&data), Some(p)))
+            .collect();
+        discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
+        let settled = |projects: &[&Path]| {
+            let mut p = claude(&data).clone();
+            let texts: Vec<String> = projects.iter().map(|d| text(d)).collect();
+            settle_ttls(&mut p, texts.iter().map(String::as_str));
+            p
+        };
+        let p = settled(&[&plain, &cloud]);
+        assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
+        assert!(!p.ttl.main.varies);
+        assert!(settled(&[&plain, &off]).ttl.main.varies);
     }
 
     // Ported from the discovery half of idle.test.ts: "native informational notices are the only parsed idle attribution; project owners and threshold floor resolve".

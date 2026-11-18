@@ -1604,8 +1604,10 @@ pub struct Coverage {
     pub total: u64,
     /// Sessions or turns T3 could not settle between this line and another owner, left out
     /// of the comparison; `stand_ins` of them count in `total`, at the line's settled share.
+    /// None when none were left out, or when some had no share, which leaves the comparison
+    /// unestimated.
     pub left_out: u64,
-    pub stand_ins: u64,
+    pub stand_ins: Option<u64>,
 }
 
 /// Shared recommendation metadata; savings are relative to the named baseline.

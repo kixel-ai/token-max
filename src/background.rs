@@ -597,7 +597,7 @@ fn check(
                 priced: paired.priced,
                 total: paired.total,
                 left_out,
-                stand_ins: stand_ins.unwrap_or(0),
+                stand_ins: stand_ins.filter(|_| left_out > 0),
             }),
             savings_usd: if measurable && enabled { estimate } else { None },
             margin: margin.filter(|_| measurable && enabled),
@@ -1148,7 +1148,7 @@ mod tests {
                 coverage.left_out,
                 coverage.stand_ins
             ),
-            (3, 5, 3, 2)
+            (3, 5, 3, Some(2))
         );
         let one = fork_cost(
             &prices(),
@@ -1167,6 +1167,9 @@ mod tests {
             (c.base.action, c.base.savings_usd),
             (Action::Advisory, None)
         );
+        // Every turn has usage; what is missing is the share, which the report names.
+        let coverage = c.base.coverage.unwrap();
+        assert_eq!((coverage.left_out, coverage.stand_ins), (6, None));
     }
 
     #[test]

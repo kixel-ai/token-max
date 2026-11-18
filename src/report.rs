@@ -2810,6 +2810,9 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
     if b.base.current.is_none() {
         return "Cost unknown: current scope or launch selection is unresolved.";
     }
+    if no_share(b.base.coverage) {
+        return "Cost unknown: T3 settled none of the requests between this line's owner and the others that could have run its open sessions, so they have no share to count.";
+    }
     match b.feature {
         BackgroundFeature::GoalCheckIns => {
             "Cost unknown: check-in turns are not marked in transcripts."
@@ -3027,6 +3030,10 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         }
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
+            let a = &i.after_recommendations;
+            if a.delta.is_none() && no_share(Some(a.coverage)) {
+                return IDLE_NO_SHARE.into();
+            }
             let periods = &i.after_recommendations.periods;
             if periods.total() > 0
                 && periods.with_status(PeriodStatus::Censored)
@@ -3056,9 +3063,24 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     }
 }
 
+/// Whether a comparison left out sessions T3 could not settle with no share to count them
+/// at, which leaves it unestimated.
+fn no_share(coverage: Option<Coverage>) -> bool {
+    coverage.is_some_and(|c| c.left_out > 0 && c.stand_ins.is_none())
+}
+
+/// Why an idle line has no estimate when it left out sessions with no share to count.
+const IDLE_NO_SHARE: &str = "T3 settled none of the requests between this line's owner and the others that could have run its open sessions, so they have no share to count.";
+
 /// The modes T3 could price, and the first input the others lack.
 fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     let scenarios = &c.after_recommendations.scenarios;
+    if scenarios
+        .iter()
+        .any(|s| s.savings.is_none() && no_share(Some(s.coverage)))
+    {
+        return IDLE_NO_SHARE.into();
+    }
     let priced: Vec<String> = scenarios
         .iter()
         .filter_map(|s| {
@@ -3609,7 +3631,7 @@ fn coverage_note(r: &Common<'_>, items: &str) -> String {
         note += &format!(
             "; {} {unit} T3 could not settle between this line's owner and another count as {}, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover",
             count(c.left_out),
-            count(c.stand_ins)
+            count(c.stand_ins.unwrap_or(0))
         );
     }
     note
@@ -7198,13 +7220,36 @@ mod tests {
                 priced: 4,
                 total: 6,
                 left_out: 4,
-                stand_ins: 1,
+                stand_ins: Some(1),
             });
         }
         let rendered = text(&report, None, true);
         let row = report_line(&rendered, "Idle compaction");
         assert!(
             row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 66.6% of sessions that could be priced to the rest, assuming they resemble each other; 4 sessions T3 could not settle between this line's owner and another count as 1, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover."),
+            "{row:?}"
+        );
+        // With no share to count the open sessions at, the line names that gap rather than
+        // missing usage.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.after_recommendations.delta = None;
+            c.after_recommendations.coverage = Coverage {
+                priced: 4,
+                total: 4,
+                left_out: 2,
+                stand_ins: None,
+            };
+            c.base.action = Action::Advisory;
+            c.base.recommended = None;
+            c.base.savings_usd = None;
+            c.base.monthly_savings_usd = None;
+            c.base.margin = None;
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence
+                .starts_with("Not enough evidence: T3 settled none of the requests"),
             "{row:?}"
         );
     }

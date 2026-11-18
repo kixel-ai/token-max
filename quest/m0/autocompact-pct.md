@@ -1,4 +1,4 @@
-# [S] Resolve CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in the compaction window check
+# [M] Resolve CLAUDE_AUTOCOMPACT_PCT_OVERRIDE in the compaction window check
 
 ## Goal
 
@@ -35,6 +35,27 @@ automatic-compaction trigger as the unset window already does, and leave the
 row advisory when neither resolves it. Resolve the override from every
 environment owner the window resolves from, T3 instance environments
 included.
+
+Removing the override is one edit that moves the trigger of every model the
+owner runs, subagent models included, so the recommendation covers each
+model the transcripts show under that owner: the target model gets its
+target window, and every other model whose trigger the override lowered gets
+a `modelSettings.<model>.autoCompactWindow` (or the T3 instance's
+equivalent) at its current effective trigger, so its trigger doesn't move.
+When any of those models' current trigger is unresolved, the row stays
+advisory.
+
+The edit removes the override from every scope that sets it, not only the
+winning one, since a lower-precedence value would otherwise take over (a 50%
+user override left behind a removed project one fires at half the new
+window). An owner the walk can't edit, such as the shell environment that
+launched Claude Code, keeps the row advisory and names that owner.
+
+Transcripts don't record the override, so an observed trigger is evidence of
+the current one only when it postdates the override's last change: use only
+observations from sessions that started after the owning settings file was
+last modified, and leave the row advisory when the owner has no such time,
+such as the shell environment.
 
 ## Related
 

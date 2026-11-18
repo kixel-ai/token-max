@@ -668,10 +668,12 @@ pub(crate) fn discover(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             let mut unresolved_env = false;
+            let mut own_environment = vec![];
             for entry in instance.environment {
                 if ENVIRONMENT.contains(&entry.name.as_str()) {
                     match entry.value {
                         Some(value) => {
+                            own_environment.push(entry.name.clone());
                             env.insert(entry.name, value);
                         }
                         None => {
@@ -805,6 +807,15 @@ pub(crate) fn discover(
                     setting: None,
                 };
             }
+            if harness == Harness::Claude {
+                crate::controls::t3_percent(
+                    &mut profile.compaction,
+                    &own_environment,
+                    &file.display().to_string(),
+                    &id,
+                    !config.auto_compact_window.is_empty(),
+                );
+            }
             let resolved = enabled && !unresolved_env && !launch_unresolved && !policy_unresolved;
             if !resolved {
                 profile.compaction.default.comparison_unknown = Some("T3 instance is disabled or effective environment/launch overrides are unresolved".into());
@@ -877,6 +888,7 @@ pub(crate) fn discover(
                 // Without its own window, T3 passes no window, so Claude Code reads the
                 // same user, project and local settings as a native session.
                 inherited_window: config.auto_compact_window.is_empty(),
+                environment: own_environment,
                 retained_since: None,
             });
             if harness == Harness::Codex {

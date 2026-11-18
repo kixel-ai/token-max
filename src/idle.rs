@@ -5260,6 +5260,7 @@ mod tests {
             limitations: vec![],
             env: None,
             inherited_window: true,
+            environment: vec![],
             retained_since: None,
         });
         for r in &mut scan.requests {

@@ -879,6 +879,36 @@ pub struct CompactionControls {
     /// maximum; any window larger than its model's runs at this size.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub contexts: IndexMap<String, i64>,
+    /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, when it can lower a trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<PercentOverride>,
+}
+
+/// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which lowers each model's trigger to a percentage of its
+/// auto-compact window, and what shows the trigger it sets.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PercentOverride {
+    /// The percentage below 100, or None when the value is not one Claude Code documents.
+    pub value: Option<f64>,
+    /// Every setting of the variable, highest precedence last, which removing it clears.
+    pub owners: Vec<String>,
+    /// The files whose last change bounds which recorded triggers show the current one: those
+    /// that set the variable, a window, or what sizes the context.
+    pub files: Vec<String>,
+    /// Owners of those settings that keep no modification time, such as the shell.
+    pub timeless: Vec<String>,
+    /// When the last of `files` changed; None until dated, and whenever `timeless` is not empty.
+    pub since: Option<Millis>,
+    /// The latest automatic trigger by undated model, from sessions that started after `since`.
+    pub observed: IndexMap<String, i64>,
+}
+
+impl PercentOverride {
+    /// The setting Claude Code reads.
+    pub fn owner(&self) -> &str {
+        self.owners.last().map_or("", String::as_str)
+    }
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
@@ -1135,6 +1165,9 @@ pub struct T3Instance {
     /// Whether T3 passes no window, so Claude Code reads the native user, project and local ones.
     #[serde(skip)]
     pub inherited_window: bool,
+    /// The variables the instance's own environment sets, which T3's settings file owns.
+    #[serde(skip)]
+    pub environment: Vec<String>,
     /// When T3's pruned event log becomes complete, which starts its idle check's window;
     /// None when it never pruned or was not read.
     pub retained_since: Option<Millis>,
@@ -1751,6 +1784,32 @@ pub struct CompactionCheck {
     pub scenarios: Vec<WindowScenario>,
     pub usage_estimates: Vec<UsageEstimate>,
     pub cache_evidence: Vec<CacheReplayEvidence>,
+    /// The edits that make one setting own the trigger when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
+    /// lowers it, so the recommended window is the trigger.
+    pub reowned: Option<Reowned>,
+}
+
+/// What changing a window under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` also changes: the variable
+/// comes out of every scope, and every other model the line runs keeps its trigger.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reowned {
+    /// Every setting of the variable, each removed.
+    pub overrides: Vec<String>,
+    /// `CLAUDE_CODE_AUTO_COMPACT_WINDOW`'s owner when it is set and other models run, so the
+    /// window it gives them moves to their own rows.
+    pub environment_window: Option<String>,
+    /// Every other model the line runs, pinned at its current trigger in its own row.
+    pub pins: Vec<Pin>,
+}
+
+/// A model held at its current trigger by its own window row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pin {
+    pub model: Text,
+    /// The current trigger, or None when it is unresolved.
+    pub trigger: Option<i64>,
+    /// The setting that owns its window now.
+    pub owner: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

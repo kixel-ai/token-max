@@ -5,12 +5,15 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use std::collections::BTreeSet;
 
 use crate::cache::{CODEX_CACHE_MILLISECONDS, CacheBoundaries, ttl_milliseconds};
-use crate::controls::{CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, window_control};
+use crate::controls::{
+    CLAUDE_WINDOW_MAXIMUM, CLAUDE_WINDOW_MINIMUM, PERCENT_KEY, strip_dated, window_control,
+};
 use crate::discovery::locale_compare;
 use crate::model::{
     Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
-    CompactionBasis, CompactionCharge, CompactionCheck, Cost, Coverage, EventKind, Evidence,
-    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, Request, RequestEvidence, Scalar,
+    CompactionBasis, CompactionCharge, CompactionCheck, CompactionControls, Cost, Coverage, EventKind, Evidence,
+    Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, PercentOverride, Pin, Reowned,
+    Request, RequestEvidence, Scalar,
     Scan, StructuralEvent, Text, Ttl, TtlCheck, Usage, UsageEstimate, Usd, WindowBasisKind,
     WindowControl, WindowScenario, WindowSensitivity,
 };
@@ -20,8 +23,9 @@ use crate::prices::{
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
 
-const SOURCES: [&str; 7] = [
+const SOURCES: [&str; 8] = [
     "https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction (2026-11-07)",
+    "https://code.claude.com/docs/en/env-vars (2026-11-18)",
     "https://code.claude.com/docs/en/model-config#default-auto-compact-thresholds (2026-11-11)",
     "https://platform.claude.com/docs/en/build-with-claude/context-windows (2026-11-11)",
     "https://platform.claude.com/docs/en/build-with-claude/compaction (2026-11-11)",
@@ -1711,8 +1715,32 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     && (e.model.is_none()
                         || models.iter().any(|m| m.as_deref() == e.model.as_deref()))
             });
-            let applicable =
-                control.applicable && per_model_supported && (!claude || !models.contains(&None));
+            let reowned = profile
+                .compaction
+                .percent
+                .as_ref()
+                .filter(|_| claude)
+                .map(|percent| reowned(&profile.compaction, percent, models, observed.keys()));
+            // Removing the override moves every other model's trigger, so each must be known
+            // to be kept.
+            let unpinned = reowned.as_ref().and_then(|r| {
+                let models: Vec<&str> = r
+                    .pins
+                    .iter()
+                    .filter(|p| p.trigger.is_none())
+                    .map(|p| &*p.model)
+                    .collect();
+                (!models.is_empty() && recommended != control.value).then(|| {
+                    format!(
+                        "changing this window removes {PERCENT_KEY}, which moves the trigger of {}, and where it compacts now is unresolved",
+                        models.join(", ")
+                    )
+                })
+            });
+            let applicable = control.applicable
+                && per_model_supported
+                && (!claude || !models.contains(&None))
+                && unpinned.is_none();
             let profiles: IndexSet<&String> =
                 selected.iter().flat_map(|r| r.profiles.iter()).collect();
             let savings = winning
@@ -1734,6 +1762,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             if !control.applicable {
                 uncertainty.insert(control.reason.clone());
             }
+            uncertainty.extend(unpinned);
             if !per_model_supported {
                 uncertainty.insert(format!(
                     "current client support for this window control is not established (requires Claude v2.1.{patch})"
@@ -1834,10 +1863,54 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     .filter_map(|r| options.estimates.get(&r.id).cloned())
                     .collect(),
                 cache_evidence: baseline_evidence.clone(),
+                reowned,
             });
         }
     }
     checks
+}
+
+/// What a window change under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` must also change so one
+/// setting owns each trigger: every setting of the variable comes out, and every other model
+/// the line ran keeps its current trigger in its own row, as does each model a removed
+/// environment window covered.
+fn reowned<'m>(
+    compaction: &CompactionControls,
+    percent: &PercentOverride,
+    group: &[Option<Text>],
+    line: impl Iterator<Item = &'m Option<Text>>,
+) -> Reowned {
+    let undated = |model: &str| Text::from(strip_dated(model, 8).unwrap_or(model));
+    let targets: HashSet<Text> = group.iter().flatten().map(|m| undated(m)).collect();
+    let mut pins: Vec<Pin> = vec![];
+    for model in line.flatten() {
+        let model = undated(model);
+        if targets.contains(&model) || pins.iter().any(|p| p.model == model) {
+            continue;
+        }
+        let control = window_control(compaction, Some(&model));
+        pins.push(Pin {
+            model,
+            trigger: control.value,
+            owner: control.owner,
+        });
+    }
+    // The variable outranks every row, so with other models it cannot hold the target alone.
+    let environment_window = (!pins.is_empty())
+        .then(|| {
+            let control = window_control(compaction, group.iter().flatten().next().map(|m| &**m));
+            [control.owner]
+                .into_iter()
+                .chain(pins.iter().map(|p| p.owner.clone()))
+                .map(|o| o.split(" (").next().unwrap_or(&o).to_string())
+                .find(|o| o.ends_with("CLAUDE_CODE_AUTO_COMPACT_WINDOW"))
+        })
+        .flatten();
+    Reowned {
+        overrides: percent.owners.clone(),
+        environment_window,
+        pins,
+    }
 }
 
 /// Unreadable lines in the transcripts of these profiles; each could have been a request.

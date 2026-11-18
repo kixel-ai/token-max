@@ -2058,7 +2058,13 @@ fn reowned<'m>(
             let models: IndexSet<&str> = if member {
                 line.iter().copied().flatten().map(|m| &**m).collect()
             } else {
-                ran.get(profile.id.as_str())
+                let recorded = ran.get(profile.id.as_str());
+                if recorded.is_some_and(|r| r.contains(&None)) {
+                    unkept.push(format!(
+                        "requests with no recorded model ran{place}, and their trigger cannot be checked"
+                    ));
+                }
+                recorded
                     .into_iter()
                     .flatten()
                     .flatten()
@@ -2066,7 +2072,21 @@ fn reowned<'m>(
                     .collect()
             };
             for model in models {
-                let now = window_control(before, Some(model)).value;
+                let current = window_control(before, Some(model));
+                // A scope whose trigger is unresolved, such as a T3 instance whose environment
+                // is, cannot show it kept; projects that differ only in TTL still know it.
+                if let Some(reason) = current
+                    .comparison_unknown
+                    .as_ref()
+                    .filter(|r| *r != crate::discovery::TTL_PROJECTS_DIFFER)
+                {
+                    missed
+                        .entry(model.to_string())
+                        .or_default()
+                        .push(format!("its trigger{place} is unknown: {reason}"));
+                    continue;
+                }
+                let now = current.value;
                 let then = window_control(&after, Some(model)).value;
                 let wanted = if member && targets.contains(&model) {
                     Some(target)
@@ -3614,6 +3634,35 @@ mod tests {
         // One whose window comes from its own file is left alone.
         other.compaction = read("other.json");
         assert!(plan(&other).unkept.is_empty());
+        // One that reads the file but recorded requests with no model cannot be checked.
+        other.compaction = read("settings.json");
+        let unrecorded = HashMap::from_iter([("t3-instance", IndexSet::from_iter([None]))]);
+        let profile = &scan.profiles[0];
+        let unkept = super::reowned(
+            &[profile],
+            &[&other],
+            &unrecorded,
+            profile.compaction.percent.as_ref().unwrap(),
+            100_000,
+            &line[..1],
+            line.iter(),
+        )
+        .unkept;
+        assert!(
+            unkept
+                .iter()
+                .any(|u| u.contains("no recorded model ran on t3-instance")),
+            "{unkept:?}"
+        );
+        // Nor can one whose environment is unresolved.
+        other.compaction.default.comparison_unknown = Some("T3 instance is disabled".into());
+        let unkept = plan(&other).unkept;
+        assert!(
+            unkept
+                .iter()
+                .any(|u| u.contains("on t3-instance is unknown: T3 instance is disabled")),
+            "{unkept:?}"
+        );
     }
 
     #[test]

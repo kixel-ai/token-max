@@ -7837,7 +7837,7 @@ mod tests {
         // A model whose trigger a project file owns is pinned there by hand.
         let project = "/synthetic/project/.claude/settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow";
         let How::Manual { step, .. } = how(
-            shared,
+            shared.clone(),
             plan(vec![
                 change(&row_of("claude-opus-5-5"), Some(300_000)),
                 change(project, Some(150_000)),
@@ -7849,6 +7849,18 @@ mod tests {
         assert!(
             step.ends_with(&format!("; set {project} to 150000")),
             "{step}"
+        );
+
+        // T3 keeps an instance's variables as named entries, so the step names the entry.
+        let instance = format!("{ROOT}/t3.json:providerInstances.claudeAgent.environment.{key}");
+        let How::Manual { step, .. } = how(shared, plan(vec![change(&instance, None)])) else {
+            panic!("expected a step by hand");
+        };
+        assert_eq!(
+            step,
+            format!(
+                "remove the {key} entry from {ROOT}/t3.json:providerInstances.claudeAgent.environment"
+            )
         );
     }
 

@@ -1048,6 +1048,10 @@ pub fn t3_percent(
     if let Some(layers) = &mut compaction.layers {
         let mut own = Env::default();
         for key in environment {
+            // A name listed twice is the instance's once.
+            if own.contains_key(key) {
+                continue;
+            }
             if let Some(value) = layers.shell.remove(key) {
                 own.insert(key.clone(), value);
             }
@@ -2102,6 +2106,28 @@ mod tests {
         let control = window_control(&p, Some("gateway-model"));
         assert_eq!(control.value, Some(120_000));
         assert!(control.applicable);
+    }
+
+    #[test]
+    fn a_t3_instance_that_lists_a_variable_twice_keeps_its_own_value() {
+        let empty = Map::new();
+        let mut merged = Env::default();
+        merged.insert(PERCENT_KEY.into(), "60".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &merged)).unwrap();
+        let mut shell = Env::default();
+        shell.insert(PERCENT_KEY.into(), "80".into());
+        let twice = [PERCENT_KEY.to_string(), PERCENT_KEY.to_string()];
+        t3_percent(
+            &mut controls,
+            &twice,
+            "t3.json",
+            "claudeAgent",
+            false,
+            &shell,
+        );
+        let layers = controls.layers.unwrap();
+        assert_eq!(layers.instance.unwrap().env[PERCENT_KEY], "60");
+        assert_eq!(layers.shell[PERCENT_KEY], "80");
     }
 
     #[test]

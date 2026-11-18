@@ -673,7 +673,9 @@ pub(crate) fn discover(
                 if ENVIRONMENT.contains(&entry.name.as_str()) {
                     match entry.value {
                         Some(value) => {
-                            own_environment.push(entry.name.clone());
+                            if !own_environment.contains(&entry.name) {
+                                own_environment.push(entry.name.clone());
+                            }
                             env.insert(entry.name, value);
                         }
                         None => {

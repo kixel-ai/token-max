@@ -955,9 +955,17 @@ fn reown(reowned: &Reowned, profile: &Profile) -> How {
         let owner = change.owner();
         let mine = matches!(&change.source, crate::model::Source::File(f) if f == file);
         if !mine {
-            let step = match change.value {
-                Some(value) => format!("set {owner} to {value}"),
-                None => format!("remove {owner}"),
+            let step = match (&change.source, &change.setting, change.value) {
+                // T3 keeps an instance's variables as entries named in a list.
+                (crate::model::Source::Instance { file, id }, Setting::Env(key), value) => {
+                    let list = format!("{file}:providerInstances.{id}.environment");
+                    match value {
+                        Some(value) => format!("set the {key} entry in {list} to {value}"),
+                        None => format!("remove the {key} entry from {list}"),
+                    }
+                }
+                (_, _, Some(value)) => format!("set {owner} to {value}"),
+                (_, _, None) => format!("remove {owner}"),
             };
             foreign.push((owner, step));
             continue;
@@ -2979,6 +2987,16 @@ pub fn confirm(
     }
 }
 
+/// The settings whose values the confirm shows unmasked: those an edit sets. A removed value
+/// is not one the person chose, so it stays masked.
+fn shown(edits: &[Edit]) -> Vec<&[String]> {
+    edits
+        .iter()
+        .filter(|e| e.op != Op::Remove)
+        .map(|e| e.path.as_slice())
+        .collect()
+}
+
 /// How `target`'s text would change to `after`: its name, then each changed line with a
 /// line of context on either side, removed lines red and added ones green.
 /// Secret values show masked, as `mask` describes.
@@ -2989,7 +3007,7 @@ fn diff(pending: &Pending, after: &str, style: &Style) -> String {
     } else {
         "****"
     };
-    let edited: Vec<&[String]> = pending.edits.iter().map(|e| e.path.as_slice()).collect();
+    let edited = shown(&pending.edits);
     let hide = |text: &str| match target.harness {
         Harness::Claude => mask_json(text, mask, &edited),
         Harness::Codex => mask_toml(text, mask),
@@ -5057,6 +5075,19 @@ mod tests {
         std::fs::write(&loose, "{}\n").unwrap();
         let written = write(&accepted(&w, &[(&loose, Harness::Claude)])).unwrap();
         assert!(written[0].backup.is_some());
+    }
+
+    #[test]
+    fn the_confirm_keeps_a_removed_value_masked() {
+        let edits = [
+            Edit::set("env.DISABLE_X", "1"),
+            Edit::remove(&["env", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"]),
+        ];
+        let text = "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"sk-pasted\"}\n}\n";
+        assert_eq!(
+            mask_json(text, "****", &shown(&edits)),
+            "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"****\"}\n}\n"
+        );
     }
 
     #[test]

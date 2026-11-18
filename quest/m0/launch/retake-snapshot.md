@@ -20,4 +20,3 @@ declined), and redeploy the site once it merges.
 ## Required
 
 - [Retake the results snapshot across every host](/quest/m0/launch/snapshot.md) - the four-host snapshot and its procedure this repeats
-- [Read shared settings for controls T3 leaves alone](/quest/m0/launch/t3-shared-controls.md) - the TTL lines that count toward the savings

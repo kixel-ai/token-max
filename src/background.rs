@@ -113,8 +113,14 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
                 groups.extend(profile.background.iter().map(|c| (c, (vec![], vec![]))));
             }
         }
+        let split = crate::t3::Split::new(
+            &input.scan.profiles,
+            &input.scan.requests,
+            &line.ids,
+            input.since,
+        );
         for (control, (requests, ends)) in groups {
-            result.push(check(input, &line, control, &requests, &ends));
+            result.push(check(input, &line, control, &requests, &ends, &split));
         }
     }
     result
@@ -425,7 +431,7 @@ fn generations(
     catalog: &Catalog,
     feature: BackgroundFeature,
     ends: &[&TurnEnd<'_>],
-    line: &[String],
+    split: &crate::t3::Split<'_>,
 ) -> Generations {
     let mut result = Generations::default();
     for end in ends.iter().filter(|e| e.interactive) {
@@ -437,7 +443,7 @@ fn generations(
         if !runs {
             continue;
         }
-        if crate::t3::unsettled(&end.request.profiles, line) {
+        if split.sessions.contains(&*end.request.session) {
             result.left_out += 1;
             continue;
         }
@@ -456,6 +462,7 @@ fn check(
     control: &BackgroundControl,
     requests: &[&Request],
     ends: &[&TurnEnd<'_>],
+    split: &crate::t3::Split<'_>,
 ) -> BackgroundCheck {
     let profile = line.lead;
     let feature = control.feature;
@@ -471,13 +478,12 @@ fn check(
         off,
         left_out,
     } = if measurable && enabled {
-        generations(input.catalog, feature, ends, &line.ids)
+        generations(input.catalog, feature, ends, split)
     } else {
         Generations::default()
     };
     // Turns T3 could not settle to this line stand in at its share of those it did.
-    let stand_ins =
-        crate::t3::Split::new(&input.scan.requests, &line.ids, input.since).stand_ins(left_out);
+    let stand_ins = split.stand_ins(left_out);
     let paired = pairs.savings(stand_ins.unwrap_or(0));
     // Extrapolate the measured net cost to every turn where it ran, as context costs do.
     let estimate = paired.usd().filter(|_| stand_ins.is_some());

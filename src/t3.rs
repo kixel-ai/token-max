@@ -69,11 +69,6 @@ pub(crate) fn profile_key(state: &str, instance: &str) -> String {
     format!("t3:{state}:{instance}")
 }
 
-/// Whether a profile id is a T3 instance's, current or removed; native ids are digests.
-fn instance_key(id: &str) -> bool {
-    id.starts_with("t3:")
-}
-
 /// Whether a line's T3 instances can take guidance: each is enabled with resolved settings,
 /// and T3 settled which profile ran each request, or left it open only between the line's
 /// own profiles, which share its owner.
@@ -2322,13 +2317,6 @@ fn unsettled_for(
     open
 }
 
-/// Whether T3 left a request's owner open between `line`'s profiles and others.
-pub(crate) fn unsettled(profiles: &[String], line: &[String]) -> bool {
-    profiles.iter().any(|p| line.contains(p))
-        && profiles.iter().any(|p| !line.contains(p))
-        && profiles.iter().any(|p| instance_key(p))
-}
-
 /// How a line that acts for one owner alone, such as native idle compaction, T3's idle
 /// modes or the background features, extrapolates over the main-agent requests T3 left open
 /// between its profiles and others: their sessions are left out of its comparison, and stand
@@ -2343,15 +2331,33 @@ pub(crate) struct Split<'a> {
 
 impl<'a> Split<'a> {
     /// The split of `line`'s selected main-agent requests from `since`.
-    pub fn new(requests: &'a [Request], line: &[String], since: Option<Millis>) -> Self {
+    pub fn new(
+        profiles: &[Profile],
+        requests: &'a [Request],
+        line: &[String],
+        since: Option<Millis>,
+    ) -> Self {
         let selected = || {
             requests
                 .iter()
                 .filter(|r| r.agent == Agent::Main && since.is_none_or(|s| r.time >= s))
         };
+        // A T3 instance's, or a removed one's, which no current profile names.
+        let instance = |id: &str| {
+            profiles
+                .iter()
+                .find(|p| p.id == id)
+                .is_none_or(|p| p.t3.is_some())
+        };
+        // T3 left the owner open between the line's profiles and others.
+        let open = |r: &Request| {
+            r.profiles.iter().any(|p| line.contains(p))
+                && r.profiles.iter().any(|p| !line.contains(p))
+                && r.profiles.iter().any(|p| instance(p))
+        };
         let mut split = Split::default();
         let mut rivals: HashSet<&str> = HashSet::default();
-        for r in selected().filter(|r| unsettled(&r.profiles, line)) {
+        for r in selected().filter(|r| open(r)) {
             split.sessions.insert(&r.session);
             rivals.extend(
                 r.profiles
@@ -2548,40 +2554,49 @@ mod tests {
 
     #[test]
     fn a_split_stands_in_unsettled_sessions_at_the_settled_share() {
-        let native = "native".to_string();
-        let t3 = "t3:/state:agent".to_string();
-        let request = |id: &str, session: &str, profiles: &[&String]| {
+        use crate::test_support::{make_profile, make_t3_profile};
+        // Current instances' ids are digests like native ones; only the profiles tell them apart.
+        let profiles = [
+            make_profile("native", "/home/.claude"),
+            make_profile("other", "/home/.claude"),
+            make_t3_profile("agent", "/home/.claude"),
+        ];
+        let request = |id: &str, session: &str, owners: &[&str]| {
             let mut r = make_request();
             r.id = id.into();
             r.session = session.into();
-            r.profiles = profiles.iter().map(|p| p.to_string()).collect();
+            r.profiles = owners.iter().map(|p| p.to_string()).collect();
             r
         };
         let mut requests = vec![
-            request("a", "native-1", &[&native]),
-            request("b", "native-2", &[&native]),
-            request("c", "native-3", &[&native]),
-            request("d", "t3-1", &[&t3]),
-            request("e", "open", &[&native, &t3]),
+            request("a", "native-1", &["native"]),
+            request("b", "native-2", &["native"]),
+            request("c", "native-3", &["native"]),
+            request("d", "t3-1", &["agent"]),
+            request("e", "open", &["native", "agent"]),
         ];
-        let line = [native.clone()];
-        let split = Split::new(&requests, &line, None);
+        let line = ["native".to_string()];
+        let split = Split::new(&profiles, &requests, &line, None);
         assert_eq!(split.sessions, HashSet::from_iter(["open"]));
         assert_eq!(split.share, Some(0.75));
         assert_eq!(split.stand_ins(4), Some(3));
         // T3's line sees the same requests from its side.
-        assert_eq!(Split::new(&requests, std::slice::from_ref(&t3), None).share, Some(0.25));
-        // Requests open between native profiles alone are not T3's to settle.
-        let other = "other".to_string();
-        requests.push(request("f", "copied", &[&native, &other]));
-        assert!(
-            !Split::new(&requests, &line, None)
-                .sessions
-                .contains("copied")
+        let t3 = ["agent".to_string()];
+        assert_eq!(
+            Split::new(&profiles, &requests, &t3, None).share,
+            Some(0.25)
         );
-        // With nothing settled between them, no share can be estimated.
-        let open = [request("e", "open", &[&native, &t3])];
-        let split = Split::new(&open, &line, None);
+        // Requests open between native profiles alone are not T3's to settle.
+        requests.push(request("f", "copied", &["native", "other"]));
+        let split = Split::new(&profiles, &requests, &line, None);
+        assert!(!split.sessions.contains("copied"));
+        // A removed instance is no current profile, and counts as T3's.
+        requests.push(request("g", "removed", &["native", "t3:/state:gone"]));
+        let split = Split::new(&profiles, &requests, &line, None);
+        assert!(split.sessions.contains("removed"));
+        // With nothing settled to estimate a share from, none can be priced.
+        let open = [request("e", "open", &["native", "agent"])];
+        let split = Split::new(&profiles, &open, &line, None);
         assert_eq!((split.share, split.stand_ins(1)), (None, None));
         assert_eq!(split.stand_ins(0), Some(0));
     }

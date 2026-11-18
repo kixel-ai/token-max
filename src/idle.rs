@@ -2434,7 +2434,7 @@ fn profile_checks<'a>(
         groups,
         window_events: WindowEvents::new(events.iter().copied()),
         calibration: compaction_samples(&requests, &events, options.summaries),
-        split: crate::t3::Split::new(&scan.requests, &group.ids, Some(since)),
+        split: crate::t3::Split::new(&scan.profiles, &scan.requests, &group.ids, Some(since)),
         detail,
     };
     let scopes = &profiled.scopes;
@@ -2710,7 +2710,12 @@ fn detailed_t3_checks(
             groups,
             window_events: WindowEvents::new(events.iter().copied()),
             calibration: samples,
-            split: crate::t3::Split::new(&options.scan.requests, &group.ids, since),
+            split: crate::t3::Split::new(
+                &options.scan.profiles,
+                &options.scan.requests,
+                &group.ids,
+                since,
+            ),
             detail,
         };
         let current_windows = current_windows(&profiled.scopes, &requests);

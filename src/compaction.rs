@@ -1982,22 +1982,6 @@ fn reowned<'m>(
             differs.join(", ")
         ));
     }
-    // Two names for one settings file, such as a symlink, are one owner.
-    let removed: Vec<String> = overrides
-        .iter()
-        .map(|o| crate::rows::canonical(o))
-        .collect();
-    for other in outside {
-        let shared = scopes(other)
-            .flat_map(|c| c.percent.iter().flat_map(|p| &p.owners))
-            .any(|o| removed.contains(&crate::rows::canonical(o)));
-        if shared {
-            unkept.push(format!(
-                "{} reads the same override on another line, whose triggers this plan does not pin",
-                other.id
-            ));
-        }
-    }
     let mut targets: Vec<Text> = vec![];
     for model in group.iter().flatten() {
         let key = row_key(&window_control(compaction, Some(model)).owner, model);
@@ -2030,6 +2014,35 @@ fn reowned<'m>(
             .any(|o| owner_setting(o).ends_with(WINDOW_KEY))
     };
     let environment_windows = if held { every(|p| &p.windows) } else { vec![] };
+    // Another line that reads a lifted setting moves with it. Two names for one settings file,
+    // such as a symlink, are one owner.
+    let canonical = |owners: &[String]| -> Vec<String> {
+        owners.iter().map(|o| crate::rows::canonical(o)).collect()
+    };
+    let (removed, lifted) = (canonical(&overrides), canonical(&environment_windows));
+    for other in outside {
+        fn reads<'o>(removed: &[String], mut owners: impl Iterator<Item = &'o String>) -> bool {
+            owners.any(|o| removed.contains(&crate::rows::canonical(owner_setting(o))))
+        }
+        let percents = || scopes(other).flat_map(|c| c.percent.iter());
+        if reads(&removed, percents().flat_map(|p| &p.owners)) {
+            unkept.push(format!(
+                "{} reads the same override on another line, whose triggers this plan does not pin",
+                other.id
+            ));
+        }
+        // A line without the override still reads a window variable this plan lifts.
+        let windows = scopes(other)
+            .flat_map(|c| std::iter::once(&c.default).chain(c.models.values()))
+            .map(|w| &w.owner)
+            .chain(percents().flat_map(|p| &p.windows));
+        if reads(&lifted, windows) {
+            unkept.push(format!(
+                "{} reads a {WINDOW_KEY} this plan lifts on another line, whose triggers this plan does not pin",
+                other.id
+            ));
+        }
+    }
     Reowned {
         overrides,
         environment_windows,
@@ -3353,6 +3366,14 @@ mod tests {
                 .iter()
                 .any(|u| u.contains("claude-haiku-5-5"))
         );
+        // Even when that model last ran before the window: the override still lowers its
+        // trigger, and removing it would move that trigger unseen.
+        let all = checks_since(&scan, Some(2 * HOUR + 1));
+        let opus = all
+            .iter()
+            .find(|c| c.model.as_deref() == Some("claude-opus-5-5"))
+            .unwrap();
+        assert_eq!(opus.base.action, Action::Advisory);
 
         // A trigger below the smallest window a setting may name cannot be pinned either.
         let low = |scan: &mut Scan| {
@@ -3473,6 +3494,68 @@ mod tests {
             )
         );
         assert_eq!(&*row_key(&owner, dated), dated);
+        // So may a model's own row key.
+        let gateway = "gateway.autoCompactWindow.backup";
+        let owner =
+            format!("settings.json:modelSettings.{gateway}.autoCompactWindow (capped at 200000)");
+        assert_eq!(&*row_key(&owner, gateway), gateway);
+    }
+
+    #[test]
+    fn a_plan_names_another_line_that_reads_a_window_variable_it_lifts() {
+        let (key, window) = (crate::controls::PERCENT_KEY, crate::controls::WINDOW_KEY);
+        let mut scan = data(4);
+        scan.profiles[0].compaction = controls(
+            Harness::Claude,
+            json!({"env": {key: "50", window: "400000"}}),
+            &Env::default(),
+            "settings.json",
+        );
+        let line = [
+            Some(Text::from("claude-opus-5-5")),
+            Some(Text::from("claude-haiku-5-5")),
+        ];
+        let plan = |other: &Profile| {
+            let profile = &scan.profiles[0];
+            super::reowned(
+                &[profile],
+                &[other],
+                profile.compaction.percent.as_ref().unwrap(),
+                &line[..1],
+                line.iter(),
+            )
+        };
+        // Another line without the override reads the same file's window variable.
+        let mut other = scan.profiles[0].clone();
+        other.id = "t3-instance".into();
+        other.compaction = controls(
+            Harness::Claude,
+            json!({"env": {window: "400000"}}),
+            &Env::default(),
+            "settings.json",
+        );
+        assert!(other.compaction.percent.is_none());
+        let reowned = plan(&other);
+        assert_eq!(
+            reowned.environment_windows,
+            [format!("settings.json:env.{window}")]
+        );
+        assert!(
+            reowned
+                .unkept
+                .iter()
+                .any(|u| u.contains("t3-instance reads a CLAUDE_CODE_AUTO_COMPACT_WINDOW")),
+            "{:?}",
+            reowned.unkept
+        );
+        // One whose window comes from its own file is left alone.
+        other.compaction = controls(
+            Harness::Claude,
+            json!({"env": {window: "400000"}}),
+            &Env::default(),
+            "other.json",
+        );
+        assert!(plan(&other).unkept.is_empty());
     }
 
     #[test]

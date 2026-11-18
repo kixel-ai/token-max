@@ -843,7 +843,9 @@ move but cannot pin keeps the line advisory: another model
 whose current trigger is unresolved or below the 100,000-token smallest window
 a setting can name, requests with no recorded model, a model a recorded project
 compacts at another trigger or through another setting than the home does,
-or another line, such as a T3 instance's, that reads the same override.
+or another line, such as a T3 instance's, that reads the same override or a
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` the change lifts. A model counts whenever the line's
+history shows it, even one that last ran before the window.
 
 Candidates come from current controls, price-tier boundaries, provider limits,
 and measured resumed-prefix geometry. Added compactions use observed summary and resumed-prefix sizes in matching

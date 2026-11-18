@@ -798,7 +798,7 @@ pub fn t3_percent(
 }
 
 /// A window owner without its trailing note, such as ` (capped at 200000)`; a settings path
-/// may itself hold ` (`, so the owner ends at its key.
+/// may itself hold ` (`, so the note is looked for only after it.
 pub fn owner_setting(owner: &str) -> &str {
     // The key follows the file's path, which may itself hold a key's name.
     let start = [".json:", ".toml:"]
@@ -806,13 +806,10 @@ pub fn owner_setting(owner: &str) -> &str {
         .filter_map(|ext| owner.find(ext).map(|i| i + ext.len()))
         .min()
         .unwrap_or(0);
-    let setting = &owner[start..];
-    for key in [".autoCompactWindow", WINDOW_KEY] {
-        if let Some(at) = setting.find(key) {
-            return &owner[..start + at + key.len()];
-        }
-    }
-    let end = setting.find(" (").map_or(owner.len(), |at| start + at);
+    // Only the note goes: a model's row key may itself hold `.autoCompactWindow`.
+    let end = owner[start..]
+        .find(" (")
+        .map_or(owner.len(), |at| start + at);
     &owner[..end]
 }
 

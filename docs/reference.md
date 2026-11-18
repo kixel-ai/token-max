@@ -30,7 +30,8 @@ in PowerShell,
 ## Applying changes
 
 On a terminal, `doctor` opens with one header line naming what it read: the
-requests, the window and their cost. It then walks through each change it can
+requests, the sessions they ran in (each subagent counted with the session
+that spawned it), the window and their cost. It then walks through each change it can
 make, after a headline counting its questions and the changes they cover,
 across every settings file, recommended and worth considering alike, biggest
 monthly saving first. Each change is a card. Its first line is a counter, such
@@ -370,7 +371,11 @@ nothing else changes. **Everything else** follows, ranked by what it costs,
 biggest first, with lines whose cost is unknown or that have no figure after.
 When several profiles were read, each line also names the settings file that
 owns it, or the profile when no file does (see [Profiles](#profiles)).
-The headline counts both kinds of change. A dot's color carries the verdict:
+The headline counts both kinds of change. The line under it sums what they
+save together, as the walk's running total would if every change were
+accepted, such as "Together, these changes save about $40/mo, 9% of this
+host's spend; overlapping changes may save less", since each saving holds
+every other setting constant. A dot's color carries the verdict:
 red, yellow, green for a value already at its recommendation, and a dim hollow
 dot for no verdict, either for lack of evidence or because nothing can be set.
 Without color a word replaces the dot: `change`, `consider`, `keep`,
@@ -455,7 +460,7 @@ no applicable changes does not imply complete visibility or optimal settings.
 
 ## Savings against the defaults
 
-Under the headline, one line sums what this host's current settings save
+Under the headline and its total, one line sums what this host's current settings save
 against the Claude Code and Codex defaults, such as "Compared with defaults,
 your settings save about $945/mo, 2% of this host's spend". Every line whose
 setting differs from its default gets a note under it naming the default and
@@ -925,7 +930,7 @@ linked build to run here instead, such as the release installers'.
 
 Each host is analyzed on its own and gets its own section, labeled with the
 destination, or `this host`. A run of several hosts heads its report with one
-total: the hosts' requests, their spend at API prices, and the sum of what the
+total: the hosts' requests and sessions, their spend at API prices, and the sum of what the
 changes they offer save every 30 days, with each saving's percent of the hosts'
 spend together. Offered changes may overlap, within a host or between hosts, so
 applying them all can save less than that sum, as the total says. The hosts' figures are added as they are, so a history copied between

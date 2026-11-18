@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>token-max: the default settings are costing you money</title>
-<meta name="description" content="token-max replays your Claude Code and Codex transcripts at API prices and shows which settings cost you money. On the maintainer's machine, a 1h subagent cache cost ~15% less than the default 5m.">
+<meta name="description" content="token-max replays your Claude Code and Codex transcripts at API prices and shows which settings cost you money. On the maintainer's machines, a 1h subagent cache cost ~17% less than the default 5m.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
@@ -40,28 +40,38 @@
 
 <!-- The maintainer's results, as docs/results.md and the README's top give them; update all three together. -->
 <section class="findings" aria-labelledby="found">
-  <h2 id="found">On the maintainer's 56 days of Claude Code</h2>
+  <h2 id="found">On the maintainer's last 30 days, across four machines</h2>
+  <dl class="totals">
+    <div><dt>API cost</dt><dd>~$70,009</dd></div>
+    <div><dt>Sessions</dt><dd>12,076</dd></div>
+    <div><dt>Potential savings</dt><dd>~$1,689/mo</dd></div>
+  </dl>
+  <p class="small">1,181,845 Claude Code, Codex and T3 Code requests at public API
+  prices. The savings are every change <code>token-max doctor --defaults</code>
+  would make for a user with no settings files, 2% of the spend: a third from the
+  main agent's cache, the rest auto memory and unused skills and tools. The subagent
+  cache saving is left out: on the plan profiles doctor can't yet tell which
+  settings T3 Code's sessions ran with.</p>
   <div class="cards">
     <article class="card">
       <h3 class="who">Subagent cache, 1h instead of 5m</h3>
-      <p class="big">~15% cheaper</p>
+      <p class="big">~17% cheaper</p>
       <p>Every Claude Code user's subagents cache for 5 minutes. An hour would have
-      cost ~$6,105 less.</p>
+      cost ~$4,146 less over the 30 days, not yet counted in the savings.</p>
       <code class="setting">subagentPromptCacheTtl</code>
     </article>
     <article class="card">
       <h3 class="who">API-key main agent, 1h instead of 5m</h3>
-      <p class="big">~36% cheaper</p>
+      <p class="big">~37% cheaper</p>
       <p>A plan's included usage gets 1 hour, but API keys and usage credits get 5
-      minutes. An hour would
-      have cost ~$7,383 less.</p>
+      minutes. An hour saves ~$519/mo.</p>
       <code class="setting">promptCacheTtl</code>
     </article>
   </div>
   <p class="see-yours"><a href="#run">Run it to see yours.</a></p>
   <p class="small">Both settings live in <code>~/.claude/settings.json</code>. ~ marks
-  figures from the requests that could be priced: 95.1% for subagents, 97.9% for
-  the main agent. Replayed 2026-11-17;
+  figures extrapolated over requests that could not be priced. Replayed
+  2026-11-17;
   <a href="https://github.com/kixel-ai/token-max/blob/main/docs/results.md">full results</a>.</p>
 </section>
 

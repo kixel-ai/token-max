@@ -6313,6 +6313,7 @@ mod tests {
             }],
             usage_estimates: vec![],
             cache_evidence: vec![],
+            reowned: None,
         })
     }
 
@@ -7667,6 +7668,203 @@ mod tests {
     }
 
     #[test]
+    fn a_window_change_under_the_percent_override_makes_one_setting_own_each_trigger() {
+        use crate::doctor::{Edit, How, Op, Patch, fixes};
+        use crate::model::{Change, Reowned};
+        use serde_json::json;
+        let file = format!("{ROOT}/settings.json");
+        let key = crate::controls::PERCENT_KEY;
+        let variable = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+        let edit = |path: &[&str], value: serde_json::Value, op: Op| Edit {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            value,
+            op,
+        };
+        let row = |model: &str, window: i64| {
+            edit(
+                &["modelSettings", model, "autoCompactWindow"],
+                json!(window),
+                Op::Set,
+            )
+        };
+        let remove = |variable: &str| edit(&["env", variable], json!(null), Op::Remove);
+        let change = |owner: &str, value: Option<i64>| {
+            let (source, setting) = crate::controls::locate(owner).expect("a window setting");
+            Change {
+                source,
+                setting,
+                value,
+            }
+        };
+        let plan = |changes: Vec<Change>| Reowned {
+            changes,
+            unkept: vec![],
+        };
+        let how = |owner: String, reowned: Reowned| {
+            let mut report = synthetic();
+            let mut window = check_base(Action::Change, Some(200_000), Some(300_000));
+            window.owner = owner;
+            let mut check = compaction_check(window);
+            if let CheckResult::Compaction(c) = &mut check {
+                c.reowned = Some(reowned);
+            }
+            report.checks = vec![check];
+            report.context.clear();
+            fixes(&report, false)
+                .into_iter()
+                .find(|f| f.name.starts_with("Auto-compact window"))
+                .expect("a window fix")
+                .how
+        };
+        let row_of = |model: &str| format!("{file}:modelSettings.{model}.autoCompactWindow");
+        let removed = change(&format!("{file}:env.{key}"), None);
+
+        // Alone on its line, the window stays where its owner holds it.
+        let shared = format!("{file}:autoCompactWindow");
+        assert_eq!(
+            how(
+                shared.clone(),
+                plan(vec![change(&shared, Some(300_000)), removed.clone()])
+            ),
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: vec![
+                    edit(&["autoCompactWindow"], json!(300_000), Op::Set),
+                    remove(key),
+                ],
+            })
+        );
+
+        // Beside another model, the target and the other model each get their own row.
+        let beside = vec![
+            change(&row_of("claude-opus-5-5"), Some(300_000)),
+            change(&row_of("claude-haiku-5-5"), Some(150_000)),
+            removed.clone(),
+        ];
+        assert_eq!(
+            how(shared.clone(), plan(beside.clone())),
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: vec![
+                    row("claude-opus-5-5", 300_000),
+                    row("claude-haiku-5-5", 150_000),
+                    remove(key),
+                ],
+            })
+        );
+
+        // A window variable in the file comes out as a removal there.
+        let lifted = format!("{file}:env.{variable}");
+        let mut with_window = beside.clone();
+        with_window.insert(1, change(&lifted, None));
+        assert_eq!(
+            how(lifted.clone(), plan(with_window.clone())),
+            How::Edit(Patch {
+                file: file.clone(),
+                harness: Harness::Claude,
+                edits: vec![
+                    row("claude-opus-5-5", 300_000),
+                    remove(variable),
+                    row("claude-haiku-5-5", 150_000),
+                    remove(key),
+                ],
+            })
+        );
+
+        // A copy the shell exports is by hand, so the whole change is.
+        let mut shell_window = with_window.clone();
+        shell_window.insert(1, change(variable, None));
+        let How::Manual { step, reason } = how(lifted.clone(), plan(shell_window)) else {
+            panic!("expected a step by hand");
+        };
+        assert!(
+            reason.contains(&format!("the {variable} environment variable sets it")),
+            "{reason}"
+        );
+        assert!(step.contains(&format!("remove env.{variable}")), "{step}");
+        assert!(step.contains(&format!("; remove {variable}")), "{step}");
+
+        // Two plans that pin each other's target leave the second by hand, so accepting both
+        // never reverts the first.
+        let mut report = synthetic();
+        let pinned = |model: &str, other: &str| {
+            let mut window = check_base(Action::Change, Some(200_000), Some(100_000));
+            window.owner = row_of(model);
+            let mut check = compaction_check(window);
+            if let CheckResult::Compaction(c) = &mut check {
+                c.model = Some(model.into());
+                c.models = vec![Some(model.into())];
+                c.reowned = Some(plan(vec![
+                    change(&row_of(model), Some(100_000)),
+                    change(&row_of(other), Some(150_000)),
+                    removed.clone(),
+                ]));
+            }
+            check
+        };
+        report.checks = vec![
+            pinned("claude-opus-5-5", "claude-haiku-5-5"),
+            pinned("claude-haiku-5-5", "claude-opus-5-5"),
+        ];
+        report.context.clear();
+        let windows: Vec<How> = fixes(&report, false)
+            .into_iter()
+            .filter(|f| f.name.starts_with("Auto-compact window"))
+            .map(|f| f.how)
+            .collect();
+        assert!(matches!(windows[0], How::Edit(_)), "{windows:?}");
+        assert!(
+            matches!(&windows[1], How::Manual { reason, .. } if reason.contains("wants a different value for the same setting")),
+            "{windows:?}"
+        );
+
+        // The shell's override is left by hand, naming every step.
+        let mut shell = beside.clone();
+        shell.insert(2, change(key, None));
+        let How::Manual { step, reason } = how(shared.clone(), plan(shell)) else {
+            panic!("expected a step by hand");
+        };
+        assert!(
+            reason.contains(&format!("the {key} environment variable sets it")),
+            "{reason}"
+        );
+        assert!(step.contains("set \"modelSettings\""), "{step}");
+        assert!(step.contains(&format!("remove env.{key}")), "{step}");
+        assert!(step.ends_with(&format!("; remove {key}")), "{step}");
+
+        // A model whose trigger a project file owns is pinned there by hand.
+        let project = "/synthetic/project/.claude/settings.json:modelSettings.claude-haiku-5-5.autoCompactWindow";
+        let How::Manual { step, .. } = how(
+            shared.clone(),
+            plan(vec![
+                change(&row_of("claude-opus-5-5"), Some(300_000)),
+                change(project, Some(150_000)),
+                removed,
+            ]),
+        ) else {
+            panic!("expected a step by hand");
+        };
+        assert!(
+            step.ends_with(&format!("; set {project} to 150000")),
+            "{step}"
+        );
+
+        // T3 keeps an instance's variables as named entries, so the step names the entry.
+        let instance = format!("{ROOT}/t3.json:providerInstances.claudeAgent.environment.{key}");
+        let How::Manual { step, .. } = how(shared, plan(vec![change(&instance, None)])) else {
+            panic!("expected a step by hand");
+        };
+        assert_eq!(
+            step,
+            format!(
+                "remove the {key} entry from {ROOT}/t3.json:providerInstances.claudeAgent.environment"
+            )
+        );
+    }
+
+    #[test]
     fn doctor_edits_the_owning_setting_and_leaves_other_owners_by_hand() {
         use crate::doctor::{Edit, How, Patch, fixes};
         use serde_json::json;
@@ -7678,7 +7876,7 @@ mod tests {
                 edits: vec![Edit {
                     path: path.iter().map(|p| p.to_string()).collect(),
                     value,
-                    append: false,
+                    op: crate::doctor::Op::Set,
                 }],
             })
         };
@@ -7838,7 +8036,7 @@ mod tests {
                 edits: vec![Edit {
                     path: path.iter().map(|p| p.to_string()).collect(),
                     value: value.into(),
-                    append: false,
+                    op: crate::doctor::Op::Set,
                 }],
             })
         };
@@ -9324,7 +9522,7 @@ mod tests {
                 edits: vec![Edit {
                     path: vec!["promptCacheTtl".into()],
                     value: serde_json::json!(winner),
-                    append: false,
+                    op: crate::doctor::Op::Set,
                 }],
             })
         );

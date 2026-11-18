@@ -4708,6 +4708,7 @@ mod tests {
             scenarios: vec![],
             usage_estimates: vec![],
             cache_evidence: vec![],
+            reowned: None,
         };
         for policies in [
             Policies {
@@ -5282,6 +5283,7 @@ mod tests {
             limitations: vec![],
             env: None,
             inherited_window: true,
+            environment: vec![],
             retained_since: None,
         });
         for r in &mut scan.requests {

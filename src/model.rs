@@ -879,6 +879,42 @@ pub struct CompactionControls {
     /// maximum; any window larger than its model's runs at this size.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub contexts: IndexMap<String, i64>,
+    /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, when it can lower a trigger.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub percent: Option<PercentOverride>,
+    /// The raw settings these controls resolve from, which a plan's changes re-resolve.
+    #[serde(skip)]
+    pub layers: Option<Box<crate::controls::WindowLayers>>,
+}
+
+/// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which lowers each model's trigger to a percentage of its
+/// auto-compact window, and what shows the trigger it sets.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PercentOverride {
+    /// The percentage below 100, or None when the value is not one Claude Code documents.
+    pub value: Option<f64>,
+    /// Every setting of the variable, highest precedence last, which removing it clears.
+    pub owners: Vec<String>,
+    /// Every setting of `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, highest precedence last, which
+    /// lifting it from under per-model rows clears.
+    pub windows: Vec<String>,
+    /// The files whose last change bounds which recorded triggers show the current one: those
+    /// that set the variable, a window, or what sizes the context.
+    pub files: Vec<String>,
+    /// Owners of those settings that keep no modification time, such as the shell.
+    pub timeless: Vec<String>,
+    /// When the last of `files` changed; None until dated, and whenever `timeless` is not empty.
+    pub since: Option<Millis>,
+    /// The latest automatic trigger by recorded model ID, from sessions that started after `since`.
+    pub observed: IndexMap<String, i64>,
+}
+
+impl PercentOverride {
+    /// The setting Claude Code reads.
+    pub fn owner(&self) -> &str {
+        self.owners.last().map_or("", String::as_str)
+    }
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
@@ -1135,6 +1171,9 @@ pub struct T3Instance {
     /// Whether T3 passes no window, so Claude Code reads the native user, project and local ones.
     #[serde(skip)]
     pub inherited_window: bool,
+    /// The variables the instance's own environment sets, which T3's settings file owns.
+    #[serde(skip)]
+    pub environment: Vec<String>,
     /// When T3's pruned event log becomes complete, which starts its idle check's window;
     /// None when it never pruned or was not read.
     pub retained_since: Option<Millis>,
@@ -1751,6 +1790,73 @@ pub struct CompactionCheck {
     pub scenarios: Vec<WindowScenario>,
     pub usage_estimates: Vec<UsageEstimate>,
     pub cache_evidence: Vec<CacheReplayEvidence>,
+    /// The edits that make one setting own the trigger when `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
+    /// lowers it, so the recommended window is the trigger.
+    pub reowned: Option<Reowned>,
+}
+
+/// What changing a window under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` also changes: the variable
+/// comes out of every scope, and every other model the line runs keeps its trigger.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Reowned {
+    /// Every setting the change sets or removes, in the order they apply.
+    pub changes: Vec<Change>,
+    /// Why the settings with these changes applied would not give every target its target and
+    /// every other model its current trigger; any keeps the change advisory.
+    pub unkept: Vec<String>,
+}
+
+/// One setting a plan sets to a window, or removes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Change {
+    pub source: Source,
+    pub setting: Setting,
+    /// The window to set, or None to remove the setting.
+    pub value: Option<i64>,
+}
+
+/// Where a setting lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The environment that launched Claude Code.
+    Shell,
+    /// A settings file.
+    File(String),
+    /// A T3 provider instance in T3's settings file.
+    Instance { file: String, id: String },
+}
+
+/// Which window setting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Setting {
+    /// The window every model without its own row reads.
+    Window,
+    /// A `modelSettings` row's window.
+    Row(Text),
+    /// An environment variable.
+    Env(String),
+}
+
+impl Change {
+    /// The setting as the report names an owner.
+    pub fn owner(&self) -> String {
+        let setting = match &self.setting {
+            Setting::Window => "autoCompactWindow".to_string(),
+            Setting::Row(model) => format!("modelSettings.{model}.autoCompactWindow"),
+            Setting::Env(key) => format!("env.{key}"),
+        };
+        match (&self.source, &self.setting) {
+            (Source::Shell, Setting::Env(key)) => key.clone(),
+            (Source::Shell, _) => setting,
+            (Source::File(file), _) => format!("{file}:{setting}"),
+            (Source::Instance { file, id }, Setting::Env(key)) => {
+                format!("{file}:providerInstances.{id}.environment.{key}")
+            }
+            (Source::Instance { file, id }, _) => {
+                format!("{file}:providerInstances.{id}.config.autoCompactWindow")
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

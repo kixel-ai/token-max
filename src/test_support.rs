@@ -275,6 +275,8 @@ pub fn make_profile(id: &str, root: &str) -> Profile {
             declared: None,
             tuned: IndexMap::default(),
             contexts: IndexMap::default(),
+            percent: None,
+            layers: None,
         },
         idle: None,
         speed: None,
@@ -305,6 +307,7 @@ pub fn make_t3_profile(id: &str, root: &str) -> Profile {
         limitations: vec![],
         env: None,
         inherited_window: true,
+        environment: vec![],
         retained_since: None,
     });
     p

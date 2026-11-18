@@ -5,9 +5,9 @@ use crate::collections::{HashMap, IndexMap};
 use serde_json::{Map, Value};
 
 use crate::model::{
-    BackgroundControl, BackgroundFeature, BashCapControl, CompactionControls, EventKind, Harness,
-    IdleAttribution, IdleControl, Location, MemoryControl, Millis, Scan, SpeedControl, TunedWindow,
-    WindowControl,
+    BackgroundControl, BackgroundFeature, BashCapControl, Change, CompactionControls, EventKind,
+    Harness, IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan,
+    Setting, Source, SpeedControl, TunedWindow, WindowControl,
 };
 use crate::safe::{ScanError, object};
 
@@ -572,6 +572,8 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             declared: None,
             tuned: IndexMap::default(),
             contexts: IndexMap::default(),
+            percent: None,
+            layers: None,
         });
     }
     let env_key = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
@@ -663,7 +665,7 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             models.insert(key.clone(), resolve(Some(key))?);
         }
     }
-    Ok(CompactionControls {
+    let mut controls = CompactionControls {
         default: resolve(None)?,
         models,
         capped: environment.is("CLAUDE_CODE_DISABLE_1M_CONTEXT", "1"),
@@ -677,7 +679,481 @@ pub fn compaction_controls(sources: &CompactionSources) -> Result<CompactionCont
             .filter(|&n| n > 0),
         tuned: IndexMap::default(),
         contexts: IndexMap::default(),
+        percent: percent_override(scopes, env, &environment),
+        layers: Some(Box::new(WindowLayers {
+            file: file.to_string(),
+            managed_file: managed_file.to_string(),
+            scopes: scopes
+                .iter()
+                .map(|scope| (scope.file.to_string(), window_settings(scope.config)))
+                .collect(),
+            shell: window_environment(env),
+            instance: None,
+        })),
+    };
+    date_percent(&mut controls);
+    Ok(controls)
+}
+
+/// The variables a Claude window resolves from; no other value is kept.
+const WINDOW_ENVIRONMENT: [&str; 5] = [
+    WINDOW_KEY,
+    PERCENT_KEY,
+    "DISABLE_AUTO_COMPACT",
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+];
+
+fn window_environment(env: &Env) -> Env {
+    env.iter()
+        .filter(|(key, _)| WINDOW_ENVIRONMENT.contains(&key.as_str()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+/// The part of a settings file a Claude window resolves from.
+fn window_settings(config: &Map<String, Value>) -> Map<String, Value> {
+    let mut kept = Map::new();
+    for key in ["autoCompactWindow", "autoCompactEnabled"] {
+        if let Some(value) = config.get(key) {
+            kept.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(env) = config.get("env") {
+        kept.insert(
+            "env".into(),
+            match env {
+                Value::Object(env) => Value::Object(
+                    env.iter()
+                        .filter(|(key, _)| WINDOW_ENVIRONMENT.contains(&key.as_str()))
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect(),
+                ),
+                other => other.clone(),
+            },
+        );
+    }
+    if let Some(rows) = config.get("modelSettings") {
+        kept.insert(
+            "modelSettings".into(),
+            match rows {
+                // A row's presence matters even when it names no window.
+                Value::Object(rows) => Value::Object(
+                    rows.iter()
+                        .map(|(model, row)| {
+                            let row = match row {
+                                Value::Object(row) => Value::Object(
+                                    row.iter()
+                                        .filter(|(key, _)| *key == "autoCompactWindow")
+                                        .map(|(key, value)| (key.clone(), value.clone()))
+                                        .collect(),
+                                ),
+                                other => other.clone(),
+                            };
+                            (model.clone(), row)
+                        })
+                        .collect(),
+                ),
+                other => other.clone(),
+            },
+        );
+    }
+    kept
+}
+
+/// The raw settings a profile's or directory's Claude windows resolve from: each settings
+/// file's window settings in precedence order, the shell's variables, and a T3 instance's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WindowLayers {
+    file: String,
+    managed_file: String,
+    scopes: Vec<(String, Map<String, Value>)>,
+    shell: Env,
+    instance: Option<InstanceLayer>,
+}
+
+/// What a T3 instance sets above the settings files: its own variables and its own window.
+#[derive(Clone, Debug, PartialEq)]
+struct InstanceLayer {
+    file: String,
+    id: String,
+    env: Env,
+    window: Option<i64>,
+}
+
+/// The setting an owner names, or None when it names no window setting a change can make.
+pub fn locate(owner: &str) -> Option<(Source, Setting)> {
+    let owner = owner_setting(owner);
+    if !owner.contains(':') {
+        return [WINDOW_KEY, PERCENT_KEY]
+            .contains(&owner)
+            .then(|| (Source::Shell, Setting::Env(owner.to_string())));
+    }
+    let end = [".json:", ".toml:"]
+        .iter()
+        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len() - 1))
+        .min()?;
+    let (file, rest) = (&owner[..end], &owner[end + 1..]);
+    if rest == "autoCompactWindow" {
+        return Some((Source::File(file.into()), Setting::Window));
+    }
+    if let Some(model) = rest
+        .strip_prefix("modelSettings.")
+        .and_then(|r| r.strip_suffix(".autoCompactWindow"))
+    {
+        return Some((Source::File(file.into()), Setting::Row(model.into())));
+    }
+    if let Some(key) = rest.strip_prefix("env.") {
+        return Some((Source::File(file.into()), Setting::Env(key.into())));
+    }
+    let (id, tail) = rest.strip_prefix("providerInstances.")?.split_once('.')?;
+    let source = Source::Instance {
+        file: file.into(),
+        id: id.into(),
+    };
+    match tail {
+        "config.autoCompactWindow" => Some((source, Setting::Window)),
+        _ => Some((
+            source,
+            Setting::Env(tail.strip_prefix("environment.")?.into()),
+        )),
+    }
+}
+
+/// The controls with `changes` applied to the settings they resolve from, or None when no
+/// change touches them. Nothing recorded shows a trigger under the changed settings, so no
+/// observation carries over; tuned defaults and context sizes do, since no change moves them.
+pub fn reresolve(
+    compaction: &CompactionControls,
+    changes: &[Change],
+) -> Option<Result<CompactionControls, ScanError>> {
+    let mut layers = (**compaction.layers.as_ref()?).clone();
+    let real = |file: &str| crate::discovery::realpath(file).unwrap_or_else(|_| file.to_string());
+    let mut touched = false;
+    for change in changes {
+        match &change.source {
+            Source::Shell => {
+                if let Setting::Env(key) = &change.setting
+                    && layers.shell.contains_key(key)
+                {
+                    touched = true;
+                    match change.value {
+                        Some(value) => layers.shell.insert(key.clone(), value.to_string()),
+                        None => layers.shell.remove(key),
+                    };
+                }
+            }
+            Source::File(file) => {
+                let file = real(file);
+                for (scope, config) in &mut layers.scopes {
+                    if real(scope) == file {
+                        touched = true;
+                        apply(config, &change.setting, change.value);
+                    }
+                }
+            }
+            Source::Instance { file, id } => {
+                if let Some(instance) = &mut layers.instance
+                    && &instance.id == id
+                    && real(&instance.file) == real(file)
+                {
+                    touched = true;
+                    match &change.setting {
+                        Setting::Env(key) => match change.value {
+                            Some(value) => instance.env.insert(key.clone(), value.to_string()),
+                            None => instance.env.remove(key),
+                        },
+                        _ => {
+                            instance.window = change.value;
+                            None
+                        }
+                    };
+                }
+            }
+        }
+    }
+    if !touched {
+        return None;
+    }
+    let configs: Vec<(String, Map<String, Value>)> = layers.scopes.clone();
+    let scopes: Vec<SettingsScope> = configs
+        .iter()
+        .map(|(file, config)| SettingsScope { config, file })
+        .collect();
+    let mut env = layers.shell.clone();
+    if let Some(instance) = &layers.instance {
+        env.extend(instance.env.clone());
+    }
+    let empty = Map::new();
+    let result = compaction_controls(&CompactionSources {
+        harness: Harness::Claude,
+        user: scopes.first().map_or(&empty, |s| s.config),
+        managed: &empty,
+        env: &env,
+        file: &layers.file,
+        managed_file: &layers.managed_file,
+        scopes: Some(&scopes),
     })
+    .map(|mut changed| {
+        if let Some(instance) = &layers.instance
+            && let Some(window) = instance.window
+        {
+            changed.models.clear();
+            changed.default = WindowControl {
+                value: Some(window),
+                owner: format!(
+                    "{}:providerInstances.{}.config.autoCompactWindow",
+                    instance.file, instance.id
+                ),
+                unset: false,
+                setting: None,
+                ..changed.default.clone()
+            };
+        }
+        if let Some(percent) = &mut changed.percent {
+            percent.observed.clear();
+        }
+        changed.tuned = compaction.tuned.clone();
+        changed.contexts = compaction.contexts.clone();
+        changed.layers = Some(Box::new(layers));
+        changed
+    });
+    Some(result)
+}
+
+/// Set or remove one window setting in a settings file's window settings.
+fn apply(config: &mut Map<String, Value>, setting: &Setting, value: Option<i64>) {
+    match (setting, value) {
+        (Setting::Window, Some(value)) => {
+            config.insert("autoCompactWindow".into(), value.into());
+        }
+        (Setting::Window, None) => {
+            config.remove("autoCompactWindow");
+        }
+        (Setting::Row(model), value) => {
+            let rows = config
+                .entry("modelSettings")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(rows) = rows.as_object_mut() {
+                let row = rows
+                    .entry(model.to_string())
+                    .or_insert_with(|| Value::Object(Map::new()));
+                if let Some(row) = row.as_object_mut() {
+                    match value {
+                        Some(value) => row.insert("autoCompactWindow".into(), value.into()),
+                        None => row.remove("autoCompactWindow"),
+                    };
+                }
+            }
+        }
+        (Setting::Env(key), value) => {
+            let env = config
+                .entry("env")
+                .or_insert_with(|| Value::Object(Map::new()));
+            if let Some(env) = env.as_object_mut() {
+                match value {
+                    Some(value) => env.insert(key.clone(), value.to_string().into()),
+                    None => env.remove(key),
+                };
+            }
+        }
+    }
+}
+
+/// The variable that lowers every model's trigger to a percentage of its window.
+pub const PERCENT_KEY: &str = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE";
+
+/// The variable that sets every model's window, above each settings row.
+pub const WINDOW_KEY: &str = "CLAUDE_CODE_AUTO_COMPACT_WINDOW";
+
+/// Variables that decide a model's trigger, besides the window settings.
+const TRIGGER_KEYS: [&str; 4] = [
+    PERCENT_KEY,
+    WINDOW_KEY,
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
+];
+
+/// Resolve `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, or None when it is unset or cannot lower a
+/// trigger: Claude Code ignores a percentage at or above its default, which is below 100.
+fn percent_override(
+    scopes: &[SettingsScope],
+    env: &Env,
+    environment: &ScopedEnvironment,
+) -> Option<PercentOverride> {
+    let raw = js_string(Some(environment.values.get(PERCENT_KEY)?));
+    let text = raw.trim();
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let number = match text.split_once('.') {
+        Some((whole, fraction)) => digits(whole) && digits(fraction),
+        None => digits(text),
+    };
+    let value = number.then(|| text.parse::<f64>().ok()).flatten();
+    if value.is_some_and(|v| v >= 100.0) {
+        return None;
+    }
+    let mut owners = vec![];
+    let mut windows = vec![];
+    for (key, owners) in [(PERCENT_KEY, &mut owners), (WINDOW_KEY, &mut windows)] {
+        if env.contains_key(key) {
+            owners.push(key.to_string());
+        }
+    }
+    let mut files: Vec<String> = vec![];
+    for scope in scopes {
+        let variables = members(scope.config.get("env"));
+        for (key, owners) in [(PERCENT_KEY, &mut owners), (WINDOW_KEY, &mut windows)] {
+            if variables.contains_key(key) {
+                owners.push(format!("{}:env.{key}", scope.file));
+            }
+        }
+        let windowed = scope.config.contains_key("autoCompactWindow")
+            || members(scope.config.get("modelSettings"))
+                .values()
+                .any(|row| members(Some(row)).contains_key("autoCompactWindow"));
+        if (windowed || TRIGGER_KEYS.iter().any(|k| variables.contains_key(*k)))
+            && !files.iter().any(|f| f == scope.file)
+        {
+            files.push(scope.file.to_string());
+        }
+    }
+    Some(PercentOverride {
+        // Claude Code documents 1 to 100; below 1 is no percentage it defines.
+        value: value.filter(|v| *v >= 1.0),
+        owners,
+        windows,
+        files,
+        timeless: TRIGGER_KEYS
+            .iter()
+            .filter(|k| env.contains_key(**k))
+            .map(|k| k.to_string())
+            .collect(),
+        since: None,
+        observed: IndexMap::default(),
+    })
+}
+
+/// Credit the variables a T3 instance's own environment sets, and its own window, to T3's
+/// settings file, which dates them, rather than to the shell, with or without the override.
+pub fn t3_percent(
+    compaction: &mut CompactionControls,
+    environment: &[String],
+    file: &str,
+    instance: &str,
+    window: bool,
+    shell: &Env,
+) {
+    // Split the merged environment back into the shell's and the instance's own.
+    let own_window = window.then_some(compaction.default.value).flatten();
+    if let Some(layers) = &mut compaction.layers {
+        let mut own = Env::default();
+        for key in environment {
+            // A name listed twice is the instance's once.
+            if own.contains_key(key) {
+                continue;
+            }
+            if let Some(value) = layers.shell.remove(key) {
+                own.insert(key.clone(), value);
+            }
+            if let Some(value) = shell
+                .get(key)
+                .filter(|_| WINDOW_ENVIRONMENT.contains(&key.as_str()))
+            {
+                layers.shell.insert(key.clone(), value.clone());
+            }
+        }
+        layers.instance = Some(InstanceLayer {
+            file: file.to_string(),
+            id: instance.to_string(),
+            env: own,
+            window: own_window,
+        });
+    }
+    // The window variable the instance sets is the effective one, so its own entry owns it.
+    if environment.iter().any(|k| k == WINDOW_KEY) {
+        let own = format!("{file}:providerInstances.{instance}.environment.{WINDOW_KEY}");
+        for control in
+            std::iter::once(&mut compaction.default).chain(compaction.models.values_mut())
+        {
+            if control.owner == WINDOW_KEY {
+                control.owner = own.clone();
+            }
+        }
+    }
+    let Some(percent) = &mut compaction.percent else {
+        return;
+    };
+    for owners in [&mut percent.owners, &mut percent.windows] {
+        // The instance's copy outranks the shell's, which stays listed so a plan lifts both.
+        *owners = std::mem::take(owners)
+            .into_iter()
+            .flat_map(|owner| {
+                if !environment.contains(&owner) {
+                    return vec![owner];
+                }
+                let own = format!("{file}:providerInstances.{instance}.environment.{owner}");
+                if shell.contains_key(&owner) {
+                    vec![owner, own]
+                } else {
+                    vec![own]
+                }
+            })
+            .collect();
+    }
+    percent.timeless.retain(|key| !environment.contains(key));
+    let decides = window
+        || environment
+            .iter()
+            .any(|k| TRIGGER_KEYS.contains(&k.as_str()));
+    if decides && !percent.files.iter().any(|f| f == file) {
+        percent.files.push(file.to_string());
+    }
+    date_percent(compaction);
+}
+
+/// A window owner without its trailing note, such as ` (capped at 200000)`; a settings path
+/// may itself hold ` (`, so the note is looked for only after it.
+pub fn owner_setting(owner: &str) -> &str {
+    // The key follows the file's path, which may itself hold a key's name.
+    let start = [".json:", ".toml:"]
+        .iter()
+        .filter_map(|ext| owner.find(ext).map(|i| i + ext.len()))
+        .min()
+        .unwrap_or(0);
+    // Only the note goes: a model's row key may itself hold `.autoCompactWindow`.
+    let end = owner[start..]
+        .find(" (")
+        .map_or(owner.len(), |at| start + at);
+    &owner[..end]
+}
+
+/// Date a resolved override by when the last file that decides a trigger changed.
+pub fn date_percent(compaction: &mut CompactionControls) {
+    let Some(percent) = &mut compaction.percent else {
+        return;
+    };
+    percent.since = None;
+    if !percent.timeless.is_empty() {
+        return;
+    }
+    let mut since = Millis::MIN;
+    for file in &percent.files {
+        // A time before 1970 is still a time.
+        let modified = std::fs::metadata(file)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| match t.duration_since(std::time::UNIX_EPOCH) {
+                Ok(after) => Millis::try_from(after.as_millis()).ok(),
+                Err(before) => Millis::try_from(before.duration().as_millis())
+                    .ok()
+                    .map(|m| -m),
+            });
+        let Some(modified) = modified else {
+            return;
+        };
+        since = since.max(modified);
+    }
+    percent.since = Some(since);
 }
 
 /// The family of a `claude-<family>-` model ID.
@@ -703,8 +1179,113 @@ pub(crate) fn strip_dated(text: &str, digits: usize) -> Option<&str> {
 pub const CAPPED_SHARED: &str =
     "the window applies to every model, so no setting changes this model's capped window alone";
 
-/// Exact model settings win; known dated Claude IDs share their undated model row.
+/// Exact model settings win; known dated Claude IDs share their undated model row. The value
+/// is the trigger, lowered by `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` where it applies.
 pub fn window_control(compaction: &CompactionControls, model: Option<&str>) -> WindowControl {
+    let control = window_setting(compaction, model);
+    match &compaction.percent {
+        Some(percent) => lowered(compaction, percent, model.unwrap_or(""), control),
+        None => control,
+    }
+}
+
+/// The trigger under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`. An explicit window below the model's
+/// context compacts at the percentage of it. Elsewhere the trigger rests on Claude Code's
+/// undocumented default percentage, or on whether the override applies at all where a session
+/// compacts at the context limit, so only a recorded trigger under the current settings shows it.
+fn lowered(
+    compaction: &CompactionControls,
+    percent: &PercentOverride,
+    model: &str,
+    mut control: WindowControl,
+) -> WindowControl {
+    let owner = percent.owner();
+    let Some(value) = percent.value else {
+        control.value = None;
+        control.applicable = false;
+        control.reason = format!(
+            "{owner} is not a percentage Claude Code documents, so the trigger is unresolved; {}",
+            control.reason
+        );
+        return control;
+    };
+    let canonical = strip_dated(model, 8).unwrap_or(model);
+    // The context is known when Claude Code holds the model below 1M, or documents it at 1M.
+    let context =
+        compaction
+            .contexts
+            .get(canonical)
+            .copied()
+            .or((Sizing::of(compaction, canonical) == Sizing::Native
+                && native_million(canonical) == Some(true))
+            .then_some(CLAUDE_WINDOW_MAXIMUM));
+    let percentage = format!("{PERCENT_KEY}={value}");
+    // An unresolved alias selection leaves no window to lower, and a recorded trigger cannot
+    // show which setting owned it.
+    if control.value.is_none() && !control.unset {
+        return control;
+    }
+    if let Some(window) = control.value
+        && !control.unset
+        && control.setting.is_none()
+        && context.is_some_and(|context| window < context)
+    {
+        let trigger = (window as f64 * value / 100.0).floor() as i64;
+        control.value = Some(trigger);
+        control.reason = format!(
+            "{owner} sets {percentage}, so this {window}-token window compacts at {trigger} tokens; {}",
+            control.reason
+        );
+        return control;
+    }
+    // A dated ID borrows its undated ID's recorded trigger only under the same settings.
+    let borrowed = || {
+        (canonical != model
+            && percent_key(compaction, percent, model)
+                == percent_key(compaction, percent, canonical))
+        .then(|| percent.observed.get(canonical))
+        .flatten()
+    };
+    control.value = percent.observed.get(model).or_else(borrowed).copied();
+    let evidence = match (control.value, percent.since) {
+        (Some(trigger), _) => format!(
+            "the latest automatic compaction on this model since the settings that decide it last changed triggered at {trigger} tokens"
+        ),
+        (None, Some(_)) => "no automatic compaction on this model was recorded since the settings that decide it last changed".into(),
+        (None, None) => format!(
+            "{} keeps no modification time, so no recorded compaction shows it",
+            percent
+                .timeless
+                .first()
+                .or(percent.files.first())
+                .map_or("a setting", String::as_str)
+        ),
+    };
+    control.reason = format!(
+        "{owner} sets {percentage}, and where this model compacts under it rests on Claude Code's undocumented default percentage; {evidence}; {}",
+        control.reason
+    );
+    match control.value {
+        // Recorded triggers differ by model, so only the model's own row holds one.
+        Some(_) => {
+            // An unset window lacked only its trigger, which the recorded one now gives.
+            if control.unset {
+                control.applicable = true;
+            }
+            if let Some(file) = control.owner.strip_suffix(":autoCompactWindow") {
+                control.owner = format!("{file}:modelSettings.{canonical}.autoCompactWindow");
+            } else if !control.owner.contains(":modelSettings.") {
+                // A variable or T3 window has no row per model, so the owner keys the model too.
+                control.owner += &format!(" (recorded on {canonical})");
+            }
+        }
+        None => control.applicable = false,
+    }
+    control
+}
+
+/// The window a setting or Claude Code's tuned default gives the model, before any percentage.
+fn window_setting(compaction: &CompactionControls, model: Option<&str>) -> WindowControl {
     let models = &compaction.models;
     let model = model.unwrap_or("");
     let canonical = strip_dated(model, 8).unwrap_or(model);
@@ -884,6 +1465,7 @@ fn observe(
 ) -> (
     IndexMap<String, i64>,
     IndexMap<(String, Sizing), (Millis, i64)>,
+    IndexMap<PercentKey, (Millis, i64)>,
 ) {
     let mine = |profiles: &[String]| profiles.iter().any(|p| line.contains(p));
     let mut largest: IndexMap<String, i64> = IndexMap::default();
@@ -918,6 +1500,13 @@ fn observe(
             .unwrap_or(&origin.compaction)
     };
     let mut observed: IndexMap<(String, Sizing), (Millis, i64)> = IndexMap::default();
+    // A session reads its settings when it starts, so its first request dates them.
+    let mut started: HashMap<&str, Millis> = HashMap::default();
+    for r in cache_context.requests.iter().chain(requests.iter()) {
+        let start = started.entry(&r.session).or_insert(r.time);
+        *start = (*start).min(r.time);
+    }
+    let mut percented: IndexMap<PercentKey, (Millis, i64)> = IndexMap::default();
     for e in cache_context.boundaries.iter().chain(events.iter()) {
         if let (
             EventKind::Compaction,
@@ -932,11 +1521,29 @@ fn observe(
             &e.model,
             e.pre_tokens,
         ) && mine(&e.profiles)
-            && (CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+            && tokens > 0
         {
-            // A trigger under an explicit window does not show the default.
             let at = scope(&e.profiles, e.cwd.as_deref());
-            if !window_control(at, Some(model)).unset {
+            // A percentage can lower a trigger below the smallest window a setting may name.
+            if let Some(percent) = &at.percent
+                && let Some(since) = percent.since
+                && started.get(&*e.session).is_some_and(|&start| start > since)
+            {
+                // The recorded ID, since an exact dated row may set its window.
+                let key = percent_key(at, percent, model);
+                let latest = percented
+                    .entry((model.to_string(), key))
+                    .or_insert((e.time, tokens));
+                if e.time >= latest.0 {
+                    *latest = (e.time, tokens);
+                }
+            }
+            // A trigger under an explicit window, or one an override may have lowered, does
+            // not show the default.
+            if at.percent.is_some()
+                || !(CLAUDE_WINDOW_MINIMUM..=CLAUDE_WINDOW_MAXIMUM).contains(&tokens)
+                || !window_setting(at, Some(model)).unset
+            {
                 continue;
             }
             let model = undated(model);
@@ -947,7 +1554,38 @@ fn observe(
             }
         }
     }
-    (largest, observed)
+    (largest, observed, percented)
+}
+
+/// A model, and what decides its trigger under an override, which a recorded trigger must
+/// share to show the trigger under another directory's controls.
+type PercentKey = (String, PercentScope);
+
+/// The override's value, when its settings last changed, the window a setting names (or none)
+/// and its owner, and what sizes the model's context.
+type PercentScope = (Option<u64>, Option<Millis>, Option<(i64, String)>, Sizing);
+
+fn percent_key(
+    compaction: &CompactionControls,
+    percent: &PercentOverride,
+    model: &str,
+) -> PercentScope {
+    let control = window_setting(compaction, Some(model));
+    // A capped window keeps the setting it caps, and owners carry notes after their key.
+    let window = (!control.unset).then(|| {
+        let owner = owner_setting(&control.owner);
+        (
+            control.setting.or(control.value).unwrap_or(0),
+            owner.to_string(),
+        )
+    });
+    (
+        percent.value.map(f64::to_bits),
+        percent.since,
+        window,
+        // Sizing reads the documented table, which knows only undated IDs.
+        Sizing::of(compaction, strip_dated(model, 8).unwrap_or(model)),
+    )
 }
 
 /// Fill the tuned window of every model a Claude profile used, in the profile's controls and in
@@ -995,13 +1633,21 @@ pub fn tune_windows(scan: &mut Scan) {
         })
         .collect();
     for (profile, observation) in profiles.iter_mut().zip(observations) {
-        let Some((largest, observed)) = observation else {
+        let Some((largest, observed, percented)) = observation else {
             continue;
         };
         let directories = profile.idle_directories.iter_mut().flatten();
         for compaction in std::iter::once(&mut profile.compaction)
             .chain(directories.filter_map(|(_, idle)| idle.compaction.as_mut()))
         {
+            if let Some(percent) = &compaction.percent {
+                let observed = percented
+                    .iter()
+                    .filter(|((model, key), _)| *key == percent_key(compaction, percent, model))
+                    .map(|((model, _), &(_, tokens))| (model.clone(), tokens))
+                    .collect();
+                compaction.percent.as_mut().expect("checked above").observed = observed;
+            }
             // Directories share the profile's history, so its largest requests stand for each.
             compaction.contexts = largest
                 .iter()
@@ -1321,6 +1967,202 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_settings_file_changed_before_1970_still_dates_the_override() {
+        let w = crate::test_support::Workspace::new();
+        let file = w.home.join("settings.json");
+        std::fs::write(&file, "{}").unwrap();
+        let before = std::time::UNIX_EPOCH - std::time::Duration::from_secs(86_400);
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(before)
+            .unwrap();
+        let mut controls = CompactionControls {
+            percent: Some(PercentOverride {
+                value: Some(50.0),
+                files: vec![file.display().to_string()],
+                ..Default::default()
+            }),
+            ..compaction_controls(&claude_sources(&Map::new(), &Map::new(), &Env::default()))
+                .unwrap()
+        };
+        date_percent(&mut controls);
+        assert_eq!(controls.percent.unwrap().since, Some(-86_400_000));
+    }
+
+    #[test]
+    fn a_t3_instance_owns_and_dates_the_override_its_environment_sets() {
+        let w = crate::test_support::Workspace::new();
+        let state = w.home.join("settings.json");
+        std::fs::write(&state, "{}").unwrap();
+        let state = state.display().to_string();
+        let empty = Map::new();
+        let mut env = Env::default();
+        env.insert(PERCENT_KEY.into(), "60".into());
+        env.insert("CLAUDE_CODE_DISABLE_1M_CONTEXT".into(), "1".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &env)).unwrap();
+        let shell = controls.percent.clone().unwrap();
+        assert_eq!(shell.owners, [PERCENT_KEY]);
+        assert_eq!(shell.since, None);
+        // The instance sets the override, but the 1M opt-out still comes from the shell.
+        t3_percent(
+            &mut controls,
+            &[PERCENT_KEY.into()],
+            &state,
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
+        let percent = controls.percent.clone().unwrap();
+        assert_eq!(
+            percent.owners,
+            [format!(
+                "{state}:providerInstances.claudeAgent.environment.{PERCENT_KEY}"
+            )]
+        );
+        assert_eq!(percent.files, std::slice::from_ref(&state));
+        assert_eq!(percent.timeless, ["CLAUDE_CODE_DISABLE_1M_CONTEXT"]);
+        assert_eq!(percent.since, None);
+        let environment = [PERCENT_KEY.into(), "CLAUDE_CODE_DISABLE_1M_CONTEXT".into()];
+        t3_percent(
+            &mut controls,
+            &environment,
+            &state,
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
+        let percent = controls.percent.unwrap();
+        assert!(percent.timeless.is_empty());
+        assert!(percent.since.is_some_and(|t| t > 0));
+    }
+
+    #[test]
+    fn a_t3_instance_copy_keeps_the_shell_copy_it_outranks() {
+        let empty = Map::new();
+        let mut env = Env::default();
+        env.insert(PERCENT_KEY.into(), "60".into());
+        env.insert(WINDOW_KEY.into(), "150000".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &env)).unwrap();
+        // The shell exports both; the instance sets both again.
+        let shell = env.clone();
+        let environment = [PERCENT_KEY.into(), WINDOW_KEY.into()];
+        t3_percent(
+            &mut controls,
+            &environment,
+            "t3.json",
+            "claudeAgent",
+            true,
+            &shell,
+        );
+        let percent = controls.percent.unwrap();
+        let own = |key: &str| format!("t3.json:providerInstances.claudeAgent.environment.{key}");
+        assert_eq!(percent.owners, [PERCENT_KEY.to_string(), own(PERCENT_KEY)]);
+        assert_eq!(percent.windows, [WINDOW_KEY.to_string(), own(WINDOW_KEY)]);
+        assert_eq!(percent.owners.last().unwrap(), &own(PERCENT_KEY));
+    }
+
+    #[test]
+    fn an_override_neither_lowers_an_unresolved_alias_nor_accepts_a_fraction_of_a_percent() {
+        let user = map(json!({
+            "env": {PERCENT_KEY: "50"},
+            "modelSettings": {
+                "opus[1m]": { "autoCompactWindow": 400000 },
+                "claude-opus-4-6[1m]": { "autoCompactWindow": 300000 },
+            },
+        }));
+        let empty = Map::new();
+        let none = Env::default();
+        let mut p = compaction_controls(&claude_sources(&user, &empty, &none)).unwrap();
+        // A recorded trigger cannot say which alias owned the window.
+        let percent = p.percent.as_mut().unwrap();
+        percent.since = Some(0);
+        percent.observed.insert("claude-opus-4-6".into(), 150_000);
+        let aliased = window_control(&p, Some("claude-opus-4-6"));
+        assert_eq!(aliased.value, None);
+        assert!(aliased.reason.contains("alias"));
+
+        // Claude Code documents 1 to 100.
+        let fraction = map(json!({"env": {PERCENT_KEY: "0.5"}, "autoCompactWindow": 400000}));
+        let p = compaction_controls(&claude_sources(&fraction, &empty, &none)).unwrap();
+        assert_eq!(p.percent.as_ref().unwrap().value, None);
+        assert_eq!(window_control(&p, Some("claude-opus-4-6")).value, None);
+    }
+
+    #[test]
+    fn a_recorded_trigger_makes_an_unset_custom_window_applicable() {
+        let user = map(json!({"env": {PERCENT_KEY: "50"}}));
+        let empty = Map::new();
+        let mut p = compaction_controls(&claude_sources(&user, &empty, &Env::default())).unwrap();
+        // No documented default covers the ID, so only a recorded trigger resolves it.
+        assert!(!window_control(&p, Some("gateway-model")).applicable);
+        let percent = p.percent.as_mut().unwrap();
+        percent.since = Some(0);
+        percent.observed.insert("gateway-model".into(), 120_000);
+        let control = window_control(&p, Some("gateway-model"));
+        assert_eq!(control.value, Some(120_000));
+        assert!(control.applicable);
+    }
+
+    #[test]
+    fn a_t3_instance_that_lists_a_variable_twice_keeps_its_own_value() {
+        let empty = Map::new();
+        let mut merged = Env::default();
+        merged.insert(PERCENT_KEY.into(), "60".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &merged)).unwrap();
+        let mut shell = Env::default();
+        shell.insert(PERCENT_KEY.into(), "80".into());
+        let twice = [PERCENT_KEY.to_string(), PERCENT_KEY.to_string()];
+        t3_percent(
+            &mut controls,
+            &twice,
+            "t3.json",
+            "claudeAgent",
+            false,
+            &shell,
+        );
+        let layers = controls.layers.unwrap();
+        assert_eq!(layers.instance.unwrap().env[PERCENT_KEY], "60");
+        assert_eq!(layers.shell[PERCENT_KEY], "80");
+    }
+
+    #[test]
+    fn a_t3_instance_owns_the_window_variable_it_sets_without_the_override() {
+        let empty = Map::new();
+        let mut env = Env::default();
+        env.insert(WINDOW_KEY.into(), "300000".into());
+        let mut controls = compaction_controls(&claude_sources(&empty, &empty, &env)).unwrap();
+        assert!(controls.percent.is_none());
+        assert_eq!(controls.default.owner, WINDOW_KEY);
+        t3_percent(
+            &mut controls,
+            &[WINDOW_KEY.into()],
+            "t3.json",
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
+        assert_eq!(
+            controls.default.owner,
+            format!("t3.json:providerInstances.claudeAgent.environment.{WINDOW_KEY}")
+        );
+        // A settings file's own variable outranks the instance's and keeps its owner.
+        let file = map(json!({"env": {WINDOW_KEY: "300000"}}));
+        let mut controls = compaction_controls(&claude_sources(&file, &empty, &env)).unwrap();
+        let owner = controls.default.owner.clone();
+        t3_percent(
+            &mut controls,
+            &[WINDOW_KEY.into()],
+            "t3.json",
+            "claudeAgent",
+            false,
+            &Env::default(),
+        );
+        assert_eq!(controls.default.owner, owner);
     }
 
     fn claude_sources<'a>(

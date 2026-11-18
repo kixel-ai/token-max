@@ -16,8 +16,8 @@ use crate::collections::{IndexMap, IndexSet};
 use crate::context::{json_value, setting_text, typed_only};
 use crate::mcp::{Definition, Entry, Lock};
 use crate::model::{
-    BackgroundFeature, Billing, Bucket, CheckResult, ContextKind, Control, Harness, Margin,
-    Profile, Report, Verdict,
+    BackgroundFeature, Billing, Bucket, CheckResult, CompactionCheck, ContextKind, Control,
+    Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
     AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
@@ -133,12 +133,22 @@ pub struct Patch {
     pub edits: Vec<Edit>,
 }
 
-/// Set `path` to `value`, or add `value` to the list at `path`.
+/// Set `path` to `value`, add `value` to the list at `path`, or remove `path`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Edit {
     pub path: Vec<String>,
+    /// Null for a removal.
     pub value: Value,
-    pub append: bool,
+    pub op: Op,
+}
+
+/// What an edit does to its setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Op {
+    Set,
+    /// Add the value to the list, once.
+    Append,
+    Remove,
 }
 
 impl From<&Control> for Edit {
@@ -146,7 +156,7 @@ impl From<&Control> for Edit {
         Edit {
             path: control.path.clone(),
             value: json_value(&control.value),
-            append: control.append,
+            op: if control.append { Op::Append } else { Op::Set },
         }
     }
 }
@@ -156,17 +166,28 @@ impl Edit {
         Edit {
             path: path.split('.').map(String::from).collect(),
             value: value.into(),
-            append: false,
+            op: Op::Set,
+        }
+    }
+
+    /// Remove `path`, given split on dots.
+    fn remove(path: &[&str]) -> Self {
+        Edit {
+            path: path.iter().map(|p| p.to_string()).collect(),
+            value: Value::Null,
+            op: Op::Remove,
         }
     }
 
     /// The edit as a settings fragment, such as `"promptCacheTtl": "1h"`.
     pub fn text(&self, harness: Harness) -> String {
-        let text = setting_text(&self.path, self.value.clone(), self.append, harness);
-        if self.append {
-            format!("{text} (added to the list)")
-        } else {
-            text
+        match self.op {
+            Op::Set => setting_text(&self.path, self.value.clone(), false, harness),
+            Op::Append => format!(
+                "{} (added to the list)",
+                setting_text(&self.path, self.value.clone(), true, harness)
+            ),
+            Op::Remove => format!("remove {}", self.path.join(".")),
         }
     }
 }
@@ -220,10 +241,12 @@ fn conflicts(how: &How, patch: &Patch) -> bool {
     (other.file == patch.file
         || identity(Path::new(&other.file)) == identity(Path::new(&patch.file)))
         && other.edits.iter().any(|a| {
-            patch
-                .edits
-                .iter()
-                .any(|b| !a.append && !b.append && a.path == b.path && a.value != b.value)
+            patch.edits.iter().any(|b| {
+                a.op != Op::Append
+                    && b.op != Op::Append
+                    && a.path == b.path
+                    && (a.op != b.op || a.value != b.value)
+            })
         })
 }
 
@@ -234,8 +257,17 @@ fn steps(patch: &Patch) -> String {
 
 /// The edits as steps to take by hand in `file`, such as the end of a symlink.
 fn steps_in(patch: &Patch, file: &str) -> String {
-    let edits: Vec<String> = patch.edits.iter().map(|e| e.text(patch.harness)).collect();
-    format!("in {file}, set {}", edits.join(" and "))
+    let (removals, sets): (Vec<&Edit>, Vec<&Edit>) =
+        patch.edits.iter().partition(|e| e.op == Op::Remove);
+    let text = |edits: Vec<&Edit>| -> Vec<String> {
+        edits.iter().map(|e| e.text(patch.harness)).collect()
+    };
+    let mut steps = vec![];
+    if !sets.is_empty() {
+        steps.push(format!("set {}", text(sets).join(" and ")));
+    }
+    steps.extend(text(removals));
+    format!("in {file}, {}", steps.join(", and "))
 }
 
 /// A path as the filesystem resolves it, so two names for one file compare equal; a file
@@ -461,7 +493,7 @@ fn switch(members: &[&Profile], edit: Edit, defaults: bool) -> How {
 /// set what `edit` sets. Claude's `permissions.deny` rules from every file apply together,
 /// so a rule added to the user file is never outranked.
 fn outranking(profile: &Profile, edit: &Edit, defaults: bool) -> Result<Vec<String>, ScanError> {
-    if profile.harness == Harness::Claude && edit.append {
+    if profile.harness == Harness::Claude && edit.op == Op::Append {
         return Ok(vec![]);
     }
     let mut owners = vec![];
@@ -489,7 +521,7 @@ fn outranking(profile: &Profile, edit: &Edit, defaults: bool) -> Result<Vec<Stri
 pub(crate) fn outranked(profile: &Profile, control: &Control) -> bool {
     let edit = Edit::from(control);
     // Claude's deny rules from every file apply together.
-    if profile.harness == Harness::Claude && edit.append {
+    if profile.harness == Harness::Claude && edit.op == Op::Append {
         return false;
     }
     let differs = |config: &Map<String, Value>| sets(config, &edit) && !sets_to(config, &edit);
@@ -519,7 +551,7 @@ fn sets_to(config: &Map<String, Value>, edit: &Edit) -> bool {
     for key in &edit.path[1..] {
         value = value.and_then(|v| v.get(key));
     }
-    match (edit.append, value) {
+    match (edit.op == Op::Append, value) {
         (true, Some(Value::Array(items))) => items.iter().any(|i| match edit.value.get("path") {
             Some(path) => {
                 i.get("path") == Some(path) && i.get("enabled") == edit.value.get("enabled")
@@ -549,7 +581,7 @@ fn sets(config: &Map<String, Value>, edit: &Edit) -> bool {
     };
     // A Codex skill entry is matched by its `path`; any other list a file sets replaces the
     // user's.
-    match (edit.append, edit.value.get("path"), value) {
+    match (edit.op == Op::Append, edit.value.get("path"), value) {
         (true, Some(key), Value::Array(items)) => items.iter().any(|i| i.get("path") == Some(key)),
         (true, Some(_), _) => false,
         _ => true,
@@ -656,47 +688,10 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
             let Some(window) = c.base.recommended else {
                 return unknown(&c.base.owner);
             };
-            let owner = &c.base.owner;
-            let step = format!("set {owner} to {window}");
-            if profile.harness == Harness::Codex {
-                let key = "model_auto_compact_token_limit";
-                return owned(
-                    owner,
-                    profile,
-                    vec![(key.into(), vec![Edit::set(key, window)])],
-                    step,
-                );
+            match &c.reowned {
+                Some(reowned) if c.base.current != Some(window) => reown(reowned, profile),
+                _ => window_how(c, window, profile),
             }
-            let mut candidates = vec![
-                (
-                    "autoCompactWindow".into(),
-                    vec![Edit::set("autoCompactWindow", window)],
-                ),
-                (
-                    "env.CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
-                    vec![env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", &window.to_string())],
-                ),
-            ];
-            // A model's own row, which owners name whole; model IDs may hold dots.
-            let row = owner
-                .strip_prefix(&format!("{file}:modelSettings."))
-                .map(|rest| rest.split(" (").next().unwrap_or(rest))
-                .and_then(|rest| rest.strip_suffix(".autoCompactWindow"));
-            if let Some(model) = row {
-                candidates.push((
-                    format!("modelSettings.{model}.autoCompactWindow"),
-                    vec![Edit {
-                        path: vec![
-                            "modelSettings".into(),
-                            model.into(),
-                            "autoCompactWindow".into(),
-                        ],
-                        value: window.into(),
-                        append: false,
-                    }],
-                ));
-            }
-            owned(owner, profile, candidates, step)
         }
         CheckResult::Idle(c) => {
             let Some(on) = c.base.recommended else {
@@ -870,7 +865,7 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                 let edit = vec![Edit {
                     path: vec!["modelSettings".into(), model.clone(), "effortLevel".into()],
                     value: level.into(),
-                    append: false,
+                    op: Op::Set,
                 }];
                 candidates.push(("effortLevel".into(), edit.clone()));
                 candidates.push((format!("modelSettings.{model}.effortLevel"), edit));
@@ -892,7 +887,7 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
                         vec![Edit {
                             path: vec!["modelSettings".into(), key.into(), field.into()],
                             value: level.into(),
-                            append: false,
+                            op: Op::Set,
                         }],
                     ));
                 }
@@ -902,12 +897,128 @@ fn check_how(result: &CheckResult, profile: &Profile) -> How {
     }
 }
 
+/// The edit that sets a compaction window where its owner holds it.
+fn window_how(c: &CompactionCheck, window: i64, profile: &Profile) -> How {
+    let file = profile.settings_file.as_str();
+    let owner = &c.base.owner;
+
+    let step = format!("set {owner} to {window}");
+    if profile.harness == Harness::Codex {
+        let key = "model_auto_compact_token_limit";
+        return owned(
+            owner,
+            profile,
+            vec![(key.into(), vec![Edit::set(key, window)])],
+            step,
+        );
+    }
+    let mut candidates = vec![
+        (
+            "autoCompactWindow".into(),
+            vec![Edit::set("autoCompactWindow", window)],
+        ),
+        (
+            "env.CLAUDE_CODE_AUTO_COMPACT_WINDOW".into(),
+            vec![env("CLAUDE_CODE_AUTO_COMPACT_WINDOW", &window.to_string())],
+        ),
+    ];
+    // A model's own row, which owners name whole; model IDs may hold dots.
+    let row = owner
+        .strip_prefix(&format!("{file}:modelSettings."))
+        .map(|rest| rest.split(" (").next().unwrap_or(rest))
+        .and_then(|rest| rest.strip_suffix(".autoCompactWindow"));
+    if let Some(model) = row {
+        candidates.push((
+            format!("modelSettings.{model}.autoCompactWindow"),
+            vec![Edit {
+                path: vec![
+                    "modelSettings".into(),
+                    model.into(),
+                    "autoCompactWindow".into(),
+                ],
+                value: window.into(),
+                op: Op::Set,
+            }],
+        ));
+    }
+    owned(owner, profile, candidates, step)
+}
+
+/// The edits that change a window under `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` so one setting owns
+/// every trigger: each change the plan checked, as an edit to the profile's settings file, or a
+/// step by hand for any other owner, which leaves the whole change by hand.
+fn reown(reowned: &Reowned, profile: &Profile) -> How {
+    let file = profile.settings_file.as_str();
+    let mut foreign: Vec<(String, String)> = vec![];
+    let mut edits = vec![];
+    for change in &reowned.changes {
+        let owner = change.owner();
+        let mine = matches!(&change.source, crate::model::Source::File(f) if f == file);
+        if !mine {
+            let step = match (&change.source, &change.setting, change.value) {
+                // T3 keeps an instance's variables as entries named in a list.
+                (crate::model::Source::Instance { file, id }, Setting::Env(key), value) => {
+                    let list = format!("{file}:providerInstances.{id}.environment");
+                    match value {
+                        Some(value) => format!("set the {key} entry in {list} to {value}"),
+                        None => format!("remove the {key} entry from {list}"),
+                    }
+                }
+                (_, _, Some(value)) => format!("set {owner} to {value}"),
+                (_, _, None) => format!("remove {owner}"),
+            };
+            foreign.push((owner, step));
+            continue;
+        }
+        let path: Vec<String> = match &change.setting {
+            Setting::Window => vec!["autoCompactWindow".into()],
+            Setting::Row(model) => vec![
+                "modelSettings".into(),
+                model.to_string(),
+                "autoCompactWindow".into(),
+            ],
+            Setting::Env(key) => vec!["env".into(), key.clone()],
+        };
+        edits.push(match (change.value, &change.setting) {
+            (None, _) => Edit::remove(&path.iter().map(String::as_str).collect::<Vec<_>>()),
+            // A Claude settings file's `env` block holds strings.
+            (Some(value), Setting::Env(_)) => Edit {
+                path,
+                value: value.to_string().into(),
+                op: Op::Set,
+            },
+            (Some(value), _) => Edit {
+                path,
+                value: value.into(),
+                op: Op::Set,
+            },
+        });
+    }
+    let patch = Patch {
+        file: file.into(),
+        harness: profile.harness,
+        edits,
+    };
+    let Some((first, _)) = foreign.first() else {
+        return How::Edit(patch);
+    };
+    let mut steps: Vec<String> = foreign.iter().map(|(_, step)| step.clone()).collect();
+    if !patch.edits.is_empty() {
+        steps.insert(0, self::steps(&patch));
+    }
+    let step = steps.join("; ");
+    match manual(first, profile, String::new()) {
+        How::Manual { reason, .. } => How::Manual { step, reason },
+        How::Edit(_) => unreachable!("manual is never an edit"),
+    }
+}
+
 /// A variable in a Claude settings file's `env` block, which holds strings.
 fn env(variable: &str, value: &str) -> Edit {
     Edit {
         path: vec!["env".into(), variable.into()],
         value: value.into(),
-        append: false,
+        op: Op::Set,
     }
 }
 
@@ -2876,6 +2987,16 @@ pub fn confirm(
     }
 }
 
+/// The settings whose values the confirm shows unmasked: those an edit sets. A removed value
+/// is not one the person chose, so it stays masked.
+fn shown(edits: &[Edit]) -> Vec<&[String]> {
+    edits
+        .iter()
+        .filter(|e| e.op != Op::Remove)
+        .map(|e| e.path.as_slice())
+        .collect()
+}
+
 /// How `target`'s text would change to `after`: its name, then each changed line with a
 /// line of context on either side, removed lines red and added ones green.
 /// Secret values show masked, as `mask` describes.
@@ -2886,7 +3007,7 @@ fn diff(pending: &Pending, after: &str, style: &Style) -> String {
     } else {
         "****"
     };
-    let edited: Vec<&[String]> = pending.edits.iter().map(|e| e.path.as_slice()).collect();
+    let edited = shown(&pending.edits);
     let hide = |text: &str| match target.harness {
         Harness::Claude => mask_json(text, mask, &edited),
         Harness::Codex => mask_toml(text, mask),
@@ -3282,6 +3403,16 @@ fn apply_json(text: &str, edits: &[Edit]) -> Result<String, String> {
     };
     for edit in edits {
         let (last, parents) = edit.path.split_last().expect("edits name a setting");
+        if edit.op == Op::Remove {
+            let mut node = Some(&mut *map);
+            for key in parents {
+                node = node.and_then(|n| n.get_mut(key)?.as_object_mut());
+            }
+            if let Some(node) = node {
+                node.shift_remove(last);
+            }
+            continue;
+        }
         let mut node = &mut *map;
         for (i, key) in parents.iter().enumerate() {
             let child = node
@@ -3291,7 +3422,7 @@ fn apply_json(text: &str, edits: &[Edit]) -> Result<String, String> {
                 .as_object_mut()
                 .ok_or_else(|| format!("{} is not an object", edit.path[..=i].join(".")))?;
         }
-        if !edit.append {
+        if edit.op == Op::Set {
             node.insert(last.clone(), edit.value.clone());
             continue;
         }
@@ -3343,6 +3474,16 @@ pub(crate) fn apply_toml(text: &str, edits: &[Edit]) -> Result<String, String> {
         .map_err(|_| "the file is not valid TOML".to_string())?;
     for edit in edits {
         let (last, parents) = edit.path.split_last().expect("edits name a setting");
+        if edit.op == Op::Remove {
+            let mut table: Option<&mut dyn TableLike> = Some(doc.as_table_mut());
+            for key in parents {
+                table = table.and_then(|t| t.get_mut(key)?.as_table_like_mut());
+            }
+            if let Some(table) = table {
+                table.remove(last);
+            }
+            continue;
+        }
         let mut table: &mut dyn TableLike = doc.as_table_mut();
         for (i, key) in parents.iter().enumerate() {
             let item = table.entry(key).or_insert_with(|| {
@@ -3356,7 +3497,7 @@ pub(crate) fn apply_toml(text: &str, edits: &[Edit]) -> Result<String, String> {
         }
         let path = edit.path.join(".");
         let value = toml_value(&edit.value);
-        if !edit.append {
+        if edit.op == Op::Set {
             match table.get_mut(last) {
                 Some(Item::Value(old)) => {
                     let decor = old.decor().clone();
@@ -3539,10 +3680,11 @@ mod tests {
     use crate::test_support::Workspace;
 
     fn edit(path: &str, value: impl Into<Value>, append: bool) -> Edit {
+        let op = if append { Op::Append } else { Op::Set };
         Edit {
             path: path.split('.').map(String::from).collect(),
             value: value.into(),
-            append,
+            op,
         }
     }
 
@@ -3770,6 +3912,28 @@ mod tests {
         assert_eq!(
             apply_json("", &[edit("a", 1, false)]).unwrap(),
             "{\n  \"a\": 1\n}\n"
+        );
+        // A removal deletes the key, keeping its parent, and is a no-op where nothing is set.
+        let remove = |path: &[&str]| Edit::remove(path);
+        assert_eq!(
+            apply_json(
+                "{\n  \"env\": {\n    \"A\": \"50\",\n    \"B\": \"1\"\n  }\n}\n",
+                &[
+                    remove(&["env", "A"]),
+                    remove(&["env", "C"]),
+                    remove(&["x", "y"])
+                ],
+            )
+            .unwrap(),
+            "{\n  \"env\": {\n    \"B\": \"1\"\n  }\n}\n"
+        );
+        assert_eq!(
+            apply_toml(
+                "a = 1 # keep\nb = 2\n",
+                &[remove(&["b"]), remove(&["c", "d"])]
+            )
+            .unwrap(),
+            "a = 1 # keep\n"
         );
         for (text, error) in [
             (r#"{"permissions": "x"}"#, "permissions is not an object"),
@@ -4911,6 +5075,19 @@ mod tests {
         std::fs::write(&loose, "{}\n").unwrap();
         let written = write(&accepted(&w, &[(&loose, Harness::Claude)])).unwrap();
         assert!(written[0].backup.is_some());
+    }
+
+    #[test]
+    fn the_confirm_keeps_a_removed_value_masked() {
+        let edits = [
+            Edit::set("env.DISABLE_X", "1"),
+            Edit::remove(&["env", "CLAUDE_CODE_AUTO_COMPACT_WINDOW"]),
+        ];
+        let text = "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"sk-pasted\"}\n}\n";
+        assert_eq!(
+            mask_json(text, "****", &shown(&edits)),
+            "{\n  \"env\": {\"DISABLE_X\": \"1\", \"CLAUDE_CODE_AUTO_COMPACT_WINDOW\": \"****\"}\n}\n"
+        );
     }
 
     #[test]

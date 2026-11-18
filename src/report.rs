@@ -2719,6 +2719,8 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
                     "A foreground wait as long as the cap outlasts the {} cache; lower it below the TTL.",
                     ttl.as_str()
                 ),
+                // An unsettled owner leaves the cap advisory whatever its value.
+                (Some(_), Action::Advisory) => unresolved(result, r),
                 (Some(ttl), _) => format!("The cap is under the {} cache TTL.", ttl.as_str()),
             };
         }

@@ -2687,6 +2687,11 @@ mod tests {
                     ownership_only && details,
                     "{env} {details}"
                 );
+                // An advisory cap never claims to be under the TTL.
+                assert!(
+                    !(ownership_only && text.contains("The cap is under")),
+                    "{env} {details}"
+                );
             }
         }
     }

@@ -2812,6 +2812,26 @@ fn setting_name(result: &CheckResult) -> String {
     }
 }
 
+/// What tells a background feature's line apart from the same feature's line for other
+/// directories, coarsest first: why it resolved apart, then how many directories, then which.
+fn background_scopes(b: &BackgroundCheck, out: &Out<'_>) -> Vec<String> {
+    let name = |d: &Option<crate::model::Text>| {
+        d.as_ref()
+            .filter(|d| !d.is_empty())
+            .map_or_else(|| "directory absent".into(), |d| out.home(d))
+    };
+    let mut parts: Vec<String> = b.scope.iter().cloned().collect();
+    match &b.directories[..] {
+        [] => {}
+        [one] => parts.push(name(one)),
+        [first, rest @ ..] => parts.extend([
+            format!("{} directories", rest.len() + 1),
+            format!("such as {}", name(first)),
+        ]),
+    }
+    (1..=parts.len()).map(|n| parts[..n].join(", ")).collect()
+}
+
 /// Why a background feature's cost is unknown.
 fn background_unknown(b: &BackgroundCheck) -> &'static str {
     if b.base.current.is_none() {
@@ -3816,6 +3836,9 @@ struct Row {
     sources: Vec<&'static str>,
     /// Where it was found, shown only when another line would read the same.
     location: Option<String>,
+    /// What sets the line apart from another of the same setting and tag, coarsest first:
+    /// each is added to the tag only while two lines would still read the same.
+    scopes: Vec<String>,
     /// The report line it is, for a line `doctor` may offer.
     origin: Option<Origin>,
     /// What it saves every 30 days, when measured.
@@ -3843,6 +3866,7 @@ impl Row {
             evidence: String::new(),
             sources: vec![],
             location: None,
+            scopes: vec![],
             origin: None,
             saving: None,
             margin: None,
@@ -3997,6 +4021,27 @@ fn rows_section(rows: &[Row], review: Option<Review<'_>>, out: &mut Out<'_>) {
             row.setting = edit.to_string();
         } else if let Some(key) = row.setting.strip_prefix(&format!("{file}:")) {
             row.setting = key.to_string();
+        }
+    }
+    // Name what separates lines of one setting that read the same, such as the groups of
+    // working directories it resolved apart for, each time with the next finer detail.
+    let tags: Vec<String> = rows.iter().map(|r| r.profile.clone()).collect();
+    for depth in 0..rows.iter().map(|r| r.scopes.len()).max().unwrap_or(0) {
+        let mut seen = crate::collections::HashMap::<(String, String), usize>::default();
+        for row in &rows {
+            *seen
+                .entry((row.name.clone(), row.profile.clone()))
+                .or_default() += 1;
+        }
+        for (row, tag) in rows.iter_mut().zip(&tags) {
+            if seen[&(row.name.clone(), row.profile.clone())] > 1
+                && let Some(scope) = row.scopes.get(depth)
+            {
+                row.profile = match tag.strip_suffix(']') {
+                    Some(tag) => format!("{tag}: {scope}]"),
+                    None => format!("[{scope}]"),
+                };
+            }
         }
     }
     // A stable sort keeps the verdict order among lines with the same figure.
@@ -4817,6 +4862,9 @@ fn summary(
             );
         }
         row.profile = tag(r.profiles, &|_| r.owner.to_string(), out);
+        if let CheckResult::Background(b) = result {
+            row.scopes = background_scopes(b, out);
+        }
         let unset = unset_main_ttl(result, r, out);
         let current = match r.current {
             None if unset => "unset".into(),
@@ -7586,6 +7634,7 @@ mod tests {
                 feature,
                 directories: vec![],
                 reason: "user setting".into(),
+                scope: None,
                 off: "\"promptSuggestionEnabled\": false".into(),
                 off_file: Some(format!("{ROOT}/settings.json")),
                 generations: Some(0),
@@ -10084,6 +10133,66 @@ mod tests {
         assert!(
             !lines.contains("working directory no longer exists"),
             "{lines}"
+        );
+    }
+
+    #[test]
+    fn one_setting_resolved_apart_for_groups_of_directories_gets_a_line_that_names_each() {
+        let mut report = synthetic_report();
+        let group = |scope: Option<&str>, directories: &[Option<&str>]| {
+            let mut base = check_base(Action::Advisory, None, None);
+            base.owner = format!("{ROOT}/settings.json:promptSuggestionEnabled");
+            CheckResult::Background(BackgroundCheck {
+                base,
+                feature: BackgroundFeature::PromptSuggestions,
+                directories: directories.iter().map(|d| d.map(Into::into)).collect(),
+                reason: "synthetic".into(),
+                scope: scope.map(Into::into),
+                off: "\"promptSuggestionEnabled\": false".into(),
+                off_file: Some(format!("{ROOT}/settings.json")),
+                generations: None,
+                cost: cost(None, 0.0),
+                cost_estimate: None,
+                lost_warming: cost(None, 0.0),
+                lost_estimate: None,
+            })
+        };
+        report.checks.extend([
+            group(
+                None,
+                &[Some("/synthetic/home/a"), Some("/synthetic/home/b")],
+            ),
+            group(
+                None,
+                &[Some("/synthetic/home/c"), Some("/synthetic/home/d")],
+            ),
+            group(
+                Some("working directory changed"),
+                &[Some("/synthetic/home/e")],
+            ),
+            group(Some("working directory missing"), &[Some("/gone"), None]),
+            group(Some("working directory missing"), &[Some("/other")]),
+        ]);
+        let text = text(&report, None, false);
+        let mut tags: Vec<String> = report_lines(&text)
+            .into_iter()
+            .filter(|r| r.head.starts_with("Prompt suggestions"))
+            .filter_map(|r| Some(r.setting[..=r.setting.find(']')?].to_string()))
+            .collect();
+        tags.sort();
+        // Each line gets only as much as it needs to differ from the rest, and none repeats.
+        assert_eq!(
+            tags,
+            [
+                "[2 directories, such as /synthetic/home/a]",
+                "[2 directories, such as /synthetic/home/c]",
+                // The fixture's own line, from a transcript with no working directory.
+                "[working directory absent]",
+                "[working directory changed]",
+                "[working directory missing, /other]",
+                "[working directory missing, 2 directories]",
+            ],
+            "{text}"
         );
     }
 

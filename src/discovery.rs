@@ -1004,11 +1004,14 @@ fn claude_local_root(root: &str, options: &DiscoveryOptions) -> Result<Option<St
     }
 }
 
-fn unresolved_background(controls: &mut [BackgroundControl], reason: &str) {
+/// Leave each control unresolved for `reason`, which `scope` names in a few words so a report
+/// can tell the groups of directories that resolved apart.
+fn unresolved_background(controls: &mut [BackgroundControl], scope: &str, reason: &str) {
     for control in controls {
         control.value = None;
         control.minutes = None;
         control.reason = reason.into();
+        control.scope = Some(scope.into());
     }
 }
 
@@ -1102,6 +1105,7 @@ pub fn discover_claude_controls(
         let mut unknown = profile.background.clone();
         unresolved_background(
             &mut unknown,
+            "working directory absent",
             "recorded working directory is absent; current project/local ownership and launch selection are unresolved",
         );
         profile
@@ -1112,6 +1116,7 @@ pub fn discover_claude_controls(
                 let mut controls = profile.background.clone();
                 unresolved_background(
                     &mut controls,
+                    "working directory missing",
                     "recorded working directory is missing or not absolute; current project/local ownership and launch selection are unresolved",
                 );
                 profile.background_directories.insert(cwd.into(), controls);
@@ -1212,6 +1217,7 @@ pub fn discover_claude_controls(
                     let mut controls = background.clone();
                     unresolved_background(
                         &mut controls,
+                        "launch environment conflict",
                         "settings env and inherited environment conflict; the recorded client does not establish terminal versus hosted launch precedence",
                     );
                     std::sync::Arc::<[BackgroundControl]>::from(controls)
@@ -1280,6 +1286,7 @@ pub fn discover_claude_controls(
                     let mut controls = controls.clone();
                     unresolved_background(
                         &mut controls,
+                        "working directory changed",
                         "session working directory changed; /cd environment carry-over and launch selection are not recorded",
                     );
                     controls.into()
@@ -1456,6 +1463,7 @@ pub fn discover_codex_controls(
         if legacy_selection {
             unresolved_background(
                 &mut base,
+                "legacy profile configuration",
                 "legacy profile configuration exists; current Codex removed it in 0.134.0, but installed version and launch selection are unresolved",
             );
         }
@@ -1501,6 +1509,7 @@ pub fn discover_codex_controls(
                 }])?;
                 unresolved_background(
                     &mut base,
+                    "named config profiles",
                     "named config profiles can override automatic recaps; --profile and CLI/session selection are not recorded",
                 );
                 base[0].owner = format!(
@@ -1521,6 +1530,7 @@ pub fn discover_codex_controls(
         let mut unknown = base.clone();
         unresolved_background(
             &mut unknown,
+            "working directory absent",
             "recorded working directory is absent; current project trust, ownership and launch selection are unresolved",
         );
         profile
@@ -1565,6 +1575,7 @@ pub fn discover_codex_controls(
                 let mut controls = base.clone();
                 unresolved_background(
                     &mut controls,
+                    "working directory missing",
                     "recorded working directory is missing or not absolute; current project trust and ownership are unresolved",
                 );
                 profile.background_directories.insert(cwd.into(), controls);
@@ -1734,12 +1745,18 @@ pub fn discover_codex_controls(
             if has_override && trust != Some("trusted") {
                 unresolved_background(
                     &mut controls,
+                    "project trust unknown",
                     "project automatic recap overrides exist, but current project trust is unknown; historical trust and CLI/session selection are not recorded",
                 );
             }
             if marker_selection {
                 unresolved_background(
                     &mut controls,
+                    if legacy_selection {
+                        "legacy profile configuration"
+                    } else {
+                        "named profiles change root or trust"
+                    },
                     if legacy_selection {
                         "legacy profile configuration exists; installed version and launch selection are unresolved"
                     } else {
@@ -3671,6 +3688,7 @@ mod tests {
         let c = &claude(&d).background_requests[&*hosted.id];
         assert!(c.iter().all(|c| c.value.is_none()));
         assert!(c[0].reason.contains("launch precedence"));
+        assert_eq!(c[0].scope.as_deref(), Some("launch environment conflict"));
     }
 
     #[test]
@@ -3723,6 +3741,12 @@ mod tests {
             );
         }
         assert!(p.background_requests["r4"][1].reason.contains("carry-over"));
+        assert_eq!(
+            p.background_requests["r4"][1].scope.as_deref(),
+            Some("working directory changed")
+        );
+        // A resolved control has no scope to name.
+        assert_eq!(p.background_directories[&text(&b)][1].scope, None);
         assert!(
             p.background_requests["r5"][1]
                 .reason

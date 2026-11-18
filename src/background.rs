@@ -12,8 +12,8 @@ use crate::collections::IndexSet;
 use crate::cache::{observed_ttl, ttl_milliseconds};
 use crate::model::{
     Action, BackgroundCheck, BackgroundControl, BackgroundFeature, BillingPart, CheckBase, Cost,
-    Coverage, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request, RequestEvidence,
-    Scan, Text, Ttl, Usage, Usd,
+    Coverage, Estimate, EventKind, Evidence, Harness, Millis, PartKind, Profile, Request,
+    RequestEvidence, Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
     Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
@@ -113,8 +113,14 @@ pub fn background_checks(input: &BackgroundInput<'_>) -> Vec<BackgroundCheck> {
                 groups.extend(profile.background.iter().map(|c| (c, (vec![], vec![]))));
             }
         }
+        let split = crate::t3::Split::new(
+            &input.scan.profiles,
+            &input.scan.requests,
+            &line.ids,
+            input.since,
+        );
         for (control, (requests, ends)) in groups {
-            result.push(check(input, &line, control, &requests, &ends));
+            result.push(check(input, &line, control, &requests, &ends, &split));
         }
     }
     result
@@ -416,6 +422,9 @@ struct Generations {
     pairs: Pairs,
     on: Sum,
     off: Sum,
+    /// The shares of the turns where it would have run that T3 could not settle to the
+    /// line, which are left out.
+    left_out: Vec<Option<f64>>,
 }
 
 /// Total the estimated (on, off) cost of each turn where the feature would have run.
@@ -423,6 +432,7 @@ fn generations(
     catalog: &Catalog,
     feature: BackgroundFeature,
     ends: &[&TurnEnd<'_>],
+    split: &crate::t3::Split<'_>,
 ) -> Generations {
     let mut result = Generations::default();
     for end in ends.iter().filter(|e| e.interactive) {
@@ -432,6 +442,10 @@ fn generations(
             BackgroundFeature::GoalCheckIns | BackgroundFeature::AutoRecaps => false,
         };
         if !runs {
+            continue;
+        }
+        if let Some(share) = split.left_out(&end.request.session) {
+            result.left_out.push(share);
             continue;
         }
         let on = fork_cost(catalog, end, feature);
@@ -449,6 +463,7 @@ fn check(
     control: &BackgroundControl,
     requests: &[&Request],
     ends: &[&TurnEnd<'_>],
+    split: &crate::t3::Split<'_>,
 ) -> BackgroundCheck {
     let profile = line.lead;
     let feature = control.feature;
@@ -458,14 +473,24 @@ fn check(
     );
     let enabled = control.value == Some(true);
     let resolved = control.value.is_some();
-    let Generations { pairs, on, off } = if measurable && enabled {
-        generations(input.catalog, feature, ends)
+    let Generations {
+        pairs,
+        on,
+        off,
+        left_out,
+    } = if measurable && enabled {
+        generations(input.catalog, feature, ends, split)
     } else {
         Generations::default()
     };
-    let paired = pairs.savings(0);
+    // Turns T3 could not settle to this line stand in at its share of those it did.
+    let (left_out, stand_ins) = (
+        left_out.len() as u64,
+        crate::t3::stand_ins(left_out, pairs.count()),
+    );
+    let paired = pairs.savings(stand_ins.unwrap_or(0));
     // Extrapolate the measured net cost to every turn where it ran, as context costs do.
-    let estimate = paired.usd();
+    let estimate = paired.usd().filter(|_| stand_ins.is_some());
     let margin = paired.savings.and_then(|s| s.margin);
     let start = input.since.or(requests.iter().map(|r| r.time).min());
     let month = |v: Option<f64>| match (v, start) {
@@ -510,8 +535,22 @@ fn check(
         });
         (unknown.clone(), unknown)
     } else {
-        (on.cost(), off.cost())
+        let mut costs = (on.cost(), off.cost());
+        // The settled turns' subtotals are not the line's whole cost.
+        if left_out > 0 {
+            let reason = match left_out {
+                1 => "1 turn T3 could not settle to this line is left out".to_string(),
+                n => format!("{n} turns T3 could not settle to this line are left out"),
+            };
+            for cost in [&mut costs.0, &mut costs.1] {
+                cost.total_usd = None;
+                cost.unknown.push(reason.clone());
+            }
+        }
+        costs
     };
+    // Each extrapolated over the same turns as the estimated requests.
+    let whole = |e: Option<Estimate>| e.filter(|_| stand_ins.is_some() && measurable && enabled);
     uncertainty.extend(cost.unknown.iter().cloned());
     uncertainty.extend(lost.unknown.iter().cloned());
     let uncertainty: IndexSet<String> = uncertainty.into_iter().collect();
@@ -574,6 +613,8 @@ fn check(
             coverage: (measurable && enabled).then_some(Coverage {
                 priced: paired.priced,
                 total: paired.total,
+                left_out,
+                stand_ins: stand_ins.filter(|_| left_out > 0),
             }),
             savings_usd: if measurable && enabled { estimate } else { None },
             margin: margin.filter(|_| measurable && enabled),
@@ -602,7 +643,9 @@ fn check(
         off_file: control.off_file.clone(),
         generations: (measurable && resolved).then_some(paired.total),
         cost,
+        cost_estimate: whole(paired.baseline),
         lost_warming: lost,
+        lost_estimate: whole(paired.alternative),
     }
 }
 
@@ -1078,6 +1121,108 @@ mod tests {
         assert_eq!(checks[1].base.evidence, Evidence::Guidance);
         assert_eq!(checks[1].generations, None);
         assert_eq!(checks[1].cost.total_usd, None);
+    }
+
+    #[test]
+    fn turns_t3_left_open_stand_in_at_the_line_share() {
+        let mut s = turns(&[(BackgroundFeature::PromptSuggestions, true)]);
+        let t3 = "t3:/state:agent".to_string();
+        // A second copy of the four turns in a session T3 left open with the line.
+        let open: Vec<Request> = s
+            .requests
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                r.id = format!("open-{}", r.id).into();
+                r.session = "open".into();
+                r.profiles = vec!["profile".into(), t3.clone()].into();
+                r
+            })
+            .collect();
+        let prompts: Vec<StructuralEvent> = s
+            .events
+            .iter()
+            .map(|e| {
+                let mut e = e.clone();
+                e.id = format!("open-{}", e.id).into();
+                e.session = "open".into();
+                e
+            })
+            .collect();
+        s.requests.extend(open);
+        s.events.extend(prompts);
+        // T3 settled one request to itself against the line's four: a share of 4 in 5.
+        let mut settled = response(20, 100_000);
+        settled.id = "t3".into();
+        settled.session = "t3".into();
+        settled.profiles = vec![t3].into();
+        s.requests.push(settled);
+        let c = &run(&s, 100.0)[0];
+        let coverage = c.base.coverage.unwrap();
+        // Three turns would run it in the open session; 2.4 of them count, rounded to 2.
+        assert_eq!(
+            (
+                coverage.priced,
+                coverage.total,
+                coverage.left_out,
+                coverage.stand_ins
+            ),
+            (3, 5, 3, Some(2))
+        );
+        let one = fork_cost(
+            &prices(),
+            &turn_ends(&s, &Group::one(&s.profiles[0]))[0],
+            BackgroundFeature::PromptSuggestions,
+        );
+        assert!(
+            (c.base.savings_usd.unwrap() - one.total_usd.unwrap().to_f64() * 5.0).abs() < 1e-12
+        );
+        // The costs cover the same five turns, not just the three settled ones.
+        assert_eq!(c.cost.total_usd, None);
+        assert_eq!(
+            c.cost.unknown,
+            ["3 turns T3 could not settle to this line are left out"]
+        );
+        assert!(
+            (c.cost_estimate.unwrap().usd - one.total_usd.unwrap().to_f64() * 5.0).abs() < 1e-12
+        );
+        assert_eq!(c.lost_estimate.map(|e| e.usd), Some(0.0));
+        // A share that rounds to no turn still needs a settled turn like it to count it by.
+        let mut rounded = s.clone();
+        for r in rounded
+            .requests
+            .iter_mut()
+            .filter(|r| &*r.session == "session")
+        {
+            r.client = Some("sdk".into());
+        }
+        // 36 more settled to T3 leave the line a share of 4 in 40: 0.3 of the three turns.
+        for i in 0..36 {
+            let mut settled = response(30 + i, 100_000);
+            settled.id = format!("t3-{i}").into();
+            settled.session = "t3".into();
+            settled.profiles = vec!["t3:/state:agent".into()].into();
+            rounded.requests.push(settled);
+        }
+        let c = &run(&rounded, 100.0)[0];
+        assert_eq!(
+            (c.base.action, c.base.savings_usd, c.cost_estimate),
+            (Action::Advisory, None, None)
+        );
+        let coverage = c.base.coverage.unwrap();
+        assert_eq!((coverage.left_out, coverage.stand_ins), (3, None));
+        // With nothing settled to estimate a share from, nothing is priced.
+        for r in &mut s.requests {
+            r.profiles = vec!["profile".into(), "t3:/state:agent".into()].into();
+        }
+        let c = &run(&s, 100.0)[0];
+        assert_eq!(
+            (c.base.action, c.base.savings_usd),
+            (Action::Advisory, None)
+        );
+        // Every turn has usage; what is missing is the share, which the report names.
+        let coverage = c.base.coverage.unwrap();
+        assert_eq!((coverage.left_out, coverage.stand_ins), (6, None));
     }
 
     #[test]

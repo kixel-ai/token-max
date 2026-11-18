@@ -2588,7 +2588,8 @@ fn claude_auto_memory_turned_off_is_kept_off() {
             ownership_resolved: false,
             settings_unresolved: true,
             limitations: vec![],
-            inherited_window: None,
+            env: None,
+            inherited_window: true,
             retained_since: None,
         });
     }

@@ -631,6 +631,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
             value,
             owner,
             reason: reason.into(),
+            varies: false,
         }
     };
     PerBucket {
@@ -672,6 +673,114 @@ fn unanswer_mixed_defaults(profile: &mut Profile) {
     }
     profile.billing = None;
 }
+
+/// Each existing recorded directory's cache TTLs for a Claude profile under `env`: the user,
+/// project, local and managed settings Claude Code reads there. Subagents count, since they
+/// read the same files. A missing directory runs nothing more, so it decides no current value.
+/// `known` holds directories already read, which keep that one observation.
+fn directory_ttls(
+    options: &DiscoveryOptions,
+    profile: &Profile,
+    env: &Env,
+    requests: &[Request],
+    known: IndexMap<String, PerBucket<TtlControl>>,
+) -> Result<IndexMap<String, PerBucket<TtlControl>>, ScanError> {
+    let mut result = known;
+    let unread: Vec<&str> =
+        directories(requests.iter().filter(|r| r.profiles.contains(&profile.id)))
+            .into_iter()
+            .filter(|cwd| !result.contains_key(*cwd))
+            .collect();
+    if unread.is_empty() {
+        return Ok(result);
+    }
+    let managed_file = options.managed_settings_file.as_str();
+    let user = options.settings(&profile.settings_file, Harness::Claude)?;
+    let managed = settings(managed_file, Harness::Claude)?;
+    for cwd in unread {
+        if !existing_directory(cwd)? {
+            continue;
+        }
+        let [project_file, legacy_file, local_file] = claude_project_files(cwd, options)?;
+        let project = options.settings(&project_file, Harness::Claude)?;
+        let legacy = options.settings(&legacy_file, Harness::Claude)?;
+        let local = options.settings(&local_file, Harness::Claude)?;
+        let scopes = [
+            SettingsScope {
+                config: &user,
+                file: &profile.settings_file,
+            },
+            SettingsScope {
+                config: &project,
+                file: &project_file,
+            },
+            SettingsScope {
+                config: &legacy,
+                file: &legacy_file,
+            },
+            SettingsScope {
+                config: &local,
+                file: &local_file,
+            },
+            SettingsScope {
+                config: &managed,
+                file: managed_file,
+            },
+        ];
+        let config = merged(&[&user, &project, &legacy, &local, &managed]);
+        let ttl = ttl_controls(&TtlSources {
+            config: &config,
+            env,
+            file: &profile.settings_file,
+            managed: &managed,
+            managed_file,
+            scopes: Some(&scopes),
+            billing: profile.billing,
+        });
+        result.insert(cwd.to_string(), ttl);
+    }
+    Ok(result)
+}
+
+/// A profile's TTL is one value only when every recorded project its requests ran in gets
+/// it from the same owner at the same value; otherwise it `varies`, and each directory keeps
+/// its own. An unset default whose billing is unknown does not vary while every project
+/// leaves it to the same setting, since pinning it covers them.
+pub(crate) fn settle_ttls<'d>(
+    profile: &mut Profile,
+    directories: impl Iterator<Item = &'d str> + Clone,
+) {
+    for bucket in [crate::model::Bucket::Main, crate::model::Bucket::Subagent] {
+        let ttl = profile.ttl.get(bucket);
+        let pinnable = ttl.value.is_none() && ttl.reason == TTL_BILLING_UNKNOWN;
+        let owner = crate::rows::canonical(&ttl.owner);
+        // Pinning a TTL covers another default, but not a project that turns caching off.
+        let varies = directories
+            .clone()
+            .filter_map(|cwd| profile.ttl_directories.get(cwd))
+            .map(|d| d.get(bucket))
+            .any(|d| {
+                crate::rows::canonical(&d.owner) != owner
+                    || (d.value != ttl.value && !pinnable)
+                    || (pinnable && d.value.is_none() && d.reason != ttl.reason)
+            });
+        if varies {
+            let ttl = profile.ttl.get_mut(bucket);
+            ttl.varies = true;
+            ttl.reason = TTL_PROJECTS_DIFFER.into();
+            // The window replay applies one TTL across the profile, so its comparison is
+            // unknown too, as under unresolved T3 ownership.
+            let compaction = &mut profile.compaction;
+            compaction.default.comparison_unknown = Some(TTL_PROJECTS_DIFFER.into());
+            for c in compaction.models.values_mut() {
+                c.comparison_unknown = Some(TTL_PROJECTS_DIFFER.into());
+            }
+        }
+    }
+}
+
+/// Why a profile's TTL has no one value: its recorded projects set it differently.
+pub const TTL_PROJECTS_DIFFER: &str = "recorded projects set it differently, so no one value describes every request; each project's own settings decide its sessions";
 
 /// Why an unset main-conversation TTL has no known value: Claude Code picks it by billing.
 pub const TTL_BILLING_UNKNOWN: &str = "billing state is unknown; main default can change from a Claude plan's included usage to usage credits";
@@ -957,6 +1066,8 @@ pub fn discover_claude_controls(
         }
         let mut speed_directories = IndexMap::default();
         let mut idle_directories = IndexMap::default();
+        // Existing directories whose settings the idle controls read.
+        let mut read: Vec<&str> = vec![];
         let relevant: Vec<&Request> = requests
             .iter()
             .filter(|r| r.agent == Agent::Main && r.profiles.contains(&profile.id))
@@ -1110,6 +1221,7 @@ pub fn discover_claude_controls(
                     .insert(request.id.clone(), controls.clone());
             }
             let config = merged(&[&user, &project, &legacy, &local, &managed]);
+            read.push(cwd);
             idle.ttl = Some(ttl_controls(&TtlSources {
                 config: &config,
                 env: local_env,
@@ -1137,6 +1249,16 @@ pub fn discover_claude_controls(
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
         unanswer_mixed_defaults(profile);
+        // The main-agent directories keep the TTLs idle compaction read, so both see one
+        // observation of each file.
+        let known = read
+            .into_iter()
+            .filter_map(|cwd| {
+                let idle = profile.idle_directories.as_ref()?.get(cwd)?;
+                Some((cwd.to_string(), idle.ttl.clone()?))
+            })
+            .collect();
+        profile.ttl_directories = directory_ttls(options, profile, local_env, requests, known)?;
         profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
@@ -1172,13 +1294,19 @@ pub fn discover_claude_controls(
     // A T3 instance that inherits its window reads it from the same project/local files,
     // under the instance's own environment; its other controls stay T3's.
     for profile in profiles.iter_mut().filter(|p| p.harness == Harness::Claude) {
-        let Some(env) = profile
-            .t3
-            .as_ref()
-            .and_then(|t| t.inherited_window.as_ref())
-        else {
+        let Some(t3) = &profile.t3 else {
             continue;
         };
+        let Some(env) = t3.env.clone() else {
+            continue;
+        };
+        let inherited = t3.inherited_window;
+        let env = &env;
+        let ttls = directory_ttls(options, profile, env, requests, IndexMap::default())?;
+        profile.ttl_directories = ttls.clone();
+        if !inherited {
+            continue;
+        }
         let user = options.settings(&profile.settings_file, Harness::Claude)?;
         let managed = settings(managed_file, Harness::Claude)?;
         let user_scope = SettingsScope {
@@ -1189,7 +1317,7 @@ pub fn discover_claude_controls(
             config: &managed,
             file: managed_file,
         };
-        // T3 reads only the window and TTL from a directory's control.
+        // T3 reads only the window and TTLs from a directory's control.
         let base = IdleControl {
             ttl: Some(profile.ttl.clone()),
             ..idle_controls(&[user_scope, managed_scope], env)?
@@ -1237,6 +1365,7 @@ pub fn discover_claude_controls(
                 cwd.to_string(),
                 IdleControl {
                     compaction: Some(compaction),
+                    ttl: ttls.get(cwd).cloned().or_else(|| base.ttl.clone()),
                     ..base.clone()
                 },
             );
@@ -2287,6 +2416,7 @@ pub(crate) fn profile(
         instruction_budget_file,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        ttl_directories: IndexMap::default(),
         claude_config,
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
@@ -2997,7 +3127,8 @@ mod tests {
                     ownership_resolved: true,
                     settings_unresolved: false,
                     limitations: vec![],
-                    inherited_window: None,
+                    env: None,
+                    inherited_window: true,
                     retained_since: None,
                 });
             }
@@ -4064,6 +4195,88 @@ mod tests {
             (p.billing, p.ttl.main.value),
             (Some(Billing::Api), Some(Ttl::FiveMinutes))
         );
+    }
+
+    #[test]
+    fn a_ttl_resolves_for_a_profile_only_when_every_recorded_project_gets_it() {
+        let w = Workspace::new();
+        let (plain, pinned) = (w.home.join("plain"), w.home.join("pinned"));
+        for project in [&plain, &pinned] {
+            fs::create_dir_all(project.join(".git")).unwrap();
+        }
+        write(w.claude.join("settings.json"), r#"{"promptCacheTtl":"5m"}"#);
+        write(
+            pinned.join(".claude/settings.json"),
+            r#"{"promptCacheTtl":"1h"}"#,
+        );
+        let gone = w.home.join("gone");
+        let o = options(&w);
+        let mut data = discover(&o).unwrap();
+        // Discovery reads every recorded directory, including a deleted one's absence.
+        let requests: Vec<Request> = [&plain, &pinned, &gone]
+            .iter()
+            .map(|p| request(claude(&data), Some(p)))
+            .collect();
+        discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
+        // Once T3 attributes the requests, only the profile's own directories settle it.
+        let settled = |projects: &[&Path]| {
+            let mut p = claude(&data).clone();
+            let texts: Vec<String> = projects.iter().map(|d| text(d)).collect();
+            settle_ttls(&mut p, texts.iter().map(String::as_str));
+            p
+        };
+        // A deleted project runs nothing more, so it decides no current value.
+        let p = settled(&[&plain, &gone]);
+        assert_eq!(p.ttl.main.one().value, Some(Ttl::FiveMinutes));
+        assert_eq!(p.compaction.default.comparison_unknown, None);
+        // A project's own file decides its sessions, which the user file cannot change.
+        for projects in [&[pinned.as_path()][..], &[&plain, &pinned]] {
+            let p = settled(projects);
+            assert!(p.ttl.main.varies);
+            assert_eq!(p.ttl.main.one().value, None);
+            // The home's value stays for replays that read each directory's own.
+            assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
+            assert_eq!(p.ttl.main.reason, TTL_PROJECTS_DIFFER);
+            assert!(!p.ttl.subagent.varies);
+            // Every check that applies one TTL across the profile goes unknown with it.
+            assert_eq!(
+                p.compaction.default.comparison_unknown.as_deref(),
+                Some(TTL_PROJECTS_DIFFER)
+            );
+            let directories = p.idle_directories.as_ref().unwrap();
+            let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.value;
+            assert_eq!(main(&pinned), Some(Ttl::OneHour));
+        }
+        // An unset main TTL with unknown billing stays pinnable across another default, such
+        // as a cloud provider's, but not across a project that turns caching off.
+        write(w.claude.join("settings.json"), "{}");
+        let (cloud, off) = (w.home.join("cloud"), w.home.join("off"));
+        for (project, env) in [
+            (&cloud, "CLAUDE_CODE_USE_BEDROCK"),
+            (&off, "DISABLE_PROMPT_CACHING"),
+        ] {
+            fs::create_dir_all(project.join(".git")).unwrap();
+            write(
+                project.join(".claude/settings.json"),
+                &format!(r#"{{"env":{{"{env}":"1"}}}}"#),
+            );
+        }
+        let mut data = discover(&o).unwrap();
+        let requests: Vec<Request> = [&plain, &cloud, &off]
+            .iter()
+            .map(|p| request(claude(&data), Some(p)))
+            .collect();
+        discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
+        let settled = |projects: &[&Path]| {
+            let mut p = claude(&data).clone();
+            let texts: Vec<String> = projects.iter().map(|d| text(d)).collect();
+            settle_ttls(&mut p, texts.iter().map(String::as_str));
+            p
+        };
+        let p = settled(&[&plain, &cloud]);
+        assert_eq!(p.ttl.main.reason, TTL_BILLING_UNKNOWN);
+        assert!(!p.ttl.main.varies);
+        assert!(settled(&[&plain, &off]).ttl.main.varies);
     }
 
     // Ported from the discovery half of idle.test.ts: "native informational notices are the only parsed idle attribution; project owners and threshold floor resolve".

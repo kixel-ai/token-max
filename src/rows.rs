@@ -136,16 +136,20 @@ pub fn window_owner(profile: &Profile) -> String {
 }
 
 /// The owner and value of a profile's cache TTL for one bucket, whether an unset value
-/// is the billing default a change can pin rather than caching turned off, and, for the main
-/// conversation, how the profile was answered to pay. A profile whose TTL another owner sets,
-/// that caching is off for, or whose default differs replays or compares differently.
+/// is the billing default a change can pin rather than caching turned off, whether its
+/// projects set it differently, and, for the main conversation, how the profile was answered
+/// to pay. A profile whose TTL another owner sets, that caching is off for, whose projects
+/// differ or whose default differs replays or compares differently.
 pub fn ttl_owner(profile: &Profile, bucket: Bucket) -> String {
-    let ttl = profile.ttl.get(bucket);
+    let ttl = &profile.ttl.get(bucket).one();
     let pinnable = ttl.value.is_none() && ttl.reason == crate::discovery::TTL_BILLING_UNKNOWN;
     let billing = (bucket == Bucket::Main)
         .then_some(profile.billing)
         .flatten();
-    format!("{}\n{:?}\n{pinnable}\n{billing:?}", ttl.owner, ttl.value)
+    format!(
+        "{}\n{:?}\n{pinnable}\n{}\n{billing:?}",
+        ttl.owner, ttl.value, ttl.varies
+    )
 }
 
 /// The owners of the compaction windows, then of both cache TTLs the window replay
@@ -213,6 +217,17 @@ mod tests {
         let [mut native, off, _] = profiles;
         native.ttl.main.value = None;
         native.ttl.main.reason = crate::discovery::TTL_BILLING_UNKNOWN.into();
+        assert_eq!(
+            ids(&groups(&[native.clone(), off.clone()], |p| ttl_owner(
+                p,
+                Bucket::Main
+            ))),
+            [["native"], ["off"]]
+        );
+        // Projects that set it differently leave no one value, unlike caching off.
+        native.ttl.main.value = Some(crate::model::Ttl::OneHour);
+        native.ttl.main.varies = true;
+        native.ttl.main.reason = crate::discovery::TTL_PROJECTS_DIFFER.into();
         assert_eq!(
             ids(&groups(&[native, off], |p| ttl_owner(p, Bucket::Main))),
             [["native"], ["off"]]

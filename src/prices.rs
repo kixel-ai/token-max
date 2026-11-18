@@ -878,6 +878,11 @@ impl Pairs {
         self.alternative.add(alternative);
     }
 
+    /// How many pairs were added, priced or not.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
     /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
     pub fn savings(&self, unknown: u64) -> PairedSavings {
         let total = self.count + unknown;

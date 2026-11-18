@@ -2066,8 +2066,12 @@ fn card(result: &CheckResult, action: Action, out: &mut Out<'_>) {
                 &b.generations
                     .map_or_else(|| "unknown".into(), |n| n.to_string()),
             );
-            out.cost("Estimated request cost", &b.cost);
-            out.cost("Later input costs its reads avoided", &b.lost_warming);
+            out.estimate("Estimated request cost", &b.cost, b.cost_estimate);
+            out.estimate(
+                "Later input costs its reads avoided",
+                &b.lost_warming,
+                b.lost_estimate,
+            );
         }
         CheckResult::Ttl(t) => {
             out.field(
@@ -2719,6 +2723,8 @@ fn reason(result: &CheckResult, r: &Common<'_>) -> String {
                     "A foreground wait as long as the cap outlasts the {} cache; lower it below the TTL.",
                     ttl.as_str()
                 ),
+                // An unsettled owner leaves the cap advisory whatever its value.
+                (Some(_), Action::Advisory) => unresolved(result, r),
                 (Some(ttl), _) => format!("The cap is under the {} cache TTL.", ttl.as_str()),
             };
         }
@@ -2811,6 +2817,9 @@ fn background_unknown(b: &BackgroundCheck) -> &'static str {
     if b.base.current.is_none() {
         return "Cost unknown: current scope or launch selection is unresolved.";
     }
+    if no_share(b.base.coverage) {
+        return NO_SHARE_COST;
+    }
     match b.feature {
         BackgroundFeature::GoalCheckIns => {
             "Cost unknown: check-in turns are not marked in transcripts."
@@ -2891,8 +2900,20 @@ fn keepalive_unresolved(k: &KeepaliveCheck, r: &Common<'_>) -> String {
             r.owner.strip_prefix("no setting: ").unwrap_or(r.owner)
         );
     }
-    if k.lifetime_ms.is_none() {
-        "The main cache TTL is unknown, so pings could not be priced.".into()
+    if r.uncertainty
+        .iter()
+        .any(|u| u == crate::keepalive::KEEPALIVE_SPLIT)
+    {
+        capitalize(crate::keepalive::KEEPALIVE_SPLIT) + "."
+    } else if k.lifetime_ms.is_none() {
+        k.base
+            .assumptions
+            .first()
+            .and_then(|a| a.strip_prefix("cache lifetime unknown: "))
+            .map_or_else(
+                || "The main cache TTL is unknown, so pings could not be priced.".into(),
+                |why| format!("{}, so pings could not be priced.", capitalize(why)),
+            )
     } else if k.ping_input_tokens.is_none() || k.ping_output_tokens.is_none() {
         "No consecutive request geometry establishes a ping input size.".into()
     } else if r.coverage.is_none_or(|c| c.priced == 0) {
@@ -2966,11 +2987,22 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
     if r.uncertainty.iter().any(|u| u == crate::t3::UNOWNED) {
         return "The T3 instance is disabled or the file that owns this setting for it is unresolved, so its past costs do not establish a setting to change.".into();
     }
-    if let CheckResult::BashCap(b) = result
-        && b.ttl.is_none()
-    {
-        return "The main-agent cache TTL is unresolved, so the cap has nothing to compare with."
-            .into();
+    if let CheckResult::BashCap(b) = result {
+        // Advisory with no recommendation either for want of a TTL or for an unsettled owner.
+        return match b.ttl {
+            None => format!(
+                "{}, so the cap has nothing to compare with.",
+                capitalize(&b.ttl_basis)
+            ),
+            Some(_) => r
+                .uncertainty
+                .iter()
+                .find(|u| u.contains("unresolved T3 control ownership"))
+                .map_or_else(
+                    || "The cap could not be compared with the cache TTL.".into(),
+                    |_| "Requests T3 could not settle may have run under another owner's cap, so the cap's line is unresolved.".into(),
+                ),
+        };
     }
     if let CheckResult::Keepalive(k) = result {
         return keepalive_unresolved(k, r);
@@ -3028,6 +3060,10 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
         }
         CheckResult::T3Idle(c) => t3_idle_unresolved(c, r),
         CheckResult::Idle(i) => {
+            let a = &i.after_recommendations;
+            if a.delta.is_none() && no_share(Some(a.coverage)) {
+                return NO_SHARE.into();
+            }
             let periods = &i.after_recommendations.periods;
             if periods.total() > 0
                 && periods.with_status(PeriodStatus::Censored)
@@ -3046,20 +3082,41 @@ fn unresolved(result: &CheckResult, r: &Common<'_>) -> String {
             "Idle summaries or resumed sessions could not be priced in any session it could act on."
                 .into()
         }
+        // Handled above; a doctor run never panics on a combination nothing names.
         CheckResult::Speed(_)
         | CheckResult::Background(_)
         | CheckResult::BashCap(_)
         | CheckResult::Keepalive(_)
         | CheckResult::Memory(_)
-        | CheckResult::Effort(_) => {
-            unreachable!("handled above")
-        }
+        | CheckResult::Effort(_) => "No verdict could be reached.".into(),
     }
 }
+
+/// Whether a comparison left out sessions T3 could not settle with nothing settled to stand
+/// for them, which leaves it unestimated.
+fn no_share(coverage: Option<Coverage>) -> bool {
+    coverage.is_some_and(|c| c.left_out > 0 && c.stand_ins.is_none())
+}
+
+/// Why a line has no estimate when it left out sessions nothing settled can stand for.
+macro_rules! no_share {
+    () => {
+        "T3 could not settle some sessions between this line's owner and another, and nothing it did settle can stand for them: no request between their possible owners, or no session like them on this line."
+    };
+}
+const NO_SHARE: &str = no_share!();
+/// [`NO_SHARE`] as the reason a cost is unknown.
+const NO_SHARE_COST: &str = concat!("Cost unknown: ", no_share!());
 
 /// The modes T3 could price, and the first input the others lack.
 fn t3_idle_unresolved(c: &T3IdleCheck, r: &Common<'_>) -> String {
     let scenarios = &c.after_recommendations.scenarios;
+    if scenarios
+        .iter()
+        .any(|s| s.savings.is_none() && no_share(Some(s.coverage)))
+    {
+        return NO_SHARE.into();
+    }
     let priced: Vec<String> = scenarios
         .iter()
         .filter_map(|s| {
@@ -3594,14 +3651,30 @@ fn context_sizes(report: &Report, result: &CheckResult, profile: &str) -> String
 /// How a replay's figure was extrapolated over the `items` it priced, such as "requests with
 /// measured usage", when some were not.
 fn coverage_note(r: &Common<'_>, items: &str) -> String {
-    match r.coverage {
-        // Percent, because one request can bill several parts.
-        Some(c) if c.priced != c.total => format!(
+    let Some(c) = r.coverage else {
+        return String::new();
+    };
+    let mut note = String::new();
+    // Percent, because one request can bill several parts.
+    if c.priced != c.total {
+        note += &format!(
             ", extrapolated from the {}% of {items} to the rest, assuming they resemble each other",
             percent(c.priced, c.total)
-        ),
-        _ => String::new(),
+        );
     }
+    if c.left_out > 0 {
+        let units = items.split(' ').next().unwrap_or(items);
+        let (unit, verb) = match c.left_out {
+            1 => (units.strip_suffix('s').unwrap_or(units), "counts"),
+            _ => (units, "count"),
+        };
+        note += &format!(
+            "; {} {unit} T3 could not settle between this line's owner and another {verb} as {}, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover",
+            count(c.left_out),
+            count(c.stand_ins.unwrap_or(0))
+        );
+    }
+    note
 }
 
 /// What most replays extrapolate from.
@@ -6111,6 +6184,7 @@ mod tests {
             coverage: Some(Coverage {
                 priced: 1990,
                 total: 2000,
+                ..Default::default()
             }),
             savings_usd: Some(150.0),
             margin: None,
@@ -6207,6 +6281,7 @@ mod tests {
                 coverage: Coverage {
                     priced: 3,
                     total: 4,
+                    ..Default::default()
                 },
                 added: vec![AddedCompaction {
                     request: "synthetic-added".into(),
@@ -6285,6 +6360,7 @@ mod tests {
             coverage: Coverage {
                 priced: 1,
                 total: 1,
+                ..Default::default()
             },
             monthly_delta: delta.map(|usd| Estimate { usd, margin: None }),
             by_context: vec![ContextDelta {
@@ -6531,6 +6607,7 @@ mod tests {
         ttl_sub.coverage = Some(Coverage {
             priced: 2000,
             total: 2000,
+            ..Default::default()
         });
         let mut window = check_base(Action::Advisory, Some(200_000), None);
         window.owner = format!("{ROOT}/settings.json:autoCompactWindow");
@@ -7206,13 +7283,66 @@ mod tests {
         base.coverage = Some(Coverage {
             priced: 4,
             total: 5,
+            ..Default::default()
         });
         report.checks = vec![idle_check(base, PeriodCounts::default(), Some(-30.0))];
-        let text = text(&report, None, true);
-        let row = report_line(&text, "Idle compaction");
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
         assert!(row.head.contains("saves ~$30/mo ± $6"), "{row:?}");
         assert!(
             row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 80% of sessions that could be priced to the rest, assuming they resemble each other."),
+            "{row:?}"
+        );
+        // Sessions T3 could not settle stand in at the line's share, an assumption the
+        // margin leaves out.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.base.coverage = Some(Coverage {
+                priced: 4,
+                total: 6,
+                left_out: 4,
+                stand_ins: Some(1),
+            });
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence.starts_with("Replayed on and off, assuming the same sessions, extrapolated from the 66.6% of sessions that could be priced to the rest, assuming they resemble each other; 4 sessions T3 could not settle between this line's owner and another count as 1, this line's share of those T3 did settle, assuming they split the same way, which the margin does not cover."),
+            "{row:?}"
+        );
+        // One open session reads in the singular.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.base.coverage.as_mut().unwrap().left_out = 1;
+            c.base.coverage.as_mut().unwrap().stand_ins = Some(0);
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence.contains(
+                "; 1 session T3 could not settle between this line's owner and another counts as 0,"
+            ),
+            "{row:?}"
+        );
+        // With no share to count the open sessions at, the line names that gap rather than
+        // missing usage.
+        if let CheckResult::Idle(c) = &mut report.checks[0] {
+            c.after_recommendations.delta = None;
+            c.after_recommendations.coverage = Coverage {
+                priced: 4,
+                total: 4,
+                left_out: 2,
+                stand_ins: None,
+            };
+            c.base.action = Action::Advisory;
+            c.base.recommended = None;
+            c.base.savings_usd = None;
+            c.base.monthly_savings_usd = None;
+            c.base.margin = None;
+        }
+        let rendered = text(&report, None, true);
+        let row = report_line(&rendered, "Idle compaction");
+        assert!(
+            row.evidence
+                .starts_with("Not enough evidence: T3 could not settle some sessions"),
             "{row:?}"
         );
     }
@@ -7432,6 +7562,7 @@ mod tests {
             value: None,
             owner: format!("{ROOT}/settings.json:promptCacheTtl"),
             reason: TTL_BILLING_UNKNOWN.into(),
+            varies: false,
         };
         let ttl = ttl_mut(&mut report);
         ttl.base.current = None;
@@ -7450,7 +7581,9 @@ mod tests {
                 off_file: Some(format!("{ROOT}/settings.json")),
                 generations: Some(0),
                 cost: cost(Some(0.0), 0.0),
+                cost_estimate: None,
                 lost_warming: cost(Some(0.0), 0.0),
+                lost_estimate: None,
             })
         };
         report.checks.extend([

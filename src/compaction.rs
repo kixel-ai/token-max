@@ -1266,7 +1266,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .iter()
                 .find(|t| t.bucket == bucket)
                 .and_then(|t| t.base.recommended)
-                .or(profile.ttl.get(bucket).value)
+                .or(profile.ttl.get(bucket).one().value)
         };
         let ttls = PerBucket {
             main: recommended_ttl(Bucket::Main),
@@ -1632,6 +1632,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                         coverage: Coverage {
                             priced: paired.priced,
                             total: paired.total,
+                            ..Default::default()
                         },
                         // Sensitivity runs report only their savings, so skip copying their detail.
                         added: if detail { added.to_vec() } else { vec![] },
@@ -1921,6 +1922,7 @@ mod tests {
             value: Some(value),
             owner: owner.into(),
             reason: "current explicit setting".into(),
+            varies: false,
         }
     }
 
@@ -2005,6 +2007,7 @@ mod tests {
             instruction_budget_file: None,
             instruction_budget_unresolved: None,
             outranking_files: vec![],
+            ttl_directories: IndexMap::default(),
             claude_config: None,
             codex_system_config: None,
             switched_off: vec![],

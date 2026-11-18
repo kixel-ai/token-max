@@ -43,8 +43,9 @@ on its own host, so these totals are its four reports added by hand, as
   the `code-review` skill.
 
 Against the maintainer's current settings, the changes doctor still offers save
-~$758/mo; their settings already save ~$515/mo against the defaults, nearly all
-from that 1h main-agent cache.
+~$758/mo. Their settings already save ~$515/mo against the defaults: the 1h
+main-agent cache's ~$519/mo, less ~$3.63/mo that the 1h subagent cache on the
+same profiles costs more than the default 5m.
 
 doctor asked how each Claude profile pays, and each answer came from the
 profile's account (`oauthAccount.billingType` in its `.claude.json`): every

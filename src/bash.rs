@@ -74,7 +74,7 @@ fn evaluation_ttl(
     if let Some(ttl) = verdict {
         return (Some(ttl), "the main-agent cache TTL this report recommends");
     }
-    if let Some(ttl) = profile.ttl.main.value {
+    if let Some(ttl) = profile.ttl.main.one().value {
         return (Some(ttl), "the current main-agent cache TTL setting");
     }
     let observed = requests

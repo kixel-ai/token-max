@@ -631,6 +631,7 @@ fn ttl_controls(sources: &TtlSources) -> PerBucket<TtlControl> {
             value,
             owner,
             reason: reason.into(),
+            varies: false,
         }
     };
     PerBucket {
@@ -731,20 +732,28 @@ fn directory_ttls(
     Ok(result)
 }
 
-/// A profile's TTL is one value only when every recorded project gets it from the same owner.
-/// Where a project's own file or a different default decides it, the profile's TTL is
-/// unknown; its directories keep their own. An unset default whose billing is unknown stays
-/// pinnable while every project leaves it to the same setting, since pinning it covers them.
-fn settle_ttls(profile: &mut Profile, directories: &IndexMap<String, PerBucket<TtlControl>>) {
+/// A profile's TTL is one value only when every recorded project its requests ran in gets
+/// it from the same owner at the same value; otherwise it `varies`, and each directory keeps
+/// its own. An unset default whose billing is unknown does not vary while every project
+/// leaves it to the same setting, since pinning it covers them.
+pub(crate) fn settle_ttls<'d>(
+    profile: &mut Profile,
+    directories: impl Iterator<Item = &'d str> + Clone,
+) {
     for bucket in [crate::model::Bucket::Main, crate::model::Bucket::Subagent] {
-        let ttl = profile.ttl.get_mut(bucket);
+        let ttl = profile.ttl.get(bucket);
         let pinnable = ttl.value.is_none() && ttl.reason == TTL_BILLING_UNKNOWN;
         let owner = crate::rows::canonical(&ttl.owner);
-        let differs = directories.values().map(|d| d.get(bucket)).any(|d| {
-            crate::rows::canonical(&d.owner) != owner || (d.value != ttl.value && !pinnable)
-        });
-        if differs {
-            ttl.value = None;
+        let varies = directories
+            .clone()
+            .filter_map(|cwd| profile.ttl_directories.get(cwd))
+            .map(|d| d.get(bucket))
+            .any(|d| {
+                crate::rows::canonical(&d.owner) != owner || (d.value != ttl.value && !pinnable)
+            });
+        if varies {
+            let ttl = profile.ttl.get_mut(bucket);
+            ttl.varies = true;
             ttl.reason = TTL_PROJECTS_DIFFER.into();
         }
     }
@@ -1217,8 +1226,7 @@ pub fn discover_claude_controls(
         profile.speed_directories = Some(speed_directories);
         profile.idle_directories = Some(idle_directories);
         unanswer_mixed_defaults(profile);
-        let ttls = directory_ttls(options, profile, local_env, requests)?;
-        settle_ttls(profile, &ttls);
+        profile.ttl_directories = directory_ttls(options, profile, local_env, requests)?;
         profile.outranking_files = outranking;
         // /cd reapplies the new env over the old one; removed keys can survive it.
         let mut session_cwds = crate::collections::HashMap::default();
@@ -1263,7 +1271,7 @@ pub fn discover_claude_controls(
         let inherited = t3.inherited_window;
         let env = &env;
         let ttls = directory_ttls(options, profile, env, requests)?;
-        settle_ttls(profile, &ttls);
+        profile.ttl_directories = ttls.clone();
         if !inherited {
             continue;
         }
@@ -2376,6 +2384,7 @@ pub(crate) fn profile(
         instruction_budget_file,
         instruction_budget_unresolved: None,
         outranking_files: vec![],
+        ttl_directories: IndexMap::default(),
         claude_config,
         codex_system_config: (!claude).then(|| system_file.to_string()),
         switched_off: switched_off(harness, &user),
@@ -4169,26 +4178,33 @@ mod tests {
             r#"{"promptCacheTtl":"1h"}"#,
         );
         let gone = w.home.join("gone");
-        let resolve = |projects: &[&Path]| {
-            let o = options(&w);
-            let mut data = discover(&o).unwrap();
-            let requests: Vec<Request> = projects
-                .iter()
-                .map(|p| request(claude(&data), Some(p)))
-                .collect();
-            discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
-            claude(&data).clone()
+        let o = options(&w);
+        let mut data = discover(&o).unwrap();
+        // Discovery reads every recorded directory, including a deleted one's absence.
+        let requests: Vec<Request> = [&plain, &pinned, &gone]
+            .iter()
+            .map(|p| request(claude(&data), Some(p)))
+            .collect();
+        discover_claude_controls(&o, &mut data.profiles, &requests).unwrap();
+        // Once T3 attributes the requests, only the profile's own directories settle it.
+        let settled = |projects: &[&Path]| {
+            let mut p = claude(&data).clone();
+            let texts: Vec<String> = projects.iter().map(|d| text(d)).collect();
+            settle_ttls(&mut p, texts.iter().map(String::as_str));
+            p
         };
         // A deleted project runs nothing more, so it decides no current value.
-        let p = resolve(&[&plain, &gone]);
-        assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
+        let p = settled(&[&plain, &gone]);
+        assert_eq!(p.ttl.main.one().value, Some(Ttl::FiveMinutes));
         // A project's own file decides its sessions, which the user file cannot change.
         for projects in [&[pinned.as_path()][..], &[&plain, &pinned]] {
-            let p = resolve(projects);
-            assert_eq!(p.ttl.main.value, None);
+            let p = settled(projects);
+            assert!(p.ttl.main.varies);
+            assert_eq!(p.ttl.main.one().value, None);
+            // The home's value stays for replays that read each directory's own.
+            assert_eq!(p.ttl.main.value, Some(Ttl::FiveMinutes));
             assert_eq!(p.ttl.main.reason, TTL_PROJECTS_DIFFER);
-            assert_eq!(p.ttl.subagent.value, Some(Ttl::FiveMinutes));
-            // Each directory keeps its own.
+            assert!(!p.ttl.subagent.varies);
             let directories = p.idle_directories.as_ref().unwrap();
             let main = |d: &Path| directories[&text(d)].ttl.as_ref().unwrap().main.value;
             assert_eq!(main(&pinned), Some(Ttl::OneHour));

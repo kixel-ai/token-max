@@ -744,12 +744,15 @@ cross only in a destination's session lines.
 ## Cache TTL
 
 A profile's TTL resolves to one value only when every request in it, across all
-of its recorded projects, gets that value from the same owner. Where a project's
-own settings file sets it, or a project defaults differently, the TTL line stays
+of its recorded projects, gets that value from the same owner. The projects are
+those its own requests ran in, once T3 has attributed them, so a project only a T3
+instance used never unsettles native Claude Code's TTL. Where a project's own
+settings file sets it, or a project defaults differently, the TTL line stays
 unresolved for the profile, since no one edit to the user file covers every
-project; each directory keeps its own value for the replays that resolve per
-directory, such as idle compaction and T3's inherited window. A project directory
-that no longer exists runs nothing more and decides nothing. An unset main TTL
+project, and so do the checks that apply one TTL across the profile: the Bash
+cap, keepalive pings, compaction windows and T3's idle modes. Native idle
+compaction resolves each directory's TTL instead. A project directory that no
+longer exists runs nothing more and decides nothing. An unset main TTL
 whose billing is unknown stays pinnable while every project leaves it to the same
 setting.
 

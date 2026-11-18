@@ -47,20 +47,22 @@ const POLICY_CHANGE: &str = "effective project TTL/window policy changes within 
 ///
 /// Only sessions where idle compaction could act, `acting`, stand for the unpriced ones. One
 /// where it could not counts exactly, so its zero doesn't dilute them; unpriced, such as when
-/// its replay failed, it still changes nothing, since no run acts on it. A session `split`
-/// leaves out, since T3 could not settle whether this line's owner ran it, stands in as its
-/// share of an unpriced acting one, and with no share nothing is estimated.
+/// its replay failed, it still changes nothing, since no run acts on it. A session left out,
+/// since T3 could not settle whether this line's owner ran it, stands in at its share of an
+/// unpriced acting one (see [`crate::t3::Split`]), and one with no share leaves nothing
+/// estimated.
 fn paired<'c>(
-    sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool, bool)>,
-    split: &crate::t3::Split<'_>,
+    sessions: impl IntoIterator<Item = (&'c Cost, &'c Cost, bool, Option<Option<f64>>)>,
 ) -> (Option<Estimate>, Coverage) {
     let mut pairs = Pairs::default();
     let mut exact = Usd::ZERO;
     let mut known = 0;
-    let mut left_out = 0;
+    let mut shares = vec![];
     for (baseline, alternative, acting, out) in sessions {
-        if out {
-            left_out += u64::from(acting);
+        if let Some(share) = out {
+            if acting {
+                shares.push(share);
+            }
             continue;
         }
         if acting {
@@ -72,7 +74,8 @@ fn paired<'c>(
         }
         known += 1;
     }
-    let stand_ins = split.stand_ins(left_out);
+    let left_out = shares.len() as u64;
+    let stand_ins = crate::t3::stand_ins(shares);
     let paired = pairs.savings(stand_ins.unwrap_or(0));
     let estimate = paired
         .savings
@@ -2090,9 +2093,9 @@ impl<'a> Profiled<'a> {
         // Whether idle compaction could change each session: a period that could trigger, or
         // an applied one that off undoes.
         let mut acting: Vec<bool> = vec![];
-        let mut left_out: Vec<bool> = vec![];
+        let mut left_out: Vec<Option<Option<f64>>> = vec![];
         for (session, failed, mut periods) in sessions() {
-            left_out.push(self.split.sessions.contains(session));
+            left_out.push(self.split.left_out(session));
             acting.push(periods.iter().any(|p| {
                 matches!(
                     p.kind.status,
@@ -2127,10 +2130,8 @@ impl<'a> Profiled<'a> {
         let pair = |r: &Run| {
             let sessions = r.sessions.iter().zip(&off.sessions).zip(&acting);
             let sessions = sessions.zip(&left_out);
-            let (delta, coverage) = paired(
-                sessions.map(|(((on, off), &a), &out)| (on, off, a, out)),
-                &self.split,
-            );
+            let (delta, coverage) =
+                paired(sessions.map(|(((on, off), &a), &out)| (on, off, a, out)));
             (delta.filter(|_| !replay.blocked), coverage)
         };
         let delta = |r: &Run| pair(r).0;
@@ -2735,9 +2736,17 @@ fn detailed_t3_checks(
                     })
             })
             .collect();
+        // T3's replay applies one TTL to every project, so one that varies leaves it unpriced.
+        let mut unresolved_windows = unresolved_windows;
+        unresolved_windows.extend(
+            [&profile.ttl.main, &profile.ttl.subagent]
+                .into_iter()
+                .filter(|t| t.varies)
+                .map(|t| t.reason.clone()),
+        );
         let current_ttls = PerBucket {
-            main: profile.ttl.main.value,
-            subagent: profile.ttl.subagent.value,
+            main: profile.ttl.main.one().value,
+            subagent: profile.ttl.subagent.one().value,
         };
         let mut current_replay = profiled.replay(&current_ttls, &current_windows, true);
         // The unresolved window causes the replay's own errors, so it is named first.
@@ -2763,7 +2772,7 @@ fn detailed_t3_checks(
                     && c.base.action == Action::Change
             })
             .and_then(|c| c.base.recommended)
-            .or(profile.ttl.main.value);
+            .or(profile.ttl.main.one().value);
         let after_ttls = PerBucket {
             main: ttl,
             subagent: options
@@ -2775,7 +2784,7 @@ fn detailed_t3_checks(
                         && c.base.action == Action::Change
                 })
                 .and_then(|c| c.base.recommended)
-                .or(profile.ttl.subagent.value),
+                .or(profile.ttl.subagent.one().value),
         };
         let mut after_replay = profiled.replay(&after_ttls, &after_windows, true);
         after_replay
@@ -2999,7 +3008,7 @@ fn t3_comparison(
             };
             // T3 dates expiry from the request start, so the timer is relative to `r.time`.
             let expires = meta.and_then(|t| t.cache_expires_at).and_then(|expiry| {
-                if ttl == profile.ttl.main.value {
+                if ttl == profile.ttl.main.one().value {
                     return Some(expiry);
                 }
                 let old =
@@ -3029,7 +3038,7 @@ fn t3_comparison(
                 .and_then(|t| t.idle_mode);
             // A recorded compaction shows when T3 fired under the current TTL; another TTL
             // moves the timer, so that gap is judged like any other.
-            let (status, reason) = if observed.is_some() && ttl == profile.ttl.main.value {
+            let (status, reason) = if observed.is_some() && ttl == profile.ttl.main.one().value {
                 (
                     PeriodStatus::Eligible,
                     "explicit idle run identity and native applied compaction boundary",
@@ -3291,13 +3300,12 @@ fn t3_comparison(
         .map(|run| {
             let acting = sessions
                 .iter()
-                .map(|s| (acting.contains(s), profiled.split.sessions.contains(s)));
+                .map(|s| (acting.contains(s), profiled.split.left_out(s)));
             let (estimate, _) = paired(
                 run.sessions
                     .iter()
                     .zip(acting.clone())
                     .map(|(cost, (a, out))| (cost, &zero, a, out)),
-                &profiled.split,
             );
             let (savings, coverage) = paired(
                 current
@@ -3305,7 +3313,6 @@ fn t3_comparison(
                     .zip(&run.sessions)
                     .zip(acting)
                     .map(|((current, cost), (a, out))| (current, cost, a, out)),
-                &profiled.split,
             );
             let unblocked = |e: Option<Estimate>| e.filter(|_| !replay.blocked);
             // Priced in full, the pairs add up to the totals' difference.
@@ -3902,12 +3909,14 @@ mod tests {
             value: Some(value),
             owner: owner.into(),
             reason: "explicit".into(),
+            varies: false,
         };
         Profile {
             agents: Default::default(),
             instruction_budget_file: None,
             instruction_budget_unresolved: None,
             outranking_files: vec![],
+            ttl_directories: IndexMap::default(),
             claude_config: None,
             codex_system_config: None,
             switched_off: vec![],
@@ -4160,15 +4169,12 @@ mod tests {
         };
         let (zero, unknown) = (zero_cost(), unknown_cost("synthetic"));
         // A priced session no mode acts on counts exactly, beside the extrapolated ones.
-        let (estimate, coverage) = paired(
-            [
-                (&usd(3.0), &zero, true, false),
-                (&usd(5.0), &zero, true, false),
-                (&unknown, &zero, true, false),
-                (&usd(1.0), &zero, false, false),
-            ],
-            &crate::t3::Split::default(),
-        );
+        let (estimate, coverage) = paired([
+            (&usd(3.0), &zero, true, None),
+            (&usd(5.0), &zero, true, None),
+            (&unknown, &zero, true, None),
+            (&usd(1.0), &zero, false, None),
+        ]);
         let estimate = estimate.unwrap();
         near(Some(estimate.usd), 4.0 * 3.0 + 1.0);
         assert!(matches!(estimate.margin, Some(Margin::Usd(m)) if m > 0.0));
@@ -4182,20 +4188,14 @@ mod tests {
         );
         // Sessions T3 left open stand in at the line's share; one idle could not act on
         // stands for nothing.
-        let half = crate::t3::Split {
-            share: Some(0.5),
-            ..Default::default()
-        };
-        let (estimate, coverage) = paired(
-            [
-                (&usd(3.0), &zero, true, false),
-                (&usd(5.0), &zero, true, false),
-                (&usd(9.0), &zero, true, true),
-                (&unknown, &zero, true, true),
-                (&usd(1.0), &zero, false, true),
-            ],
-            &half,
-        );
+        let half = Some(Some(0.5));
+        let (estimate, coverage) = paired([
+            (&usd(3.0), &zero, true, None),
+            (&usd(5.0), &zero, true, None),
+            (&usd(9.0), &zero, true, half),
+            (&unknown, &zero, true, half),
+            (&usd(1.0), &zero, false, half),
+        ]);
         near(estimate.map(|e| e.usd), 4.0 * 3.0);
         assert_eq!(
             coverage,
@@ -4206,32 +4206,23 @@ mod tests {
                 stand_ins: 1,
             }
         );
-        let none = crate::t3::Split::default();
-        let (estimate, _) = paired(
-            [
-                (&usd(3.0), &zero, true, false),
-                (&usd(9.0), &zero, true, true),
-            ],
-            &none,
-        );
+        // A left-out session with no share leaves nothing estimated.
+        let (estimate, _) = paired([
+            (&usd(3.0), &zero, true, None),
+            (&usd(9.0), &zero, true, Some(None)),
+        ]);
         assert_eq!(estimate, None);
         // Nothing priced where idle could act leaves nothing to extrapolate from.
-        let (estimate, _) = paired(
-            [
-                (&unknown, &zero, true, false),
-                (&usd(1.0), &zero, false, false),
-            ],
-            &crate::t3::Split::default(),
-        );
+        let (estimate, _) = paired([
+            (&unknown, &zero, true, None),
+            (&usd(1.0), &zero, false, None),
+        ]);
         assert_eq!(estimate, None);
         // Every session priced is exact.
-        let (estimate, coverage) = paired(
-            [
-                (&usd(2.0), &usd(0.5), true, false),
-                (&usd(1.0), &zero, false, false),
-            ],
-            &crate::t3::Split::default(),
-        );
+        let (estimate, coverage) = paired([
+            (&usd(2.0), &usd(0.5), true, None),
+            (&usd(1.0), &zero, false, None),
+        ]);
         assert_eq!(
             estimate,
             Some(Estimate {

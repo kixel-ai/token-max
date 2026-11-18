@@ -2230,6 +2230,19 @@ pub(crate) fn enrich(
             }
         }
     }
+    // A Claude profile's TTL is one value only across the projects its own requests ran
+    // in, which attribution has now settled.
+    for p in profiles
+        .iter_mut()
+        .filter(|p| !p.ttl_directories.is_empty())
+    {
+        let directories: HashSet<&str> = requests
+            .iter()
+            .filter(|r| r.profiles.contains(&p.id))
+            .filter_map(|r| r.cwd.as_deref())
+            .collect();
+        crate::discovery::settle_ttls(p, directories.iter().copied());
+    }
     let open = |control: Control| unsettled_for(profiles, &unsettled, control);
     let [speed, main_ttl, subagent_ttl, compaction] = [
         Control::Speed,
@@ -2319,14 +2332,14 @@ fn unsettled_for(
 
 /// How a line that acts for one owner alone, such as native idle compaction, T3's idle
 /// modes or the background features, extrapolates over the main-agent requests T3 left open
-/// between its profiles and others: their sessions are left out of its comparison, and stand
-/// in at `share`, the line's part of the requests T3 settled between the same owners.
+/// between its profiles and others: their sessions are left out of its comparison, and each
+/// stands in at the line's share of the requests T3 settled between that session's own
+/// possible owners, so another home on the same line never dilutes it.
 #[derive(Debug, Default)]
 pub(crate) struct Split<'a> {
-    /// Sessions with a selected request whose owner T3 left open.
-    pub sessions: HashSet<&'a str>,
-    /// The line's share of the settled requests; None when T3 settled none of them.
-    pub share: Option<f64>,
+    /// Each session with a selected request whose owner T3 left open, with its share; None
+    /// when T3 settled no request between its possible owners.
+    pub sessions: HashMap<&'a str, Option<f64>>,
 }
 
 impl<'a> Split<'a> {
@@ -2355,43 +2368,51 @@ impl<'a> Split<'a> {
                 && r.profiles.iter().any(|p| !line.contains(p))
                 && r.profiles.iter().any(|p| instance(p))
         };
-        let mut split = Split::default();
-        let mut rivals: HashSet<&str> = HashSet::default();
+        let mut owners: HashMap<&'a str, std::collections::BTreeSet<&'a str>> = HashMap::default();
         for r in selected().filter(|r| open(r)) {
-            split.sessions.insert(&r.session);
-            rivals.extend(
-                r.profiles
-                    .iter()
-                    .filter(|p| !line.contains(p))
-                    .map(String::as_str),
-            );
+            owners
+                .entry(&r.session)
+                .or_default()
+                .extend(r.profiles.iter().map(String::as_str));
         }
-        if split.sessions.is_empty() {
-            return split;
+        let mut shares: HashMap<&std::collections::BTreeSet<&str>, Option<f64>> =
+            HashMap::default();
+        for cohort in owners.values() {
+            shares.entry(cohort).or_insert_with(|| {
+                let (mut own, mut other) = (0u64, 0u64);
+                for r in selected().filter(|r| {
+                    !r.profiles.is_empty() && r.profiles.iter().all(|p| cohort.contains(&**p))
+                }) {
+                    if r.profiles.iter().all(|p| line.contains(p)) {
+                        own += 1;
+                    } else if r.profiles.iter().all(|p| !line.contains(p)) {
+                        other += 1;
+                    }
+                }
+                (own + other > 0).then(|| own as f64 / (own + other) as f64)
+            });
         }
-        let within = |r: &Request, set: &dyn Fn(&str) -> bool| {
-            !r.profiles.is_empty() && r.profiles.iter().all(|p| set(p))
-        };
-        let (mut own, mut other) = (0u64, 0u64);
-        for r in selected() {
-            if within(r, &|p| line.iter().any(|l| l == p)) {
-                own += 1;
-            } else if within(r, &|p| rivals.contains(p)) {
-                other += 1;
-            }
-        }
-        split.share = (own + other > 0).then(|| own as f64 / (own + other) as f64);
-        split
+        let sessions = owners
+            .iter()
+            .map(|(&session, cohort)| (session, shares[cohort]))
+            .collect();
+        Split { sessions }
     }
 
-    /// How many of `count` left-out sessions or turns stand in for the line, or None when
-    /// none can be estimated.
-    pub fn stand_ins(&self, count: u64) -> Option<u64> {
-        if count == 0 {
-            return Some(0);
-        }
-        self.share.map(|s| (s * count as f64).round() as u64)
+    /// Whether the line leaves `session` out, and if so its share.
+    pub fn left_out(&self, session: &str) -> Option<Option<f64>> {
+        self.sessions.get(session).copied()
     }
+}
+
+/// How many left-out sessions or turns, each with its share, stand in for the line, or None
+/// when any has no share.
+pub(crate) fn stand_ins(shares: impl IntoIterator<Item = Option<f64>>) -> Option<u64> {
+    let mut sum = 0.0;
+    for share in shares {
+        sum += share?;
+    }
+    Some(sum.round() as u64)
 }
 
 #[cfg(test)]
@@ -2559,6 +2580,7 @@ mod tests {
         let profiles = [
             make_profile("native", "/home/.claude"),
             make_profile("other", "/home/.claude"),
+            make_profile("elsewhere", "/work/.claude"),
             make_t3_profile("agent", "/home/.claude"),
         ];
         let request = |id: &str, session: &str, owners: &[&str]| {
@@ -2577,28 +2599,33 @@ mod tests {
         ];
         let line = ["native".to_string()];
         let split = Split::new(&profiles, &requests, &line, None);
-        assert_eq!(split.sessions, HashSet::from_iter(["open"]));
-        assert_eq!(split.share, Some(0.75));
-        assert_eq!(split.stand_ins(4), Some(3));
+        assert_eq!(split.sessions.len(), 1);
+        assert_eq!(split.left_out("open"), Some(Some(0.75)));
+        assert_eq!(split.left_out("native-1"), None);
+        assert_eq!(stand_ins([Some(0.75); 4]), Some(3));
         // T3's line sees the same requests from its side.
         let t3 = ["agent".to_string()];
-        assert_eq!(
-            Split::new(&profiles, &requests, &t3, None).share,
-            Some(0.25)
-        );
+        let split = Split::new(&profiles, &requests, &t3, None);
+        assert_eq!(split.left_out("open"), Some(Some(0.25)));
+        // Another home on a shared line has no say in this home's share.
+        let shared = ["native".to_string(), "elsewhere".to_string()];
+        requests.extend((0..100).map(|i| request(&format!("w{i}"), "work", &["elsewhere"])));
+        let split = Split::new(&profiles, &requests, &shared, None);
+        assert_eq!(split.left_out("open"), Some(Some(0.75)));
         // Requests open between native profiles alone are not T3's to settle.
         requests.push(request("f", "copied", &["native", "other"]));
         let split = Split::new(&profiles, &requests, &line, None);
-        assert!(!split.sessions.contains("copied"));
+        assert_eq!(split.left_out("copied"), None);
         // A removed instance is no current profile, and counts as T3's.
         requests.push(request("g", "removed", &["native", "t3:/state:gone"]));
         let split = Split::new(&profiles, &requests, &line, None);
-        assert!(split.sessions.contains("removed"));
+        assert_eq!(split.left_out("removed"), Some(Some(1.0)));
         // With nothing settled to estimate a share from, none can be priced.
         let open = [request("e", "open", &["native", "agent"])];
         let split = Split::new(&profiles, &open, &line, None);
-        assert_eq!((split.share, split.stand_ins(1)), (None, None));
-        assert_eq!(split.stand_ins(0), Some(0));
+        assert_eq!(split.left_out("open"), Some(None));
+        assert_eq!(stand_ins([None]), None);
+        assert_eq!(stand_ins([]), Some(0));
     }
 
     #[test]

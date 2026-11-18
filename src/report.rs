@@ -7424,6 +7424,7 @@ mod tests {
             value: None,
             owner: format!("{ROOT}/settings.json:promptCacheTtl"),
             reason: TTL_BILLING_UNKNOWN.into(),
+            varies: false,
         };
         let ttl = ttl_mut(&mut report);
         ttl.base.current = None;

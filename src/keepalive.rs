@@ -146,7 +146,7 @@ fn claude_lifetime(
         .and_then(|c| c.base.recommended)
     {
         (t, "recommended main TTL")
-    } else if let Some(t) = profile.ttl.main.value {
+    } else if let Some(t) = profile.ttl.main.one().value {
         (t, "current main TTL")
     } else if let Some(t) = check.and_then(|c| c.base.recommended) {
         (t, "main TTL the replay favors")

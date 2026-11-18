@@ -840,9 +840,25 @@ pub struct TunedWindow {
 /// A current TTL control for one bucket.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TtlControl {
+    /// The home's value, which a recorded project may override; see `varies`.
     pub value: Option<Ttl>,
     pub owner: String,
     pub reason: String,
+    /// Whether recorded projects get the TTL from another owner or at another value, so
+    /// `value` does not hold for every request; replays that resolve each directory still
+    /// read it there.
+    #[serde(skip)]
+    pub varies: bool,
+}
+
+impl TtlControl {
+    /// The control as one value for the whole profile: unknown where projects differ.
+    pub fn one(&self) -> TtlControl {
+        TtlControl {
+            value: self.value.filter(|_| !self.varies),
+            ..self.clone()
+        }
+    }
 }
 
 /// Window controls for the default and per-model overrides.
@@ -995,6 +1011,10 @@ pub struct Profile {
     /// the same switch in `settings_file`. Only files that hold settings are listed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outranking_files: Vec<String>,
+    /// Each existing recorded directory's cache TTLs, from which the profile's are settled
+    /// once T3 attributes its requests.
+    #[serde(skip)]
+    pub ttl_directories: IndexMap<String, PerBucket<TtlControl>>,
     /// Claude Code's own state file for this root, such as `~/.claude.json`, which holds
     /// its user- and local-scope MCP servers; none for Codex.
     #[serde(skip)]

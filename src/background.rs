@@ -422,8 +422,9 @@ struct Generations {
     pairs: Pairs,
     on: Sum,
     off: Sum,
-    /// Turns where it would have run that T3 could not settle to the line, left out.
-    left_out: u64,
+    /// The shares of the turns where it would have run that T3 could not settle to the
+    /// line, which are left out.
+    left_out: Vec<Option<f64>>,
 }
 
 /// Total the estimated (on, off) cost of each turn where the feature would have run.
@@ -443,8 +444,8 @@ fn generations(
         if !runs {
             continue;
         }
-        if split.sessions.contains(&*end.request.session) {
-            result.left_out += 1;
+        if let Some(share) = split.left_out(&end.request.session) {
+            result.left_out.push(share);
             continue;
         }
         let on = fork_cost(catalog, end, feature);
@@ -483,7 +484,7 @@ fn check(
         Generations::default()
     };
     // Turns T3 could not settle to this line stand in at its share of those it did.
-    let stand_ins = split.stand_ins(left_out);
+    let (left_out, stand_ins) = (left_out.len() as u64, crate::t3::stand_ins(left_out));
     let paired = pairs.savings(stand_ins.unwrap_or(0));
     // Extrapolate the measured net cost to every turn where it ran, as context costs do.
     let estimate = paired.usd().filter(|_| stand_ins.is_some());

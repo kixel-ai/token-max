@@ -216,10 +216,12 @@ unwritten. If the connection drops while a destination writes, its files may or
 may not have changed, and the error says to check them and their backups.
 
 Ctrl-C before the confirm stops every destination with nothing written. After
-the yes, Ctrl-C starts no further host's write and exits 2, naming the hosts
-left unwritten. A write already under way on this host finishes. A
-destination's write may still finish there after this host stops waiting for
-it, so the error says to check that host's files and backups.
+the yes, Ctrl-C starts no further host's write. A write already under way on
+this host finishes. A destination's write may still finish there after this
+host stops waiting for it, so the error says to check that host's files and
+backups. The run exits 2 when the Ctrl-C left a host unwritten or stopped
+waiting for one, naming each. A Ctrl-C that lands as the last write finishes
+cuts nothing short, so the run reports what it wrote and exits 0.
 
 ## Profiles
 

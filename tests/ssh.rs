@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use token_max::controls::Env;
 use token_max::discovery::DiscoveryOptions;
 use token_max::model::{
@@ -23,7 +24,8 @@ const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 /// Destinations under one target scratch directory whose path has a space, removed on drop.
 ///
 /// `ssh` runs the destination's command with `sh`, its home under `homes/` and its `PATH`
-/// of `remote/<host>`, which links the real binary unless a test replaces it, then `tools/`.
+/// of `remote/<host>`, where a test can replace a command, then `tools/`. The coordinator
+/// copies itself to each destination's cache on its first run there.
 struct Hosts {
     root: PathBuf,
 }
@@ -42,11 +44,21 @@ impl Hosts {
         let tools = root.join("tools");
         std::fs::create_dir_all(&tools).unwrap();
         let path = std::env::var_os("PATH").unwrap();
-        for tool in ["sh", "uname", "sleep"] {
-            let found = std::env::split_paths(&path)
+        // Linux ships sha256sum and macOS shasum; either checks a copy.
+        let sums = ["sha256sum", "shasum"];
+        for tool in [
+            "sh", "uname", "sleep", "cat", "mkdir", "mktemp", "chmod", "mv", "rm",
+        ]
+        .into_iter()
+        .chain(sums)
+        {
+            let Some(found) = std::env::split_paths(&path)
                 .map(|dir| dir.join(tool))
                 .find(|file| file.is_file())
-                .unwrap_or_else(|| panic!("{tool} is not on PATH"));
+            else {
+                assert!(sums.contains(&tool), "{tool} is not on PATH");
+                continue;
+            };
             let found = std::env::current_dir().unwrap().join(found);
             symlink(found, tools.join(tool)).unwrap();
         }
@@ -65,12 +77,38 @@ HOME="$TEST_ROOT/homes/$host" PATH="$TEST_ROOT/remote/$host:$TEST_PATH" exec sh 
         hosts
     }
 
-    /// A destination with the real binary installed and the synthetic transcript.
+    /// A destination with the synthetic transcript, where the coordinator copies itself.
     fn host(&self, name: &str) -> PathBuf {
-        let bin = self.root.join("remote").join(name);
-        std::fs::create_dir_all(&bin).unwrap();
-        symlink(BIN, bin.join("token-max")).unwrap();
         self.home(name)
+    }
+
+    /// The cache the coordinator copies itself into on `host`.
+    fn cache(&self, host: &str) -> PathBuf {
+        self.root
+            .join("homes")
+            .join(host)
+            .join(".cache/token-max/ssh")
+    }
+
+    /// A destination whose copy of this build is this shell script instead.
+    fn fake(&self, host: &str, body: &str) {
+        let cache = self.cache(host);
+        std::fs::create_dir_all(&cache).unwrap();
+        script(&cache.join(copy_name()), body);
+    }
+
+    /// A destination whose `uname` names another platform than this one.
+    fn elsewhere(&self, host: &str) {
+        let (os, arch) = if cfg!(target_os = "linux") {
+            ("Darwin", "arm64")
+        } else {
+            ("Linux", "x86_64")
+        };
+        self.replace(
+            host,
+            "uname",
+            &format!(r#"case "$1" in -s) echo {os} ;; -m) echo {arch} ;; esac"#),
+        );
     }
 
     fn home(&self, name: &str) -> PathBuf {
@@ -151,6 +189,13 @@ impl Drop for Hosts {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+/// The name the coordinator caches its copy under on each destination.
+fn copy_name() -> String {
+    let digest = Sha256::digest(std::fs::read(BIN).unwrap());
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    format!("token-max-{}", &hex[..16])
 }
 
 fn script(path: &Path, body: &str) {
@@ -831,9 +876,43 @@ fn background_controls_and_estimates_keep_their_remote_history() {
 }
 
 #[test]
-fn the_release_installers_directory_is_searched() {
+fn the_coordinator_copies_itself_once_and_replaces_older_copies() {
+    let hosts = Hosts::new();
+    hosts.host("devbox");
+    // An older build's copy, which this one replaces.
+    let cache = hosts.cache("devbox");
+    std::fs::create_dir_all(&cache).unwrap();
+    script(&cache.join("token-max-0000000000000000"), "exit 2");
+    // An installed development build may be any commit, so it is not run.
+    hosts.replace("devbox", "token-max", "exit 2");
+    let copies = || {
+        std::fs::read_to_string(hosts.root.join("ssh.args"))
+            .unwrap()
+            .matches(".copy.XXXXXX")
+            .count()
+    };
+    for _ in 0..2 {
+        let (status, stdout, stderr) = hosts.run(&["--ssh", "devbox"]);
+        assert_eq!(status, 0, "{stderr}");
+        assert!(stdout.starts_with("token-max: devbox  "), "{stdout}");
+        assert_eq!(copies(), 1);
+    }
+    let cached: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(cached, [copy_name()]);
+    assert_eq!(
+        std::fs::read(cache.join(copy_name())).unwrap(),
+        std::fs::read(BIN).unwrap()
+    );
+}
+
+#[test]
+fn another_platform_runs_its_installed_build() {
     let hosts = Hosts::new();
     let home = hosts.home("installed");
+    hosts.elsewhere("installed");
     let bin = home.join(".local/bin");
     std::fs::create_dir_all(&bin).unwrap();
     symlink(BIN, bin.join("token-max")).unwrap();
@@ -844,6 +923,7 @@ fn the_release_installers_directory_is_searched() {
     let (status, stdout, stderr) = hosts.run(&["--ssh", "installed"]);
     assert_eq!(status, 0, "{stderr}");
     assert!(stdout.starts_with("token-max: installed  "), "{stdout}");
+    assert!(!hosts.cache("installed").exists());
 }
 
 #[test]
@@ -851,23 +931,25 @@ fn any_failed_destination_fails_the_whole_report() {
     let hosts = Hosts::new();
     hosts.host("devbox");
     hosts.home("bare");
+    hosts.elsewhere("bare");
     hosts.host("windows");
     hosts.replace("windows", "uname", "echo Windows_NT");
-    hosts.replace("old", "token-max", "echo 'invalid arguments' >&2; exit 2");
+    hosts.host("static");
+    hosts.replace("static", "chmod", "exit 1");
+    hosts.host("damaged");
+    for sum in ["sha256sum", "shasum"] {
+        hosts.replace("damaged", sum, "echo 00 -");
+    }
+    hosts.fake("old", "echo 'invalid arguments' >&2; exit 2");
     let header = hosts.header();
     assert!(header.starts_with("{\"tokenMaxScan\":"), "{header}");
     let other = header.replacen("\"tokenMaxScan\":\"", "\"tokenMaxScan\":\"9.9.9+", 1);
-    hosts.replace(
-        "other",
-        "token-max",
-        &format!("echo '{other}'; exec sleep 600"),
-    );
-    hosts.replace(
+    hosts.fake("other", &format!("echo '{other}'; exec sleep 600"));
+    hosts.fake(
         "corrupt",
-        "token-max",
         &format!("echo '{header}'; echo '{{\"scan\":{{\"since\":'"),
     );
-    hosts.replace("silent", "token-max", &format!("echo '{header}'; exit 0"));
+    hosts.fake("silent", &format!("echo '{header}'; exit 0"));
     let broken = hosts.host("broken");
     std::fs::write(
         broken.join(".claude/projects/my project/main.jsonl"),
@@ -875,22 +957,17 @@ fn any_failed_destination_fails_the_whole_report() {
 "#,
     )
     .unwrap();
-    // The hint names the command that installs this build there.
-    let install = match env!("CARGO_PKG_VERSION") {
-        "0.0.0" => {
-            "`cargo install --locked --git https://github.com/kixel-ai/token-max` on both hosts"
-                .to_string()
-        }
-        version => format!(
-            "`curl -LsSf https://max.kixel.ai/install.sh | sh` on both hosts, or `cargo install --locked token-max --version {version}` there"
-        ),
+    let build = "`cargo install --locked --git https://github.com/kixel-ai/token-max --rev <commit>` there, from this build's commit";
+    let (os, arch) = (std::env::consts::OS, std::env::consts::ARCH);
+    let target = if cfg!(target_os = "linux") {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-unknown-linux-musl"
     };
     let bare = format!(
-        "bare: token-max is not installed on PATH, in the release installers' directory or in ~/.cargo/bin; install it with {install}\n"
+        "bare: runs on {target}, and this development build for {os} {arch} has no release to download; build it with {build}\n"
     );
-    let old = format!(
-        "old: token-max there did not start an SSH audit (exit 2); install the same version with {install}\n"
-    );
+    let other = "other: the token-max 0.0.0 there is build 9.9.9+";
     for (host, expected) in [
         (
             "unreachable",
@@ -898,8 +975,19 @@ fn any_failed_destination_fails_the_whole_report() {
         ),
         ("bare", bare.as_str()),
         ("windows", "windows: unsupported platform"),
-        ("old", old.as_str()),
-        ("other", "other: runs token-max 9.9.9+"),
+        (
+            "static",
+            "static: a copy of this token-max does not run there",
+        ),
+        (
+            "damaged",
+            "damaged: the copy of this token-max arrived damaged\n",
+        ),
+        (
+            "old",
+            "old: token-max there did not start an SSH audit (exit 2)\n",
+        ),
+        ("other", other),
         ("corrupt", "corrupt: invalid SSH audit stream at line "),
         ("silent", "silent: invalid SSH audit stream at line 2"),
         ("broken", "broken: "),
@@ -913,6 +1001,11 @@ fn any_failed_destination_fails_the_whole_report() {
             "{host}: {stderr}"
         );
         assert!(!stderr.contains("SYNTHETIC_PRIVATE") && !stderr.contains("noise"));
+    }
+    // A failed copy leaves nothing behind.
+    for host in ["static", "damaged"] {
+        let cache = hosts.cache(host);
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0, "{host}");
     }
     let (status, _, stderr) = hosts.run(&["--ssh", "broken"]);
     assert_eq!(status, 2);
@@ -935,9 +1028,8 @@ fn cancelling_stops_and_reaps_every_destination() {
     // SAFETY: mkfifo creates a named pipe at a path this test owns.
     assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
     let header = hosts.header();
-    hosts.replace(
+    hosts.fake(
         "slow",
-        "token-max",
         &format!("echo '{header}'; echo > \"$TEST_ROOT/ready\"; exec sleep 600"),
     );
     for signal in [libc::SIGINT, libc::SIGTERM] {
@@ -988,9 +1080,8 @@ fn prices_and_destinations_stop_the_run_whichever_fails_first() {
     // The slow destination writes invalid prices here once it is scanning.
     let invalid = mkfifo("invalid.json");
     let header = hosts.header();
-    hosts.replace(
+    hosts.fake(
         "slow",
-        "token-max",
         &format!("echo '{header}'; printf '{{' > \"$TEST_ROOT/invalid.json\"; exec sleep 600"),
     );
     // The real binary, which starts its audit and then fails to read this transcript.

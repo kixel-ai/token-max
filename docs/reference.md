@@ -879,12 +879,11 @@ and limits.
 
 `--ssh HOST` (repeatable) audits a machine you reach with OpenSSH, using your
 SSH configuration, keys and known hosts without prompting. Add
-`--include-local` to audit this host in the same run. Each destination needs
-the same version of token-max installed; token-max installs nothing there
-itself. A missing or different version fails with the
-command to run. Linux and macOS destinations are supported. `token-max
-sessions` takes the same flags, and each destination sends only its priced
-session lines.
+`--include-local` to audit this host in the same run. You install nothing
+there: each destination runs this build of token-max, which token-max puts
+there itself. Linux and macOS destinations on x86_64 or arm64 are supported.
+`token-max sessions` takes the same flags, and each destination sends only its
+priced session lines.
 
 ```sh
 token-max doctor --ssh devbox --ssh user@laptop --include-local
@@ -894,10 +893,33 @@ The destination runs `token-max doctor --ssh-scan`, which discovers that host's 
 profiles from its home and environment, reads its transcripts and settings,
 and runs every check there, priced from the one catalog this host loads and
 sends it. Only its finished report comes back, so its transcripts and scan
-never leave it, and this host never holds more than its own scan. It looks for
-`token-max` on the non-interactive `PATH`, then in the release installers'
-directory (the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and
-`~/.local/bin`), then in `~/.cargo/bin`.
+never leave it, and this host never holds more than its own scan.
+
+Each run first asks the destination its OS and architecture, over the
+connection that then runs the audit:
+
+- **On this host's platform**, it runs a copy of this exact binary. Without
+  one, token-max copies itself there over SSH, checked by its SHA-256. An
+  installed token-max is not used, since every build after a release reports
+  that release's version.
+- **On another platform**, it runs this version's release. Failing that, it
+  runs the first installed `token-max` whose `--version` matches, on the
+  non-interactive `PATH`, then in the release installers' directory (the
+  first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`),
+  then in `~/.cargo/bin`. With neither, the destination downloads the
+  release from GitHub and checks it against its published checksum, which
+  needs `curl`, `tar` and `xz` there. Matching the version is not matching
+  the build, so a destination whose build differs from this one fails with
+  what to run instead. A development build has no release, so it fails with
+  the `cargo install` command to run there.
+
+Copies and downloads are cached in `~/.cache/token-max/ssh` there (or under
+`$XDG_CACHE_HOME`): a copy named by its digest, a release by version and
+target. Later runs reuse them, and each new one replaces the binaries cached
+there before it. Either step checks that the binary runs there before caching
+it. A copy linked against this host's libraries fails with a statically
+linked build to run here instead, such as the release installers'.
+
 `--claude-dir`, `--codex-dir` and `--t3-dir` select local profiles only, so with
 `--ssh` they need `--include-local`.
 

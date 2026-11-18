@@ -49,7 +49,7 @@ Usage: token-max doctor [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
-  --ssh HOST              Audit an SSH destination with the token-max installed there (repeatable)
+  --ssh HOST              Audit an SSH destination, putting this build there first if needed (repeatable)
   --include-local         Also audit this host when --ssh is given
   --max-cost-per-use USD  Suggest turning off a used tool, skill or MCP server that cost more than this per use (default: 1)
   --details               Show grouped check evidence, assumptions, uncertainty and sources
@@ -77,7 +77,8 @@ It prints that report and edits nothing, even on a terminal.
 Without profile flags, discover local Claude/Codex profiles and T3 instances. Explicit profiles
 limit the entire run. Directory flags select local profiles only; with --ssh
 they need --include-local. Each SSH destination discovers its own profiles
-and needs this same version installed there; it prices its own history with this host's
+with this build of token-max, copied there or downloaded there from this version's release
+and cached; it prices its own history with this host's
 prices, and only its report and its totals cross SSH, never its scan. Several hosts get one
 total, their figures added as they are. Its changes are listed to make there. Current
 settings are applied to the selected history; checks can use different windows and
@@ -114,7 +115,7 @@ Usage: token-max sessions [options]
   --claude-dir DIR        Select a Claude profile (repeatable)
   --codex-dir DIR         Select a Codex home, including archived sessions (repeatable)
   --t3-dir DIR            Select a T3 state directory (repeatable)
-  --ssh HOST              Also export an SSH destination's sessions with the token-max installed there (repeatable)
+  --ssh HOST              Also export an SSH destination's sessions, putting this build there first if needed (repeatable)
   --include-local         Also export this host's sessions when --ssh is given
   --offline               Use cached public prices without network access
   --prices-file FILE      Use a local models.dev catalog without network access

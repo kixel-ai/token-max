@@ -746,14 +746,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
         groups.entry(&r.session).or_default().push(r);
     }
     let mut events: HashMap<&str, Vec<&StructuralEvent>> = HashMap::default();
-    for e in options
-        .scan
-        .cache_context
-        .boundaries
-        .iter()
-        .chain(&options.scan.events)
-        .filter(|e| e.kind == EventKind::Compaction && line.covers(&e.profiles))
-    {
+    for &e in &all_events {
         for session in
             std::iter::once(e.session.as_ref()).chain(e.origins.iter().map(|o| o.session.as_ref()))
         {

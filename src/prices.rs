@@ -515,10 +515,6 @@ impl Drop for Discard<'_> {
     }
 }
 
-fn now_millis() -> i64 {
-    millis(SystemTime::now()).expect("clock after the Unix epoch")
-}
-
 fn millis(time: SystemTime) -> Option<i64> {
     i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
@@ -590,7 +586,7 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
     let _discard = Discard(&temporary);
     match download(&options.cache, &temporary) {
         Ok(catalog) => Ok(Catalog {
-            fetched_at: Some(iso(now_millis())),
+            fetched_at: Some(iso(crate::reader::now())),
             offline: false,
             ..catalog
         }),
@@ -613,25 +609,11 @@ pub fn zero_cost() -> Cost {
 
 /// Keep partial known charges separate from an unknown total.
 pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
-    let mut known = Usd::ZERO;
-    let mut total = Some(Usd::ZERO);
-    let mut unknown = IndexSet::default();
-    let mut assumptions = IndexSet::default();
+    let mut sum = Sum::new();
     for cost in costs {
-        known += cost.known_usd;
-        total = match (total, cost.total_usd) {
-            (Some(sum), Some(value)) => Some(sum + value),
-            _ => None,
-        };
-        unknown.extend(cost.unknown.iter().map(String::as_str));
-        assumptions.extend(cost.assumptions.iter().map(String::as_str));
+        sum.add(cost);
     }
-    Cost {
-        known_usd: known,
-        total_usd: total,
-        unknown: unknown.into_iter().map(str::to_string).collect(),
-        assumptions: assumptions.into_iter().map(str::to_string).collect(),
-    }
+    sum.cost()
 }
 
 /// A running [`add_costs`], so charges need not be kept to be totaled.

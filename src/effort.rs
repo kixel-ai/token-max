@@ -95,10 +95,7 @@ fn claude_canonical(model: &str) -> Option<String> {
     {
         id = head.into();
     }
-    if let Some((head, date)) = id.rsplit_once('-')
-        && date.len() == 8
-        && date.bytes().all(|b| b.is_ascii_digit())
-    {
+    if let Some(head) = crate::controls::strip_dated(&id, 8) {
         id = head.into();
     }
     Some(id)

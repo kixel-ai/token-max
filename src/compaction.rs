@@ -972,16 +972,7 @@ impl<'a> Replayer<'a> {
         estimates: &IndexMap<Text, UsageEstimate>,
         visit: impl FnMut(ReplayedPart<'r>),
     ) {
-        let options = ReplayOptions {
-            estimates,
-            catalog: self.catalog,
-            ttls: self.ttls,
-            since: self.since,
-            cold_prefixes: false,
-            estimated_parts: None,
-            attempt_scenario: Default::default(),
-        };
-        replay_parts(requests, [self.cache], &options)
+        replay_parts(requests, [self.cache], &self.options(estimates))
             .filter(|i| i.selected)
             .for_each(visit);
     }

@@ -4036,7 +4036,10 @@ mod tests {
             }])
             .unwrap();
         assert_eq!(
-            plan.files.iter().map(|p| &p.target.file).collect::<Vec<_>>(),
+            plan.files
+                .iter()
+                .map(|p| &p.target.file)
+                .collect::<Vec<_>>(),
             [&settings.to_string_lossy()]
         );
         assert_eq!(*choice(&plan, "A"), Choice::Accepted);

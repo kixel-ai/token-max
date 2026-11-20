@@ -176,8 +176,9 @@ static PROGRESS: Mutex<usize> = Mutex::new(0);
 fn show_progress(message: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
     let room = progress_room();
-    let text = fit(&format!("token-max: {message}..."), room);
-    let cells = crate::terminal::cells(&text);
+    let line = format!("token-max: {message}...");
+    let text = crate::terminal::fit(&line, room);
+    let cells = crate::terminal::cells(text);
     let pad = " ".repeat((*shown).min(room).saturating_sub(cells));
     eprint!("\r{text}{pad}");
     *shown = cells;
@@ -189,19 +190,6 @@ fn progress_room() -> usize {
     let columns: usize =
         terminal_size::terminal_size_of(io::stderr()).map_or(80, |(w, _)| w.0.into());
     columns.max(2) - 1
-}
-
-/// `text` cut to at most `columns` cells, keeping whole characters.
-fn fit(text: &str, columns: usize) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        let next = format!("{out}{c}");
-        if crate::terminal::cells(&next) > columns {
-            break;
-        }
-        out = next;
-    }
-    out
 }
 
 /// Clear the progress line, if one is showing, so what follows starts on a clean row.
@@ -1456,13 +1444,6 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn progress_fits_one_row() {
-        assert_eq!(super::fit("token-max: Scanning", 9), "token-max");
-        assert_eq!(super::fit("ab", 9), "ab");
-        assert_eq!(super::fit("漢字", 3), "漢");
-    }
-
     use super::*;
 
     #[test]

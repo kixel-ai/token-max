@@ -43,8 +43,11 @@ pub fn build() -> String {
         ]
         .concat(),
     );
-    let hex: String = schema[..6].iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}+{hex}", env!("CARGO_PKG_VERSION"))
+    format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::safe::hex(&schema[..6])
+    )
 }
 
 /// The first value of every stream, written before the scan starts.

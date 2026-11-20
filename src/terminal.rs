@@ -112,6 +112,18 @@ pub fn cells(text: &str) -> usize {
     text.graphemes(true).map(cluster_cells).sum()
 }
 
+/// `text` cut to at most `columns` cells, keeping whole grapheme clusters.
+pub fn fit(text: &str, columns: usize) -> &str {
+    let mut used = 0;
+    for (at, cluster) in text.grapheme_indices(true) {
+        used += cluster_cells(cluster);
+        if used > columns {
+            return &text[..at];
+        }
+    }
+    text
+}
+
 /// Wrap plain text by terminal cells without normalizing Unicode or shortening words.
 ///
 /// Input must already be free of terminal escapes, such as text passed through `safe::terminal_text`.
@@ -244,6 +256,15 @@ mod tests {
                 ..Default::default()
             },
         )
+    }
+
+    #[test]
+    fn fitting_keeps_whole_clusters() {
+        assert_eq!(fit("token-max: Scanning", 9), "token-max");
+        assert_eq!(fit("ab", 9), "ab");
+        assert_eq!(fit("漢字", 3), "漢");
+        // Half a flag is a different symbol, so a cut never splits one.
+        assert_eq!(fit("a🇺🇸", 2), "a");
     }
 
     #[test]

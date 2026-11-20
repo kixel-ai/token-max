@@ -118,10 +118,7 @@ fn binary() -> Result<&'static Binary, ScanError> {
             let bytes = std::env::current_exe()
                 .and_then(std::fs::read)
                 .map_err(|_| "cannot read this token-max binary to copy it".to_string())?;
-            let sha256: String = Sha256::digest(&bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect();
+            let sha256 = crate::safe::hex(&Sha256::digest(&bytes));
             Ok(Binary {
                 name: format!("token-max-{}", &sha256[..16]),
                 sha256,
@@ -1090,10 +1087,7 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-        let mut hash: String = Sha256::digest(std::fs::read(&archive).unwrap())
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let mut hash = crate::safe::hex(&Sha256::digest(std::fs::read(&archive).unwrap()));
         if corrupt {
             hash = hash.replace(|c: char| c != '0', "0");
         }
@@ -1147,10 +1141,7 @@ mod tests {
         let binary = home.join("binary");
         release(&binary, "0.0.1");
         let bytes = std::fs::read(&binary).unwrap();
-        let hash: String = Sha256::digest(&bytes)
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hash = crate::safe::hex(&Sha256::digest(&bytes));
         let copy = |sha256: &str| {
             let output = command(home, &format!("{SUM}{COPY}"), &["token-max-copy", sha256])
                 .stdin(std::fs::File::open(&binary).unwrap())

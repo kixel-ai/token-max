@@ -68,11 +68,15 @@ pub fn digest(value: &str) -> Id {
 
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.
 pub fn identity(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((byte & 15) as u32, 16).unwrap());
+    hex(&Sha256::digest(value.as_bytes()))
+}
+
+/// Lowercase hexadecimal, two digits a byte.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String");
     }
     out
 }

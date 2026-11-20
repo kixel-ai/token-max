@@ -288,7 +288,7 @@ impl Replayer<'_> {
                         let next = main.iter().find(|r| r.time >= e.time);
                         if let Some(next) = next {
                             let p = message(next).next()?;
-                            let full = p.usage.read? + p.usage.write?;
+                            let full = p.usage.cached_prefix()?;
                             offset += pre - full;
                             context = Some((full, 0));
                         } else {

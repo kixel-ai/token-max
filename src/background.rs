@@ -357,9 +357,8 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
     {
         return zero_cost();
     }
-    let prefix = match (source.usage.read, source.usage.write) {
-        (Some(read), Some(write)) => read + write,
-        _ => return unknown_cost("the turn's last response has no recorded cache usage"),
+    let Some(prefix) = source.usage.cached_prefix() else {
+        return unknown_cost("the turn's last response has no recorded cache usage");
     };
     let read = part.usage.read.map(|read| read.min(prefix));
     let (Some(read), Some(rates)) = (read, unit_rates(catalog, next, part)) else {

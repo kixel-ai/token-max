@@ -281,15 +281,18 @@ impl<'a> WindowEvents<'a> {
     }
 }
 
-fn is_message(p: &BillingPart) -> bool {
+/// Whether a part is a model message turn.
+pub(crate) fn is_message(p: &BillingPart) -> bool {
     p.kind == PartKind::Message
 }
 
-fn is_conversation(p: &BillingPart) -> bool {
+/// Whether a part may carry conversation: a message, or one of unknown kind.
+pub(crate) fn is_conversation(p: &BillingPart) -> bool {
     matches!(p.kind, PartKind::Message | PartKind::Unknown)
 }
 
-fn median(mut values: Vec<i64>) -> i64 {
+/// The middle value, rounding an even split up.
+pub(crate) fn median(mut values: Vec<i64>) -> i64 {
     values.sort_unstable();
     let mid = values.len() / 2;
     if values.len() % 2 == 1 {
@@ -303,10 +306,7 @@ fn median(mut values: Vec<i64>) -> i64 {
 fn prefix(harness: Harness, u: &Usage) -> Option<i64> {
     match harness {
         Harness::Codex => u.input,
-        Harness::Claude => match (u.read, u.write) {
-            (Some(read), Some(write)) => Some(read + write),
-            _ => None,
-        },
+        Harness::Claude => u.cached_prefix(),
     }
 }
 

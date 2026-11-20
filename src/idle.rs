@@ -2584,7 +2584,7 @@ fn profile_checks<'a>(
                 margin,
                 monthly_savings_usd: savings
                     .filter(|_| elapsed > 0)
-                    .map(|s| s * 30.0 * 86_400_000.0 / elapsed as f64),
+                    .map(|s| crate::report::monthly(s, Some(since), Some(now))),
                 break_even,
                 assumptions: vec![
                     c.reason.clone(),

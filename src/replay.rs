@@ -32,7 +32,6 @@ use crate::scenarios::{
 };
 
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
-const MINUTE: Millis = 60_000;
 
 fn in_bucket(r: &Request, p: &BillingPart, selected: Bucket) -> bool {
     cache_bucket(r, p).is_none_or(|b| b == selected)
@@ -814,7 +813,7 @@ fn ttl_check(
             margin: paired.savings.and_then(|s| s.margin),
             monthly_savings_usd: savings
                 .filter(|_| now > since)
-                .map(|s| s * 30.0 * 24.0 * 60.0 * MINUTE as f64 / (now - since) as f64),
+                .map(|s| crate::report::monthly(s, Some(since), Some(now))),
             break_even: break_even.map(|b| {
                 format!(
                     "1h breaks even at {}% of modeled warm-prefix reuse in 5-60 minute gaps",

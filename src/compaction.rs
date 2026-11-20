@@ -1869,7 +1869,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     margin,
                     monthly_savings_usd: savings
                         .filter(|_| now > since)
-                        .map(|s| (s * 30.0 * 86400000.0) / (now - since) as f64),
+                        .map(|s| crate::report::monthly(s, Some(since), Some(now))),
                     break_even: savings.filter(|&s| s > 0.0).map(|s| {
                         format!(
                             "${s:.4} of additional re-read or changed-work cost erases the modeled saving over this window"

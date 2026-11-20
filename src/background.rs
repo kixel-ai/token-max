@@ -31,7 +31,6 @@ const SOURCES: [&str; 8] = [
     "https://learn.chatgpt.com/docs/config-file/config-advanced (2026-11-08)",
 ];
 
-const DAY: f64 = 86_400_000.0;
 const MINUTE: Millis = 60_000;
 /// A recap starts once the terminal has been unfocused this long after a completed turn.
 const RECAP_DELAY: Millis = 3 * MINUTE;
@@ -492,12 +491,7 @@ fn check(
     let estimate = paired.usd().filter(|_| stand_ins.is_some());
     let margin = paired.savings.and_then(|s| s.margin);
     let start = input.since.or(requests.iter().map(|r| r.time).min());
-    let month = |v: Option<f64>| match (v, start) {
-        (Some(v), Some(start)) if input.now > start => {
-            Some((v * 30.0 * DAY) / (input.now - start) as f64)
-        }
-        _ => v,
-    };
+    let month = |v: Option<f64>| v.map(|v| crate::report::monthly(v, start, Some(input.now)));
     // A suggestion or recap use is not recorded, so nonuse is never proven: a whole
     // cost above the per-use limit may still be under it per use, and stays advisory.
     let action = match (control.value, measurable, estimate) {

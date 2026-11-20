@@ -2504,7 +2504,7 @@ mod tests {
         let end = "2026-01-01T00:00:10Z";
         db.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt','thread',?1,?2,?3,?4)",params![driver,instance,end,json!({"nativeThreadRef":{"nativeId":native},"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
         db.execute("INSERT INTO orchestration_v2_projection_run_attempts VALUES('attempt','thread','pt','run',?1,?2)",params![instance,json!({"nativeThreadId":native,"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
-        db.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn','thread','pt','attempt','completed',?1,?2,?3)",params![start,end,json!({"nativeTurnRef":{"driver":driver,"nativeId":"native-turn"},"tokenUsage":{"updatedAt":end,"usedTokens":300000,"promptCacheExpiresAt":"2026-01-01T00:05:10Z"},"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
+        db.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn','thread','pt','attempt','completed',?1,?2,?3,1)",params![start,end,json!({"nativeTurnRef":{"driver":driver,"nativeId":"native-turn"},"tokenUsage":{"updatedAt":end,"usedTokens":300000,"promptCacheExpiresAt":"2026-01-01T00:05:10Z"},"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
         db.execute(
             "INSERT INTO orchestration_v2_projection_runs VALUES('run','thread',1,'completed',?1)",
             [json!({"userMessageId":"message"}).to_string()],
@@ -2978,7 +2978,7 @@ mod tests {
             read().requests[0].requested_speed.as_ref().unwrap().tier,
             None
         );
-        db.execute("INSERT INTO orchestration_v2_projection_provider_turns SELECT 'duplicate',thread_id,provider_thread_id,run_attempt_id,status,started_at,completed_at,payload_json FROM orchestration_v2_projection_provider_turns",[]).unwrap();
+        db.execute("INSERT INTO orchestration_v2_projection_provider_turns SELECT 'duplicate',thread_id,provider_thread_id,run_attempt_id,status,started_at,completed_at,payload_json,ordinal+1 FROM orchestration_v2_projection_provider_turns",[]).unwrap();
         let scan = read();
         assert!(scan.requests[0].t3.is_none());
         assert!(scan.t3[0].ambiguous_requests > 0);
@@ -3378,7 +3378,7 @@ mod tests {
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
-        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1,2)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
         let valid = NativeRequest {
             id: "valid",
             root: "opaque-session",
@@ -3722,7 +3722,7 @@ mod tests {
         let database = db(&root);
         seed(&database, "claudeAgent", "claudeAgent");
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt2','thread2','claudeAgent','claudeAgent','2026-01-01T00:00:10Z',?1)",[json!({"nativeThreadRef":{"nativeId":"other-session"}}).to_string()]).unwrap();
-        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn2','thread2','pt2',NULL,'completed',NULL,NULL,'{}')",[]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn2','thread2','pt2',NULL,'completed',NULL,NULL,'{}',1)",[]).unwrap();
         // Inserted first, so it dates when T3 began recording provider turn items.
         for (native, turn) in [
             ("cleared-uuid", "turn"),
@@ -3745,7 +3745,7 @@ mod tests {
         }
         // Linked after the native snapshot, with no earlier event to prove the link.
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt3','thread3','claudeAgent','claudeAgent','2999-01-01T00:00:00Z',?1)",[json!({"nativeThreadRef":{"nativeId":"third-session"}}).to_string()]).unwrap();
-        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn3','thread3','pt3',NULL,'completed',NULL,NULL,'{}')",[]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn3','thread3','pt3',NULL,'completed',NULL,NULL,'{}',1)",[]).unwrap();
         // Each session gets its own second so its request can be found again.
         let row = |session: &str, time: &str, entrypoint: &str, content: Value| json!({"type":"assistant","uuid":format!("{session}-uuid"),"sessionId":session,"timestamp":time,"entrypoint":entrypoint,"message":{"id":format!("{session}-message"),"model":"claude-opus-5-5","content":content,"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
         for (session, time, entrypoint, content) in [

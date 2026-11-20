@@ -1266,10 +1266,17 @@ pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<V
         // input is ordinary.
         let written = u.write?;
         if written > 0 {
-            match (u.write30m.unwrap_or(0), u.write12h.unwrap_or(0)) {
-                (0, 0) => spans.push((written as f64, input * 1.25)),
+            // As `price_components` prices them: an unsplit count takes the default 30m
+            // lifetime, a split missing one lifetime is unpriced, and only the Responses API
+            // takes 12h writes.
+            let (short, long) = match (u.write30m, u.write12h) {
+                (None, None) => (written, 0),
+                (Some(short), Some(long)) => (short, long),
+                _ => return None,
+            };
+            match (short, long) {
                 (short, 0) => spans.push((short as f64, input * 1.25)),
-                (0, long) => spans.push((long as f64, input * 2.5)),
+                (0, long) if r.api == Api::Responses => spans.push((long as f64, input * 2.5)),
                 _ => return None,
             }
         }
@@ -2238,6 +2245,108 @@ mod tests {
             ..p
         };
         assert_eq!(price_part(&catalog, &r, &unbilled).total_usd, None);
+    }
+
+    #[test]
+    fn codex_prefix_spans_price_writes_only_where_the_whole_request_is_priced() {
+        let catalog = prices();
+        let part = |details: Value| BillingPart {
+            model: Some("gpt-6.1-sol".into()),
+            usage: codex(json!({
+                "input_tokens": 100000,
+                "output_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 20000, "cache_write_tokens": 30000, "cache_write_tokens_details": details},
+            })),
+            ..make_request().parts[0].clone()
+        };
+        let r = codex_request();
+        let (input, read) = (2.0 / 1e6, 0.1 / 1e6);
+        let priced = |p: &BillingPart, r: &Request| price_part(&catalog, r, p).total_usd.is_some();
+        let spans = |p: &BillingPart, r: &Request| prefix_spans(&catalog, r, p);
+        let write = |tokens: f64, rate: f64| {
+            Some(vec![
+                (20000.0, read),
+                (tokens, rate),
+                (f64::INFINITY, input),
+            ])
+        };
+        // An unsplit count takes the default 30m lifetime.
+        assert_eq!(spans(&part(json!({})), &r), write(30000.0, input * 1.25));
+        assert_eq!(
+            spans(
+                &part(json!({"ttl_30m_tokens": 30000, "ttl_12h_tokens": 0})),
+                &r
+            ),
+            write(30000.0, input * 1.25)
+        );
+        let long = part(json!({"ttl_30m_tokens": 0, "ttl_12h_tokens": 30000}));
+        assert_eq!(spans(&long, &r), write(30000.0, input * 2.5));
+        // Two lifetimes leave their order in the prefix unknown.
+        assert_eq!(
+            spans(
+                &part(json!({"ttl_30m_tokens": 10000, "ttl_12h_tokens": 20000})),
+                &r
+            ),
+            None
+        );
+        // A split that names one lifetime leaves the other's tokens unpriced, not ordinary.
+        let partial = part(json!({"ttl_30m_tokens": 10000}));
+        assert!(!priced(&partial, &r));
+        assert_eq!(spans(&partial, &r), None);
+        // Only the Responses API takes 12h writes.
+        let mut messages = codex_request();
+        messages.api = Api::Messages;
+        assert!(priced(&long, &r) && !priced(&long, &messages));
+        assert_eq!(spans(&long, &messages), None);
+    }
+
+    #[test]
+    fn premium_tiers_on_gpt_5_5_and_earlier_are_priced_only_within_the_short_context() {
+        let fixture = crate::test_support::fixture_path("prices.json");
+        let mut catalog: Value =
+            serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        catalog["openai"]["models"]["gpt-5.5"] = json!({
+            "family": "gpt",
+            "release_date": "2026-04-23",
+            "tool_call": true,
+            "modalities": {"output": ["text"]},
+            "cost": {
+                "input": 5, "output": 30, "cache_read": 0.5,
+                "tiers": [{"tier": {"type": "context", "size": 272000}, "input": 10, "output": 45, "cache_read": 1}],
+                "context_over_200k": {"input": 10, "output": 45, "cache_read": 1},
+            },
+        });
+        let Ok(catalog) = parse_catalog(catalog.to_string().as_bytes()) else {
+            panic!("the catalog parses");
+        };
+        let r = codex_request();
+        for (model, multiplier) in [("gpt-5.4", 2.0), ("gpt-5.5", 2.5)] {
+            let at = |input: i64, tier: &str| {
+                let p = BillingPart {
+                    model: Some(model.into()),
+                    tier: Some(tier.into()),
+                    usage: codex(json!({
+                        "input_tokens": input,
+                        "output_tokens": 100,
+                        "cached_input_tokens": 1000,
+                    })),
+                    ..r.parts[0].clone()
+                };
+                price_part(&catalog, &r, &p).total_usd.map(Usd::to_f64)
+            };
+            for tier in ["fast", "priority"] {
+                let standard = at(272000, "default").unwrap();
+                let premium = at(272000, tier).unwrap();
+                assert!(
+                    (premium - standard * multiplier).abs() < 1e-12,
+                    "{model} {tier}: {premium} vs {standard}"
+                );
+                // Above the threshold no premium rate is documented, so the price is unknown.
+                assert!(at(272001, "default").is_some(), "{model}");
+                assert_eq!(at(272001, tier), None, "{model} {tier}");
+            }
+            assert_eq!(at(1000, "ultrafast"), None, "{model}");
+        }
     }
 
     // Ported from fast.test.ts: "plain GPT-5.6 alias has verified fast rates without substituting catalog model prices".

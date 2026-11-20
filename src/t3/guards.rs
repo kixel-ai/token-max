@@ -1725,7 +1725,7 @@ mod tests {
                 provider_thread(json!({})),
             ),
             (
-                "INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn1','th','pt',NULL,'completed',NULL,NULL,?1)",
+                "INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn1','th','pt',NULL,'completed',NULL,NULL,?1,1)",
                 turn("turn1", json!({})),
             ),
             (
@@ -1963,7 +1963,7 @@ mod tests {
                     provider_thread(json!({})),
                 ),
                 (
-                    "INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn1','th','pt',NULL,'completed',NULL,NULL,?1)",
+                    "INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn1','th','pt',NULL,'completed',NULL,NULL,?1,1)",
                     turn("turn1", json!({})),
                 ),
             ];

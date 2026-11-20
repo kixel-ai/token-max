@@ -370,7 +370,7 @@ fn since(value: &str) -> Result<Millis, ScanError> {
     let invalid = || ScanError::new("invalid --since date");
     let day: jiff::civil::Date = value[..10].parse().map_err(|_| invalid())?;
     let midnight = day
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .map_err(|_| invalid())?
         .timestamp()
         .as_millisecond();

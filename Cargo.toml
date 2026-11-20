@@ -12,22 +12,21 @@ categories = ["command-line-utilities", "development-tools"]
 include = ["/src", "/tests", "/test/fixtures", "/site/public/run.sh", "/site/public/run.ps1", "/docs/semantics.md", "/README.md", "/LICENSE"]
 
 [dependencies]
-ctrlc = { version = "3.5.2", features = ["termination"] }
+ctrlc = { version = "3.5.3", features = ["termination"] }
 foldhash = "0.2.0"
 indexmap = { version = "2.14.2", features = ["serde"] }
-rusqlite = { version = "0.41.1", features = ["bundled", "limits"] }
-jiff = "0.2.40"
+rusqlite = { version = "0.43.0", features = ["bundled", "limits"] }
+jiff = "1.0.1"
 memchr = "2.8.3"
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 similar = "3.2.1"
 serde_json = { version = "1.0.154", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = "0.11.1"
 terminal_size = "0.4.4"
-thiserror = "2.0.21"
 toml = "1.2.1"
 unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
-ureq = "3.5.1"
+ureq = "3.5.2"
 mimalloc = "0.1.52"
 toml_edit = { version = "0.25.19", default-features = false, features = ["parse", "display"] }
 

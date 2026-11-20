@@ -8,12 +8,19 @@ use sha2::{Digest, Sha256};
 use crate::model::{Id, Location, Millis};
 
 /// An error whose message is safe for terminal and JSON diagnostics.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
-#[error("{message}")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScanError {
     pub message: String,
     pub location: Option<Location>,
 }
+
+impl std::fmt::Display for ScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ScanError {}
 
 impl ScanError {
     /// An error without a source location.
@@ -130,7 +137,7 @@ pub fn parse_instant(text: &str) -> Option<Millis> {
         return Some(ts.as_millisecond());
     }
     let civil = text.parse::<jiff::civil::DateTime>().ok()?;
-    let zoned = civil.to_zoned(jiff::tz::TimeZone::system()).ok()?;
+    let zoned = civil.to_zoned_datetime(jiff::tz::TimeZone::system()).ok()?;
     Some(zoned.timestamp().as_millisecond())
 }
 

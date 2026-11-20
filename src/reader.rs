@@ -2955,7 +2955,8 @@ mod tests {
                 },
             },
         });
-        lines.insert(2, applied.to_string());
+        // After the fixture's own settings, which it then overrides.
+        lines.insert(4, applied.to_string());
         write(&file, lines.join("\n") + "\n");
         let data = scan(&options(&w)).unwrap();
         let r = &data.requests[0];

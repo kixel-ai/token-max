@@ -564,9 +564,13 @@ fn codex_context_and_output_keep_their_remote_controls() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    // Its session, task, turn and settings, then its first usage record.
+    let usage = &fixture[4];
     let mut records = vec![
         fixture[0].clone(),
         fixture[1].clone(),
+        fixture[2].clone(),
+        fixture[3].clone(),
         serde_json::json!({
             "type": "world_state", "timestamp": "2026-11-01T00:00:00Z",
             "payload": {"full": true, "state": {"tools": {"mcp__docs": "SYNTHETIC_SHIPPED_SCHEMA"}}}
@@ -579,9 +583,9 @@ fn codex_context_and_output_keep_their_remote_controls() {
             "type": "response_item", "timestamp": "2026-11-01T00:00:00Z",
             "payload": {"type": "function_call_output", "call_id": "read-1", "output": "SYNTHETIC_PRIVATE_OUTPUT"}
         }),
-        fixture[2].clone(),
+        usage.clone(),
     ];
-    let mut next = fixture[2].clone();
+    let mut next = usage.clone();
     next["timestamp"] = "2026-11-01T00:00:02Z".into();
     next["payload"]["response_id"] = "response-b".into();
     records.push(next.clone());

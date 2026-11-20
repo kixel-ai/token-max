@@ -599,9 +599,14 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
 
 /// A known zero with no missing components.
 pub fn zero_cost() -> Cost {
+    known_cost(Usd::ZERO)
+}
+
+/// A fully known amount with no missing components.
+pub fn known_cost(usd: Usd) -> Cost {
     Cost {
-        known_usd: Usd::ZERO,
-        total_usd: Some(Usd::ZERO),
+        known_usd: usd,
+        total_usd: Some(usd),
         unknown: vec![],
         assumptions: vec![],
     }
@@ -1912,11 +1917,7 @@ mod tests {
             .map(|_| {
                 let mantissa = (next() >> 11) as f64 / (1u64 << 53) as f64;
                 let usd = mantissa * 10f64.powi((next() % 12) as i32 - 9);
-                Cost {
-                    known_usd: Usd::from_f64(usd),
-                    total_usd: Some(Usd::from_f64(usd)),
-                    ..Cost::default()
-                }
+                known_cost(Usd::from_f64(usd))
             })
             .collect();
         let forward = add_costs(&costs);
@@ -1955,11 +1956,7 @@ mod tests {
 
     #[test]
     fn paired_savings_extrapolate_over_unpriced_parts() {
-        let known = |usd: f64| Cost {
-            known_usd: Usd::from_f64(usd),
-            total_usd: Some(Usd::from_f64(usd)),
-            ..Cost::default()
-        };
+        let known = |usd: f64| known_cost(Usd::from_f64(usd));
         let missing = unknown_cost("missing");
         let (three, two, one) = (known(3.0), known(2.0), known(1.0));
         let a = (&three, &one);

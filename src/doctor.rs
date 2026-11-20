@@ -20,7 +20,7 @@ use crate::model::{
     Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
-    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
+    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
     recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
@@ -381,13 +381,13 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
     let what = match reason {
         // A skill left typeable counts only the model's uses.
         Reason::Unused if typed_only(c.control.as_ref()) => {
-            format!("{} the model never used", capital(kind))
+            format!("{} the model never used", capitalize(kind))
         }
         Reason::Unused => format!("Never-used {kind}"),
-        Reason::Unrecorded => format!("{} with no recorded use", capital(kind)),
+        Reason::Unrecorded => format!("{} with no recorded use", capitalize(kind)),
         Reason::Costly => format!(
             "{} over {} per use",
-            capital(kind),
+            capitalize(kind),
             about(report.max_cost_per_use_usd)
         ),
         Reason::Duplicate => format!("Duplicate copies of {kind}"),
@@ -398,14 +398,6 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
-    })
-}
-
-/// `text` with its first letter capitalized.
-fn capital(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
     })
 }
 

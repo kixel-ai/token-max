@@ -16,7 +16,8 @@ use crate::model::{
     RequestEvidence, Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
-    Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
+    Catalog, Pairs, Sum, add_costs, known_cost, price_components, unit_rates, unknown_cost,
+    zero_cost,
 };
 use crate::rows::Group;
 
@@ -368,11 +369,7 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
         Ttl::OneHour => rates.write1h,
     };
     let usd = Usd::from_f64(read as f64 * (write - rates.read));
-    Cost {
-        known_usd: usd,
-        total_usd: Some(usd),
-        ..zero_cost()
-    }
+    known_cost(usd)
 }
 
 /// The extra ordinary input a recap would pay without a suggestion refreshing its prefix.
@@ -396,11 +393,7 @@ fn recap_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
         return unknown_cost("the recap's cached prefix has no priced usage");
     };
     let usd = Usd::from_f64((read + write) as f64 * (rates.ordinary - rates.read));
-    Cost {
-        known_usd: usd,
-        total_usd: Some(usd),
-        ..zero_cost()
-    }
+    known_cost(usd)
 }
 
 /// Later input costs avoided by this feature's cache reads, with other features held constant.

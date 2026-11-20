@@ -197,7 +197,8 @@ fn percent(part: u64, whole: u64) -> String {
     js_number(((part as f64 / whole as f64) * 1000.0).floor() / 10.0)
 }
 
-fn capitalize(text: &str) -> String {
+/// `text` with its first letter capitalized.
+pub(crate) fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -9032,12 +9033,7 @@ mod tests {
     fn subagent_lines_are_evidence_that_never_count_as_changes() {
         let mut report = synthetic();
         let before = text(&report, None, false);
-        let cost = |usd: f64| Cost {
-            known_usd: Usd::from_f64(usd),
-            total_usd: Some(Usd::from_f64(usd)),
-            unknown: vec![],
-            assumptions: vec![],
-        };
+        let cost = |usd: f64| crate::prices::known_cost(Usd::from_f64(usd));
         report.subagents.push(SubagentCost {
             harness: Harness::Claude,
             profiles: vec!["profile".into()],

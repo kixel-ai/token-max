@@ -4153,12 +4153,7 @@ mod tests {
 
     #[test]
     fn pairs_extrapolate_only_from_sessions_idle_could_act_on() {
-        let usd = |v: f64| Cost {
-            known_usd: Usd::from_f64(v),
-            total_usd: Some(Usd::from_f64(v)),
-            unknown: vec![],
-            assumptions: vec![],
-        };
+        let usd = |v: f64| crate::prices::known_cost(Usd::from_f64(v));
         let (zero, unknown) = (zero_cost(), unknown_cost("synthetic"));
         // A priced session no mode acts on counts exactly, beside the extrapolated ones.
         let (estimate, coverage) = paired([

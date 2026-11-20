@@ -403,7 +403,7 @@ mod tests {
         }
     }
 
-    // Ported from report.test.ts: narrow output never exceeds its width.
+    // Narrow output never exceeds its width.
     #[test]
     fn every_row_fits_its_width() {
         let text = "Change claude-cache-ttl for /home/user/.claude/projects/very-long-directory-name 漢字😀 to 1h; saves $12.34 per month.";

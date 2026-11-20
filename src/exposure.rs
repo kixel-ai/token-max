@@ -138,7 +138,7 @@ pub struct ExposureCollector {
     invocations: IndexMap<String, (Invocation, Copies)>,
     observations: HashMap<Text, FileObservations>,
     file: Option<File>,
-    // Active revision and category by component key, in JavaScript `Map` insertion order.
+    // Active revision and category by component key, in insertion order.
     active: IndexMap<Text, (Text, Category)>,
     pending_removed: IndexSet<Text>,
     session: Text,
@@ -324,9 +324,9 @@ impl Placed {
 /// What a component's size and fingerprint are measured from.
 enum Content<'a> {
     Text(&'a str),
-    /// The `JSON.stringify` text of a value.
+    /// The compact JSON text of a value.
     Json(&'a Value),
-    /// `JSON.stringify(undefined)`, which is not text.
+    /// No value at all, which has no text.
     Missing,
     /// A value whose rendered size is unknown; only its serialized identity is kept.
     Opaque(&'a Value),
@@ -1935,7 +1935,7 @@ impl ExposureCollector {
                 .as_ref()
                 .and_then(|items| self.message_characters(items));
             if let Some(messages) = messages {
-                // A shape without a system prompt counts it as zero, as JavaScript adds null.
+                // A shape without a system prompt counts it as zero.
                 complete = Some(
                     messages
                         + shape.system.size.characters.unwrap_or(0)
@@ -2945,7 +2945,7 @@ fn intern(pool: &mut HashSet<Text>, value: &str) -> Text {
 /// a content-level thinking block's opaque signature is dropped; every other
 /// field, tool input included, counts.
 fn blob_characters(message: Option<&Value>) -> Result<Option<i64>, ScanError> {
-    // JSON.stringify(undefined) is not text; the TypeScript failed here too.
+    // A missing message has no text to count, so it is an error rather than zero.
     let message = message.ok_or_else(|| ScanError::new("invalid context object"))?;
     let mut sink = Chars(0);
     match message {
@@ -3063,13 +3063,13 @@ fn complete_text(params: &Map<String, Value>) -> Result<bool, ScanError> {
 }
 
 // ---------------------------------------------------------------------------
-// Raw record access, mirroring JavaScript's view of parsed JSON.
+// Raw record access, where a missing key reads as null.
 
 fn field<'a>(map: &'a Map<String, Value>, key: &str) -> &'a Value {
     map.get(key).unwrap_or(&Value::Null)
 }
 
-/// JavaScript's `??` treats null like a missing key.
+/// The value, treating null like a missing key.
 fn present(value: Option<&Value>) -> Option<&Value> {
     value.filter(|v| !v.is_null())
 }
@@ -3108,7 +3108,8 @@ fn id(value: Option<&Value>) -> Result<String, ScanError> {
     safe::id(value.unwrap_or(&Value::Null))
 }
 
-/// JavaScript's `String(value)`, with a missing value as "undefined".
+/// A value as text: absent is "undefined", arrays join with commas and nulls in them as empty,
+/// objects are "[object Object]".
 fn js_string(value: Option<&Value>) -> String {
     match value {
         None => "undefined".into(),
@@ -3128,7 +3129,7 @@ fn js_string(value: Option<&Value>) -> String {
     }
 }
 
-/// JavaScript's default string sort compares UTF-16 code units.
+/// Compare strings by UTF-16 code units.
 fn js_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
 }
@@ -3181,9 +3182,9 @@ fn kind_name(kind: InvocationKind) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Patterns, matched exactly as the JavaScript regular expressions they replace.
+// Patterns over transcript text, matched by hand.
 
-/// JavaScript's `\s`.
+/// Whitespace: ASCII and Unicode spaces, line and paragraph separators, and the byte order mark.
 fn js_space(c: char) -> bool {
     matches!(
         c,
@@ -3198,7 +3199,7 @@ fn js_space(c: char) -> bool {
     )
 }
 
-/// Where JavaScript's multiline `^` may match, and what `.` excludes.
+/// A line terminator: where a line may start, and what never belongs to a line.
 fn line_terminator(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
@@ -3545,7 +3546,8 @@ fn script_references(code: &str) -> Vec<(usize, &str)> {
 }
 
 // ---------------------------------------------------------------------------
-// JSON.stringify, byte for byte, into a string, a character count or a hash.
+// Compact JSON, written into a string, a character count or a hash, so sizes and
+// fingerprints never depend on how a value was parsed.
 
 trait Sink {
     fn put(&mut self, text: &str);
@@ -3557,7 +3559,7 @@ impl Sink for String {
     }
 }
 
-/// Counts code points, as iterating a JavaScript string does.
+/// Counts code points.
 struct Chars(usize);
 
 impl Sink for Chars {
@@ -3600,7 +3602,7 @@ fn json<S: Sink>(value: &Value, sink: &mut S) {
     }
 }
 
-/// Write an object in JavaScript property order, optionally without one key.
+/// Write an object in `js_entries` order, optionally without one key.
 fn write_object<S: Sink>(
     map: &Map<String, Value>,
     sink: &mut S,
@@ -3633,14 +3635,14 @@ fn write_object<S: Sink>(
     sink.put("}");
 }
 
-/// Object entries in JavaScript order: array indices ascending, then insertion order.
+/// Object entries with array-index keys first, ascending, then the rest in insertion order.
 pub(crate) fn js_entries(map: &Map<String, Value>) -> Vec<(&str, &Value)> {
     let mut entries: Vec<(&str, &Value)> = map.iter().map(|(k, v)| (k.as_str(), v)).collect();
     entries.sort_by_key(|(k, _)| array_index(k).map_or((1, 0), |n| (0, n)));
     entries
 }
 
-/// A canonical array index property name, which JavaScript enumerates first.
+/// A key that is a canonical array index: no leading zero, below 2^32 - 1.
 fn array_index(key: &str) -> Option<u32> {
     let b = key.as_bytes();
     if b.is_empty()
@@ -3654,7 +3656,7 @@ fn array_index(key: &str) -> Option<u32> {
     (n < u64::from(u32::MAX)).then_some(n as u32)
 }
 
-/// JSON.stringify's string escaping: quotes, backslashes and control characters only.
+/// Quote a JSON string, escaping only quotes, backslashes and control characters.
 fn quote<S: Sink>(text: &str, sink: &mut S) {
     sink.put("\"");
     let mut start = 0;
@@ -3682,7 +3684,8 @@ fn quote<S: Sink>(text: &str, sink: &mut S) {
     sink.put("\"");
 }
 
-/// JavaScript's `Number.prototype.toString` for a parsed JSON number.
+/// A parsed JSON number in shortest round-trip form: exponent form below 1e-6 or from 1e21
+/// in magnitude, and integers beyond 2^53 as the nearest double.
 pub(crate) fn number(n: &Number) -> String {
     const SAFE: u64 = 1 << 53;
     if let Some(u) = n.as_u64()
@@ -3699,7 +3702,7 @@ pub(crate) fn number(n: &Number) -> String {
     if value == 0.0 {
         return "0".into();
     }
-    // Shortest round-trip digits, then ECMAScript's choice of plain or exponential form.
+    // Shortest round-trip digits, then plain or exponential form by magnitude.
     let sign = if value < 0.0 { "-" } else { "" };
     let scientific = format!("{:e}", value.abs());
     let (mantissa, exponent) = scientific.split_once('e').expect("exponent");

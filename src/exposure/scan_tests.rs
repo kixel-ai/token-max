@@ -102,7 +102,7 @@ fn assistant(second: u32, content: Value) -> Value {
     })
 }
 
-/// Merge `fields` into a copy of the object `base`, like a JavaScript spread.
+/// A copy of the object `base` with `fields` set over it.
 fn with(base: Value, fields: Value) -> Value {
     let mut merged = base;
     let object = merged.as_object_mut().unwrap();
@@ -116,7 +116,7 @@ fn jsonl(records: &[Value]) -> String {
     records.iter().map(|r| format!("{r}\n")).collect()
 }
 
-/// JSON text length in UTF-16 units, like JavaScript's `JSON.stringify(v).length`.
+/// Compact JSON text length in UTF-16 units.
 fn length(value: &Value) -> usize {
     serde_json::to_string(value).unwrap().encode_utf16().count()
 }

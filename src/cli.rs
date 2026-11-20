@@ -219,7 +219,7 @@ fn enter(phase: Phase) {
     *PHASE.lock().unwrap_or_else(PoisonError::into_inner) = phase;
 }
 
-/// Parsed flags, as `node:util` `parseArgs` would return them in strict mode.
+/// The parsed flags: each string option's value, every value of a repeatable one, and each switch.
 #[derive(Debug, Default, PartialEq)]
 struct Values {
     since: Option<String>,
@@ -287,7 +287,7 @@ impl Values {
     }
 }
 
-/// Parse like strict `parseArgs`: no positionals, no unknown options, no inline values for
+/// Parse strictly: no positionals, no unknown options, no inline values for
 /// booleans, and a dash-led separate value is rejected as ambiguous.
 fn parse(args: &[String]) -> Option<Values> {
     let mut values = Values::default();
@@ -381,8 +381,8 @@ fn since(value: &str) -> Result<Millis, ScanError> {
     Ok(midnight + time)
 }
 
-/// Milliseconds after UTC midnight for `THH:mm[:ss[.fff]]` and `Z` or `+HH:mm`, as V8's ISO
-/// parser reads it: 24:00 is the next midnight, seconds stop at 59, extra fraction digits drop.
+/// Milliseconds after UTC midnight for `THH:mm[:ss[.fff]]` and `Z` or `+HH:mm`:
+/// 24:00 is the next midnight, seconds stop at 59, extra fraction digits drop.
 fn iso_time(b: &[u8]) -> Option<Millis> {
     let two = |at: usize, max: i64| -> Option<i64> {
         let digits = b.get(at..at + 2)?;
@@ -448,7 +448,7 @@ fn env(name: &str) -> Option<String> {
     std::env::var_os(name).map(|v| v.to_string_lossy().into_owned())
 }
 
-/// An environment variable that is set and not empty, as JavaScript `||` treats it.
+/// An environment variable that is set and not empty; an empty one reads as unset.
 fn env_nonempty(name: &str) -> Option<String> {
     env(name).filter(|v| !v.is_empty())
 }
@@ -497,7 +497,8 @@ fn help(text: &str) -> String {
         .join("\n")
 }
 
-/// Numbers print as JavaScript's `JSON.stringify` prints them, such as `1` rather than `1.0`.
+/// Numbers print in their shortest round-trip form, integers without a fraction, such as `1`
+/// rather than `1.0`.
 struct JsFormatter;
 
 impl JsFormatter {
@@ -507,7 +508,8 @@ impl JsFormatter {
     }
 }
 
-/// Integers beyond 2^53 print as the nearest double, as JavaScript holds them.
+/// Integers beyond 2^53 print as the nearest double, so every number a reader parses as a
+/// double reads back exactly.
 const SAFE: u64 = 1 << 53;
 
 impl Formatter for JsFormatter {
@@ -548,7 +550,7 @@ impl Formatter for JsFormatter {
     }
 }
 
-/// Stream a value as one compact JavaScript-compatible JSON line.
+/// Stream a value as one compact JSON line, numbers formatted by `JsFormatter`.
 fn write_json(writer: impl Write, value: &impl Serialize) -> io::Result<()> {
     let mut writer = io::BufWriter::new(writer);
     let mut serializer = serde_json::Serializer::with_formatter(&mut writer, JsFormatter);
@@ -720,7 +722,7 @@ fn now() -> Millis {
     i64::try_from(elapsed.as_millis()).expect("clock within range")
 }
 
-/// The `--since` bound; an empty value is absent, as JavaScript treats a falsy option.
+/// The `--since` bound; an empty value is absent.
 fn window(values: &Values) -> Result<Option<Millis>, ScanError> {
     match values.since.as_deref() {
         None | Some("") => Ok(None),

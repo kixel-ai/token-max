@@ -622,7 +622,7 @@ mod tests {
         );
     }
 
-    /// The TypeScript fast-mode tests that read real settings files through `scan`, then `speed_checks` or `analyze`.
+    /// Fast-mode tests that read real settings files through `scan`, then `speed_checks` or `analyze`.
     mod end_to_end {
         use super::super::{SpeedInput, speed_checks};
         use crate::controls::{Env, SettingsScope, speed_controls};
@@ -652,7 +652,7 @@ mod tests {
             std::fs::write(path, contents).unwrap();
         }
 
-        /// The TypeScript `workspace().options`: this home, no environment, a checkout-local managed file.
+        /// This home, no environment, a checkout-local managed file.
         fn options(w: &Workspace) -> DiscoveryOptions {
             DiscoveryOptions {
                 home: text(&w.home),
@@ -704,7 +704,7 @@ mod tests {
             })
         }
 
-        /// The TypeScript `control(harness, config)`: a user scope over an empty managed scope.
+        /// A user scope over an empty managed scope.
         fn control(harness: Harness, config: Value) -> SpeedControl {
             let config = config.as_object().cloned().unwrap();
             let managed = serde_json::Map::new();
@@ -751,7 +751,7 @@ mod tests {
             }
         }
 
-        // Ported from fast.test.ts: "rate-only premium preserves Claude 5m/1h reads/writes, geography and fixed fees".
+        // Rate-only premium preserves Claude 5m/1h reads/writes, geography and fixed fees.
         #[test]
         fn rate_only_premium_preserves_claude_cache_lifetimes_geography_and_fixed_fees() {
             let w = Workspace::new();
@@ -870,7 +870,7 @@ mod tests {
             assert!(standard.observed.premium.total_usd.unwrap().to_f64() > 0.0);
         }
 
-        // Ported from fast.test.ts: "current-setting warning survives missing billing metadata; historical unknowns and prices stay unknown".
+        // Current-setting warning survives missing billing metadata; historical unknowns and prices stay unknown.
         #[test]
         fn current_setting_warning_survives_missing_billing_metadata() {
             let w = Workspace::new();
@@ -914,7 +914,7 @@ mod tests {
             assert_eq!(empty.base.savings_usd, None);
         }
 
-        // Ported from fast.test.ts: "active-profile environment, managed policy and current project ownership suppress stale preferences".
+        // Active-profile environment, managed policy and current project ownership suppress stale preferences.
         #[test]
         fn active_profile_environment_managed_policy_and_project_ownership_suppress_stale_preferences()
          {
@@ -971,7 +971,7 @@ mod tests {
             assert_eq!(result.base.owner, format!("{}:fastMode", text(&local)));
         }
 
-        // Ported from fast.test.ts: "Codex legacy/named profiles and project selection stay advisory; local requirements can block premium".
+        // Codex legacy/named profiles and project selection stay advisory; local requirements can block premium.
         #[test]
         fn codex_legacy_named_profiles_stay_advisory_and_local_requirements_block_premium() {
             let w = Workspace::new();
@@ -1005,7 +1005,7 @@ mod tests {
             assert_eq!(speed().value.as_deref(), Some("standard"));
         }
 
-        // Ported from fast.test.ts: "unknown speeds, price gaps and explicit windows never turn missing premiums into zero".
+        // Unknown speeds, price gaps and explicit windows never turn missing premiums into zero.
         #[test]
         fn unknown_speeds_price_gaps_and_explicit_windows_never_turn_missing_premiums_into_zero() {
             let w = Workspace::new();
@@ -1036,7 +1036,7 @@ mod tests {
             assert_eq!(unknown.base.action, Action::Change);
         }
 
-        // Ported from fast.test.ts: "unsupported Opus history has no hypothetical premium and unknown iteration ownership stays unpriced".
+        // Unsupported Opus history has no hypothetical premium and unknown iteration ownership stays unpriced.
         #[test]
         fn unsupported_opus_history_has_no_hypothetical_premium_and_unknown_ownership_stays_unpriced()
          {
@@ -1076,7 +1076,7 @@ mod tests {
             );
         }
 
-        // Ported from fast.test.ts: "known distinct project controls get separate cards and nearest Codex scope remains advisory owner".
+        // Known distinct project controls get separate cards and nearest Codex scope remains advisory owner.
         #[test]
         fn known_distinct_project_controls_get_separate_cards_and_nearest_codex_scope_owns() {
             let w = Workspace::new();
@@ -1178,7 +1178,7 @@ mod tests {
             assert_eq!(cards, [(Action::Change, 1), (Action::Keep, 1)]);
         }
 
-        // Ported from fast.test.ts: "managed blocks survive named/legacy alternatives while a separately allowed premium remains unresolved".
+        // Managed blocks survive named/legacy alternatives while a separately allowed premium remains unresolved.
         #[test]
         fn managed_blocks_survive_named_alternatives_while_an_allowed_premium_stays_unresolved() {
             let w = Workspace::new();
@@ -1217,7 +1217,7 @@ mod tests {
             assert_eq!(speed().value.as_deref(), Some("standard"));
         }
 
-        // Ported from fast.test.ts: "partially priced premium retains covered categories as subtotal while its total remains unknown".
+        // Partially priced premium retains covered categories as subtotal while its total remains unknown.
         #[test]
         fn partially_priced_premium_retains_covered_categories_as_a_subtotal() {
             let w = Workspace::new();

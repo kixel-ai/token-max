@@ -28,7 +28,7 @@ That is 1,190,393 Claude Code, Codex and T3 Code requests at public API
 prices. The savings are what `token-max doctor --defaults` finds for a user
 with no settings files on the same history: every change it would make, 8%
 of the spend. Most of it is a 1h subagent cache; the rest is a 1h main-agent
-cache on usage credits, auto memory and unused skills and tools.
+cache on usage credits, auto memory and unused or costly skills and tools.
 
 - **Subagents: a 1h prompt cache cost ~17% less than the default 5m**, ~$3,940/mo
   of those savings. Every Claude Code user's subagents get 5m. The setting is
@@ -114,7 +114,7 @@ token-max doctor --help
 | Tools, skills and MCP servers | What each cost to send with every request, and how often it was used |
 | Instruction files | What each CLAUDE.md or AGENTS.md cost, beside the provider's size guidance |
 | Fast mode | What the premium cost; recommended off |
-| Main-session effort | What each model and effort cost, beside the provider's guidance; `max` recommended down to `xhigh`, `low` worth considering raising |
+| Main-session effort | What each model and effort cost, beside the provider's guidance; `max` recommended down to `xhigh` (or `high` where a model lacks it), `low` worth considering raising |
 | Auto memory | What loading, reading and writing it cost, and how often it was used; worth considering off |
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
 | Bash timeout cap | Whether long foreground waits let the cache expire |

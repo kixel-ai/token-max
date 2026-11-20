@@ -38,8 +38,8 @@ fn in_bucket(r: &Request, p: &BillingPart, selected: Bucket) -> bool {
     cache_bucket(r, p).is_none_or(|b| b == selected)
 }
 
-/// Whether a Claude client version has TTL controls (v2.1.242 or later), read as JavaScript
-/// `Number` integers.
+/// Whether a Claude client version has TTL controls (v2.1.242 or later); each component must
+/// parse as an integral number.
 fn version_supported(version: Option<&str>) -> bool {
     let Some(version) = version else {
         return false;
@@ -57,7 +57,7 @@ fn version_supported(version: Option<&str>) -> bool {
     major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && patch >= 242.0)))
 }
 
-/// JavaScript's `toFixed(1)`, which rounds exact binary halves away from zero.
+/// One decimal place, rounding exact binary halves away from zero.
 fn to_fixed1(value: f64) -> String {
     // An exact tie at one decimal is an odd multiple of 1/4; Rust would round it to even.
     let quarters = value.abs() * 4.0;
@@ -908,7 +908,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::default();
     for r in &scan.requests {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
-        // JavaScript's default sort compares UTF-16 code units.
+        // Profiles sort by UTF-16 code units.
         profiles.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         groups.entry(profiles.join(":")).or_default().push(r);
     }

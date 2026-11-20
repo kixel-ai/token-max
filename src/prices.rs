@@ -231,7 +231,7 @@ fn rates(value: &Value) -> Result<Rates, ScanError> {
     })
 }
 
-/// JavaScript truthiness, which decides whether a legacy tier field is present.
+/// Whether a legacy tier field is present: not null, false, zero or an empty string.
 fn truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
@@ -2178,7 +2178,7 @@ mod tests {
         );
     }
 
-    // Ported from fast.test.ts: "OpenAI fast and ultrafast API repricing preserves long context and billed write lifetimes".
+    // OpenAI fast and ultrafast API repricing preserves long context and billed write lifetimes.
     #[test]
     fn openai_fast_and_ultrafast_repricing_preserves_long_context_and_billed_write_lifetimes() {
         let catalog = prices();
@@ -2240,7 +2240,7 @@ mod tests {
         assert_eq!(price_part(&catalog, &r, &unbilled).total_usd, None);
     }
 
-    // Ported from fast.test.ts: "plain GPT-5.6 alias has verified fast rates without substituting catalog model prices".
+    // Plain GPT-5.6 alias has verified fast rates without substituting catalog model prices.
     #[test]
     fn plain_gpt_5_6_alias_has_verified_fast_rates_without_substituting_catalog_prices() {
         let mut c = prices();

@@ -27,6 +27,11 @@ Show
 Type "token-max doctor"
 Sleep 500ms
 Enter
+Sleep 2s
+# How the profile pays: usage credits, so its main agent's default cache is 5m.
+Type "a"
+Sleep 300ms
+Enter
 Sleep 4s
 Type "y"
 Sleep 300ms

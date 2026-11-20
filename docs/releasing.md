@@ -31,7 +31,7 @@ Each release carries, per target, `token-max-<target>.tar.xz` (a
 `token-max-<target>/` directory holding the binary, README and LICENSE) or,
 on Windows, a flat `token-max-<target>.zip`, each with a `.sha256` file;
 `token-max-installer.sh` and `token-max-installer.ps1`, which install into
-the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`; `source.tar.gz`; and `sha256.sum` over the archives. Every
+the first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`; `source.tar.gz` with its `.sha256`; and `sha256.sum` over the archives. Every
 asset gets a GitHub build provenance attestation, which
 `gh attestation verify <file> --repo kixel-ai/token-max` checks.
 `[package.metadata.binstall]` in `Cargo.toml` points `cargo binstall` at the

@@ -196,7 +196,7 @@ fn is_conversation(p: &BillingPart) -> bool {
     matches!(p.kind, PartKind::Message | PartKind::Unknown)
 }
 
-/// JavaScript's `Math.sign`.
+/// 1 for a positive `value`, -1 for a negative one, else `value` itself (zero or NaN).
 fn sign(value: f64) -> f64 {
     if value > 0.0 {
         1.0
@@ -529,7 +529,7 @@ impl<'r> ReplayIndex<'r> {
             index.requests.entry(&*r.session).or_default().push(r);
             index.by_id.insert(&*r.id, r);
         }
-        // The last event with each identity, like a JavaScript Map built from the array.
+        // The last event with each identity.
         let mut by_id: HashMap<&Id, &StructuralEvent> = HashMap::default();
         for &e in events {
             by_id.insert(&e.id, e);
@@ -710,7 +710,7 @@ impl Period<'_> {
 /// Known-on cohorts by version, client and flag state.
 type Cohorts<'r> = IndexMap<(&'r str, &'r str, &'static str), ActivationCohort>;
 
-/// The first window owning each (owner, model), as `find` would return.
+/// The first window owning each (owner, model); later duplicates never win.
 fn window_lookup(windows: &[ScenarioWindow]) -> HashMap<(&str, Option<&str>), Option<i64>> {
     let mut lookup = HashMap::default();
     for w in windows {
@@ -1038,8 +1038,7 @@ enum Tick<'r> {
 /// A total replay order for a tick at `position` in the list of requests, then boundaries,
 /// then idle triggers: time, then boundaries first, then list order.
 ///
-/// The TypeScript comparator calls any tied boundary smaller, even against another boundary,
-/// which its engine's stable merge sort resolves by reversing tied boundaries.
+/// Tied boundaries replay in reverse list order.
 fn tick_key(time: Millis, boundary: bool, position: usize) -> (Millis, u8, i64) {
     let position = position as i64;
     if boundary {
@@ -1057,7 +1056,7 @@ struct Session<'r> {
 
 /// Charges shared by every profile.
 struct Summaries<'a> {
-    /// The last charge for each event, like a JavaScript Map built from the array.
+    /// The last charge for each event.
     by_event: HashMap<&'a Id, &'a CompactionCharge>,
     requests: HashSet<&'a str>,
 }

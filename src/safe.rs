@@ -113,7 +113,7 @@ pub fn timestamp(value: &Value) -> Option<Millis> {
     parse_instant(value.as_str()?)
 }
 
-/// Parse an ISO date-time like JavaScript's `Date.parse`, local time when no offset is given.
+/// Parse an ISO date-time, as local time when no offset is given.
 pub fn parse_instant(text: &str) -> Option<Millis> {
     let b = text.as_bytes();
     let shape = b.len() > 10
@@ -134,7 +134,7 @@ pub fn parse_instant(text: &str) -> Option<Millis> {
     Some(zoned.timestamp().as_millisecond())
 }
 
-/// Format an instant like JavaScript's `Date.prototype.toISOString`.
+/// Format an instant as UTC with milliseconds, such as `2026-11-01T00:00:00.000Z`.
 pub fn iso(millis: Millis) -> String {
     let ts = jiff::Timestamp::from_millisecond(millis).expect("instant in range");
     ts.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()

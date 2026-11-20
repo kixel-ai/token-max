@@ -642,8 +642,7 @@ pub(crate) struct PeriodCalibration {
     pub(crate) prefix_tokens: i64,
 }
 
-/// One period with its evidence. Only tests read single periods; the report counts them.
-#[cfg_attr(not(test), allow(dead_code))]
+/// One period with its evidence.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct IdlePeriod {
     pub(crate) request: Text,

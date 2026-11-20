@@ -49,6 +49,7 @@ impl Workspace {
 
     /// The fixture moved so its history starts `days` before now. A report's window ends
     /// now, so a monthly figure from the fixture as written shrinks as the days pass.
+    #[cfg(unix)]
     fn recent_fixture(&self, days: i64) {
         let text = std::fs::read_to_string(fixture("claude.jsonl")).unwrap();
         let lines: Vec<Value> = text

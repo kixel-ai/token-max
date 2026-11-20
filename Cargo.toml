@@ -51,3 +51,8 @@ pkg-fmt = "txz"
 [package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
 pkg-fmt = "zip"
 bin-dir = "{ bin }{ binary-ext }"
+
+# A suppression says why it is needed, and `expect` fails once it no longer is.
+[lints.clippy]
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"

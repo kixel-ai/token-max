@@ -2255,7 +2255,10 @@ pub struct KeepaliveCheck {
 }
 
 /// Setting-specific evidence accompanies one common recommendation model.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a report holds one result per check, too few for boxing to save memory worth the indirection"
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CheckResult {
     Ttl(TtlCheck),

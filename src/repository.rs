@@ -275,7 +275,6 @@ fn value(chars: &mut Chars, line: &mut u64) -> Result<String, u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::Workspace;
 
     #[test]
     fn urls_lose_their_userinfo_and_keep_everything_else() {
@@ -344,7 +343,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_checkout_resolves_from_subdirectories_and_linked_worktrees() {
-        let w = Workspace::new();
+        let w = crate::test_support::Workspace::new();
         let text = |p: &std::path::Path| p.to_str().unwrap().to_string();
         let main = w.home.join("main");
         std::fs::create_dir_all(main.join("src/deep")).unwrap();

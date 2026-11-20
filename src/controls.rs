@@ -1454,9 +1454,18 @@ impl Sizing {
     }
 }
 
-/// The largest input of each model a line used, and the latest automatic compaction trigger
-/// on each model and sizing that ran under an unset window.
-#[allow(clippy::type_complexity)]
+/// What one line's requests show about its compaction windows.
+struct Observation {
+    /// The largest input of each model the line used.
+    largest: IndexMap<String, i64>,
+    /// The latest automatic compaction trigger on each model and sizing that ran under an unset
+    /// window.
+    observed: IndexMap<(String, Sizing), (Millis, i64)>,
+    /// The latest automatic compaction trigger under each percent override.
+    percented: IndexMap<PercentKey, (Millis, i64)>,
+}
+
+/// What a line's requests show about its compaction windows.
 fn observe(
     profile: &crate::model::Profile,
     line: &[String],
@@ -1465,11 +1474,7 @@ fn observe(
     events: &[crate::model::StructuralEvent],
     cache_context: &crate::model::CacheContext,
     undated: &dyn Fn(&str) -> String,
-) -> (
-    IndexMap<String, i64>,
-    IndexMap<(String, Sizing), (Millis, i64)>,
-    IndexMap<PercentKey, (Millis, i64)>,
-) {
+) -> Observation {
     let mine = |profiles: &[String]| profiles.iter().any(|p| line.contains(p));
     let mut largest: IndexMap<String, i64> = IndexMap::default();
     for r in cache_context.requests.iter().chain(requests.iter()) {
@@ -1557,7 +1562,11 @@ fn observe(
             }
         }
     }
-    (largest, observed, percented)
+    Observation {
+        largest,
+        observed,
+        percented,
+    }
 }
 
 /// A model, and what decides its trigger under an override, which a recorded trigger must
@@ -1636,7 +1645,12 @@ pub fn tune_windows(scan: &mut Scan) {
         })
         .collect();
     for (profile, observation) in profiles.iter_mut().zip(observations) {
-        let Some((largest, observed, percented)) = observation else {
+        let Some(Observation {
+            largest,
+            observed,
+            percented,
+        }) = observation
+        else {
             continue;
         };
         let directories = profile.idle_directories.iter_mut().flatten();

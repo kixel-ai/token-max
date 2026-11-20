@@ -41,11 +41,6 @@ pub fn object(value: &Value) -> &Map<String, Value> {
     }
 }
 
-/// Look up a key, treating anything but an object as empty.
-pub fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
-    object(value).get(key).unwrap_or(&Value::Null)
-}
-
 /// Retain only metadata identifiers, never free-form strings.
 pub fn label(value: &Value) -> Option<String> {
     let text = value.as_str()?;

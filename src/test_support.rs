@@ -1,5 +1,4 @@
 //! Synthetic requests and isolated scratch profiles for unit tests.
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -73,6 +73,9 @@ jobs:
       - name: Update the preinstalled stable toolchain
         run: rustup update stable --no-self-update
       - name: Run the tests
+        # Clippy runs only on Linux, so this catches code another platform leaves unused.
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo +stable test --locked
 
   check:

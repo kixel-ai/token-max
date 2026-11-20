@@ -842,21 +842,8 @@ impl PairedSavings {
     }
 }
 
-/// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
-/// cannot hide a clear winner. `unknown` counts further items that could differ but left no
-/// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
-pub fn paired_savings<'a>(
-    pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
-    unknown: u64,
-) -> PairedSavings {
-    let mut sum = Pairs::default();
-    for (baseline, alternative) in pairs {
-        sum.add(baseline, alternative);
-    }
-    sum.savings(unknown)
-}
-
-/// [`paired_savings`] taken one pair at a time, so a whole history's pairs need not be kept.
+/// Compares two scenarios pair by pair as (baseline, alternative), so a few unpriced requests
+/// cannot hide a clear winner, without keeping a whole history's pairs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pairs {
     count: u64,
@@ -883,7 +870,8 @@ impl Pairs {
         self.count
     }
 
-    /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
+    /// The savings over every pair added, extrapolated over `unknown` further items that could
+    /// differ but left no evidence, such as unreadable transcript lines.
     pub fn savings(&self, unknown: u64) -> PairedSavings {
         let total = self.count + unknown;
         PairedSavings {
@@ -1524,6 +1512,20 @@ pub(crate) fn request_evidence(r: &Request, mut result: Cost) -> Cost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
+    /// cannot hide a clear winner. `unknown` counts further items that could differ but left no
+    /// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
+    fn paired_savings<'a>(
+        pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
+        unknown: u64,
+    ) -> PairedSavings {
+        let mut sum = Pairs::default();
+        for (baseline, alternative) in pairs {
+            sum.add(baseline, alternative);
+        }
+        sum.savings(unknown)
+    }
     use crate::model::{Text, Usage};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
     use serde_json::json;

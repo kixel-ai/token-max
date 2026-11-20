@@ -1169,7 +1169,7 @@ pub fn context_costs(input: &ContextInput<'_>) -> Vec<ContextCost> {
         // it do not fit there. Elsewhere content can run to the end of the input.
         let content_end = u
             .filter(|_| !codex)
-            .and_then(|u| Some(u.read? + u.write?))
+            .and_then(|u| u.cached_prefix())
             .filter(|&cached| cached > 0 && total <= cached as f64)
             .or(end);
         let prior = previous.insert(

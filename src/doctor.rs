@@ -20,11 +20,11 @@ use crate::model::{
     Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
-    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
+    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
     recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{WrapOptions, wrap_spans};
+use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -381,13 +381,13 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
     let what = match reason {
         // A skill left typeable counts only the model's uses.
         Reason::Unused if typed_only(c.control.as_ref()) => {
-            format!("{} the model never used", capital(kind))
+            format!("{} the model never used", capitalize(kind))
         }
         Reason::Unused => format!("Never-used {kind}"),
-        Reason::Unrecorded => format!("{} with no recorded use", capital(kind)),
+        Reason::Unrecorded => format!("{} with no recorded use", capitalize(kind)),
         Reason::Costly => format!(
             "{} over {} per use",
-            capital(kind),
+            capitalize(kind),
             about(report.max_cost_per_use_usd)
         ),
         Reason::Duplicate => format!("Duplicate copies of {kind}"),
@@ -398,14 +398,6 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
-    })
-}
-
-/// `text` with its first letter capitalized.
-fn capital(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
     })
 }
 
@@ -1112,11 +1104,6 @@ const MARGIN: usize = crate::report::MARGIN;
 /// A card's figure is aligned to the right of this many cells, or of a narrower terminal,
 /// and its paragraphs wrap there.
 const CARD_CELLS: usize = 88;
-const BOLD: &str = "1";
-const DIM: &str = "2";
-const RED: &str = "31";
-const GREEN: &str = "32";
-const YELLOW: &str = "33";
 
 /// A question of the walk as a card: a heading with its figure at the right, the change,
 /// then labeled paragraphs.

@@ -288,7 +288,7 @@ impl Replayer<'_> {
                         let next = main.iter().find(|r| r.time >= e.time);
                         if let Some(next) = next {
                             let p = message(next).next()?;
-                            let full = p.usage.read? + p.usage.write?;
+                            let full = p.usage.cached_prefix()?;
                             offset += pre - full;
                             context = Some((full, 0));
                         } else {
@@ -1053,7 +1053,7 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
             window_basis: if options.since.is_some() {"explicit --since window"} else {"available transcript window"}.into(),
             baseline: if alternative > 0.0 {"idle compaction as recommended, with no pings"} else {"sessions left idle, with no pings"}.into(),
             requests: main.len() as u64, coverage: Some(Coverage {priced, total: priced + unpriced, ..Default::default()}),
-            savings_usd: savings, margin: error, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| s * 30.0 * DAY as f64 / elapsed as f64), break_even,
+            savings_usd: savings, margin: error, monthly_savings_usd: savings.filter(|_| elapsed > 0).map(|s| crate::report::monthly(s, Some(since), Some(options.now))), break_even,
             assumptions: vec![
                 lifetime.as_ref().map_or_else(|| if profile.ttl.main.varies {"cache lifetime unknown: recorded projects set the main TTL differently".into()} else {"cache lifetime unknown".into()}, |l| format!("cache lifetime: {}", l.reason)),
                 "each session is replayed sequentially at each cap and with no pings, carrying cache warmth and ping context; all policies use the same recommended compaction windows and their modeled summary costs".into(),

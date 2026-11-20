@@ -362,6 +362,13 @@ pub struct Usage {
     pub reasoning: Option<i64>,
 }
 
+impl Usage {
+    /// The cached prefix: cache reads plus writes, unknown if either is.
+    pub fn cached_prefix(&self) -> Option<i64> {
+        Some(self.read? + self.write?)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PartKind {

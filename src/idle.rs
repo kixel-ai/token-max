@@ -12,7 +12,7 @@ use serde_json::{Map, Number, Value};
 use crate::cache::{CacheBoundaries, ttl_milliseconds};
 use crate::compaction::{
     CompactionSample, CompactionSamples, Modeled, WindowEvents, WindowOptions, WindowSetting,
-    compaction_samples, replay_windows,
+    compaction_samples, is_conversation, is_message, median, replay_windows,
 };
 use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
@@ -134,17 +134,6 @@ fn supported(version: Option<&str>, patch: i64) -> bool {
     major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && micro >= patch as f64)))
 }
 
-/// The middle value, rounding an even split up.
-fn median(mut values: Vec<i64>) -> i64 {
-    values.sort_unstable();
-    let mid = values.len() / 2;
-    if values.len() % 2 == 1 {
-        values[mid]
-    } else {
-        ((values[mid - 1] + values[mid]) as f64 / 2.0).ceil() as i64
-    }
-}
-
 /// A cost times `fraction`; a zero fraction is a known zero, dropping unknowns.
 fn scale(cost: &Cost, fraction: f64) -> Cost {
     if fraction == 0.0 {
@@ -181,19 +170,6 @@ fn difference(after: &Cost, before: &Cost) -> Cost {
             .collect(),
         assumptions: assumptions.into_iter().cloned().collect(),
     }
-}
-
-/// The full cache prefix: reads plus writes.
-fn prefix(p: &BillingPart) -> Option<i64> {
-    Some(p.usage.read? + p.usage.write?)
-}
-
-fn is_message(p: &BillingPart) -> bool {
-    p.kind == PartKind::Message
-}
-
-fn is_conversation(p: &BillingPart) -> bool {
-    matches!(p.kind, PartKind::Message | PartKind::Unknown)
 }
 
 /// JavaScript's `Math.sign`.
@@ -866,7 +842,7 @@ fn adjusted<'p>(
     if s.offset == 0 {
         return Some(Cow::Borrowed(p));
     }
-    let size = prefix(p)?;
+    let size = p.usage.cached_prefix()?;
     let input = p.usage.input?;
     let ttl = ttl?;
     if size + s.offset < 0 || input + s.offset < 0 {
@@ -1257,7 +1233,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             }
                             let usable = calibration.filter(|c| {
                                 c.uniform
-                                    && prefix(part).is_some()
+                                    && part.usage.cached_prefix().is_some()
                                     && item.window.is_some()
                                     && is_message(part)
                             });
@@ -1309,7 +1285,10 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 && sample.summary.speed == part.speed
                                 && sample.summary.geo == part.geo;
                             let read = if same_cache && warm(time, state.path.time, HOUR) {
-                                let full = prefix(part).expect("usable calibration has a prefix");
+                                let full = part
+                                    .usage
+                                    .cached_prefix()
+                                    .expect("usable calibration has a prefix");
                                 input.min((full + state.path.offset).max(0))
                             } else {
                                 0
@@ -1417,7 +1396,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             let resumed_part = item
                                 .next
                                 .and_then(|n| n.parts.iter().find(|p| is_message(p)));
-                            let full = resumed_part.and_then(prefix);
+                            let full = resumed_part.and_then(|p| p.usage.cached_prefix());
                             let base = on.then(|| match (summary_request, linked) {
                                 (Some(_), Some(linked)) => {
                                     let costs: Vec<Cost> = billed
@@ -1561,7 +1540,8 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 }
                                 if conversation {
                                     let path = &mut state.path;
-                                    path.prefix = next.as_deref().and_then(prefix);
+                                    path.prefix =
+                                        next.as_deref().and_then(|p| p.usage.cached_prefix());
                                     path.input = p.usage.input;
                                     path.cohort = Some(current);
                                     path.time = Some(r.time);
@@ -2604,7 +2584,7 @@ fn profile_checks<'a>(
                 margin,
                 monthly_savings_usd: savings
                     .filter(|_| elapsed > 0)
-                    .map(|s| s * 30.0 * 86_400_000.0 / elapsed as f64),
+                    .map(|s| crate::report::monthly(s, Some(since), Some(now))),
                 break_even,
                 assumptions: vec![
                     c.reason.clone(),
@@ -3518,7 +3498,9 @@ fn t3_replay(
                             let altered = if offset == 0 && !changed {
                                 Some(p.clone())
                             } else {
-                                let size = prefix(p)
+                                let size = p
+                                    .usage
+                                    .cached_prefix()
                                     .and_then(|n| n.checked_add(offset))
                                     .filter(|n| *n >= 0);
                                 let input = p
@@ -3593,7 +3575,10 @@ fn t3_replay(
                                     .zip(p.usage.output)
                                     .and_then(|(a, b)| a.checked_add(b))
                                     .and_then(|n| n.checked_add(offset));
-                                cached_prefix = altered.as_ref().and_then(prefix).unwrap_or(0);
+                                cached_prefix = altered
+                                    .as_ref()
+                                    .and_then(|p| p.usage.cached_prefix())
+                                    .unwrap_or(0);
                                 last_time = Some(r.end_time);
                                 cache_lifetime = ttl.map(ttl_milliseconds);
                             }
@@ -3611,7 +3596,11 @@ fn t3_replay(
                                 && r.parts.iter().any(is_message)
                         });
                         if let Some(next) = next {
-                            let full = next.parts.iter().find(|p| is_message(p)).and_then(prefix);
+                            let full = next
+                                .parts
+                                .iter()
+                                .find(|p| is_message(p))
+                                .and_then(|p| p.usage.cached_prefix());
                             match e.pre_tokens.zip(full) {
                                 Some((pre, full)) => offset += pre - full,
                                 _ => add(unknown_cost(
@@ -4164,12 +4153,7 @@ mod tests {
 
     #[test]
     fn pairs_extrapolate_only_from_sessions_idle_could_act_on() {
-        let usd = |v: f64| Cost {
-            known_usd: Usd::from_f64(v),
-            total_usd: Some(Usd::from_f64(v)),
-            unknown: vec![],
-            assumptions: vec![],
-        };
+        let usd = |v: f64| crate::prices::known_cost(Usd::from_f64(v));
         let (zero, unknown) = (zero_cost(), unknown_cost("synthetic"));
         // A priced session no mode acts on counts exactly, beside the extrapolated ones.
         let (estimate, coverage) = paired([

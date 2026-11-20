@@ -3,6 +3,17 @@
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 
+/// Bold text's SGR attribute.
+pub(crate) const BOLD: &str = "1";
+/// Dim text's SGR attribute.
+pub(crate) const DIM: &str = "2";
+/// Red text's SGR attribute, for a recommended change.
+pub(crate) const RED: &str = "31";
+/// Green text's SGR attribute, for a saving or a setting to keep.
+pub(crate) const GREEN: &str = "32";
+/// Yellow text's SGR attribute, for an advisory.
+pub(crate) const YELLOW: &str = "33";
+
 /// How to wrap: without a width, lines are only indented.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WrapOptions {

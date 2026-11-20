@@ -17,8 +17,7 @@ The flake's nixpkgs, flake-utils and quest inputs are commit pins, so they are
 skipped. There is no vendored code or fork.
 
 Check first: whether a pinned action's comment names a release tag (the m1 run
-found the Nix installer pinned to an untagged `main` commit), and whether the
-Nix installer still supports upstream Nix (`determinate: false`).
+found the Nix installer pinned to an untagged `main` commit).
 
 ## Audit
 

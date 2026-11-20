@@ -471,7 +471,7 @@ fn toml_json(value: toml::Value) -> Option<Value> {
         toml::Value::String(s) => Value::String(s),
         toml::Value::Integer(n) => {
             // Integers JavaScript cannot represent exactly are a parse error there.
-            if n.unsigned_abs() > 9_007_199_254_740_991 {
+            if n.unsigned_abs() > crate::safe::MAX_SAFE_INTEGER as u64 {
                 return None;
             }
             Value::from(n)
@@ -2162,13 +2162,6 @@ impl Walk {
     }
 }
 
-fn harness_name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Claude => "claude",
-        Harness::Codex => "codex",
-    }
-}
-
 /// Add a candidate root; an explicit root keeps its origin, and explicit selection excludes the rest.
 fn add_root(
     candidates: &mut IndexMap<String, RootStatus>,
@@ -2178,7 +2171,7 @@ fn add_root(
     origin: RootOrigin,
 ) {
     let absolute = resolve(path);
-    let key = format!("{}{absolute}", harness_name(harness));
+    let key = format!("{}{absolute}", harness.as_str());
     if candidates
         .get(&key)
         .is_some_and(|previous| previous.origin == RootOrigin::Explicit)
@@ -2611,7 +2604,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             continue;
         };
         let path = join(&[home, &name]);
-        if candidates.contains_key(&format!("{}{}", harness_name(harness), resolve(&path))) {
+        if candidates.contains_key(&format!("{}{}", harness.as_str(), resolve(&path))) {
             continue;
         }
         let found = match fs::metadata(&path) {
@@ -2668,7 +2661,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
                 ));
             }
         };
-        let key = format!("{}{canonical}", harness_name(root.harness));
+        let key = format!("{}{canonical}", root.harness.as_str());
         if let Some(previous) = profiles.get_mut(&key) {
             previous.aliases.push(root.path.clone());
             continue;

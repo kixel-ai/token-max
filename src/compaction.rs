@@ -1206,7 +1206,8 @@ fn version_supported(version: Option<&str>, patch: i64) -> bool {
     let [Some(major), Some(minor), Some(micro)] = parts[..] else {
         return false;
     };
-    let safe = |v: f64| v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0 && v >= 0.0;
+    let safe =
+        |v: f64| v.fract() == 0.0 && v.abs() <= crate::safe::MAX_SAFE_INTEGER as f64 && v >= 0.0;
     if !(safe(major) && safe(minor) && safe(micro)) {
         return false;
     }

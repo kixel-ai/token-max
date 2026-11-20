@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::skills::skill_file;
 
 use crate::context::synced_short;
+use crate::controls::js_string;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
     Harness, Id, Ids, Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
@@ -40,7 +41,7 @@ pub fn measure_size(text: Option<&str>) -> Size {
 
 /// Tokenization belongs to the model; client versions only change what is sent.
 pub fn cohort(r: &Request) -> String {
-    let key = (harness_name(r.harness), &r.model, &r.provider);
+    let key = (r.harness.as_str(), &r.model, &r.provider);
     identity(&serde_json::to_string(&key).expect("strings serialize"))
 }
 
@@ -117,9 +118,8 @@ pub struct ExposureCollector {
     // Directories of the MEMORY.md files loaded in the current file, which
     // `autoMemoryDirectory` can move outside the profile root.
     memory_dirs: IndexSet<String>,
-    names: HashSet<Text>,
-    // One shared copy of each profile set calls and results are seen under.
-    profile_sets: Interner,
+    // One shared copy of each name, and of each profile set calls and results are seen under.
+    interner: Interner,
     // One shared copy of each list of sessions a call, result or invocation was copied into.
     copies: HashSet<Copies>,
     // The tool each call id in the current file belongs to.
@@ -450,8 +450,7 @@ impl ExposureCollector {
             memory: IndexMap::default(),
             roots: HashMap::default(),
             memory_dirs: IndexSet::default(),
-            names: HashSet::default(),
-            profile_sets: Interner::default(),
+            interner: Interner::default(),
             copies: HashSet::default(),
             call_tools: HashMap::default(),
             held: IndexMap::default(),
@@ -954,7 +953,7 @@ impl ExposureCollector {
     /// Count a call to `name`, once per call id across copied files.
     fn call(&mut self, id: &str, name: &str, time: Option<Millis>) {
         self.call_tools
-            .insert(id.to_string(), intern(&mut self.names, &output_owner(name)));
+            .insert(id.to_string(), self.interner.text(&output_owner(name)));
         let Some(time) = time.filter(|&t| self.since.is_none_or(|s| t >= s)) else {
             return;
         };
@@ -962,7 +961,7 @@ impl ExposureCollector {
         let entry = match self.calls.entry(call_key(id)) {
             indexmap::map::Entry::Occupied(entry) => entry.into_mut(),
             indexmap::map::Entry::Vacant(entry) => entry.insert(ToolCall {
-                name: intern(&mut self.names, name),
+                name: self.interner.text(name),
                 harness: file.harness,
                 copies: Copies::from([]),
                 time,
@@ -970,7 +969,7 @@ impl ExposureCollector {
         };
         entry.copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &entry.copies,
             &self.session,
             &file.profiles,
@@ -982,7 +981,7 @@ impl ExposureCollector {
         let (characters, opaque) = output_characters(output);
         let tool = match self.call_tools.get(id) {
             Some(tool) => tool.clone(),
-            None => intern(&mut self.names, UNKNOWN_TOOL),
+            None => self.interner.text(UNKNOWN_TOOL),
         };
         let held = self.held.entry(tool.clone()).or_insert((0, false));
         held.0 += characters;
@@ -1003,7 +1002,7 @@ impl ExposureCollector {
         };
         entry.copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &entry.copies,
             &self.session,
             &file.profiles,
@@ -1070,7 +1069,7 @@ impl ExposureCollector {
             });
         record.copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &record.copies,
             &self.session,
             &file.profiles,
@@ -1092,7 +1091,7 @@ impl ExposureCollector {
         self.file = Some(File {
             name: snapshot.file.clone(),
             harness: snapshot.harness,
-            profiles: self.profile_sets.profiles(&snapshot.profiles),
+            profiles: self.interner.profiles(&snapshot.profiles),
             subagent: is_subagent(&snapshot.file),
             basename: basename(&snapshot.file).to_string(),
             roots: snapshot
@@ -1243,7 +1242,7 @@ impl ExposureCollector {
                         Grouping::Name => group(new.name),
                         Grouping::Fixed(g) => g.map(str::to_string),
                     },
-                    provenance: intern(&mut self.names, new.provenance),
+                    provenance: self.interner.text(new.provenance),
                     first_seen: at,
                     current: crate::model::Current::Unresolved,
                     scope: if !member
@@ -1443,7 +1442,7 @@ impl ExposureCollector {
         let file = self.file.as_ref().expect("observing a file");
         let id = identity(&format!(
             "{}:{}:{}",
-            harness_name(file.harness),
+            file.harness.as_str(),
             input.call,
             kind_name(input.kind)
         ));
@@ -1454,7 +1453,7 @@ impl ExposureCollector {
             }
             *copies = copy(
                 &mut self.copies,
-                &mut self.profile_sets,
+                &mut self.interner,
                 copies,
                 &self.session,
                 &file.profiles,
@@ -1487,7 +1486,7 @@ impl ExposureCollector {
         };
         let copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &Copies::from([]),
             &self.session,
             &file.profiles,
@@ -2005,7 +2004,7 @@ impl ExposureCollector {
             }),
             complete_characters: complete,
             prefix,
-            wire_model: label(field(params, "model")).map(|m| intern(&mut self.names, &m)),
+            wire_model: label(field(params, "model")).map(|m| self.interner.text(&m)),
             reasons: reasons(&mut self.reasons, &[reason]),
         };
         let reference = id(raw.get("id"))?;
@@ -2262,7 +2261,7 @@ impl ExposureCollector {
             let characters = match access {
                 MemoryAccess::Read => {
                     // What it read back is memory's cost, not the Read tool's.
-                    let owner = intern(&mut self.names, MEMORY_OUTPUT);
+                    let owner = self.interner.text(MEMORY_OUTPUT);
                     self.call_tools.insert(call.to_string(), owner);
                     None
                 }
@@ -2420,7 +2419,7 @@ impl ExposureCollector {
                 && let Some(Value::String(bare)) = p.get("name")
             {
                 let name = codex_tool_name(bare, p.get("namespace").and_then(Value::as_str));
-                let owner = intern(&mut self.names, &output_owner(&name));
+                let owner = self.interner.text(&output_owner(&name));
                 self.call_tools.insert(call.to_string(), owner);
             }
             self.result(call, p.get("output"), line.time);
@@ -2441,7 +2440,7 @@ impl ExposureCollector {
             self.call_tools.insert(output_id.to_string(), owner);
             // Codex's dedicated memory tools, which `memories.dedicated_tools` adds.
             if let Some(tool) = name.strip_prefix("memories.") {
-                let owner = intern(&mut self.names, MEMORY_OUTPUT);
+                let owner = self.interner.text(MEMORY_OUTPUT);
                 self.call_tools.insert(call.to_string(), owner.clone());
                 self.call_tools.insert(output_id.to_string(), owner);
                 let (access, characters) = if tool == "add_ad_hoc_note" {
@@ -2731,15 +2730,6 @@ fn reasons(
     shared
 }
 
-fn intern(pool: &mut HashSet<Text>, value: &str) -> Text {
-    if let Some(found) = pool.get(value) {
-        return found.clone();
-    }
-    let value = Text::from(value);
-    pool.insert(value.clone());
-    value
-}
-
 /// Characters of one recorded message, or None when its content holds images,
 /// documents or redacted thinking, whose billed tokens text cannot measure. Only
 /// a content-level thinking block's opaque signature is dropped; every other
@@ -2908,26 +2898,6 @@ fn id(value: Option<&Value>) -> Result<String, ScanError> {
     safe::id(value.unwrap_or(&Value::Null))
 }
 
-/// JavaScript's `String(value)`, with a missing value as "undefined".
-fn js_string(value: Option<&Value>) -> String {
-    match value {
-        None => "undefined".into(),
-        Some(Value::Null) => "null".into(),
-        Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Number(n)) => number(n),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|v| match v {
-                Value::Null => String::new(),
-                v => js_string(Some(v)),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        Some(Value::Object(_)) => "[object Object]".into(),
-    }
-}
-
 /// JavaScript's default string sort compares UTF-16 code units.
 fn js_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
@@ -2960,13 +2930,6 @@ fn is_skill(kind: InvocationKind) -> bool {
     )
 }
 
-fn harness_name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Claude => "claude",
-        Harness::Codex => "codex",
-    }
-}
-
 fn kind_name(kind: InvocationKind) -> &'static str {
     match kind {
         InvocationKind::SkillRequest => "skill-request",
@@ -2984,7 +2947,7 @@ fn kind_name(kind: InvocationKind) -> &'static str {
 // Patterns, matched exactly as the JavaScript regular expressions they replace.
 
 /// JavaScript's `\s`.
-fn js_space(c: char) -> bool {
+pub(crate) fn js_space(c: char) -> bool {
     matches!(
         c,
         '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
@@ -3003,8 +2966,8 @@ fn line_terminator(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
-/// `/[/\\]subagents[/\\]/`
-fn is_subagent(path: &str) -> bool {
+/// Whether a transcript path has a `subagents` directory, `/[/\\]subagents[/\\]/`.
+pub(crate) fn is_subagent(path: &str) -> bool {
     let b = path.as_bytes();
     path.match_indices("subagents").any(|(i, m)| {
         i > 0

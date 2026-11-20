@@ -227,6 +227,16 @@ pub enum Harness {
     Codex,
 }
 
+impl Harness {
+    /// The lowercase name it serializes as.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Harness::Claude => "claude",
+            Harness::Codex => "codex",
+        }
+    }
+}
+
 /// A documented Claude cache lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 pub enum Ttl {

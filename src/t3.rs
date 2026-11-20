@@ -13,7 +13,7 @@ use serde_json::{Map, Value, value::RawValue};
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
 use crate::model::*;
-use crate::safe::{ScanError, digest, identity, iso, timestamp};
+use crate::safe::{ScanError, digest, identity, iso, parse_instant};
 
 mod guards;
 
@@ -1366,7 +1366,7 @@ impl TurnRow {
                 completed_at,
                 usage_updated_at,
                 used_tokens: integer_column(row, 10).filter(|n| {
-                    (0..=9_007_199_254_740_991).contains(n)
+                    (0..=crate::safe::MAX_SAFE_INTEGER).contains(n)
                         && usage_updated_at.is_some_and(|t| t <= bound_ms)
                 }),
                 cache_expires_at: usage_updated_at
@@ -1462,7 +1462,9 @@ fn integer_column(row: &rusqlite::Row<'_>, index: usize) -> Option<i64> {
     match row.get_ref(index).ok()? {
         ValueRef::Integer(n) => Some(n),
         ValueRef::Real(n)
-            if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0 =>
+            if n.is_finite()
+                && n.fract() == 0.0
+                && n.abs() <= crate::safe::MAX_SAFE_INTEGER as f64 =>
         {
             Some(n as i64)
         }
@@ -1478,7 +1480,7 @@ fn bool_column(row: &rusqlite::Row<'_>, index: usize) -> Option<bool> {
 }
 
 fn instant(s: Option<String>) -> Option<Millis> {
-    s.and_then(|s| timestamp(&Value::String(s)))
+    s.as_deref().and_then(parse_instant)
 }
 fn mode(s: Option<String>) -> Option<T3IdleMode> {
     match s.as_deref() {
@@ -1517,7 +1519,7 @@ fn metadata(
             return Err(Unavailable::Schema(format!("no table {table}")));
         }
     }
-    let bound_ms = timestamp(&Value::String(bound.into()))
+    let bound_ms = parse_instant(bound)
         .ok_or_else(|| Unavailable::Schema(format!("invalid native bound {bound}")))?;
     let boundary = guards::boundary(tx)?;
     let driver = |h: Harness| -> &'static str {
@@ -2465,6 +2467,7 @@ pub(crate) fn stand_ins(
 mod tests {
     use super::*;
     use crate::reader::scan;
+    use crate::safe::timestamp;
     use crate::test_support::{Workspace, make_request};
     use rusqlite::params;
     use serde_json::json;

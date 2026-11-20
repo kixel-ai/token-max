@@ -77,7 +77,8 @@ pub fn identity(value: &str) -> String {
     out
 }
 
-const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+/// JavaScript's `Number.MAX_SAFE_INTEGER`, the largest integer an f64 holds exactly.
+pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Preserve absent counts as unknown and reject corrupt counts.
 pub fn count(value: Option<&Value>) -> Result<Option<i64>, ScanError> {
@@ -86,20 +87,31 @@ pub fn count(value: Option<&Value>) -> Result<Option<i64>, ScanError> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(n)) => {
             if let Some(v) = n.as_u64() {
-                return if v as f64 <= MAX_SAFE_INTEGER {
+                return if v <= MAX_SAFE_INTEGER as u64 {
                     Ok(Some(v as i64))
                 } else {
                     Err(invalid())
                 };
             }
             match n.as_f64() {
-                Some(f) if f >= 0.0 && f.fract() == 0.0 && f <= MAX_SAFE_INTEGER => {
+                Some(f) if f >= 0.0 && f.fract() == 0.0 && f <= MAX_SAFE_INTEGER as f64 => {
                     Ok(Some(f as i64))
                 }
                 _ => Err(invalid()),
             }
         }
         Some(_) => Err(invalid()),
+    }
+}
+
+/// JavaScript truthiness of an optional JSON member.
+pub fn truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(_) | Value::Object(_)) => true,
     }
 }
 

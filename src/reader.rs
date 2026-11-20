@@ -20,8 +20,8 @@ use crate::discovery::{
 };
 use crate::exposure::{ExposureCollector, js_entries};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Few, Harness,
-    Id, IdleAttribution, Interner, Location, Millis, Origin, Origins, PartKind, Pricing, Profile,
+    Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Few, Harness, Id,
+    IdleAttribution, Interner, Location, Millis, Origin, Origins, PartKind, Pricing, Profile,
     Profiles, Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings,
     ShellCall, Snapshot, StructuralEvent, Subagent, Text, Usage,
 };
@@ -775,7 +775,6 @@ fn event(
             client: context.client.clone(),
             cwd: context.cwd.clone(),
             trigger: None,
-            precomputed: None,
             pre_tokens: None,
             post_tokens: None,
             duration_ms: None,
@@ -823,7 +822,6 @@ fn request(
             effort: context.effort.clone(),
             server_tools: None,
             profiles: context.profiles.clone(),
-            accounting: Accounting::Individual,
             attempt: None,
             requested_speed: Some(RequestedSpeed {
                 tier: context.tier.clone(),
@@ -1370,7 +1368,6 @@ impl Reader {
             e.trigger = string(meta, "trigger")
                 .filter(|t| *t == "auto" || *t == "manual")
                 .map(str::to_string);
-            e.precomputed = meta.get("precomputed").and_then(Value::as_bool);
             if selected {
                 e.pre_tokens = count(meta.get("preTokens"))?;
                 e.post_tokens = count(meta.get("postTokens"))?;
@@ -1666,11 +1663,6 @@ impl Reader {
                 identity(&format!("{scope}:{time}:{total_json}")),
             );
             let last = truthy(info.get("last_token_usage"));
-            r.accounting = if last {
-                Accounting::LegacyLast
-            } else {
-                Accounting::LegacyDelta
-            };
             r.evidence = if last {
                 RequestEvidence::Measured
             } else {
@@ -2417,7 +2409,6 @@ mod tests {
         assert_eq!(data.requests[0].parts[0].usage.output, Some(20));
         assert_eq!(data.requests[0].source.as_deref(), Some("sdk"));
         assert_eq!(data.requests[0].locations.len(), 2);
-        assert_eq!(data.events[0].precomputed, Some(true));
         assert_eq!(data.events[0].idle_attribution, IdleAttribution::Unknown);
         assert_eq!(data.events[0].pre_tokens, Some(1100));
         assert_eq!(data.events[0].post_tokens, Some(100));
@@ -2446,7 +2437,7 @@ mod tests {
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].parts[0].usage.input, Some(1000));
         assert_eq!(data.requests[0].parts[0].usage.reasoning, Some(20));
-        assert_eq!(data.requests[0].accounting, Accounting::Individual);
+        assert_eq!(data.requests[0].evidence, RequestEvidence::Measured);
         assert_eq!(data.events.last().unwrap().kind, EventKind::TurnEnd);
         assert!(!private(&data));
     }

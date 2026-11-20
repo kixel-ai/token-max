@@ -574,7 +574,6 @@ pub(crate) fn discover(
                     metadata: "not selected".into(),
                     snapshot_started_at: None,
                     snapshot_finished_at: None,
-                    joined_requests: 0,
                     ambiguous_requests: 0,
                     unresolved: IndexMap::default(),
                     removed: IndexMap::default(),
@@ -641,7 +640,6 @@ pub(crate) fn discover(
             metadata: "not read".into(),
             snapshot_started_at: None,
             snapshot_finished_at: None,
-            joined_requests: 0,
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::default(),
@@ -884,7 +882,6 @@ pub(crate) fn discover(
                 enabled,
                 idle_mode,
                 idle_owner,
-                ownership_resolved: resolved,
                 settings_unresolved: unresolved_env || launch_unresolved || policy_unresolved,
                 limitations,
                 env: (resolved && harness == Harness::Claude).then(|| local.env.clone()),
@@ -1350,13 +1347,14 @@ impl TurnRow {
     fn read(row: &rusqlite::Row<'_>, bound_ms: Millis) -> Self {
         let completed_at = instant(text_column(row, 8));
         let usage_updated_at = instant(text_column(row, 9));
-        let id = |index| text_column(row, index).map(|text| Id::from(identity(&text)));
         let evidence = (|| {
+            // A row missing its thread, attempt or provider turn is incomplete evidence,
+            // though only the run is kept.
+            for index in [2, 4, 5] {
+                text_column(row, index)?;
+            }
             Some(T3Request {
-                thread: id(2)?,
-                run: id(3)?,
-                attempt: id(4)?,
-                provider_turn: id(5)?,
+                run: Id::from(identity(&text_column(row, 3)?)),
                 status: match text_column(row, 6)?.as_str() {
                     "completed" => "completed",
                     "running" => "running",
@@ -2045,17 +2043,6 @@ pub(crate) fn enrich(
                         native.speed = native.speed.take().or_else(|| requested.speed.clone());
                     }
                 }
-                let state = profiles
-                    .iter()
-                    .find(|p| &p.id == owner)
-                    .and_then(|p| p.t3.as_ref())
-                    .map(|t| &t.state)
-                    .or_else(|| removed.get(owner).map(|(state, _)| state));
-                if let Some(state) =
-                    state.and_then(|path| states.iter_mut().find(|s| s.path == *path))
-                {
-                    state.joined_requests += 1;
-                }
             } else if subagent {
                 r.issues.push("subagent shares its root session's owner; T3 records no per-request run/speed/idle metadata for it".into());
             } else {
@@ -2556,7 +2543,6 @@ mod tests {
                     && p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
         );
         assert_eq!(scan.snapshots.len(), 1);
-        assert_eq!(scan.t3[0].joined_requests, 1);
         assert!(
             scan.t3[0]
                 .exclusions
@@ -2858,7 +2844,7 @@ mod tests {
                 .iter()
                 .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
                 .unwrap();
-            // `ownership_resolved` also reflects platform policy (always unresolved on
+            // Settings resolution also reflects platform policy (always unresolved on
             // Windows), so check the native speed T3 overrides, which shared-history
             // ambiguity leaves unresolved. So does the TTL: T3 names `elsewhere`, which
             // reads it from another home, as the session's owner.
@@ -2880,7 +2866,6 @@ mod tests {
             if removed {
                 assert_eq!(*r.profiles, [profile_key(&t3.path, "gone")]);
                 assert!(r.t3.is_some(), "joined evidence still applies");
-                assert_eq!(t3.joined_requests, 1);
                 assert_eq!(t3.removed, IndexMap::from_iter([("gone".into(), 1)]));
                 assert!(t3.unresolved.is_empty(), "{:?}", t3.unresolved);
             } else {
@@ -3047,7 +3032,7 @@ mod tests {
             scan.profiles
                 .iter()
                 .filter_map(|p| p.t3.as_ref())
-                .any(|t| !t.ownership_resolved)
+                .any(|t| t.settings_unresolved)
         );
         assert!(
             !serde_json::to_string(&scan)
@@ -3246,13 +3231,10 @@ mod tests {
                 .clone()
         };
         let chrome = instance(&data, "claudeAgent");
-        assert!(chrome.t3.as_ref().unwrap().ownership_resolved);
         assert_eq!(chrome.compaction.default.value, Some(400000));
         assert_eq!(chrome.compaction.default.comparison_unknown, None);
         let flagged = instance(&data, "flagged");
-        assert!(!flagged.t3.as_ref().unwrap().ownership_resolved);
         assert!(flagged.compaction.default.comparison_unknown.is_some());
-        assert!(!instance(&data, "codex").t3.unwrap().ownership_resolved);
         // Launch arguments that can replace settings leave them unresolved; sharing a
         // root alone does not.
         assert!(!chrome.t3.as_ref().unwrap().settings_unresolved);
@@ -3889,7 +3871,7 @@ mod tests {
             .unwrap();
         let t3 = |p: &String| window.profiles.iter().any(|q| &q.id == p && q.t3.is_some());
         assert!(r.profiles.len() == 1 && t3(&r.profiles[0]), "{r:?}");
-        // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
+        // Settings resolution also reflects platform policy (always unresolved on Windows),
         // so check the native speed T3 overrides, which shared-history ambiguity leaves
         // unresolved, while the TTL every possible owner reads from one file stays known,
         // unless a machine policy may replace T3's settings and so its line.

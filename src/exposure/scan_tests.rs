@@ -259,7 +259,6 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
         .find(|c| &*c.provenance == "opaque-schema-identity")
         .unwrap();
     assert_eq!(hash.size.characters, None);
-    assert_eq!(hash.size.recorded_tokens, None);
     let listing = e
         .components
         .iter()
@@ -1455,11 +1454,6 @@ fn skill_references_need_a_known_catalog_and_native_user_aliases_keep_repeated_m
     .unwrap();
     let requests = kinds(&data.exposure, InvocationKind::SkillRequest);
     assert_eq!(requests.len(), 2);
-    assert!(
-        requests
-            .iter()
-            .all(|i| i.identity_basis == IdentityBasis::ContentOccurrence)
-    );
     assert_eq!(
         kinds(&data.exposure, InvocationKind::SkillReference).len(),
         4
@@ -1968,7 +1962,6 @@ fn codex_path_usage_deduplicates_copies_and_separates_requests_loads_and_success
         ),
         (1, 1, 1)
     );
-    assert_eq!(evidence.successful_invocations, None);
     assert_eq!(a.skill.as_ref().unwrap().ambiguous_requests, 1);
     assert_eq!(evidence.duplicate_entries, 2);
     assert_eq!(
@@ -2575,7 +2568,6 @@ fn claude_auto_memory_turned_off_is_kept_off() {
             enabled: true,
             idle_mode: crate::model::T3IdleMode::Off,
             idle_owner: "synthetic".into(),
-            ownership_resolved: false,
             settings_unresolved: true,
             limitations: vec![],
             env: None,

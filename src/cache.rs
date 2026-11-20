@@ -856,7 +856,6 @@ mod tests {
                 client: Some("sdk-ts".into()),
                 cwd: None,
                 trigger: None,
-                precomputed: None,
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,

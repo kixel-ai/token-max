@@ -834,8 +834,8 @@ fn background_controls_and_estimates_keep_their_remote_history() {
         .find(|p| p.harness == Harness::Claude)
         .unwrap();
     assert_eq!(
-        claude.background_directories[home.join("workspace").to_str().unwrap()][2].minutes,
-        Some(7)
+        claude.background_directories[home.join("workspace").to_str().unwrap()][2].value,
+        Some(true)
     );
     assert_eq!(remote.scan.cache_context.prompts.len(), 2);
     assert_eq!(remote.scan.cache_context.requests.len(), 2);

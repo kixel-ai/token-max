@@ -1009,7 +1009,6 @@ fn claude_local_root(root: &str, options: &DiscoveryOptions) -> Result<Option<St
 fn unresolved_background(controls: &mut [BackgroundControl], scope: &str, reason: &str) {
     for control in controls {
         control.value = None;
-        control.minutes = None;
         control.reason = reason.into();
         control.scope = Some(scope.into());
     }
@@ -3154,7 +3153,6 @@ mod tests {
                     enabled: true,
                     idle_mode: crate::model::T3IdleMode::Off,
                     idle_owner: String::new(),
-                    ownership_resolved: true,
                     settings_unresolved: false,
                     limitations: vec![],
                     env: None,
@@ -3653,11 +3651,11 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(
-            (c[2].minutes, c[2].off_file.as_deref()),
-            (Some(7), Some(text(&local).as_str()))
+            (c[2].value, c[2].off_file.as_deref()),
+            (Some(true), Some(text(&local).as_str()))
         );
         #[cfg(windows)]
-        assert_eq!(c[2].minutes, Some(3));
+        assert_eq!(c[2].value, Some(true));
         assert!(
             p.background_directories[""]
                 .iter()
@@ -3674,7 +3672,7 @@ mod tests {
         );
         discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let c = &claude(&d).background_directories[&text(&nested)];
-        assert_eq!((c[1].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!((c[1].value, c[2].value), (Some(false), Some(false)));
         assert_eq!(
             c[2].off_file.as_deref(),
             Some(text(&w.managed_settings_file()).as_str())

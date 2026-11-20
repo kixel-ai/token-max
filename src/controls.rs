@@ -272,7 +272,6 @@ pub fn claude_background(
                 value: Some(value),
                 reason: reason.into(),
                 scope: None,
-                minutes: None,
                 owner,
                 off: file.map_or_else(
                     || environment_off(variable, off).0,
@@ -315,7 +314,6 @@ pub fn claude_background(
         value: Some(minutes != Some(0)),
         reason: reason.into(),
         scope: None,
-        minutes: Some(minutes.unwrap_or(30)),
         owner: match minutes {
             Some(_) => environment.owners[variable].clone(),
             None if environment.values.contains_key(variable) => {
@@ -342,7 +340,6 @@ pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundContro
         value: Some(value),
         reason: "current config files applied to history; historical files and CLI/session overrides are not recorded".into(),
         scope: None,
-        minutes: None,
         owner,
         off: format!("{key} = false"),
         off_file: Some(file.into()),
@@ -2314,7 +2311,7 @@ mod tests {
         );
         // Turning it off has to happen where the effective value is set.
         assert_eq!(c[1].off_file.as_deref(), Some("managed.json"));
-        assert_eq!((c[2].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!(c[2].value, Some(false));
         // A shell variable overrides its paired setting, while managed env replaces the shell.
         let shell = env(&[
             ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true"),
@@ -2328,7 +2325,7 @@ mod tests {
         );
         assert_eq!(c[0].off_file, None);
         assert_eq!(c[1].owner, "managed.json:awaySummaryEnabled");
-        assert_eq!((c[2].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!(c[2].value, Some(false));
     }
 
     #[test]

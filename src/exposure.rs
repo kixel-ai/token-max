@@ -15,9 +15,9 @@ use crate::skills::skill_file;
 use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
-    Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, MemoryAccess, MemoryUse, Millis, Owner, Profile, Profiles, References,
-    Request, RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls,
+    Harness, Id, Ids, Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
+    MemoryAccess, MemoryUse, Millis, Owner, Profile, Profiles, References, Request,
+    RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls,
     ToolResults, Via,
 };
 use crate::safe::{self, ScanError, identity, label, object};
@@ -34,7 +34,6 @@ pub(crate) const UNMAPPED_DELTA: &str = "unmapped-rendered-delta";
 pub fn measure_size(text: Option<&str>) -> Size {
     Size {
         characters: text.map(|t| t.chars().count() as i64),
-        recorded_tokens: None,
         fingerprint: safe::digest(text.unwrap_or("opaque")),
     }
 }
@@ -357,13 +356,11 @@ impl Content<'_> {
                 json(value, &mut sink);
                 Size {
                     characters: Some(sink.characters as i64),
-                    recorded_tokens: None,
                     fingerprint: Id::Digest(sink.hash.finalize().into()),
                 }
             }
             Content::Opaque(value) => Size {
                 characters: None,
-                recorded_tokens: None,
                 fingerprint: Content::Json(value).measure().fingerprint,
             },
         }
@@ -432,7 +429,6 @@ struct Invoke {
     status: InvocationStatus,
     call: String,
     group: Option<String>,
-    basis: IdentityBasis,
 }
 
 const CHRONOLOGICAL: &str = "chronological state is not proof of exact request exposure";
@@ -1480,7 +1476,6 @@ impl ExposureCollector {
             via: input.via,
             session: self.session.to_string(),
             sessions: vec![],
-            identity_basis: input.basis,
             turn: (file.harness == Harness::Codex)
                 .then(|| self.turn.clone())
                 .flatten(),
@@ -2083,14 +2078,13 @@ impl ExposureCollector {
                 None => format!("{}:{}", line.snapshot.file, line.location.line),
             };
             let mut call = format!("{source}:{index}");
-            let mut basis = IdentityBasis::Recorded;
             let block_text = b.get("text").and_then(Value::as_str);
             if user
                 && codex
                 && let Some(t) = block_text
             {
                 // Native aliases lack a shared message id. Match their nth equal text occurrence,
-                // keeping repeated messages in each source separate and disclosing the inference.
+                // keeping repeated messages in each source separate.
                 let signature = identity(&format!("{}:{t}", self.session));
                 let source = format!(
                     "{}:{}",
@@ -2101,20 +2095,19 @@ impl ExposureCollector {
                 let occurrence = sources.entry(source).or_insert(0);
                 *occurrence += 1;
                 call = format!("user:{signature}:{occurrence}");
-                basis = IdentityBasis::ContentOccurrence;
             }
             if codex && let Some(t) = block_text {
                 for (offset, name) in mentions(t) {
                     typed_aliases
                         .entry(name.to_ascii_lowercase())
-                        .or_insert_with(|| (format!("{call}:{offset}"), basis));
+                        .or_insert_with(|| format!("{call}:{offset}"));
                 }
             }
             if user && is(b, "type", "skill") {
                 self.typed_skills
                     .insert(text(b.get("name"))?.to_ascii_lowercase());
             }
-            block_ids.push((call, basis));
+            block_ids.push(call);
         }
         if user && codex {
             // Text aliases share their inferred turn, so a request and a later load
@@ -2125,7 +2118,7 @@ impl ExposureCollector {
                 .find(|(v, _)| object(v).get("text").is_some_and(Value::is_string))
                 .map(|(_, id)| id)
                 .or_else(|| block_ids.first());
-            let inferred = boundary.map(|(call, _)| identity(call));
+            let inferred = boundary.map(|call| identity(call));
             let recorded = inferred
                 .as_ref()
                 .and_then(|turn| self.turn_aliases.get(turn))
@@ -2138,7 +2131,7 @@ impl ExposureCollector {
             self.turn_available = false;
             self.turn = recorded.or(inferred);
         }
-        for (v, (call, basis)) in blocks.iter().zip(block_ids) {
+        for (v, call) in blocks.iter().zip(block_ids) {
             let b = object(v);
             let block_text = b.get("text").and_then(Value::as_str);
             if user && is(b, "type", "skill") {
@@ -2148,9 +2141,8 @@ impl ExposureCollector {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
                     status: InvocationStatus::Requested,
-                    call: alias.map_or_else(|| call.clone(), |(call, _)| call.clone()),
+                    call: alias.unwrap_or(&call).clone(),
                     group: group(name),
-                    basis: alias.map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
                 };
                 let selected = if codex {
                     b.get("path")
@@ -2187,7 +2179,6 @@ impl ExposureCollector {
                         status,
                         call: format!("{call}:{offset}"),
                         group: group(name),
-                        basis,
                     };
                     self.invoke(name, invoke, line)?;
                 }
@@ -2199,7 +2190,6 @@ impl ExposureCollector {
                         status,
                         call: call.clone(),
                         group: group(name),
-                        basis,
                     };
                     self.invoke(name, invoke, line)?;
                 }
@@ -2227,7 +2217,6 @@ impl ExposureCollector {
                         },
                         call: use_id.clone(),
                         group: tool.group.clone(),
-                        basis: IdentityBasis::Recorded,
                     };
                     self.invocation(tool.target.clone(), invoke, time);
                     if !failed {
@@ -2301,7 +2290,6 @@ impl ExposureCollector {
             status: InvocationStatus::Called,
             call: call.to_string(),
             group: group(target_name),
-            basis: IdentityBasis::Recorded,
         };
         self.invoke(target_name, invoke, line)?;
         let target_name = if scope == "skill" {
@@ -2350,7 +2338,6 @@ impl ExposureCollector {
                 },
                 call: call.to_string(),
                 group,
-                basis: IdentityBasis::Recorded,
             };
             self.invoke(&name, invoke, line)?;
             // The model sees each server under its sanitized name, as in `mcp__t3_code`.
@@ -2406,7 +2393,6 @@ impl ExposureCollector {
                     },
                     call: format!("{}:{}", text(item.get("id"))?, id(read.get("path"))?),
                     group: group(path),
-                    basis: IdentityBasis::Recorded,
                 };
                 self.invoke(path, invoke, line)?;
                 if reads.len() == 1
@@ -2488,7 +2474,6 @@ impl ExposureCollector {
                     status: InvocationStatus::Called,
                     call: call.to_string(),
                     group: group(&name),
-                    basis: IdentityBasis::Recorded,
                 };
                 self.invoke(&name, invoke, line)?;
             }
@@ -2501,7 +2486,6 @@ impl ExposureCollector {
                         status: InvocationStatus::Reference,
                         call: format!("{call}:{offset}"),
                         group: group(reference),
-                        basis: IdentityBasis::Recorded,
                     };
                     self.invoke(reference, invoke, line)?;
                 }
@@ -2556,7 +2540,6 @@ fn split_system(system: Option<&Value>) -> (Placed, Option<Placed>) {
         placed.size.characters = placed.size.characters.map(|c| c - characters);
         let size = Size {
             characters: Some(characters),
-            recorded_tokens: None,
             fingerprint: Id::Digest(sink.hash.finalize().into()),
         };
         Placed::sized(Category::Memory, MEMORY_SECTION, size, None)
@@ -4192,11 +4175,6 @@ mod tests {
                 (K::SkillLoad, S::Completed, Via::Tool),
                 (K::McpCall, S::Failed, Via::Tool),
             ]
-        );
-        assert!(
-            scan.invocations
-                .iter()
-                .all(|i| i.identity_basis == IdentityBasis::Recorded)
         );
         let skill = &scan.invocations[4];
         assert_eq!(skill.target, target("skill", "plugin:known"));

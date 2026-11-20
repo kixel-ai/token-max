@@ -2137,8 +2137,8 @@ mod tests {
     use crate::controls::{CompactionSources, Env, compaction_controls};
     use crate::estimates::estimate_usage;
     use crate::model::{
-        Accounting, Api, Attempt, CacheContext, CompactionControls, ExposureScan, IdleAttribution,
-        Location, PerTtl, Pricing, Profile, RequestMeta, ScanCoverage, Snapshot, TtlControl,
+        Api, Attempt, CacheContext, CompactionControls, ExposureScan, IdleAttribution, Location,
+        PerTtl, Pricing, Profile, RequestMeta, ScanCoverage, Snapshot, TtlControl,
     };
     use crate::prices::price_request;
     use crate::safe::identity;
@@ -2264,7 +2264,6 @@ mod tests {
                 client: Some("sdk-ts".into()),
                 cwd: None,
                 trigger: Some("auto".into()),
-                precomputed: Some(false),
                 pre_tokens: Some(300000),
                 post_tokens: Some(2000),
                 duration_ms: Some(1000),
@@ -2440,7 +2439,6 @@ mod tests {
                     cwd: e.cwd.clone(),
                     effort: None,
                     profiles: e.profiles.clone(),
-                    accounting: Accounting::Individual,
                     attempt: None,
                     server_tools: Some(crate::model::ServerTools::default()),
                     requested_speed: None,

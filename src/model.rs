@@ -406,14 +406,6 @@ pub enum Api {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Accounting {
-    Individual,
-    LegacyLast,
-    LegacyDelta,
-}
-
 /// Recorded API-attempt budget; this does not establish execution or billing.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -470,7 +462,6 @@ pub struct RequestMeta {
     pub effort: Option<Text>,
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
-    pub accounting: Accounting,
     pub attempt: Option<Attempt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
@@ -701,7 +692,6 @@ pub struct EventMeta {
     pub client: Option<Text>,
     pub cwd: Option<Text>,
     pub trigger: Option<String>,
-    pub precomputed: Option<bool>,
     pub pre_tokens: Option<i64>,
     pub post_tokens: Option<i64>,
     pub duration_ms: Option<i64>,
@@ -1159,7 +1149,6 @@ pub struct T3Instance {
     pub enabled: bool,
     pub idle_mode: T3IdleMode,
     pub idle_owner: String,
-    pub ownership_resolved: bool,
     /// Whether launch arguments, a secret environment value or machine policy could
     /// override native settings in ways discovery does not resolve.
     pub settings_unresolved: bool,
@@ -1189,7 +1178,6 @@ pub struct T3State {
     pub metadata: String,
     pub snapshot_started_at: Option<String>,
     pub snapshot_finished_at: Option<String>,
-    pub joined_requests: u64,
     pub ambiguous_requests: u64,
     /// Requests whose T3 or native control owner stays unresolved, counted by cause.
     pub unresolved: IndexMap<String, u64>,
@@ -1229,10 +1217,7 @@ pub struct T3TextGeneration {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct T3Request {
-    pub thread: Id,
     pub run: Id,
-    pub attempt: Id,
-    pub provider_turn: Id,
     pub status: &'static str,
     pub completed_at: Option<Millis>,
     pub usage_updated_at: Option<Millis>,
@@ -1309,8 +1294,6 @@ pub struct BackgroundControl {
     /// None while it is resolved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// The goal check-in interval, when it applies.
-    pub minutes: Option<i64>,
     /// Where the effective value comes from.
     pub owner: String,
     /// The setting that turns it off.
@@ -1706,7 +1689,6 @@ pub struct UnlinkedSensitivity {
 pub struct TtlSensitivity {
     pub cold_prefix1h_usd: Option<f64>,
     pub cold_prefix1h_comparison_usd: Option<f64>,
-    pub warm_reuse_break_even_fraction: Option<f64>,
     pub unlinked: Option<UnlinkedSensitivity>,
 }
 
@@ -2342,7 +2324,6 @@ impl Category {
 #[serde(rename_all = "camelCase")]
 pub struct Size {
     pub characters: Option<i64>,
-    pub recorded_tokens: Option<i64>,
     pub fingerprint: Id,
 }
 
@@ -2441,13 +2422,6 @@ pub enum Via {
     Script,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum IdentityBasis {
-    Recorded,
-    ContentOccurrence,
-}
-
 /// Actual calls, requested skills and weak script references are different evidence.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2460,7 +2434,6 @@ pub struct Invocation {
     pub via: Via,
     pub session: String,
     pub sessions: Vec<String>,
-    pub identity_basis: IdentityBasis,
     /// Opaque Codex user-turn boundary, recorded or inferred from native user-message aliases.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<String>,
@@ -2857,8 +2830,6 @@ pub struct CatalogSkill {
     pub path: Option<String>,
     pub requested: u64,
     pub loaded: u64,
-    /// Successful skill execution is not observed in the supported Codex records.
-    pub successful_invocations: Option<u64>,
     /// Name-only requests that could reach multiple catalog paths, excluded from uses.
     pub ambiguous_requests: u64,
     /// Same-named entries in the current catalog, including itself; one when not flagged.

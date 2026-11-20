@@ -42,6 +42,11 @@ winapi-util = "0.1.11"
 inherits = "release"
 lto = "thin"
 
+# `--ssh` hashes its own binary on every run, which an unoptimized sha2 makes the
+# slowest part of the test suite.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # Where `cargo binstall` finds the archives cargo-dist attaches to each release.
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"

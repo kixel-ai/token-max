@@ -2787,6 +2787,55 @@ mod tests {
     }
 
     #[test]
+    fn legacy_totals_before_the_window_start_the_first_delta_inside_it() {
+        let w = Workspace::new();
+        let u = |input: Value| json!({ "input_tokens": input, "cached_input_tokens": 0, "output_tokens": 1 });
+        let inputs = |totals: &[(&str, Value)]| {
+            let mut records = vec![
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "id": "legacy", "source": "cli", "model_provider": "openai" },
+                }),
+                json!({
+                    "type": "turn_context",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "model": "gpt-5.4", "service_tier": "standard" },
+                }),
+            ];
+            for (time, input) in totals {
+                records.push(json!({
+                    "type": "event_msg",
+                    "timestamp": time,
+                    "payload": { "type": "token_count", "info": { "total_token_usage": u(input.clone()) } },
+                }));
+            }
+            write(w.codex.join("sessions/legacy.jsonl"), jsonl(&records));
+            let data = scan(&since(options(&w), "2026-11-01T00:02:00Z")).unwrap();
+            data.requests
+                .iter()
+                .map(|r| r.parts[0].usage.input)
+                .collect::<Vec<_>>()
+        };
+        let before = ("2026-11-01T00:01:00Z", json!(100));
+        let inside = [
+            ("2026-11-01T00:03:00Z", json!(250)),
+            ("2026-11-01T00:04:00Z", json!(400)),
+        ];
+        // The first request in the window bills only what it added to the earlier total.
+        assert_eq!(
+            inputs(&[before.clone(), inside[0].clone(), inside[1].clone()]),
+            [Some(150), Some(150)]
+        );
+        // A malformed total before the window leaves the next delta unknown, not the whole total.
+        let malformed = ("2026-11-01T00:01:30Z", json!("bad"));
+        assert_eq!(
+            inputs(&[before, malformed, inside[0].clone(), inside[1].clone()]),
+            [None, Some(150)]
+        );
+    }
+
+    #[test]
     fn usage_validates_subset_invariants_and_keeps_missing_write_counters() {
         let codex = |v: Value| usage(&v, Harness::Codex).map_err(|e| e.message);
         let u = codex(json!({

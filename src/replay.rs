@@ -15,8 +15,8 @@ use crate::idle::{IdleOptions, idle_checks};
 use crate::keepalive::{KeepaliveOptions, keepalive_checks};
 use crate::memory::{MemoryInput, memory_checks};
 use crate::model::{
-    Accounting, Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase,
-    CheckResult, CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
+    Action, Agent, Api, BillingPart, Bucket, CacheReplayEvidence, CheckBase, CheckResult,
+    CompactionCharge, Cost, Coverage, EventKind, Evidence, ExposureSummary, Harness,
     HistoricalCost, Id, Millis, PartKind, PerTtl, PriceSource, Report, Request, RequestEvidence,
     RequestMeta, Scan, StructuralEvent, Text, Ttl, TtlCheck, TtlSensitivity, UnlinkedSensitivity,
     Usage, UsageEstimate, Usd, WindowBasisKind,
@@ -120,7 +120,6 @@ fn proxy_request(event: &StructuralEvent, previous: Option<&Request>) -> Option<
             cwd: event.cwd.clone(),
             effort: None,
             profiles: event.profiles.clone(),
-            accounting: Accounting::Individual,
             attempt: None,
             server_tools: Some(crate::model::ServerTools::default()),
             requested_speed: None,
@@ -862,7 +861,6 @@ fn ttl_check(
         sensitivity: TtlSensitivity {
             cold_prefix1h_usd: cold.total_usd.map(Usd::to_f64),
             cold_prefix1h_comparison_usd: cold_comparison.total_usd.map(Usd::to_f64),
-            warm_reuse_break_even_fraction: break_even,
             unlinked,
         },
     })
@@ -1302,7 +1300,6 @@ mod tests {
                 client: None,
                 cwd: None,
                 trigger: Some("auto".into()),
-                precomputed: Some(false),
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,
@@ -1419,8 +1416,15 @@ mod tests {
         assert!((total(&c.cost.one_hour).unwrap() - expected).abs() < 1e-10);
         assert!(c.base.savings_usd.unwrap() > 0.0);
         assert!(c.base.monthly_savings_usd.unwrap() > 0.0);
-        let fraction = c.sensitivity.warm_reuse_break_even_fraction.unwrap();
-        assert!(fraction > 0.0 && fraction < 1.0);
+        let percent: f64 = c
+            .base
+            .break_even
+            .as_deref()
+            .and_then(|b| b.strip_prefix("1h breaks even at "))
+            .and_then(|b| b.split_once('%'))
+            .map(|(p, _)| p.parse().unwrap())
+            .unwrap();
+        assert!(percent > 0.0 && percent < 100.0);
         assert!(c.sensitivity.cold_prefix1h_usd.unwrap() > total(&c.cost.five_minutes).unwrap());
         let mut next = next;
         retime(&mut next, 60_000);
@@ -1770,7 +1774,6 @@ mod tests {
                 ..boundary("unpriced-summary", "other-session", 300_000)
             };
             built.client = Some("sdk-ts".into());
-            built.precomputed = Some(true);
             built
         };
         let result = check(&data(vec![first, next], vec![event]), None, 1_200_000);

@@ -6265,7 +6265,6 @@ mod tests {
             sensitivity: TtlSensitivity {
                 cold_prefix1h_usd: Some(1.5),
                 cold_prefix1h_comparison_usd: None,
-                warm_reuse_break_even_fraction: None,
                 unlinked: Some(UnlinkedSensitivity {
                     no_billed_attempt: PerTtl::default(),
                     cold_cache: PerTtl {
@@ -7167,7 +7166,6 @@ mod tests {
             metadata: String::new(),
             snapshot_started_at: None,
             snapshot_finished_at: None,
-            joined_requests: 0,
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::from_iter([("gone".into(), 3)]),

@@ -3845,7 +3845,6 @@ mod tests {
                 client: Some("cli".into()),
                 cwd: None,
                 trigger: Some("manual".into()),
-                precomputed: Some(false),
                 pre_tokens: Some(300_000),
                 post_tokens: Some(2000),
                 duration_ms: Some(1000),
@@ -4670,7 +4669,6 @@ mod tests {
             sensitivity: TtlSensitivity {
                 cold_prefix1h_usd: None,
                 cold_prefix1h_comparison_usd: None,
-                warm_reuse_break_even_fraction: None,
                 unlinked: None,
             },
         };
@@ -5261,7 +5259,6 @@ mod tests {
             enabled: true,
             idle_mode: mode,
             idle_owner: "t3/settings.json:idleCompaction".into(),
-            ownership_resolved: true,
             settings_unresolved: false,
             limitations: vec![],
             env: None,
@@ -5279,10 +5276,7 @@ mod tests {
                     ttl,
                 );
                 r.t3 = Some(std::sync::Arc::new(T3Request {
-                    thread: r.session.to_string().into(),
                     run: r.id.to_string().into(),
-                    attempt: r.id.to_string().into(),
-                    provider_turn: r.id.to_string().into(),
                     status: "completed",
                     completed_at: Some(r.end_time),
                     usage_updated_at: Some(r.end_time),
@@ -5617,7 +5611,6 @@ mod tests {
             sensitivity: TtlSensitivity {
                 cold_prefix1h_usd: None,
                 cold_prefix1h_comparison_usd: None,
-                warm_reuse_break_even_fraction: None,
                 unlinked: None,
             },
         };

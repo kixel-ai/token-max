@@ -293,7 +293,6 @@ mod tests {
                 client: None,
                 cwd: None,
                 trigger: None,
-                precomputed: None,
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,

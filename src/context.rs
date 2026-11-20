@@ -1719,8 +1719,8 @@ mod tests {
 
     use super::*;
     use crate::model::{
-        Exposure, ExposureView, IdentityBasis, Ids, Invocation, Margin, Owner, Scope, Size,
-        TextCoverage, ToolCalls, ToolResults, Usage, Via,
+        Exposure, ExposureView, Ids, Invocation, Margin, Owner, Scope, Size, TextCoverage,
+        ToolCalls, ToolResults, Usage, Via,
     };
     use crate::test_support::{make_request, make_snapshot, prices};
 
@@ -1739,7 +1739,6 @@ mod tests {
             instruction_size: None,
             size: Size {
                 characters: Some(characters),
-                recorded_tokens: None,
                 fingerprint: id.into(),
             },
             id: id.into(),
@@ -2324,7 +2323,6 @@ mod tests {
                 via: Via::Tool,
                 session: "session".into(),
                 sessions: vec!["session".into()],
-                identity_basis: IdentityBasis::Recorded,
                 turn: None,
                 harness: Harness::Claude,
                 client: None,
@@ -3054,7 +3052,6 @@ mod tests {
             via: Via::Tool,
             session: "session".into(),
             sessions: vec!["session".into()],
-            identity_basis: IdentityBasis::Recorded,
             turn: None,
             harness: Harness::Claude,
             client: None,

@@ -9,7 +9,7 @@ use crate::model::{
     Harness, IdleAttribution, IdleControl, Location, MemoryControl, Millis, PercentOverride, Scan,
     Setting, Source, SpeedControl, TunedWindow, WindowControl,
 };
-use crate::safe::{ScanError, object};
+use crate::safe::{MAX_SAFE_INTEGER, ScanError, object};
 
 /// A process environment, from variable name to value.
 pub type Env = HashMap<String, String>;
@@ -35,8 +35,6 @@ impl ScopedEnvironment {
     }
 }
 
-const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
-
 /// A settings error on the first line of the file that supplied the value.
 fn invalid(message: impl Into<String>, file: &str) -> ScanError {
     ScanError::at(
@@ -56,7 +54,7 @@ pub(crate) fn members(value: Option<&Value>) -> &Map<String, Value> {
 /// A number that JavaScript's `Number.isSafeInteger` accepts, including integral floats.
 fn safe_integer(value: &Value) -> Option<i64> {
     let n = value.as_f64()?;
-    (n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER).then_some(n as i64)
+    (n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER as f64).then_some(n as i64)
 }
 
 /// JavaScript's `String(value)`, where `None` is `undefined`.
@@ -65,7 +63,7 @@ pub(crate) fn js_string(value: Option<&Value>) -> String {
         None => "undefined".into(),
         Some(Value::Null) => "null".into(),
         Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Number(n)) => js_number(n.as_f64().unwrap_or(f64::NAN)),
+        Some(Value::Number(n)) => crate::exposure::number(n),
         Some(Value::String(s)) => s.clone(),
         // Array holes and nulls join as empty strings.
         Some(Value::Array(items)) => items
@@ -78,23 +76,6 @@ pub(crate) fn js_string(value: Option<&Value>) -> String {
             .join(","),
         Some(Value::Object(_)) => "[object Object]".into(),
     }
-}
-
-/// JavaScript number formatting: shortest round trip, exponents outside [1e-7, 1e21).
-fn js_number(n: f64) -> String {
-    if n == 0.0 {
-        return "0".into();
-    }
-    if n.abs() >= 1e21 || n.abs() < 1e-6 {
-        let text = format!("{n:e}");
-        return match text.split_once('e') {
-            Some((mantissa, exponent)) if !exponent.starts_with('-') => {
-                format!("{mantissa}e+{exponent}")
-            }
-            _ => text,
-        };
-    }
-    n.to_string()
 }
 
 /// Merge terminal environment with settings taking precedence, preserving each effective key's owner.
@@ -152,7 +133,7 @@ pub fn idle_controls(scopes: &[SettingsScope], env: &Env) -> Result<IdleControl,
         threshold = if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
             text.parse::<f64>()
                 .ok()
-                .filter(|n| *n > 0.0 && *n <= MAX_SAFE_INTEGER)
+                .filter(|n| *n > 0.0 && *n <= MAX_SAFE_INTEGER as f64)
                 .map(|n| (n as i64).max(100_000))
         } else {
             None
@@ -272,7 +253,6 @@ pub fn claude_background(
                 value: Some(value),
                 reason: reason.into(),
                 scope: None,
-                minutes: None,
                 owner,
                 off: file.map_or_else(
                     || environment_off(variable, off).0,
@@ -315,7 +295,6 @@ pub fn claude_background(
         value: Some(minutes != Some(0)),
         reason: reason.into(),
         scope: None,
-        minutes: Some(minutes.unwrap_or(30)),
         owner: match minutes {
             Some(_) => environment.owners[variable].clone(),
             None if environment.values.contains_key(variable) => {
@@ -342,7 +321,6 @@ pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundContro
         value: Some(value),
         reason: "current config files applied to history; historical files and CLI/session overrides are not recorded".into(),
         scope: None,
-        minutes: None,
         owner,
         off: format!("{key} = false"),
         off_file: Some(file.into()),
@@ -432,7 +410,7 @@ fn timeout_millis(value: &Value) -> Option<Millis> {
     let parsed = if text.contains(['e', 'E']) {
         text.parse::<f64>()
             .ok()
-            .filter(|n| n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER)
+            .filter(|n| n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER as f64)
             .map(|n| n as i64)
     } else {
         let number = text.strip_prefix('+').unwrap_or(text);
@@ -2314,7 +2292,7 @@ mod tests {
         );
         // Turning it off has to happen where the effective value is set.
         assert_eq!(c[1].off_file.as_deref(), Some("managed.json"));
-        assert_eq!((c[2].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!(c[2].value, Some(false));
         // A shell variable overrides its paired setting, while managed env replaces the shell.
         let shell = env(&[
             ("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", "true"),
@@ -2328,7 +2306,7 @@ mod tests {
         );
         assert_eq!(c[0].off_file, None);
         assert_eq!(c[1].owner, "managed.json:awaySummaryEnabled");
-        assert_eq!((c[2].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!(c[2].value, Some(false));
     }
 
     #[test]

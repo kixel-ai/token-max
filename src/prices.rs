@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::model::{
     Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, TierScenario, Usd,
 };
-use crate::safe::{ScanError, iso, label, object};
+use crate::safe::{ScanError, iso, label, object, truthy};
 
 const PRICE_URL: &str = "https://models.dev/api.json";
 
@@ -231,17 +231,6 @@ fn rates(value: &Value) -> Result<Rates, ScanError> {
     })
 }
 
-/// JavaScript truthiness, which decides whether a legacy tier field is present.
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
-}
-
 fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     let cost = object(value).get("cost").unwrap_or(&Value::Null);
     let fields = object(cost);
@@ -266,7 +255,8 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     }
     tiers.sort_by(|a, b| a.size.partial_cmp(&b.size).expect("finite tier sizes"));
     let legacy = match fields.get("context_over_200k") {
-        Some(value) if truthy(value) => Some(rates(value)?),
+        // JavaScript truthiness decides whether a legacy tier field is present.
+        Some(value) if truthy(Some(value)) => Some(rates(value)?),
         _ => None,
     };
     let model = object(value);

@@ -1105,6 +1105,12 @@ Separate lines retain distinct owners across recorded projects and charge only
 their requests. Claude project/local settings and their `env` blocks participate;
 Codex uses trusted project config layers, closest to the working directory first.
 Missing directories, unknown trust and unrecorded profile selection stay advisory.
+When two lines of one feature would read the same, each tag names its group inside
+the brackets: why it resolved apart (`working directory changed`, `working directory
+missing`, `working directory absent`, `launch environment conflict`, or for Codex
+`legacy profile configuration`, `named config profiles`, `named profiles change root
+or trust` or `project trust unknown`),
+then how many directories, then one of them. A line that already differs carries none.
 Current files are applied to history as an estimate, not proof of past settings.
 
 Neither client logs these requests, so suggestion and recap costs are estimated

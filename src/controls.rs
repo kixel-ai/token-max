@@ -271,6 +271,7 @@ pub fn claude_background(
                 feature,
                 value: Some(value),
                 reason: reason.into(),
+                scope: None,
                 minutes: None,
                 owner,
                 off: file.map_or_else(
@@ -313,6 +314,7 @@ pub fn claude_background(
         feature: BackgroundFeature::GoalCheckIns,
         value: Some(minutes != Some(0)),
         reason: reason.into(),
+        scope: None,
         minutes: Some(minutes.unwrap_or(30)),
         owner: match minutes {
             Some(_) => environment.owners[variable].clone(),
@@ -339,6 +341,7 @@ pub fn codex_background(scopes: &[SettingsScope]) -> Result<Vec<BackgroundContro
         feature: BackgroundFeature::AutoRecaps,
         value: Some(value),
         reason: "current config files applied to history; historical files and CLI/session overrides are not recorded".into(),
+        scope: None,
         minutes: None,
         owner,
         off: format!("{key} = false"),

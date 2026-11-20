@@ -1305,6 +1305,10 @@ pub struct BackgroundControl {
     pub value: Option<bool>,
     /// What the current discovery establishes, without claiming historical state.
     pub reason: String,
+    /// A few words for why the value is unresolved, such as "working directory changed";
+    /// None while it is resolved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     /// The goal check-in interval, when it applies.
     pub minutes: Option<i64>,
     /// Where the effective value comes from.
@@ -1930,6 +1934,8 @@ pub struct BackgroundCheck {
     pub directories: Vec<Option<Text>>,
     /// Current ownership and any unresolved scope or selection.
     pub reason: String,
+    /// The control's `scope`: why it is unresolved, in a few words.
+    pub scope: Option<String>,
     /// The setting that turns it off.
     pub off: String,
     /// The file to set it in; None for an environment variable.

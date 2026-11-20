@@ -2731,39 +2731,6 @@ pub struct ExposureView {
     pub reasons: std::sync::Arc<[String]>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Visible {
-    Partial,
-    Unknown,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Observed {
-    Observed,
-    Unknown,
-}
-
-/// Coverage is scoped to a concrete harness, client, version, component and window.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Visibility {
-    pub harness: Harness,
-    pub client: Option<Text>,
-    pub version: Option<Text>,
-    pub profiles: Profiles,
-    pub component: Option<Text>,
-    pub since: Millis,
-    pub until: Millis,
-    pub exposure: Visible,
-    pub direct_calls: Observed,
-    pub nested_calls: Visible,
-    pub typed_skills: Observed,
-    /// The same reasons for every row, so rows share one list.
-    pub reasons: std::sync::Arc<[String]>,
-}
-
 /// How often one tool was called within the window, per profile set.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2792,7 +2759,6 @@ pub struct ExposureScan {
     pub components: Vec<Component>,
     pub requests: Vec<Exposure>,
     pub invocations: Vec<Invocation>,
-    pub visibility: Vec<Visibility>,
     /// Selected-window calls to each tool, deduplicated by call id.
     pub tool_calls: Vec<ToolCalls>,
     /// Selected-window output of each tool, deduplicated by call id.

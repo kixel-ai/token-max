@@ -266,11 +266,6 @@ fn world_state_deltas_keep_identities_removals_inheritance_and_compaction_uncert
         .find(|c| c.category == Category::SkillListing)
         .unwrap();
     assert_eq!(listing.owner, Owner::Skills);
-    assert!(
-        e.visibility
-            .iter()
-            .all(|v| v.nested_calls == Visible::Unknown)
-    );
     assert!(!leaks(e, &["SYNTHETIC_PRIVATE", "0123456789"]));
 }
 
@@ -634,11 +629,6 @@ fn typed_skill_aliases_deduplicate_while_nested_calls_and_script_references_stay
     assert_eq!(
         kinds(e, InvocationKind::ScriptReference)[0].status,
         InvocationStatus::Reference
-    );
-    assert!(
-        e.visibility
-            .iter()
-            .all(|v| v.nested_calls == Visible::Partial && v.typed_skills == Observed::Observed)
     );
     assert!(!leaks(&data, &["SYNTHETIC_PRIVATE"]));
 }

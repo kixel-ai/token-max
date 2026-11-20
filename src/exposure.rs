@@ -16,9 +16,9 @@ use crate::context::synced_short;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
     Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, MemoryAccess, MemoryUse, Millis, Observed, Owner, Profile, Profiles,
-    References, Request, RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage,
-    ToolCalls, ToolResults, Via, Visibility, Visible,
+    Linkage, Location, MemoryAccess, MemoryUse, Millis, Owner, Profile, Profiles, References,
+    Request, RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls,
+    ToolResults, Via,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -443,11 +443,6 @@ const SHAPE_REASON: &str = "recorded request shape gives the system prompt and t
 const FULL_REASON: &str =
     "serialized text includes wire framing; API tokenization is calibrated, not exact";
 const DIGEST_REASON: &str = "request digest/base/keep/tail hashes have no verified content mapping; attachment state is candidate exposure only";
-const VISIBILITY_REASONS: [&str; 3] = [
-    "call visibility describes the client/version window, not proof of use by each component",
-    "no supported client/version establishes complete nested-call or typed-skill recording",
-    "historical exposure and current effective enablement are independent",
-];
 
 impl ExposureCollector {
     /// A collector whose tool-call counts start at `since`.
@@ -878,8 +873,6 @@ impl ExposureCollector {
             })
             .collect();
 
-        let visibility = visibility(requests, &exposures, &invocations, since);
-
         let mut used = vec![false; components.len()];
         let mut queue = vec![];
         // Lists are interned, so each distinct one is visited once.
@@ -931,7 +924,6 @@ impl ExposureCollector {
                     i
                 })
                 .collect(),
-            visibility,
             tool_calls: tool_calls(calls),
             tool_results: tool_results(results),
             memory,
@@ -2517,181 +2509,6 @@ impl ExposureCollector {
         }
         Ok(())
     }
-}
-
-/// Visibility windows per client/version cohort and component, in first-request order.
-fn visibility(
-    requests: &[Request],
-    exposures: &[Exposure],
-    invocations: &[Invocation],
-    since: Option<Millis>,
-) -> Vec<Visibility> {
-    type Cohort<'a> = (Harness, Option<&'a str>, Option<&'a str>, Vec<&'a str>);
-    type SessionKey<'a> = (Harness, Option<&'a str>, Option<&'a str>, &'a str);
-    struct Group<'a> {
-        r: &'a Request,
-        view: Arc<ExposureView>,
-        sessions: HashSet<&'a str>,
-        since: Millis,
-        until: Millis,
-    }
-    struct Window<'a> {
-        r: &'a Request,
-        sessions: HashSet<&'a str>,
-        since: Millis,
-        until: Millis,
-    }
-    // Requests with the same cohort and listed components open the same windows. Grouping
-    // them first preserves the order in which each window first appears.
-    let mut cohorts: HashMap<Cohort<'_>, usize> = HashMap::default();
-    let mut groups: IndexMap<(usize, usize, usize), Group<'_>> = IndexMap::default();
-    for (r, e) in requests.iter().zip(exposures) {
-        let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
-        profiles.sort_unstable();
-        let next = cohorts.len();
-        let cohort = *cohorts
-            .entry((
-                r.harness,
-                r.client.as_deref(),
-                r.version.as_deref(),
-                profiles,
-            ))
-            .or_insert(next);
-        let key = (
-            cohort,
-            e.view.components.address(),
-            e.view.candidates.address(),
-        );
-        let g = groups.entry(key).or_insert_with(|| Group {
-            r,
-            view: e.view.clone(),
-            sessions: HashSet::default(),
-            since: r.time,
-            until: r.end_time,
-        });
-        g.sessions.insert(&*r.session);
-        g.since = g.since.min(r.time);
-        g.until = g.until.max(r.end_time);
-    }
-    let mut windows: IndexMap<(usize, Option<Text>), Window<'_>> = IndexMap::default();
-    for (&(cohort, _, _), g) in &groups {
-        let listed: Vec<Option<Text>> =
-            if g.view.components.is_empty() && g.view.candidates.is_empty() {
-                vec![None]
-            } else {
-                g.view
-                    .components
-                    .iter()
-                    .chain(g.view.candidates.iter())
-                    .map(|c| Some(c.clone()))
-                    .collect()
-            };
-        for component in listed {
-            let w = windows
-                .entry((cohort, component))
-                .or_insert_with(|| Window {
-                    r: g.r,
-                    sessions: HashSet::default(),
-                    since: since.unwrap_or(g.r.time),
-                    until: g.r.end_time,
-                });
-            w.sessions.extend(&g.sessions);
-            w.since = w.since.min(g.since);
-            w.until = w.until.max(g.until);
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    struct Calls {
-        since: Millis,
-        until: Millis,
-        direct: bool,
-        nested: bool,
-        typed: bool,
-    }
-    impl Calls {
-        fn merge(self, other: Calls) -> Calls {
-            Calls {
-                since: self.since.min(other.since),
-                until: self.until.max(other.until),
-                direct: self.direct || other.direct,
-                nested: self.nested || other.nested,
-                typed: self.typed || other.typed,
-            }
-        }
-    }
-    // A window counts a call recorded in any of its sessions, so per-session summaries combine.
-    let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::default();
-    for i in invocations
-        .iter()
-        .filter(|i| since.is_none_or(|s| i.time >= s))
-    {
-        let call = Calls {
-            since: i.time,
-            until: i.time,
-            direct: i.kind == InvocationKind::McpCall,
-            nested: i.via == Via::Completion && i.kind == InvocationKind::McpCall,
-            typed: i.via == Via::Typed,
-        };
-        for session in &i.sessions {
-            let key = (
-                i.harness,
-                i.client.as_deref(),
-                i.version.as_deref(),
-                session.as_str(),
-            );
-            by_session
-                .entry(key)
-                .and_modify(|c| *c = c.merge(call))
-                .or_insert(call);
-        }
-    }
-    let reasons: Arc<[String]> = VISIBILITY_REASONS.iter().map(|r| r.to_string()).collect();
-    windows
-        .into_iter()
-        .map(|((_, component), w)| {
-            let r = w.r;
-            let calls = w
-                .sessions
-                .iter()
-                .filter_map(|s| {
-                    by_session
-                        .get(&(r.harness, r.client.as_deref(), r.version.as_deref(), *s))
-                        .copied()
-                })
-                .reduce(Calls::merge);
-            Visibility {
-                harness: r.harness,
-                client: r.client.clone(),
-                version: r.version.clone(),
-                profiles: r.profiles.clone(),
-                since: since.unwrap_or(calls.map_or(w.since, |c| w.since.min(c.since))),
-                until: calls.map_or(w.until, |c| w.until.max(c.until)),
-                exposure: if component.is_none() {
-                    Visible::Unknown
-                } else {
-                    Visible::Partial
-                },
-                component,
-                direct_calls: if calls.is_some_and(|c| c.direct) {
-                    Observed::Observed
-                } else {
-                    Observed::Unknown
-                },
-                nested_calls: if calls.is_some_and(|c| c.nested) {
-                    Visible::Partial
-                } else {
-                    Visible::Unknown
-                },
-                typed_skills: if calls.is_some_and(|c| c.typed) {
-                    Observed::Observed
-                } else {
-                    Observed::Unknown
-                },
-                reasons: reasons.clone(),
-            }
-        })
-        .collect()
 }
 
 /// A Codex tool's full name from its bare name and namespace.
@@ -4642,7 +4459,6 @@ mod tests {
         };
         let same = scan("listing");
         assert_eq!(same.requests[0].view.linkage, Linkage::Chronological);
-        assert_eq!(same.visibility.len(), 1);
         let different = scan("other listing");
         let view = &different.requests[0].view;
         assert_eq!(view.linkage, Linkage::Unknown);
@@ -4651,7 +4467,6 @@ mod tests {
             *view.reasons,
             ["copied/inherited histories disagree on exposure"]
         );
-        assert_eq!(different.visibility.len(), 2);
     }
 
     #[test]

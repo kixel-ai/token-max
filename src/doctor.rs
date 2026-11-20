@@ -24,7 +24,7 @@ use crate::report::{
     recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{WrapOptions, wrap_spans};
+use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -1104,11 +1104,6 @@ const MARGIN: usize = crate::report::MARGIN;
 /// A card's figure is aligned to the right of this many cells, or of a narrower terminal,
 /// and its paragraphs wrap there.
 const CARD_CELLS: usize = 88;
-const BOLD: &str = "1";
-const DIM: &str = "2";
-const RED: &str = "31";
-const GREEN: &str = "32";
-const YELLOW: &str = "33";
 
 /// A question of the walk as a card: a heading with its figure at the right, the change,
 /// then labeled paragraphs.

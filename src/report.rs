@@ -21,7 +21,7 @@ use crate::model::{
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
-use crate::terminal::{WrapOptions, cells, wrap_spans};
+use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
 
 /// How to lay out the text report; presentation never changes the analysis.
 #[derive(Clone, Copy, Debug, Default)]
@@ -698,8 +698,6 @@ fn token_range(mut values: impl Iterator<Item = i64>) -> String {
 
 /// An unstyled line.
 const PLAIN: &str = "";
-/// A heading's ANSI style.
-const BOLD: &str = "1";
 /// Cells every line but the title is indented by.
 pub(crate) const MARGIN: usize = 2;
 /// Section rules stop here on a wide terminal.
@@ -709,9 +707,9 @@ const RULE_CELLS: usize = 100;
 /// a recommended change, yellow for an advisory, green for a value already right.
 fn tier(action: Action) -> &'static str {
     match action {
-        Action::Change => "31",
-        Action::Advisory => "33",
-        Action::Keep => "32",
+        Action::Change => RED,
+        Action::Advisory => YELLOW,
+        Action::Keep => GREEN,
     }
 }
 
@@ -3793,10 +3791,6 @@ impl Mark {
     }
 }
 
-/// A dim line's ANSI style.
-const DIM: &str = "2";
-/// A saving's ANSI color.
-const GREEN: &str = "32";
 /// Cells the plain-text verdict word takes, with its gap.
 const WORD_CELLS: usize = 9;
 /// Names and values wider than this are not padded, so one long name doesn't widen every line.
@@ -4473,21 +4467,24 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
 /// The headline: how many changes the report recommends and how many are worth considering,
 /// as bold spans with each count in its verdict's color.
 fn headline(changes: usize, considered: usize) -> Vec<(String, &'static str)> {
-    const RED: &str = "1;31";
-    const YELLOW: &str = "1;33";
-    const GREEN: &str = "1;32";
+    const BOLD_RED: &str = "1;31";
+    const BOLD_YELLOW: &str = "1;33";
+    const BOLD_GREEN: &str = "1;32";
     let s = if changes == 1 { "" } else { "s" };
     let parts: Vec<(String, &'static str)> = match (changes, considered) {
-        (0, 0) => vec![("No changes recommended or worth considering".into(), GREEN)],
+        (0, 0) => vec![(
+            "No changes recommended or worth considering".into(),
+            BOLD_GREEN,
+        )],
         (0, c) => vec![
             ("No changes recommended; ".into(), BOLD),
-            (format!("{c} worth considering"), YELLOW),
+            (format!("{c} worth considering"), BOLD_YELLOW),
         ],
-        (r, 0) => vec![(format!("{r} change{s} recommended"), RED)],
+        (r, 0) => vec![(format!("{r} change{s} recommended"), BOLD_RED)],
         (r, c) => vec![
-            (format!("{r} change{s} recommended"), RED),
+            (format!("{r} change{s} recommended"), BOLD_RED),
             (" and ".into(), BOLD),
-            (format!("{c} worth considering"), YELLOW),
+            (format!("{c} worth considering"), BOLD_YELLOW),
         ],
     };
     parts

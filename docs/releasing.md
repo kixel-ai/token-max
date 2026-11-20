@@ -9,8 +9,10 @@ The read-only `Check` workflow runs `just check` (formatting, clippy with
 warnings as errors, the synthetic tests and `quest check`) on Linux, and the
 tests on macOS and Windows. A change only to `quest/` and the agent docs
 (`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`) runs `quest check` alone. The
-required `Check` job aggregates them; failed, cancelled, or skipped
-dependencies fail it, so a skipped draft run cannot satisfy the gate. PR jobs have no publication credentials or OIDC permission.
+required `Check` job aggregates them. A failed, cancelled, or skipped job
+fails it, apart from the platform tests a quest-only change skips, so a
+skipped draft run cannot satisfy the gate. PR jobs have no publication
+credentials or OIDC permission.
 
 ## Binaries
 

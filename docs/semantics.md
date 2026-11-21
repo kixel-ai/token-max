@@ -572,8 +572,8 @@ Neither harness has a native mechanism for capped idle pings.
 
 ## Shared component measurements
 
-`scan.exposure` adds historical component revisions, request views, invocation
-evidence, and client/version/window visibility. Components retain Unicode
+`scan.exposure` adds historical component revisions, request views, and invocation
+evidence. Components retain Unicode
 character counts, opaque identities and fingerprints, source locations, one
 owner (`skills` or `context`), and a server/namespace attribution key, or a plugin key where the record explicitly
 identifies it. A listed skill, a tool definition and a Codex namespace also
@@ -878,7 +878,7 @@ skill is not proof of successful execution. A textual mention or command wrapper
 needs a known historical catalog entry to count as a skill request; otherwise it
 remains a weak reference. Meta user-role attachments are excluded from mention
 inference. Codex user aliases without a shared message identity are matched by
-their corresponding equal-text occurrence, with that identity basis disclosed. Observed nested completions establish
+their corresponding equal-text occurrence. Observed nested completions establish
 positive evidence, never complete nested visibility. Corrupt pre-window exposure metadata invalidates subsequent candidate state and
 adds a coverage issue, preserving the reader's existing billing-window semantics.
 Calibration
@@ -886,7 +886,7 @@ estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so the
-exposure scan's `automaticUnused` stays false. Context verdicts instead rest on
+exposure scan never marks a component unused by itself. Context verdicts rest on
 the calls each transcript records: Claude records every tool, MCP and Skill
 call, subagents' included, so a piece carried from the window's start with none
 is unused. Codex catalog skills and pieces first sent mid-window stay advisory

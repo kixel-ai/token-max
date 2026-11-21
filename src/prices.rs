@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::model::{
     Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, TierScenario, Usd,
 };
-use crate::safe::{ScanError, iso, label, object};
+use crate::safe::{ScanError, iso, label, object, truthy};
 
 const PRICE_URL: &str = "https://models.dev/api.json";
 
@@ -231,17 +231,6 @@ fn rates(value: &Value) -> Result<Rates, ScanError> {
     })
 }
 
-/// JavaScript truthiness, which decides whether a legacy tier field is present.
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
-}
-
 fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     let cost = object(value).get("cost").unwrap_or(&Value::Null);
     let fields = object(cost);
@@ -266,7 +255,8 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     }
     tiers.sort_by(|a, b| a.size.partial_cmp(&b.size).expect("finite tier sizes"));
     let legacy = match fields.get("context_over_200k") {
-        Some(value) if truthy(value) => Some(rates(value)?),
+        // JavaScript truthiness decides whether a legacy tier field is present.
+        Some(value) if truthy(Some(value)) => Some(rates(value)?),
         _ => None,
     };
     let model = object(value);
@@ -515,10 +505,6 @@ impl Drop for Discard<'_> {
     }
 }
 
-fn now_millis() -> i64 {
-    millis(SystemTime::now()).expect("clock after the Unix epoch")
-}
-
 fn millis(time: SystemTime) -> Option<i64> {
     i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
@@ -590,7 +576,7 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
     let _discard = Discard(&temporary);
     match download(&options.cache, &temporary) {
         Ok(catalog) => Ok(Catalog {
-            fetched_at: Some(iso(now_millis())),
+            fetched_at: Some(iso(crate::reader::now())),
             offline: false,
             ..catalog
         }),
@@ -603,9 +589,14 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
 
 /// A known zero with no missing components.
 pub fn zero_cost() -> Cost {
+    known_cost(Usd::ZERO)
+}
+
+/// A fully known amount with no missing components.
+pub fn known_cost(usd: Usd) -> Cost {
     Cost {
-        known_usd: Usd::ZERO,
-        total_usd: Some(Usd::ZERO),
+        known_usd: usd,
+        total_usd: Some(usd),
         unknown: vec![],
         assumptions: vec![],
     }
@@ -613,25 +604,11 @@ pub fn zero_cost() -> Cost {
 
 /// Keep partial known charges separate from an unknown total.
 pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
-    let mut known = Usd::ZERO;
-    let mut total = Some(Usd::ZERO);
-    let mut unknown = IndexSet::default();
-    let mut assumptions = IndexSet::default();
+    let mut sum = Sum::new();
     for cost in costs {
-        known += cost.known_usd;
-        total = match (total, cost.total_usd) {
-            (Some(sum), Some(value)) => Some(sum + value),
-            _ => None,
-        };
-        unknown.extend(cost.unknown.iter().map(String::as_str));
-        assumptions.extend(cost.assumptions.iter().map(String::as_str));
+        sum.add(cost);
     }
-    Cost {
-        known_usd: known,
-        total_usd: total,
-        unknown: unknown.into_iter().map(str::to_string).collect(),
-        assumptions: assumptions.into_iter().map(str::to_string).collect(),
-    }
+    sum.cost()
 }
 
 /// A running [`add_costs`], so charges need not be kept to be totaled.
@@ -842,21 +819,8 @@ impl PairedSavings {
     }
 }
 
-/// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
-/// cannot hide a clear winner. `unknown` counts further items that could differ but left no
-/// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
-pub fn paired_savings<'a>(
-    pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
-    unknown: u64,
-) -> PairedSavings {
-    let mut sum = Pairs::default();
-    for (baseline, alternative) in pairs {
-        sum.add(baseline, alternative);
-    }
-    sum.savings(unknown)
-}
-
-/// [`paired_savings`] taken one pair at a time, so a whole history's pairs need not be kept.
+/// Compares two scenarios pair by pair as (baseline, alternative), so a few unpriced requests
+/// cannot hide a clear winner, without keeping a whole history's pairs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pairs {
     count: u64,
@@ -883,7 +847,8 @@ impl Pairs {
         self.count
     }
 
-    /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
+    /// The savings over every pair added, extrapolated over `unknown` further items that could
+    /// differ but left no evidence, such as unreadable transcript lines.
     pub fn savings(&self, unknown: u64) -> PairedSavings {
         let total = self.count + unknown;
         PairedSavings {
@@ -1531,6 +1496,20 @@ pub(crate) fn request_evidence(r: &Request, mut result: Cost) -> Cost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
+    /// cannot hide a clear winner. `unknown` counts further items that could differ but left no
+    /// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
+    fn paired_savings<'a>(
+        pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
+        unknown: u64,
+    ) -> PairedSavings {
+        let mut sum = Pairs::default();
+        for (baseline, alternative) in pairs {
+            sum.add(baseline, alternative);
+        }
+        sum.savings(unknown)
+    }
     use crate::model::{Text, Usage};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
     use serde_json::json;
@@ -1885,6 +1864,10 @@ mod tests {
             server_cost(&tools(&[("code_execution_requests", 1)])).total_usd,
             None
         );
+        // Off Anthropic the per-search fee is unknown, never zero.
+        let mut elsewhere = tools(&[("web_search_requests", 1)]);
+        elsewhere.provider = Some("bedrock".into());
+        assert_eq!(server_cost(&elsewhere).total_usd, None);
         let unrecorded = {
             let mut built = Request {
                 parts: vec![p],
@@ -1935,11 +1918,7 @@ mod tests {
             .map(|_| {
                 let mantissa = (next() >> 11) as f64 / (1u64 << 53) as f64;
                 let usd = mantissa * 10f64.powi((next() % 12) as i32 - 9);
-                Cost {
-                    known_usd: Usd::from_f64(usd),
-                    total_usd: Some(Usd::from_f64(usd)),
-                    ..Cost::default()
-                }
+                known_cost(Usd::from_f64(usd))
             })
             .collect();
         let forward = add_costs(&costs);
@@ -1978,11 +1957,7 @@ mod tests {
 
     #[test]
     fn paired_savings_extrapolate_over_unpriced_parts() {
-        let known = |usd: f64| Cost {
-            known_usd: Usd::from_f64(usd),
-            total_usd: Some(Usd::from_f64(usd)),
-            ..Cost::default()
-        };
+        let known = |usd: f64| known_cost(Usd::from_f64(usd));
         let missing = unknown_cost("missing");
         let (three, two, one) = (known(3.0), known(2.0), known(1.0));
         let a = (&three, &one);

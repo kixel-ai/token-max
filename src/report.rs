@@ -21,7 +21,7 @@ use crate::model::{
 };
 use crate::prices::{TIER_SENSITIVITY, add_costs};
 use crate::safe::{display, iso, parse_instant, terminal_text};
-use crate::terminal::{WrapOptions, cells, wrap_spans};
+use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, cells, wrap_spans};
 
 /// How to lay out the text report; presentation never changes the analysis.
 #[derive(Clone, Copy, Debug, Default)]
@@ -197,7 +197,8 @@ fn percent(part: u64, whole: u64) -> String {
     js_number(((part as f64 / whole as f64) * 1000.0).floor() / 10.0)
 }
 
-fn capitalize(text: &str) -> String {
+/// `text` with its first letter capitalized.
+pub(crate) fn capitalize(text: &str) -> String {
     let mut chars = text.chars();
     match chars.next() {
         Some(first) => first.to_uppercase().chain(chars).collect(),
@@ -483,10 +484,9 @@ fn effort_evidence(e: &EffortCheck, mark: Mark, out: &Out<'_>) -> String {
                     None => "unpriced".into(),
                 };
                 format!(
-                    "{} {} time{}, {cost}",
+                    "{} {}, {cost}",
                     effort_pair(run),
-                    count(run.requests),
-                    if run.requests == 1 { "" } else { "s" }
+                    plural(run.requests, "time")
                 )
             })
             .collect();
@@ -621,13 +621,10 @@ fn memory_uses(c: &MemoryCheck) -> String {
         return "never read back or written".into();
     }
     format!(
-        "used {} time{} ({} read{}, {} write{})",
-        count(uses),
-        if uses == 1 { "" } else { "s" },
-        count(c.reads),
-        if c.reads == 1 { "" } else { "s" },
-        count(c.writes),
-        if c.writes == 1 { "" } else { "s" },
+        "used {} ({}, {})",
+        plural(uses, "time"),
+        plural(c.reads, "read"),
+        plural(c.writes, "write"),
     )
 }
 
@@ -701,8 +698,6 @@ fn token_range(mut values: impl Iterator<Item = i64>) -> String {
 
 /// An unstyled line.
 const PLAIN: &str = "";
-/// A heading's ANSI style.
-const BOLD: &str = "1";
 /// Cells every line but the title is indented by.
 pub(crate) const MARGIN: usize = 2;
 /// Section rules stop here on a wide terminal.
@@ -712,9 +707,9 @@ const RULE_CELLS: usize = 100;
 /// a recommended change, yellow for an advisory, green for a value already right.
 fn tier(action: Action) -> &'static str {
     match action {
-        Action::Change => "31",
-        Action::Advisory => "33",
-        Action::Keep => "32",
+        Action::Change => RED,
+        Action::Advisory => YELLOW,
+        Action::Keep => GREEN,
     }
 }
 
@@ -1156,7 +1151,7 @@ pub fn totals_section(
     let read = format!(
         "  {} requests in {}, {spent} at API prices",
         count(totals.requests),
-        requests_of(totals.sessions, "session")
+        plural(totals.sessions, "session")
     );
     let mut text = wrap_spans(
         &[(&name, BOLD), (&read, DIM)],
@@ -1317,6 +1312,22 @@ fn generated_at(report: &Report) -> Millis {
     parse_instant(&report.generated_at).expect("reports record an ISO generation time")
 }
 
+/// The sentences naming what replaces a T3 text-generation selection, each with a leading space.
+fn t3_overrides(g: &T3TextGeneration) -> String {
+    let mut text = String::new();
+    for (key, s) in &g.overrides {
+        let _ = write!(text, " {key} replaces it with {} {}.", s.instance, s.model);
+    }
+    if g.project_overrides > 0 {
+        let _ = write!(
+            text,
+            " {} replace these selections in projectSettingsOverrides.",
+            plural(g.project_overrides, "project")
+        );
+    }
+    text
+}
+
 /// One line per T3 state for its text-generation model, whose cost no native record holds.
 fn t3_text_generation(report: &Report, out: &Out<'_>) -> Vec<String> {
     let text = |g: &T3TextGeneration| {
@@ -1327,17 +1338,7 @@ fn t3_text_generation(report: &Report, out: &Out<'_>) -> Vec<String> {
             g.resolution,
             out.home(&g.owner)
         );
-        for (key, s) in &g.overrides {
-            let _ = write!(line, " {key} replaces it with {} {}.", s.instance, s.model);
-        }
-        if g.project_overrides > 0 {
-            let _ = write!(
-                line,
-                " {} project{} replace these selections in projectSettingsOverrides.",
-                count(g.project_overrides),
-                if g.project_overrides == 1 { "" } else { "s" }
-            );
-        }
+        line.push_str(&t3_overrides(g));
         line
     };
     report
@@ -1361,20 +1362,15 @@ fn t3_coverage(report: &Report, out: &mut Out<'_>) {
         for (cause, n) in &state.unresolved {
             out.note(
                 "T3 unresolved",
-                &format!(
-                    "{} request{}: {cause}",
-                    count(*n),
-                    if *n == 1 { "" } else { "s" }
-                ),
+                &format!("{}: {cause}", plural(*n, "request")),
             );
         }
         for (instance, n) in &state.removed {
             out.note(
                 "T3 removed",
                 &format!(
-                    "{} request{} of instance {instance}, no longer in T3's settings: billed, left out of every current profile's checks",
-                    count(*n),
-                    if *n == 1 { "" } else { "s" }
+                    "{} of instance {instance}, no longer in T3's settings: billed, left out of every current profile's checks",
+                    plural(*n, "request")
                 ),
             );
         }
@@ -1548,7 +1544,7 @@ fn details(report: &Report, out: &mut Out<'_>) {
                         "{}: {} ({})",
                         label(&s.source),
                         out.home_in(&s.detail),
-                        runs(s.runs)
+                        plural(s.runs, "run")
                     ),
                 );
             }
@@ -1573,10 +1569,10 @@ fn details(report: &Report, out: &mut Out<'_>) {
             out.blank();
             let names: Vec<String> = u.profiles.iter().map(|p| out.profile_name(p)).collect();
             out.line(&names.join(", "), 0, BOLD);
-            out.field("Requests", &requests_of(u.requests, "Fable request"));
+            out.field("Requests", &plural(u.requests, "Fable request"));
             for w in &u.weeks {
                 out.estimate(
-                    &format!("{}, {}", fable_span(w), requests_of(w.requests, "request")),
+                    &format!("{}, {}", fable_span(w), plural(w.requests, "request")),
                     &w.cost,
                     w.estimate,
                 );
@@ -1767,11 +1763,6 @@ fn subagent_name(c: &SubagentCost) -> String {
     }
 }
 
-/// A count of subagent runs.
-fn runs(n: u64) -> String {
-    format!("{} run{}", count(n), if n == 1 { "" } else { "s" })
-}
-
 /// Values with their share of `whole`, or the value alone when there is only one.
 fn shares(values: &[Share], whole: u64) -> String {
     match values {
@@ -1839,13 +1830,13 @@ fn subagent_line(c: &SubagentCost, out: &Out<'_>) -> String {
             if c.sources.len() == 1 {
                 detail
             } else {
-                format!("{detail} ({})", runs(s.runs))
+                format!("{detail} ({})", plural(s.runs, "run"))
             }
         })
         .collect();
     format!(
         "{}{coverage} on {} at {effort}. Model source: {}. {} Model setting: {}. Effort setting: {}.",
-        capitalize(&runs(c.runs)),
+        capitalize(&plural(c.runs, "run")),
         shares(&c.models, c.requests),
         sources.join("; "),
         reprice_text(c),
@@ -1873,8 +1864,9 @@ const FABLE_RULE: &str = "on a Claude Max or Ultra plan or a Team or seat-based 
 /// Why a profile's Fable figures fall short of what the plan's cap counts.
 const FABLE_PARTIAL: &str = "These figures are partial: the cap counts Fable use on every Claude surface, they cover only this profile's recorded sessions, and they may include requests paid with usage credits after the cap was reached. The weekly reset time is not recorded, and the limit is not published in tokens or dollars, so no share of it is shown.";
 
-/// How many requests, with the noun in the right number.
-fn requests_of(n: u64, noun: &str) -> String {
+/// A grouped count with the noun in the right number, such as "1,024 runs".
+fn plural(n: impl Into<i128>, noun: &str) -> String {
+    let n = n.into();
     format!("{} {noun}{}", count(n), if n == 1 { "" } else { "s" })
 }
 
@@ -1895,7 +1887,7 @@ fn fable_caveats(u: &FableUse) -> String {
         let _ = write!(
             text,
             " {} recorded no model and may have run on Fable.",
-            requests_of(u.unrecorded, "request")
+            plural(u.unrecorded, "request")
         );
     }
     text
@@ -1939,7 +1931,7 @@ fn fable_row(u: &FableUse) -> Row {
             format!(
                 "{} ({}, {})",
                 figure(w.estimate),
-                requests_of(w.requests, "request"),
+                plural(w.requests, "request"),
                 fable_span(w)
             )
         })
@@ -1947,7 +1939,7 @@ fn fable_row(u: &FableUse) -> Row {
     row.amount = Some(("costs", figure(u.estimate)));
     row.evidence = format!(
         "{} at API prices, per 7 days back from this report: {}. {FABLE_PARTIAL}{caveats} {official}",
-        requests_of(u.requests, "Fable request"),
+        plural(u.requests, "Fable request"),
         weeks.join(", ")
     );
     row
@@ -3799,10 +3791,6 @@ impl Mark {
     }
 }
 
-/// A dim line's ANSI style.
-const DIM: &str = "2";
-/// A saving's ANSI color.
-const GREEN: &str = "32";
 /// Cells the plain-text verdict word takes, with its gap.
 const WORD_CELLS: usize = 9;
 /// Names and values wider than this are not padded, so one long name doesn't widen every line.
@@ -4229,11 +4217,7 @@ fn instruction_row(c: &ContextCost, profiles: &[Profile], out: &Out<'_>) -> Row 
                 name,
                 what,
             );
-            row.value = format!(
-                "{} line{}",
-                count(size.lines as u64),
-                if size.lines == 1 { "" } else { "s" }
-            );
+            row.value = plural(size.lines as u64, "line");
             row.sources = vec![CLAUDE_MEMORY_DOCS];
             row.evidence = if over {
                 format!(
@@ -4483,21 +4467,24 @@ pub(crate) fn recommendations(report: &Report, unicode: bool) -> Vec<Recommendat
 /// The headline: how many changes the report recommends and how many are worth considering,
 /// as bold spans with each count in its verdict's color.
 fn headline(changes: usize, considered: usize) -> Vec<(String, &'static str)> {
-    const RED: &str = "1;31";
-    const YELLOW: &str = "1;33";
-    const GREEN: &str = "1;32";
+    const BOLD_RED: &str = "1;31";
+    const BOLD_YELLOW: &str = "1;33";
+    const BOLD_GREEN: &str = "1;32";
     let s = if changes == 1 { "" } else { "s" };
     let parts: Vec<(String, &'static str)> = match (changes, considered) {
-        (0, 0) => vec![("No changes recommended or worth considering".into(), GREEN)],
+        (0, 0) => vec![(
+            "No changes recommended or worth considering".into(),
+            BOLD_GREEN,
+        )],
         (0, c) => vec![
             ("No changes recommended; ".into(), BOLD),
-            (format!("{c} worth considering"), YELLOW),
+            (format!("{c} worth considering"), BOLD_YELLOW),
         ],
-        (r, 0) => vec![(format!("{r} change{s} recommended"), RED)],
+        (r, 0) => vec![(format!("{r} change{s} recommended"), BOLD_RED)],
         (r, c) => vec![
-            (format!("{r} change{s} recommended"), RED),
+            (format!("{r} change{s} recommended"), BOLD_RED),
             (" and ".into(), BOLD),
-            (format!("{c} worth considering"), YELLOW),
+            (format!("{c} worth considering"), BOLD_YELLOW),
         ],
     };
     parts
@@ -4633,7 +4620,7 @@ fn summary(
         Some(since) if coverage.requests > 0 => format!(
             "{} requests in {} from {} to {} ({}), {spent} at API prices",
             count(coverage.requests),
-            requests_of(sessions(&report.scan), "session"),
+            plural(sessions(&report.scan), "session"),
             date(&iso(since)),
             date(&report.generated_at),
             days(Some(since), Some(spend.until))
@@ -4835,9 +4822,8 @@ fn summary(
         }
         let cost = figure(w.miss_estimate);
         format!(
-            "{} foreground Bash wait{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost} over the window.",
-            count(w.long),
-            if w.long == 1 { "" } else { "s" },
+            "{} outlasted the cache ({} hit the timeout, {} polled in a loop); the cache misses cost {cost} over the window.",
+            plural(w.long, "foreground Bash wait"),
             count(w.timed_out),
             count(w.polling)
         )
@@ -4855,9 +4841,8 @@ fn summary(
         row.baseline = crate::defaults::check(result, out.profiles.get(r.profile).copied());
         if r.requests > 0 {
             row.stats = format!(
-                "Measured on {} request{} over {}.",
-                count(r.requests),
-                if r.requests == 1 { "" } else { "s" },
+                "Measured on {} over {}.",
+                plural(r.requests, "request"),
                 days(r.since, r.until)
             );
         }
@@ -5116,9 +5101,8 @@ fn summary(
                 }
                 if m.unpriced_reads > 0 && r.savings_usd.is_some() {
                     notes.push(format!(
-                        "memory read back by {} request{} that recorded no context could not be priced",
-                        count(m.unpriced_reads),
-                        if m.unpriced_reads == 1 { "" } else { "s" }
+                        "memory read back by {} that recorded no context could not be priced",
+                        plural(m.unpriced_reads, "request")
                     ));
                 }
                 if unmeasured {
@@ -5618,17 +5602,7 @@ fn summary(
             g.resolution,
             out.home(&g.owner)
         );
-        for (key, s) in &g.overrides {
-            let _ = write!(text, " {key} replaces it with {} {}.", s.instance, s.model);
-        }
-        if g.project_overrides > 0 {
-            let _ = write!(
-                text,
-                " {} project{} replace these selections in projectSettingsOverrides.",
-                count(g.project_overrides),
-                if g.project_overrides == 1 { "" } else { "s" }
-            );
-        }
+        text.push_str(&t3_overrides(g));
         row.evidence = text;
         row.setting = out.home(&g.owner);
         rows.push(row);
@@ -6034,9 +6008,8 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
         let used = match c.calls {
             None => String::new(),
             Some(results) if c.kind == ContextKind::ToolOutput => format!(
-                "; {} result{} in the window, the largest {} characters",
-                count(results),
-                if results == 1 { "" } else { "s" },
+                "; {} in the window, the largest {} characters",
+                plural(results, "result"),
                 count(c.largest_characters.unwrap_or(0))
             ),
             _ if c.skill.is_some() => format!(
@@ -6046,9 +6019,8 @@ fn context_section(report: &Report, out: &mut Out<'_>) {
             ),
             Some(0) => "; no recorded use".into(),
             Some(calls) => format!(
-                "; used {} time{}, last {}",
-                count(calls),
-                if calls == 1 { "" } else { "s" },
+                "; used {}, last {}",
+                plural(calls, "time"),
                 date(&iso(c.last_used.unwrap_or(0)))
             ),
         };
@@ -6293,7 +6265,6 @@ mod tests {
             sensitivity: TtlSensitivity {
                 cold_prefix1h_usd: Some(1.5),
                 cold_prefix1h_comparison_usd: None,
-                warm_reuse_break_even_fraction: None,
                 unlinked: Some(UnlinkedSensitivity {
                     no_billed_attempt: PerTtl::default(),
                     cold_cache: PerTtl {
@@ -7195,7 +7166,6 @@ mod tests {
             metadata: String::new(),
             snapshot_started_at: None,
             snapshot_finished_at: None,
-            joined_requests: 0,
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::from_iter([("gone".into(), 3)]),
@@ -9032,12 +9002,7 @@ mod tests {
     fn subagent_lines_are_evidence_that_never_count_as_changes() {
         let mut report = synthetic();
         let before = text(&report, None, false);
-        let cost = |usd: f64| Cost {
-            known_usd: Usd::from_f64(usd),
-            total_usd: Some(Usd::from_f64(usd)),
-            unknown: vec![],
-            assumptions: vec![],
-        };
+        let cost = |usd: f64| crate::prices::known_cost(Usd::from_f64(usd));
         report.subagents.push(SubagentCost {
             harness: Harness::Claude,
             profiles: vec!["profile".into()],

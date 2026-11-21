@@ -16,7 +16,8 @@ use crate::model::{
     RequestEvidence, Scan, Text, Ttl, Usage, Usd,
 };
 use crate::prices::{
-    Catalog, Pairs, Sum, add_costs, price_components, unit_rates, unknown_cost, zero_cost,
+    Catalog, Pairs, Sum, add_costs, known_cost, price_components, unit_rates, unknown_cost,
+    zero_cost,
 };
 use crate::rows::Group;
 
@@ -31,7 +32,6 @@ const SOURCES: [&str; 8] = [
     "https://learn.chatgpt.com/docs/config-file/config-advanced (2026-11-08)",
 ];
 
-const DAY: f64 = 86_400_000.0;
 const MINUTE: Millis = 60_000;
 /// A recap starts once the terminal has been unfocused this long after a completed turn.
 const RECAP_DELAY: Millis = 3 * MINUTE;
@@ -357,9 +357,8 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
     {
         return zero_cost();
     }
-    let prefix = match (source.usage.read, source.usage.write) {
-        (Some(read), Some(write)) => read + write,
-        _ => return unknown_cost("the turn's last response has no recorded cache usage"),
+    let Some(prefix) = source.usage.cached_prefix() else {
+        return unknown_cost("the turn's last response has no recorded cache usage");
     };
     let read = part.usage.read.map(|read| read.min(prefix));
     let (Some(read), Some(rates)) = (read, unit_rates(catalog, next, part)) else {
@@ -370,11 +369,7 @@ fn request_warming(catalog: &Catalog, end: &TurnEnd<'_>, feature: BackgroundFeat
         Ttl::OneHour => rates.write1h,
     };
     let usd = Usd::from_f64(read as f64 * (write - rates.read));
-    Cost {
-        known_usd: usd,
-        total_usd: Some(usd),
-        ..zero_cost()
-    }
+    known_cost(usd)
 }
 
 /// The extra ordinary input a recap would pay without a suggestion refreshing its prefix.
@@ -398,11 +393,7 @@ fn recap_warming(catalog: &Catalog, end: &TurnEnd<'_>) -> Cost {
         return unknown_cost("the recap's cached prefix has no priced usage");
     };
     let usd = Usd::from_f64((read + write) as f64 * (rates.ordinary - rates.read));
-    Cost {
-        known_usd: usd,
-        total_usd: Some(usd),
-        ..zero_cost()
-    }
+    known_cost(usd)
 }
 
 /// Later input costs avoided by this feature's cache reads, with other features held constant.
@@ -493,12 +484,7 @@ fn check(
     let estimate = paired.usd().filter(|_| stand_ins.is_some());
     let margin = paired.savings.and_then(|s| s.margin);
     let start = input.since.or(requests.iter().map(|r| r.time).min());
-    let month = |v: Option<f64>| match (v, start) {
-        (Some(v), Some(start)) if input.now > start => {
-            Some((v * 30.0 * DAY) / (input.now - start) as f64)
-        }
-        _ => v,
-    };
+    let month = |v: Option<f64>| v.map(|v| crate::report::monthly(v, start, Some(input.now)));
     // A suggestion or recap use is not recorded, so nonuse is never proven: a whole
     // cost above the per-use limit may still be under it per use, and stays advisory.
     let action = match (control.value, measurable, estimate) {
@@ -662,7 +648,6 @@ mod tests {
             value: Some(value),
             reason: "synthetic current controls applied to history".into(),
             scope: None,
-            minutes: None,
             owner: "/synthetic/.claude/settings.json:key".into(),
             off: "\"key\": false".into(),
             off_file: Some("/synthetic/.claude/settings.json".into()),
@@ -693,7 +678,6 @@ mod tests {
                 client: None,
                 cwd: None,
                 trigger: None,
-                precomputed: None,
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,

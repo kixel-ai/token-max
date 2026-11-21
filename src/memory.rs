@@ -14,8 +14,6 @@ use crate::model::{
 };
 use crate::prices::{Catalog, Sample, output_rate};
 
-const DAY: f64 = 86_400_000.0;
-
 const SOURCES: [&str; 2] = [
     "https://code.claude.com/docs/en/memory#auto-memory (2026-11-11)",
     "https://developers.openai.com/codex/memories (2026-11-11)",
@@ -239,12 +237,7 @@ fn check(
     let total = context_usd.zip(writes_usd).map(|(a, b)| (a + b).to_f64());
     let (context_usd, writes_usd) = (context_usd.map(Usd::to_f64), writes_usd.map(Usd::to_f64));
     let start = input.since.or(mine.iter().map(|r| r.time).min());
-    let monthly = match (total, start) {
-        (Some(usd), Some(start)) if input.now > start => {
-            Some((usd * 30.0 * DAY) / (input.now - start) as f64)
-        }
-        _ => total,
-    };
+    let monthly = total.map(|usd| crate::report::monthly(usd, start, Some(input.now)));
     let mut uncertainty = vec![];
     if rows
         .iter()

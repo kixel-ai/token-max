@@ -8,7 +8,7 @@ use crate::model::{
     Harness, Id, Millis, Profile, Request, RequestEvidence, Scan, StructuralEvent, Ttl, TtlCheck,
     Usd,
 };
-use crate::prices::{Catalog, Sample, add_costs, unit_rates, unknown_cost, zero_cost};
+use crate::prices::{Catalog, Sample, add_costs, known_cost, unit_rates, unknown_cost, zero_cost};
 
 const SOURCES: [&str; 3] = [
     "https://code.claude.com/docs/en/env-vars (2026-11-08)",
@@ -129,11 +129,7 @@ fn miss(catalog: &Catalog, issuing: Option<&Request>, next: Option<&Request>) ->
         None => return unknown_cost("the write lifetime after the wait is not recorded"),
     };
     let usd = Usd::from_f64(rewritten as f64 * (write_rate - rates.read));
-    Cost {
-        known_usd: usd,
-        total_usd: Some(usd),
-        ..zero_cost()
-    }
+    known_cost(usd)
 }
 
 fn check(

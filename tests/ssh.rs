@@ -10,14 +10,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use token_max::controls::Env;
-use token_max::discovery::DiscoveryOptions;
-use token_max::model::{
+use token_max::DiscoveryOptions;
+use token_max::Env;
+use token_max::{
     Action, BackgroundCheck, BackgroundFeature, CheckResult, ContextKind, Harness, Report,
 };
-use token_max::prices::{PriceOptions, load_prices};
-use token_max::reader::{ScanOptions, scan};
-use token_max::replay::{AnalyzeOptions, analyze};
+use token_max::{AnalyzeOptions, analyze};
+use token_max::{PriceOptions, load_prices};
+use token_max::{ScanOptions, scan};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -838,8 +838,8 @@ fn background_controls_and_estimates_keep_their_remote_history() {
         .find(|p| p.harness == Harness::Claude)
         .unwrap();
     assert_eq!(
-        claude.background_directories[home.join("workspace").to_str().unwrap()][2].minutes,
-        Some(7)
+        claude.background_directories[home.join("workspace").to_str().unwrap()][2].value,
+        Some(true)
     );
     assert_eq!(remote.scan.cache_context.prompts.len(), 2);
     assert_eq!(remote.scan.cache_context.requests.len(), 2);

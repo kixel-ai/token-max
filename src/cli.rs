@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Mutex, PoisonError, mpsc};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::ser::Formatter;
@@ -177,8 +176,9 @@ static PROGRESS: Mutex<usize> = Mutex::new(0);
 fn show_progress(message: &str) {
     let mut shown = PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
     let room = progress_room();
-    let text = fit(&format!("token-max: {message}..."), room);
-    let cells = crate::terminal::cells(&text);
+    let line = format!("token-max: {message}...");
+    let text = crate::terminal::fit(&line, room);
+    let cells = crate::terminal::cells(text);
     let pad = " ".repeat((*shown).min(room).saturating_sub(cells));
     eprint!("\r{text}{pad}");
     *shown = cells;
@@ -190,19 +190,6 @@ fn progress_room() -> usize {
     let columns: usize =
         terminal_size::terminal_size_of(io::stderr()).map_or(80, |(w, _)| w.0.into());
     columns.max(2) - 1
-}
-
-/// `text` cut to at most `columns` cells, keeping whole characters.
-fn fit(text: &str, columns: usize) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        let next = format!("{out}{c}");
-        if crate::terminal::cells(&next) > columns {
-            break;
-        }
-        out = next;
-    }
-    out
 }
 
 /// Clear the progress line, if one is showing, so what follows starts on a clean row.
@@ -501,33 +488,24 @@ fn help(text: &str) -> String {
 struct JsFormatter;
 
 impl JsFormatter {
-    fn number<W: ?Sized + Write>(writer: &mut W, value: f64) -> io::Result<()> {
-        let n = serde_json::Number::from_f64(value).expect("serde_json writes non-finite as null");
+    fn number<W: ?Sized + Write>(writer: &mut W, n: serde_json::Number) -> io::Result<()> {
         writer.write_all(crate::exposure::number(&n).as_bytes())
     }
 }
 
-/// Integers beyond 2^53 print as the nearest double, as JavaScript holds them.
-const SAFE: u64 = 1 << 53;
-
 impl Formatter for JsFormatter {
     fn write_f64<W: ?Sized + Write>(&mut self, writer: &mut W, value: f64) -> io::Result<()> {
-        Self::number(writer, value)
+        let n = serde_json::Number::from_f64(value).expect("serde_json writes non-finite as null");
+        Self::number(writer, n)
     }
     fn write_f32<W: ?Sized + Write>(&mut self, writer: &mut W, value: f32) -> io::Result<()> {
-        Self::number(writer, value.into())
+        self.write_f64(writer, value.into())
     }
     fn write_u64<W: ?Sized + Write>(&mut self, writer: &mut W, value: u64) -> io::Result<()> {
-        if value > SAFE {
-            return Self::number(writer, value as f64);
-        }
-        write!(writer, "{value}")
+        Self::number(writer, value.into())
     }
     fn write_i64<W: ?Sized + Write>(&mut self, writer: &mut W, value: i64) -> io::Result<()> {
-        if value.unsigned_abs() > SAFE {
-            return Self::number(writer, value as f64);
-        }
-        write!(writer, "{value}")
+        Self::number(writer, value.into())
     }
     /// Terminal controls and direction overrides print as `\uXXXX`, which decodes to the same
     /// string, so a path or URL from a transcript or a destination cannot drive the terminal.
@@ -713,13 +691,6 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
     })
 }
 
-fn now() -> Millis {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("clock after the Unix epoch");
-    i64::try_from(elapsed.as_millis()).expect("clock within range")
-}
-
 /// The `--since` bound; an empty value is absent, as JavaScript treats a falsy option.
 fn window(values: &Values) -> Result<Option<Millis>, ScanError> {
     match values.since.as_deref() {
@@ -734,11 +705,16 @@ fn price_options(
     price_cache: Option<String>,
     offline: bool,
 ) -> Result<PriceOptions, ScanError> {
-    let cache = match price_cache {
+    let cache = match price_cache.filter(|cache| !cache.is_empty()) {
         Some(cache) => PathBuf::from(cache),
         None => {
-            let base = match env("XDG_CACHE_HOME") {
-                Some(base) => PathBuf::from(base),
+            // The XDG spec ignores an empty or relative base, which would put the cache under
+            // whatever directory the command ran in.
+            let base = env("XDG_CACHE_HOME")
+                .map(PathBuf::from)
+                .filter(|base| base.is_absolute());
+            let base = match base {
+                Some(base) => base,
                 None => std::env::home_dir()
                     .ok_or_else(|| ScanError::new("cannot discover home directory"))?
                     .join(".cache"),
@@ -1022,7 +998,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                             Render {
                                 catalog,
                                 since,
-                                now: now(),
+                                now: crate::reader::now(),
                                 max_cost_per_use_usd: *max_cost_per_use_usd,
                                 format,
                                 home: home.as_deref(),
@@ -1468,13 +1444,6 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn progress_fits_one_row() {
-        assert_eq!(super::fit("token-max: Scanning", 9), "token-max");
-        assert_eq!(super::fit("ab", 9), "ab");
-        assert_eq!(super::fit("漢字", 3), "漢");
-    }
-
     use super::*;
 
     #[test]

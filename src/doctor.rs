@@ -20,11 +20,11 @@ use crate::model::{
     Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
-    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
+    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
     recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{WrapOptions, wrap_spans};
+use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -381,13 +381,13 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
     let what = match reason {
         // A skill left typeable counts only the model's uses.
         Reason::Unused if typed_only(c.control.as_ref()) => {
-            format!("{} the model never used", capital(kind))
+            format!("{} the model never used", capitalize(kind))
         }
         Reason::Unused => format!("Never-used {kind}"),
-        Reason::Unrecorded => format!("{} with no recorded use", capital(kind)),
+        Reason::Unrecorded => format!("{} with no recorded use", capitalize(kind)),
         Reason::Costly => format!(
             "{} over {} per use",
-            capital(kind),
+            capitalize(kind),
             about(report.max_cost_per_use_usd)
         ),
         Reason::Duplicate => format!("Duplicate copies of {kind}"),
@@ -398,14 +398,6 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
-    })
-}
-
-/// `text` with its first letter capitalized.
-fn capital(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
     })
 }
 
@@ -1112,11 +1104,6 @@ const MARGIN: usize = crate::report::MARGIN;
 /// A card's figure is aligned to the right of this many cells, or of a narrower terminal,
 /// and its paragraphs wrap there.
 const CARD_CELLS: usize = 88;
-const BOLD: &str = "1";
-const DIM: &str = "2";
-const RED: &str = "31";
-const GREEN: &str = "32";
-const YELLOW: &str = "33";
 
 /// A question of the walk as a card: a heading with its figure at the right, the change,
 /// then labeled paragraphs.
@@ -1686,8 +1673,6 @@ pub struct Plan {
     files: Vec<Pending>,
     /// What became of each change, by the report lines it came from.
     choices: Vec<(Origin, Choice)>,
-    /// How many changes the walk offered.
-    offered: usize,
     total: Total,
 }
 
@@ -1701,17 +1686,6 @@ impl Plan {
     /// nothing was accepted.
     pub fn total(&self, label: &str) -> String {
         self.total.text(label, THIS_HOST)
-    }
-
-    /// What the walk came to, as the confirm and the closing lines name it.
-    pub fn summary(&self) -> Summary {
-        Summary {
-            answered: !self.choices.is_empty() || self.offered > 0,
-            offered: self.offered,
-            files: self.files.iter().map(|p| p.target.file.clone()).collect(),
-            changes: self.total.changes(),
-            removals: self.files.iter().map(|p| p.removals.len()).sum(),
-        }
     }
 }
 
@@ -2390,7 +2364,6 @@ impl Owner {
         Ok(Plan {
             files,
             choices,
-            offered: self.offers.offered(),
             total,
         })
     }
@@ -3804,7 +3777,7 @@ mod tests {
         style: &Style,
         input: &mut impl BufRead,
         output: &mut impl Write,
-    ) -> io::Result<Plan> {
+    ) -> io::Result<Asked> {
         let owner = Owner::new(fixes, turned_off, style.home.clone(), 100.0);
         let hosts = [Walking {
             label: None,
@@ -3812,32 +3785,48 @@ mod tests {
             style,
         }];
         let selections = super::ask(&hosts, style, input, output)?;
-        Ok(owner.plan(selections[0].events()).unwrap())
+        Ok(Asked {
+            plan: owner.plan(selections[0].events()).unwrap(),
+            summary: selections[0].summary(owner.offers()),
+        })
+    }
+
+    /// One host's plan and its summary, as `doctor` makes both from the walk.
+    struct Asked {
+        plan: Plan,
+        summary: Summary,
+    }
+
+    impl std::ops::Deref for Asked {
+        type Target = Plan;
+
+        fn deref(&self) -> &Plan {
+            &self.plan
+        }
     }
 
     /// Confirm one host's plan as `doctor` does.
     fn confirm(
-        plan: &Plan,
+        plan: &Asked,
         style: &Style,
         input: &mut impl BufRead,
         output: &mut impl Write,
     ) -> io::Result<bool> {
-        let summary = plan.summary();
         let preview = preview(plan, style);
         let request = Confirm {
             preview: &preview,
-            hosts: vec![(&summary, style)],
+            hosts: vec![(&plan.summary, style)],
         };
         super::confirm(&request, style, input, output)
     }
 
     /// The closing lines for one host.
-    fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
-        super::finish(&[(&plan.summary(), written, style)], style)
+    fn finish(plan: &Asked, written: &[Written], style: &Style) -> String {
+        super::finish(&[(&plan.summary, written, style)], style)
     }
 
     /// Walk `fixes` answering with `answers`, returning the plan and what was printed.
-    fn walk(fixes: Vec<Fix>, w: &Workspace, answers: &str) -> (Plan, String) {
+    fn walk(fixes: Vec<Fix>, w: &Workspace, answers: &str) -> (Asked, String) {
         let mut printed = vec![];
         let plan = ask(
             fixes,
@@ -4033,7 +4022,13 @@ mod tests {
                 yes: true,
             }])
             .unwrap();
-        assert_eq!(plan.summary().files, [settings.to_string_lossy()]);
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|p| &p.target.file)
+                .collect::<Vec<_>>(),
+            [&settings.to_string_lossy()]
+        );
         assert_eq!(*choice(&plan, "A"), Choice::Accepted);
         assert_eq!(offers.check(), Ok(()));
         let mut stray = offers.clone();
@@ -4881,7 +4876,7 @@ mod tests {
     }
 
     /// A change adding `key` to `file`, as the walk accepts it.
-    fn accepted(w: &Workspace, files: &[(&Path, Harness)]) -> Plan {
+    fn accepted(w: &Workspace, files: &[(&Path, Harness)]) -> Asked {
         let fixes = files
             .iter()
             .enumerate()
@@ -5124,7 +5119,7 @@ mod tests {
         std::fs::write(&settings, "{}\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "x"]);
-        let confirm_text = |plan: &Plan| {
+        let confirm_text = |plan: &Asked| {
             let mut printed = vec![];
             confirm(plan, &style(&w), &mut "y\n".as_bytes(), &mut printed).unwrap();
             String::from_utf8(printed).unwrap()

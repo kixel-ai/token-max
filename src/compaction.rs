@@ -281,15 +281,18 @@ impl<'a> WindowEvents<'a> {
     }
 }
 
-fn is_message(p: &BillingPart) -> bool {
+/// Whether a part is a model message turn.
+pub(crate) fn is_message(p: &BillingPart) -> bool {
     p.kind == PartKind::Message
 }
 
-fn is_conversation(p: &BillingPart) -> bool {
+/// Whether a part may carry conversation: a message, or one of unknown kind.
+pub(crate) fn is_conversation(p: &BillingPart) -> bool {
     matches!(p.kind, PartKind::Message | PartKind::Unknown)
 }
 
-fn median(mut values: Vec<i64>) -> i64 {
+/// The middle value, rounding an even split up.
+pub(crate) fn median(mut values: Vec<i64>) -> i64 {
     values.sort_unstable();
     let mid = values.len() / 2;
     if values.len() % 2 == 1 {
@@ -303,10 +306,7 @@ fn median(mut values: Vec<i64>) -> i64 {
 fn prefix(harness: Harness, u: &Usage) -> Option<i64> {
     match harness {
         Harness::Codex => u.input,
-        Harness::Claude => match (u.read, u.write) {
-            (Some(read), Some(write)) => Some(read + write),
-            _ => None,
-        },
+        Harness::Claude => u.cached_prefix(),
     }
 }
 
@@ -972,16 +972,7 @@ impl<'a> Replayer<'a> {
         estimates: &IndexMap<Text, UsageEstimate>,
         visit: impl FnMut(ReplayedPart<'r>),
     ) {
-        let options = ReplayOptions {
-            estimates,
-            catalog: self.catalog,
-            ttls: self.ttls,
-            since: self.since,
-            cold_prefixes: false,
-            estimated_parts: None,
-            attempt_scenario: Default::default(),
-        };
-        replay_parts(requests, [self.cache], &options)
+        replay_parts(requests, [self.cache], &self.options(estimates))
             .filter(|i| i.selected)
             .for_each(visit);
     }
@@ -1215,7 +1206,8 @@ fn version_supported(version: Option<&str>, patch: i64) -> bool {
     let [Some(major), Some(minor), Some(micro)] = parts[..] else {
         return false;
     };
-    let safe = |v: f64| v.fract() == 0.0 && v.abs() <= 9_007_199_254_740_991.0 && v >= 0.0;
+    let safe =
+        |v: f64| v.fract() == 0.0 && v.abs() <= crate::safe::MAX_SAFE_INTEGER as f64 && v >= 0.0;
     if !(safe(major) && safe(minor) && safe(micro)) {
         return false;
     }
@@ -1878,7 +1870,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                     margin,
                     monthly_savings_usd: savings
                         .filter(|_| now > since)
-                        .map(|s| (s * 30.0 * 86400000.0) / (now - since) as f64),
+                        .map(|s| crate::report::monthly(s, Some(since), Some(now))),
                     break_even: savings.filter(|&s| s > 0.0).map(|s| {
                         format!(
                             "${s:.4} of additional re-read or changed-work cost erases the modeled saving over this window"
@@ -2146,8 +2138,8 @@ mod tests {
     use crate::controls::{CompactionSources, Env, compaction_controls};
     use crate::estimates::estimate_usage;
     use crate::model::{
-        Accounting, Api, Attempt, CacheContext, CompactionControls, ExposureScan, IdleAttribution,
-        Location, PerTtl, Pricing, Profile, RequestMeta, ScanCoverage, Snapshot, TtlControl,
+        Api, Attempt, CacheContext, CompactionControls, ExposureScan, IdleAttribution, Location,
+        PerTtl, Pricing, Profile, RequestMeta, ScanCoverage, Snapshot, TtlControl,
     };
     use crate::prices::price_request;
     use crate::safe::identity;
@@ -2273,7 +2265,6 @@ mod tests {
                 client: Some("sdk-ts".into()),
                 cwd: None,
                 trigger: Some("auto".into()),
-                precomputed: Some(false),
                 pre_tokens: Some(300000),
                 post_tokens: Some(2000),
                 duration_ms: Some(1000),
@@ -2449,7 +2440,6 @@ mod tests {
                     cwd: e.cwd.clone(),
                     effort: None,
                     profiles: e.profiles.clone(),
-                    accounting: Accounting::Individual,
                     attempt: None,
                     server_tools: Some(crate::model::ServerTools::default()),
                     requested_speed: None,

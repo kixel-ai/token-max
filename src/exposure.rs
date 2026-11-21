@@ -3739,11 +3739,6 @@ mod tests {
         assert_eq!(items(3), None);
         assert_eq!(scan.requests[0].view.linkage, Linkage::Unknown);
         assert!(scan.requests[0].view.reasons[0].starts_with("request digest"));
-        let serialized = serde_json::to_value(&scan.requests[2]).unwrap();
-        assert_eq!(
-            serialized["references"]["items"].as_array().unwrap().len(),
-            3
-        );
 
         let mut c = ExposureCollector::new(None);
         let mut feed = Feed::new("/p/main.jsonl", Harness::Claude, &["profile"]);

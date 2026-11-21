@@ -1,4 +1,5 @@
-//! Shared data types. Types the SSH stream carries derive serde; their names are its wire names.
+//! Shared data types. Only the few that `wire` and `sessions` carry derive serde; their
+//! names are wire names. The scan itself never leaves the process.
 
 use crate::collections::{HashSet, IndexMap};
 use serde::{Deserialize, Serialize};
@@ -61,12 +62,6 @@ impl std::fmt::Display for Id {
 impl std::fmt::Debug for Id {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self.to_string())
-    }
-}
-
-impl Serialize for Id {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_str(self)
     }
 }
 
@@ -238,17 +233,14 @@ impl Harness {
 }
 
 /// A documented Claude cache lifetime.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Ttl {
-    #[serde(rename = "5m")]
     FiveMinutes,
-    #[serde(rename = "1h")]
     OneHour,
 }
 
 /// How a Claude profile pays for its requests, as the person running doctor answered it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Billing {
     /// A Claude plan's included usage; usage credits pay for requests past it.
     Plan,
@@ -276,7 +268,7 @@ impl Ttl {
     }
 }
 
-/// A value for each TTL, serialized as `{"5m": .., "1h": ..}`.
+/// A value for each TTL.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PerTtl<T> {
     pub five_minutes: T,
@@ -299,7 +291,7 @@ impl<T> PerTtl<T> {
 }
 
 /// A value for the main conversation and for sub-agents.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PerBucket<T> {
     pub main: T,
     pub subagent: T,
@@ -353,21 +345,17 @@ pub struct Location {
     pub line: u64,
 }
 
-/// Normalized counts: reads and writes are subsets of input, reasoning of output.
+/// Normalized counts: reads and writes are subsets of input, reasoning of output. It
+/// serializes only for the reader to key and identify Codex's cumulative totals.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct Usage {
     pub input: Option<i64>,
     pub output: Option<i64>,
     pub read: Option<i64>,
     pub write: Option<i64>,
-    #[serde(rename = "write5m")]
     pub write5m: Option<i64>,
-    #[serde(rename = "write1h")]
     pub write1h: Option<i64>,
-    #[serde(rename = "write30m")]
     pub write30m: Option<i64>,
-    #[serde(rename = "write12h")]
     pub write12h: Option<i64>,
     pub reasoning: Option<i64>,
 }
@@ -379,8 +367,7 @@ impl Usage {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PartKind {
     Message,
     Compaction,
@@ -389,7 +376,7 @@ pub enum PartKind {
 }
 
 /// One non-overlapping billed sampling iteration.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BillingPart {
     pub kind: PartKind,
     pub model: Option<Text>,
@@ -399,24 +386,21 @@ pub struct BillingPart {
     pub geo: Option<Text>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RequestEvidence {
     Measured,
     Estimated,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Agent {
     Main,
     Subagent,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Api {
     Responses,
     Messages,
@@ -424,14 +408,13 @@ pub enum Api {
 }
 
 /// Recorded API-attempt budget; this does not establish execution or billing.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Attempt {
     pub max_output_tokens: Option<i64>,
 }
 
 /// Requested controls never establish the billed response tier.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RequestedSpeed {
     pub tier: Option<Text>,
     pub speed: Option<Text>,
@@ -442,8 +425,7 @@ pub struct RequestedSpeed {
 /// A history holds a million requests, so each keeps only what differs per request and
 /// shares the rest, such as its session, model and profiles, with every request recorded
 /// alike. Shared fields read and write through `Deref`; a write copies them first.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Request {
     pub evidence: RequestEvidence,
     pub id: Text,
@@ -454,15 +436,12 @@ pub struct Request {
     pub parts: Vec<BillingPart>,
     pub locations: Few<Location>,
     /// Shared with every request the same T3 provider turn ran.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<std::sync::Arc<T3Request>>,
-    #[serde(flatten)]
     pub meta: std::sync::Arc<RequestMeta>,
 }
 
 /// What requests recorded alike share: everything but their identity, time, usage and location.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct RequestMeta {
     pub harness: Harness,
     pub session: Text,
@@ -480,7 +459,6 @@ pub struct RequestMeta {
     pub server_tools: Option<ServerTools>,
     pub profiles: Profiles,
     pub attempt: Option<Attempt>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_speed: Option<RequestedSpeed>,
     pub issues: Vec<Text>,
 }
@@ -500,7 +478,7 @@ impl std::ops::DerefMut for Request {
 }
 
 /// A safe location under one conversation alias.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Origin {
     pub session: Text,
     pub location: Location,
@@ -627,14 +605,7 @@ impl<'a, T> IntoIterator for &'a mut Few<T> {
     }
 }
 
-impl<T: Serialize> Serialize for Few<T> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        (**self).serialize(serializer)
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EventKind {
     Compaction,
     TurnStart,
@@ -646,8 +617,7 @@ pub enum EventKind {
     IdleNotice,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IdleAttribution {
     Unknown,
     Notice,
@@ -655,8 +625,7 @@ pub enum IdleAttribution {
 }
 
 /// A scalar settings value as recorded.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(untagged)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Scalar {
     Bool(bool),
     Number(f64),
@@ -664,7 +633,7 @@ pub enum Scalar {
 }
 
 /// Preceding pricing metadata from the same file.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Pricing {
     pub model: Option<Text>,
     pub provider: Option<Text>,
@@ -677,8 +646,7 @@ pub struct Pricing {
 ///
 /// Like a request, an event keeps only what differs per event and shares the rest with
 /// every event recorded alike, through `Deref`; a write copies the shared fields first.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StructuralEvent {
     pub id: Id,
     /// All observed conversation aliases and safe locations for a copied event.
@@ -691,15 +659,12 @@ pub struct StructuralEvent {
     pub settings: Settings,
     pub idle_attribution: IdleAttribution,
     /// Claude Bash call details on its tool start and end, without the command.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub shell: Option<ShellCall>,
-    #[serde(flatten)]
     pub meta: std::sync::Arc<EventMeta>,
 }
 
 /// What events recorded alike share: their file's context and any rare per-kind details.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct EventMeta {
     pub harness: Harness,
     pub session: Text,
@@ -715,7 +680,6 @@ pub struct EventMeta {
     pub tool: Option<Text>,
     /// Preceding metadata from this file, retained even before the selected window.
     pub pricing: Option<std::sync::Arc<Pricing>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<std::sync::Arc<T3Request>>,
 }
 
@@ -771,12 +735,6 @@ impl From<IndexMap<String, Scalar>> for Settings {
     }
 }
 
-impl Serialize for Settings {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_map(self.iter())
-    }
-}
-
 /// The profiles a record belongs to, shared by every record with the same set.
 pub type Profiles = std::sync::Arc<[String]>;
 
@@ -798,15 +756,8 @@ impl FromIterator<(String, i64)> for ServerTools {
     }
 }
 
-impl Serialize for ServerTools {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_map(self.iter())
-    }
-}
-
 /// What a Claude Bash call asked for and how it ended, never its command or output.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ShellCall {
     /// Started with `run_in_background`, so the model did not wait on it.
     pub background: bool,
@@ -817,27 +768,22 @@ pub struct ShellCall {
 }
 
 /// A current window control and the setting that owns it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowControl {
     pub value: Option<i64>,
     pub owner: String,
     pub reason: String,
     pub applicable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub minimum_claude_patch: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison_unknown: Option<String>,
     /// No setting names a window, so Claude Code's tuned window for the model applies.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub unset: bool,
     /// The window a setting names when the model's context window caps it; `value` is the cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub setting: Option<i64>,
 }
 
 /// Claude Code's window for one model when no setting names one.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TunedWindow {
     /// The trigger in tokens, or None when neither a compaction nor the documented table establishes it.
     pub value: Option<i64>,
@@ -845,7 +791,7 @@ pub struct TunedWindow {
 }
 
 /// A current TTL control for one bucket.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TtlControl {
     /// The home's value, which a recorded project may override; see `varies`.
     pub value: Option<Ttl>,
@@ -854,7 +800,6 @@ pub struct TtlControl {
     /// Whether recorded projects get the TTL from another owner or at another value, so
     /// `value` does not hold for every request; replays that resolve each directory still
     /// read it there.
-    #[serde(skip)]
     pub varies: bool,
 }
 
@@ -869,35 +814,28 @@ impl TtlControl {
 }
 
 /// Window controls for the default and per-model overrides.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactionControls {
     pub default: WindowControl,
     pub models: IndexMap<String, WindowControl>,
     /// `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` holds every model at a 200k window.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub capped: bool,
     /// The positive `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, which may size a model ID Claude Code does not recognize.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub declared: Option<u64>,
     /// Tuned windows by undated model ID, for every model the profile used.
-    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub tuned: IndexMap<String, TunedWindow>,
     /// Context windows by undated model ID, for each used model Claude Code holds below the 1M
     /// maximum; any window larger than its model's runs at this size.
-    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub contexts: IndexMap<String, i64>,
     /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, when it can lower a trigger.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub percent: Option<PercentOverride>,
     /// The raw settings these controls resolve from, which a plan's changes re-resolve.
-    #[serde(skip)]
     pub layers: Option<Box<crate::controls::WindowLayers>>,
 }
 
 /// `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, which lowers each model's trigger to a percentage of its
 /// auto-compact window, and what shows the trigger it sets.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PercentOverride {
     /// The percentage below 100, or None when the value is not one Claude Code documents.
     pub value: Option<f64>,
@@ -925,8 +863,7 @@ impl PercentOverride {
 }
 
 /// Current native idle controls, with ownership and unresolved scopes kept explicit.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct IdleControl {
     pub value: Option<bool>,
     pub owner: String,
@@ -935,14 +872,12 @@ pub struct IdleControl {
     pub auto_compact: Option<bool>,
     pub reason: String,
     pub resolved: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub ttl: Option<PerBucket<TtlControl>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub compaction: Option<CompactionControls>,
 }
 
 /// Current speed preference after known disabling controls, without inferred session overrides.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SpeedControl {
     pub value: Option<String>,
     pub owner: String,
@@ -953,8 +888,7 @@ pub struct SpeedControl {
 
 /// A profile's main-session default reasoning effort, the setting that decides it and the
 /// level its session runs at.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EffortControl {
     /// The model the default is resolved for; None when it cannot be named.
     pub model: Option<String>,
@@ -981,8 +915,7 @@ pub struct EffortControl {
 }
 
 /// Claude's effective foreground Bash timeout ceiling and the variables that set it.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BashCapControl {
     /// The larger of `BASH_MAX_TIMEOUT_MS` (default 600000) and `BASH_DEFAULT_TIMEOUT_MS`.
     pub value: Millis,
@@ -993,13 +926,11 @@ pub struct BashCapControl {
     pub default_owner: String,
     /// Why the cap stays advisory: a request T3 could not settle may have run under another
     /// owner's cap.
-    #[serde(skip)]
     pub unresolved: Option<String>,
 }
 
 /// A selected profile's current settings and their owning controls.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Profile {
     pub id: String,
     pub harness: Harness,
@@ -1010,92 +941,71 @@ pub struct Profile {
     pub ttl: PerBucket<TtlControl>,
     pub provider: Option<String>,
     /// How a Claude profile pays, when doctor asked; None when unasked or for a cloud provider.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<Billing>,
     pub settings: IndexMap<String, Scalar>,
     /// MCP server ids the settings file declares, which its own switches can turn off.
     pub mcp_servers: Vec<String>,
     pub compaction: CompactionControls,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub idle: Option<IdleControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub speed: Option<SpeedControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub bash: Option<BashCapControl>,
     /// The main session's default reasoning effort.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<EffortControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub speed_directories: Option<IndexMap<String, SpeedControl>>,
     /// Current project controls observed at recorded working directories.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_directories: Option<IndexMap<String, IdleControl>>,
     /// Background generation features and the controls that switch them.
     pub background: Vec<BackgroundControl>,
     /// Background controls at recorded working directories; an empty key means no directory.
-    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub background_directories: IndexMap<String, Vec<BackgroundControl>>,
     /// Request-specific overrides when session transitions or launch precedence are unresolved,
     /// by request id; requests resolved alike share one list.
-    #[serde(skip_serializing_if = "IndexMap::is_empty")]
     pub background_requests: IndexMap<Text, std::sync::Arc<[BackgroundControl]>>,
     /// Auto memory's current setting.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryControl>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub t3: Option<T3Instance>,
     /// Current controls that choose subagent models and efforts.
     pub agents: AgentControls,
     /// The file that sets Codex's `project_doc_max_bytes` in `settings`, when one does.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_budget_file: Option<String>,
     /// Why Codex's `project_doc_max_bytes` may differ from the system and user value
     /// in `settings`, such as a project or named profile that sets it.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_budget_unresolved: Option<String>,
     /// Settings files that outrank `settings_file` for some recorded sessions, such as a
     /// project's, a managed one or a named Codex profile, so a switch they set overrides
     /// the same switch in `settings_file`. Only files that hold settings are listed.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub outranking_files: Vec<String>,
     /// Each existing recorded directory's cache TTLs, from which the profile's are settled
     /// once T3 attributes its requests.
-    #[serde(skip)]
     pub ttl_directories: IndexMap<String, PerBucket<TtlControl>>,
     /// Claude Code's own state file for this root, such as `~/.claude.json`, which holds
     /// its user- and local-scope MCP servers; none for Codex.
-    #[serde(skip)]
     pub claude_config: Option<String>,
     /// Codex's system `config.toml`, below the user's file, which can declare an MCP server
     /// that the user's table turns off; none for Claude.
-    #[serde(skip)]
     pub codex_system_config: Option<String>,
     /// The tools, skills and MCP servers `settings_file` turns off, each as the control that
     /// does it, so the report can show them though no request records them.
-    #[serde(skip)]
     pub switched_off: Vec<Control>,
     /// Under `doctor --defaults`, each switch a user, project or local file turns off and
     /// policy does not, with that file: features the report shows on. A Codex MCP server's
     /// `enabled_tools` allowlist is one too, turning off every tool it leaves out. Empty
     /// otherwise.
-    #[serde(skip)]
     pub pretended_on: Vec<(String, Control)>,
     /// Under `doctor --defaults`, the switches policy turns off, with the policy file, which
     /// keep a feature off whatever `pretended_on` restores; empty otherwise.
-    #[serde(skip)]
     pub policy_off: Vec<(String, Control)>,
 }
 
 /// A setting's current value and the file or variable that sets it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Owned {
     pub value: String,
     pub owner: String,
 }
 
 /// The current settings that choose subagent models and efforts, which history does not record.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AgentControls {
     /// Claude's `CLAUDE_CODE_SUBAGENT_MODEL` or Codex's `agents.default_subagent_model`.
     pub model: Option<Owned>,
@@ -1122,8 +1032,7 @@ pub struct AgentControls {
 }
 
 /// One agent definition file's model and effort, never its prompt.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentDefinition {
     pub name: String,
     pub file: String,
@@ -1158,8 +1067,7 @@ impl T3IdleMode {
 }
 
 /// An instance's allowlisted current controls; disabled instances retain historical usage.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct T3Instance {
     pub state: String,
     pub instance: String,
@@ -1172,13 +1080,10 @@ pub struct T3Instance {
     pub limitations: Vec<String>,
     /// A Claude instance's environment when its settings resolve, under which discovery
     /// reads each recorded project's settings as it does a native profile's.
-    #[serde(skip)]
     pub env: Option<crate::controls::Env>,
     /// Whether T3 passes no window, so Claude Code reads the native user, project and local ones.
-    #[serde(skip)]
     pub inherited_window: bool,
     /// The variables the instance's own environment sets, which T3's settings file owns.
-    #[serde(skip)]
     pub environment: Vec<String>,
     /// When T3's pruned event log becomes complete, which starts its idle check's window;
     /// None when it never pruned or was not read.
@@ -1186,8 +1091,7 @@ pub struct T3Instance {
 }
 
 /// Coverage of one selected T3 state, without aggregate usage or connection credentials.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct T3State {
     pub path: String,
     pub status: String,
@@ -1201,23 +1105,20 @@ pub struct T3State {
     /// Requests every T3 owner of which was removed from settings, counted by instance; billed but in no current profile's checks.
     pub removed: IndexMap<String, u64>,
     /// Every instance the settings name, which tells a removed owner from one not selected.
-    #[serde(skip)]
     pub(crate) instances: HashSet<String>,
     /// The model T3 resolves for generated text; absent for a state that was not read.
     pub text_generation: Option<T3TextGeneration>,
 }
 
 /// A T3 model selection: the instance or text generator it routes to, and its model.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct T3Selection {
     pub instance: String,
     pub model: String,
 }
 
 /// T3's current text-generation model; its cost is unmeasured because T3 keeps no native records.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct T3TextGeneration {
     pub selection: T3Selection,
     /// The settings key that changes it.
@@ -1231,8 +1132,7 @@ pub struct T3TextGeneration {
 }
 
 /// Historical projection evidence uniquely linked to a captured native request.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct T3Request {
     pub run: Id,
     pub status: &'static str,
@@ -1250,7 +1150,7 @@ pub struct T3Request {
 pub type T3Guard = Result<bool, &'static str>;
 
 /// T3's idle-timer guards after one completed run, from its completion until a later run starts.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct T3Guards {
     /// Each completed-run event that re-armed the thread's timer, and the guards just after it.
     pub arms: Vec<(Millis, T3Guard)>,
@@ -1259,8 +1159,7 @@ pub struct T3Guards {
 }
 
 /// A model request the client makes on its own, outside the turns the user drives.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackgroundFeature {
     /// Claude's predicted next prompt after each response.
     PromptSuggestions,
@@ -1273,8 +1172,7 @@ pub enum BackgroundFeature {
 }
 
 /// Whether auto memory is on in current settings, and the setting that turns it off.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryControl {
     pub value: bool,
     /// Where the effective value comes from.
@@ -1285,22 +1183,18 @@ pub struct MemoryControl {
     pub off_file: Option<String>,
     /// The working directory it was resolved at, the latest session's; null when
     /// only profile-wide settings were read.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
     /// Why a setting that may apply could not be resolved, such as an unrecorded
     /// project trust or profile selection; null when it resolved.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub unresolved: Option<String>,
     /// Files whose memory settings may override `offFile` but could not be resolved.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<String>,
     /// Whether Codex's memory store exists, so memories were generated at some point.
     pub stored: bool,
 }
 
 /// One background feature's current state and the control that owns it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BackgroundControl {
     pub feature: BackgroundFeature,
     /// Current file-based value; null when scope, trust or launch selection is unresolved.
@@ -1309,7 +1203,6 @@ pub struct BackgroundControl {
     pub reason: String,
     /// A few words for why the value is unresolved, such as "working directory changed";
     /// None while it is resolved.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     /// Where the effective value comes from.
     pub owner: String,
@@ -1319,8 +1212,7 @@ pub struct BackgroundControl {
     pub off_file: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RootState {
     Selected,
     Excluded,
@@ -1328,8 +1220,7 @@ pub enum RootState {
     Inaccessible,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RootOrigin {
     Default,
     Environment,
@@ -1338,7 +1229,7 @@ pub enum RootOrigin {
 }
 
 /// Discovery includes exclusions and failures so selection cannot imply full-host coverage.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RootStatus {
     pub harness: Harness,
     pub path: String,
@@ -1347,8 +1238,7 @@ pub struct RootStatus {
 }
 
 /// File identity and byte boundary frozen before any transcript is parsed.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     pub file: String,
     pub harness: Harness,
@@ -1365,8 +1255,7 @@ pub struct Snapshot {
 }
 
 /// One subagent transcript's type and what its spawn requested, never its task.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Subagent {
     pub harness: Harness,
     pub session: Text,
@@ -2293,8 +2182,7 @@ impl CheckResult {
 // ---------------------------------------------------------------------------
 // Exposure: recurring context components and how they were used.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Category {
     ToolSchema,
     SkillListing,
@@ -2337,32 +2225,27 @@ impl Category {
 }
 
 /// Measured size of one component.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Size {
     pub characters: Option<i64>,
     pub fingerprint: Id,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Owner {
     Skills,
     Context,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
     Component,
     Aggregate,
 }
 
 /// One revision of one historical component, with no retained content but its shipped description.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Component {
-    #[serde(flatten)]
     pub size: Size,
     /// The revision, sharing the copy that indexes it.
     pub id: Text,
@@ -2380,33 +2263,28 @@ pub struct Component {
     pub members: Vec<String>,
     pub targets: Vec<String>,
     /// Absolute SKILL.md identity resolved from a rendered Codex catalog, without filesystem reads.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_path: Option<String>,
     /// The first sentence of the description a skill or tool ships, which is configuration,
     /// not conversation.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Recorded instruction text size, without retaining its content.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub instruction_size: Option<InstructionSize>,
 }
 
 /// UTF-8 bytes and lines of recorded instruction text, including rendered wrappers.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct InstructionSize {
     pub bytes: usize,
     pub lines: usize,
 }
 
 /// Whether a historical component is still sent; scans never resolve it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Current {
     Unresolved,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InvocationKind {
     SkillRequest,
     SkillReference,
@@ -2418,8 +2296,7 @@ pub enum InvocationKind {
     ScriptReference,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum InvocationStatus {
     Requested,
     Called,
@@ -2428,8 +2305,7 @@ pub enum InvocationStatus {
     Reference,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Via {
     Typed,
     Mention,
@@ -2440,8 +2316,7 @@ pub enum Via {
 }
 
 /// Actual calls, requested skills and weak script references are different evidence.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Invocation {
     pub id: String,
     pub target: String,
@@ -2452,7 +2327,6 @@ pub struct Invocation {
     pub session: String,
     pub sessions: Vec<String>,
     /// Opaque Codex user-turn boundary, recorded or inferred from native user-message aliases.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<String>,
     pub harness: Harness,
     pub client: Option<String>,
@@ -2461,23 +2335,21 @@ pub struct Invocation {
     pub profiles: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Linkage {
     Wire,
     Chronological,
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextCoverage {
     CompleteText,
     Partial,
     Unknown,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct References {
     pub base: Option<Id>,
     pub keep: Option<i64>,
@@ -2658,13 +2530,6 @@ impl std::fmt::Debug for Ids {
     }
 }
 
-impl Serialize for Ids {
-    /// A flat list, however its chain is shared in memory.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.iter())
-    }
-}
-
 /// A request-local view of historical state, including unresolved visibility.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exposure {
@@ -2675,25 +2540,8 @@ pub struct Exposure {
     pub results: Option<std::sync::Arc<ResultTotals>>,
 }
 
-impl Serialize for Exposure {
-    /// The request and its view's fields, without the tool-output totals.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        #[derive(Serialize)]
-        struct Flat<'a> {
-            request: &'a str,
-            #[serde(flatten)]
-            view: &'a ExposureView,
-        }
-        Flat {
-            request: &self.request,
-            view: &self.view,
-        }
-        .serialize(serializer)
-    }
-}
-
 /// Characters of tool output a conversation holds, by tool, since its last compaction.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ResultTotals {
     /// Changes at every compaction and transcript, so equal epochs mean one unbroken conversation.
     pub epoch: u64,
@@ -2702,8 +2550,7 @@ pub struct ResultTotals {
 }
 
 /// The request-independent part of an exposure.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ExposureView {
     pub components: Ids,
     pub candidates: Ids,
@@ -2722,8 +2569,7 @@ pub struct ExposureView {
 }
 
 /// How often one tool was called within the window, per profile set.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolCalls {
     pub name: String,
     pub profiles: Vec<String>,
@@ -2732,8 +2578,7 @@ pub struct ToolCalls {
 }
 
 /// How much output one tool returned within the window, per profile set.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ToolResults {
     pub name: String,
     pub profiles: Vec<String>,
@@ -2743,8 +2588,7 @@ pub struct ToolResults {
 }
 
 /// Parser output shared by later skills and context checks.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ExposureScan {
     pub components: Vec<Component>,
     pub requests: Vec<Exposure>,
@@ -2758,16 +2602,14 @@ pub struct ExposureScan {
 }
 
 /// Whether the agent read or wrote auto memory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryAccess {
     Read,
     Write,
 }
 
 /// One read or write of auto memory by the agent.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MemoryUse {
     pub harness: Harness,
     pub access: MemoryAccess,
@@ -3046,7 +2888,7 @@ pub struct SubagentCost {
 // Scan and report.
 
 /// Pre-window metadata supplies cache and spawn evidence, never selected billing or coverage.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CacheContext {
     pub requests: Vec<Request>,
     /// Pre-window Codex requests, without usage, that start a transcript or change its model,
@@ -3058,8 +2900,7 @@ pub struct CacheContext {
     pub prompts: Vec<StructuralEvent>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ScanCoverage {
     pub requests: u64,
     pub source_known: u64,
@@ -3073,8 +2914,7 @@ pub struct ScanCoverage {
 }
 
 /// The reusable parser output for downstream checks.
-#[derive(Clone, Debug, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Scan {
     pub snapshot_started_at: String,
     pub snapshot_finished_at: String,
@@ -3091,13 +2931,10 @@ pub struct Scan {
     pub coverage: ScanCoverage,
     /// Each subagent transcript's type and spawn request, by session.
     pub subagents: Vec<Subagent>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub t3: Vec<T3State>,
     /// Native session identities, which only the local session export prints.
-    #[serde(skip)]
     pub sessions: crate::sessions::Sessions,
     /// Read for `doctor --defaults`, with the settings files pretended away.
-    #[serde(skip)]
     pub defaults: bool,
 }
 
@@ -3209,10 +3046,6 @@ mod ids_tests {
                 flat[start.min(flat.len())..]
             );
         }
-        assert_eq!(
-            serde_json::to_value(&last).unwrap(),
-            serde_json::to_value(&flat).unwrap()
-        );
         assert!(HashSet::from_iter([Ids::from(flat)]).contains(&last));
         assert_ne!(last, Ids::from(texts(&["a", "different", "i"])));
     }
@@ -3238,7 +3071,7 @@ mod ids_tests {
     }
 
     #[test]
-    fn long_growing_lists_serialize_and_drop_without_recursion() {
+    fn long_growing_lists_iterate_and_drop_without_recursion() {
         let mut ids = Ids::from(vec![]);
         for n in 0..20_000 {
             ids = Ids::new(
@@ -3247,9 +3080,9 @@ mod ids_tests {
             );
         }
         assert_eq!(ids.len(), 20_000);
-        let json = serde_json::to_value(&ids).unwrap();
-        assert_eq!(json[0], "0");
-        assert_eq!(json[19_999], "19999");
+        let flat: Vec<&Text> = ids.iter().collect();
+        assert_eq!(&**flat[0], "0");
+        assert_eq!(&**flat[19_999], "19999");
         drop(ids);
     }
 }

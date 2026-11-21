@@ -224,6 +224,50 @@ pub fn make_snapshot(profile: &str, lines: &[&str], unmatched: u64) -> Snapshot 
     }
 }
 
+/// A cache TTL check for `profile`'s `bucket` that recommends `recommended` with `action`.
+pub fn make_ttl_check(profile: &str, bucket: Bucket, action: Action, recommended: Ttl) -> TtlCheck {
+    TtlCheck {
+        base: CheckBase {
+            profile: profile.into(),
+            profiles: vec![profile.into()],
+            history_profiles: vec![],
+            evidence: Evidence::Estimated,
+            action,
+            current: None,
+            recommended: Some(recommended),
+            owner: String::new(),
+            since: None,
+            until: None,
+            window_basis: String::new(),
+            baseline: String::new(),
+            requests: 0,
+            coverage: None,
+            savings_usd: None,
+            margin: None,
+            monthly_savings_usd: None,
+            break_even: None,
+            assumptions: vec![],
+            uncertainty: vec![],
+            sources: vec![],
+        },
+        window_basis_kind: WindowBasisKind::Available,
+        bucket,
+        one_hour_savings_usd: 0.0,
+        comparison_estimate: PerTtl::default(),
+        cost: Default::default(),
+        summary_cost: Default::default(),
+        comparison_cost: Default::default(),
+        fixed_cost: crate::prices::zero_cost(),
+        usage_estimates: vec![],
+        cache_evidence: vec![],
+        sensitivity: TtlSensitivity {
+            cold_prefix1h_usd: None,
+            cold_prefix1h_comparison_usd: None,
+            unlinked: None,
+        },
+    }
+}
+
 /// One synthetic Claude profile rooted at `root`, with explicit 5m TTLs and no speed or idle controls.
 pub fn make_profile(id: &str, root: &str) -> Profile {
     let ttl = || TtlControl {

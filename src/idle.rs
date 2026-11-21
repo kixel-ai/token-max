@@ -17,18 +17,19 @@ use crate::compaction::{
 use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
-    Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
-    CompactionCheck, ContextDelta, Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id,
-    IdleAttribution, IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff,
-    PartKind, PerBucket, PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request,
-    ReturnTiming, Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl,
-    Usage, UsageEstimate, Usd, WindowControl,
+    Action, ActivationCohort, Agent, BillingPart, CheckBase, CompactionCharge, CompactionCheck,
+    ContextDelta, Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id, IdleAttribution,
+    IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
+    PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar,
+    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl, Usage, UsageEstimate,
+    Usd, WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Sum, add_costs, price_components, price_part, server_cost,
     unknown_cost, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
+use crate::version::claude_at_least;
 
 /// The one-hour cache lifetime.
 const HOUR: Millis = 60 * 60_000;
@@ -111,28 +112,6 @@ type Ttls = PerBucket<Option<Ttl>>;
 /// A request's idle-control scope: an index into the line's project directories, or None
 /// for the profile-wide control.
 type Scope = Option<usize>;
-
-/// Whether `version` is exactly `major.minor.patch` digits and at least v2.1.`patch`.
-fn supported(version: Option<&str>, patch: i64) -> bool {
-    let Some(version) = version else {
-        return false;
-    };
-    let mut parts = version.split('.');
-    let (Some(major), Some(minor), Some(micro), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    let number = |text: &str| {
-        (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| text.parse::<f64>().unwrap_or(f64::INFINITY))
-    };
-    let (Some(major), Some(minor), Some(micro)) = (number(major), number(minor), number(micro))
-    else {
-        return false;
-    };
-    major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && micro >= patch as f64)))
-}
 
 /// A cost times `fraction`; a zero fraction is a known zero, dropping unknowns.
 fn scale(cost: &Cost, fraction: f64) -> Cost {
@@ -1706,7 +1685,7 @@ impl<'a> Profiled<'a> {
                     old.extend(e.settings.iter().map(|(k, v)| (k.as_str(), v)));
                 }
             }
-            let flag_state = if supported(r.version.as_deref(), 314) {
+            let flag_state = if claude_at_least(r.version.as_deref(), 1, 314) {
                 Some("not-required")
             } else {
                 match old.get("idleCompactionAvailable") {
@@ -1720,8 +1699,9 @@ impl<'a> Profiled<'a> {
                 _ => None,
             };
             let native = self.scopes.window(scope, p.model.as_deref());
-            let window = if supported(
+            let window = if claude_at_least(
                 r.version.as_deref(),
+                1,
                 native.minimum_claude_patch.unwrap_or(288),
             ) {
                 lookup
@@ -1803,7 +1783,7 @@ impl<'a> Profiled<'a> {
                 || window.is_none()
                 || (boundary.is_none()
                     && (client != Client::Supported
-                        || !supported(r.version.as_deref(), 290)
+                        || !claude_at_least(r.version.as_deref(), 1, 290)
                         || flag_off))
             {
                 (
@@ -2242,6 +2222,19 @@ pub(crate) fn recommended_windows(
     recommended_windows
 }
 
+/// The TTLs a replay after the recommendations uses: each bucket's recommended TTL where its
+/// check says Change, else `current`. Advisory recommendations stay unapplied, as `doctor`
+/// offers no change for them.
+pub(crate) fn ttls_after(current: Ttls, profile: &Profile, checks: &[&TtlCheck]) -> Ttls {
+    let mut ttls = current;
+    for c in checks {
+        if c.base.profiles.contains(&profile.id) && c.base.action == Action::Change {
+            *ttls.get_mut(c.bucket) = c.base.recommended;
+        }
+    }
+    ttls
+}
+
 /// Idle checks for each owning idle control of one line's native Claude profiles.
 fn profile_checks<'a>(
     options: &IdleOptions<'a>,
@@ -2319,16 +2312,7 @@ fn profile_checks<'a>(
         main: profile.ttl.main.value,
         subagent: profile.ttl.subagent.value,
     };
-    let mut after_ttls = current_ttls.clone();
-    for bucket in Bucket::ALL {
-        let check = options
-            .ttls
-            .iter()
-            .find(|c| c.base.profiles.contains(&profile.id) && c.bucket == bucket);
-        if let Some(c) = check.filter(|c| c.base.action == Action::Change) {
-            *after_ttls.get_mut(bucket) = c.base.recommended;
-        }
-    }
+    let after_ttls = ttls_after(current_ttls.clone(), profile, options.ttls);
     // Each owner keeps its first position and its last request's control.
     let mut controls: IndexMap<&str, &IdleControl> = IndexMap::default();
     for r in &main {
@@ -2398,9 +2382,9 @@ fn profile_checks<'a>(
         let applicable = c.resolved
             && c.value.is_some()
             && client(recent) == Client::Supported
-            && supported(recent.version.as_deref(), 290)
+            && claude_at_least(recent.version.as_deref(), 1, 290)
             && after.applicable
-            && (supported(recent.version.as_deref(), 314)
+            && (claude_at_least(recent.version.as_deref(), 1, 314)
                 || historically_available(&events, recent));
         let savings = match (delta, c.value) {
             (Some(delta), Some(_)) => Some(if winner == c.value { 0.0 } else { delta.abs() }),
@@ -2637,29 +2621,7 @@ fn detailed_t3_checks(
             &current_ttls,
             "T3 modes at current native TTL/window controls",
         );
-        let ttl = options
-            .ttls
-            .iter()
-            .find(|c| {
-                c.base.profiles.contains(&profile.id)
-                    && c.bucket == Bucket::Main
-                    && c.base.action == Action::Change
-            })
-            .and_then(|c| c.base.recommended)
-            .or(profile.ttl.main.one().value);
-        let after_ttls = PerBucket {
-            main: ttl,
-            subagent: options
-                .ttls
-                .iter()
-                .find(|c| {
-                    c.base.profiles.contains(&profile.id)
-                        && c.bucket == Bucket::Subagent
-                        && c.base.action == Action::Change
-                })
-                .and_then(|c| c.base.recommended)
-                .or(profile.ttl.subagent.one().value),
-        };
+        let after_ttls = ttls_after(current_ttls.clone(), profile, options.ttls);
         let mut after_replay = profiled.replay(&after_ttls, &after_windows, true);
         after_replay
             .errors
@@ -3610,13 +3572,15 @@ mod tests {
     use super::*;
     use crate::controls::{CompactionSources, compaction_controls};
     use crate::model::{
-        CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan, Location,
-        Margin, Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
+        Bucket, CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan,
+        Location, Margin, Origin, Pricing, Report, ScanCoverage,
     };
     use crate::reader::{ScanOptions, scan};
     use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
     use crate::report::{ReportOptions, rendered as format_report};
-    use crate::test_support::{ClaudeUsage, Workspace, claude_usage, make_request, prices};
+    use crate::test_support::{
+        ClaudeUsage, Workspace, claude_usage, make_request, make_ttl_check, prices,
+    };
     use serde_json::json;
 
     const MINUTE: Millis = 60_000;
@@ -4507,24 +4471,7 @@ mod tests {
     #[test]
     fn ttl_and_window_choices_decide_applicability_while_the_current_comparison_is_retained() {
         let s = data(vec![request("final", 100.0, 300_000)], vec![]);
-        let ttl = TtlCheck {
-            base: base(Action::Change, "", Some(Ttl::FiveMinutes)),
-            window_basis_kind: WindowBasisKind::Available,
-            bucket: Bucket::Main,
-            one_hour_savings_usd: 0.0,
-            comparison_estimate: crate::model::PerTtl::default(),
-            cost: Default::default(),
-            summary_cost: Default::default(),
-            comparison_cost: Default::default(),
-            fixed_cost: zero_cost(),
-            usage_estimates: vec![],
-            cache_evidence: vec![],
-            sensitivity: TtlSensitivity {
-                cold_prefix1h_usd: None,
-                cold_prefix1h_comparison_usd: None,
-                unlinked: None,
-            },
-        };
+        let ttl = make_ttl_check("profile", Bucket::Main, Action::Change, Ttl::FiveMinutes);
         let window = CompactionCheck {
             base: base(
                 Action::Change,
@@ -4883,20 +4830,6 @@ mod tests {
         ]);
         let result: Vec<(f64, i64)> = merged.iter().map(|s| (s.weight, s.path.offset)).collect();
         assert_eq!(result, [(0.5, 2), (0.5, 1)]);
-    }
-
-    #[test]
-    fn versions_must_be_three_numeric_parts() {
-        assert!(supported(Some("2.1.314"), 314));
-        assert!(supported(Some("3.0.0"), 314));
-        assert!(supported(Some("2.2.0"), 999));
-        assert!(!supported(Some("2.1.313"), 314));
-        assert!(!supported(Some("2.1.314-beta"), 314));
-        assert!(!supported(Some("2.1"), 1));
-        assert!(!supported(Some("2.1.3.4"), 1));
-        assert!(!supported(Some(" 2.1.314"), 314));
-        assert!(!supported(None, 0));
-        assert!(supported(Some("02.01.0314"), 314));
     }
 
     #[test]
@@ -5449,24 +5382,7 @@ mod tests {
 
         // Under a recommended 1h cache the timer would start at minute 58, after the user
         // returned, so the recorded summary is not replayed at its 5m time.
-        let one_hour = TtlCheck {
-            base: base(Action::Change, "", Some(Ttl::OneHour)),
-            window_basis_kind: WindowBasisKind::Available,
-            bucket: Bucket::Main,
-            one_hour_savings_usd: 0.0,
-            comparison_estimate: crate::model::PerTtl::default(),
-            cost: Default::default(),
-            summary_cost: Default::default(),
-            comparison_cost: Default::default(),
-            fixed_cost: zero_cost(),
-            usage_estimates: vec![],
-            cache_evidence: vec![],
-            sensitivity: TtlSensitivity {
-                cold_prefix1h_usd: None,
-                cold_prefix1h_comparison_usd: None,
-                unlinked: None,
-            },
-        };
+        let one_hour = make_ttl_check("profile", Bucket::Main, Action::Change, Ttl::OneHour);
         let check = t3_check_with(&scan, 10.0, &[&one_hour]);
         let status =
             |periods: &[IdlePeriod]| periods.iter().find(|p| &*p.request == "a").unwrap().status;
@@ -5484,6 +5400,42 @@ mod tests {
             near(s.cost.total_usd.map(Usd::to_f64), 0.0);
             assert_eq!(s.summaries, 0);
         }
+    }
+
+    #[test]
+    fn ttls_after_applies_only_change_for_the_profile() {
+        let check =
+            |action, bucket, ttl, profile: &str| make_ttl_check(profile, bucket, action, ttl);
+        let current = PerBucket {
+            main: Some(Ttl::FiveMinutes),
+            subagent: None,
+        };
+        let run = |checks: &[TtlCheck]| {
+            let checks: Vec<&TtlCheck> = checks.iter().collect();
+            ttls_after(current.clone(), &profile(), &checks)
+        };
+        let profile_id = profile().id;
+        assert_eq!(
+            run(&[
+                check(Action::Change, Bucket::Main, Ttl::OneHour, &profile_id),
+                check(Action::Change, Bucket::Subagent, Ttl::OneHour, &profile_id),
+            ]),
+            PerBucket {
+                main: Some(Ttl::OneHour),
+                subagent: Some(Ttl::OneHour),
+            }
+        );
+        // An unsupported client gets an Advisory recommendation that doctor offers no change for.
+        for action in [Action::Advisory, Action::Keep] {
+            assert_eq!(
+                run(&[check(action, Bucket::Main, Ttl::OneHour, &profile_id)]),
+                current
+            );
+        }
+        assert_eq!(
+            run(&[check(Action::Change, Bucket::Main, Ttl::OneHour, "other")]),
+            current
+        );
     }
 
     #[test]

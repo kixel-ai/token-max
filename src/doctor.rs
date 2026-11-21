@@ -4992,6 +4992,108 @@ mod tests {
         assert!(std::fs::read_to_string(&config).unwrap().contains("key"));
     }
 
+    #[test]
+    fn a_write_that_fails_after_another_names_the_file_already_written() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let config = w.codex.join("config.toml");
+        let bak = w.codex.join("config.toml.token-max.bak");
+        std::fs::write(&settings, "{}\n").unwrap();
+        std::fs::write(&config, "a = 1\n").unwrap();
+        std::fs::write(&bak, "older\n").unwrap();
+        let plan = accepted(
+            &w,
+            &[(&settings, Harness::Claude), (&config, Harness::Codex)],
+        );
+        // Something already sits where the second file's new text is staged.
+        let blocker = w
+            .codex
+            .join(format!(".config.toml.token-max-{}", std::process::id()));
+        std::fs::write(&blocker, "theirs").unwrap();
+        let error = write(&plan).unwrap_err().message;
+        let shown = |file: &Path| file.display().to_string();
+        assert!(
+            error.starts_with(&format!("cannot write {} (", shown(&config)))
+                && error.ends_with(&format!("; already wrote {}", shown(&settings))),
+            "{error}"
+        );
+        assert!(std::fs::read_to_string(&settings).unwrap().contains("key"));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "a = 1\n");
+        // The second file's earlier backup stays, its staged one is cleaned up, and the
+        // blocker is not ours to remove.
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "older\n");
+        let mut left: Vec<_> = std::fs::read_dir(&w.codex)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let blocker = blocker.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            left,
+            [
+                blocker.as_str(),
+                "config.toml",
+                "config.toml.token-max.bak",
+                "sessions"
+            ]
+        );
+    }
+
+    #[test]
+    fn turned_off_mcp_servers_are_removed_together_or_one_by_one() {
+        let w = Workspace::new();
+        let config = w.codex.join("config.toml");
+        let text = "[mcp_servers.a]\nenabled = false\n\n[mcp_servers.b]\nenabled = false\n\n[mcp_servers.c]\nenabled = false\n\n[mcp_servers.on]\ncommand = \"x\"\n";
+        let off =
+            |name: &str| Definition::Entry(entry(&config, Harness::Codex, &["mcp_servers", name]));
+        let run = |answers: &str| {
+            std::fs::write(&config, text).unwrap();
+            let mut printed = vec![];
+            let plan = ask(
+                vec![],
+                vec![off("a"), off("b"), off("c")],
+                &style(&w),
+                &mut answers.as_bytes(),
+                &mut printed,
+            )
+            .unwrap();
+            write(&plan).unwrap();
+            (
+                std::fs::read_to_string(&config).unwrap(),
+                String::from_utf8(printed).unwrap(),
+            )
+        };
+        // The servers left configured.
+        let servers = |text: &str| -> Vec<String> {
+            let table: toml::Table = toml::from_str(text).unwrap();
+            table["mcp_servers"]
+                .as_table()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let (after, printed) = run("y\n");
+        assert!(
+            printed.ends_with("  Remove all 3? [y]es, [n]o, [o]ne by one, [q]uit: "),
+            "{printed}"
+        );
+        assert_eq!(servers(&after), ["on"]);
+        assert_eq!(run("n\n").0, text);
+        // One by one asks each server alone, numbered within the batch.
+        let (after, printed) = run("o\nn\ny\nn\n");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(printed.contains(&format!(
+            "\n  [1/1, 2/3] MCP server b  saves nothing\n             off -> removed  Worth considering (Opinion)\n             Where  [mcp_servers.b] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
+        )), "{printed}");
+        assert_eq!(printed.matches("Remove it?").count(), 3, "{printed}");
+        assert_eq!(servers(&after), ["a", "c", "on"]);
+        // A quit asks nothing more and keeps the removals already accepted.
+        let (after, printed) = run("o\ny\nq\n");
+        assert!(!printed.contains("3/3"), "{printed}");
+        assert_eq!(servers(&after), ["b", "c", "on"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_git_tracks_with_no_uncommitted_changes_gets_no_backup() {

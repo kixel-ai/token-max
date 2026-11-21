@@ -894,7 +894,7 @@ mod tests {
                     .unwrap()
                     .tier
                     .as_deref(),
-                Some("standard")
+                Some("default")
             );
             let first = check(&s, &c);
             assert_eq!(first.base.action, Action::Change);

@@ -25,7 +25,7 @@ mod windows {
     use serde_json::Value;
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Console::{
-        CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+        CTRL_C_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
     };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -33,8 +33,7 @@ mod windows {
         SetInformationJobObject,
     };
     use windows_sys::Win32::System::Threading::{
-        CREATE_NEW_PROCESS_GROUP, GetCurrentProcess, OpenProcess, PROCESS_SYNCHRONIZE,
-        WaitForSingleObject,
+        CREATE_NO_WINDOW, GetCurrentProcess, OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
     };
 
     const BIN: &str = env!("CARGO_BIN_EXE_token-max");
@@ -44,6 +43,10 @@ mod windows {
         let exe = std::env::current_exe().unwrap();
         if exe.file_stem() == Some("ssh".as_ref()) {
             std::process::exit(ssh());
+        }
+        if let Some(root) = std::env::var_os("TEST_CANCEL_ROOT") {
+            cancel_on_this_console(root.into());
+            return;
         }
         let tests: [(&str, fn()); 4] = [
             (
@@ -385,7 +388,6 @@ mod windows {
     fn cancelling_stops_every_destination() {
         let hosts = Hosts::new();
         let header = hosts.header();
-        let ready = hosts.root.join("ready");
         // Mid-scan once it names the Windows process running it, which the test then watches.
         hosts.fake(
             "slow",
@@ -393,23 +395,47 @@ mod windows {
                 "echo '{header}'; cat /proc/$$/winpid > \"$TEST_ROOT/ready.tmp\" && mv \"$TEST_ROOT/ready.tmp\" \"$TEST_ROOT/ready\"; exec sleep 600"
             ),
         );
-        // Ctrl-Break, since Windows sends Ctrl-C only to every process on the console; token-max
-        // handles both alike.
+        // A Ctrl-C goes to every process on the console, so it is sent on a console of its own,
+        // by a copy of this binary, rather than to cargo's.
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env("TEST_CANCEL_ROOT", &hosts.root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Press Ctrl-C on this console while the coordinator audits the slow destination in `root`.
+    fn cancel_on_this_console(root: PathBuf) {
+        let hosts = Hosts {
+            root,
+            tools: tools(),
+        };
         let child = hosts
             .invoke("doctor", &["--ssh", "slow"])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .creation_flags(CREATE_NEW_PROCESS_GROUP)
             .spawn()
             .unwrap();
+        // Only now, since children inherit it: this process ignores the Ctrl-C it sends.
+        // SAFETY: a null handler only sets this process's own flag.
+        assert_ne!(unsafe { SetConsoleCtrlHandler(None, 1) }, 0);
+        let ready = hosts.root.join("ready");
         let deadline = Instant::now() + Duration::from_secs(60);
         while !ready.exists() {
             assert!(Instant::now() < deadline, "the destination never started");
             std::thread::sleep(Duration::from_millis(10));
         }
-        // SAFETY: this only signals the process group this test started.
+        // SAFETY: group 0 is every process on this console, which only this test uses.
         assert_ne!(
-            unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, child.id()) },
+            unsafe { GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) },
             0,
             "{}",
             std::io::Error::last_os_error()

@@ -16,9 +16,10 @@ Check first:
   functions. It cannot see a `pub` field of a type `tests/` reaches, so
   search `src/model.rs` for fields written but read only in tests (the m1 run
   removed a dozen).
-- Code only tests use, such as a function or a whole trace passed a
-  test-only flag. Build the library without tests (`cargo check --lib`) to
-  find them.
+- Code only tests use. Build the library without tests (`cargo check --lib`)
+  to find whole functions. It cannot see a branch only tests reach, such as a
+  trace behind a flag production always passes as `false`: search for `bool`
+  parameters and options and check every production call site's value.
 - Helpers written again under a new name. The m1 run found copies of
   `median`, `harness_name`, `js_string`, `js_space`, hex encoding, the 30-day
   projection and plural helpers. Search for distinctive bodies such as

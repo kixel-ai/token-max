@@ -37,9 +37,14 @@
               ./Cargo.toml
               ./Cargo.lock
               ./src
+              ./tests/ssh_windows.rs
             ];
           };
           cargoLock.lockFile = ./Cargo.lock;
+          # nixpkgs' Cargo setup hook makes rusqlite link the system SQLite, so
+          # the build needs it and pkg-config, bundled feature or not.
+          nativeBuildInputs = [ pkgs.pkg-config ];
+          buildInputs = [ pkgs.sqlite ];
           # CI runs the tests; running the tool should not.
           doCheck = false;
           meta.mainProgram = "token-max";

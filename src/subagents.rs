@@ -22,7 +22,7 @@ use crate::model::{
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
 use crate::safe::{ScanError, label};
-use crate::version::claude_at_least;
+use crate::version::{claude_at_least, claude_version};
 
 /// Claude Code 2.1.198 made the built-in Explore inherit the main model; it ran on Haiku before.
 const EXPLORE_INHERITS_PATCH: u64 = 198;
@@ -757,8 +757,8 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
         };
     };
     if builtin.name == "Explore" {
-        return match run.version {
-            None => unknown("the Claude Code version is not recorded".into()),
+        return match run.version.filter(|v| claude_version(v).is_some()) {
+            None => unknown("the Claude Code version is not recorded as plain digits".into()),
             Some(v) if !claude_at_least(Some(v), 1, EXPLORE_INHERITS_PATCH) => decided((
                 ModelSource::Definition,
                 "built-in Explore ran on Haiku before Claude Code 2.1.198".into(),
@@ -1357,6 +1357,9 @@ mod tests {
         older.version = Some("2.1.197");
         assert_eq!(source(&older, &none, "Explore"), ModelSource::Definition);
         older.version = None;
+        assert_eq!(source(&older, &none, "Explore"), ModelSource::Unknown);
+        // A version that is not plain digits establishes no release, so it is never an older one.
+        older.version = Some("2.1.197-beta");
         assert_eq!(source(&older, &none, "Explore"), ModelSource::Unknown);
         // A model no current rule gives is never guessed.
         let odd = run(&explore, "claude-sonnet-5-5", "claude-opus-5-5");

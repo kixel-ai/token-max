@@ -2335,9 +2335,7 @@ mod tests {
     }
 
     fn private(scan: &Scan) -> bool {
-        serde_json::to_string(scan)
-            .unwrap()
-            .contains("SYNTHETIC_PRIVATE")
+        format!("{scan:?}").contains("SYNTHETIC_PRIVATE")
     }
 
     fn assistant(session: &str, message: &str) -> Value {

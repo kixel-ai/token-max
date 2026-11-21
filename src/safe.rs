@@ -260,7 +260,6 @@ mod tests {
         ] {
             let id = Id::from(text);
             assert_eq!(id.to_string(), text);
-            assert_eq!(serde_json::to_value(&id).unwrap(), json!(text));
         }
         assert!(matches!(Id::from(hex.to_uppercase()), Id::Text(_)));
     }

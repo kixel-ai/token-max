@@ -9,7 +9,6 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::collections::HashSet;
@@ -19,14 +18,11 @@ use crate::model::{ContextKind, Harness};
 const LONGEST_NAME: usize = 256;
 
 /// What one transcript's unreadable lines mention and which tool results lack a call.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Unreadable {
     /// Hashes of the names, MCP servers and ids in the unreadable lines' bytes.
-    #[serde(skip)]
     names: HashSet<u64>,
     /// Hashes of the tool call ids the unreadable lines' bytes name as results.
-    #[serde(skip)]
     results: HashSet<u64>,
     /// Tool results, in parsed records or unreadable lines, whose id matches no parsed
     /// call anywhere in the file; zero unless the file has an unreadable line.

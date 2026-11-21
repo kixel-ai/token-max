@@ -3370,11 +3370,7 @@ mod tests {
             .unwrap();
         assert_eq!(codex.compaction.default.value, Some(240_000));
         assert!(!codex.compaction.default.applicable);
-        assert!(
-            !serde_json::to_string(&data.profiles)
-                .unwrap()
-                .contains("PRIVATE")
-        );
+        assert!(!format!("{:?}", data.profiles).contains("PRIVATE"));
         write(
             w.codex.join("config.toml"),
             "model_auto_compact_token_limit = 'bad'\n",
@@ -3654,11 +3650,7 @@ mod tests {
                 .iter()
                 .all(|c| c.value.is_none())
         );
-        assert!(
-            !serde_json::to_string(p)
-                .unwrap()
-                .contains("SYNTHETIC_PRIVATE")
-        );
+        assert!(!format!("{p:?}").contains("SYNTHETIC_PRIVATE"));
         write(
             w.managed_settings_file(),
             r#"{"env":{"CLAUDE_CODE_ENABLE_AWAY_SUMMARY":"0","CLAUDE_CODE_GOAL_CHECKIN_MINUTES":"0"}}"#,
@@ -4129,11 +4121,7 @@ mod tests {
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, Some(true));
         assert_eq!(recap(&d).off_file.as_deref(), Some(text(&nearest).as_str()));
-        assert!(
-            !serde_json::to_string(&d.profiles)
-                .unwrap()
-                .contains("SYNTHETIC_PRIVATE")
-        );
+        assert!(!format!("{:?}", d.profiles).contains("SYNTHETIC_PRIVATE"));
         write(w.codex.join("config.toml"), "[tui]\nauto_recap = false\n");
         discover_codex_controls(&options(&w), &mut d.profiles, std::slice::from_ref(&req)).unwrap();
         assert_eq!(recap(&d).value, None);

@@ -1715,11 +1715,7 @@ mod tests {
                 ("builder", None, Some("high")),
             ]
         );
-        assert!(
-            !serde_json::to_string(&data)
-                .unwrap()
-                .contains("SYNTHETIC_PRIVATE")
-        );
+        assert!(!format!("{data:?}").contains("SYNTHETIC_PRIVATE"));
     }
 
     fn put(path: std::path::PathBuf, text: &str) {
@@ -1898,11 +1894,7 @@ mod tests {
                 .is_some_and(|r| r.contains("trust")),
             "{untrusted:?}"
         );
-        assert!(
-            !serde_json::to_string(&profile)
-                .unwrap()
-                .contains("SYNTHETIC_PRIVATE")
-        );
+        assert!(!format!("{profile:?}").contains("SYNTHETIC_PRIVATE"));
     }
 
     #[test]

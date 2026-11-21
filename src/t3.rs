@@ -2552,7 +2552,14 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("unsupported"))
         );
-        let exported = serde_json::to_string(&scan).unwrap();
+        // Session facts keep native session IDs by design, for the `sessions` export.
+        let exported = format!(
+            "{:?}",
+            Scan {
+                sessions: Default::default(),
+                ..scan.clone()
+            }
+        );
         for secret in [
             "PRIVATE_SECRET",
             "PRIVATE_CONNECTION",
@@ -3037,11 +3044,7 @@ mod tests {
                 .filter_map(|p| p.t3.as_ref())
                 .any(|t| t.settings_unresolved)
         );
-        assert!(
-            !serde_json::to_string(&scan)
-                .unwrap()
-                .contains("PRIVATE_HOME")
-        );
+        assert!(!format!("{scan:?}").contains("PRIVATE_HOME"));
     }
     #[test]
     fn claude_exact_sdk_items_link_idle_runs_without_exporting_text() {
@@ -3084,7 +3087,7 @@ mod tests {
         attribute_compactions(&mut scan, &charges);
         assert_eq!(scan.events[0].idle_attribution, IdleAttribution::T3);
         assert!(scan.events[0].t3.is_some());
-        let json = serde_json::to_string(&scan).unwrap();
+        let debug = format!("{scan:?}");
         for private in [
             "PRIVATE_REPLY",
             "PRIVATE_MESSAGE",
@@ -3092,7 +3095,7 @@ mod tests {
             "native-message",
             "assistant-uuid",
         ] {
-            assert!(!json.contains(private), "{private}");
+            assert!(!debug.contains(private), "{private}");
         }
     }
 
@@ -3908,11 +3911,7 @@ mod tests {
         let resolve = |settings: Value| {
             let root = state(&w, settings);
             let data = scan(&w.scan_options()).unwrap();
-            assert!(
-                !serde_json::to_string(&data)
-                    .unwrap()
-                    .contains("PRIVATE_KEY")
-            );
+            assert!(!format!("{data:?}").contains("PRIVATE_KEY"));
             let g = data.t3[0].text_generation.clone().unwrap();
             assert_eq!(
                 g.owner,
@@ -4018,8 +4017,8 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("unsupported"))
         );
-        let serialized = serde_json::to_string(&data).unwrap();
-        assert!(!serialized.contains("PRIVATE_ENV") && !serialized.contains("PRIVATE_CONFIG"));
+        let debug = format!("{data:?}");
+        assert!(!debug.contains("PRIVATE_ENV") && !debug.contains("PRIVATE_CONFIG"));
         write(
             root.join("settings.json"),
             r#"{"idleCompaction":"unsupported-new-mode"}"#,

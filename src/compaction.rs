@@ -158,8 +158,6 @@ pub(crate) struct Calibration<'a> {
     /// The cohort's samples in order; never empty. The first is the template a replayed
     /// summary is priced from.
     pub(crate) samples: Vec<CompactionSample<'a>>,
-    /// The samples' events, shared by every period this cohort calibrates.
-    pub(crate) events: std::sync::Arc<[Id]>,
     /// Whether every sample agrees on the summary model, provider, tier, speed and geography.
     pub(crate) uniform: bool,
     pub(crate) median: Geometry,
@@ -210,7 +208,6 @@ impl<'a> Calibration<'a> {
             overhead: median(overheads),
         };
         Self {
-            events: samples.iter().map(|s| s.event.id.clone()).collect(),
             uniform: summaries.len() == 1,
             median,
             larger,
@@ -5174,7 +5171,7 @@ mod tests {
                 .unwrap();
             assert_eq!(codex.compaction.default.value, Some(240000));
             assert!(!codex.compaction.default.applicable);
-            assert!(!serde_json::to_string(&result).unwrap().contains("PRIVATE"));
+            assert!(!format!("{result:?}").contains("PRIVATE"));
             std::fs::write(
                 w.codex.join("config.toml"),
                 "model_auto_compact_token_limit = 'bad'\n",

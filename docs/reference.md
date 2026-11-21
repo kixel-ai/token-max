@@ -806,8 +806,9 @@ charges can still be compared.
 
 ## Compaction window
 
-Compaction-window comparisons run after the recommended TTLs and use the current
-window as their baseline. Claude controls resolve environment overrides,
+Compaction-window comparisons run after the TTL changes `doctor` recommends, as
+keepalive and idle comparisons do, so an advisory TTL is not applied; they use
+the current window as their baseline. Claude controls resolve environment overrides,
 managed and user settings, including `modelSettings.<model>.autoCompactWindow`;
 Codex uses `model_auto_compact_token_limit`. An unset Claude window uses each
 model's latest observed automatic-compaction trigger, else Claude Code's

@@ -12,7 +12,7 @@ use crate::compaction::{
     CompactionSamples, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
     replay_windows,
 };
-use crate::idle::{Scopes, recommended_windows};
+use crate::idle::{Scopes, recommended_windows, ttls_after};
 use crate::model::{
     Action, Agent, BillingPart, Bucket, CheckBase, CompactionCharge, CompactionCheck, Coverage,
     Estimate, EventKind, Evidence, Harness, IdleAttribution, IdleCheck, KeepaliveCheck,
@@ -712,17 +712,14 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
     );
     let scopes = Scopes::new(line);
     let windows = recommended_windows(&scopes, &main, options.windows);
-    let mut ttls = PerBucket {
-        main: profile.ttl.main.value,
-        subagent: profile.ttl.subagent.value,
-    };
-    for c in options
-        .ttls
-        .iter()
-        .filter(|c| c.base.profiles.contains(&profile.id) && c.base.action == Action::Change)
-    {
-        *ttls.get_mut(c.bucket) = c.base.recommended;
-    }
+    let mut ttls = ttls_after(
+        PerBucket {
+            main: profile.ttl.main.value,
+            subagent: profile.ttl.subagent.value,
+        },
+        profile,
+        options.ttls,
+    );
     if let Some(Lifetime {
         cache: Cache::Claude(ttl),
         ..

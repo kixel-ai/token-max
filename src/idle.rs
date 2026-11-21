@@ -17,12 +17,12 @@ use crate::compaction::{
 use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
 use crate::model::{
-    Action, ActivationCohort, Agent, BillingPart, Bucket, CheckBase, CompactionCharge,
-    CompactionCheck, ContextDelta, Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id,
-    IdleAttribution, IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff,
-    PartKind, PerBucket, PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request,
-    ReturnTiming, Scalar, Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl,
-    Usage, UsageEstimate, Usd, WindowControl,
+    Action, ActivationCohort, Agent, BillingPart, CheckBase, CompactionCharge, CompactionCheck,
+    ContextDelta, Cost, Coverage, Estimate, EventKind, Evidence, Harness, Id, IdleAttribution,
+    IdleCheck, IdleControl, IdleScenario, IdleSensitivity, Millis, OnOff, PartKind, PerBucket,
+    PeriodCounts, PeriodKind, PeriodOutcome, PeriodStatus, Profile, Request, ReturnTiming, Scalar,
+    Scan, ScenarioWindow, StructuralEvent, Text, Ttl, TtlCheck, TtlControl, Usage, UsageEstimate,
+    Usd, WindowControl,
 };
 use crate::prices::{
     Catalog, PRICE_SOURCES, Pairs, Sum, add_costs, price_components, price_part, server_cost,
@@ -2351,6 +2351,19 @@ pub(crate) fn recommended_windows(
     recommended_windows
 }
 
+/// The TTLs a replay after the recommendations uses: each bucket's recommended TTL where its
+/// check says Change, else `current`. Advisory recommendations stay unapplied, as `doctor`
+/// offers no change for them.
+pub(crate) fn ttls_after(current: Ttls, profile: &Profile, checks: &[&TtlCheck]) -> Ttls {
+    let mut ttls = current;
+    for c in checks {
+        if c.base.profiles.contains(&profile.id) && c.base.action == Action::Change {
+            *ttls.get_mut(c.bucket) = c.base.recommended;
+        }
+    }
+    ttls
+}
+
 /// Idle checks for each owning idle control of one line's native Claude profiles.
 fn profile_checks<'a>(
     options: &IdleOptions<'a>,
@@ -2428,16 +2441,7 @@ fn profile_checks<'a>(
         main: profile.ttl.main.value,
         subagent: profile.ttl.subagent.value,
     };
-    let mut after_ttls = current_ttls.clone();
-    for bucket in Bucket::ALL {
-        let check = options
-            .ttls
-            .iter()
-            .find(|c| c.base.profiles.contains(&profile.id) && c.bucket == bucket);
-        if let Some(c) = check.filter(|c| c.base.action == Action::Change) {
-            *after_ttls.get_mut(bucket) = c.base.recommended;
-        }
-    }
+    let after_ttls = ttls_after(current_ttls.clone(), profile, options.ttls);
     // Each owner keeps its first position and its last request's control.
     let mut controls: IndexMap<&str, &IdleControl> = IndexMap::default();
     for r in &main {
@@ -2746,29 +2750,7 @@ fn detailed_t3_checks(
             &current_ttls,
             "T3 modes at current native TTL/window controls",
         );
-        let ttl = options
-            .ttls
-            .iter()
-            .find(|c| {
-                c.base.profiles.contains(&profile.id)
-                    && c.bucket == Bucket::Main
-                    && c.base.action == Action::Change
-            })
-            .and_then(|c| c.base.recommended)
-            .or(profile.ttl.main.one().value);
-        let after_ttls = PerBucket {
-            main: ttl,
-            subagent: options
-                .ttls
-                .iter()
-                .find(|c| {
-                    c.base.profiles.contains(&profile.id)
-                        && c.bucket == Bucket::Subagent
-                        && c.base.action == Action::Change
-                })
-                .and_then(|c| c.base.recommended)
-                .or(profile.ttl.subagent.one().value),
-        };
+        let after_ttls = ttls_after(current_ttls.clone(), profile, options.ttls);
         let mut after_replay = profiled.replay(&after_ttls, &after_windows, true);
         after_replay
             .errors
@@ -3757,8 +3739,8 @@ mod tests {
     use super::*;
     use crate::controls::{CompactionSources, compaction_controls};
     use crate::model::{
-        CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan, Location,
-        Margin, Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
+        Bucket, CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan,
+        Location, Margin, Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
     };
     use crate::reader::{ScanOptions, scan};
     use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
@@ -5631,6 +5613,62 @@ mod tests {
             near(s.cost.total_usd.map(Usd::to_f64), 0.0);
             assert_eq!(s.summaries, 0);
         }
+    }
+
+    #[test]
+    fn ttls_after_applies_only_change_for_the_profile() {
+        let check = |action, bucket, ttl, profile: &str| {
+            let mut base = base(action, "", Some(ttl));
+            base.profiles = vec![profile.into()];
+            TtlCheck {
+                base,
+                window_basis_kind: WindowBasisKind::Available,
+                bucket,
+                one_hour_savings_usd: 0.0,
+                comparison_estimate: crate::model::PerTtl::default(),
+                cost: Default::default(),
+                summary_cost: Default::default(),
+                comparison_cost: Default::default(),
+                fixed_cost: zero_cost(),
+                usage_estimates: vec![],
+                cache_evidence: vec![],
+                sensitivity: TtlSensitivity {
+                    cold_prefix1h_usd: None,
+                    cold_prefix1h_comparison_usd: None,
+                    unlinked: None,
+                },
+            }
+        };
+        let current = PerBucket {
+            main: Some(Ttl::FiveMinutes),
+            subagent: None,
+        };
+        let run = |checks: &[TtlCheck]| {
+            let checks: Vec<&TtlCheck> = checks.iter().collect();
+            ttls_after(current.clone(), &profile(), &checks)
+        };
+        let profile_id = profile().id;
+        assert_eq!(
+            run(&[
+                check(Action::Change, Bucket::Main, Ttl::OneHour, &profile_id),
+                check(Action::Change, Bucket::Subagent, Ttl::OneHour, &profile_id),
+            ]),
+            PerBucket {
+                main: Some(Ttl::OneHour),
+                subagent: Some(Ttl::OneHour),
+            }
+        );
+        // An unsupported client gets an Advisory recommendation that doctor offers no change for.
+        for action in [Action::Advisory, Action::Keep] {
+            assert_eq!(
+                run(&[check(action, Bucket::Main, Ttl::OneHour, &profile_id)]),
+                current
+            );
+        }
+        assert_eq!(
+            run(&[check(Action::Change, Bucket::Main, Ttl::OneHour, "other")]),
+            current
+        );
     }
 
     #[test]

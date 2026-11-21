@@ -22,9 +22,10 @@ use crate::model::{
 use crate::prices::{Catalog, Sample, Sum, price_part, price_request, server_cost};
 use crate::reader::UNRECORDED;
 use crate::safe::{ScanError, label};
+use crate::version::claude_at_least;
 
 /// Claude Code 2.1.198 made the built-in Explore inherit the main model; it ran on Haiku before.
-const EXPLORE_INHERITS: (u64, u64, u64) = (2, 1, 198);
+const EXPLORE_INHERITS_PATCH: u64 = 198;
 
 /// Model families that rank above Opus, whose Explore runs are capped at Opus.
 const ABOVE_OPUS: [&str; 2] = ["fable", "mythos"];
@@ -569,18 +570,6 @@ pub fn discover(
     Ok(())
 }
 
-/// A dotted version's first three numbers.
-fn version(text: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = text.split('.').map(|p| {
-        p.chars()
-            .take_while(char::is_ascii_digit)
-            .collect::<String>()
-            .parse()
-            .ok()
-    });
-    Some((parts.next()??, parts.next()??, parts.next()??))
-}
-
 /// The family alias a Claude model ID belongs to.
 fn family(model: &str) -> Option<&'static str> {
     FAMILIES.into_iter().find(|f| model.contains(f))
@@ -768,9 +757,9 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
         };
     };
     if builtin.name == "Explore" {
-        return match run.version.and_then(version) {
+        return match run.version {
             None => unknown("the Claude Code version is not recorded".into()),
-            Some(v) if v < EXPLORE_INHERITS => decided((
+            Some(v) if !claude_at_least(Some(v), 1, EXPLORE_INHERITS_PATCH) => decided((
                 ModelSource::Definition,
                 "built-in Explore ran on Haiku before Claude Code 2.1.198".into(),
                 Expect::Model("haiku"),

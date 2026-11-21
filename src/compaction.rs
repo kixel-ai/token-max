@@ -22,6 +22,7 @@ use crate::prices::{
     server_cost, tier_sensitive, unknown_cost, write_billing, zero_cost,
 };
 use crate::scenarios::{PartReplay, ReplayOptions, ReplayTtls, ReplayedPart, replay_parts};
+use crate::version::claude_at_least;
 
 const SOURCES: [&str; 8] = [
     "https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction (2026-11-07)",
@@ -1157,63 +1158,6 @@ struct Run {
     cache_evidence: Vec<CacheReplayEvidence>,
 }
 
-/// Parse one version component as JavaScript `Number` would; None for NaN.
-pub(crate) fn js_number(text: &str) -> Option<f64> {
-    // JavaScript trims Unicode spaces and the byte-order mark, but not NEL.
-    let text = text.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}');
-    if text.is_empty() {
-        return Some(0.0);
-    }
-    let radix = |digits: &str, radix: u32| {
-        (!digits.is_empty() && digits.chars().all(|c| c.is_digit(radix))).then(|| {
-            digits.chars().fold(0.0, |n, c| {
-                n * radix as f64 + c.to_digit(radix).unwrap_or(0) as f64
-            })
-        })
-    };
-    let lower = text.to_ascii_lowercase();
-    if let Some(digits) = lower.strip_prefix("0x") {
-        return radix(digits, 16);
-    }
-    if let Some(digits) = lower.strip_prefix("0o") {
-        return radix(digits, 8);
-    }
-    if let Some(digits) = lower.strip_prefix("0b") {
-        return radix(digits, 2);
-    }
-    match text.trim_start_matches(['+', '-']) {
-        "Infinity" if text.len() - "Infinity".len() <= 1 => Some(if text.starts_with('-') {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        }),
-        _ if text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || b"+-.eE".contains(&b)) =>
-        {
-            text.parse().ok()
-        }
-        _ => None,
-    }
-}
-
-/// Whether a Claude client version is at least v2.1.`patch`, as safe non-negative integers.
-fn version_supported(version: Option<&str>, patch: i64) -> bool {
-    let Some(version) = version else {
-        return false;
-    };
-    let parts: Vec<Option<f64>> = version.split('.').map(js_number).collect();
-    let [Some(major), Some(minor), Some(micro)] = parts[..] else {
-        return false;
-    };
-    let safe =
-        |v: f64| v.fract() == 0.0 && v.abs() <= crate::safe::MAX_SAFE_INTEGER as f64 && v >= 0.0;
-    if !(safe(major) && safe(minor) && safe(micro)) {
-        return false;
-    }
-    major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && micro >= patch as f64)))
-}
-
 /// Compare compaction windows after the recommended TTLs, without summing independent savings.
 pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
     let CompactionOptions {
@@ -1739,7 +1683,7 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
                 .filter(|_| !conditional);
             let patch = control.minimum_claude_patch.unwrap_or(288);
             let per_model_supported =
-                !claude || version_supported(recent.version.as_deref(), patch);
+                !claude || claude_at_least(recent.version.as_deref(), 1, patch);
             let window_key = if claude {
                 "autoCompactWindow"
             } else {
@@ -4576,25 +4520,6 @@ mod tests {
             ["missing input/cache geometry or iteration semantics can affect window eligibility"]
         );
         assert_eq!(result.uncertain.get("session"), Some(&(HOUR + 1000)));
-    }
-
-    #[test]
-    fn version_support_reads_components_like_javascript_numbers() {
-        assert_eq!(js_number(""), Some(0.0));
-        assert_eq!(js_number(" 2 "), Some(2.0));
-        assert_eq!(js_number("0x1F"), Some(31.0));
-        assert_eq!(js_number("1e3"), Some(1000.0));
-        assert_eq!(js_number("-Infinity"), Some(f64::NEG_INFINITY));
-        assert_eq!(js_number("inf"), None);
-        assert_eq!(js_number("1a"), None);
-        assert!(version_supported(Some("2.1.288"), 288));
-        assert!(version_supported(Some("3.0.0"), 288));
-        assert!(version_supported(Some("2.01.0x200"), 288));
-        assert!(!version_supported(Some("2.1.287"), 288));
-        assert!(!version_supported(Some("2.1"), 288));
-        assert!(!version_supported(Some("2.1.x"), 288));
-        assert!(version_supported(Some("2.1.-0"), 0));
-        assert!(!version_supported(None, 0));
     }
 
     #[test]

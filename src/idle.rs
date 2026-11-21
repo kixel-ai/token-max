@@ -29,6 +29,7 @@ use crate::prices::{
     unknown_cost, zero_cost,
 };
 use crate::scenarios::{ReplayOptions, ReplayTtls, replay_parts};
+use crate::version::claude_at_least;
 
 /// The one-hour cache lifetime.
 const HOUR: Millis = 60 * 60_000;
@@ -111,28 +112,6 @@ type Ttls = PerBucket<Option<Ttl>>;
 /// A request's idle-control scope: an index into the line's project directories, or None
 /// for the profile-wide control.
 type Scope = Option<usize>;
-
-/// Whether `version` is exactly `major.minor.patch` digits and at least v2.1.`patch`.
-fn supported(version: Option<&str>, patch: i64) -> bool {
-    let Some(version) = version else {
-        return false;
-    };
-    let mut parts = version.split('.');
-    let (Some(major), Some(minor), Some(micro), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    let number = |text: &str| {
-        (!text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| text.parse::<f64>().unwrap_or(f64::INFINITY))
-    };
-    let (Some(major), Some(minor), Some(micro)) = (number(major), number(minor), number(micro))
-    else {
-        return false;
-    };
-    major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && micro >= patch as f64)))
-}
 
 /// A cost times `fraction`; a zero fraction is a known zero, dropping unknowns.
 fn scale(cost: &Cost, fraction: f64) -> Cost {
@@ -1815,7 +1794,7 @@ impl<'a> Profiled<'a> {
                     old.extend(e.settings.iter().map(|(k, v)| (k.as_str(), v)));
                 }
             }
-            let flag_state = if supported(r.version.as_deref(), 314) {
+            let flag_state = if claude_at_least(r.version.as_deref(), 1, 314) {
                 Some("not-required")
             } else {
                 match old.get("idleCompactionAvailable") {
@@ -1829,8 +1808,9 @@ impl<'a> Profiled<'a> {
                 _ => None,
             };
             let native = self.scopes.window(scope, p.model.as_deref());
-            let window = if supported(
+            let window = if claude_at_least(
                 r.version.as_deref(),
+                1,
                 native.minimum_claude_patch.unwrap_or(288),
             ) {
                 lookup
@@ -1912,7 +1892,7 @@ impl<'a> Profiled<'a> {
                 || window.is_none()
                 || (boundary.is_none()
                     && (client != Client::Supported
-                        || !supported(r.version.as_deref(), 290)
+                        || !claude_at_least(r.version.as_deref(), 1, 290)
                         || flag_off))
             {
                 (
@@ -2507,9 +2487,9 @@ fn profile_checks<'a>(
         let applicable = c.resolved
             && c.value.is_some()
             && client(recent) == Client::Supported
-            && supported(recent.version.as_deref(), 290)
+            && claude_at_least(recent.version.as_deref(), 1, 290)
             && after.applicable
-            && (supported(recent.version.as_deref(), 314)
+            && (claude_at_least(recent.version.as_deref(), 1, 314)
                 || historically_available(&events, recent));
         let savings = match (delta, c.value) {
             (Some(delta), Some(_)) => Some(if winner == c.value { 0.0 } else { delta.abs() }),
@@ -5030,20 +5010,6 @@ mod tests {
         ]);
         let result: Vec<(f64, i64)> = merged.iter().map(|s| (s.weight, s.path.offset)).collect();
         assert_eq!(result, [(0.5, 2), (0.5, 1)]);
-    }
-
-    #[test]
-    fn versions_must_be_three_numeric_parts() {
-        assert!(supported(Some("2.1.314"), 314));
-        assert!(supported(Some("3.0.0"), 314));
-        assert!(supported(Some("2.2.0"), 999));
-        assert!(!supported(Some("2.1.313"), 314));
-        assert!(!supported(Some("2.1.314-beta"), 314));
-        assert!(!supported(Some("2.1"), 1));
-        assert!(!supported(Some("2.1.3.4"), 1));
-        assert!(!supported(Some(" 2.1.314"), 314));
-        assert!(!supported(None, 0));
-        assert!(supported(Some("02.01.0314"), 314));
     }
 
     #[test]

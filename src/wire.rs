@@ -42,6 +42,8 @@ pub fn build() -> String {
             include_str!("doctor.rs"),
             include_str!("mcp.rs"),
             include_str!("report.rs"),
+            // Its `ScanError` is the stream's error outcome.
+            include_str!("safe.rs"),
         ]
         .concat(),
     );

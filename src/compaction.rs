@@ -157,8 +157,6 @@ pub(crate) struct Calibration<'a> {
     /// The cohort's samples in order; never empty. The first is the template a replayed
     /// summary is priced from.
     pub(crate) samples: Vec<CompactionSample<'a>>,
-    /// The samples' events, shared by every period this cohort calibrates.
-    pub(crate) events: std::sync::Arc<[Id]>,
     /// Whether every sample agrees on the summary model, provider, tier, speed and geography.
     pub(crate) uniform: bool,
     pub(crate) median: Geometry,
@@ -209,7 +207,6 @@ impl<'a> Calibration<'a> {
             overhead: median(overheads),
         };
         Self {
-            events: samples.iter().map(|s| s.event.id.clone()).collect(),
             uniform: summaries.len() == 1,
             median,
             larger,

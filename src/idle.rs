@@ -134,18 +134,6 @@ fn supported(version: Option<&str>, patch: i64) -> bool {
     major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && micro >= patch as f64)))
 }
 
-/// A cost times `fraction`; a zero fraction is a known zero, dropping unknowns.
-fn scale(cost: &Cost, fraction: f64) -> Cost {
-    if fraction == 0.0 {
-        return zero_cost();
-    }
-    Cost {
-        known_usd: cost.known_usd.scale(fraction),
-        total_usd: cost.total_usd.map(|t| t.scale(fraction)),
-        ..cost.clone()
-    }
-}
-
 /// `after` minus `before`, keeping both sides' unknowns.
 fn difference(after: &Cost, before: &Cost) -> Cost {
     if after == before {
@@ -498,81 +486,6 @@ struct Period<'r> {
     confirmed: bool,
     flag_state: Option<&'static str>,
     activation: Option<f64>,
-    /// The known-on cohort whose applied fraction set an unobserved activation.
-    cohort: Option<usize>,
-}
-
-/// The calibration one period's hypothetical summary used.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct PeriodCalibration {
-    /// The calibrating summaries' events, shared by every period one cohort calibrates.
-    pub(crate) events: std::sync::Arc<[Id]>,
-    pub(crate) summary_tokens: i64,
-    pub(crate) prefix_tokens: i64,
-}
-
-/// One period with its evidence.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct IdlePeriod {
-    pub(crate) request: Text,
-    pub(crate) resume: Option<Text>,
-    pub(crate) session: Text,
-    pub(crate) context_tokens: Option<i64>,
-    pub(crate) gap_ms: i64,
-    pub(crate) status: PeriodStatus,
-    pub(crate) reason: &'static str,
-    pub(crate) confirmed: bool,
-    pub(crate) return_timing: ReturnTiming,
-    pub(crate) outcome: PeriodOutcome,
-    pub(crate) event: Option<Id>,
-    pub(crate) version: Option<Text>,
-    pub(crate) client: Option<Text>,
-    pub(crate) flag_state: Option<&'static str>,
-    pub(crate) activation: Option<f64>,
-    pub(crate) activation_basis: Cow<'static, str>,
-    pub(crate) summary_cost: Cost,
-    pub(crate) calibration: Option<PeriodCalibration>,
-}
-
-impl Period<'_> {
-    /// This period as tests read it, before any run charges it.
-    fn detail(&self, cohorts: &[ActivationCohort]) -> IdlePeriod {
-        let kind = self.kind;
-        let activation_basis: Cow<'static, str> = if kind.status != PeriodStatus::Eligible {
-            "not applicable".into()
-        } else if kind.outcome != PeriodOutcome::Unobserved {
-            "recorded applied/not-applied returned outcome; missing discarded generation is separately unobserved".into()
-        } else {
-            match self.cohort.map(|c| &cohorts[c]) {
-                Some(c) => format!(
-                    "same version/client/flag known-on returned applied fraction {}/{}; final periods use that same fraction with no second liveness factor",
-                    c.applied, c.eligible
-                )
-                .into(),
-                None => "documented-trigger fallback: left open and awake, one summary; final periods have the same assumed activation and no return benefit".into(),
-            }
-        };
-        IdlePeriod {
-            request: self.previous.id.clone(),
-            resume: self.next.map(|n| n.id.clone()),
-            session: self.previous.session.clone(),
-            context_tokens: self.context_tokens,
-            gap_ms: self.gap_ms,
-            status: kind.status,
-            reason: kind.reason,
-            confirmed: self.confirmed,
-            return_timing: kind.return_timing,
-            outcome: kind.outcome,
-            event: self.boundary.map(|b| b.id.clone()),
-            version: self.previous.version.clone(),
-            client: self.previous.client.clone(),
-            flag_state: self.flag_state,
-            activation: self.activation,
-            activation_basis,
-            summary_cost: zero_cost(),
-            calibration: None,
-        }
-    }
 }
 
 /// Known-on cohorts by version, client and flag state.
@@ -642,13 +555,13 @@ fn activate<'r>(periods: &mut [Period<'r>], cohorts: &Cohorts<'r>) {
         }
         // Cohorts never hold a missing or empty version or client, so a missing value matches none.
         let r: &'r Request = p.previous;
-        p.cohort = match (r.version.as_deref(), r.client.as_deref(), p.flag_state) {
+        let cohort = match (r.version.as_deref(), r.client.as_deref(), p.flag_state) {
             (Some(version), Some(client), Some(flag_state)) => {
-                cohorts.get_index_of(&(version, client, flag_state))
+                cohorts.get(&(version, client, flag_state))
             }
             _ => None,
         };
-        p.activation = Some(p.cohort.map_or(1.0, |c| cohorts[c].fraction));
+        p.activation = Some(cohort.map_or(1.0, |c| c.fraction));
     }
 }
 
@@ -1046,15 +959,12 @@ impl<'r, 'x> Runner<'r, 'x> {
             .collect()
     }
 
-    /// Replay the runner's sessions with idle compaction on or off into `ledger`; point runs
-    /// also record each detailed period's summary cost and calibration, when `detail` holds
-    /// them.
+    /// Replay the runner's sessions with idle compaction on or off into `ledger`.
     fn run(
         &self,
         context: &Profiled<'r>,
         scenario: &Ttls,
         (on, mode): (bool, Mode),
-        detail: &mut [IdlePeriod],
         ledger: &mut RunState<'r>,
     ) {
         let periods = self.periods;
@@ -1065,7 +975,6 @@ impl<'r, 'x> Runner<'r, 'x> {
         } else {
             &self.sessions
         };
-        let point = mode == Mode::Point;
         let catalog = self.catalog;
         let since = self.since;
         let sizes = &self.sizes;
@@ -1130,10 +1039,6 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     && is_message(part)
                             });
                             let Some(c) = usable else {
-                                if let Some(d) = detail.get_mut(i).filter(|_| point) {
-                                    d.summary_cost =
-                                        unknown_cost("summary calibration is unresolved");
-                                }
                                 ledger.charge(
                                     sizes,
                                     Some(active),
@@ -1151,13 +1056,6 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 &c.median
                             };
                             let sample = &c.samples[0];
-                            if let Some(d) = detail.get_mut(i).filter(|_| point) {
-                                d.calibration = Some(PeriodCalibration {
-                                    events: c.events.clone(),
-                                    summary_tokens: g.output,
-                                    prefix_tokens: g.prefix,
-                                });
-                            }
                             let retained = (g.prefix - g.output).min(g.read);
                             let window = item.window.expect("usable calibration has a window");
                             if retained < 0 || g.prefix >= input || g.prefix >= window {
@@ -1212,10 +1110,6 @@ impl<'r, 'x> Runner<'r, 'x> {
                                 Some(_) => price_part(catalog, sample.summary_request, &summary),
                             };
                             ledger.charge(sizes, Some(active), &cost, weight);
-                            if let Some(d) = detail.get_mut(i).filter(|_| point) {
-                                d.summary_cost =
-                                    add_costs([&d.summary_cost, &scale(&cost, weight)]);
-                            }
                             if item.next.is_some() {
                                 ledger.resumed += weight;
                             }
@@ -1321,12 +1215,6 @@ impl<'r, 'x> Runner<'r, 'x> {
                                     };
                                     if linked.map_or(e.time, |l| l.time) >= since {
                                         ledger.charge(sizes, Some(active), &cost, state.weight);
-                                    }
-                                    if let Some(d) = detail.get_mut(i).filter(|_| point) {
-                                        d.summary_cost = add_costs([
-                                            &d.summary_cost,
-                                            &scale(&cost, state.weight),
-                                        ]);
                                     }
                                     if item.next.is_some() {
                                         ledger.resumed += state.weight;
@@ -1449,9 +1337,6 @@ impl<'r, 'x> Runner<'r, 'x> {
                 for &i in &session.periods {
                     if periods[i].kind.status == PeriodStatus::Unknown {
                         let cost = unknown_cost(periods[i].kind.reason);
-                        if let Some(d) = detail.get_mut(i).filter(|_| point) {
-                            d.summary_cost = cost.clone();
-                        }
                         ledger.charge(sizes, Some(self.canonical[i]), &cost, 1.0);
                     }
                 }
@@ -1476,8 +1361,6 @@ struct Profiled<'a> {
     calibration: CompactionSamples<'a>,
     /// The sessions T3 could not settle to this line, which comparisons leave out.
     split: crate::t3::Split<'a>,
-    /// Whether scenarios also keep single periods, which only tests read.
-    detail: bool,
 }
 
 impl<'a> Profiled<'a> {
@@ -1855,14 +1738,12 @@ impl<'a> Profiled<'a> {
                 confirmed: eligible && turn_end >= r.end_time && turn_end < r.time + EARLY,
                 flag_state,
                 activation: None,
-                cohort: None,
             });
         }
         periods
     }
 
-    /// Compare idle on and off for `owner` in one replayed TTL/window configuration, with its
-    /// single periods when `self.detail` asks for them.
+    /// Compare idle on and off for `owner` in one replayed TTL/window configuration.
     fn scenario(
         &self,
         replay: &Replay,
@@ -1871,7 +1752,7 @@ impl<'a> Profiled<'a> {
         ttls: &Ttls,
         windows: &[ScenarioWindow],
         baseline: &str,
-    ) -> (IdleScenario, Vec<IdlePeriod>) {
+    ) -> IdleScenario {
         let lookup = window_lookup(windows);
         // Each pass builds one session's periods at a time and drops them after it.
         let sessions = || {
@@ -1964,7 +1845,6 @@ impl<'a> Profiled<'a> {
         ];
         let mut states =
             MODES.map(|(_, mode)| RunState::new((mode == Mode::Point).then_some(sizes.len())));
-        let mut detail: Vec<IdlePeriod> = vec![];
         // Whether idle compaction could change each session: a period that could trigger, or
         // an applied one that off undoes.
         let mut acting: Vec<bool> = vec![];
@@ -1978,13 +1858,9 @@ impl<'a> Profiled<'a> {
                 ) || p.boundary.is_some()
             }));
             activate(&mut periods, &cohorts);
-            let first = detail.len();
-            if self.detail {
-                detail.extend(periods.iter().map(|p| p.detail(&activation_cohorts)));
-            }
             let runner = Runner::new(self, index, &periods, &sizes, ttls);
             for (state, mode) in states.iter_mut().zip(MODES) {
-                runner.run(self, ttls, mode, &mut detail[first..], state);
+                runner.run(self, ttls, mode, state);
                 state.end_session(failed);
             }
         }
@@ -1995,7 +1871,7 @@ impl<'a> Profiled<'a> {
             for (_, failed, mut periods) in sessions() {
                 activate(&mut periods, &cohorts);
                 let runner = Runner::new(self, index, &periods, &sizes, ttls);
-                runner.run(self, ttls, (true, mode), &mut [], &mut state);
+                runner.run(self, ttls, (true, mode), &mut state);
                 state.end_session(failed);
             }
             state.finish()
@@ -2111,7 +1987,7 @@ impl<'a> Profiled<'a> {
             },
             unknown,
         };
-        (scenario, detail)
+        scenario
     }
 }
 
@@ -2159,15 +2035,6 @@ fn historically_available(events: &[&StructuralEvent], r: &Request) -> bool {
 
 /// Compare idle compaction on and off for each Claude profile.
 pub fn idle_checks(options: &IdleOptions) -> Vec<IdleCheck> {
-    detailed_checks(options, false)
-        .into_iter()
-        .map(|(check, _)| check)
-        .collect()
-}
-
-/// Each check with its single periods at current settings and after recommendations, when
-/// `detail` asks for them.
-fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<IdlePeriod>; 2])> {
     let mut checks = Vec::new();
     let native = options
         .scan
@@ -2183,7 +2050,7 @@ fn detailed_checks(options: &IdleOptions, detail: bool) -> Vec<(IdleCheck, [Vec<
         )
     };
     for group in crate::rows::groups(native, owner) {
-        profile_checks(options, &group, detail, &mut checks);
+        profile_checks(options, &group, &mut checks);
     }
     checks
 }
@@ -2247,8 +2114,7 @@ pub(crate) fn recommended_windows(
 fn profile_checks<'a>(
     options: &IdleOptions<'a>,
     group: &crate::rows::Group<'a>,
-    detail: bool,
-    checks: &mut Vec<(IdleCheck, [Vec<IdlePeriod>; 2])>,
+    checks: &mut Vec<IdleCheck>,
 ) {
     let scan = options.scan;
     let profile = group.lead;
@@ -2311,7 +2177,6 @@ fn profile_checks<'a>(
         window_events: WindowEvents::new(events.iter().copied()),
         calibration: compaction_samples(&requests, &events, options.summaries),
         split: crate::t3::Split::new(&scan.profiles, &scan.requests, &group.ids, Some(since)),
-        detail,
     };
     let scopes = &profiled.scopes;
     let current_windows = current_windows(scopes, &main);
@@ -2337,7 +2202,7 @@ fn profile_checks<'a>(
         controls.insert(c.owner.as_str(), c);
     }
     // Each replay covers the whole history, so the current one is released before the next.
-    let current_settings: Vec<(IdleScenario, Vec<IdlePeriod>)> = {
+    let current_settings: Vec<IdleScenario> = {
         let current = profiled.replay(&current_ttls, &current_windows, false);
         let current_events = all_events(&events, &current.modeled);
         let current_index = ReplayIndex::new(
@@ -2377,9 +2242,8 @@ fn profile_checks<'a>(
         .cloned()
         .collect();
     let elapsed = now - since;
-    for ((&owner, &c), (current_settings, current_periods)) in controls.iter().zip(current_settings)
-    {
-        let (after, after_periods) = profiled.scenario(
+    for ((&owner, &c), current_settings) in controls.iter().zip(current_settings) {
+        let after = profiled.scenario(
             &recommended,
             &recommended_index,
             owner,
@@ -2507,24 +2371,12 @@ fn profile_checks<'a>(
             after_recommendations: after,
             usage_estimates: usage_estimates.clone(),
         };
-        checks.push((check, [current_periods, after_periods]));
+        checks.push(check);
     }
 }
 
 /// Compare T3's policies with the shared summary calibration and provider pricing owners.
 pub fn t3_idle_checks(options: &IdleOptions<'_>) -> Vec<crate::model::T3IdleCheck> {
-    detailed_t3_checks(options, false)
-        .into_iter()
-        .map(|(check, _)| check)
-        .collect()
-}
-
-/// Each T3 check with its single periods at current settings and after recommendations,
-/// when `detail` asks for them.
-fn detailed_t3_checks(
-    options: &IdleOptions<'_>,
-    detail: bool,
-) -> Vec<(crate::model::T3IdleCheck, [Vec<IdlePeriod>; 2])> {
     use crate::model::T3IdleCheck;
     let mut checks = Vec::new();
     let instances = options
@@ -2592,7 +2444,6 @@ fn detailed_t3_checks(
                 &group.ids,
                 since,
             ),
-            detail,
         };
         let current_windows = current_windows(&profiled.scopes, &requests);
         let after_windows = recommended_windows(&profiled.scopes, &requests, options.windows);
@@ -2629,7 +2480,7 @@ fn detailed_t3_checks(
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
         current_replay.blocked = !unresolved_windows.is_empty();
-        let (current, current_periods) = t3_comparison(
+        let current = t3_comparison(
             options,
             profile,
             &current_replay,
@@ -2666,7 +2517,7 @@ fn detailed_t3_checks(
             .errors
             .splice(0..0, unresolved_windows.iter().cloned());
         after_replay.blocked = !unresolved_windows.is_empty();
-        let (after, after_periods) = t3_comparison(
+        let after = t3_comparison(
             options,
             profile,
             &after_replay,
@@ -2729,7 +2580,7 @@ fn detailed_t3_checks(
                 uncertainty: instance.limitations.iter().chain(&unresolved_windows).cloned().collect(), sources: vec![crate::t3::SOURCE.into()],
             }, current_settings: current, after_recommendations: after,
         };
-        checks.push((check, [current_periods, after_periods]));
+        checks.push(check);
     }
     checks
 }
@@ -2805,7 +2656,7 @@ fn t3_comparison(
     profiled: &Profiled<'_>,
     ttls: &Ttls,
     baseline: &str,
-) -> (crate::model::T3IdleComparison, Vec<IdlePeriod>) {
+) -> crate::model::T3IdleComparison {
     let samples = &profiled.calibration;
     use crate::model::{T3IdleComparison, T3IdleMode, T3IdleScenario};
     let ttl = ttls.main;
@@ -2838,7 +2689,6 @@ fn t3_comparison(
     }
     let mut gaps = Vec::new();
     let mut counts = PeriodCounts::default();
-    let mut detail = Vec::new();
     let mut outside: Vec<(&str, Millis, Millis)> = Vec::new();
     for group in groups.values_mut() {
         group.sort_by_key(|r| r.time);
@@ -3043,28 +2893,6 @@ fn t3_comparison(
                 },
             };
             counts.add(kind, observed.is_some());
-            if profiled.detail {
-                detail.push(IdlePeriod {
-                    request: r.id.clone(),
-                    resume: next.map(|r| r.id.clone()),
-                    session: r.session.clone(),
-                    context_tokens: tokens,
-                    gap_ms: end - r.end_time,
-                    status,
-                    reason,
-                    confirmed: observed.is_some(),
-                    return_timing: kind.return_timing,
-                    outcome: kind.outcome,
-                    event: boundary.map(|e| e.id.clone()),
-                    version: r.version.clone(),
-                    client: r.client.clone(),
-                    flag_state: None,
-                    activation: (status == PeriodStatus::Eligible).then_some(1.0),
-                    activation_basis: "conditional server liveness or on-return acceptance; absent generation is unobserved".into(),
-                    summary_cost: zero_cost(),
-                    calibration: None,
-                });
-            }
             gaps.push(T3Gap {
                 previous: r,
                 next,
@@ -3155,7 +2983,6 @@ fn t3_comparison(
                 unlinked: &unlinked,
             },
             &gaps,
-            &mut detail,
             mode,
         )
     })
@@ -3216,7 +3043,7 @@ fn t3_comparison(
         scenarios,
         periods: counts,
     };
-    (comparison, detail)
+    comparison
 }
 
 /// Replay T3 changes through later native requests, converging at unrelated compactions.
@@ -3274,7 +3101,6 @@ fn t3_replay(
     options: &IdleOptions<'_>,
     input: &T3Replay<'_>,
     gaps: &[T3Gap<'_>],
-    detail: &mut [IdlePeriod],
     mode: crate::model::T3IdleMode,
 ) -> T3Run {
     let T3Replay {
@@ -3576,16 +3402,6 @@ fn t3_replay(
                     let cost = price_part(options.catalog, sample.summary_request, &summary);
                     if options.since.is_none_or(|s| *time >= s) {
                         add(cost.clone());
-                    }
-                    if mode == T3IdleMode::BeforeCacheExpires
-                        && let Some(d) = detail.get_mut(*i)
-                    {
-                        d.summary_cost = cost;
-                        d.calibration = Some(PeriodCalibration {
-                            events: c.events.clone(),
-                            summary_tokens: output,
-                            prefix_tokens: full,
-                        });
                     }
                     cached_prefix = (full - output).min(g.read).max(0);
                     offset += full - input;
@@ -3890,31 +3706,7 @@ mod tests {
         since: Option<Millis>,
     }
 
-    /// A check with its single periods, which the report only counts.
-    struct Checked<C> {
-        check: C,
-        current: Vec<IdlePeriod>,
-        after: Vec<IdlePeriod>,
-    }
-
-    impl<C> std::ops::Deref for Checked<C> {
-        type Target = C;
-        fn deref(&self) -> &C {
-            &self.check
-        }
-    }
-
-    impl<C> Checked<C> {
-        fn new((check, [current, after]): (C, [Vec<IdlePeriod>; 2])) -> Self {
-            Self {
-                check,
-                current,
-                after,
-            }
-        }
-    }
-
-    fn check_with(scan: &Scan, now: f64, policies: &Policies) -> Checked<IdleCheck> {
+    fn check_with(scan: &Scan, now: f64, policies: &Policies) -> IdleCheck {
         let catalog = prices();
         // Charging converts linked summaries to compaction parts, which the idle replay reads.
         let mut scan = scan.clone();
@@ -3931,7 +3723,7 @@ mod tests {
             since: policies.since.or(scan.since),
             now: (now * MINUTE as f64) as Millis,
         };
-        Checked::new(detailed_checks(&options, true).remove(0))
+        idle_checks(&options).remove(0)
     }
 
     /// The full report for `scan`, as the CLI builds it.
@@ -3946,7 +3738,7 @@ mod tests {
         .unwrap()
     }
 
-    fn check(scan: &Scan, now: f64) -> Checked<IdleCheck> {
+    fn check(scan: &Scan, now: f64) -> IdleCheck {
         check_with(scan, now, &Policies::default())
     }
 
@@ -3955,11 +3747,14 @@ mod tests {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
     }
 
-    fn period<'c>(periods: &'c [IdlePeriod], request: &str) -> &'c IdlePeriod {
-        periods
+    /// How many of `counts`' periods have a kind `matches` accepts.
+    fn periods(counts: &PeriodCounts, matches: impl Fn(&PeriodKind) -> bool) -> u64 {
+        counts
+            .groups
             .iter()
-            .find(|p| &*p.request == request)
-            .expect("period")
+            .filter(|g| matches(&g.kind))
+            .map(|g| g.periods)
+            .sum()
     }
 
     fn base<V>(action: Action, owner: &str, recommended: Option<V>) -> CheckBase<V> {
@@ -4124,7 +3919,7 @@ mod tests {
         // The re-read break-even counts only the priced sessions' resumed summaries, so it
         // matches one priced session's.
         let one = check(&data(sessions_saving(&["one"]), vec![]), 202.0);
-        let per_summary = |c: &Checked<IdleCheck>| {
+        let per_summary = |c: &IdleCheck| {
             c.after_recommendations
                 .sensitivity
                 .reread_break_even_usd_per_resumed_summary
@@ -4196,13 +3991,9 @@ mod tests {
         assert_eq!(c.base.action, Action::Change);
         assert_eq!(c.base.recommended, Some(true));
         let a = &c.after_recommendations;
-        let p = period(&c.after, "before");
-        near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
-        let calibration = p.calibration.as_ref().unwrap();
-        assert_eq!(calibration.prefix_tokens, 20_000);
-        assert_eq!(calibration.summary_tokens, 2000);
-        // First replaced prefix: 21k cold writes; following 22k reads 21k and writes 1k.
-        // Off: 301k cold writes; following 302k reads 301k and writes 1k.
+        // The sample's 2k-token summary costs $0.10 (as an unresumed final shows) and leaves a
+        // 20k prefix. First replaced prefix: 21k cold writes; following 22k reads 21k and
+        // writes 1k. Off: 301k cold writes; following 302k reads 301k and writes 1k.
         near(a.delta.map(|d| d.usd), -2.196);
         near(
             Some(a.cost.on.total_usd.unwrap().to_f64() - a.cost.off.total_usd.unwrap().to_f64()),
@@ -4214,9 +4005,12 @@ mod tests {
                 .unwrap()
                 > 0.0
         );
-        assert_eq!(p.activation, Some(1.0));
-        assert!(p.activation_basis.contains("fallback"));
-        assert_eq!(p.return_timing, ReturnTiming::AfterExpiry);
+        // No known-on cohort, so the documented-trigger fallback activates the period fully.
+        assert!(a.activation_cohorts.is_empty());
+        let after_expiry = |k: &PeriodKind| {
+            k.status == PeriodStatus::Eligible && k.return_timing == ReturnTiming::AfterExpiry
+        };
+        assert_eq!(periods(&a.periods, after_expiry), 1);
     }
 
     #[test]
@@ -4226,18 +4020,17 @@ mod tests {
         assert_eq!(c.base.recommended, Some(false));
         assert_eq!(c.base.action, Action::Keep);
         let a = &c.after_recommendations;
+        // The final period's summary is all that changes.
         near(a.delta.map(|d| d.usd), 0.1);
-        let last = period(&c.after, "final");
-        assert_eq!(last.resume, None);
-        near(last.summary_cost.total_usd.map(Usd::to_f64), 0.1);
+        let eligible_final = |k: &PeriodKind| {
+            k.status == PeriodStatus::Eligible && k.return_timing == ReturnTiming::Final
+        };
+        assert_eq!(periods(&a.periods, eligible_final), 1);
         near(a.sensitivity.closed_delta.map(|d| d.usd), 0.0);
         near(a.sensitivity.open_delta.map(|d| d.usd), 0.1);
         let recent = check(&s, 150.0);
-        assert_eq!(
-            period(&recent.after, "final").status,
-            PeriodStatus::Censored
-        );
         let recent = &recent.after_recommendations;
+        assert_eq!(recent.periods.with_status(PeriodStatus::Censored), 1);
         near(recent.delta.map(|d| d.usd), 0.0);
         s.profiles[0].idle.as_mut().unwrap().value = Some(true);
         let off = check(&s, 200.0);
@@ -4255,11 +4048,9 @@ mod tests {
         s.profiles[0].idle.as_mut().unwrap().value = Some(true);
         let c = check(&s, 140.0);
         near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
-        assert!(
-            c.after
-                .iter()
-                .all(|p| matches!(p.status, PeriodStatus::Censored | PeriodStatus::Ineligible))
-        );
+        let could_trigger =
+            |k: &PeriodKind| !matches!(k.status, PeriodStatus::Censored | PeriodStatus::Ineligible);
+        assert_eq!(periods(&c.after_recommendations.periods, could_trigger), 0);
         assert_eq!(c.base.recommended, None);
         assert_eq!(c.base.action, Action::Advisory);
         let text = format_report(
@@ -4293,7 +4084,7 @@ mod tests {
             } else {
                 ReturnTiming::AfterExpiry
             };
-            assert_eq!(period(&c.after, "before").return_timing, expected);
+            assert_eq!(periods(&a.periods, |k| k.return_timing == expected), 1);
             if minute == 158.0 {
                 near(a.sensitivity.late_trigger_delta.map(|d| d.usd), 0.0);
             }
@@ -4384,7 +4175,12 @@ mod tests {
         };
         let c = check_with(&s, 200.0, &policies);
         let current = &c.current_settings;
-        assert_eq!(c.current[0].context_tokens, Some(300_000));
+        let sizes: Vec<(Option<i64>, u64)> = current
+            .by_context
+            .iter()
+            .map(|g| (g.tokens, g.periods))
+            .collect();
+        assert_eq!(sizes, [(Some(300_000), 1)]);
         near(Some(current.cost.off.known_usd.to_f64()), 2.4);
         assert_eq!(current.delta.map(|d| d.usd), None);
         assert_eq!(c.usage_estimates.len(), 1);
@@ -4433,7 +4229,6 @@ mod tests {
         crate::controls::tune_windows(&mut s);
         let row = "settings.json:modelSettings.claude-opus-5-5.autoCompactWindow";
         let windows: Vec<(String, Option<i64>)> = check(&s, 200.0)
-            .check
             .current_settings
             .windows
             .into_iter()
@@ -4465,7 +4260,7 @@ mod tests {
                 s.events.sort_by_key(|e| e.time);
                 let c = check(&s, 200.0);
                 let a = &c.after_recommendations;
-                assert_eq!(period(&c.after, "final").status, PeriodStatus::Eligible);
+                assert_eq!(a.periods.with_status(PeriodStatus::Eligible), 1);
                 near(a.delta.map(|d| d.usd), 0.1);
             }
         }
@@ -4576,9 +4371,11 @@ mod tests {
         );
         let c = check(&s, 201.0);
         let a = &c.after_recommendations;
-        let p = period(&c.after, "before");
-        assert_eq!(p.outcome, PeriodOutcome::Applied);
-        near(p.summary_cost.total_usd.map(Usd::to_f64), 0.1);
+        assert_eq!(
+            periods(&a.periods, |k| k.outcome == PeriodOutcome::Applied),
+            1
+        );
+        // The measured $0.10 summary, then the resume reads 21k instead of 300k.
         near(
             a.delta.map(|d| d.usd),
             0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6,
@@ -4655,16 +4452,17 @@ mod tests {
         s.events.sort_by_key(|e| e.time);
         let c = check(&s, 201.0);
         let a = &c.after_recommendations;
+        // The other version forms no cohort of its own, so it falls back to full activation.
+        assert_eq!(a.activation_cohorts.len(), 1);
         assert_eq!(a.activation_cohorts[0].fraction, 0.5);
-        let last = period(&c.after, "final");
-        near(last.activation, 0.5);
-        near(last.summary_cost.total_usd.map(Usd::to_f64), 0.05);
-        let no = period(&c.after, "no");
-        assert_eq!(no.outcome, PeriodOutcome::NotApplied);
-        near(no.summary_cost.total_usd.map(Usd::to_f64), 0.0);
-        let other = period(&c.after, "different");
-        near(other.activation, 1.0);
-        near(other.summary_cost.total_usd.map(Usd::to_f64), 0.1);
+        assert_eq!(
+            periods(&a.periods, |k| k.outcome == PeriodOutcome::NotApplied),
+            1
+        );
+        // `yes` as measured, `no` unchanged, `final` half of a $0.10 summary at the cohort's
+        // fraction, and `different` a whole one.
+        let applied = 0.1 - ((300_000 - 21_000) * 8) as f64 / 1e6;
+        near(a.delta.map(|d| d.usd), applied + 0.05 + 0.1);
         assert!(
             c.base
                 .uncertainty
@@ -4680,7 +4478,6 @@ mod tests {
         let a = &c.after_recommendations;
         assert_eq!(a.coverage.left_out, 1);
         assert_eq!(a.activation_cohorts[0].fraction, 1.0);
-        near(period(&c.after, "final").activation, 1.0);
     }
 
     #[test]
@@ -4704,7 +4501,7 @@ mod tests {
             assert_eq!(c.base.action, Action::Advisory);
             let mut report = report(s, 201.0);
             report.checks.retain(|r| matches!(r, CheckResult::Idle(_)));
-            report.checks[0] = CheckResult::Idle(c.check);
+            report.checks[0] = CheckResult::Idle(c);
             let text = format_report(
                 &report,
                 ReportOptions {
@@ -4763,7 +4560,11 @@ mod tests {
         let c = check(&s, 200.0);
         near(c.after_recommendations.delta.map(|d| d.usd), 0.1);
         assert_eq!(c.base.recommended, Some(false));
-        assert_eq!(period(&c.after, "final").outcome, PeriodOutcome::Applied);
+        let a = &c.after_recommendations;
+        assert_eq!(
+            periods(&a.periods, |k| k.outcome == PeriodOutcome::Applied),
+            1
+        );
     }
 
     #[test]
@@ -4783,7 +4584,10 @@ mod tests {
             let a = &c.after_recommendations;
             if mode == "active" {
                 near(a.delta.map(|d| d.usd), 0.0);
-                assert_eq!(period(&c.after, "before").status, PeriodStatus::Ineligible);
+                let active = |k: &PeriodKind| {
+                    k.status == PeriodStatus::Ineligible && k.return_timing != ReturnTiming::Final
+                };
+                assert_eq!(periods(&a.periods, active), 1);
             } else {
                 assert_eq!(a.delta.map(|d| d.usd), None, "{mode}");
                 assert_eq!(c.base.action, Action::Advisory, "{mode}");
@@ -4802,8 +4606,13 @@ mod tests {
         );
         s.since = Some(160 * MINUTE);
         let c = check(&s, 201.0);
-        near(c.after_recommendations.delta.map(|d| d.usd), 0.0);
-        assert!(!c.after.iter().any(|p| &*p.request == "before"));
+        let a = &c.after_recommendations;
+        near(a.delta.map(|d| d.usd), 0.0);
+        // `before`'s gap is the only one that ends in a return.
+        assert_eq!(
+            periods(&a.periods, |k| k.return_timing != ReturnTiming::Final),
+            0
+        );
     }
 
     #[test]
@@ -4815,25 +4624,21 @@ mod tests {
         ];
         let c = check(&data(target, vec![]), 200.0);
         let a = &c.after_recommendations;
-        let order: Vec<&str> = c.after.iter().map(|p| &*p.request).collect();
-        assert_eq!(order, ["sample-resume", "a", "b", "c"]);
         let groups: Vec<(Option<i64>, u64)> =
             a.by_context.iter().map(|g| (g.tokens, g.periods)).collect();
         assert_eq!(
             groups,
             [(Some(20_000), 1), (Some(300_000), 2), (Some(250_000), 1)]
         );
-        // Each final period only adds its summary, so a size's delta sums its own periods'.
-        let summary = |id| {
-            period(&c.after, id)
-                .summary_cost
-                .total_usd
-                .unwrap()
-                .to_f64()
-        };
-        near(a.by_context[1].delta_usd, summary("a") + summary("c"));
-        near(a.by_context[2].delta_usd, summary("b"));
-        assert!(summary("b") < summary("a"));
+        // Each final period only adds its summary, so a size's delta sums its own periods':
+        // two $0.10 summaries at 300k, and a cheaper one at 250k.
+        near(a.by_context[1].delta_usd, 0.2);
+        let smaller = a.by_context[2].delta_usd.unwrap();
+        assert!(smaller > 0.0 && smaller < 0.1, "{smaller}");
+        near(
+            a.delta.map(|d| d.usd),
+            a.by_context.iter().filter_map(|g| g.delta_usd).sum(),
+        );
     }
 
     #[test]
@@ -5156,15 +4961,11 @@ mod tests {
         })
     }
 
-    fn t3_check(scan: &Scan, now: f64) -> Checked<crate::model::T3IdleCheck> {
+    fn t3_check(scan: &Scan, now: f64) -> crate::model::T3IdleCheck {
         t3_check_with(scan, now, &[])
     }
 
-    fn t3_check_with(
-        scan: &Scan,
-        now: f64,
-        ttls: &[&TtlCheck],
-    ) -> Checked<crate::model::T3IdleCheck> {
+    fn t3_check_with(scan: &Scan, now: f64, ttls: &[&TtlCheck]) -> crate::model::T3IdleCheck {
         let catalog = prices();
         let mut scan = scan.clone();
         let summaries = compaction_charges(&mut scan, &catalog);
@@ -5178,7 +4979,7 @@ mod tests {
             since: None,
             now: (now * MINUTE as f64) as Millis,
         };
-        Checked::new(detailed_t3_checks(&options, true).remove(0))
+        t3_idle_checks(&options).remove(0)
     }
 
     #[test]
@@ -5312,10 +5113,33 @@ mod tests {
         );
         assert_eq!(check.base.recommended, Some(BeforeCacheExpires));
         assert!(check.base.owner.contains("t3/settings.json"));
-        let p = check.current.iter().find(|p| &*p.request == "a").unwrap();
-        assert_eq!(p.status, PeriodStatus::Eligible);
-        assert_eq!(p.return_timing, ReturnTiming::AfterExpiry);
-        assert_eq!(p.calibration.as_ref().unwrap().prefix_tokens, 20_000);
+        let counts = &check.current_settings.periods;
+        let gap = |k: &PeriodKind| {
+            k.status == PeriodStatus::Eligible && k.return_timing == ReturnTiming::AfterExpiry
+        };
+        assert_eq!(periods(counts, gap), 1, "{counts:#?}");
+        // The proactive $0.10 summary leaves the sample's 20k prefix, so `b` rewrites 40k
+        // instead of 320k at $5/MTok, and a sample that resumed 10k larger costs 10k more.
+        let mut larger = scan.clone();
+        let sample = larger
+            .requests
+            .iter_mut()
+            .find(|r| &*r.id == "sample-resume")
+            .unwrap();
+        sample.parts[0].usage = usage(25_000, 5000, 0, Ttl::FiveMinutes);
+        let proactive = |check: &crate::model::T3IdleCheck| {
+            check.current_settings.scenarios[2]
+                .cost
+                .total_usd
+                .unwrap()
+                .to_f64()
+        };
+        near(
+            Some(proactive(&check)),
+            0.1 + (40_000 - 320_000) as f64 * 5.0 / 1e6,
+        );
+        let larger = proactive(&t3_check(&larger, 10.0));
+        near(Some(larger - proactive(&check)), 10_000.0 * 5.0 / 1e6);
     }
 
     #[test]
@@ -5364,14 +5188,11 @@ mod tests {
         assert!(s[2].cost.total_usd.unwrap().to_f64() > s[0].cost.total_usd.unwrap().to_f64());
         assert_eq!(check.base.recommended, Some(Off));
         let short = t3_check(&scan, 2.0);
+        let periods = &short.current_settings.periods;
         assert_eq!(
-            short
-                .current
-                .iter()
-                .find(|p| &*p.request == "final")
-                .unwrap()
-                .status,
-            PeriodStatus::Censored
+            periods.with_status(PeriodStatus::Censored),
+            1,
+            "{periods:#?}"
         );
         assert!(
             short
@@ -5386,7 +5207,7 @@ mod tests {
         report
             .checks
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
-        report.checks.push(CheckResult::T3Idle(check.check));
+        report.checks.push(CheckResult::T3Idle(check));
         let text = format_report(&report, ReportOptions::default());
         let line = crate::test_support::report_line(&text, "T3 idle compaction");
         assert_eq!(line.mark, "change", "{text}");
@@ -5434,8 +5255,8 @@ mod tests {
         observed.events.push(boundary);
         observed.events.sort_by_key(|e| e.time);
         let scan = observed;
-        let observed = t3_check(&scan, 10.0).check.current_settings.scenarios;
-        let baseline = t3_check(&baseline, 10.0).check.current_settings.scenarios;
+        let observed = t3_check(&scan, 10.0).current_settings.scenarios;
+        let baseline = t3_check(&baseline, 10.0).current_settings.scenarios;
         // Off grows the later request back from 20k to 300k uncached tokens, and charges
         // neither the recorded nor a new summary.
         near(observed[0].cost.total_usd.map(Usd::to_f64), 1.5 - 0.1);
@@ -5469,10 +5290,20 @@ mod tests {
             },
         };
         let check = t3_check_with(&scan, 10.0, &[&one_hour]);
-        let status =
-            |periods: &[IdlePeriod]| periods.iter().find(|p| &*p.request == "a").unwrap().status;
-        assert_eq!(status(&check.current), PeriodStatus::Eligible);
-        assert_eq!(status(&check.after), PeriodStatus::Censored);
+        let (current, after) = (
+            &check.current_settings.periods,
+            &check.after_recommendations.periods,
+        );
+        assert_eq!(
+            current.with_status(PeriodStatus::Eligible),
+            1,
+            "{current:#?}"
+        );
+        assert_eq!(after.with_status(PeriodStatus::Eligible), 0, "{after:#?}");
+        assert_eq!(
+            after.with_status(PeriodStatus::Censored),
+            current.with_status(PeriodStatus::Censored) + 1
+        );
         assert_eq!(check.after_recommendations.scenarios[2].summaries, 0);
 
         // A gap that opens before T3's retained events keeps its recorded summary in every
@@ -5480,7 +5311,12 @@ mod tests {
         let mut scan = scan;
         scan.profiles[0].t3.as_mut().unwrap().retained_since = Some(MINUTE);
         let check = t3_check(&scan, 10.0);
-        assert!(check.current.iter().all(|p| &*p.request != "a"));
+        let periods = &check.current_settings.periods;
+        assert_eq!(
+            periods.with_status(PeriodStatus::Eligible),
+            0,
+            "{periods:#?}"
+        );
         for s in &check.current_settings.scenarios {
             near(s.cost.total_usd.map(Usd::to_f64), 0.0);
             assert_eq!(s.summaries, 0);
@@ -5551,7 +5387,7 @@ mod tests {
         report
             .checks
             .retain(|r| !matches!(r, CheckResult::T3Idle(_)));
-        report.checks.push(CheckResult::T3Idle(check.check));
+        report.checks.push(CheckResult::T3Idle(check));
         let text = format_report(
             &report,
             ReportOptions {
@@ -5583,11 +5419,11 @@ mod tests {
         // T3 or not. Without a linked start, the previous request's end bounds it.
         scan.requests.iter_mut().find(|r| &*r.id == "a").unwrap().t3 = None;
         let check = t3_check(&scan, 2.5);
-        let status = |check: &Checked<crate::model::T3IdleCheck>, id: &str| {
-            let periods = &check.current;
-            periods.iter().find(|p| *p.request == *id).unwrap().status
+        let counts = &check.current_settings.periods;
+        let early = |k: &PeriodKind| {
+            k.status == PeriodStatus::Censored && k.reason.contains("earliest timer a 5m cache")
         };
-        assert_eq!(status(&check, "a"), PeriodStatus::Censored);
+        assert_eq!(periods(counts, early), 1, "{counts:#?}");
         let proactive = &check.current_settings.scenarios[2];
         assert_eq!(
             (proactive.cost.total_usd, proactive.summaries),
@@ -5595,7 +5431,8 @@ mod tests {
         );
         // With no earlier request, `a` may have started long before its first record.
         scan.requests.retain(|r| &*r.id != "p");
-        assert_eq!(status(&t3_check(&scan, 2.5), "a"), PeriodStatus::Unknown);
+        let counts = &t3_check(&scan, 2.5).current_settings.periods;
+        assert_eq!(counts.with_status(PeriodStatus::Unknown), 1, "{counts:#?}");
 
         // T3 dates expiry from the request start; a run completing inside the lead starts
         // the summary at completion instead of skipping it.
@@ -5614,16 +5451,19 @@ mod tests {
         a.cache_expires_at = Some(5 * MINUTE);
         a.guards = Some(guards(&[4 * MINUTE], &[(4 * MINUTE, Ok(true))]));
         let check = t3_check(&scan, 10.0);
-        assert_eq!(check.current[0].status, PeriodStatus::Eligible);
+        let counts = &check.current_settings.periods;
+        assert_eq!(counts.with_status(PeriodStatus::Eligible), 1, "{counts:#?}");
         assert_eq!(check.current_settings.scenarios[2].summaries, 1);
 
         // A fully cached last request reports no TTL, so T3 arms no timer, while the
         // SDK still offers its summary when the cold session resumes.
         t3_meta(&mut scan, "a").cache_expires_at = None;
         let check = t3_check(&scan, 10.0);
-        let p = &check.current[0];
-        assert_eq!(p.status, PeriodStatus::Ineligible);
-        assert!(p.reason.contains("arms no timer"));
+        let counts = &check.current_settings.periods;
+        let unarmed = |k: &PeriodKind| {
+            k.status == PeriodStatus::Ineligible && k.reason.contains("arms no timer")
+        };
+        assert_eq!(periods(counts, unarmed), 1, "{counts:#?}");
         let s = &check.current_settings.scenarios;
         assert_eq!((s[1].summaries, s[2].summaries), (1, 0));
         assert!(s.iter().all(|s| s.cost.total_usd.is_some()));
@@ -5677,22 +5517,20 @@ mod tests {
             Ttl::FiveMinutes,
             Off,
         );
-        // The calibration sample's own gap is outside this comparison.
-        let gaps = |check: &Checked<crate::model::T3IdleCheck>| {
+        // `a`, `b` and `c` are eligible; the calibration sample is below T3's floor.
+        let eligible = |check: &crate::model::T3IdleCheck| {
             check
-                .current
-                .iter()
-                .map(|p| p.request.to_string())
-                .filter(|r| r != "sample-resume")
-                .collect::<Vec<_>>()
+                .current_settings
+                .periods
+                .with_status(PeriodStatus::Eligible)
         };
         let check = t3_check(&scan, 30.0);
-        assert_eq!(gaps(&check), ["a", "b", "c"]);
+        assert_eq!(eligible(&check), 3);
         assert!(!check.base.window_basis.contains("pruned"));
         // T3 kept its events from minute 5 on, so `a`'s gap opened before they are complete.
         scan.profiles[0].t3.as_mut().unwrap().retained_since = Some(5 * MINUTE);
         let check = t3_check(&scan, 30.0);
-        assert_eq!(gaps(&check), ["b", "c"]);
+        assert_eq!(eligible(&check), 2);
         assert_eq!(check.base.since, Some(5 * MINUTE));
         assert!(check.base.window_basis.contains("pruned event log"));
     }
@@ -5705,7 +5543,7 @@ mod tests {
             Ttl::FiveMinutes,
             OnReturn,
         );
-        let priced = t3_check(&scan, 10.0).check.current_settings.scenarios;
+        let priced = t3_check(&scan, 10.0).current_settings.scenarios;
         let mut unpriced = in_session(request("side", 1.0, 1000), "side");
         unpriced.agent = Agent::Subagent;
         unpriced.parts[0].model = Some("unpriced-model".into());

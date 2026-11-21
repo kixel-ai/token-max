@@ -886,7 +886,7 @@ estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
 currently guarantees complete typed-skill or nested-call visibility, so the
-exposure scan's `automaticUnused` stays false. Context verdicts instead rest on
+exposure scan never marks a component unused by itself. Context verdicts rest on
 the calls each transcript records: Claude records every tool, MCP and Skill
 call, subagents' included, so a piece carried from the window's start with none
 is unused. Codex catalog skills and pieces first sent mid-window stay advisory

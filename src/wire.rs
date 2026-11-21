@@ -15,9 +15,11 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::doctor::{Event, Offers, Written};
-use crate::model::{Location, Millis};
+use crate::doctor::{Event, Offers, Style, Written};
+use crate::model::Millis;
 use crate::prices::Catalog;
+use crate::report::{Host, ReportOptions};
+use crate::safe::ScanError;
 use crate::sessions::Session;
 use crate::totals::Totals;
 
@@ -40,6 +42,8 @@ pub fn build() -> String {
             include_str!("doctor.rs"),
             include_str!("mcp.rs"),
             include_str!("report.rs"),
+            // Its `ScanError` is the stream's error outcome.
+            include_str!("safe.rs"),
         ]
         .concat(),
     );
@@ -94,6 +98,30 @@ pub struct Format {
     pub host: Option<String>,
 }
 
+impl Format {
+    /// The report's layout, naming `home` as the host's home directory when `host` is set.
+    pub fn report<'a>(&'a self, home: Option<&'a str>) -> ReportOptions<'a> {
+        ReportOptions {
+            width: self.width,
+            color: self.color,
+            unicode: self.unicode,
+            details: self.details,
+            host: self.host.as_deref().map(|name| Host { name, home }),
+        }
+    }
+
+    /// The walk's layout, with paths shown from `home`.
+    pub fn style(&self, home: Option<String>) -> Style {
+        Style {
+            color: self.color,
+            unicode: self.unicode,
+            width: self.width,
+            home,
+            host: self.host.clone(),
+        }
+    }
+}
+
 /// How the destination's audit ended: what its job made, or a diagnostic as safe as a local one.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -120,7 +148,9 @@ pub enum Outcome {
         preview: String,
     },
     /// The destination's answer to [`Answer::Write`]: the files it wrote.
-    Wrote { written: Vec<Written> },
+    Wrote {
+        written: Vec<Written>,
+    },
     #[serde(rename_all = "camelCase")]
     Sessions {
         /// The window the destination scanned, which must be the one requested.
@@ -128,10 +158,7 @@ pub enum Outcome {
         /// Its sessions, ordered by first request, each without a host.
         sessions: Vec<Session>,
     },
-    Error {
-        message: String,
-        location: Option<Location>,
-    },
+    Error(ScanError),
 }
 
 /// What this host sends a destination after its report for a walk.
@@ -220,6 +247,43 @@ mod tests {
                 walk: false,
             } if host == "devbox"
         ));
+    }
+
+    #[test]
+    fn errors_keep_their_location_and_the_format_its_settings() {
+        let mut bytes = vec![];
+        let error = ScanError::at(
+            "bad line",
+            crate::model::Location {
+                file: "a.jsonl".into(),
+                line: 7,
+            },
+        );
+        write(&mut bytes, &Outcome::Error(error.clone())).unwrap();
+        let outcome: Outcome = Stream::new(&bytes[..]).value().unwrap();
+        assert!(matches!(outcome, Outcome::Error(sent) if sent == error));
+
+        let Job::Report { format, .. } = request().job else {
+            unreachable!()
+        };
+        let style = format.style(Some("/home/dev".into()));
+        assert_eq!(
+            (
+                style.color,
+                style.unicode,
+                style.width,
+                style.host.as_deref()
+            ),
+            (true, false, Some(80), Some("devbox"))
+        );
+        let report = format.report(Some("/home/dev"));
+        assert_eq!(
+            (
+                report.details,
+                report.host.map(|host| (host.name, host.home))
+            ),
+            (true, Some(("devbox", Some("/home/dev"))))
+        );
     }
 
     #[test]

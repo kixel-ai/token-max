@@ -20,7 +20,7 @@ use crate::model::{Harness, Location, Millis, Scan, Verdict};
 use crate::prices::{Catalog, PriceOptions, cancel_downloads, load_prices};
 use crate::reader::{ScanOptions, scan};
 use crate::replay::{AnalyzeOptions, analyze};
-use crate::report::{Host, Listing, ReportOptions, format_report, totals_section};
+use crate::report::{Listing, ReportOptions, format_report, totals_section};
 use crate::safe::{ScanError, display};
 use crate::sessions::{Session, export};
 use crate::ssh::{self, Reply};
@@ -634,18 +634,21 @@ pub struct Render<'a> {
     pub home: Option<&'a str>,
 }
 
-/// One host's printed report, whether it recommends a change, and its changes.
-pub struct Rendered {
+/// One host's printed report and whether it recommends a change; all a destination sends.
+pub struct Printed {
     pub text: String,
     pub change: bool,
     /// What the report adds to a total across hosts.
     pub totals: Box<Totals>,
-    /// Empty for a destination's report, whose changes are listed in its text.
+}
+
+/// This host's own report, with the changes it names.
+pub struct Rendered {
+    pub printed: Printed,
     pub fixes: Vec<Fix>,
-    /// The report, to print again after the walk; None for a destination's.
-    pub listing: Option<Box<Listing>>,
-    /// MCP servers whose tools are off already, which the walk offers to remove; empty
-    /// for a destination's report.
+    /// The report, to print again after the walk.
+    pub listing: Box<Listing>,
+    /// MCP servers whose tools are off already, which the walk offers to remove.
     pub turned_off: Vec<crate::mcp::Definition>,
 }
 
@@ -666,27 +669,19 @@ pub fn render(scan: Scan, options: Render<'_>) -> Result<Rendered, ScanError> {
             c.verdict == Some(Verdict::Off) && crate::defaults::applied(&report, c).is_none()
         });
     let format = options.format;
-    let report_options = ReportOptions {
-        width: format.width,
-        color: format.color,
-        unicode: format.unicode,
-        details: format.details,
-        host: format.host.as_deref().map(|name| Host {
-            name,
-            home: options.home,
-        }),
-    };
     // Computed once, since each reads the files that may outrank a switch: the edits the
     // report names and the walk's offers are the same value.
     let mut fixes = crate::doctor::fixes(&report, format.unicode);
-    let listing = format_report(&report, &fixes, report_options);
+    let listing = format_report(&report, &fixes, format.report(options.home));
     crate::doctor::explain(&mut fixes, &listing);
     Ok(Rendered {
-        text: listing.text(),
-        change,
-        totals: Box::new(Totals::new(&report, &fixes)),
+        printed: Printed {
+            text: listing.text(),
+            change,
+            totals: Box::new(Totals::new(&report, &fixes)),
+        },
         fixes,
-        listing: Some(Box::new(listing)),
+        listing: Box::new(listing),
         turned_off: crate::mcp::turned_off(&report.scan.profiles),
     })
 }
@@ -993,7 +988,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                             max_cost_per_use_usd,
                             format,
                             ..
-                        } => Reply::Report(render(
+                        } => Reply::Here(Box::new(render(
                             *scan,
                             Render {
                                 catalog,
@@ -1003,7 +998,7 @@ fn gather(run: Gather) -> Result<Vec<(Option<String>, Reply)>, ScanError> {
                                 format,
                                 home: home.as_deref(),
                             },
-                        )?),
+                        )?)),
                         Job::Sessions => Reply::Sessions(export(&scan, catalog)?),
                     },
                     Scanned::Remote(reply) => reply,
@@ -1086,13 +1081,7 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         host: None,
     };
     let home = std::env::home_dir().map(|dir| dir.to_string_lossy().into_owned());
-    let style = Style {
-        color,
-        unicode,
-        width: width(),
-        home: home.clone(),
-        host: None,
-    };
+    let style = format.style(home.clone());
     // This host's Claude profiles on the Anthropic API whose billing picks the main TTL's
     // default, asked before the scan; without a terminal the report names both defaults.
     if terminal && let Some(discovery) = &mut discovery {
@@ -1138,44 +1127,39 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
     let mut hosts = vec![];
     let mut sum: Option<Totals> = None;
     for (ssh, reply) in replies {
-        let (rendered, there) = match reply {
-            Reply::Report(rendered) => (rendered, None),
+        // Each host's report follows the walk, marked with its answers.
+        let (printed, side) = match reply {
+            Reply::Here(rendered) => {
+                let Rendered {
+                    printed,
+                    fixes,
+                    listing,
+                    turned_off,
+                } = *rendered;
+                let side = walk.then(|| Side::Here {
+                    owner: Owner::new(fixes, turned_off, home.clone(), printed.totals.monthly),
+                    listing,
+                });
+                (printed, side)
+            }
+            Reply::Report(printed) => (printed, None),
             Reply::Walk {
-                rendered,
+                printed,
                 offers,
                 remote,
-            } => (rendered, Some((offers, remote))),
+            } => (printed, Some(Side::There { offers, remote })),
             Reply::Sessions(_) => unreachable!("a report job gets reports"),
         };
-        let Rendered {
-            text: report,
-            change,
-            totals,
-            fixes,
-            listing,
-            turned_off,
-        } = rendered;
-        code = code.max(u8::from(change));
+        code = code.max(u8::from(printed.change));
         match &mut sum {
-            Some(sum) => sum.merge(&totals),
-            None => sum = Some(*totals.clone()),
+            Some(sum) => sum.merge(&printed.totals),
+            None => sum = Some(*printed.totals.clone()),
         }
-        // Each host's report follows the walk, marked with its answers.
-        if walk {
-            let side = match there {
-                Some((offers, remote)) => Side::There { offers, remote },
-                None => Side::Here {
-                    owner: Owner::new(fixes, turned_off, home.clone(), totals.monthly),
-                    listing: listing.expect("this host's report has its listing"),
-                },
-            };
+        if let Some(side) = side {
             let (label, host_style) = match &side {
                 Side::Here { .. } => (
                     (sections > 1).then(|| "this host".to_string()),
-                    Style {
-                        home: home.clone(),
-                        ..style.clone()
-                    },
+                    style.clone(),
                 ),
                 Side::There { offers, .. } => (
                     ssh.clone(),
@@ -1198,8 +1182,8 @@ fn doctor(args: &[String]) -> Result<(Output, u8), ScanError> {
         }
         // A destination's report is its own text, so escape all but our own styles.
         match ssh {
-            Some(_) => text.push_str(&crate::safe::remote_text(&report, color)),
-            None => text.push_str(&report),
+            Some(_) => text.push_str(&crate::safe::remote_text(&printed.text, color)),
+            None => text.push_str(&printed.text),
         }
     }
     // Several hosts get one total at the head, beside each host's own section.

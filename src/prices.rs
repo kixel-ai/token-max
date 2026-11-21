@@ -1857,6 +1857,10 @@ mod tests {
             server_cost(&tools(&[("code_execution_requests", 1)])).total_usd,
             None
         );
+        // Off Anthropic the per-search fee is unknown, never zero.
+        let mut elsewhere = tools(&[("web_search_requests", 1)]);
+        elsewhere.provider = Some("bedrock".into());
+        assert_eq!(server_cost(&elsewhere).total_usd, None);
         let unrecorded = {
             let mut built = Request {
                 parts: vec![p],

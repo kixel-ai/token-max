@@ -19,11 +19,8 @@ Four places work out the TTLs after the cache TTL check's recommendation:
   value whenever the client version is unsupported, so compaction replays a
   TTL that the user was told not to rely on.
 
-Replace them with one `ttls_after(profile, checks)`. The open question is
-which rule wins.
-
-## Waiting
-
-- Maintainer: should a replay "after the recommendations" apply an Advisory TTL? Options:
-  1. **(Recommended)** Apply only `Change`, as keepalive, idle and T3 idle do. Compaction's figures then change on lines whose TTL check is Advisory, which fixes them to match what `doctor` offers to change.
-  2. Apply Advisory too, everywhere. Keepalive and idle figures would then assume a TTL the client may not honor.
+Replace them with one `ttls_after(profile, checks)` that applies
+`recommended` only when the action is `Change`, as keepalive, idle and T3 idle
+do (maintainer, 2026-11-20; rejected: apply Advisory too). Compaction's figures
+then change on lines whose TTL check is Advisory, matching what `doctor` offers
+to change.

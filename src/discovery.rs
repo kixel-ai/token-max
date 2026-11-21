@@ -470,7 +470,7 @@ fn toml_json(value: toml::Value) -> Option<Value> {
     Some(match value {
         toml::Value::String(s) => Value::String(s),
         toml::Value::Integer(n) => {
-            // An integer outside a double's exact range fails the parse.
+            // An integer outside a double's safe-integer range fails the parse.
             if n.unsigned_abs() > crate::safe::MAX_SAFE_INTEGER as u64 {
                 return None;
             }

@@ -3740,12 +3740,14 @@ mod tests {
     use crate::controls::{CompactionSources, compaction_controls};
     use crate::model::{
         Bucket, CacheContext, CheckResult, CompactionCheck, EstimateEvidence, ExposureScan,
-        Location, Margin, Origin, Pricing, Report, ScanCoverage, TtlSensitivity, WindowBasisKind,
+        Location, Margin, Origin, Pricing, Report, ScanCoverage,
     };
     use crate::reader::{ScanOptions, scan};
     use crate::replay::{AnalyzeOptions, analyze, compaction_charges};
     use crate::report::{ReportOptions, rendered as format_report};
-    use crate::test_support::{ClaudeUsage, Workspace, claude_usage, make_request, prices};
+    use crate::test_support::{
+        ClaudeUsage, Workspace, claude_usage, make_request, make_ttl_check, prices,
+    };
     use serde_json::json;
 
     const MINUTE: Millis = 60_000;
@@ -4636,24 +4638,7 @@ mod tests {
     #[test]
     fn ttl_and_window_choices_decide_applicability_while_the_current_comparison_is_retained() {
         let s = data(vec![request("final", 100.0, 300_000)], vec![]);
-        let ttl = TtlCheck {
-            base: base(Action::Change, "", Some(Ttl::FiveMinutes)),
-            window_basis_kind: WindowBasisKind::Available,
-            bucket: Bucket::Main,
-            one_hour_savings_usd: 0.0,
-            comparison_estimate: crate::model::PerTtl::default(),
-            cost: Default::default(),
-            summary_cost: Default::default(),
-            comparison_cost: Default::default(),
-            fixed_cost: zero_cost(),
-            usage_estimates: vec![],
-            cache_evidence: vec![],
-            sensitivity: TtlSensitivity {
-                cold_prefix1h_usd: None,
-                cold_prefix1h_comparison_usd: None,
-                unlinked: None,
-            },
-        };
+        let ttl = make_ttl_check("profile", Bucket::Main, Action::Change, Ttl::FiveMinutes);
         let window = CompactionCheck {
             base: base(
                 Action::Change,
@@ -5578,24 +5563,7 @@ mod tests {
 
         // Under a recommended 1h cache the timer would start at minute 58, after the user
         // returned, so the recorded summary is not replayed at its 5m time.
-        let one_hour = TtlCheck {
-            base: base(Action::Change, "", Some(Ttl::OneHour)),
-            window_basis_kind: WindowBasisKind::Available,
-            bucket: Bucket::Main,
-            one_hour_savings_usd: 0.0,
-            comparison_estimate: crate::model::PerTtl::default(),
-            cost: Default::default(),
-            summary_cost: Default::default(),
-            comparison_cost: Default::default(),
-            fixed_cost: zero_cost(),
-            usage_estimates: vec![],
-            cache_evidence: vec![],
-            sensitivity: TtlSensitivity {
-                cold_prefix1h_usd: None,
-                cold_prefix1h_comparison_usd: None,
-                unlinked: None,
-            },
-        };
+        let one_hour = make_ttl_check("profile", Bucket::Main, Action::Change, Ttl::OneHour);
         let check = t3_check_with(&scan, 10.0, &[&one_hour]);
         let status =
             |periods: &[IdlePeriod]| periods.iter().find(|p| &*p.request == "a").unwrap().status;
@@ -5617,28 +5585,8 @@ mod tests {
 
     #[test]
     fn ttls_after_applies_only_change_for_the_profile() {
-        let check = |action, bucket, ttl, profile: &str| {
-            let mut base = base(action, "", Some(ttl));
-            base.profiles = vec![profile.into()];
-            TtlCheck {
-                base,
-                window_basis_kind: WindowBasisKind::Available,
-                bucket,
-                one_hour_savings_usd: 0.0,
-                comparison_estimate: crate::model::PerTtl::default(),
-                cost: Default::default(),
-                summary_cost: Default::default(),
-                comparison_cost: Default::default(),
-                fixed_cost: zero_cost(),
-                usage_estimates: vec![],
-                cache_evidence: vec![],
-                sensitivity: TtlSensitivity {
-                    cold_prefix1h_usd: None,
-                    cold_prefix1h_comparison_usd: None,
-                    unlinked: None,
-                },
-            }
-        };
+        let check =
+            |action, bucket, ttl, profile: &str| make_ttl_check(profile, bucket, action, ttl);
         let current = PerBucket {
             main: Some(Ttl::FiveMinutes),
             subagent: None,

@@ -135,7 +135,8 @@ struct Lifetime {
 /// Why a keepalive line leaves its winner open when idle compaction left T3's sessions out.
 pub const KEEPALIVE_SPLIT: &str = "the idle-compaction alternative counts sessions T3 could not settle at this line's share, while pings price them in full, so the aggregate winner is unresolved";
 
-/// The cache lifetime pings must beat: the recommended main TTL, else the current or observed one.
+/// The cache lifetime pings must beat: the main TTL `doctor` recommends changing to, else the
+/// current or observed one. An advisory recommendation is not applied, as in `ttls_after`.
 fn claude_lifetime(
     profile: &Profile,
     ttls: &[&TtlCheck],
@@ -155,8 +156,6 @@ fn claude_lifetime(
         (t, "recommended main TTL")
     } else if let Some(t) = profile.ttl.main.one().value {
         (t, "current main TTL")
-    } else if let Some(t) = check.and_then(|c| c.base.recommended) {
-        (t, "main TTL the replay favors")
     } else {
         let t = requests
             .iter()
@@ -1071,7 +1070,9 @@ fn check(options: &KeepaliveOptions, line: &crate::rows::Group<'_>) -> Option<Ke
 mod tests {
     use super::*;
     use crate::model::{CacheContext, ExposureScan, ScanCoverage};
-    use crate::test_support::{ClaudeUsage, claude_usage, make_profile, make_request, prices};
+    use crate::test_support::{
+        ClaudeUsage, claude_usage, make_profile, make_request, make_ttl_check, prices,
+    };
 
     const HOUR: Millis = 60 * MINUTE;
 
@@ -1226,6 +1227,25 @@ mod tests {
         assert_eq!(check.lifetime_ms, None);
         assert_eq!(check.base.action, Action::Advisory);
         assert_eq!(check.base.recommended, None);
+    }
+
+    #[test]
+    fn an_unknown_lifetime_applies_only_a_change_recommendation() {
+        let mut profile = one_hour();
+        profile.ttl.main.value = None;
+        let request = turn("a", 0);
+        let lifetime = |action| {
+            let check = make_ttl_check(&profile.id, Bucket::Main, action, Ttl::FiveMinutes);
+            claude_lifetime(&profile, &[&check], &[&request]).unwrap()
+        };
+        assert_eq!(
+            lifetime(Action::Change).ms,
+            ttl_milliseconds(Ttl::FiveMinutes)
+        );
+        // An unsupported client's Advisory recommendation falls back to the recorded 1h write.
+        let advisory = lifetime(Action::Advisory);
+        assert_eq!(advisory.ms, ttl_milliseconds(Ttl::OneHour));
+        assert!(advisory.reason.contains("latest recorded cache write"));
     }
 
     #[test]

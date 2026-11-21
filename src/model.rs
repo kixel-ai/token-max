@@ -825,7 +825,7 @@ pub struct WindowControl {
     pub reason: String,
     pub applicable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub minimum_claude_patch: Option<i64>,
+    pub minimum_claude_patch: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison_unknown: Option<String>,
     /// No setting names a window, so Claude Code's tuned window for the model applies.

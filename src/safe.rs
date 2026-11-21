@@ -88,7 +88,7 @@ pub fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// The largest integer an f64 holds exactly, 2^53 - 1.
+/// The largest integer an f64 holds exactly along with both its neighbors, 2^53 - 1.
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Preserve absent counts as unknown and reject corrupt counts.

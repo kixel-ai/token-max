@@ -51,8 +51,8 @@ A change saving $5/mo or more is its own question. A smaller one joins a group
 of its kind and reason, such as never-used skills or MCP servers over $1 per
 use. The reasons are never used, no use recorded where the window cannot rule
 one out, over `--max-cost-per-use` per use, and a redundant copy of a Codex
-catalog skill whose most-used copy stays. Each reason is its own group, so one yes never
-covers a feature in use. A group is one question ranked by its combined saving,
+catalog skill whose most-used copy stays. Each reason is its own group, so a yes to
+never-used features never also removes one in use. A group is one question ranked by its combined saving,
 which names every member and takes `y` for all, `n` for none, `q` to quit or `o` to go
 through them one at a time; a group of one is asked as that change. Features
 whose savings were not measured, such as Codex catalog skills, are grouped the

@@ -618,8 +618,8 @@ impl<'r, 'o> Simulator<'r, 'o> {
             }
             None => source,
         };
-        // A state taken from the session map is written back even when a part bails out, while a fresh one replaces the map entry
-        // only once a part completes.
+        // A state taken from the session map is written back even when a part bails out, while
+        // a fresh one replaces the map entry only once a part completes.
         let (key, previous) = match self.states.remove_entry(&req.session) {
             Some((key, state)) => (key, Some(state)),
             None => (req.session.clone(), None),
@@ -5456,8 +5456,7 @@ mod tests {
             assert!(!text.contains("could not confirm"), "{text}");
         }
 
-        // Unreadable lines count as unknown parts, so many of them block a recommendation.
-        // They are now extrapolated over like any unpriced part.
+        // Unreadable lines count as unknown parts, extrapolated over like any unpriced part.
         #[test]
         fn unreadable_lines_count_as_unknown_parts_extrapolated_over() {
             let mut s = data(4);

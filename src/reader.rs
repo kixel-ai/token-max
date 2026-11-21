@@ -34,6 +34,7 @@ use crate::unreadable::ToolIds;
 /// Select a time window and local roots.
 #[derive(Clone, Debug)]
 pub struct ScanOptions {
+    /// Where discovery looks.
     pub discovery: DiscoveryOptions,
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,

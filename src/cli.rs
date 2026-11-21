@@ -626,10 +626,15 @@ enum Arrival {
 
 /// What one host's scan is analyzed and printed with.
 pub struct Render<'a> {
+    /// The prices every request is costed with.
     pub catalog: &'a Catalog,
+    /// Requests before this instant stay out of the report, when set.
     pub since: Option<Millis>,
+    /// The instant the report is generated at.
     pub now: Millis,
+    /// A context item that cost more than this per use is advised off.
     pub max_cost_per_use_usd: f64,
+    /// How the report is printed.
     pub format: &'a Format,
     /// The host's home directory, which its report shows as `~`.
     pub home: Option<&'a str>,
@@ -637,7 +642,9 @@ pub struct Render<'a> {
 
 /// One host's printed report and whether it recommends a change; all a destination sends.
 pub struct Printed {
+    /// The printed report.
     pub text: String,
+    /// Whether the report recommends a change.
     pub change: bool,
     /// What the report adds to a total across hosts.
     pub totals: Box<Totals>,
@@ -645,7 +652,9 @@ pub struct Printed {
 
 /// This host's own report, with the changes it names.
 pub struct Rendered {
+    /// The report and its totals.
     pub printed: Printed,
+    /// The edits the report recommends, which the walk offers to apply.
     pub fixes: Vec<Fix>,
     /// The report, to print again after the walk.
     pub listing: Box<Listing>,

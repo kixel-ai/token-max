@@ -1,4 +1,5 @@
 //! token-max replays local Claude Code and Codex transcripts against public API prices.
+#![warn(missing_docs)]
 
 mod background;
 mod bash;

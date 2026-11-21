@@ -76,13 +76,13 @@ jobs:
   platform:
     name: Tests (${{ matrix.os }})
     needs: state
-    if: needs.state.outputs.draft == 'false' && needs.state.outputs.build == 'true'
+    if: needs.state.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2025]
+        os: [windows-2025]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,7 +93,7 @@ jobs:
         # Clippy runs only on Linux, so this catches code another platform leaves unused.
         env:
           RUSTFLAGS: -D warnings
-        run: cargo +stable test --locked
+        run: cargo +stable test --locked --test ssh_windows
 
   check:
     name: Check

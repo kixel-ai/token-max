@@ -33,7 +33,8 @@ and states its assumption that the unpriced requests resemble the priced ones.
 through the recommendations and offers to apply each one, editing a settings
 file only after showing the change and getting a yes. Machine-readable output
 for other tools, such as quest's session export, lives in other commands and
-never shapes `doctor`.
+never shapes `doctor`. A change to `doctor`'s questions reruns
+`assets/demo/walk.tape`, since no check runs it.
 
 - Never edit a transcript, and never print or keep prompt or reply text.
 - The README is for someone deciding whether to run the tool. Per-check

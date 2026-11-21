@@ -509,7 +509,7 @@ fn outranking(profile: &Profile, edit: &Edit, defaults: bool) -> Result<Vec<Stri
 /// whether that can't be read.
 ///
 /// Any such file counts, even one that a higher file overrides back: the maintainer chose
-/// to keep offering the switch in that case rather than resolve each chain here (PR #129).
+/// to keep offering the switch in that case rather than resolve each chain here.
 pub(crate) fn outranked(profile: &Profile, control: &Control) -> bool {
     let edit = Edit::from(control);
     // Claude's deny rules from every file apply together.

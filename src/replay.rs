@@ -41,7 +41,7 @@ fn in_bucket(r: &Request, p: &BillingPart, selected: Bucket) -> bool {
     cache_bucket(r, p).is_none_or(|b| b == selected)
 }
 
-/// JavaScript's `toFixed(1)`, which rounds exact binary halves away from zero.
+/// One decimal place, rounding exact binary halves away from zero.
 fn to_fixed1(value: f64) -> String {
     // An exact tie at one decimal is an odd multiple of 1/4; Rust would round it to even.
     let quarters = value.abs() * 4.0;
@@ -893,7 +893,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::default();
     for r in &scan.requests {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
-        // JavaScript's default sort compares UTF-16 code units.
+        // Profiles sort by UTF-16 code units.
         profiles.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         groups.entry(profiles.join(":")).or_default().push(r);
     }

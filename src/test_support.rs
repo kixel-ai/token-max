@@ -202,8 +202,8 @@ impl Drop for Workspace {
     }
 }
 
-/// One synthetic Claude transcript of `profile` with `skipped` unreadable lines, which hold
-/// `lines` and leave `unmatched` tool results without a parsed call.
+/// One synthetic Claude transcript of `profile` whose unreadable lines are `lines`, which
+/// leave `unmatched` tool results without a parsed call.
 pub fn make_snapshot(profile: &str, lines: &[&str], unmatched: u64) -> Snapshot {
     let mut unreadable = crate::unreadable::Unreadable::default();
     for line in lines {

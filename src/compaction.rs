@@ -415,7 +415,7 @@ pub fn compaction_samples<'a>(
     summaries: &[CompactionCharge],
 ) -> CompactionSamples<'a> {
     let mut result = Vec::new();
-    // Later duplicates win, like a JavaScript Map built from the array.
+    // Later duplicates win.
     let by_id: HashMap<&str, &'a Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
     // Later records of an event win too, since they carry its final state.
     let last: HashMap<&Id, &'a StructuralEvent> = events.iter().map(|e| (&e.id, *e)).collect();
@@ -697,9 +697,8 @@ impl<'r, 'o> Simulator<'r, 'o> {
             }
             None => source,
         };
-        // `state` stands for the JavaScript object in the session map: one taken from the map
-        // is written back even when a part bails out, while a fresh one replaces the map entry
-        // only once a part completes.
+        // A state taken from the session map is written back even when a part bails out, while
+        // a fresh one replaces the map entry only once a part completes.
         let (key, previous) = match self.states.remove_entry(&req.session) {
             Some((key, state)) => (key, Some(state)),
             None => (req.session.clone(), None),
@@ -2363,7 +2362,7 @@ mod tests {
             r.parts[0].usage = writes(150000);
             requests.push(r);
         }
-        // Coverage and snapshot times match the TypeScript fixture, which the text report prints.
+        // Coverage and snapshot times are fixed because the text report prints them.
         let n = requests.len() as u64;
         Scan {
             subagents: vec![],
@@ -2515,7 +2514,7 @@ mod tests {
         }
     }
 
-    /// The synthetic scans of the TypeScript compaction tests, called without TTL checks.
+    /// The synthetic scans the compaction tests share, called without TTL checks.
     fn scenario(name: &str) -> Scan {
         match name {
             "base" => data(4),
@@ -2758,7 +2757,6 @@ mod tests {
         assert!((actual - expected).abs() < 1e-10, "{actual} != {expected}");
     }
 
-    /// Recommendations and savings the TypeScript implementation reports for the same scans.
     #[test]
     fn unset_windows_take_the_latest_observed_trigger_else_the_documented_default() {
         let mut scan = data(4);
@@ -4409,7 +4407,7 @@ mod tests {
         assert!(samples_of(&requests, &events, &[]).samples.is_empty());
     }
 
-    /// A direct transliteration of the TypeScript scan, quadratic but obviously first-match.
+    /// A naive scan to check the real one against, quadratic but obviously first-match.
     fn naive_samples(
         requests: &[&Request],
         events: &[&StructuralEvent],
@@ -4646,7 +4644,7 @@ mod tests {
         assert_eq!(skipped_lines(&s, &["other".into()]), 0);
     }
 
-    /// Matches the TypeScript replayWindows on the same scan, including an inert first window.
+    /// Includes an inert first window.
     #[test]
     fn replay_windows_applies_estimates_in_the_first_pass_and_chains_later_ones() {
         let mut scan = scenario("attempt");
@@ -4724,7 +4722,7 @@ mod tests {
         assert_eq!(result.estimated_parts.len(), 3);
     }
 
-    /// The TypeScript compaction tests, each through `analyze` (with the TTL checks it runs) and the text report.
+    /// Compaction tests, each through `analyze` (with the TTL checks it runs) and the text report.
     mod end_to_end {
         use super::{at, controls, data, near, usage, writes};
         use crate::controls::{CompactionSources, Env, compaction_controls, window_control};
@@ -4815,7 +4813,7 @@ mod tests {
             }
         }
 
-        // Ported from compaction.test.ts: "net window winner prices summary and new prefix once, retaining observed summaries".
+        // Net window winner prices summary and new prefix once, retaining observed summaries.
         #[test]
         fn net_window_winner_prices_summary_and_new_prefix_once_retaining_observed_summaries() {
             let report = report(&data(4));
@@ -4859,7 +4857,7 @@ mod tests {
             assert_eq!(check.ttls.main, Some(Ttl::FiveMinutes));
         }
 
-        // Ported from compaction.test.ts: "window presentation keeps conditional baselines, every scenario and geometry evidence reachable".
+        // Window presentation keeps conditional baselines, every scenario and geometry evidence reachable.
         #[test]
         fn window_presentation_keeps_conditional_baselines_every_scenario_and_geometry_evidence() {
             let report = report(&data(4));
@@ -4926,7 +4924,7 @@ mod tests {
             ));
         }
 
-        // Ported from compaction.test.ts: "summary overhead can lose, sensitivity cannot veto a positive aggregate estimate".
+        // Summary overhead can lose, sensitivity cannot veto a positive aggregate estimate.
         #[test]
         fn summary_overhead_can_lose_and_sensitivity_cannot_veto_a_positive_aggregate() {
             let one = check(&data(1));
@@ -4944,7 +4942,7 @@ mod tests {
             assert!(loss.scenarios[0].savings_usd.unwrap() < 0.0);
         }
 
-        // Ported from compaction.test.ts: "current smaller window is the comparison baseline, rather than old larger history".
+        // Current smaller window is the comparison baseline, rather than old larger history.
         #[test]
         fn current_smaller_window_is_the_comparison_baseline() {
             let mut s = data(4);
@@ -4960,7 +4958,7 @@ mod tests {
             );
         }
 
-        // Ported from compaction.test.ts: "unsupported affected usage is unpriced; unknown unchanged output cancels with provenance".
+        // Unsupported affected usage is unpriced; unknown unchanged output cancels with provenance.
         #[test]
         fn unsupported_affected_usage_is_unpriced_and_unknown_unchanged_output_cancels() {
             let mut s = data(4);
@@ -4983,7 +4981,7 @@ mod tests {
             assert_eq!(check(&no_sample).scenarios[0].savings_usd, None);
         }
 
-        // Ported from compaction.test.ts: "historical-only or unsupported client controls remain advisory, including unknown candidates".
+        // Historical-only or unsupported client controls remain advisory, including unknown candidates.
         #[test]
         fn historical_only_or_unsupported_client_controls_remain_advisory() {
             let mut s = data(4);
@@ -5007,7 +5005,7 @@ mod tests {
             assert!(check(&unsupported).scenarios[0].margin.is_some());
         }
 
-        // Ported from compaction.test.ts: "Codex standalone compaction uses linked billed summary and cold prefix at the full context tier".
+        // Codex standalone compaction uses linked billed summary and cold prefix at the full context tier.
         #[test]
         fn codex_standalone_compaction_uses_linked_billed_summary_and_cold_prefix() {
             let mut s = data(4);
@@ -5086,7 +5084,7 @@ mod tests {
             assert_eq!(u.scenarios[0].savings_usd, None);
         }
 
-        // Ported from compaction.test.ts: "bracketed Claude model controls scan safely and unresolved aliases stay advisory".
+        // Bracketed Claude model controls scan safely and unresolved aliases stay advisory.
         #[test]
         fn bracketed_claude_model_controls_scan_safely_and_unresolved_aliases_stay_advisory() {
             let w = Workspace::new();
@@ -5140,7 +5138,7 @@ mod tests {
             );
         }
 
-        // Ported from compaction.test.ts: "discovery retains only whitelisted compaction controls and malformed selected limits fail".
+        // Discovery retains only whitelisted compaction controls and malformed selected limits fail.
         #[test]
         fn discovery_retains_only_whitelisted_compaction_controls_and_malformed_limits_fail() {
             let w = Workspace::new();
@@ -5190,7 +5188,7 @@ mod tests {
             );
         }
 
-        // Ported from compaction.test.ts: "window replay uses TTL recommendations and never inherits old-prefix external warming".
+        // Window replay uses TTL recommendations and never inherits old-prefix external warming.
         #[test]
         fn window_replay_uses_ttl_recommendations_and_never_inherits_external_warming() {
             let mut s = data(2);
@@ -5231,7 +5229,7 @@ mod tests {
             assert_eq!(s.requests[2].parts[0].usage.read, Some(0));
         }
 
-        // Ported from compaction.test.ts: "changing a message prefix preserves unchanged billed compaction iterations".
+        // Changing a message prefix preserves unchanged billed compaction iterations.
         #[test]
         fn changing_a_message_prefix_preserves_unchanged_billed_compaction_iterations() {
             let mut s = data(2);
@@ -5253,7 +5251,7 @@ mod tests {
             assert_eq!(s.requests, before);
         }
 
-        // Ported from compaction.test.ts: "window estimates reuse bracketed attempt inputs and retain missing historical billing".
+        // Window estimates reuse bracketed attempt inputs and retain missing historical billing.
         #[test]
         fn window_estimates_reuse_bracketed_attempt_inputs_and_retain_missing_billing() {
             let mut s = data(2);
@@ -5291,7 +5289,7 @@ mod tests {
             assert_eq!(s.requests[2].parts[0].usage.input, None);
         }
 
-        // Ported from compaction.test.ts: "pre-window summary linkage calibrates selected work without charging old generation".
+        // Pre-window summary linkage calibrates selected work without charging old generation.
         #[test]
         fn pre_window_summary_linkage_calibrates_selected_work_without_charging_old_generation() {
             let mut s = data(4);
@@ -5326,7 +5324,7 @@ mod tests {
             near(check.base.savings_usd, 1.96);
         }
 
-        // Ported from compaction.test.ts: "an unsupported smaller window does not veto another candidate's positive aggregate".
+        // An unsupported smaller window does not veto another candidate's positive aggregate.
         #[test]
         fn an_unsupported_smaller_window_does_not_veto_another_candidates_positive_aggregate() {
             let mut s = data(4);
@@ -5341,7 +5339,7 @@ mod tests {
             assert!(check.base.savings_usd.unwrap() > 0.0);
         }
 
-        // Ported from compaction.test.ts: "shared Claude controls produce one aggregate recommendation for all affected models".
+        // Shared Claude controls produce one aggregate recommendation for all affected models.
         #[test]
         fn shared_claude_controls_produce_one_aggregate_recommendation_for_all_models() {
             for environment in [false, true] {
@@ -5408,7 +5406,7 @@ mod tests {
             }
         }
 
-        // Ported from compaction.test.ts: "small unknown iterations cancel while truly missing input leaves only its own session unpriced".
+        // Small unknown iterations cancel while truly missing input leaves only its own session unpriced.
         #[test]
         fn small_unknown_iterations_cancel_while_missing_input_leaves_only_its_session_unpriced() {
             let mut s = data(4);
@@ -5428,7 +5426,7 @@ mod tests {
             assert!(scenario.margin.is_some());
         }
 
-        // Ported from compaction.test.ts: "each added summary is its own pair, so a few unpriced sessions cannot outweigh many small differences".
+        // Each added summary is its own pair, so a few unpriced sessions cannot outweigh many small differences.
         // Unpriced sessions are now extrapolated over rather than bounded.
         #[test]
         fn each_added_summary_is_its_own_pair_so_unpriced_sessions_are_extrapolated_over() {
@@ -5470,7 +5468,7 @@ mod tests {
             assert_eq!(check.base.action, Action::Change);
         }
 
-        // Ported from compaction.test.ts: "a window that changes no request is a keep, not missing evidence".
+        // A window that changes no request is a keep, not missing evidence.
         #[test]
         fn a_window_that_changes_no_request_is_a_keep_not_missing_evidence() {
             let mut s = data(0);
@@ -5492,8 +5490,7 @@ mod tests {
             assert!(!text.contains("could not confirm"), "{text}");
         }
 
-        // Ported from compaction.test.ts: "unreadable lines count as unknown parts, so many of them block a recommendation".
-        // They are now extrapolated over like any unpriced part.
+        // Unreadable lines count as unknown parts, extrapolated over like any unpriced part.
         #[test]
         fn unreadable_lines_count_as_unknown_parts_extrapolated_over() {
             let mut s = data(4);
@@ -5517,7 +5514,7 @@ mod tests {
             assert!(extrapolated.base.margin.is_some());
         }
 
-        // Ported from compaction.test.ts: "Claude historical window differences and structured TTL window alignment remain visible".
+        // Claude historical window differences and structured TTL window alignment remain visible.
         #[test]
         fn claude_historical_window_differences_remain_visible() {
             let mut s = data(4);
@@ -5539,7 +5536,7 @@ mod tests {
             assert_eq!(check.base.action, Action::Change);
         }
 
-        // Ported from compaction.test.ts: "added summaries require billed output and do not confuse postTokens with output".
+        // Added summaries require billed output and do not confuse postTokens with output.
         #[test]
         fn added_summaries_require_billed_output_and_do_not_confuse_post_tokens_with_output() {
             let mut s = data(4);

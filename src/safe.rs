@@ -89,7 +89,7 @@ pub fn hex(bytes: &[u8]) -> String {
     out
 }
 
-/// JavaScript's `Number.MAX_SAFE_INTEGER`, the largest integer an f64 holds exactly.
+/// The largest integer an f64 holds exactly along with both its neighbors, 2^53 - 1.
 pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Preserve absent counts as unknown and reject corrupt counts.
@@ -116,7 +116,7 @@ pub fn count(value: Option<&Value>) -> Result<Option<i64>, ScanError> {
     }
 }
 
-/// JavaScript truthiness of an optional JSON member.
+/// Whether an optional JSON member is set: not absent, null, false, zero or an empty string.
 pub fn truthy(value: Option<&Value>) -> bool {
     match value {
         None | Some(Value::Null) => false,
@@ -132,7 +132,7 @@ pub fn timestamp(value: &Value) -> Option<Millis> {
     parse_instant(value.as_str()?)
 }
 
-/// Parse an ISO date-time like JavaScript's `Date.parse`, local time when no offset is given.
+/// Parse an ISO date-time, as local time when no offset is given.
 pub fn parse_instant(text: &str) -> Option<Millis> {
     let b = text.as_bytes();
     let shape = b.len() > 10
@@ -153,7 +153,7 @@ pub fn parse_instant(text: &str) -> Option<Millis> {
     Some(zoned.timestamp().as_millisecond())
 }
 
-/// Format an instant like JavaScript's `Date.prototype.toISOString`.
+/// Format an instant as UTC with milliseconds, such as `2026-11-01T00:00:00.000Z`.
 pub fn iso(millis: Millis) -> String {
     let ts = jiff::Timestamp::from_millisecond(millis).expect("instant in range");
     ts.strftime("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()

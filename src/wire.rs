@@ -184,6 +184,7 @@ pub struct Stream<R: Read> {
 }
 
 impl<R: Read> Stream<R> {
+    /// Reads values from `reader`.
     pub fn new(reader: R) -> Self {
         Self {
             json: serde_json::Deserializer::from_reader(reader),

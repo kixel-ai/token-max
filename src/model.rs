@@ -267,7 +267,9 @@ impl Billing {
 }
 
 impl Ttl {
+    /// Both TTLs, shortest first.
     pub const ALL: [Ttl; 2] = [Ttl::FiveMinutes, Ttl::OneHour];
+    /// The serialized name, such as "5m".
     pub fn as_str(self) -> &'static str {
         match self {
             Ttl::FiveMinutes => "5m",
@@ -284,12 +286,14 @@ pub struct PerTtl<T> {
 }
 
 impl<T> PerTtl<T> {
+    /// The value for `ttl`.
     pub fn get(&self, ttl: Ttl) -> &T {
         match ttl {
             Ttl::FiveMinutes => &self.five_minutes,
             Ttl::OneHour => &self.one_hour,
         }
     }
+    /// The mutable value for `ttl`.
     pub fn get_mut(&mut self, ttl: Ttl) -> &mut T {
         match ttl {
             Ttl::FiveMinutes => &mut self.five_minutes,
@@ -306,12 +310,14 @@ pub struct PerBucket<T> {
 }
 
 impl<T> PerBucket<T> {
+    /// The value for `bucket`.
     pub fn get(&self, bucket: Bucket) -> &T {
         match bucket {
             Bucket::Main => &self.main,
             Bucket::Subagent => &self.subagent,
         }
     }
+    /// The mutable value for `bucket`.
     pub fn get_mut(&mut self, bucket: Bucket) -> &mut T {
         match bucket {
             Bucket::Main => &mut self.main,
@@ -328,7 +334,9 @@ pub enum Bucket {
 }
 
 impl Bucket {
+    /// Both buckets, main first.
     pub const ALL: [Bucket; 2] = [Bucket::Main, Bucket::Subagent];
+    /// The serialized name, such as "subagent".
     pub fn as_str(self) -> &'static str {
         match self {
             Bucket::Main => "main",
@@ -379,6 +387,7 @@ impl Usage {
     }
 }
 
+/// What a billed part was sampled for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PartKind {
@@ -399,6 +408,7 @@ pub struct BillingPart {
     pub geo: Option<Text>,
 }
 
+/// Whether a request's usage was recorded, estimated or missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RequestEvidence {
@@ -407,6 +417,7 @@ pub enum RequestEvidence {
     Unknown,
 }
 
+/// Whether a request came from the main conversation or a sub-agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Agent {
@@ -415,6 +426,7 @@ pub enum Agent {
     Unknown,
 }
 
+/// Which provider API a request used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Api {
@@ -520,6 +532,7 @@ pub enum Few<T> {
 pub type Origins = Few<Origin>;
 
 impl<T> Few<T> {
+    /// Adds `item` to the end.
     pub fn push(&mut self, item: T) {
         *self = match std::mem::take(self) {
             Few::None => Few::One(item),
@@ -633,6 +646,7 @@ impl<T: Serialize> Serialize for Few<T> {
     }
 }
 
+/// What a structural event marks in a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum EventKind {
@@ -646,6 +660,7 @@ pub enum EventKind {
     IdleNotice,
 }
 
+/// What tied an idle period to its cause, when anything did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum IdleAttribution {
@@ -1319,6 +1334,7 @@ pub struct BackgroundControl {
     pub off_file: Option<String>,
 }
 
+/// Whether a transcript root was read, and why not.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RootState {
@@ -1328,6 +1344,7 @@ pub enum RootState {
     Inaccessible,
 }
 
+/// Where a transcript root's path came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RootOrigin {
@@ -1516,6 +1533,7 @@ pub struct CompactionCharge {
     pub assumptions: Vec<String>,
 }
 
+/// Whether a usage estimate has a basis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum EstimateEvidence {
     Estimated,
@@ -1534,6 +1552,7 @@ pub struct UsageEstimate {
     pub assumptions: Vec<String>,
 }
 
+/// Whether a cache predecessor's state is known, estimated or unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KnownState {
     Known,
@@ -1541,6 +1560,7 @@ pub enum KnownState {
     Unknown,
 }
 
+/// Whether a cached prefix size was measured or estimated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PrefixEvidence {
     Measured,
@@ -1560,6 +1580,7 @@ pub struct CachePredecessor {
     pub reason: &'static str,
 }
 
+/// Whether a request's replayed cache geometry is exact, rests on an estimate, or is unknown.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReplayOutcome {
     Invariant,
@@ -1579,6 +1600,7 @@ pub struct CacheReplayEvidence {
     pub reason: &'static str,
 }
 
+/// What a check recommends doing with its setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
     Change,
@@ -1689,6 +1711,7 @@ pub struct CheckBase<V> {
     pub sources: Vec<String>,
 }
 
+/// What chose the TTL comparison's window: `--since`, the last TTL change, or all available history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowBasisKind {
     Explicit,
@@ -1696,12 +1719,14 @@ pub enum WindowBasisKind {
     Available,
 }
 
+/// TTL costs under alternative assumptions for requests with no linked cache history.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UnlinkedSensitivity {
     pub no_billed_attempt: PerTtl<Cost>,
     pub cold_cache: PerTtl<Cost>,
 }
 
+/// How sensitive the TTL comparison is to cold caches and unlinked requests.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TtlSensitivity {
     pub cold_prefix1h_usd: Option<f64>,
@@ -1750,6 +1775,7 @@ pub struct AddedCompaction {
     pub prefix_cost: Cost,
 }
 
+/// How sensitive a compaction window's savings are to summary size and re-reads.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSensitivity {
     pub larger_summary_savings_usd: Option<f64>,
@@ -1862,6 +1888,7 @@ impl Change {
     }
 }
 
+/// The fast-mode premium measured on responses that recorded their speed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ObservedPremium {
     pub premium_parts: u64,
@@ -1871,6 +1898,7 @@ pub struct ObservedPremium {
     pub monthly_premium_usd: Option<f64>,
 }
 
+/// The fast-mode premium the current setting would add, at rate-card prices.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CurrentPremium {
     pub premium: Cost,
@@ -2017,6 +2045,7 @@ pub struct BashCapCheck {
     pub waits: BashWaits,
 }
 
+/// Whether an idle period could have triggered the idle policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PeriodStatus {
     Eligible,
@@ -2025,6 +2054,7 @@ pub enum PeriodStatus {
     Censored,
 }
 
+/// When the user returned after an idle period, relative to cache expiry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ReturnTiming {
     BeforeExpiry,
@@ -2033,6 +2063,7 @@ pub enum ReturnTiming {
     Final,
 }
 
+/// Whether the idle policy was seen acting on a period.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PeriodOutcome {
     Applied,
@@ -2096,6 +2127,7 @@ pub struct OnOff<T> {
     pub off: T,
 }
 
+/// A compaction window in effect for one owner and its models.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScenarioWindow {
     pub owner: String,
@@ -2103,6 +2135,7 @@ pub struct ScenarioWindow {
     pub value: Option<i64>,
 }
 
+/// The idle policy's cost difference for periods of one context size.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextDelta {
     pub tokens: Option<i64>,
@@ -2110,6 +2143,7 @@ pub struct ContextDelta {
     pub delta_usd: Option<f64>,
 }
 
+/// How often the idle policy applied, for one client version and flag state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ActivationCohort {
     pub version: Text,
@@ -2120,6 +2154,7 @@ pub struct ActivationCohort {
     pub fraction: f64,
 }
 
+/// How sensitive the idle policy's cost difference is to its assumptions.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IdleSensitivity {
     pub closed_delta: Option<Estimate>,
@@ -2293,6 +2328,7 @@ impl CheckResult {
 // ---------------------------------------------------------------------------
 // Exposure: recurring context components and how they were used.
 
+/// What kind of recurring context a component is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Category {
@@ -2344,6 +2380,7 @@ pub struct Size {
     pub fingerprint: Id,
 }
 
+/// Which check reports a component: skills or context.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Owner {
@@ -2351,6 +2388,7 @@ pub enum Owner {
     Context,
 }
 
+/// Whether a component is one item or an aggregate of several.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Scope {
@@ -2405,6 +2443,7 @@ pub enum Current {
     Unresolved,
 }
 
+/// What kind of use an invocation records.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum InvocationKind {
@@ -2418,6 +2457,7 @@ pub enum InvocationKind {
     ScriptReference,
 }
 
+/// How far an invocation got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InvocationStatus {
@@ -2428,6 +2468,7 @@ pub enum InvocationStatus {
     Reference,
 }
 
+/// How an invocation was made: typed, mentioned, by a tool, and so on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Via {
@@ -2461,6 +2502,7 @@ pub struct Invocation {
     pub profiles: Vec<String>,
 }
 
+/// How a request's components were tied to it: on the wire, by time order, or not at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Linkage {
@@ -2469,6 +2511,7 @@ pub enum Linkage {
     Unknown,
 }
 
+/// Whether a request's text was recorded in full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextCoverage {
@@ -2477,6 +2520,7 @@ pub enum TextCoverage {
     Unknown,
 }
 
+/// A request's component identifiers, sharing a prefix with an earlier request's.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct References {
     pub base: Option<Id>,
@@ -2567,9 +2611,11 @@ impl Ids {
         let tail = ids[keep..].iter().cloned().collect();
         Self::new(like.map(|like| (like, keep)), tail)
     }
+    /// How many identifiers there are.
     pub fn len(&self) -> usize {
         self.0.len
     }
+    /// Whether there are no identifiers.
     pub fn is_empty(&self) -> bool {
         self.0.len == 0
     }
@@ -2779,6 +2825,7 @@ pub struct MemoryUse {
     pub request: Option<String>,
 }
 
+/// One request's character and token counts, for calibrating estimates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CalibrationSample {
     pub request: Text,
@@ -2815,6 +2862,7 @@ pub struct Control {
     pub append: bool,
 }
 
+/// What kind of context an item adds to requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextKind {
     Tool,
@@ -2831,6 +2879,7 @@ pub enum ContextKind {
     Other,
 }
 
+/// What a context check recommends for one item.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Verdict {
     /// Never used across a window that would have recorded a use: a recommended change.
@@ -3058,6 +3107,7 @@ pub struct CacheContext {
     pub prompts: Vec<StructuralEvent>,
 }
 
+/// How much of the scan could be read and priced.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanCoverage {
@@ -3101,6 +3151,7 @@ pub struct Scan {
     pub defaults: bool,
 }
 
+/// Where prices came from and when.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PriceSource {
     pub source: String,
@@ -3108,6 +3159,7 @@ pub struct PriceSource {
     pub offline: bool,
 }
 
+/// What one bucket of requests cost at API prices.
 #[derive(Clone, Debug, PartialEq)]
 pub struct HistoricalCost {
     pub bucket: String,
@@ -3131,6 +3183,7 @@ pub struct TierScenario {
     pub cost: Cost,
 }
 
+/// Calibrations and assumptions behind exposure estimates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExposureSummary {
     pub calibration: Vec<Calibration>,

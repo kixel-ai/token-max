@@ -54,7 +54,7 @@ pub fn setting_text(path: &[String], value: Value, append: bool, harness: Harnes
         .expect("JSON values serialize");
     let pretty = String::from_utf8(pretty).expect("JSON is UTF-8");
     // One line: each newline and its indentation become a single space, then
-    // brackets close up. Like the TypeScript, this also applies inside strings.
+    // brackets close up. This also applies inside strings, which only affects display.
     let mut flat = String::with_capacity(pretty.len());
     let mut chars = pretty.chars().peekable();
     while let Some(c) = chars.next() {
@@ -603,7 +603,7 @@ fn pieces(
             None,
         ),
         Category::PluginInstructions => {
-            // Each UTF-16 unit outside the allowed set becomes one underscore, as in JavaScript.
+            // Each UTF-16 unit outside the allowed set becomes one underscore.
             let mut server = String::with_capacity(name.len());
             for c in name.chars() {
                 if c.is_ascii_alphanumeric() || c == '_' || c == '-' {

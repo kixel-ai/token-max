@@ -54,12 +54,12 @@ fn nested<'a>(map: &'a Map<String, Value>, key: &str) -> &'a Map<String, Value> 
     object(member(map, key))
 }
 
-/// JavaScript's `a ?? b`: a null or absent `a` falls through to `b`.
+/// `a`, or `b` when `a` is null or absent.
 fn coalesce<'a>(a: Option<&'a Value>, b: Option<&'a Value>) -> Option<&'a Value> {
     a.filter(|v| !v.is_null()).or(b)
 }
 
-/// A member that is a string, like `typeof value === "string"`.
+/// A member that is a string.
 fn string<'a>(map: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     map.get(key).and_then(Value::as_str)
 }
@@ -521,14 +521,14 @@ impl Iterator for Records<'_> {
     }
 }
 
-/// Parse one line like a fatal `TextDecoder` followed by `JSON.parse`; non-objects are unreadable.
+/// Parse one line as strict UTF-8 JSON; non-objects are unreadable.
 fn parse(line: &[u8]) -> Option<Map<String, Value>> {
-    // The decoder drops a leading byte order mark before JSON.parse sees the text.
+    // A leading byte order mark is not part of the JSON.
     let line = line.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(line);
     let value = match serde_json::from_slice(line) {
         Ok(value) => value,
         Err(_) => {
-            // JSON.parse accepts escaped lone surrogates, which JavaScript writers emit for
+            // Escaped lone surrogates are accepted, since JavaScript writers emit them for
             // truncated text. U+FFFD is what hashing such a string in UTF-8 sees anyway.
             let text = std::str::from_utf8(line).ok()?;
             serde_json::from_str(&replace_lone_surrogates(text)?).ok()?

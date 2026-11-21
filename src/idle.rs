@@ -11,8 +11,8 @@ use serde_json::{Map, Number, Value};
 
 use crate::cache::{CacheBoundaries, ttl_milliseconds};
 use crate::compaction::{
-    CompactionSample, CompactionSamples, Modeled, WindowEvents, WindowOptions, WindowSetting,
-    compaction_samples, is_conversation, is_message, median, replay_windows,
+    CompactionSamples, Modeled, WindowEvents, WindowOptions, WindowSetting, compaction_samples,
+    is_conversation, is_message, replay_windows,
 };
 use crate::controls::{Env, SettingsScope, idle_controls, window_control};
 use crate::discovery::locale_compare;
@@ -420,52 +420,6 @@ struct Replay<'a> {
     requests: Vec<Modeled<'a>>,
 }
 
-/// The cohort a calibration sample can stand in for; every field must match exactly.
-type SampleKey<'a> = (
-    &'a str,
-    &'a str,
-    &'a str,
-    &'a str,
-    Agent,
-    Option<&'a str>,
-    Option<&'a str>,
-    Option<&'a str>,
-);
-
-/// Provider, version, client, model, agent, tier, speed and geography; None when the provider,
-/// version, client or model is unrecorded, which matches no sample.
-fn sample_key<'a>(r: &'a Request, p: &'a BillingPart) -> Option<SampleKey<'a>> {
-    Some((
-        r.provider.as_deref()?,
-        r.version.as_deref()?,
-        r.client.as_deref()?,
-        p.model.as_deref()?,
-        r.agent,
-        p.tier.as_deref(),
-        p.speed.as_deref(),
-        p.geo.as_deref(),
-    ))
-}
-
-/// Summary geometry from one cohort's samples.
-struct Geometry {
-    output: i64,
-    prefix: i64,
-    read: i64,
-    overhead: i64,
-}
-
-/// One cohort's matching samples, with median and maximum geometry computed once.
-struct Calibration<'a> {
-    samples: Vec<&'a CompactionSample<'a>>,
-    /// The samples' events, for every period this cohort calibrates.
-    events: std::sync::Arc<[Id]>,
-    /// Whether every sample shares one summary pricing cohort.
-    uniform: bool,
-    median: Geometry,
-    larger: Geometry,
-}
-
 /// One replay's requests and events, indexed by session and identity once for every owner
 /// and run.
 struct ReplayIndex<'r> {
@@ -479,7 +433,7 @@ struct ReplayIndex<'r> {
     by_id: HashMap<&'r str, &'r Request>,
     /// Identities with an event at or after the window start.
     selected_events: HashSet<&'r Id>,
-    calibration: HashMap<SampleKey<'r>, Calibration<'r>>,
+    calibration: &'r CompactionSamples<'r>,
 }
 
 impl<'r> ReplayIndex<'r> {
@@ -496,7 +450,7 @@ impl<'r> ReplayIndex<'r> {
             boundaries: HashMap::default(),
             by_id: HashMap::default(),
             selected_events: HashSet::default(),
-            calibration: HashMap::default(),
+            calibration: samples,
         };
         for r in requests.iter().map(AsRef::as_ref) {
             if r.agent != Agent::Subagent && r.parts.iter().any(is_conversation) {
@@ -505,10 +459,7 @@ impl<'r> ReplayIndex<'r> {
             index.requests.entry(&*r.session).or_default().push(r);
             index.by_id.insert(&*r.id, r);
         }
-        // The last event with each identity, like a JavaScript Map built from the array.
-        let mut by_id: HashMap<&Id, &StructuralEvent> = HashMap::default();
         for &e in events {
-            by_id.insert(&e.id, e);
             if e.time >= since {
                 index.selected_events.insert(&e.id);
             }
@@ -522,64 +473,6 @@ impl<'r> ReplayIndex<'r> {
                     index.boundaries.entry(session).or_default().push(e);
                 }
             }
-        }
-        let mut groups: HashMap<SampleKey, Vec<&CompactionSample>> = HashMap::default();
-        for s in &samples.samples {
-            if let Some(key) = sample_key(s.request, s.p) {
-                groups.entry(key).or_default().push(s);
-            }
-        }
-        for (key, matches) in groups {
-            let summaries: HashSet<_> = matches
-                .iter()
-                .map(|s| {
-                    (
-                        s.summary_request.provider.as_deref(),
-                        s.summary.model.as_deref(),
-                        s.summary.tier.as_deref(),
-                        s.summary.speed.as_deref(),
-                        s.summary.geo.as_deref(),
-                    )
-                })
-                .collect();
-            let column = |f: &dyn Fn(&CompactionSample) -> i64| -> Vec<i64> {
-                matches.iter().map(|s| f(s)).collect()
-            };
-            let outputs = column(&|s| s.output);
-            let prefixes = column(&|s| s.prefix);
-            let reads = column(&|s| s.p.usage.read.unwrap_or(0));
-            let overheads = column(&|s| {
-                let input = s.summary.usage.input;
-                let before = by_id
-                    .get(s.event)
-                    .and_then(|e| e.pre_tokens)
-                    .or(input)
-                    .unwrap_or(0);
-                (input.unwrap_or(0) - before).max(0)
-            });
-            let max = |values: &[i64]| values.iter().copied().max().expect("samples");
-            let larger = Geometry {
-                output: max(&outputs),
-                prefix: max(&prefixes),
-                read: max(&reads),
-                overhead: max(&overheads),
-            };
-            let median = Geometry {
-                output: median(outputs),
-                prefix: median(prefixes),
-                read: median(reads),
-                overhead: median(overheads),
-            };
-            index.calibration.insert(
-                key,
-                Calibration {
-                    events: matches.iter().map(|s| s.event.clone()).collect(),
-                    samples: matches,
-                    uniform: summaries.len() == 1,
-                    median,
-                    larger,
-                },
-            );
         }
         index
     }
@@ -1219,8 +1112,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             .iter()
                             .find(|p| is_message(p))
                             .expect("eligible periods follow a message");
-                        let calibration = sample_key(item.previous, part)
-                            .and_then(|key| self.index.calibration.get(&key));
+                        let calibration = self.index.calibration.idle(item.previous, part);
                         let context_tokens = item.context_tokens;
                         let active = self.canonical[i];
                         let mut branched = Vec::with_capacity(states.len() * 2);
@@ -1258,7 +1150,7 @@ impl<'r, 'x> Runner<'r, 'x> {
                             } else {
                                 &c.median
                             };
-                            let sample = c.samples[0];
+                            let sample = &c.samples[0];
                             if let Some(d) = detail.get_mut(i).filter(|_| point) {
                                 d.calibration = Some(PeriodCalibration {
                                     events: c.events.clone(),
@@ -3637,46 +3529,15 @@ fn t3_replay(
                     if gap.next.is_none() {
                         final_count += 1;
                     }
-                    let matches: Vec<&CompactionSample> = samples
-                        .samples
-                        .iter()
-                        .filter(|s| {
-                            sample_key(s.request, s.p) == sample_key(gap.previous, p)
-                                && sample_key(gap.previous, p).is_some()
-                        })
-                        .collect();
-                    let uniform = matches.first().is_some_and(|first| {
-                        matches.iter().all(|s| {
-                            s.summary.model == first.summary.model
-                                && s.summary_request.provider == first.summary_request.provider
-                                && s.summary.tier == first.summary.tier
-                                && s.summary.speed == first.summary.speed
-                                && s.summary.geo == first.summary.geo
-                        })
-                    });
-                    if !uniform {
+                    let Some(c) = samples.idle(gap.previous, p).filter(|c| c.uniform) else {
                         add(unknown_cost(
                             "T3 summary needs compatible linked native output and full resumed-prefix calibration",
                         ));
                         continue;
-                    }
-                    let sample = matches[0];
-                    let full = median(matches.iter().map(|s| s.prefix).collect());
-                    let output = median(matches.iter().map(|s| s.output).collect());
-                    let overhead = median(
-                        matches
-                            .iter()
-                            .map(|s| {
-                                (s.summary.usage.input.unwrap_or(0)
-                                    - events
-                                        .iter()
-                                        .find(|e| e.id == *s.event)
-                                        .and_then(|e| e.pre_tokens)
-                                        .unwrap_or(s.summary.usage.input.unwrap_or(0)))
-                                .max(0)
-                            })
-                            .collect(),
-                    );
+                    };
+                    let sample = &c.samples[0];
+                    let g = &c.median;
+                    let (output, full) = (g.output, g.prefix);
                     if full >= input {
                         add(unknown_cost(
                             "T3 calibrated full resumed prefix does not shrink this context",
@@ -3702,7 +3563,7 @@ fn t3_replay(
                     let write = input - read;
                     let summary = BillingPart {
                         usage: Usage {
-                            input: Some(input + overhead),
+                            input: Some(input + g.overhead),
                             output: Some(output),
                             read: Some(read),
                             write: Some(write),
@@ -3721,19 +3582,12 @@ fn t3_replay(
                     {
                         d.summary_cost = cost;
                         d.calibration = Some(PeriodCalibration {
-                            events: matches.iter().map(|s| s.event.clone()).collect(),
+                            events: c.events.clone(),
                             summary_tokens: output,
                             prefix_tokens: full,
                         });
                     }
-                    cached_prefix = (full - output)
-                        .min(median(
-                            matches
-                                .iter()
-                                .map(|s| s.p.usage.read.unwrap_or(0))
-                                .collect(),
-                        ))
-                        .max(0);
+                    cached_prefix = (full - output).min(g.read).max(0);
                     offset += full - input;
                     context = Some(full);
                     last_time = Some(*time);

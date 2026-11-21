@@ -218,7 +218,9 @@ impl Interner {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
+    /// Claude Code.
     Claude,
+    /// Codex.
     Codex,
 }
 
@@ -1492,8 +1494,11 @@ pub struct CacheReplayEvidence {
 /// What a check recommends doing with its setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
+    /// Change the setting to the recommended value.
     Change,
+    /// Leave the setting as it is.
     Keep,
+    /// Worth considering, but the measurement does not settle it.
     Advisory,
 }
 
@@ -1845,6 +1850,7 @@ pub struct EffortCheck {
 pub struct BackgroundCheck {
     /// Current and recommended values: true is on.
     pub base: CheckBase<bool>,
+    /// The background feature this result is for.
     pub feature: BackgroundFeature,
     /// Recorded directories whose requests this control applies to; None means absent.
     pub directories: Vec<Option<Text>>,
@@ -2184,15 +2190,25 @@ pub struct KeepaliveCheck {
 )]
 #[derive(Clone, Debug, PartialEq)]
 pub enum CheckResult {
+    /// The prompt cache's time to live.
     Ttl(TtlCheck),
+    /// The context window size that triggers compaction.
     Compaction(CompactionCheck),
+    /// Compacting a session that sits idle, before its cache expires.
     Idle(IdleCheck),
+    /// How T3 Code treats an idle session.
     T3Idle(T3IdleCheck),
+    /// Fast mode's premium rates.
     Speed(SpeedCheck),
+    /// A model request the client makes on its own.
     Background(BackgroundCheck),
+    /// The foreground Bash timeout cap.
     BashCap(BashCapCheck),
+    /// Pings that keep the cache warm.
     Keepalive(KeepaliveCheck),
+    /// Auto memory.
     Memory(MemoryCheck),
+    /// The default reasoning effort.
     Effort(EffortCheck),
 }
 
@@ -2707,17 +2723,25 @@ pub struct Control {
 /// What kind of context an item adds to requests.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ContextKind {
+    /// A built-in tool's definition.
     Tool,
+    /// An MCP server and its tools.
     McpServer,
+    /// One tool from an MCP server.
     McpTool,
+    /// The listing of deferred MCP tools.
     McpDiscovery,
+    /// A skill's listing.
     Skill,
+    /// Instruction files such as AGENTS.md and CLAUDE.md.
     Instructions,
+    /// The harness's own system prompt.
     System,
     /// A tool's output, carried in the conversation after the call that returned it.
     ToolOutput,
     /// Auto memory: its loaded context and the memory files the agent read.
     Memory,
+    /// Context that fits no other kind.
     Other,
 }
 
@@ -2729,6 +2753,7 @@ pub enum Verdict {
     /// Worth considering off, an advisory: it cost more than the limit per use, or no
     /// use was recorded but the window cannot rule one out.
     Consider,
+    /// Used and under the limit per use, or free.
     Keep,
 }
 
@@ -3060,11 +3085,17 @@ pub struct FableWeek {
 /// One host's analysis, which the text report presents.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
+    /// When the report was generated, as an ISO timestamp.
     pub generated_at: String,
+    /// What the transcripts and settings held.
     pub scan: Scan,
+    /// Where the prices came from.
     pub prices: PriceSource,
+    /// What the window's requests cost at API prices.
     pub historical: Vec<HistoricalCost>,
+    /// Each observed compaction and what it cost.
     pub compactions: Vec<CompactionCharge>,
+    /// The calibrations and assumptions behind the exposure estimates.
     pub exposure: ExposureSummary,
     /// What each piece of always-sent context cost, most expensive first.
     pub context: Vec<ContextCost>,
@@ -3074,7 +3105,9 @@ pub struct Report {
     pub subagents: Vec<SubagentCost>,
     /// Each subscription-eligible Claude profile's weekly Fable spend, as evidence only.
     pub fable: Vec<FableUse>,
+    /// One result per setting checked.
     pub checks: Vec<CheckResult>,
+    /// What the report assumes beyond the measurements.
     pub assumptions: Vec<String>,
 }
 

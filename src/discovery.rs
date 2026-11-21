@@ -23,9 +23,13 @@ use crate::safe::{ScanError, identity, label};
 /// Where discovery looks; explicit roots limit the entire scan, otherwise host-local profiles are discovered.
 #[derive(Clone, Debug)]
 pub struct DiscoveryOptions {
+    /// The home directory, where host-local profiles are looked for.
     pub home: String,
+    /// The environment discovery reads settings overrides from.
     pub env: Env,
+    /// Explicit Claude config directories.
     pub claude_dirs: Vec<String>,
+    /// Explicit Codex home directories.
     pub codex_dirs: Vec<String>,
     /// Explicit T3 state directories: settings.json, and statev2.sqlite when it exists.
     pub t3_dirs: Vec<String>,

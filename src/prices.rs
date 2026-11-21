@@ -431,8 +431,11 @@ fn parse_catalog(reader: impl Read) -> Result<Catalog, Failure> {
 /// Explicit offline and fixture modes never make network requests.
 #[derive(Clone, Debug, Default)]
 pub struct PriceOptions {
+    /// A prices file to read instead of fetching.
     pub file: Option<PathBuf>,
+    /// Where fetched prices are cached.
     pub cache: PathBuf,
+    /// Read the file or cache without ever fetching.
     pub offline: bool,
 }
 

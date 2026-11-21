@@ -5251,7 +5251,7 @@ mod tests {
                 .unwrap();
             assert_eq!(codex.compaction.default.value, Some(240000));
             assert!(!codex.compaction.default.applicable);
-            assert!(!serde_json::to_string(&result).unwrap().contains("PRIVATE"));
+            assert!(!format!("{result:?}").contains("PRIVATE"));
             std::fs::write(
                 w.codex.join("config.toml"),
                 "model_auto_compact_token_limit = 'bad'\n",

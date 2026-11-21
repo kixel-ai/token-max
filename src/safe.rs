@@ -2,13 +2,14 @@
 
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::model::{Id, Location, Millis};
 
 /// An error whose message is safe for terminal and JSON diagnostics.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ScanError {
     pub message: String,
     pub location: Option<Location>,

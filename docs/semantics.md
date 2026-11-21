@@ -367,7 +367,9 @@ Before an affected request, a modeled pass reads the entire estimated context at
 ordinary input rates and writes the median observed summary output in a matching
 model/provider/agent/tier/speed/geography cohort. Its resumed cache prefix uses the
 median first post-boundary prefix, which can contain instructions, retained items
-and new context. Added passes require linked billed summary output. Claude `postTokens` remains
+and new context. Window, idle and T3 replays share this calibration; idle and T3 also
+match the client and its version, and a boundary recorded more than once calibrates
+from its last record. Added passes require linked billed summary output. Claude `postTokens` remains
 a proxy only for unmatched observed charges in the baseline; it cannot
 establish output size for calibrating additional passes. Disagreeing summary-model
 attribution leaves the affected comparison unpriced. The new prefix is cold on the resumed

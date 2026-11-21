@@ -16,7 +16,8 @@ The m1 code audit found two such seams:
   `detail.get_mut(i).filter(|_| point)` blocks through `Runner::run` and
   `t3_replay`. That is about 150 lines. Rewrite those tests to assert on the
   `IdleCheck` aggregates, or on a cfg(test) trace if an aggregate can't pin
-  the behavior.
+  the behavior. `Calibration::events` in `src/compaction.rs` serves only
+  `PeriodCalibration`, so drop it with the trace.
 - **`Serialize` on the `Scan` tree.** Nothing in production serializes `Scan`
   or the model types under it (except the `Usage` dedup key in
   `src/reader.rs`). What crosses the SSH stream and `sessions` is

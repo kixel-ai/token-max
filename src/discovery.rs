@@ -27,7 +27,7 @@ pub struct DiscoveryOptions {
     pub env: Env,
     pub claude_dirs: Vec<String>,
     pub codex_dirs: Vec<String>,
-    /// Explicit T3 state directories containing settings.json and statev2.sqlite.
+    /// Explicit T3 state directories: settings.json, and statev2.sqlite when it exists.
     pub t3_dirs: Vec<String>,
     /// The system managed Claude settings file; overridable for host adapters and synthetic tests.
     pub managed_settings_file: String,
@@ -450,7 +450,7 @@ fn collation_weight(c: char) -> Option<u32> {
     }
 }
 
-/// JavaScript's default `localeCompare` (ICU root collation) for printable ASCII paths:
+/// ICU root collation for printable ASCII paths:
 /// punctuation before digits before letters, then lowercase before uppercase.
 pub(crate) fn locale_compare(a: &str, b: &str) -> Ordering {
     let primary = |s: &str| s.chars().filter_map(collation_weight).collect::<Vec<_>>();
@@ -465,12 +465,12 @@ pub(crate) fn locale_compare(a: &str, b: &str) -> Ordering {
         .then_with(|| tertiary(a).cmp(&tertiary(b)))
 }
 
-/// Convert TOML into the JSON shapes JavaScript's TOML parser yields.
+/// Convert TOML into JSON: a date becomes an empty object, a non-finite float null.
 fn toml_json(value: toml::Value) -> Option<Value> {
     Some(match value {
         toml::Value::String(s) => Value::String(s),
         toml::Value::Integer(n) => {
-            // Integers JavaScript cannot represent exactly are a parse error there.
+            // An integer outside a double's safe-integer range fails the parse.
             if n.unsigned_abs() > crate::safe::MAX_SAFE_INTEGER as u64 {
                 return None;
             }
@@ -2127,7 +2127,7 @@ impl Walk {
                     };
                     entries.push((name.to_string_lossy().into_owned(), kind));
                 }
-                // JavaScript's default sort compares UTF-16 code units.
+                // Names sort by UTF-16 code units.
                 entries.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
                 for (name, kind) in entries.into_iter().rev() {
                     stack.push((join(&[&canonical, &name]), kind));
@@ -2965,7 +2965,7 @@ mod tests {
         );
     }
 
-    // Ported from reader.test.ts: "current environment overrides are scoped to the active config root".
+    // Current environment overrides are scoped to the active config root.
     #[test]
     fn environment_overrides_are_scoped_to_the_active_root() {
         let w = Workspace::new();
@@ -3185,7 +3185,7 @@ mod tests {
         }
     }
 
-    // Ported from reader.test.ts: "managed TTL controls retain the managed owner and API-key presence leaves billing unknown".
+    // Managed TTL controls retain the managed owner and API-key presence leaves billing unknown.
     #[test]
     fn managed_ttl_controls_keep_the_managed_owner() {
         let w = Workspace::new();
@@ -3213,7 +3213,7 @@ mod tests {
         assert_eq!(claude(&data).ttl.subagent.value, Some(Ttl::FiveMinutes));
     }
 
-    // Ported from reader.test.ts: "automatic discovery ignores a symlinked Claude config file".
+    // Automatic discovery ignores a symlinked Claude config file.
     #[cfg(unix)]
     #[test]
     fn symlinked_config_files_are_not_profiles() {
@@ -3230,7 +3230,7 @@ mod tests {
         assert_eq!(error.message, "selected root is missing or inaccessible");
     }
 
-    // Ported from reader.test.ts: "managed file locations match the supported host platforms".
+    // Managed file locations match the supported host platforms.
     #[test]
     fn managed_file_locations_match_platforms() {
         assert_eq!(
@@ -3247,7 +3247,7 @@ mod tests {
         );
     }
 
-    // Ported from the discovery half of reader.test.ts: "shared directories are read once, preserve profile aliases, and include nested subagents".
+    // Shared directories are read once, preserve profile aliases, and include nested subagents.
     #[cfg(unix)]
     #[test]
     fn shared_directories_are_snapshotted_once_and_explicit_roots_exclude_others() {
@@ -3279,7 +3279,7 @@ mod tests {
         assert_eq!(selected.profiles[0].ttl.main.value, Some(Ttl::OneHour));
     }
 
-    // Ported from the discovery halves of reader.test.ts: "all lengths freeze before reading" and "a shrunk snapshot fails".
+    // All lengths freeze before reading, and a shrunk snapshot fails.
     #[test]
     fn lengths_freeze_at_discovery_and_missing_explicit_roots_fail() {
         let w = Workspace::new();
@@ -3345,7 +3345,7 @@ mod tests {
         assert_eq!(error.message, "cannot snapshot selected history");
     }
 
-    // Ported from compaction.test.ts: "discovery retains only whitelisted compaction controls and malformed selected limits fail".
+    // Discovery retains only whitelisted compaction controls and malformed selected limits fail.
     #[test]
     fn discovery_keeps_whitelisted_compaction_controls_and_rejects_malformed_limits() {
         let w = Workspace::new();
@@ -3386,7 +3386,7 @@ mod tests {
         assert_eq!(error.message, "invalid per-model settings");
     }
 
-    // Ported from the discovery half of fast.test.ts: "active-profile environment, managed policy and current project ownership suppress stale preferences".
+    // Active-profile environment, managed policy and current project ownership suppress stale preferences.
     #[test]
     fn environment_managed_policy_and_project_ownership_suppress_fast_preferences() {
         let w = Workspace::new();
@@ -3432,7 +3432,7 @@ mod tests {
         assert_eq!(directory.owner, format!("{}:fastMode", text(&local)));
     }
 
-    // Ported from fast.test.ts: "Codex legacy/named profiles and project selection stay advisory; local requirements can block premium".
+    // Codex legacy/named profiles and project selection stay advisory; local requirements can block premium.
     #[test]
     fn codex_named_profiles_stay_advisory_and_requirements_block_premium() {
         let w = Workspace::new();
@@ -3479,7 +3479,7 @@ mod tests {
         assert_eq!(error.message, "invalid required speed feature");
     }
 
-    // Ported from the discovery half of fast.test.ts: "known distinct project controls get separate cards and nearest Codex scope remains advisory owner".
+    // Known distinct project controls get separate cards and nearest Codex scope remains advisory owner.
     #[test]
     fn nearest_codex_project_scope_owns_speed() {
         let w = Workspace::new();
@@ -3514,7 +3514,7 @@ mod tests {
         assert_eq!(directory.replacement, profile.speed.unwrap().replacement);
     }
 
-    // Ported from the discovery half of reader.test.ts: "a custom ANTHROPIC_BASE_URL proxy is priced as the public Anthropic API".
+    // A custom ANTHROPIC_BASE_URL proxy is priced as the public Anthropic API.
     #[test]
     fn an_answered_billing_sets_only_an_unset_main_ttl_on_the_anthropic_api() {
         let w = Workspace::new();
@@ -4296,7 +4296,7 @@ mod tests {
         assert!(settled(&[&plain, &off]).ttl.main.varies);
     }
 
-    // Ported from the discovery half of idle.test.ts: "native informational notices are the only parsed idle attribution; project owners and threshold floor resolve".
+    // Native informational notices are the only parsed idle attribution; project owners and threshold floor resolve.
     #[test]
     fn project_owners_and_threshold_floor_resolve_at_recorded_directories() {
         let w = Workspace::new();

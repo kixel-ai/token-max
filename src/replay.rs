@@ -5,7 +5,7 @@ use crate::collections::{HashMap, HashSet, IndexMap, IndexSet};
 use crate::background::{BackgroundInput, background_checks};
 use crate::bash::{BashInput, bash_checks};
 use crate::cache::{CacheBoundaries, observed_ttl};
-use crate::compaction::{CompactionOptions, compaction_checks, js_number, skipped_lines};
+use crate::compaction::{CompactionOptions, compaction_checks, skipped_lines};
 use crate::context::{ContextInput, context_costs};
 use crate::discovery::{TTL_BILLING_UNKNOWN, TTL_PLAN_DEFAULT};
 use crate::estimates::estimate_usage;
@@ -30,6 +30,10 @@ use crate::safe::{ScanError, identity, iso};
 use crate::scenarios::{
     AttemptScenario, ReplayOptions, ReplayTtls, ReplayedPart, cache_bucket, replay_parts,
 };
+use crate::version::claude_at_least;
+
+/// The v2.1 patch release that added TTL controls.
+const TTL_CONTROLS_PATCH: u64 = 242;
 
 const TTL_SOURCE: &str = "https://code.claude.com/docs/en/prompt-caching (2026-11-07)";
 
@@ -37,26 +41,7 @@ fn in_bucket(r: &Request, p: &BillingPart, selected: Bucket) -> bool {
     cache_bucket(r, p).is_none_or(|b| b == selected)
 }
 
-/// Whether a Claude client version has TTL controls (v2.1.242 or later), read as JavaScript
-/// `Number` integers.
-fn version_supported(version: Option<&str>) -> bool {
-    let Some(version) = version else {
-        return false;
-    };
-    let parts: Vec<Option<f64>> = version.split('.').map(js_number).collect();
-    let [Some(major), Some(minor), Some(patch)] = parts[..] else {
-        return false;
-    };
-    if [major, minor, patch]
-        .iter()
-        .any(|v| !v.is_finite() || v.fract() != 0.0)
-    {
-        return false;
-    }
-    major > 2.0 || (major == 2.0 && (minor > 1.0 || (minor == 1.0 && patch >= 242.0)))
-}
-
-/// JavaScript's `toFixed(1)`, which rounds exact binary halves away from zero.
+/// One decimal place, rounding exact binary halves away from zero.
 fn to_fixed1(value: f64) -> String {
     // An exact tie at one decimal is an odd multiple of 1/4; Rust would round it to even.
     let quarters = value.abs() * 4.0;
@@ -709,7 +694,10 @@ fn ttl_check(
         .filter(|id| requests.iter().any(|r| r.profiles.contains(id)))
         .map(|id| latest(&relevant, id).or_else(|| latest(requests, id)))
         .collect();
-    let supported = !versions.is_empty() && versions.into_iter().all(version_supported);
+    let supported = !versions.is_empty()
+        && versions
+            .into_iter()
+            .all(|v| claude_at_least(v, 1, TTL_CONTROLS_PATCH));
     // An unset main TTL varies with billing, so pinning the replay's winner is a change either way.
     let pinnable = current.value.is_none() && current.reason == TTL_BILLING_UNKNOWN;
     let applies = supported && (current.value.is_some() || pinnable);
@@ -905,7 +893,7 @@ pub fn analyze(options: AnalyzeOptions) -> Result<Report, ScanError> {
     let mut groups: IndexMap<String, Vec<&Request>> = IndexMap::default();
     for r in &scan.requests {
         let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
-        // JavaScript's default sort compares UTF-16 code units.
+        // Profiles sort by UTF-16 code units.
         profiles.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         groups.entry(profiles.join(":")).or_default().push(r);
     }
@@ -2742,15 +2730,7 @@ mod tests {
     }
 
     #[test]
-    fn versions_and_fixed_decimals_follow_javascript() {
-        assert!(version_supported(Some("2.1.242")));
-        assert!(version_supported(Some("3.0.0")));
-        assert!(version_supported(Some("2.1.0x100")));
-        assert!(!version_supported(Some("2.1.241")));
-        assert!(!version_supported(Some("2.1")));
-        assert!(!version_supported(Some("2.1.242a")));
-        assert!(!version_supported(Some("2.1.242.5")));
-        assert!(!version_supported(None));
+    fn fixed_decimals_follow_javascript() {
         assert_eq!(to_fixed1(0.25), "0.3");
         assert_eq!(to_fixed1(-0.25), "-0.3");
         assert_eq!(to_fixed1(0.35), "0.3");

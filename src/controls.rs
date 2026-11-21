@@ -51,13 +51,14 @@ pub(crate) fn members(value: Option<&Value>) -> &Map<String, Value> {
     object(value.unwrap_or(&Value::Null))
 }
 
-/// A number that JavaScript's `Number.isSafeInteger` accepts, including integral floats.
+/// An integral number, float or not, of magnitude at most 2^53 - 1.
 fn safe_integer(value: &Value) -> Option<i64> {
     let n = value.as_f64()?;
     (n.fract() == 0.0 && n.abs() <= MAX_SAFE_INTEGER as f64).then_some(n as i64)
 }
 
-/// JavaScript's `String(value)`, where `None` is `undefined`.
+/// A value as text: absent is "undefined", arrays join with commas and nulls in them as empty,
+/// objects are "[object Object]".
 pub(crate) fn js_string(value: Option<&Value>) -> String {
     match value {
         None => "undefined".into(),
@@ -2436,7 +2437,7 @@ mod tests {
         );
     }
 
-    // Ported from compaction.test.ts: "effective per-model controls honor managed scope, environment ownership and dated IDs".
+    // Effective per-model controls honor managed scope, environment ownership and dated IDs.
     #[test]
     fn per_model_controls_honor_managed_scope_environment_and_dated_ids() {
         let user = map(json!({
@@ -2486,7 +2487,7 @@ mod tests {
         assert_eq!(&*error.location.unwrap().file, "managed.json");
     }
 
-    // Ported from compaction.test.ts: "bracketed Claude model controls scan safely and unresolved aliases stay advisory".
+    // Bracketed Claude model controls scan safely and unresolved aliases stay advisory.
     #[test]
     fn bracketed_model_controls_and_unresolved_aliases() {
         let user = map(json!({
@@ -2646,7 +2647,7 @@ mod tests {
         assert!(!codex_premium_model("gpt-6.1-sol-2026-1-02", false));
     }
 
-    // Ported from fast.test.ts: "Claude disabling controls and unsupported models suppress saved fast preferences, with exact owners".
+    // Claude disabling controls and unsupported models suppress saved fast preferences, with exact owners.
     #[test]
     fn claude_disabling_controls_suppress_saved_fast_preferences() {
         let c = json!({ "model": "claude-opus-5-5", "fastMode": true });
@@ -2729,7 +2730,7 @@ mod tests {
         );
     }
 
-    // Ported from fast.test.ts: "Codex gates are independent, support ultrafast and keep unsupported tiers unknown".
+    // Codex gates are independent, support ultrafast and keep unsupported tiers unknown.
     #[test]
     fn codex_gates_are_independent_and_unsupported_tiers_stay_unknown() {
         let codex = |config: Value| speed(Harness::Codex, config, json!({}), &[]);
@@ -2783,7 +2784,7 @@ mod tests {
         );
     }
 
-    // Ported from fast.test.ts: "invalid speed controls name the effective source file including Windows drive letters".
+    // Invalid speed controls name the effective source file including Windows drive letters.
     #[test]
     fn invalid_speed_controls_name_the_effective_source_file() {
         let system = Map::new();

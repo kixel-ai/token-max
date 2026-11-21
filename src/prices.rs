@@ -255,7 +255,7 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     }
     tiers.sort_by(|a, b| a.size.partial_cmp(&b.size).expect("finite tier sizes"));
     let legacy = match fields.get("context_over_200k") {
-        // JavaScript truthiness decides whether a legacy tier field is present.
+        // A legacy tier field counts only when set: not null, false, zero or an empty string.
         Some(value) if truthy(Some(value)) => Some(rates(value)?),
         _ => None,
     };
@@ -2160,7 +2160,7 @@ mod tests {
         );
     }
 
-    // Ported from fast.test.ts: "OpenAI fast and ultrafast API repricing preserves long context and billed write lifetimes".
+    // OpenAI fast and ultrafast API repricing preserves long context and billed write lifetimes.
     #[test]
     fn openai_fast_and_ultrafast_repricing_preserves_long_context_and_billed_write_lifetimes() {
         let catalog = prices();
@@ -2324,7 +2324,7 @@ mod tests {
         }
     }
 
-    // Ported from fast.test.ts: "plain GPT-5.6 alias has verified fast rates without substituting catalog model prices".
+    // Plain GPT-5.6 alias has verified fast rates without substituting catalog model prices.
     #[test]
     fn plain_gpt_5_6_alias_has_verified_fast_rates_without_substituting_catalog_prices() {
         let mut c = prices();

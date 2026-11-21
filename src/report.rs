@@ -49,7 +49,7 @@ pub struct Host<'a> {
 
 const DAY: f64 = 86_400_000.0;
 
-/// JavaScript's `Number.prototype.toString`.
+/// Shortest round-trip digits, with `NaN`, `Infinity` and `-Infinity` for non-finite values.
 fn js_number(value: f64) -> String {
     match serde_json::Number::from_f64(value) {
         Some(n) => crate::exposure::number(&n),
@@ -59,7 +59,7 @@ fn js_number(value: f64) -> String {
     }
 }
 
-/// JavaScript's `Math.round`: halves round up, toward positive infinity.
+/// Round to the nearest integer, halves toward positive infinity.
 fn js_round(value: f64) -> f64 {
     let floor = value.floor();
     if value - floor >= 0.5 {
@@ -69,13 +69,13 @@ fn js_round(value: f64) -> f64 {
     }
 }
 
-/// JavaScript's `toFixed(2)` for a non-negative value, which rounds exact binary halves up.
+/// Two decimal places for a non-negative value, rounding exact binary halves up.
 fn to_fixed2(value: f64) -> String {
     if !value.is_finite() || value >= 1e21 {
         return js_number(value);
     }
     // A value whose exact binary expansion ends in a half cent is an odd multiple
-    // of 1/8. Rust rounds those to even; JavaScript picks the larger.
+    // of 1/8. Rust rounds those to even; this picks the larger.
     let eighths = value * 8.0;
     if eighths.fract() == 0.0 && eighths % 2.0 == 1.0 {
         let cents = (value * 100.0).floor() as u64 + 1;
@@ -139,7 +139,7 @@ fn approx_estimate(value: Option<Estimate>) -> String {
     value.map_or_else(|| "unknown".into(), |e| approx_usd(e.usd, e.margin))
 }
 
-/// A whole number grouped like `toLocaleString("en-US")`.
+/// A whole number with commas between groups of three digits.
 fn count(value: impl Into<i128>) -> String {
     let value = value.into();
     let digits = value.unsigned_abs().to_string();
@@ -7228,7 +7228,7 @@ mod tests {
 
     #[test]
     fn numbers_format_like_javascript() {
-        // toFixed rounds exact binary halves up; Rust's formatter rounds them to even.
+        // Exact binary halves round up, where Rust's formatter rounds them to even.
         assert_eq!(usd(0.125), "$0.13");
         assert_eq!(usd(0.625), "$0.63");
         assert_eq!(usd(2.675), "$2.67");

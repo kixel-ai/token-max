@@ -48,10 +48,11 @@ Against the maintainer's current settings, the changes doctor still offers save
 ~$781/mo. Their settings already save ~$4,452/mo against the defaults, as each
 report's "Compared with defaults" line gives it: the 1h caches the plan
 profiles set, less the small cost of the 1h subagent cache on the usage
-credits profiles.
+credits profiles. Each figure adds up changes measured one at a time against
+a different baseline, so together they need not equal the ~$5,653/mo above.
 
-doctor asked how each Claude profile pays, and each answer came from the
-profile's account (`oauthAccount.billingType` in its `.claude.json`): every
+doctor asked how each Claude profile pays, and the maintainer answered from
+the profile's account (`oauthAccount.billingType` in its `.claude.json`): every
 machine's `~/.claude` is on a plan, and the usage credits profiles, plus an
 archived profile with no account, were answered as API. Every offered change
 was declined, and no settings file changed.
@@ -71,7 +72,7 @@ The plan profiles' subagent line is now priced, so its ~$3,940/mo is in the
 savings above. The previous snapshot left it out as "not enough evidence": T3
 Code shares those profiles' histories, and doctor could not tell whether a T3
 session ran under the profile's setting. It now reads the shared settings file
-for the controls T3 leaves alone. [How context is priced](reference.md#how-context-is-priced)
+for the controls T3 leaves alone. [T3 Code](reference.md#t3-code)
 describes the rule. On the usage credits profiles, whose main agent gets 5m
 unless set, 1h is the ~$518/mo in the savings; on their few subagent requests
 5m was cheaper, by ~$3.63 over the window.

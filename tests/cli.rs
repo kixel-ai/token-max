@@ -730,7 +730,7 @@ fn sessions_prints_one_json_line_per_session_and_only_takes_its_options() {
     assert!(help.contains("\n  sessions "), "{help}");
 }
 
-/// Floats print as JavaScript prints them: integers without a fraction, no `1.0`.
+/// Floats print in shortest form: integers without a fraction, no `1.0`.
 #[test]
 fn session_numbers_print_like_javascript() {
     let w = Workspace::new();
@@ -999,7 +999,7 @@ fn a_relocated_binary_runs_from_any_directory_with_relative_paths() {
     assert!(!stderr.contains("SYNTHETIC_PRIVATE"));
 }
 
-// Ported from fast.test.ts: "built CLI warns from current settings alone, remains read-only and skips unreadable lines".
+// Built CLI warns from current settings alone, remains read-only and skips unreadable lines.
 #[test]
 fn warns_from_current_fast_settings_alone_stays_read_only_and_skips_unreadable_lines() {
     let w = Workspace::new();

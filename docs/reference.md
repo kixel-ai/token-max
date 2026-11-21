@@ -48,12 +48,12 @@ once, as a diff. A change whose saving was not measured, such as raising an
 effort, comes after the measured ones and says so.
 
 A change saving $5/mo or more is its own question. A smaller one joins a group
-of its kind and reason: never used, no use recorded where the window cannot
-rule one out, over `--max-cost-per-use` per use, or a redundant copy of a
-Codex catalog skill whose most-used copy stays, such as never-used skills
-or MCP servers over $1 per use. Each reason is its own group, so one yes never
-covers a feature in use. A group is one question ranked by its combined saving,
-which names every member and takes `y` for all, `n` for none or `o` to go
+of its kind and reason, such as never-used skills or MCP servers over $1 per
+use. The reasons are never used, no use recorded where the window cannot rule
+one out, over `--max-cost-per-use` per use, and a redundant copy of a Codex
+catalog skill whose most-used copy stays. Each reason is its own group, so a yes to
+never-used features never also removes one in use. A group is one question ranked by its combined saving,
+which names every member and takes `y` for all, `n` for none, `q` to quit or `o` to go
 through them one at a time; a group of one is asked as that change. Features
 whose savings were not measured, such as Codex catalog skills, are grouped the
 same way after the measured questions. A group saving under $1/mo in total,
@@ -299,7 +299,7 @@ changes it, and the list ends with the source:
 | --- | --- |
 | Main-agent prompt cache TTL, while unset | Claude Code [requests 1h](https://code.claude.com/docs/en/prompt-caching#which-ttl-each-request-gets) for the main conversation on a Claude plan within its included usage, and 5m once usage credits or an API key pay for it. When `doctor` asked how the profile pays, the line shows that default, such as `1h (default)`, and prices against it alone. Otherwise token-max can't tell which applies, so the line shows `unset` and names both. When the replay picks a winner, setting it is the cheaper choice either way, so the line recommends `unset -> 1h` (or `5m`) and `doctor` offers to set it; it shows the replay's gap as "saves up to", saved only while the other default would apply. |
 | Claude fast mode | A Claude plan [pays fast mode only from usage credits](https://code.claude.com/docs/en/fast-mode#requirements), at its API rates, even with plan usage left. |
-| Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is 2x for Fast on GPT-6 and GPT-5.6 and 6x for Ultrafast, so included usage can draw faster than it shows. |
+| Codex fast mode | A ChatGPT plan [counts Fast at 2.5x and Ultrafast at 8x](https://learn.chatgpt.com/docs/pricing) standard against included usage, and 2x and 6x on credits. The API premium priced is the [documented API rate](semantics.md#speed-controls-and-premiums), which can be lower, so included usage can draw faster than it shows. |
 | Prompt suggestions | Claude Code [skips them](https://code.claude.com/docs/en/costs#background-token-usage) while a plan is near its usage limit, which the estimate, run on every eligible turn, cannot see. |
 | Fable weekly use | Anthropic [caps Fable models](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan) at up to half the weekly usage limit on Max, Ultra and Team and seat-based Enterprise premium seats, drawing it faster than other models, runs them on usage credits on Pro and Team and seat-based Enterprise standard seats, and bills them at API rates on usage-based Enterprise. The line shows weekly API-price spend and no share of the cap, as [Fable weekly use](#fable-weekly-use) explains. |
 | Codex compaction window and keepalive pings | ChatGPT credits [charge cache writes as ordinary input](https://learn.chatgpt.com/docs/pricing), while API prices from GPT-5.6 on charge 1.25x for a 30-minute write, so a replay that trades writes for reads can come out differently on credits. |
@@ -386,11 +386,12 @@ The kinds of claim are:
   keepalive pings, background generation, tool output caps, and every tool,
   skill and MCP server, with subagent types and context no setting turns off.
 - **Official**: the provider's own guidance beside what the transcripts show:
-  CLAUDE.md length and the AGENTS.md byte budget, MCP tool loading, and
-  Fable's weekly use beside the plan rule. A Claude
+  CLAUDE.md length and the AGENTS.md byte budget, MCP tool loading,
+  main-session effort, and Fable's weekly use beside the plan rule. A Claude
   subagent type's evidence also cites Anthropic's model guide.
 - **Opinion**: the maintainer's preference, beside whatever was measured: fast
-  mode off and auto memory off.
+  mode off, auto memory off, raising a `low` effort, and lowering a Codex
+  `max` effort.
 
 The lines come in two groups. **Changes** come first: every line recommended
 (red, exit 1) or worth considering (yellow, exit 0), ranked together by what
@@ -705,8 +706,7 @@ the verdict in its color, the saving green, and labels dim. `NO_COLOR`
 disables color, and `--plain` also disables decorative Unicode, and either
 puts the verdict word back in place of the dot. Evidence cards keep their
 verdict words and only add color, and each names its claim. Redirected output
-is plain, and progress appears only on interactive stderr. SIGINT or SIGTERM ends
-with exit 2 and no success report.
+is plain, and progress appears only on interactive stderr.
 Unicode decorations require a UTF-8 locale. Progress is one line that shows each
 phase in turn, never an invented percent, and clears itself before the report.
 
@@ -718,9 +718,10 @@ as the session export below.
 
 IDs in the report are opaque hashes. Shared histories are read once, and a
 request whose profile is ambiguous counts once on the line its profiles share
-(see [Profiles](#profiles)). Independent check savings must not be summed; the
-walk's running total and the [savings against the defaults](#savings-against-the-defaults)
-are the only sums, and each says that overlapping settings may save less.
+(see [Profiles](#profiles)). Independent check savings must not be summed;
+every total the report gives, such as the walk's running total or the
+[savings against the defaults](#savings-against-the-defaults), says that
+overlapping changes may save less.
 
 ## Session export
 
@@ -806,8 +807,9 @@ charges can still be compared.
 
 ## Compaction window
 
-Compaction-window comparisons run after the recommended TTLs and use the current
-window as their baseline. Claude controls resolve environment overrides,
+Compaction-window comparisons run after the TTL changes `doctor` recommends, as
+keepalive and idle comparisons do, so an advisory TTL is not applied; they use
+the current window as their baseline. Claude controls resolve environment overrides,
 managed and user settings, including `modelSettings.<model>.autoCompactWindow`;
 Codex uses `model_auto_compact_token_limit`. An unset Claude window uses each
 model's latest observed automatic-compaction trigger, else Claude Code's
@@ -987,7 +989,7 @@ connection that then runs the audit:
   runs the first installed `token-max` whose `--version` matches, on the
   non-interactive `PATH`, then in the release installers' directory (the
   first of `$XDG_BIN_HOME`, `$XDG_DATA_HOME/../bin` and `~/.local/bin`),
-  then in `~/.cargo/bin`. With neither, the destination downloads the
+  then in `$CARGO_HOME/bin` (default `~/.cargo/bin`). With neither, the destination downloads the
   release from GitHub and checks it against its published checksum, which
   needs `curl`, `tar` and `xz` there. Matching the version is not matching
   the build, so a destination whose build differs from this one fails,
@@ -1020,9 +1022,8 @@ too small. Any failed
 host, connection or stream before the reports are printed fails the whole run
 with exit 2 and no report, and Ctrl-C then stops every destination. After
 the reports, a failure during the walk, a Ctrl-C during its questions, or a
-Ctrl-C after the yes that leaves a host unwritten also exits 2, as
-[On SSH hosts](#on-ssh-hosts) describes. On a terminal, `doctor` walks through every
-host's changes and writes each on its own host, as
+Ctrl-C after the yes that leaves a host unwritten also exits 2. On a terminal,
+`doctor` walks through every host's changes and writes each on its own host, as
 [On SSH hosts](#on-ssh-hosts) describes. Each host's percents
 are of that host's own spend, and the total's of the hosts' spend together.
 
@@ -1031,8 +1032,9 @@ are of that host's own spend, and the total's of the hosts' spend together.
 The `keepalive` check asks whether pinging an idle session just under its cache
 lifetime would cost less than the cache misses it avoids. It compares leaving
 sessions idle, Claude idle compaction where that check recommends it, and
-pinging for each cap on how long to keep going. Claude uses the recommended
-main TTL; Codex uses the documented 30-minute lifetime of models that bill cache
+pinging for each cap on how long to keep going. Claude uses the main TTL `doctor`
+recommends changing to, else the current one, else the one the latest main-agent
+request wrote; an advisory TTL is not applied. Codex uses the documented 30-minute lifetime of models that bill cache
 writes. Each cap replays the entire session with the same recommended compaction
 window as the idle alternative, carrying ping context and cache warmth forward. A ping is the median recorded request, and a session that never came
 back pings for the whole cap, since transcripts do not record when a client
@@ -1050,8 +1052,8 @@ activity, and their metadata does not establish whether they are keepalive pings
 The maintainer's cost preference is fast mode off for both harnesses. The
 `fast-mode` check names the current effective local preference, its owner and
 the standard-speed replacement: Claude `fastMode: false`, or Codex
-`service_tier = "default"`. Use `/fast off` for an active session. No settings
-are edited. A justified current premium preference causes exit 1 even without
+`service_tier = "default"`, which `doctor` offers to make when the profile's
+own file owns the setting. Use `/fast off` for an active session. A justified current premium preference causes exit 1 even without
 historical usage or prices. Standard current settings never receive a change
 because of historical premium sessions.
 

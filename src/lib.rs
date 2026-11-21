@@ -38,6 +38,7 @@ mod t3;
 mod terminal;
 mod totals;
 mod unreadable;
+mod version;
 mod wire;
 
 #[cfg(test)]

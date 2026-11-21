@@ -26,9 +26,9 @@ The report counts skipped lines, and `--details` the files with a deferred final
 
 Records whose timestamp proves they precede `--since` stay outside selected
 billing and usage coverage. Claude requests and compaction boundaries are retained
-separately in `scan.cacheContext` for predecessor, bracket and summary-link evidence,
+separately in `Scan.cache_context` for predecessor, bracket and summary-link evidence,
 and user prompts for per-session thresholds such as a recap's three turns.
-`scan.since` records the billing selection; checks inherit it, and a comparison
+`Scan.since` records the billing selection; checks inherit it, and a comparison
 cannot expand an already filtered scan to an earlier billing window.
 Invalid pre-window usage becomes an unknown cache state, never a billed estimate or
 silently discarded attempt; it does not fail selected billing validation. Selected
@@ -100,8 +100,8 @@ shared history stay unknown. Historical spend is never assigned to all aliases.
 
 OpenAI input includes cached reads and writes; output includes reasoning. On
 GPT-5.6 and later GPT families, recorded writes replace ordinary input at total
-rates of 1.25x for 30m and 2.5x for Responses-only 12h. Missing write counters stay
-unknown. An unsplit recorded write count uses an explicit default-30m assumption;
+rates of 1.25x for 30m and 2.5x for Responses-only 12h. Missing write counters, or a split
+that names only one lifetime, stay unknown. An unsplit recorded write count uses an explicit default-30m assumption;
 12h attribution is unknown, not derived from the catalog's single write field.
 Earlier GPT models have no additional write charge. ChatGPT credits charge no
 separate cache write ([Codex pricing](https://learn.chatgpt.com/docs/pricing),
@@ -109,8 +109,8 @@ checked 2026-11-14); replays keep the API write rate, and Codex compaction and
 keepalive lines say so. The
 [OpenAI caching guide](https://developers.openai.com/api/docs/guides/prompt-caching),
 checked 2026-11-07, documents the subset and lifetime rules. For catalog entries
-with the legacy `context_over_200k` field, supported GPT-5.4/5.5/5.6 and GPT-6 models
-use the documented 272,000-input threshold, including reads and writes. A
+with the legacy `context_over_200k` field, the GPT models `threshold` in
+`src/prices.rs` lists use the documented 272,000-input threshold, including reads and writes. A
 contradictory explicit tier fails pricing. The full request is repriced when a
 counterfactual crosses a tier. See [OpenAI pricing](https://developers.openai.com/api/docs/pricing).
 
@@ -120,7 +120,7 @@ one-hour writes derive the documented 2x ordinary-input rate. US inference uses
 the documented 1.1x multiplier. Supported fast Opus rates use the documented 2x
 factor across the full context window; other speed/tier combinations remain
 unknown. Absent geography and the older `not_available` sentinel use the labelled
-global API-equivalent assumption, without claiming an observed region. Server web search adds its public per-search fee. Web fetch has no extra
+global API-equivalent assumption, without claiming an observed region. Server web search adds its public per-search fee on the Anthropic provider; elsewhere the fee is unknown, so the request is unpriced. Web fetch has no extra
 fee. Code-execution charges remain unknown without runtime, tool version, and
 free-allowance evidence. Client-side calls add no separate server-tool charge.
 These rules and Haiku 5.5's 100,000-input threshold are from
@@ -233,8 +233,9 @@ the selected window. Sensitivity does not veto the aggregate estimate. Unsupport
 remain unknown and block only their affected comparison. No attempt is silently
 excluded or assigned observed zero billing.
 
-Current TTL resolution follows force-5m, bucket environment, bucket setting,
-enable-1h, then defaults. Shell overrides apply only to the active config root;
+Current TTL resolution follows disabled caching (no TTL), force-5m, bucket
+environment, bucket setting, enable-1h, then defaults: 5m for subagents, and for
+a main bucket on Bedrock, Vertex or Foundry. Shell overrides apply only to the active config root;
 each profile's settings environment is read separately. Whether a main request
 is within a Claude plan's included usage or paid by usage credits is not
 inferred from credential files, so its unset default is unknown, and the line
@@ -332,7 +333,7 @@ value and the capped window. A capped user or managed global window is owned by
 the model's `modelSettings` row, the only setting that changes it alone; a
 capped environment or T3 window applies to every model, so it stays advisory.
 Either owner then names what caps it, the variable and value or the cap itself.
-Per-model controls require v2.1.288; environment suffixes require
+Window controls require v2.1.288; environment suffixes (`k`, `m`) require
 v2.1.304. Project, launch and per-agent overrides remain an explicit limitation of
 the observed-file analysis. See [Claude model configuration](https://code.claude.com/docs/en/model-config#context-window-and-auto-compaction)
 and [settings reference](https://code.claude.com/docs/en/settings-reference#modelsettings),
@@ -401,8 +402,8 @@ compaction on/off policy is evaluated afterward as described below.
 `idle-compaction` compares on/off at current TTL/window settings and again after
 applicable TTL/window changes. Each owning idle toggle gets an aggregate delta,
 on cost minus off cost, across request gaps and final observation periods.
-Negative favors on, positive favors off, and exact zero retains the current
-value. Only the latter configuration decides the toggle. Independent savings
+Negative favors on, positive favors off, and exact zero is evidence for
+neither, so the line stays advisory. Only the latter configuration decides the toggle. Independent savings
 are not additive. Dollars are API-price equivalents, not invoices.
 
 Current idle controls resolve user, project, local and managed settings, with
@@ -516,8 +517,8 @@ include summary-only final periods.
 ## Keepalive pings
 
 `keepalive` replays each session sequentially for no pings and every candidate
-cap. Pings fire every five sixths of the cache lifetime after a main request:
-50 minutes under a 1h TTL, below the estimated native idle-compaction trigger at
+cap. Pings fire every five sixths of the cache lifetime after a main request,
+such as 50 minutes under a 1h TTL, below the estimated native idle-compaction trigger at
 54 minutes, and 25 minutes under Codex's documented 30-minute minimum. Each ping
 uses the preceding main request's pricing metadata, reads its accumulated context,
 and adds a prompt and reply. Prompt size is the median growth between compatible
@@ -556,8 +557,9 @@ by final pings are included in their cost and removed in the closed sensitivity.
 Codex periods are priced only for models with billed 30-minute writes, whose
 lifetime is documented and refreshed by reads
 ([OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching),
-checked 2026-11-08). Recorded uniform 12-hour writes keep their actual write
-rate and long coverage; a 30-minute ping preserves that existing expiry.
+checked 2026-11-08). Codex pings every 25 minutes whatever the write lifetime. Recorded uniform
+12-hour writes keep their actual write rate and long coverage, and the ping
+merely preserves that existing expiry.
 Mixed write lifetimes leave prefix geometry unresolved. Older models' retention
 is a range. Every cap compares the
 same fully priced sessions, and every dollar figure is extrapolated from them to
@@ -574,7 +576,7 @@ Neither harness has a native mechanism for capped idle pings.
 
 ## Shared component measurements
 
-`scan.exposure` adds historical component revisions, request views, and invocation
+`Scan.exposure` adds historical component revisions, request views, and invocation
 evidence. Components retain Unicode
 character counts, opaque identities and fingerprints, source locations, one
 owner (`skills` or `context`), and a server/namespace attribution key, or a plugin key where the record explicitly
@@ -605,7 +607,7 @@ inherited; conflicting copied histories leave exposure unknown. Current effectiv
 enablement remains separately unresolved. No installed/current file size is used
 to establish historical exposure.
 
-`report.exposure` publishes empirical calibration samples only for linked,
+`Report.exposure` publishes empirical calibration samples only for linked,
 measured, single-part, complete text-only inputs with a matching request/response
 model, grouped by harness, model and provider. Claude requests that record a
 shape and only known text message blobs are complete. A blob holding an image,
@@ -619,7 +621,7 @@ primitive. Without matching calibration, output keeps characters and unknown
 tokens/dollars. Images, opaque blocks, deferred definitions, digest-only requests,
 and multi-iteration totals cannot calibrate partial text.
 
-`report.context` prices each piece of recurring context. Claude requests
+`Report.context` prices each piece of recurring context. Claude requests
 with a recorded `api-request-shape` or full parameters qualify: tool
 definitions, then the system prompt, lead the prompt in recorded order. Codex
 requests qualify through their candidate `world_state` and `additional_tools`
@@ -645,7 +647,7 @@ falls in the same cache slot; otherwise it stays unpriced for that request. A
 row with any unpriced piece in a request, such as an MCP server whose tool is
 priced but whose instructions are not, is unpriced for that request. Each piece's calibrated
 tokens are charged at the slot they fall in: cached reads, then 1h writes, then
-5m writes, then ordinary input, at the request's model, provider and context
+5m writes (for Codex, its recorded 30m or 12h writes), then ordinary input, at the request's model, provider and context
 tier. A request whose calibrated pieces exceed its recorded input is left
 unpriced rather than clipped. A piece's cost covers priced requests only; its
 estimate scales that to every request that carried the piece and is unknown
@@ -658,8 +660,8 @@ shares conserve the aggregate's priced charge without charging it twice.
 Each row scales only its own priced observations; estimates for changing
 membership can have different coverage and must not be summed as a catalog
 counterfactual.
-MCP tools group by server. Each server also has `details`: `mcp-tool` rows
-for individually recorded tool schemas and `mcp-discovery` rows for recorded
+MCP tools group by server. Each server also has `details`: `ContextKind::McpTool` rows
+for individually recorded tool schemas and `ContextKind::McpDiscovery` rows for recorded
 discovery text. Each schema occupies its input position once, while its charge
 also credits the server total. Parent coverage remains unpriced for a request
 with any opaque member even when some detail rows can be priced. Tool calls
@@ -677,7 +679,7 @@ session has no request, and count on every row that shares a settings file with
 them. A request no selected profile owns, such as one of a T3 instance removed from
 settings, has no setting to change and prices no row; it stays in the bill.
 
-Tool results are `tool-output` rows, one per tool and one per MCP server. A
+Tool results are `ContextKind::ToolOutput` rows, one per tool and one per MCP server. A
 result stays in the conversation until it compacts: output the previous request
 held is carried, and output beyond it is new, under the bounds above. A result
 that is not plain text, such as an image, leaves its row unpriced for that
@@ -723,17 +725,17 @@ transcript files. A copy cannot say which profile made a call, so it counts for
 every row of its tool that shares a profile with it; skill uses count only the
 model's Skill calls, since a hidden skill can still be typed, except where the
 switch removes the skill entirely, where typed requests count too. A piece still sent
-today with a positive cost and no recorded use is recommended off (`verdict:
-"off"`, exit 1), whatever the amount, when the first shaped request in the
+today with a positive cost and no recorded use is recommended off (`Verdict::Off`,
+exit 1), whatever the amount, when the first shaped request in the
 window of one of its profiles already carried it and none of its profiles'
 transcripts could hide a call to it. An unreadable line could if its bytes name the piece (see
 below), or if its transcript has a tool result whose id matches no parsed call,
 a sign that a record was cut off; so could a deferred line. One every profile
 first sent later, one whose profile's transcripts could hide a call, or a Codex catalog
-skill, whose uses are only partly recorded, gets `"consider"`, an advisory that exits
-0, since the window cannot rule out a use. A used piece whose `estimatedUsd`
-divided by its uses (`costPerUseUsd`) exceeds `maxCostPerUseUsd` (default $1,
-`--max-cost-per-use`) also gets `"consider"`; otherwise it is kept. The ratio
+skill, whose uses are only partly recorded, gets `Verdict::Consider`, an advisory that exits
+0, since the window cannot rule out a use. A used piece whose `estimated_usd`
+divided by its uses (`cost_per_use_usd`) exceeds `Report.max_cost_per_use_usd` (default $1,
+`--max-cost-per-use`) also gets `Verdict::Consider`; otherwise it is kept. The ratio
 does not depend on the window's length. A piece with no priced request or
 unresolved service-tier evidence gets no verdict. Duplicate Codex copies can
 still receive a path-based recommendation without dollars. The cost is gross: removing a piece leaves later
@@ -753,7 +755,7 @@ file, the reader also hashes every tool result id and call id in the parsed
 records and the whole `tool_use_id`, `call_id` and, for an output with no
 `call_id`, `id` values in unreadable lines; an id cut off inside its value is not
 read. Results whose id matches no parsed call, anywhere in the file and not only
-in the `--since` window, are `unmatchedResults`. Claude pairs `tool_use` blocks
+in the `--since` window, are `Unreadable.unmatched_results`. Claude pairs `tool_use` blocks
 with `tool_use_id`; Codex pairs `*_call` and `*_call_output` response items by
 `call_id`. The id evidence
 cannot name the cut call's feature, so a file with unreadable lines and any
@@ -778,7 +780,7 @@ never retained. Different paths sharing a name remain separate rows; repeated
 identical entries contribute all of their rendered characters to that path's
 row, with requests counted once. Replacing aliases also changes member identity.
 
-`context[].skill` publishes the resolved path, requested and loaded evidence,
+`ContextCost.skill` publishes the resolved path, requested and loaded evidence,
 ambiguous requests, duplicate entry count, and preferred retained path.
 `calls` counts distinct observed user turns per skill, coalescing requests and
 loads in that turn so they cannot inflate the cost-per-use denominator.
@@ -915,7 +917,7 @@ keep once it is off, and never exits 1: notes the agent writes for itself skip
 the review that checked-in `CLAUDE.md` or `AGENTS.md` gets, which encourages
 slop, so the maintainer advises it off whatever it cost, as an opinion. `--max-cost-per-use` does not
 apply. The check reports the total cost, the reads and writes, and the setting
-that turns it off; its `savingsUsd` is that total. Once memory is off, the line
+that turns it off; its `savings_usd` is that total. Once memory is off, the line
 still shows what it cost and how often it was used earlier in the window.
 Requests that recorded no context keep the memory files they were measured to
 read back, and are assumed to have loaded memory as often as those that did, so
@@ -942,7 +944,7 @@ unmeasured, and the check says how many did. Today's setting decides whether
 memory is on, as every other check reads today's settings. It is resolved at the
 working directory of the latest main-agent request, where the user worked most
 recently, including the project's `.claude/settings.json` and
-`.claude/settings.local.json`, so `offFile` names the file that owns it. Claude
+`.claude/settings.local.json`, so `off_file` names the file that owns it. Claude
 Code reads the setting when a session starts, so a session begun before a change
 keeps the old value until it restarts. When main-agent sessions in that
 directory disagree with the setting at their latest request with a recorded
@@ -960,11 +962,11 @@ request whose reply made the call, using that model's calibrated token ratio;
 writes without one stay unpriced rather than zero.
 
 [Codex](https://developers.openai.com/codex/memories) memories are off unless
-`features.memories = true`, or both `memories.use_memories = false` (which
+`features.memories = true`, and stay off when both `memories.use_memories = false` (which
 keeps them out of the prompt) and `memories.generate_memories = false` (which
 stops new ones) are set. With each full context Codex 0.167.0 adds a developer message part
 tagged `memories.instructions` holding `memory_summary.md`, split into several
-parts when long; earlier versions start it with `## Memory`. A full world
+parts when long, its first part starting `## Memory`. A full world
 state leaves it in context. Compaction rebuilds it: the summary in the
 `compacted` record's `replacement_history` takes its place, and without one it
 is gone. The settings decide whether memory is on, resolved like Claude Code's
@@ -985,8 +987,8 @@ extrapolated over, or leave the cost unknown, even with memories off now, since 
 while memories were on. A missing summary shows nothing, since it appears only once one has
 been written. Uses are
 the dedicated `memories` tools (`list`, `read` and `search` as reads,
-`add_ad_hoc_note` as a write priced like a Claude write, at the 4-characters-per-token
-rule of thumb) and shell reads under `<codex home>/memories/` or
+`add_ad_hoc_note` as a write priced like a Claude write, falling back to the
+4-characters-per-token rule of thumb without calibration) and shell reads under `<codex home>/memories/` or
 `memories_v2/`. Dedicated tool output moves to the memory row; shell output
 stays on the shell's row. Extraction and consolidation run as requests Codex
 records only in telemetry, so their cost is not measured: wherever memories may
@@ -1044,8 +1046,8 @@ response before the next user prompt, or the session's last response. Only
 interactive terminal turns count (`entrypoint` `cli`, `querySource`
 `repl_main_thread` or absent); SDK and desktop clients run suggestions only when
 they ask for them, which transcripts do not record, so those turns are counted
-in the uncertainty instead. A suggestion follows a turn with at least two
-responses whose last response sent and wrote at most 10,000 uncached tokens,
+in the uncertainty instead. A suggestion follows any turn after the session's first
+response when its last response sent and wrote at most 10,000 uncached tokens,
 the client's cold-cache cutoff. A recap follows a turn once the session has three
 user turns and the next prompt came at least three minutes later. Each later
 recap requires two new user turns after the preceding modeled recap. A final
@@ -1066,15 +1068,15 @@ live prefix refreshes it at response completion, which can keep a later recap
 warm. A recap that reads a live prefix refreshes it at the recap's start. When
 turning a feature off expires the prefix before the other feature or the next
 recorded request reads it, the extra ordinary recap input or cache rewrite is
-subtracted from the saving as `lostWarming`. Only reads
+subtracted from the saving as `lost_warming`. Only reads
 on the same model, speed and provider count, up to the prefix the recap read. Turns without
 recorded usage are scaled from the priced ones, and with none priced the check
 is unknown.
 
 Uses (an accepted suggestion, a read recap) are not recorded, so nonuse is never
 proven and the check never recommends a change: a feature that cost more than
-`--max-cost-per-use` over the window is worth considering off (`action:
-"advisory"`, exit 0), and one that cost less is kept, since it cannot have cost
+`--max-cost-per-use` over the window is worth considering off (`Action::Advisory`,
+exit 0), and one that cost less is kept, since it cannot have cost
 more than that per use. Goal check-ins start ordinary-looking task
 notification turns and Codex does not record automatic recaps, so both report an
 unknown cost and stay advisory. Each line names where to turn the feature off:
@@ -1089,14 +1091,14 @@ checked 2026-11-08.
 
 ## Speed controls and premiums
 
-`checks` includes the `fast-mode` variant, using the same report, rendering,
+`Report.checks` includes the `CheckResult::Speed` variant, using the same report, rendering,
 evidence, action and exit policy as the other checks. Its `current` and
 `recommended` values describe speed after known disabling controls;
-`replacement` names the owning setting syntax. `observed.premium` is the selected
+`replacement` names the owning setting syntax. `SpeedCheck.observed.premium` is the selected
 window's rate-only premium at present API rates, with known subtotal and unknown
-total kept separate. `currentEstimate.premium` applies the current effective
+total kept separate. `current_estimate.premium` applies the current effective
 speed preference to those tokens. Only the latter supplies this check's
-`savingsUsd` when it recommends a change. It is a rate-only comparison, not net
+`savings_usd` when it recommends a change. It is a rate-only comparison, not net
 of cache switching. A standard current preference keeps, regardless of old
 premium usage. No records means unknown dollars, not zero.
 
@@ -1111,7 +1113,7 @@ Its local system/user files and requirements are inspected. Legacy
 new `NAME.config.toml` files require an unobserved `--profile` selection. Those
 scopes and project trust/launch selection stay advisory when unresolved.
 
-Requested controls have their own `Request.requestedSpeed` metadata and never
+Requested controls have their own `Request.requested_speed` metadata and never
 populate billed `BillingPart.tier`/`speed`. In particular the native
 [Codex TokenUsageRecord schema](https://github.com/openai/codex/blob/main/codex-rs/protocol/src/protocol.rs)
 contains no billed tier. Native Codex historical premiums therefore remain
@@ -1122,9 +1124,10 @@ even where the general historical cost estimate labels a standard-speed
 assumption. Each sampling iteration keeps its own model and billing metadata.
 
 The [OpenAI API price table](https://developers.openai.com/api/docs/pricing),
-checked 2026-11-07, gives supported GPT-6 and GPT-5.6 fast rates at 2x standard,
-GPT-5.5 at 2.5x and GPT-5.4 at 2x below/equal 272K input. Verified ultrafast rates
-for GPT-6 Astra and GPT-6.1 Sol are 6x across their context tiers. Older or
+checked 2026-11-07, gives fast rates at 2x standard for GPT-6 and GPT-5.6 models,
+and GPT-5.5 at 2.5x and GPT-5.4 at 2x, each only at or below 272K input; ultrafast
+is 6x across context tiers. `premium_multiplier` in `src/prices.rs` lists the
+verified models. Older or
 unsupported combinations remain unknown. These API rates differ from
 a ChatGPT plan's multipliers, Fast at 2.5x and Ultrafast at 8x standard against
 included usage and 2x and 6x on credits
@@ -1215,8 +1218,9 @@ figures as they are, so it counts that history on each. Each host sends beside
 its report only its own sums, never its scan. The first failure, of a host or of loading
 prices, stops the run at once: every `ssh` process is killed and reaped, a
 destination stops when its stdin closes, and a partial price download is
-deleted. SIGINT and SIGTERM do the same before exiting 2. Each `ssh` client runs in
-its own process group, so the terminal's Ctrl-C reaches only the coordinator,
+deleted. SIGINT and SIGTERM, or Ctrl-C and Ctrl-Break on Windows, do the same
+before exiting 2. Each `ssh` client runs in its own process group, on Windows as
+well, so the terminal's Ctrl-C reaches only the coordinator,
 which stops the clients itself. After a walk's confirm, a signal closes every
 remaining SSH session. Only the destination that was already sent the write can
 still change its files: it no longer reads stdin, so the write it started may
@@ -1233,16 +1237,20 @@ form, and anything else, zero or negative falls back to the default (600000 ms
 maximum, 120000 ms default timeout). The effective cap is the larger of the two,
 so lowering only the maximum cannot override a larger default; the replacement
 names both when needed. Project and local settings are not read for this check.
+The recommended cap is 4 minutes under a 5m TTL and 55 minutes under 1h, leaving
+room for the starting request's output and the reply (`safe_cap` in
+`src/bash.rs`).
 
 The compared TTL is the main-agent TTL check's verdict when it has one, else the
 current `promptCacheTtl`, else the write lifetime of the latest selected
-main-agent request; with none, the check is advisory. Claude Code 2.1.319 moves
+main-agent request; with none, or when recorded projects set the main TTL
+differently, the check is advisory. Claude Code 2.1.319 moves
 commands in async subagents with a 5m cache to the background after 3 minutes
 on its own, so the subagent TTL does not set the cap.
 
 The reader keeps three facts per Claude `Bash` call in `StructuralEvent.shell`:
 `background` from `run_in_background`, `polls` when the command's words include
-`sleep`, `do` and a `while`, `until` or `for` loop, and `timedOut` when the
+`sleep`, `do` and a `while`, `until` or `for` loop, and `timed_out` when the
 result's `toolUseResult.timedOutAfterMs` is a number and the message holds one
 tool result. The command and its output are never retained. A wait runs from
 the request that started the call to its result. It is long when it reaches the
@@ -1285,10 +1293,10 @@ checked 2026-11-14, first match winning:
    A user-file top-level `effortLevel` is the older form, which Opus 5.5,
    Sonnet 5.5, Haiku 5.5 and Fable 5.2 ignore. Settings accept `low` to
    `xhigh`; any other value is an error.
-4. The model's default: `medium` for Fable 5.2, Opus 5.5, Sonnet 5.5 and
+4. The model's default (`claude_model` in `src/effort.rs`): `medium` for Fable 5.2, Opus 5.5, Sonnet 5.5 and
    Haiku 5.5, `xhigh` for Opus 4.7, `high` for the other models in the docs'
-   effort table. A model outside the table takes no level; an unknown model
-   leaves the line unknown.
+   effort table. Older models the table lists without effort support take no
+   level; a model it does not list leaves the line unknown.
 
 The level then runs at the highest level the model supports at or below it
 (`xhigh` runs as `high` on Opus 4.6 and Sonnet 4.6), lowered to the lowest
@@ -1344,7 +1352,8 @@ A run's model source follows Claude Code 2.1.322: the Agent call's `model`,
 then the agent definition's `model:`, then `CLAUDE_CODE_SUBAGENT_MODEL`, then
 the main model. `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` drops the call and definition
 models, so the line then names the variable as the setting to change. A user or project agent file with a built-in's name replaces it. Built-in
-Explore and Plan say `inherit`, so the variable never reaches them; Explore is
+Explore and Plan say `inherit`, so only `CLAUDE_CODE_SUBAGENT_MODEL_FORCE` lets
+the variable reach them; Explore is
 capped at Opus on the first-party API when the main model ranks above it
 (Fable, Mythos), unless
 `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP` is set, and ran on Haiku before
@@ -1388,7 +1397,8 @@ as YAML scalars without trailing comments.
 The cheapest current model is, among the provider's catalog models that are not
 deprecated, call tools and reply in text, the newest of each family with the
 lowest output then input rate: the newest Haiku for Anthropic, the cheapest
-current GPT for OpenAI. The reprice swaps only the model on each recorded part,
+current GPT for OpenAI (`Catalog::cheapest` in `src/prices.rs`, which also needs
+known input, output and cache-read rates). The reprice swaps only the model on each recorded part,
 keeping its tokens, cache categories, speed and geography, so it assumes the
 same turns. A type already on that model is not repriced. A lower effort changes
 the output tokens, so its cost is not measured.

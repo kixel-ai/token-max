@@ -1,5 +1,5 @@
-//! Shared data types. Only the few that `wire` and `sessions` carry derive serde; their
-//! names are wire names. The scan itself never leaves the process.
+//! Shared data types. Only those `wire`, `sessions` and doctor carry derive serde, plus
+//! `Usage` for the reader's dedup key; the scan itself never leaves the process.
 
 use crate::collections::{HashSet, IndexMap};
 use serde::{Deserialize, Serialize};

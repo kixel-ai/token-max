@@ -1954,7 +1954,7 @@ impl<'a> Profiled<'a> {
             })
             .collect();
         let elapsed = self.now - self.since;
-        let scenario = IdleScenario {
+        IdleScenario {
             baseline: baseline.to_string(),
             applicable,
             ttls: ttls.clone(),
@@ -1986,8 +1986,7 @@ impl<'a> Profiled<'a> {
                 off: off.adjustment,
             },
             unknown,
-        };
-        scenario
+        }
     }
 }
 
@@ -3037,13 +3036,12 @@ fn t3_comparison(
         })
         .collect();
     // All values are changed charges against the same native request baseline.
-    let comparison = T3IdleComparison {
+    T3IdleComparison {
         baseline: baseline.into(),
         ttl,
         scenarios,
         periods: counts,
-    };
-    comparison
+    }
 }
 
 /// Replay T3 changes through later native requests, converging at unrelated compactions.

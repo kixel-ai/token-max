@@ -76,8 +76,9 @@ impl AsRef<Request> for Modeled<'_> {
 /// Linked summary output and the full first post-compaction cache prefix.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompactionSample<'a> {
-    /// The observed compaction boundary.
-    pub event: &'a Id,
+    /// The last event recorded with the boundary's identity, since a later record of the same
+    /// event carries its final state.
+    pub event: &'a StructuralEvent,
     /// The first request resumed after it, and its only message part.
     pub request: &'a Request,
     pub p: &'a BillingPart,
@@ -118,90 +119,175 @@ impl<'a> SampleCohort<'a> {
     }
 }
 
-/// The samples of one conversation cohort and the geometry every added pass derives from them,
-/// computed once rather than per affected request.
-#[derive(Clone, Debug)]
-struct CohortSamples {
-    /// Indexes into the samples, in sample order; never empty.
-    indexes: Vec<usize>,
-    /// Whether every sample agrees on the summary model, provider, tier, speed and geography.
-    uniform_summary: bool,
-    median_output: i64,
-    median_prefix: i64,
-    max_output: i64,
-    max_prefix: i64,
-    basis: Vec<CompactionBasis>,
+/// A cohort narrowed to one client and client version, which idle replays calibrate from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct SampleKey<'a> {
+    cohort: SampleCohort<'a>,
+    version: &'a str,
+    client: &'a str,
 }
 
-/// Calibration samples in order, indexed by conversation cohort.
+impl<'a> SampleKey<'a> {
+    /// None when the cohort matches no sample or the version or client is unrecorded.
+    fn of(r: &'a Request, p: &'a BillingPart) -> Option<Self> {
+        Some(Self {
+            cohort: SampleCohort::of(r, p)?,
+            version: r.version.as_deref()?,
+            client: r.client.as_deref()?,
+        })
+    }
+}
+
+/// Summary geometry from one cohort's samples.
+#[derive(Clone, Debug)]
+pub(crate) struct Geometry {
+    /// Billed summary output.
+    pub(crate) output: i64,
+    /// The full resumed prefix.
+    pub(crate) prefix: i64,
+    /// The resumed request's cache read.
+    pub(crate) read: i64,
+    /// Summary input beyond the compacted context, such as its instructions.
+    pub(crate) overhead: i64,
+}
+
+/// One cohort's samples and the geometry every replay derives from them, computed once.
+#[derive(Clone, Debug)]
+pub(crate) struct Calibration<'a> {
+    /// The cohort's samples in order; never empty. The first is the template a replayed
+    /// summary is priced from.
+    pub(crate) samples: Vec<CompactionSample<'a>>,
+    /// The samples' events, shared by every period this cohort calibrates.
+    pub(crate) events: std::sync::Arc<[Id]>,
+    /// Whether every sample agrees on the summary model, provider, tier, speed and geography.
+    pub(crate) uniform: bool,
+    pub(crate) median: Geometry,
+    pub(crate) larger: Geometry,
+}
+
+impl<'a> Calibration<'a> {
+    fn new(samples: Vec<CompactionSample<'a>>) -> Self {
+        let summaries: HashSet<_> = samples
+            .iter()
+            .map(|s| {
+                (
+                    s.summary_request.provider.as_deref(),
+                    s.summary.model.as_deref(),
+                    s.summary.tier.as_deref(),
+                    s.summary.speed.as_deref(),
+                    s.summary.geo.as_deref(),
+                )
+            })
+            .collect();
+        let column =
+            |f: fn(&CompactionSample) -> i64| -> Vec<i64> { samples.iter().map(f).collect() };
+        let outputs = column(|s| s.output);
+        let prefixes = column(|s| s.prefix);
+        let reads = column(|s| s.p.usage.read.unwrap_or(0));
+        let overheads = column(|s| {
+            let input = s.summary.usage.input;
+            let before = s.event.pre_tokens.or(input).unwrap_or(0);
+            (input.unwrap_or(0) - before).max(0)
+        });
+        let max = |values: &[i64]| {
+            values
+                .iter()
+                .copied()
+                .max()
+                .expect("a calibration has samples")
+        };
+        let larger = Geometry {
+            output: max(&outputs),
+            prefix: max(&prefixes),
+            read: max(&reads),
+            overhead: max(&overheads),
+        };
+        let median = Geometry {
+            output: median(outputs),
+            prefix: median(prefixes),
+            read: median(reads),
+            overhead: median(overheads),
+        };
+        Self {
+            events: samples.iter().map(|s| s.event.id.clone()).collect(),
+            uniform: summaries.len() == 1,
+            median,
+            larger,
+            samples,
+        }
+    }
+}
+
+/// Calibration samples in order, calibrated once per window and idle replay cohort.
 #[derive(Clone, Debug, Default)]
 pub struct CompactionSamples<'a> {
     pub samples: Vec<CompactionSample<'a>>,
-    /// Each cohort's position in `cohorts`.
-    index: HashMap<SampleCohort<'a>, usize>,
-    cohorts: Vec<CohortSamples>,
+    /// Each cohort's and idle key's position in `calibrations`.
+    cohorts: HashMap<SampleCohort<'a>, usize>,
+    keys: HashMap<SampleKey<'a>, usize>,
+    calibrations: Vec<Calibration<'a>>,
 }
 
 impl<'a> CompactionSamples<'a> {
-    /// Index samples by cohort, keeping their order within each cohort.
+    /// Calibrate every cohort and idle key the samples cover.
     pub fn new(samples: Vec<CompactionSample<'a>>) -> Self {
-        let mut index: HashMap<SampleCohort<'a>, usize> = HashMap::default();
-        let mut groups: Vec<Vec<usize>> = vec![];
-        for (i, s) in samples.iter().enumerate() {
-            if let Some(cohort) = SampleCohort::of(s.request, s.p) {
-                let position = *index.entry(cohort).or_insert_with(|| {
-                    groups.push(vec![]);
-                    groups.len() - 1
-                });
-                groups[position].push(i);
-            }
-        }
-        let cohorts = groups
-            .into_iter()
-            .map(|indexes| {
-                let matches: Vec<&CompactionSample> =
-                    indexes.iter().map(|&i| &samples[i]).collect();
-                let summaries: HashSet<_> = matches
-                    .iter()
-                    .map(|s| {
-                        (
-                            s.summary_request.provider.as_deref(),
-                            s.summary.model.as_deref(),
-                            s.summary.tier.as_deref(),
-                            s.summary.speed.as_deref(),
-                            s.summary.geo.as_deref(),
-                        )
-                    })
-                    .collect();
-                CohortSamples {
-                    uniform_summary: summaries.len() == 1,
-                    median_output: median(matches.iter().map(|s| s.output).collect()),
-                    median_prefix: median(matches.iter().map(|s| s.prefix).collect()),
-                    max_output: matches.iter().fold(0, |n, s| n.max(s.output)),
-                    max_prefix: matches.iter().fold(0, |n, s| n.max(s.prefix)),
-                    basis: matches
-                        .iter()
-                        .map(|s| CompactionBasis {
-                            event: s.event.clone(),
-                            request: s.request.id.clone(),
-                        })
-                        .collect(),
-                    indexes,
-                }
-            })
-            .collect();
+        let mut calibrations = vec![];
+        let cohorts = group(&samples, &mut calibrations, |s| {
+            SampleCohort::of(s.request, s.p)
+        });
+        let keys = group(&samples, &mut calibrations, |s| {
+            SampleKey::of(s.request, s.p)
+        });
         Self {
             samples,
-            index,
             cohorts,
+            keys,
+            calibrations,
         }
     }
 
-    fn cohort(&self, r: &Request, p: &BillingPart) -> Option<&CohortSamples> {
-        // The lookup key borrows the request, so copy the position out before borrowing a cohort.
-        let index = *self.index.get(&SampleCohort::of(r, p)?)?;
-        Some(&self.cohorts[index])
+    /// The calibration a window replay of this conversation part uses.
+    fn cohort(&self, r: &Request, p: &BillingPart) -> Option<&Calibration<'a>> {
+        // Keys are covariant, so a key borrowing only the request can find the position,
+        // which is copied out before borrowing a calibration.
+        let cohorts: &HashMap<SampleCohort<'_>, usize> = &self.cohorts;
+        let index = *cohorts.get(&SampleCohort::of(r, p)?)?;
+        Some(&self.calibrations[index])
     }
+
+    /// The calibration an idle replay of this conversation part uses, which also matches
+    /// its client and version.
+    pub(crate) fn idle(&self, r: &Request, p: &BillingPart) -> Option<&Calibration<'a>> {
+        let keys: &HashMap<SampleKey<'_>, usize> = &self.keys;
+        let index = *keys.get(&SampleKey::of(r, p)?)?;
+        Some(&self.calibrations[index])
+    }
+}
+
+/// Group samples by `key`, keeping their order within each group, and calibrate each group
+/// into `calibrations`; a sample without a key calibrates nothing.
+fn group<'a, K: Eq + std::hash::Hash>(
+    samples: &[CompactionSample<'a>],
+    calibrations: &mut Vec<Calibration<'a>>,
+    key: impl Fn(&CompactionSample<'a>) -> Option<K>,
+) -> HashMap<K, usize> {
+    let mut index: HashMap<K, usize> = HashMap::default();
+    let mut groups: Vec<Vec<CompactionSample<'a>>> = vec![];
+    for s in samples {
+        if let Some(k) = key(s) {
+            let position = *index.entry(k).or_insert_with(|| {
+                groups.push(vec![]);
+                groups.len() - 1
+            });
+            groups[position].push(s.clone());
+        }
+    }
+    let start = calibrations.len();
+    calibrations.extend(groups.into_iter().map(Calibration::new));
+    for position in index.values_mut() {
+        *position += start;
+    }
+    index
 }
 
 /// Compaction boundary times of every harness in each origin session, sorted.
@@ -244,39 +330,29 @@ impl SessionBoundaries {
 
 /// One profile's structural events, indexed once for every window simulation and replay.
 pub struct WindowEvents<'a> {
-    /// The first event with each identity.
-    by_id: HashMap<&'a Id, &'a StructuralEvent>,
+    events: Vec<&'a StructuralEvent>,
     boundaries: SessionBoundaries,
     /// Claude cache-reset boundaries for `replay_parts` over these events.
     pub cache: CacheBoundaries,
 }
 
 impl<'a> WindowEvents<'a> {
-    /// Index these events by identity and by compaction boundary.
+    /// Index these events by compaction boundary.
     pub fn new(events: impl IntoIterator<Item = &'a StructuralEvent>) -> Self {
         let events: Vec<&'a StructuralEvent> = events.into_iter().collect();
-        let mut by_id = HashMap::default();
-        for &event in &events {
-            by_id.entry(&event.id).or_insert(event);
-        }
         Self {
-            by_id,
             boundaries: SessionBoundaries::new(events.iter().copied()),
             cache: CacheBoundaries::new(events.iter().copied()),
+            events,
         }
     }
 
-    /// Keep calibration identities while removing idle boundaries from an idle-off policy.
+    /// Remove idle boundaries from an idle-off policy.
     pub(crate) fn suppress_idle(&mut self, since: Millis) {
-        let events: Vec<_> = self
-            .by_id
-            .values()
-            .copied()
-            .filter(|e| {
-                e.idle_attribution != crate::model::IdleAttribution::Notice || e.time < since
-            })
-            .collect();
-        self.boundaries = SessionBoundaries::new(events.iter().copied());
+        let events = self.events.iter().copied().filter(|e| {
+            e.idle_attribution != crate::model::IdleAttribution::Notice || e.time < since
+        });
+        self.boundaries = SessionBoundaries::new(events.clone());
         self.cache = CacheBoundaries::new(events);
     }
 }
@@ -340,6 +416,8 @@ pub fn compaction_samples<'a>(
     let mut result = Vec::new();
     // Later duplicates win, like a JavaScript Map built from the array.
     let by_id: HashMap<&str, &'a Request> = requests.iter().map(|r| (&*r.id, *r)).collect();
+    // Later records of an event win too, since they carry its final state.
+    let last: HashMap<&Id, &'a StructuralEvent> = events.iter().map(|e| (&e.id, *e)).collect();
     let mut charges: HashMap<&Id, &CompactionCharge> = HashMap::default();
     for charge in summaries {
         charges.entry(&charge.event).or_insert(charge);
@@ -417,7 +495,7 @@ pub fn compaction_samples<'a>(
             continue;
         };
         result.push(CompactionSample {
-            event: &event.id,
+            event: last[&event.id],
             request: next,
             p,
             output,
@@ -704,20 +782,21 @@ impl<'r, 'o> Simulator<'r, 'o> {
                 let matches = options.samples.cohort(&req, &req.parts[index]);
                 match (old_prefix, matches) {
                     (Some(old_prefix), Some(matches)) if messages == 1 => {
-                        let template = &options.samples.samples[matches.indexes[0]];
+                        let template = &matches.samples[0];
                         // Mixed summary models cannot establish which model an added pass would use.
-                        if !matches.uniform_summary {
+                        if !matches.uniform {
                             self.result.fail(
                                 &req.session,
                                 req.time,
                                 "compatible samples disagree about summary model/provider/tier/speed/geography",
                             );
                         }
-                        let (output, resumed) = if larger {
-                            (matches.max_output, matches.max_prefix)
+                        let geometry = if larger {
+                            &matches.larger
                         } else {
-                            (matches.median_output, matches.median_prefix)
+                            &matches.median
                         };
+                        let (output, resumed) = (geometry.output, geometry.prefix);
                         let ordinary = input - old_prefix;
                         if resumed + ordinary > window || resumed >= old_prefix - st.removed {
                             self.result.fail(
@@ -732,7 +811,14 @@ impl<'r, 'o> Simulator<'r, 'o> {
                                 input_tokens: summary_input,
                                 summary_tokens: output,
                                 prefix_tokens: resumed,
-                                basis: matches.basis.clone(),
+                                basis: matches
+                                    .samples
+                                    .iter()
+                                    .map(|s| CompactionBasis {
+                                        event: s.event.id.clone(),
+                                        request: s.request.id.clone(),
+                                    })
+                                    .collect(),
                                 summary_cost: price_part(
                                     catalog,
                                     template.summary_request,
@@ -741,11 +827,7 @@ impl<'r, 'o> Simulator<'r, 'o> {
                                 prefix_cost: zero_cost(),
                             });
                             added = Some(self.result.added.len() - 1);
-                            let event = options
-                                .events
-                                .by_id
-                                .get(template.event)
-                                .expect("calibration samples come from the simulated events");
+                            let event = template.event;
                             self.result.events.push({
                                 let mut built = StructuralEvent {
                                     id: format!("modeled:{}:{index}", req.id).into(),
@@ -4288,7 +4370,7 @@ mod tests {
         assert_eq!(samples.samples.len(), 1);
         let s = &samples.samples[0];
         assert_eq!(
-            (s.event.to_string(), &*s.request.id, s.output, s.prefix),
+            (s.event.id.to_string(), &*s.request.id, s.output, s.prefix),
             ("sample-boundary".to_string(), "sample-resume", 2000, 20000)
         );
         assert_eq!(s.summary.kind, PartKind::Compaction);
@@ -4316,6 +4398,37 @@ mod tests {
             ..unlinked
         };
         assert!(samples_of(&requests, &events, &[other]).samples.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_event_calibrates_every_replay_from_its_last_record() {
+        let (mut requests, mut events) = sample_scan();
+        let input = requests[0].parts[1].usage.input.expect("summary input");
+        // The first record says the summary read only the compacted context; a later record
+        // of the same boundary leaves 500 tokens of instructions.
+        events[0].pre_tokens = Some(input);
+        let mut later = events[0].clone();
+        later.pre_tokens = Some(input - 500);
+        events.push(later);
+        let samples = samples_of(&requests, &events, &[]);
+        assert!(!samples.samples.is_empty());
+        for s in &samples.samples {
+            assert!(std::ptr::eq(s.event, &events[1]));
+        }
+        let (r, p) = (&requests[0], &requests[0].parts[0]);
+        let window = samples.cohort(r, p).expect("window calibration");
+        let idle = samples.idle(r, p).expect("idle calibration");
+        for c in [window, idle] {
+            assert_eq!((c.median.overhead, c.larger.overhead), (500, 500));
+            assert_eq!((c.median.output, c.median.prefix), (2000, 20000));
+            assert!(c.uniform);
+        }
+        // Idle replays also need the client version, which window replays ignore.
+        requests[0].version = None;
+        let samples = samples_of(&requests, &events, &[]);
+        let (r, p) = (&requests[0], &requests[0].parts[0]);
+        assert!(samples.cohort(r, p).is_some());
+        assert!(samples.idle(r, p).is_none());
     }
 
     #[test]
@@ -4471,7 +4584,7 @@ mod tests {
                 let indexed: Vec<(Id, Text)> = compaction_samples(&refs, &events, &[])
                     .samples
                     .iter()
-                    .map(|s| (s.event.clone(), s.request.id.clone()))
+                    .map(|s| (s.event.id.clone(), s.request.id.clone()))
                     .collect();
                 assert_eq!(indexed, naive_samples(&refs, &events, &[]));
             }

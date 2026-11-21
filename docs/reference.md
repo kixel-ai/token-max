@@ -806,8 +806,9 @@ charges can still be compared.
 
 ## Compaction window
 
-Compaction-window comparisons run after the recommended TTLs and use the current
-window as their baseline. Claude controls resolve environment overrides,
+Compaction-window comparisons run after the TTL changes `doctor` recommends, as
+keepalive and idle comparisons do, so an advisory TTL is not applied; they use
+the current window as their baseline. Claude controls resolve environment overrides,
 managed and user settings, including `modelSettings.<model>.autoCompactWindow`;
 Codex uses `model_auto_compact_token_limit`. An unset Claude window uses each
 model's latest observed automatic-compaction trigger, else Claude Code's
@@ -1031,8 +1032,9 @@ are of that host's own spend, and the total's of the hosts' spend together.
 The `keepalive` check asks whether pinging an idle session just under its cache
 lifetime would cost less than the cache misses it avoids. It compares leaving
 sessions idle, Claude idle compaction where that check recommends it, and
-pinging for each cap on how long to keep going. Claude uses the recommended
-main TTL; Codex uses the documented 30-minute lifetime of models that bill cache
+pinging for each cap on how long to keep going. Claude uses the main TTL `doctor`
+recommends changing to, else the current one, else the one the latest main-agent
+request wrote; an advisory TTL is not applied. Codex uses the documented 30-minute lifetime of models that bill cache
 writes. Each cap replays the entire session with the same recommended compaction
 window as the idle alternative, carrying ping context and cache warmth forward. A ping is the median recorded request, and a session that never came
 back pings for the whole cap, since transcripts do not record when a client

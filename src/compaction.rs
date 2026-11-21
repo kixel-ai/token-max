@@ -11,7 +11,7 @@ use crate::controls::{
 };
 use crate::discovery::locale_compare;
 use crate::model::{
-    Action, AddedCompaction, Agent, BillingPart, Bucket, CacheReplayEvidence, Change, CheckBase,
+    Action, AddedCompaction, Agent, BillingPart, CacheReplayEvidence, Change, CheckBase,
     CompactionBasis, CompactionCharge, CompactionCheck, CompactionControls, Cost, Coverage,
     EventKind, Evidence, Harness, Id, Margin, Millis, Origin, PartKind, PerBucket, PercentOverride,
     Profile, Reowned, Request, RequestEvidence, Scalar, Scan, StructuralEvent, Text, Ttl, TtlCheck,
@@ -1296,17 +1296,14 @@ pub fn compaction_checks(options: &CompactionOptions) -> Vec<CompactionCheck> {
             .copied()
             .filter(|t| t.base.profiles.contains(&profile.id))
             .collect();
-        let recommended_ttl = |bucket: Bucket| {
-            ttl_results
-                .iter()
-                .find(|t| t.bucket == bucket)
-                .and_then(|t| t.base.recommended)
-                .or(profile.ttl.get(bucket).one().value)
-        };
-        let ttls = PerBucket {
-            main: recommended_ttl(Bucket::Main),
-            subagent: recommended_ttl(Bucket::Subagent),
-        };
+        let ttls = crate::idle::ttls_after(
+            PerBucket {
+                main: profile.ttl.main.one().value,
+                subagent: profile.ttl.subagent.one().value,
+            },
+            profile,
+            &ttl_results,
+        );
         let first_boundary = scan
             .events
             .iter()

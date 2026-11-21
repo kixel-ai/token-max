@@ -780,7 +780,6 @@ fn claude_source(run: &Run<'_>, controls: &AgentControls, kind: &str) -> (ModelS
                 "built-in Explore inherits the main model; CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP lifts its Opus cap".into(),
                 Expect::Parent,
             )),
-            Some(_) if controls.force => decided(inherited()),
             Some(_) => decided((
                 ModelSource::Inherited,
                 "built-in Explore inherits the main model, capped at Opus".into(),
@@ -1359,6 +1358,12 @@ mod tests {
             ..AgentControls::default()
         };
         assert_eq!(source(&above, &uncapped, "Explore"), ModelSource::Unknown);
+        // Forcing without a subagent model changes nothing, so the cap stays.
+        let forced = AgentControls {
+            force: true,
+            ..AgentControls::default()
+        };
+        assert_eq!(source(&above, &forced, "Explore"), ModelSource::Inherited);
         let mut older = run(&explore, "claude-haiku-4-5", "claude-opus-4-8");
         older.version = Some("2.1.197");
         assert_eq!(source(&older, &none, "Explore"), ModelSource::Definition);

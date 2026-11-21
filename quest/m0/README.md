@@ -202,7 +202,7 @@ and Theo Browne's
 (rejected: both audiences equally), and never reads the signed-in plan;
 ✅ the main session's default effort joins m0's checks, while model choice
 stays evidence only; ✅ all of it in m0 (rejected: the framing in m0 and
-the checks in m1; all in m1). The quests record the reasons. Where this
+the checks in m1; all in m1). The finished quests, in git history, record the reasons. Where this
 entry and an older one disagree, such as "API-price equivalents are not a
 claim about subscription bills" or "Model and review effort selection
 remain outside this expansion", this one holds.

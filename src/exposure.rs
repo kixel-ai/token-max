@@ -13,12 +13,13 @@ use sha2::{Digest, Sha256};
 use crate::skills::skill_file;
 
 use crate::context::synced_short;
+use crate::controls::js_string;
 use crate::model::{
     Calibration, CalibrationSample, Category, Component, Exposure, ExposureScan, ExposureView,
-    Harness, Id, IdentityBasis, Ids, Interner, Invocation, InvocationKind, InvocationStatus,
-    Linkage, Location, MemoryAccess, MemoryUse, Millis, Observed, Owner, Profile, Profiles,
-    References, Request, RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage,
-    ToolCalls, ToolResults, Via, Visibility, Visible,
+    Harness, Id, Ids, Interner, Invocation, InvocationKind, InvocationStatus, Linkage, Location,
+    MemoryAccess, MemoryUse, Millis, Owner, Profile, Profiles, References, Request,
+    RequestEvidence, ResultTotals, Scope, Size, Snapshot, Text, TextCoverage, ToolCalls,
+    ToolResults, Via,
 };
 use crate::safe::{self, ScanError, identity, label, object};
 
@@ -34,14 +35,13 @@ pub(crate) const UNMAPPED_DELTA: &str = "unmapped-rendered-delta";
 pub fn measure_size(text: Option<&str>) -> Size {
     Size {
         characters: text.map(|t| t.chars().count() as i64),
-        recorded_tokens: None,
         fingerprint: safe::digest(text.unwrap_or("opaque")),
     }
 }
 
 /// Tokenization belongs to the model; client versions only change what is sent.
 pub fn cohort(r: &Request) -> String {
-    let key = (harness_name(r.harness), &r.model, &r.provider);
+    let key = (r.harness.as_str(), &r.model, &r.provider);
     identity(&serde_json::to_string(&key).expect("strings serialize"))
 }
 
@@ -118,9 +118,8 @@ pub struct ExposureCollector {
     // Directories of the MEMORY.md files loaded in the current file, which
     // `autoMemoryDirectory` can move outside the profile root.
     memory_dirs: IndexSet<String>,
-    names: HashSet<Text>,
-    // One shared copy of each profile set calls and results are seen under.
-    profile_sets: Interner,
+    // One shared copy of each name, and of each profile set calls and results are seen under.
+    interner: Interner,
     // One shared copy of each list of sessions a call, result or invocation was copied into.
     copies: HashSet<Copies>,
     // The tool each call id in the current file belongs to.
@@ -357,13 +356,11 @@ impl Content<'_> {
                 json(value, &mut sink);
                 Size {
                     characters: Some(sink.characters as i64),
-                    recorded_tokens: None,
                     fingerprint: Id::Digest(sink.hash.finalize().into()),
                 }
             }
             Content::Opaque(value) => Size {
                 characters: None,
-                recorded_tokens: None,
                 fingerprint: Content::Json(value).measure().fingerprint,
             },
         }
@@ -432,7 +429,6 @@ struct Invoke {
     status: InvocationStatus,
     call: String,
     group: Option<String>,
-    basis: IdentityBasis,
 }
 
 const CHRONOLOGICAL: &str = "chronological state is not proof of exact request exposure";
@@ -443,11 +439,6 @@ const SHAPE_REASON: &str = "recorded request shape gives the system prompt and t
 const FULL_REASON: &str =
     "serialized text includes wire framing; API tokenization is calibrated, not exact";
 const DIGEST_REASON: &str = "request digest/base/keep/tail hashes have no verified content mapping; attachment state is candidate exposure only";
-const VISIBILITY_REASONS: [&str; 3] = [
-    "call visibility describes the client/version window, not proof of use by each component",
-    "no supported client/version establishes complete nested-call or typed-skill recording",
-    "historical exposure and current effective enablement are independent",
-];
 
 impl ExposureCollector {
     /// A collector whose tool-call counts start at `since`.
@@ -459,8 +450,7 @@ impl ExposureCollector {
             memory: IndexMap::default(),
             roots: HashMap::default(),
             memory_dirs: IndexSet::default(),
-            names: HashSet::default(),
-            profile_sets: Interner::default(),
+            interner: Interner::default(),
             copies: HashSet::default(),
             call_tools: HashMap::default(),
             held: IndexMap::default(),
@@ -878,8 +868,6 @@ impl ExposureCollector {
             })
             .collect();
 
-        let visibility = visibility(requests, &exposures, &invocations, since);
-
         let mut used = vec![false; components.len()];
         let mut queue = vec![];
         // Lists are interned, so each distinct one is visited once.
@@ -931,7 +919,6 @@ impl ExposureCollector {
                     i
                 })
                 .collect(),
-            visibility,
             tool_calls: tool_calls(calls),
             tool_results: tool_results(results),
             memory,
@@ -966,7 +953,7 @@ impl ExposureCollector {
     /// Count a call to `name`, once per call id across copied files.
     fn call(&mut self, id: &str, name: &str, time: Option<Millis>) {
         self.call_tools
-            .insert(id.to_string(), intern(&mut self.names, &output_owner(name)));
+            .insert(id.to_string(), self.interner.text(&output_owner(name)));
         let Some(time) = time.filter(|&t| self.since.is_none_or(|s| t >= s)) else {
             return;
         };
@@ -974,7 +961,7 @@ impl ExposureCollector {
         let entry = match self.calls.entry(call_key(id)) {
             indexmap::map::Entry::Occupied(entry) => entry.into_mut(),
             indexmap::map::Entry::Vacant(entry) => entry.insert(ToolCall {
-                name: intern(&mut self.names, name),
+                name: self.interner.text(name),
                 harness: file.harness,
                 copies: Copies::from([]),
                 time,
@@ -982,7 +969,7 @@ impl ExposureCollector {
         };
         entry.copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &entry.copies,
             &self.session,
             &file.profiles,
@@ -994,7 +981,7 @@ impl ExposureCollector {
         let (characters, opaque) = output_characters(output);
         let tool = match self.call_tools.get(id) {
             Some(tool) => tool.clone(),
-            None => intern(&mut self.names, UNKNOWN_TOOL),
+            None => self.interner.text(UNKNOWN_TOOL),
         };
         let held = self.held.entry(tool.clone()).or_insert((0, false));
         held.0 += characters;
@@ -1015,7 +1002,7 @@ impl ExposureCollector {
         };
         entry.copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &entry.copies,
             &self.session,
             &file.profiles,
@@ -1082,7 +1069,7 @@ impl ExposureCollector {
             });
         record.copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &record.copies,
             &self.session,
             &file.profiles,
@@ -1104,7 +1091,7 @@ impl ExposureCollector {
         self.file = Some(File {
             name: snapshot.file.clone(),
             harness: snapshot.harness,
-            profiles: self.profile_sets.profiles(&snapshot.profiles),
+            profiles: self.interner.profiles(&snapshot.profiles),
             subagent: is_subagent(&snapshot.file),
             basename: basename(&snapshot.file).to_string(),
             roots: snapshot
@@ -1255,7 +1242,7 @@ impl ExposureCollector {
                         Grouping::Name => group(new.name),
                         Grouping::Fixed(g) => g.map(str::to_string),
                     },
-                    provenance: intern(&mut self.names, new.provenance),
+                    provenance: self.interner.text(new.provenance),
                     first_seen: at,
                     current: crate::model::Current::Unresolved,
                     scope: if !member
@@ -1455,7 +1442,7 @@ impl ExposureCollector {
         let file = self.file.as_ref().expect("observing a file");
         let id = identity(&format!(
             "{}:{}:{}",
-            harness_name(file.harness),
+            file.harness.as_str(),
             input.call,
             kind_name(input.kind)
         ));
@@ -1466,7 +1453,7 @@ impl ExposureCollector {
             }
             *copies = copy(
                 &mut self.copies,
-                &mut self.profile_sets,
+                &mut self.interner,
                 copies,
                 &self.session,
                 &file.profiles,
@@ -1488,7 +1475,6 @@ impl ExposureCollector {
             via: input.via,
             session: self.session.to_string(),
             sessions: vec![],
-            identity_basis: input.basis,
             turn: (file.harness == Harness::Codex)
                 .then(|| self.turn.clone())
                 .flatten(),
@@ -1500,7 +1486,7 @@ impl ExposureCollector {
         };
         let copies = copy(
             &mut self.copies,
-            &mut self.profile_sets,
+            &mut self.interner,
             &Copies::from([]),
             &self.session,
             &file.profiles,
@@ -2018,7 +2004,7 @@ impl ExposureCollector {
             }),
             complete_characters: complete,
             prefix,
-            wire_model: label(field(params, "model")).map(|m| intern(&mut self.names, &m)),
+            wire_model: label(field(params, "model")).map(|m| self.interner.text(&m)),
             reasons: reasons(&mut self.reasons, &[reason]),
         };
         let reference = id(raw.get("id"))?;
@@ -2091,14 +2077,13 @@ impl ExposureCollector {
                 None => format!("{}:{}", line.snapshot.file, line.location.line),
             };
             let mut call = format!("{source}:{index}");
-            let mut basis = IdentityBasis::Recorded;
             let block_text = b.get("text").and_then(Value::as_str);
             if user
                 && codex
                 && let Some(t) = block_text
             {
                 // Native aliases lack a shared message id. Match their nth equal text occurrence,
-                // keeping repeated messages in each source separate and disclosing the inference.
+                // keeping repeated messages in each source separate.
                 let signature = identity(&format!("{}:{t}", self.session));
                 let source = format!(
                     "{}:{}",
@@ -2109,20 +2094,19 @@ impl ExposureCollector {
                 let occurrence = sources.entry(source).or_insert(0);
                 *occurrence += 1;
                 call = format!("user:{signature}:{occurrence}");
-                basis = IdentityBasis::ContentOccurrence;
             }
             if codex && let Some(t) = block_text {
                 for (offset, name) in mentions(t) {
                     typed_aliases
                         .entry(name.to_ascii_lowercase())
-                        .or_insert_with(|| (format!("{call}:{offset}"), basis));
+                        .or_insert_with(|| format!("{call}:{offset}"));
                 }
             }
             if user && is(b, "type", "skill") {
                 self.typed_skills
                     .insert(text(b.get("name"))?.to_ascii_lowercase());
             }
-            block_ids.push((call, basis));
+            block_ids.push(call);
         }
         if user && codex {
             // Text aliases share their inferred turn, so a request and a later load
@@ -2133,7 +2117,7 @@ impl ExposureCollector {
                 .find(|(v, _)| object(v).get("text").is_some_and(Value::is_string))
                 .map(|(_, id)| id)
                 .or_else(|| block_ids.first());
-            let inferred = boundary.map(|(call, _)| identity(call));
+            let inferred = boundary.map(|call| identity(call));
             let recorded = inferred
                 .as_ref()
                 .and_then(|turn| self.turn_aliases.get(turn))
@@ -2146,7 +2130,7 @@ impl ExposureCollector {
             self.turn_available = false;
             self.turn = recorded.or(inferred);
         }
-        for (v, (call, basis)) in blocks.iter().zip(block_ids) {
+        for (v, call) in blocks.iter().zip(block_ids) {
             let b = object(v);
             let block_text = b.get("text").and_then(Value::as_str);
             if user && is(b, "type", "skill") {
@@ -2156,9 +2140,8 @@ impl ExposureCollector {
                     kind: InvocationKind::SkillRequest,
                     via: Via::Typed,
                     status: InvocationStatus::Requested,
-                    call: alias.map_or_else(|| call.clone(), |(call, _)| call.clone()),
+                    call: alias.unwrap_or(&call).clone(),
                     group: group(name),
-                    basis: alias.map_or(IdentityBasis::Recorded, |(_, basis)| *basis),
                 };
                 let selected = if codex {
                     b.get("path")
@@ -2195,7 +2178,6 @@ impl ExposureCollector {
                         status,
                         call: format!("{call}:{offset}"),
                         group: group(name),
-                        basis,
                     };
                     self.invoke(name, invoke, line)?;
                 }
@@ -2207,7 +2189,6 @@ impl ExposureCollector {
                         status,
                         call: call.clone(),
                         group: group(name),
-                        basis,
                     };
                     self.invoke(name, invoke, line)?;
                 }
@@ -2235,7 +2216,6 @@ impl ExposureCollector {
                         },
                         call: use_id.clone(),
                         group: tool.group.clone(),
-                        basis: IdentityBasis::Recorded,
                     };
                     self.invocation(tool.target.clone(), invoke, time);
                     if !failed {
@@ -2281,7 +2261,7 @@ impl ExposureCollector {
             let characters = match access {
                 MemoryAccess::Read => {
                     // What it read back is memory's cost, not the Read tool's.
-                    let owner = intern(&mut self.names, MEMORY_OUTPUT);
+                    let owner = self.interner.text(MEMORY_OUTPUT);
                     self.call_tools.insert(call.to_string(), owner);
                     None
                 }
@@ -2309,7 +2289,6 @@ impl ExposureCollector {
             status: InvocationStatus::Called,
             call: call.to_string(),
             group: group(target_name),
-            basis: IdentityBasis::Recorded,
         };
         self.invoke(target_name, invoke, line)?;
         let target_name = if scope == "skill" {
@@ -2358,7 +2337,6 @@ impl ExposureCollector {
                 },
                 call: call.to_string(),
                 group,
-                basis: IdentityBasis::Recorded,
             };
             self.invoke(&name, invoke, line)?;
             // The model sees each server under its sanitized name, as in `mcp__t3_code`.
@@ -2414,7 +2392,6 @@ impl ExposureCollector {
                     },
                     call: format!("{}:{}", text(item.get("id"))?, id(read.get("path"))?),
                     group: group(path),
-                    basis: IdentityBasis::Recorded,
                 };
                 self.invoke(path, invoke, line)?;
                 if reads.len() == 1
@@ -2442,7 +2419,7 @@ impl ExposureCollector {
                 && let Some(Value::String(bare)) = p.get("name")
             {
                 let name = codex_tool_name(bare, p.get("namespace").and_then(Value::as_str));
-                let owner = intern(&mut self.names, &output_owner(&name));
+                let owner = self.interner.text(&output_owner(&name));
                 self.call_tools.insert(call.to_string(), owner);
             }
             self.result(call, p.get("output"), line.time);
@@ -2463,7 +2440,7 @@ impl ExposureCollector {
             self.call_tools.insert(output_id.to_string(), owner);
             // Codex's dedicated memory tools, which `memories.dedicated_tools` adds.
             if let Some(tool) = name.strip_prefix("memories.") {
-                let owner = intern(&mut self.names, MEMORY_OUTPUT);
+                let owner = self.interner.text(MEMORY_OUTPUT);
                 self.call_tools.insert(call.to_string(), owner.clone());
                 self.call_tools.insert(output_id.to_string(), owner);
                 let (access, characters) = if tool == "add_ad_hoc_note" {
@@ -2496,7 +2473,6 @@ impl ExposureCollector {
                     status: InvocationStatus::Called,
                     call: call.to_string(),
                     group: group(&name),
-                    basis: IdentityBasis::Recorded,
                 };
                 self.invoke(&name, invoke, line)?;
             }
@@ -2509,7 +2485,6 @@ impl ExposureCollector {
                         status: InvocationStatus::Reference,
                         call: format!("{call}:{offset}"),
                         group: group(reference),
-                        basis: IdentityBasis::Recorded,
                     };
                     self.invoke(reference, invoke, line)?;
                 }
@@ -2517,181 +2492,6 @@ impl ExposureCollector {
         }
         Ok(())
     }
-}
-
-/// Visibility windows per client/version cohort and component, in first-request order.
-fn visibility(
-    requests: &[Request],
-    exposures: &[Exposure],
-    invocations: &[Invocation],
-    since: Option<Millis>,
-) -> Vec<Visibility> {
-    type Cohort<'a> = (Harness, Option<&'a str>, Option<&'a str>, Vec<&'a str>);
-    type SessionKey<'a> = (Harness, Option<&'a str>, Option<&'a str>, &'a str);
-    struct Group<'a> {
-        r: &'a Request,
-        view: Arc<ExposureView>,
-        sessions: HashSet<&'a str>,
-        since: Millis,
-        until: Millis,
-    }
-    struct Window<'a> {
-        r: &'a Request,
-        sessions: HashSet<&'a str>,
-        since: Millis,
-        until: Millis,
-    }
-    // Requests with the same cohort and listed components open the same windows. Grouping
-    // them first preserves the order in which each window first appears.
-    let mut cohorts: HashMap<Cohort<'_>, usize> = HashMap::default();
-    let mut groups: IndexMap<(usize, usize, usize), Group<'_>> = IndexMap::default();
-    for (r, e) in requests.iter().zip(exposures) {
-        let mut profiles: Vec<&str> = r.profiles.iter().map(String::as_str).collect();
-        profiles.sort_unstable();
-        let next = cohorts.len();
-        let cohort = *cohorts
-            .entry((
-                r.harness,
-                r.client.as_deref(),
-                r.version.as_deref(),
-                profiles,
-            ))
-            .or_insert(next);
-        let key = (
-            cohort,
-            e.view.components.address(),
-            e.view.candidates.address(),
-        );
-        let g = groups.entry(key).or_insert_with(|| Group {
-            r,
-            view: e.view.clone(),
-            sessions: HashSet::default(),
-            since: r.time,
-            until: r.end_time,
-        });
-        g.sessions.insert(&*r.session);
-        g.since = g.since.min(r.time);
-        g.until = g.until.max(r.end_time);
-    }
-    let mut windows: IndexMap<(usize, Option<Text>), Window<'_>> = IndexMap::default();
-    for (&(cohort, _, _), g) in &groups {
-        let listed: Vec<Option<Text>> =
-            if g.view.components.is_empty() && g.view.candidates.is_empty() {
-                vec![None]
-            } else {
-                g.view
-                    .components
-                    .iter()
-                    .chain(g.view.candidates.iter())
-                    .map(|c| Some(c.clone()))
-                    .collect()
-            };
-        for component in listed {
-            let w = windows
-                .entry((cohort, component))
-                .or_insert_with(|| Window {
-                    r: g.r,
-                    sessions: HashSet::default(),
-                    since: since.unwrap_or(g.r.time),
-                    until: g.r.end_time,
-                });
-            w.sessions.extend(&g.sessions);
-            w.since = w.since.min(g.since);
-            w.until = w.until.max(g.until);
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    struct Calls {
-        since: Millis,
-        until: Millis,
-        direct: bool,
-        nested: bool,
-        typed: bool,
-    }
-    impl Calls {
-        fn merge(self, other: Calls) -> Calls {
-            Calls {
-                since: self.since.min(other.since),
-                until: self.until.max(other.until),
-                direct: self.direct || other.direct,
-                nested: self.nested || other.nested,
-                typed: self.typed || other.typed,
-            }
-        }
-    }
-    // A window counts a call recorded in any of its sessions, so per-session summaries combine.
-    let mut by_session: HashMap<SessionKey<'_>, Calls> = HashMap::default();
-    for i in invocations
-        .iter()
-        .filter(|i| since.is_none_or(|s| i.time >= s))
-    {
-        let call = Calls {
-            since: i.time,
-            until: i.time,
-            direct: i.kind == InvocationKind::McpCall,
-            nested: i.via == Via::Completion && i.kind == InvocationKind::McpCall,
-            typed: i.via == Via::Typed,
-        };
-        for session in &i.sessions {
-            let key = (
-                i.harness,
-                i.client.as_deref(),
-                i.version.as_deref(),
-                session.as_str(),
-            );
-            by_session
-                .entry(key)
-                .and_modify(|c| *c = c.merge(call))
-                .or_insert(call);
-        }
-    }
-    let reasons: Arc<[String]> = VISIBILITY_REASONS.iter().map(|r| r.to_string()).collect();
-    windows
-        .into_iter()
-        .map(|((_, component), w)| {
-            let r = w.r;
-            let calls = w
-                .sessions
-                .iter()
-                .filter_map(|s| {
-                    by_session
-                        .get(&(r.harness, r.client.as_deref(), r.version.as_deref(), *s))
-                        .copied()
-                })
-                .reduce(Calls::merge);
-            Visibility {
-                harness: r.harness,
-                client: r.client.clone(),
-                version: r.version.clone(),
-                profiles: r.profiles.clone(),
-                since: since.unwrap_or(calls.map_or(w.since, |c| w.since.min(c.since))),
-                until: calls.map_or(w.until, |c| w.until.max(c.until)),
-                exposure: if component.is_none() {
-                    Visible::Unknown
-                } else {
-                    Visible::Partial
-                },
-                component,
-                direct_calls: if calls.is_some_and(|c| c.direct) {
-                    Observed::Observed
-                } else {
-                    Observed::Unknown
-                },
-                nested_calls: if calls.is_some_and(|c| c.nested) {
-                    Visible::Partial
-                } else {
-                    Visible::Unknown
-                },
-                typed_skills: if calls.is_some_and(|c| c.typed) {
-                    Observed::Observed
-                } else {
-                    Observed::Unknown
-                },
-                reasons: reasons.clone(),
-            }
-        })
-        .collect()
 }
 
 /// A Codex tool's full name from its bare name and namespace.
@@ -2739,7 +2539,6 @@ fn split_system(system: Option<&Value>) -> (Placed, Option<Placed>) {
         placed.size.characters = placed.size.characters.map(|c| c - characters);
         let size = Size {
             characters: Some(characters),
-            recorded_tokens: None,
             fingerprint: Id::Digest(sink.hash.finalize().into()),
         };
         Placed::sized(Category::Memory, MEMORY_SECTION, size, None)
@@ -2931,15 +2730,6 @@ fn reasons(
     shared
 }
 
-fn intern(pool: &mut HashSet<Text>, value: &str) -> Text {
-    if let Some(found) = pool.get(value) {
-        return found.clone();
-    }
-    let value = Text::from(value);
-    pool.insert(value.clone());
-    value
-}
-
 /// Characters of one recorded message, or None when its content holds images,
 /// documents or redacted thinking, whose billed tokens text cannot measure. Only
 /// a content-level thinking block's opaque signature is dropped; every other
@@ -3108,27 +2898,6 @@ fn id(value: Option<&Value>) -> Result<String, ScanError> {
     safe::id(value.unwrap_or(&Value::Null))
 }
 
-/// A value as text: absent is "undefined", arrays join with commas and nulls in them as empty,
-/// objects are "[object Object]".
-fn js_string(value: Option<&Value>) -> String {
-    match value {
-        None => "undefined".into(),
-        Some(Value::Null) => "null".into(),
-        Some(Value::Bool(b)) => b.to_string(),
-        Some(Value::Number(n)) => number(n),
-        Some(Value::String(s)) => s.clone(),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|v| match v {
-                Value::Null => String::new(),
-                v => js_string(Some(v)),
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        Some(Value::Object(_)) => "[object Object]".into(),
-    }
-}
-
 /// Compare strings by UTF-16 code units.
 fn js_cmp(a: &str, b: &str) -> std::cmp::Ordering {
     a.encode_utf16().cmp(b.encode_utf16())
@@ -3161,13 +2930,6 @@ fn is_skill(kind: InvocationKind) -> bool {
     )
 }
 
-fn harness_name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Claude => "claude",
-        Harness::Codex => "codex",
-    }
-}
-
 fn kind_name(kind: InvocationKind) -> &'static str {
     match kind {
         InvocationKind::SkillRequest => "skill-request",
@@ -3185,7 +2947,7 @@ fn kind_name(kind: InvocationKind) -> &'static str {
 // Patterns over transcript text, matched by hand.
 
 /// Whitespace: ASCII and Unicode spaces, line and paragraph separators, and the byte order mark.
-fn js_space(c: char) -> bool {
+pub(crate) fn js_space(c: char) -> bool {
     matches!(
         c,
         '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
@@ -3204,8 +2966,8 @@ fn line_terminator(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{2028}' | '\u{2029}')
 }
 
-/// `/[/\\]subagents[/\\]/`
-fn is_subagent(path: &str) -> bool {
+/// Whether a transcript path has a `subagents` directory, `/[/\\]subagents[/\\]/`.
+pub(crate) fn is_subagent(path: &str) -> bool {
     let b = path.as_bytes();
     path.match_indices("subagents").any(|(i, m)| {
         i > 0
@@ -4379,11 +4141,6 @@ mod tests {
                 (K::McpCall, S::Failed, Via::Tool),
             ]
         );
-        assert!(
-            scan.invocations
-                .iter()
-                .all(|i| i.identity_basis == IdentityBasis::Recorded)
-        );
         let skill = &scan.invocations[4];
         assert_eq!(skill.target, target("skill", "plugin:known"));
         assert_eq!(skill.group, Some(identity("plugin:plugin")));
@@ -4645,7 +4402,6 @@ mod tests {
         };
         let same = scan("listing");
         assert_eq!(same.requests[0].view.linkage, Linkage::Chronological);
-        assert_eq!(same.visibility.len(), 1);
         let different = scan("other listing");
         let view = &different.requests[0].view;
         assert_eq!(view.linkage, Linkage::Unknown);
@@ -4654,7 +4410,6 @@ mod tests {
             *view.reasons,
             ["copied/inherited histories disagree on exposure"]
         );
-        assert_eq!(different.visibility.len(), 2);
     }
 
     #[test]

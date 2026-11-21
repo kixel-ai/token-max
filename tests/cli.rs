@@ -5,7 +5,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
-use token_max::model::{Action, BackgroundFeature, CheckResult, Usd, Verdict};
+use token_max::{Action, BackgroundFeature, CheckResult, Usd, Verdict};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -49,6 +49,7 @@ impl Workspace {
 
     /// The fixture moved so its history starts `days` before now. A report's window ends
     /// now, so a monthly figure from the fixture as written shrinks as the days pass.
+    #[cfg(unix)]
     fn recent_fixture(&self, days: i64) {
         let text = std::fs::read_to_string(fixture("claude.jsonl")).unwrap();
         let lines: Vec<Value> = text
@@ -187,14 +188,14 @@ const NOW: i64 = 1_796_083_200_000;
 /// choosing the profiles as the binary's directory flags would.
 fn analysis(
     w: &Workspace,
-    select: impl FnOnce(&mut token_max::discovery::DiscoveryOptions),
+    select: impl FnOnce(&mut token_max::DiscoveryOptions),
     max_cost_per_use_usd: f64,
-) -> token_max::model::Report {
-    use token_max::controls::Env;
-    use token_max::discovery::DiscoveryOptions;
-    use token_max::prices::{PriceOptions, load_prices};
-    use token_max::reader::{ScanOptions, scan};
-    use token_max::replay::{AnalyzeOptions, analyze};
+) -> token_max::Report {
+    use token_max::DiscoveryOptions;
+    use token_max::Env;
+    use token_max::{AnalyzeOptions, analyze};
+    use token_max::{PriceOptions, load_prices};
+    use token_max::{ScanOptions, scan};
 
     let mut discovery = DiscoveryOptions {
         home: text(&w.home),
@@ -230,7 +231,7 @@ fn analysis(
 }
 
 /// The first check `find` matches, which the test expects to exist.
-fn check(report: &token_max::model::Report, find: impl Fn(&CheckResult) -> bool) -> &CheckResult {
+fn check(report: &token_max::Report, find: impl Fn(&CheckResult) -> bool) -> &CheckResult {
     report.checks.iter().find(|c| find(c)).expect("the check")
 }
 
@@ -754,13 +755,13 @@ fn session_numbers_print_like_javascript() {
 /// Windows from `--since` replay the same cache comparison as the library.
 #[test]
 fn explicit_windows_match_the_library_replay() {
-    use token_max::controls::Env;
-    use token_max::discovery::DiscoveryOptions;
-    use token_max::model::{Action, CheckResult};
-    use token_max::prices::{PriceOptions, load_prices};
-    use token_max::reader::{ScanOptions, scan};
-    use token_max::replay::{AnalyzeOptions, analyze};
-    use token_max::report::{ReportOptions, format_report};
+    use token_max::DiscoveryOptions;
+    use token_max::Env;
+    use token_max::{Action, CheckResult};
+    use token_max::{AnalyzeOptions, analyze};
+    use token_max::{PriceOptions, load_prices};
+    use token_max::{ReportOptions, format_report};
+    use token_max::{ScanOptions, scan};
 
     const MIN: i64 = 60_000;
     let iso = |minute: i64| {
@@ -881,7 +882,7 @@ fn explicit_windows_match_the_library_replay() {
         };
         let library = format_report(
             &report,
-            &token_max::doctor::fixes(&report, false),
+            &token_max::fixes(&report, false),
             ReportOptions {
                 details: true,
                 ..ReportOptions::default()

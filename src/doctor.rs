@@ -20,11 +20,11 @@ use crate::model::{
     Harness, Margin, Profile, Reowned, Report, Setting, Verdict,
 };
 use crate::report::{
-    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx,
+    AT_LEAST, Choice, Listing, Origin, Recommendation, Source, UP_TO, about, approx, capitalize,
     recommendations, share_text,
 };
 use crate::safe::{ScanError, terminal_text};
-use crate::terminal::{WrapOptions, wrap_spans};
+use crate::terminal::{BOLD, DIM, GREEN, RED, WrapOptions, YELLOW, wrap_spans};
 
 /// Whose spend a share is of, for a host's own changes.
 const THIS_HOST: &str = "this host's";
@@ -381,13 +381,13 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
     let what = match reason {
         // A skill left typeable counts only the model's uses.
         Reason::Unused if typed_only(c.control.as_ref()) => {
-            format!("{} the model never used", capital(kind))
+            format!("{} the model never used", capitalize(kind))
         }
         Reason::Unused => format!("Never-used {kind}"),
-        Reason::Unrecorded => format!("{} with no recorded use", capital(kind)),
+        Reason::Unrecorded => format!("{} with no recorded use", capitalize(kind)),
         Reason::Costly => format!(
             "{} over {} per use",
-            capital(kind),
+            capitalize(kind),
             about(report.max_cost_per_use_usd)
         ),
         Reason::Duplicate => format!("Duplicate copies of {kind}"),
@@ -398,14 +398,6 @@ fn group(report: &Report, line: &Recommendation<'_>) -> Option<Group> {
         label: what,
         member: c.name.clone(),
         location: c.skill.as_ref().and_then(|s| s.path.clone()),
-    })
-}
-
-/// `text` with its first letter capitalized.
-fn capital(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
     })
 }
 
@@ -1112,11 +1104,6 @@ const MARGIN: usize = crate::report::MARGIN;
 /// A card's figure is aligned to the right of this many cells, or of a narrower terminal,
 /// and its paragraphs wrap there.
 const CARD_CELLS: usize = 88;
-const BOLD: &str = "1";
-const DIM: &str = "2";
-const RED: &str = "31";
-const GREEN: &str = "32";
-const YELLOW: &str = "33";
 
 /// A question of the walk as a card: a heading with its figure at the right, the change,
 /// then labeled paragraphs.
@@ -1686,8 +1673,6 @@ pub struct Plan {
     files: Vec<Pending>,
     /// What became of each change, by the report lines it came from.
     choices: Vec<(Origin, Choice)>,
-    /// How many changes the walk offered.
-    offered: usize,
     total: Total,
 }
 
@@ -1701,17 +1686,6 @@ impl Plan {
     /// nothing was accepted.
     pub fn total(&self, label: &str) -> String {
         self.total.text(label, THIS_HOST)
-    }
-
-    /// What the walk came to, as the confirm and the closing lines name it.
-    pub fn summary(&self) -> Summary {
-        Summary {
-            answered: !self.choices.is_empty() || self.offered > 0,
-            offered: self.offered,
-            files: self.files.iter().map(|p| p.target.file.clone()).collect(),
-            changes: self.total.changes(),
-            removals: self.files.iter().map(|p| p.removals.len()).sum(),
-        }
     }
 }
 
@@ -2390,7 +2364,6 @@ impl Owner {
         Ok(Plan {
             files,
             choices,
-            offered: self.offers.offered(),
             total,
         })
     }
@@ -3804,7 +3777,7 @@ mod tests {
         style: &Style,
         input: &mut impl BufRead,
         output: &mut impl Write,
-    ) -> io::Result<Plan> {
+    ) -> io::Result<Asked> {
         let owner = Owner::new(fixes, turned_off, style.home.clone(), 100.0);
         let hosts = [Walking {
             label: None,
@@ -3812,32 +3785,48 @@ mod tests {
             style,
         }];
         let selections = super::ask(&hosts, style, input, output)?;
-        Ok(owner.plan(selections[0].events()).unwrap())
+        Ok(Asked {
+            plan: owner.plan(selections[0].events()).unwrap(),
+            summary: selections[0].summary(owner.offers()),
+        })
+    }
+
+    /// One host's plan and its summary, as `doctor` makes both from the walk.
+    struct Asked {
+        plan: Plan,
+        summary: Summary,
+    }
+
+    impl std::ops::Deref for Asked {
+        type Target = Plan;
+
+        fn deref(&self) -> &Plan {
+            &self.plan
+        }
     }
 
     /// Confirm one host's plan as `doctor` does.
     fn confirm(
-        plan: &Plan,
+        plan: &Asked,
         style: &Style,
         input: &mut impl BufRead,
         output: &mut impl Write,
     ) -> io::Result<bool> {
-        let summary = plan.summary();
         let preview = preview(plan, style);
         let request = Confirm {
             preview: &preview,
-            hosts: vec![(&summary, style)],
+            hosts: vec![(&plan.summary, style)],
         };
         super::confirm(&request, style, input, output)
     }
 
     /// The closing lines for one host.
-    fn finish(plan: &Plan, written: &[Written], style: &Style) -> String {
-        super::finish(&[(&plan.summary(), written, style)], style)
+    fn finish(plan: &Asked, written: &[Written], style: &Style) -> String {
+        super::finish(&[(&plan.summary, written, style)], style)
     }
 
     /// Walk `fixes` answering with `answers`, returning the plan and what was printed.
-    fn walk(fixes: Vec<Fix>, w: &Workspace, answers: &str) -> (Plan, String) {
+    fn walk(fixes: Vec<Fix>, w: &Workspace, answers: &str) -> (Asked, String) {
         let mut printed = vec![];
         let plan = ask(
             fixes,
@@ -4033,7 +4022,13 @@ mod tests {
                 yes: true,
             }])
             .unwrap();
-        assert_eq!(plan.summary().files, [settings.to_string_lossy()]);
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|p| &p.target.file)
+                .collect::<Vec<_>>(),
+            [&settings.to_string_lossy()]
+        );
         assert_eq!(*choice(&plan, "A"), Choice::Accepted);
         assert_eq!(offers.check(), Ok(()));
         let mut stray = offers.clone();
@@ -4881,7 +4876,7 @@ mod tests {
     }
 
     /// A change adding `key` to `file`, as the walk accepts it.
-    fn accepted(w: &Workspace, files: &[(&Path, Harness)]) -> Plan {
+    fn accepted(w: &Workspace, files: &[(&Path, Harness)]) -> Asked {
         let fixes = files
             .iter()
             .enumerate()
@@ -4992,6 +4987,108 @@ mod tests {
         assert!(std::fs::read_to_string(&config).unwrap().contains("key"));
     }
 
+    #[test]
+    fn a_write_that_fails_after_another_names_the_file_already_written() {
+        let w = Workspace::new();
+        let settings = w.claude.join("settings.json");
+        let config = w.codex.join("config.toml");
+        let bak = w.codex.join("config.toml.token-max.bak");
+        std::fs::write(&settings, "{}\n").unwrap();
+        std::fs::write(&config, "a = 1\n").unwrap();
+        std::fs::write(&bak, "older\n").unwrap();
+        let plan = accepted(
+            &w,
+            &[(&settings, Harness::Claude), (&config, Harness::Codex)],
+        );
+        // Something already sits where the second file's new text is staged.
+        let blocker = w
+            .codex
+            .join(format!(".config.toml.token-max-{}", std::process::id()));
+        std::fs::write(&blocker, "theirs").unwrap();
+        let error = write(&plan).unwrap_err().message;
+        let shown = |file: &Path| file.display().to_string();
+        assert!(
+            error.starts_with(&format!("cannot write {} (", shown(&config)))
+                && error.ends_with(&format!("; already wrote {}", shown(&settings))),
+            "{error}"
+        );
+        assert!(std::fs::read_to_string(&settings).unwrap().contains("key"));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "a = 1\n");
+        // The second file's earlier backup stays, its staged one is cleaned up, and the
+        // blocker is not ours to remove.
+        assert_eq!(std::fs::read_to_string(&bak).unwrap(), "older\n");
+        let mut left: Vec<_> = std::fs::read_dir(&w.codex)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let blocker = blocker.file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(
+            left,
+            [
+                blocker.as_str(),
+                "config.toml",
+                "config.toml.token-max.bak",
+                "sessions"
+            ]
+        );
+    }
+
+    #[test]
+    fn turned_off_mcp_servers_are_removed_together_or_one_by_one() {
+        let w = Workspace::new();
+        let config = w.codex.join("config.toml");
+        let text = "[mcp_servers.a]\nenabled = false\n\n[mcp_servers.b]\nenabled = false\n\n[mcp_servers.c]\nenabled = false\n\n[mcp_servers.on]\ncommand = \"x\"\n";
+        let off =
+            |name: &str| Definition::Entry(entry(&config, Harness::Codex, &["mcp_servers", name]));
+        let run = |answers: &str| {
+            std::fs::write(&config, text).unwrap();
+            let mut printed = vec![];
+            let plan = ask(
+                vec![],
+                vec![off("a"), off("b"), off("c")],
+                &style(&w),
+                &mut answers.as_bytes(),
+                &mut printed,
+            )
+            .unwrap();
+            write(&plan).unwrap();
+            (
+                std::fs::read_to_string(&config).unwrap(),
+                String::from_utf8(printed).unwrap(),
+            )
+        };
+        // The servers left configured.
+        let servers = |text: &str| -> Vec<String> {
+            let table: toml::Table = toml::from_str(text).unwrap();
+            table["mcp_servers"]
+                .as_table()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect()
+        };
+        let (after, printed) = run("y\n");
+        assert!(
+            printed.ends_with("  Remove all 3? [y]es, [n]o, [o]ne by one, [q]uit: "),
+            "{printed}"
+        );
+        assert_eq!(servers(&after), ["on"]);
+        assert_eq!(run("n\n").0, text);
+        // One by one asks each server alone, numbered within the batch.
+        let (after, printed) = run("o\nn\ny\nn\n");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert!(printed.contains(&format!(
+            "\n  [1/1, 2/3] MCP server b  saves nothing\n             off -> removed  Worth considering (Opinion)\n             Where  [mcp_servers.b] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
+        )), "{printed}");
+        assert_eq!(printed.matches("Remove it?").count(), 3, "{printed}");
+        assert_eq!(servers(&after), ["a", "c", "on"]);
+        // A quit asks nothing more and keeps the removals already accepted.
+        let (after, printed) = run("o\ny\nq\n");
+        assert!(!printed.contains("3/3"), "{printed}");
+        assert_eq!(servers(&after), ["b", "c", "on"]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_file_git_tracks_with_no_uncommitted_changes_gets_no_backup() {
@@ -5022,7 +5119,7 @@ mod tests {
         std::fs::write(&settings, "{}\n").unwrap();
         git(&["add", "."]);
         git(&["commit", "-q", "-m", "x"]);
-        let confirm_text = |plan: &Plan| {
+        let confirm_text = |plan: &Asked| {
             let mut printed = vec![];
             confirm(plan, &style(&w), &mut "y\n".as_bytes(), &mut printed).unwrap();
             String::from_utf8(printed).unwrap()

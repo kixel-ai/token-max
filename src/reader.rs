@@ -18,14 +18,16 @@ use crate::discovery::{
     Discovery, DiscoveryOptions, discover, discover_claude_controls, discover_codex_controls,
     structural_settings,
 };
-use crate::exposure::{ExposureCollector, js_entries};
+use crate::exposure::{ExposureCollector, is_subagent, js_entries, js_space};
 use crate::model::{
-    Accounting, Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Few, Harness,
-    Id, IdleAttribution, Interner, Location, Millis, Origin, Origins, PartKind, Pricing, Profile,
+    Agent, Api, Attempt, BillingPart, CacheContext, EventKind, EventMeta, Few, Harness, Id,
+    IdleAttribution, Interner, Location, Millis, Origin, Origins, PartKind, Pricing, Profile,
     Profiles, Request, RequestEvidence, RequestMeta, RequestedSpeed, Scan, ScanCoverage, Settings,
     ShellCall, Snapshot, StructuralEvent, Subagent, Text, Usage,
 };
-use crate::safe::{ScanError, count, digest, id, identity, iso, label, object, timestamp};
+use crate::safe::{
+    MAX_SAFE_INTEGER, ScanError, count, digest, id, identity, iso, label, object, timestamp, truthy,
+};
 use crate::sessions::{Record, Sessions};
 use crate::unreadable::ToolIds;
 
@@ -36,8 +38,6 @@ pub struct ScanOptions {
     /// Records whose timestamp proves they precede this instant stay outside selected billing.
     pub since: Option<Millis>,
 }
-
-const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Bytes read per system call; lines longer than this are assembled across chunks.
 const CHUNK: usize = 1 << 20;
@@ -72,17 +72,6 @@ fn is(map: &Map<String, Value>, key: &str, expected: &str) -> bool {
 /// A member that is the boolean `true`.
 fn is_true(map: &Map<String, Value>, key: &str) -> bool {
     map.get(key) == Some(&Value::Bool(true))
-}
-
-/// Whether an optional JSON member is set: not absent, null, false, zero or an empty string.
-fn truthy(value: Option<&Value>) -> bool {
-    match value {
-        None | Some(Value::Null) => false,
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
-        Some(Value::String(s)) => !s.is_empty(),
-        Some(Value::Array(_) | Value::Object(_)) => true,
-    }
 }
 
 /// A recorded string ID, which must be non-empty, as its opaque identity.
@@ -347,21 +336,6 @@ fn numeric_tools(raw: Option<&Value>) -> Result<Option<IndexMap<String, i64>>, S
     Ok(Some(result))
 }
 
-/// Whitespace: ASCII and Unicode spaces, line and paragraph separators, and the byte order mark.
-fn js_space(c: char) -> bool {
-    matches!(
-        c,
-        '\t' | '\n' | '\u{b}' | '\u{c}' | '\r' | ' ' | '\u{a0}' | '\u{1680}' | '\u{2000}'
-            ..='\u{200a}'
-                | '\u{2028}'
-                | '\u{2029}'
-                | '\u{202f}'
-                | '\u{205f}'
-                | '\u{3000}'
-                | '\u{feff}'
-    )
-}
-
 /// The exact native idle notice text; any other informational notice is ignored.
 fn idle_notice(text: &str) -> bool {
     const NOTICES: [&str; 2] = [
@@ -383,21 +357,6 @@ fn polling_loop(command: &str) -> bool {
         .collect();
     let has = |word: &str| words.contains(&word);
     has("sleep") && has("do") && (has("while") || has("until") || has("for"))
-}
-
-/// Nested Claude subagent transcripts live under a `subagents` directory.
-fn is_subagent(file: &str) -> bool {
-    let separator = |b: u8| b == b'/' || b == b'\\';
-    file.as_bytes()
-        .windows(11)
-        .any(|w| separator(w[0]) && &w[1..10] == b"subagents" && separator(w[10]))
-}
-
-fn harness_name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Claude => "claude",
-        Harness::Codex => "codex",
-    }
 }
 
 fn kind_name(kind: EventKind) -> &'static str {
@@ -743,7 +702,7 @@ fn event(
     kind: EventKind,
     key: Option<&str>,
 ) -> StructuralEvent {
-    let harness = harness_name(snapshot.harness);
+    let harness = snapshot.harness.as_str();
     let kind_text = kind_name(kind);
     let id = match key {
         Some(key) => digest(&format!("{harness}:{kind_text}:{key}")),
@@ -775,7 +734,6 @@ fn event(
             client: context.client.clone(),
             cwd: context.cwd.clone(),
             trigger: None,
-            precomputed: None,
             pre_tokens: None,
             post_tokens: None,
             duration_ms: None,
@@ -797,7 +755,7 @@ fn request(
 ) -> Request {
     Request {
         evidence: RequestEvidence::Measured,
-        id: format!("{}:{identity}", harness_name(snapshot.harness)).into(),
+        id: format!("{}:{identity}", snapshot.harness.as_str()).into(),
         time,
         end_time: time,
         reference: None,
@@ -823,7 +781,6 @@ fn request(
             effort: context.effort.clone(),
             server_tools: None,
             profiles: context.profiles.clone(),
-            accounting: Accounting::Individual,
             attempt: None,
             requested_speed: Some(RequestedSpeed {
                 tier: context.tier.clone(),
@@ -1370,7 +1327,6 @@ impl Reader {
             e.trigger = string(meta, "trigger")
                 .filter(|t| *t == "auto" || *t == "manual")
                 .map(str::to_string);
-            e.precomputed = meta.get("precomputed").and_then(Value::as_bool);
             if selected {
                 e.pre_tokens = count(meta.get("preTokens"))?;
                 e.post_tokens = count(meta.get("postTokens"))?;
@@ -1666,11 +1622,6 @@ impl Reader {
                 identity(&format!("{scope}:{time}:{total_json}")),
             );
             let last = truthy(info.get("last_token_usage"));
-            r.accounting = if last {
-                Accounting::LegacyLast
-            } else {
-                Accounting::LegacyDelta
-            };
             r.evidence = if last {
                 RequestEvidence::Measured
             } else {
@@ -2417,7 +2368,6 @@ mod tests {
         assert_eq!(data.requests[0].parts[0].usage.output, Some(20));
         assert_eq!(data.requests[0].source.as_deref(), Some("sdk"));
         assert_eq!(data.requests[0].locations.len(), 2);
-        assert_eq!(data.events[0].precomputed, Some(true));
         assert_eq!(data.events[0].idle_attribution, IdleAttribution::Unknown);
         assert_eq!(data.events[0].pre_tokens, Some(1100));
         assert_eq!(data.events[0].post_tokens, Some(100));
@@ -2446,7 +2396,7 @@ mod tests {
         assert_eq!(data.requests.len(), 1);
         assert_eq!(data.requests[0].parts[0].usage.input, Some(1000));
         assert_eq!(data.requests[0].parts[0].usage.reasoning, Some(20));
-        assert_eq!(data.requests[0].accounting, Accounting::Individual);
+        assert_eq!(data.requests[0].evidence, RequestEvidence::Measured);
         assert_eq!(data.events.last().unwrap().kind, EventKind::TurnEnd);
         assert!(!private(&data));
     }
@@ -2787,6 +2737,55 @@ mod tests {
     }
 
     #[test]
+    fn legacy_totals_before_the_window_start_the_first_delta_inside_it() {
+        let w = Workspace::new();
+        let u = |input: Value| json!({ "input_tokens": input, "cached_input_tokens": 0, "output_tokens": 1 });
+        let inputs = |totals: &[(&str, Value)]| {
+            let mut records = vec![
+                json!({
+                    "type": "session_meta",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "id": "legacy", "source": "cli", "model_provider": "openai" },
+                }),
+                json!({
+                    "type": "turn_context",
+                    "timestamp": "2026-11-01T00:00:00Z",
+                    "payload": { "model": "gpt-5.4", "service_tier": "standard" },
+                }),
+            ];
+            for (time, input) in totals {
+                records.push(json!({
+                    "type": "event_msg",
+                    "timestamp": time,
+                    "payload": { "type": "token_count", "info": { "total_token_usage": u(input.clone()) } },
+                }));
+            }
+            write(w.codex.join("sessions/legacy.jsonl"), jsonl(&records));
+            let data = scan(&since(options(&w), "2026-11-01T00:02:00Z")).unwrap();
+            data.requests
+                .iter()
+                .map(|r| r.parts[0].usage.input)
+                .collect::<Vec<_>>()
+        };
+        let before = ("2026-11-01T00:01:00Z", json!(100));
+        let inside = [
+            ("2026-11-01T00:03:00Z", json!(250)),
+            ("2026-11-01T00:04:00Z", json!(400)),
+        ];
+        // The first request in the window bills only what it added to the earlier total.
+        assert_eq!(
+            inputs(&[before.clone(), inside[0].clone(), inside[1].clone()]),
+            [Some(150), Some(150)]
+        );
+        // A malformed total before the window leaves the next delta unknown, not the whole total.
+        let malformed = ("2026-11-01T00:01:30Z", json!("bad"));
+        assert_eq!(
+            inputs(&[before, malformed, inside[0].clone(), inside[1].clone()]),
+            [None, Some(150)]
+        );
+    }
+
+    #[test]
     fn usage_validates_subset_invariants_and_keeps_missing_write_counters() {
         let codex = |v: Value| usage(&v, Harness::Codex).map_err(|e| e.message);
         let u = codex(json!({
@@ -2906,7 +2905,8 @@ mod tests {
                 },
             },
         });
-        lines.insert(2, applied.to_string());
+        // After the fixture's own settings, which it then overrides.
+        lines.insert(4, applied.to_string());
         write(&file, lines.join("\n") + "\n");
         let data = scan(&options(&w)).unwrap();
         let r = &data.requests[0];

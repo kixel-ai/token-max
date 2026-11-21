@@ -1,5 +1,4 @@
 //! Synthetic requests and isolated scratch profiles for unit tests.
-#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,7 +98,6 @@ pub fn make_request() -> Request {
             effort: None,
             server_tools: Some(Default::default()),
             profiles: vec!["profile".into()].into(),
-            accounting: Accounting::Individual,
             attempt: None,
             requested_speed: None,
             issues: vec![],
@@ -302,7 +300,6 @@ pub fn make_t3_profile(id: &str, root: &str) -> Profile {
         enabled: true,
         idle_mode: T3IdleMode::OnReturn,
         idle_owner: "/state/settings.json:idleCompaction".into(),
-        ownership_resolved: true,
         settings_unresolved: false,
         limitations: vec![],
         env: None,

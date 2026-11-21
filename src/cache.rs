@@ -547,10 +547,7 @@ impl<'b> CacheChain<'b> {
                 evidence,
             });
         }
-        let prefix = match (p.usage.read, p.usage.write) {
-            (Some(read), Some(write)) => Some(read + write),
-            _ => None,
-        };
+        let prefix = p.usage.cached_prefix();
         // A recorded zero-cache request cannot renew or erase an older cached prefix.
         if prefix != Some(0) {
             let kind = match prefix {
@@ -856,7 +853,6 @@ mod tests {
                 client: Some("sdk-ts".into()),
                 cwd: None,
                 trigger: None,
-                precomputed: None,
                 pre_tokens: None,
                 post_tokens: None,
                 duration_ms: None,

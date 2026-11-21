@@ -43,8 +43,11 @@ pub fn build() -> String {
         ]
         .concat(),
     );
-    let hex: String = schema[..6].iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}+{hex}", env!("CARGO_PKG_VERSION"))
+    format!(
+        "{}+{}",
+        env!("CARGO_PKG_VERSION"),
+        crate::safe::hex(&schema[..6])
+    )
 }
 
 /// The first value of every stream, written before the scan starts.
@@ -171,12 +174,6 @@ impl<R: Read> Stream<R> {
         Request::deserialize(&mut self.json)
     }
 
-    /// The outcome, which must end the stream.
-    pub fn outcome(&mut self) -> Result<Outcome, serde_json::Error> {
-        let outcome = self.value()?;
-        self.end().map(|()| outcome)
-    }
-
     /// The next value, where more may follow.
     pub fn value<T: for<'de> Deserialize<'de>>(&mut self) -> Result<T, serde_json::Error> {
         T::deserialize(&mut self.json)
@@ -247,19 +244,23 @@ mod tests {
             },
         )
         .unwrap();
+        let outcome = |stream: &mut Stream<&[u8]>| {
+            let outcome: Outcome = stream.value()?;
+            stream.end().map(|()| outcome)
+        };
         let mut stream = Stream::new(&bytes[..]);
         assert_eq!(stream.header().unwrap().token_max_scan, build());
         assert!(matches!(
-            stream.outcome().unwrap(),
+            outcome(&mut stream).unwrap(),
             Outcome::Report { text, change: true, .. } if text == "report\n"
         ));
         // Truncated, or followed by anything.
         let mut stream = Stream::new(&bytes[..bytes.len() - 3]);
         stream.header().unwrap();
-        assert!(stream.outcome().is_err());
+        assert!(outcome(&mut stream).is_err());
         let trailing = [&bytes[..], b"{}"].concat();
         let mut stream = Stream::new(&trailing[..]);
         stream.header().unwrap();
-        assert!(stream.outcome().is_err());
+        assert!(outcome(&mut stream).is_err());
     }
 }

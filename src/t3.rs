@@ -13,7 +13,7 @@ use serde_json::{Map, Value, value::RawValue};
 use crate::controls::Env;
 use crate::discovery::DiscoveryOptions;
 use crate::model::*;
-use crate::safe::{ScanError, digest, identity, iso, timestamp};
+use crate::safe::{ScanError, digest, identity, iso, parse_instant};
 
 mod guards;
 
@@ -574,7 +574,6 @@ pub(crate) fn discover(
                     metadata: "not selected".into(),
                     snapshot_started_at: None,
                     snapshot_finished_at: None,
-                    joined_requests: 0,
                     ambiguous_requests: 0,
                     unresolved: IndexMap::default(),
                     removed: IndexMap::default(),
@@ -641,7 +640,6 @@ pub(crate) fn discover(
             metadata: "not read".into(),
             snapshot_started_at: None,
             snapshot_finished_at: None,
-            joined_requests: 0,
             ambiguous_requests: 0,
             unresolved: IndexMap::default(),
             removed: IndexMap::default(),
@@ -884,7 +882,6 @@ pub(crate) fn discover(
                 enabled,
                 idle_mode,
                 idle_owner,
-                ownership_resolved: resolved,
                 settings_unresolved: unresolved_env || launch_unresolved || policy_unresolved,
                 limitations,
                 env: (resolved && harness == Harness::Claude).then(|| local.env.clone()),
@@ -1350,13 +1347,14 @@ impl TurnRow {
     fn read(row: &rusqlite::Row<'_>, bound_ms: Millis) -> Self {
         let completed_at = instant(text_column(row, 8));
         let usage_updated_at = instant(text_column(row, 9));
-        let id = |index| text_column(row, index).map(|text| Id::from(identity(&text)));
         let evidence = (|| {
+            // A row missing its thread, attempt or provider turn is incomplete evidence,
+            // though only the run is kept.
+            for index in [2, 4, 5] {
+                text_column(row, index)?;
+            }
             Some(T3Request {
-                thread: id(2)?,
-                run: id(3)?,
-                attempt: id(4)?,
-                provider_turn: id(5)?,
+                run: Id::from(identity(&text_column(row, 3)?)),
                 status: match text_column(row, 6)?.as_str() {
                     "completed" => "completed",
                     "running" => "running",
@@ -1368,7 +1366,7 @@ impl TurnRow {
                 completed_at,
                 usage_updated_at,
                 used_tokens: integer_column(row, 10).filter(|n| {
-                    (0..=9_007_199_254_740_991).contains(n)
+                    (0..=crate::safe::MAX_SAFE_INTEGER).contains(n)
                         && usage_updated_at.is_some_and(|t| t <= bound_ms)
                 }),
                 cache_expires_at: usage_updated_at
@@ -1464,7 +1462,9 @@ fn integer_column(row: &rusqlite::Row<'_>, index: usize) -> Option<i64> {
     match row.get_ref(index).ok()? {
         ValueRef::Integer(n) => Some(n),
         ValueRef::Real(n)
-            if n.is_finite() && n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_991.0 =>
+            if n.is_finite()
+                && n.fract() == 0.0
+                && n.abs() <= crate::safe::MAX_SAFE_INTEGER as f64 =>
         {
             Some(n as i64)
         }
@@ -1480,7 +1480,7 @@ fn bool_column(row: &rusqlite::Row<'_>, index: usize) -> Option<bool> {
 }
 
 fn instant(s: Option<String>) -> Option<Millis> {
-    s.and_then(|s| timestamp(&Value::String(s)))
+    s.as_deref().and_then(parse_instant)
 }
 fn mode(s: Option<String>) -> Option<T3IdleMode> {
     match s.as_deref() {
@@ -1519,7 +1519,7 @@ fn metadata(
             return Err(Unavailable::Schema(format!("no table {table}")));
         }
     }
-    let bound_ms = timestamp(&Value::String(bound.into()))
+    let bound_ms = parse_instant(bound)
         .ok_or_else(|| Unavailable::Schema(format!("invalid native bound {bound}")))?;
     let boundary = guards::boundary(tx)?;
     let driver = |h: Harness| -> &'static str {
@@ -2045,17 +2045,6 @@ pub(crate) fn enrich(
                         native.speed = native.speed.take().or_else(|| requested.speed.clone());
                     }
                 }
-                let state = profiles
-                    .iter()
-                    .find(|p| &p.id == owner)
-                    .and_then(|p| p.t3.as_ref())
-                    .map(|t| &t.state)
-                    .or_else(|| removed.get(owner).map(|(state, _)| state));
-                if let Some(state) =
-                    state.and_then(|path| states.iter_mut().find(|s| s.path == *path))
-                {
-                    state.joined_requests += 1;
-                }
             } else if subagent {
                 r.issues.push("subagent shares its root session's owner; T3 records no per-request run/speed/idle metadata for it".into());
             } else {
@@ -2478,6 +2467,7 @@ pub(crate) fn stand_ins(
 mod tests {
     use super::*;
     use crate::reader::scan;
+    use crate::safe::timestamp;
     use crate::test_support::{Workspace, make_request};
     use rusqlite::params;
     use serde_json::json;
@@ -2504,7 +2494,7 @@ mod tests {
         let end = "2026-01-01T00:00:10Z";
         db.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt','thread',?1,?2,?3,?4)",params![driver,instance,end,json!({"nativeThreadRef":{"nativeId":native},"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
         db.execute("INSERT INTO orchestration_v2_projection_run_attempts VALUES('attempt','thread','pt','run',?1,?2)",params![instance,json!({"nativeThreadId":native,"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
-        db.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn','thread','pt','attempt','completed',?1,?2,?3)",params![start,end,json!({"nativeTurnRef":{"driver":driver,"nativeId":"native-turn"},"tokenUsage":{"updatedAt":end,"usedTokens":300000,"promptCacheExpiresAt":"2026-01-01T00:05:10Z"},"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
+        db.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn','thread','pt','attempt','completed',?1,?2,?3,1)",params![start,end,json!({"nativeTurnRef":{"driver":driver,"nativeId":"native-turn"},"tokenUsage":{"updatedAt":end,"usedTokens":300000,"promptCacheExpiresAt":"2026-01-01T00:05:10Z"},"private":"PRIVATE_PROJECTION"}).to_string()]).unwrap();
         db.execute(
             "INSERT INTO orchestration_v2_projection_runs VALUES('run','thread',1,'completed',?1)",
             [json!({"userMessageId":"message"}).to_string()],
@@ -2556,7 +2546,6 @@ mod tests {
                     && p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
         );
         assert_eq!(scan.snapshots.len(), 1);
-        assert_eq!(scan.t3[0].joined_requests, 1);
         assert!(
             scan.t3[0]
                 .exclusions
@@ -2858,7 +2847,7 @@ mod tests {
                 .iter()
                 .find(|p| p.t3.as_ref().is_some_and(|t| t.instance == "codex"))
                 .unwrap();
-            // `ownership_resolved` also reflects platform policy (always unresolved on
+            // Settings resolution also reflects platform policy (always unresolved on
             // Windows), so check the native speed T3 overrides, which shared-history
             // ambiguity leaves unresolved. So does the TTL: T3 names `elsewhere`, which
             // reads it from another home, as the session's owner.
@@ -2880,7 +2869,6 @@ mod tests {
             if removed {
                 assert_eq!(*r.profiles, [profile_key(&t3.path, "gone")]);
                 assert!(r.t3.is_some(), "joined evidence still applies");
-                assert_eq!(t3.joined_requests, 1);
                 assert_eq!(t3.removed, IndexMap::from_iter([("gone".into(), 1)]));
                 assert!(t3.unresolved.is_empty(), "{:?}", t3.unresolved);
             } else {
@@ -2978,7 +2966,7 @@ mod tests {
             read().requests[0].requested_speed.as_ref().unwrap().tier,
             None
         );
-        db.execute("INSERT INTO orchestration_v2_projection_provider_turns SELECT 'duplicate',thread_id,provider_thread_id,run_attempt_id,status,started_at,completed_at,payload_json FROM orchestration_v2_projection_provider_turns",[]).unwrap();
+        db.execute("INSERT INTO orchestration_v2_projection_provider_turns SELECT 'duplicate',thread_id,provider_thread_id,run_attempt_id,status,started_at,completed_at,payload_json,ordinal+1 FROM orchestration_v2_projection_provider_turns",[]).unwrap();
         let scan = read();
         assert!(scan.requests[0].t3.is_none());
         assert!(scan.t3[0].ambiguous_requests > 0);
@@ -3047,7 +3035,7 @@ mod tests {
             scan.profiles
                 .iter()
                 .filter_map(|p| p.t3.as_ref())
-                .any(|t| !t.ownership_resolved)
+                .any(|t| t.settings_unresolved)
         );
         assert!(
             !serde_json::to_string(&scan)
@@ -3246,13 +3234,10 @@ mod tests {
                 .clone()
         };
         let chrome = instance(&data, "claudeAgent");
-        assert!(chrome.t3.as_ref().unwrap().ownership_resolved);
         assert_eq!(chrome.compaction.default.value, Some(400000));
         assert_eq!(chrome.compaction.default.comparison_unknown, None);
         let flagged = instance(&data, "flagged");
-        assert!(!flagged.t3.as_ref().unwrap().ownership_resolved);
         assert!(flagged.compaction.default.comparison_unknown.is_some());
-        assert!(!instance(&data, "codex").t3.unwrap().ownership_resolved);
         // Launch arguments that can replace settings leave them unresolved; sharing a
         // root alone does not.
         assert!(!chrome.t3.as_ref().unwrap().settings_unresolved);
@@ -3378,7 +3363,7 @@ mod tests {
         database
             .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 1_048_576)
             .unwrap();
-        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('orphan','thread','pt','absent',NULL,'2026-01-01T00:00:00Z',NULL,?1,2)",[json!({"nativeTurnRef":{"driver":"codex","nativeId":"orphan"},"tokenUsage":{"usedTokens":"PRIVATE_BAD_VALUE"}}).to_string()]).unwrap();
         let valid = NativeRequest {
             id: "valid",
             root: "opaque-session",
@@ -3722,7 +3707,7 @@ mod tests {
         let database = db(&root);
         seed(&database, "claudeAgent", "claudeAgent");
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt2','thread2','claudeAgent','claudeAgent','2026-01-01T00:00:10Z',?1)",[json!({"nativeThreadRef":{"nativeId":"other-session"}}).to_string()]).unwrap();
-        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn2','thread2','pt2',NULL,'completed',NULL,NULL,'{}')",[]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn2','thread2','pt2',NULL,'completed',NULL,NULL,'{}',1)",[]).unwrap();
         // Inserted first, so it dates when T3 began recording provider turn items.
         for (native, turn) in [
             ("cleared-uuid", "turn"),
@@ -3745,7 +3730,7 @@ mod tests {
         }
         // Linked after the native snapshot, with no earlier event to prove the link.
         database.execute("INSERT INTO orchestration_v2_projection_provider_threads VALUES('pt3','thread3','claudeAgent','claudeAgent','2999-01-01T00:00:00Z',?1)",[json!({"nativeThreadRef":{"nativeId":"third-session"}}).to_string()]).unwrap();
-        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn3','thread3','pt3',NULL,'completed',NULL,NULL,'{}')",[]).unwrap();
+        database.execute("INSERT INTO orchestration_v2_projection_provider_turns VALUES('turn3','thread3','pt3',NULL,'completed',NULL,NULL,'{}',1)",[]).unwrap();
         // Each session gets its own second so its request can be found again.
         let row = |session: &str, time: &str, entrypoint: &str, content: Value| json!({"type":"assistant","uuid":format!("{session}-uuid"),"sessionId":session,"timestamp":time,"entrypoint":entrypoint,"message":{"id":format!("{session}-message"),"model":"claude-opus-5-5","content":content,"usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}});
         for (session, time, entrypoint, content) in [
@@ -3889,7 +3874,7 @@ mod tests {
             .unwrap();
         let t3 = |p: &String| window.profiles.iter().any(|q| &q.id == p && q.t3.is_some());
         assert!(r.profiles.len() == 1 && t3(&r.profiles[0]), "{r:?}");
-        // `ownership_resolved` also reflects platform policy (always unresolved on Windows),
+        // Settings resolution also reflects platform policy (always unresolved on Windows),
         // so check the native speed T3 overrides, which shared-history ambiguity leaves
         // unresolved, while the TTL every possible owner reads from one file stays known,
         // unless a machine policy may replace T3's settings and so its line.

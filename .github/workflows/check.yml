@@ -3,11 +3,12 @@ name: Check
 permissions:
   contents: read
 
+# No push trigger: main moves only to commits the merge queue already tested.
+# No `edited`: a body or base edit changes no code, and the queue tests every
+# entry against the current base anyway.
 on:
-  push:
-    branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, edited, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   # The merge queue tests each entry against the current base before it lands.
   merge_group:
   workflow_call:
@@ -17,15 +18,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Read the draft state when the run starts, not from the event payload. A body
-  # edit made just before marking ready can create its run after the
-  # ready_for_review run, cancel it, and still carry draft: true. GitHub then
-  # judges the PR by that newest run, so it must validate a PR that is ready now.
+  # Read the draft state when the run starts, not from the event payload: a run
+  # created out of order can still carry draft: true after the PR is ready, and
+  # GitHub judges the PR by its newest run, so it must validate a PR ready now.
+  # A change only to quests and agent docs cannot affect the Rust build or tests,
+  # so it runs `quest check` alone. The compare API lists at most 300 files, so a
+  # longer list builds everything.
   state:
-    name: Draft state
+    name: Plan
     runs-on: ubuntu-24.04
     outputs:
       draft: ${{ steps.read.outputs.draft }}
+      build: ${{ steps.read.outputs.build }}
     steps:
       - id: read
         env:
@@ -33,12 +37,23 @@ jobs:
           EVENT: ${{ github.event_name }}
           PR: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
         run: |
           draft=false
           if [ "$EVENT" = pull_request ]; then
             draft=$(gh api "repos/$REPO/pulls/$PR" --jq .draft)
           fi
+          build=true
+          if [ -n "$BASE" ]; then
+            # A rename counts its old path too, so moving code into quest/ still builds.
+            build=$(gh api "repos/$REPO/compare/$BASE...$HEAD" --jq '.files
+              | if length < 300 and ([.[] | .filename, (.previous_filename // empty)]
+                  | all(test("^(quest/|(AGENTS|CLAUDE|CONTRIBUTING)\\.md$)")))
+                then "false" else "true" end')
+          fi
           echo "draft=$draft" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
 
   source:
     name: Source
@@ -50,16 +65,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: DeterminateSystems/nix-installer-action@1d87d45818068401a10cf16bdc5f00b24994a83f # main
-        with:
-          determinate: false
+      - uses: cachix/install-nix-action@bb0495a1086c46893eee56f32fd192dfe4a15bb9 # v32.0.0
       - name: Check formatting, lints, tests and quests
+        if: needs.state.outputs.build == 'true'
         run: nix develop --command quest gate just check
+      - name: Check quests
+        if: needs.state.outputs.build == 'false'
+        run: nix run .#quest -- check
 
   platform:
     name: Tests (${{ matrix.os }})
     needs: state
-    if: needs.state.outputs.draft == 'false'
+    if: needs.state.outputs.draft == 'false' && needs.state.outputs.build == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -73,18 +90,28 @@ jobs:
       - name: Update the preinstalled stable toolchain
         run: rustup update stable --no-self-update
       - name: Run the tests
+        # Clippy runs only on Linux, so this catches code another platform leaves unused.
+        env:
+          RUSTFLAGS: -D warnings
         run: cargo +stable test --locked
 
   check:
     name: Check
-    needs: [source, platform]
+    needs: [state, source, platform]
     # Draft jobs are skipped, so fail this gate until real validation passes.
     # A prior skipped Check must not satisfy protection while a ready run is pending.
     if: always()
     runs-on: ubuntu-24.04
     steps:
-      - name: Require source and every platform
+      - name: Require source, and every platform unless only quests changed
         env:
+          BUILD: ${{ needs.state.outputs.build }}
           SOURCE: ${{ needs.source.result }}
           PLATFORM: ${{ needs.platform.result }}
-        run: test "$SOURCE" = success && test "$PLATFORM" = success
+        run: |
+          test "$SOURCE" = success
+          case "$BUILD" in
+            true) test "$PLATFORM" = success ;;
+            false) test "$PLATFORM" = skipped ;;
+            *) exit 1 ;;
+          esac

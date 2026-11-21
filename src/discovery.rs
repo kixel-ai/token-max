@@ -471,7 +471,7 @@ fn toml_json(value: toml::Value) -> Option<Value> {
         toml::Value::String(s) => Value::String(s),
         toml::Value::Integer(n) => {
             // An integer a double cannot hold exactly fails the parse.
-            if n.unsigned_abs() > 9_007_199_254_740_991 {
+            if n.unsigned_abs() > crate::safe::MAX_SAFE_INTEGER as u64 {
                 return None;
             }
             Value::from(n)
@@ -1009,7 +1009,6 @@ fn claude_local_root(root: &str, options: &DiscoveryOptions) -> Result<Option<St
 fn unresolved_background(controls: &mut [BackgroundControl], scope: &str, reason: &str) {
     for control in controls {
         control.value = None;
-        control.minutes = None;
         control.reason = reason.into();
         control.scope = Some(scope.into());
     }
@@ -2163,13 +2162,6 @@ impl Walk {
     }
 }
 
-fn harness_name(harness: Harness) -> &'static str {
-    match harness {
-        Harness::Claude => "claude",
-        Harness::Codex => "codex",
-    }
-}
-
 /// Add a candidate root; an explicit root keeps its origin, and explicit selection excludes the rest.
 fn add_root(
     candidates: &mut IndexMap<String, RootStatus>,
@@ -2179,7 +2171,7 @@ fn add_root(
     origin: RootOrigin,
 ) {
     let absolute = resolve(path);
-    let key = format!("{}{absolute}", harness_name(harness));
+    let key = format!("{}{absolute}", harness.as_str());
     if candidates
         .get(&key)
         .is_some_and(|previous| previous.origin == RootOrigin::Explicit)
@@ -2612,7 +2604,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
             continue;
         };
         let path = join(&[home, &name]);
-        if candidates.contains_key(&format!("{}{}", harness_name(harness), resolve(&path))) {
+        if candidates.contains_key(&format!("{}{}", harness.as_str(), resolve(&path))) {
             continue;
         }
         let found = match fs::metadata(&path) {
@@ -2669,7 +2661,7 @@ pub fn discover(options: &DiscoveryOptions) -> Result<Discovery, ScanError> {
                 ));
             }
         };
-        let key = format!("{}{canonical}", harness_name(root.harness));
+        let key = format!("{}{canonical}", root.harness.as_str());
         if let Some(previous) = profiles.get_mut(&key) {
             previous.aliases.push(root.path.clone());
             continue;
@@ -3154,7 +3146,6 @@ mod tests {
                     enabled: true,
                     idle_mode: crate::model::T3IdleMode::Off,
                     idle_owner: String::new(),
-                    ownership_resolved: true,
                     settings_unresolved: false,
                     limitations: vec![],
                     env: None,
@@ -3653,11 +3644,11 @@ mod tests {
         );
         #[cfg(unix)]
         assert_eq!(
-            (c[2].minutes, c[2].off_file.as_deref()),
-            (Some(7), Some(text(&local).as_str()))
+            (c[2].value, c[2].off_file.as_deref()),
+            (Some(true), Some(text(&local).as_str()))
         );
         #[cfg(windows)]
-        assert_eq!(c[2].minutes, Some(3));
+        assert_eq!(c[2].value, Some(true));
         assert!(
             p.background_directories[""]
                 .iter()
@@ -3674,7 +3665,7 @@ mod tests {
         );
         discover_claude_controls(&o, &mut d.profiles, std::slice::from_ref(&r)).unwrap();
         let c = &claude(&d).background_directories[&text(&nested)];
-        assert_eq!((c[1].value, c[2].minutes), (Some(false), Some(0)));
+        assert_eq!((c[1].value, c[2].value), (Some(false), Some(false)));
         assert_eq!(
             c[2].off_file.as_deref(),
             Some(text(&w.managed_settings_file()).as_str())

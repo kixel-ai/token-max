@@ -21,8 +21,6 @@ const SOURCES: [&str; 9] = [
     "https://developers.openai.com/api/docs/models/gpt-5.6 (2026-11-07)",
 ];
 
-const DAY: f64 = 86_400_000.0;
-
 /// Whether a part was billed at a premium speed; None when the record cannot say.
 fn premium(r: &Request, p: &BillingPart) -> Option<bool> {
     let tier = p.tier.as_deref().unwrap_or("");
@@ -268,7 +266,9 @@ fn check(
     }
     let start = since.or(requests.first().map(|r| r.time));
     let month = |v: Option<f64>| match (v, start) {
-        (Some(v), Some(start)) if now > start => Some((v * 30.0 * DAY) / (now - start) as f64),
+        (Some(v), Some(start)) if now > start => {
+            Some(crate::report::monthly(v, Some(start), Some(now)))
+        }
         _ => None,
     };
     let observed_cost =
@@ -894,7 +894,7 @@ mod tests {
                     .unwrap()
                     .tier
                     .as_deref(),
-                Some("standard")
+                Some("default")
             );
             let first = check(&s, &c);
             assert_eq!(first.base.action, Action::Change);

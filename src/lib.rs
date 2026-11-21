@@ -1,44 +1,58 @@
 //! token-max replays local Claude Code and Codex transcripts against public API prices.
 
-pub mod background;
-pub mod bash;
-pub mod cache;
+mod background;
+mod bash;
+mod cache;
 pub mod cli;
-pub mod collections;
-pub mod compaction;
-pub mod context;
-pub mod controls;
+mod collections;
+mod compaction;
+mod context;
+mod controls;
 mod defaults;
 mod descriptions;
-pub mod discovery;
-pub mod doctor;
-pub mod effort;
-pub mod estimates;
-pub mod exposure;
+mod discovery;
+mod doctor;
+mod effort;
+mod estimates;
+mod exposure;
 mod fable;
-pub mod fast;
-pub mod idle;
-pub mod keepalive;
-pub mod mcp;
-pub mod memory;
-pub mod model;
-pub mod prices;
-pub mod reader;
-pub mod replay;
-pub mod report;
-pub mod repository;
+mod fast;
+mod idle;
+mod keepalive;
+mod mcp;
+mod memory;
+mod model;
+mod prices;
+mod reader;
+mod replay;
+mod report;
+mod repository;
 mod rows;
-pub mod safe;
-pub mod scenarios;
-pub mod sessions;
+mod safe;
+mod scenarios;
+mod sessions;
 mod skills;
-pub mod ssh;
+mod ssh;
 mod subagents;
-pub mod t3;
-pub mod terminal;
-pub mod totals;
-pub mod unreadable;
-pub mod wire;
+mod t3;
+mod terminal;
+mod totals;
+mod unreadable;
+mod wire;
 
 #[cfg(test)]
 mod test_support;
+
+// Modules stay private, so the compiler reports code nothing uses. The integration tests reach
+// the pipeline through these.
+pub use controls::Env;
+pub use discovery::DiscoveryOptions;
+pub use doctor::fixes;
+pub use model::{
+    Action, BackgroundCheck, BackgroundFeature, CheckResult, ContextKind, Harness, Report, Usd,
+    Verdict,
+};
+pub use prices::{PriceOptions, load_prices};
+pub use reader::{ScanOptions, scan};
+pub use replay::{AnalyzeOptions, analyze};
+pub use report::{ReportOptions, format_report};

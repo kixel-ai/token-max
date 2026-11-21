@@ -15,7 +15,7 @@ use serde_json::Value;
 use crate::model::{
     Api, BillingPart, Cost, Estimate, Harness, Margin, PartKind, Request, TierScenario, Usd,
 };
-use crate::safe::{ScanError, iso, label, object};
+use crate::safe::{ScanError, iso, label, object, truthy};
 
 const PRICE_URL: &str = "https://models.dev/api.json";
 
@@ -231,17 +231,6 @@ fn rates(value: &Value) -> Result<Rates, ScanError> {
     })
 }
 
-/// Whether a legacy tier field is present: not null, false, zero or an empty string.
-fn truthy(value: &Value) -> bool {
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => !s.is_empty(),
-        Value::Array(_) | Value::Object(_) => true,
-    }
-}
-
 fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     let cost = object(value).get("cost").unwrap_or(&Value::Null);
     let fields = object(cost);
@@ -266,7 +255,8 @@ fn model_price(value: &Value) -> Result<ModelPrice, ScanError> {
     }
     tiers.sort_by(|a, b| a.size.partial_cmp(&b.size).expect("finite tier sizes"));
     let legacy = match fields.get("context_over_200k") {
-        Some(value) if truthy(value) => Some(rates(value)?),
+        // A legacy tier field counts only when set: not null, false, zero or an empty string.
+        Some(value) if truthy(Some(value)) => Some(rates(value)?),
         _ => None,
     };
     let model = object(value);
@@ -515,10 +505,6 @@ impl Drop for Discard<'_> {
     }
 }
 
-fn now_millis() -> i64 {
-    millis(SystemTime::now()).expect("clock after the Unix epoch")
-}
-
 fn millis(time: SystemTime) -> Option<i64> {
     i64::try_from(time.duration_since(UNIX_EPOCH).ok()?.as_millis()).ok()
 }
@@ -590,7 +576,7 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
     let _discard = Discard(&temporary);
     match download(&options.cache, &temporary) {
         Ok(catalog) => Ok(Catalog {
-            fetched_at: Some(iso(now_millis())),
+            fetched_at: Some(iso(crate::reader::now())),
             offline: false,
             ..catalog
         }),
@@ -603,9 +589,14 @@ pub fn load_prices(options: &PriceOptions) -> Result<Catalog, ScanError> {
 
 /// A known zero with no missing components.
 pub fn zero_cost() -> Cost {
+    known_cost(Usd::ZERO)
+}
+
+/// A fully known amount with no missing components.
+pub fn known_cost(usd: Usd) -> Cost {
     Cost {
-        known_usd: Usd::ZERO,
-        total_usd: Some(Usd::ZERO),
+        known_usd: usd,
+        total_usd: Some(usd),
         unknown: vec![],
         assumptions: vec![],
     }
@@ -613,25 +604,11 @@ pub fn zero_cost() -> Cost {
 
 /// Keep partial known charges separate from an unknown total.
 pub fn add_costs<'a>(costs: impl IntoIterator<Item = &'a Cost>) -> Cost {
-    let mut known = Usd::ZERO;
-    let mut total = Some(Usd::ZERO);
-    let mut unknown = IndexSet::default();
-    let mut assumptions = IndexSet::default();
+    let mut sum = Sum::new();
     for cost in costs {
-        known += cost.known_usd;
-        total = match (total, cost.total_usd) {
-            (Some(sum), Some(value)) => Some(sum + value),
-            _ => None,
-        };
-        unknown.extend(cost.unknown.iter().map(String::as_str));
-        assumptions.extend(cost.assumptions.iter().map(String::as_str));
+        sum.add(cost);
     }
-    Cost {
-        known_usd: known,
-        total_usd: total,
-        unknown: unknown.into_iter().map(str::to_string).collect(),
-        assumptions: assumptions.into_iter().map(str::to_string).collect(),
-    }
+    sum.cost()
 }
 
 /// A running [`add_costs`], so charges need not be kept to be totaled.
@@ -842,21 +819,8 @@ impl PairedSavings {
     }
 }
 
-/// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
-/// cannot hide a clear winner. `unknown` counts further items that could differ but left no
-/// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
-pub fn paired_savings<'a>(
-    pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
-    unknown: u64,
-) -> PairedSavings {
-    let mut sum = Pairs::default();
-    for (baseline, alternative) in pairs {
-        sum.add(baseline, alternative);
-    }
-    sum.savings(unknown)
-}
-
-/// [`paired_savings`] taken one pair at a time, so a whole history's pairs need not be kept.
+/// Compares two scenarios pair by pair as (baseline, alternative), so a few unpriced requests
+/// cannot hide a clear winner, without keeping a whole history's pairs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Pairs {
     count: u64,
@@ -883,7 +847,8 @@ impl Pairs {
         self.count
     }
 
-    /// The savings over every pair added, with `unknown` further items as in [`paired_savings`].
+    /// The savings over every pair added, extrapolated over `unknown` further items that could
+    /// differ but left no evidence, such as unreadable transcript lines.
     pub fn savings(&self, unknown: u64) -> PairedSavings {
         let total = self.count + unknown;
         PairedSavings {
@@ -1266,10 +1231,17 @@ pub fn prefix_spans(catalog: &Catalog, r: &Request, p: &BillingPart) -> Option<V
         // input is ordinary.
         let written = u.write?;
         if written > 0 {
-            match (u.write30m.unwrap_or(0), u.write12h.unwrap_or(0)) {
-                (0, 0) => spans.push((written as f64, input * 1.25)),
+            // As `price_components` prices them: an unsplit count takes the default 30m
+            // lifetime, a split missing one lifetime is unpriced, and only the Responses API
+            // takes 12h writes.
+            let (short, long) = match (u.write30m, u.write12h) {
+                (None, None) => (written, 0),
+                (Some(short), Some(long)) => (short, long),
+                _ => return None,
+            };
+            match (short, long) {
                 (short, 0) => spans.push((short as f64, input * 1.25)),
-                (0, long) => spans.push((long as f64, input * 2.5)),
+                (0, long) if r.api == Api::Responses => spans.push((long as f64, input * 2.5)),
                 _ => return None,
             }
         }
@@ -1524,6 +1496,20 @@ pub(crate) fn request_evidence(r: &Request, mut result: Cost) -> Cost {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compare two scenarios item by item as (baseline, alternative), so a few unpriced requests
+    /// cannot hide a clear winner. `unknown` counts further items that could differ but left no
+    /// evidence, such as unreadable transcript lines; they are extrapolated over like the rest.
+    fn paired_savings<'a>(
+        pairs: impl IntoIterator<Item = (&'a Cost, &'a Cost)>,
+        unknown: u64,
+    ) -> PairedSavings {
+        let mut sum = Pairs::default();
+        for (baseline, alternative) in pairs {
+            sum.add(baseline, alternative);
+        }
+        sum.savings(unknown)
+    }
     use crate::model::{Text, Usage};
     use crate::test_support::{ClaudeUsage, claude_usage, make_request, prices};
     use serde_json::json;
@@ -1878,6 +1864,10 @@ mod tests {
             server_cost(&tools(&[("code_execution_requests", 1)])).total_usd,
             None
         );
+        // Off Anthropic the per-search fee is unknown, never zero.
+        let mut elsewhere = tools(&[("web_search_requests", 1)]);
+        elsewhere.provider = Some("bedrock".into());
+        assert_eq!(server_cost(&elsewhere).total_usd, None);
         let unrecorded = {
             let mut built = Request {
                 parts: vec![p],
@@ -1928,11 +1918,7 @@ mod tests {
             .map(|_| {
                 let mantissa = (next() >> 11) as f64 / (1u64 << 53) as f64;
                 let usd = mantissa * 10f64.powi((next() % 12) as i32 - 9);
-                Cost {
-                    known_usd: Usd::from_f64(usd),
-                    total_usd: Some(Usd::from_f64(usd)),
-                    ..Cost::default()
-                }
+                known_cost(Usd::from_f64(usd))
             })
             .collect();
         let forward = add_costs(&costs);
@@ -1971,11 +1957,7 @@ mod tests {
 
     #[test]
     fn paired_savings_extrapolate_over_unpriced_parts() {
-        let known = |usd: f64| Cost {
-            known_usd: Usd::from_f64(usd),
-            total_usd: Some(Usd::from_f64(usd)),
-            ..Cost::default()
-        };
+        let known = |usd: f64| known_cost(Usd::from_f64(usd));
         let missing = unknown_cost("missing");
         let (three, two, one) = (known(3.0), known(2.0), known(1.0));
         let a = (&three, &one);
@@ -2238,6 +2220,108 @@ mod tests {
             ..p
         };
         assert_eq!(price_part(&catalog, &r, &unbilled).total_usd, None);
+    }
+
+    #[test]
+    fn codex_prefix_spans_price_writes_only_where_the_whole_request_is_priced() {
+        let catalog = prices();
+        let part = |details: Value| BillingPart {
+            model: Some("gpt-6.1-sol".into()),
+            usage: codex(json!({
+                "input_tokens": 100000,
+                "output_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 20000, "cache_write_tokens": 30000, "cache_write_tokens_details": details},
+            })),
+            ..make_request().parts[0].clone()
+        };
+        let r = codex_request();
+        let (input, read) = (2.0 / 1e6, 0.1 / 1e6);
+        let priced = |p: &BillingPart, r: &Request| price_part(&catalog, r, p).total_usd.is_some();
+        let spans = |p: &BillingPart, r: &Request| prefix_spans(&catalog, r, p);
+        let write = |tokens: f64, rate: f64| {
+            Some(vec![
+                (20000.0, read),
+                (tokens, rate),
+                (f64::INFINITY, input),
+            ])
+        };
+        // An unsplit count takes the default 30m lifetime.
+        assert_eq!(spans(&part(json!({})), &r), write(30000.0, input * 1.25));
+        assert_eq!(
+            spans(
+                &part(json!({"ttl_30m_tokens": 30000, "ttl_12h_tokens": 0})),
+                &r
+            ),
+            write(30000.0, input * 1.25)
+        );
+        let long = part(json!({"ttl_30m_tokens": 0, "ttl_12h_tokens": 30000}));
+        assert_eq!(spans(&long, &r), write(30000.0, input * 2.5));
+        // Two lifetimes leave their order in the prefix unknown.
+        assert_eq!(
+            spans(
+                &part(json!({"ttl_30m_tokens": 10000, "ttl_12h_tokens": 20000})),
+                &r
+            ),
+            None
+        );
+        // A split that names one lifetime leaves the other's tokens unpriced, not ordinary.
+        let partial = part(json!({"ttl_30m_tokens": 10000}));
+        assert!(!priced(&partial, &r));
+        assert_eq!(spans(&partial, &r), None);
+        // Only the Responses API takes 12h writes.
+        let mut messages = codex_request();
+        messages.api = Api::Messages;
+        assert!(priced(&long, &r) && !priced(&long, &messages));
+        assert_eq!(spans(&long, &messages), None);
+    }
+
+    #[test]
+    fn premium_tiers_on_gpt_5_5_and_earlier_are_priced_only_within_the_short_context() {
+        let fixture = crate::test_support::fixture_path("prices.json");
+        let mut catalog: Value =
+            serde_json::from_str(&fs::read_to_string(fixture).unwrap()).unwrap();
+        catalog["openai"]["models"]["gpt-5.5"] = json!({
+            "family": "gpt",
+            "release_date": "2026-04-23",
+            "tool_call": true,
+            "modalities": {"output": ["text"]},
+            "cost": {
+                "input": 5, "output": 30, "cache_read": 0.5,
+                "tiers": [{"tier": {"type": "context", "size": 272000}, "input": 10, "output": 45, "cache_read": 1}],
+                "context_over_200k": {"input": 10, "output": 45, "cache_read": 1},
+            },
+        });
+        let Ok(catalog) = parse_catalog(catalog.to_string().as_bytes()) else {
+            panic!("the catalog parses");
+        };
+        let r = codex_request();
+        for (model, multiplier) in [("gpt-5.4", 2.0), ("gpt-5.5", 2.5)] {
+            let at = |input: i64, tier: &str| {
+                let p = BillingPart {
+                    model: Some(model.into()),
+                    tier: Some(tier.into()),
+                    usage: codex(json!({
+                        "input_tokens": input,
+                        "output_tokens": 100,
+                        "cached_input_tokens": 1000,
+                    })),
+                    ..r.parts[0].clone()
+                };
+                price_part(&catalog, &r, &p).total_usd.map(Usd::to_f64)
+            };
+            for tier in ["fast", "priority"] {
+                let standard = at(272000, "default").unwrap();
+                let premium = at(272000, tier).unwrap();
+                assert!(
+                    (premium - standard * multiplier).abs() < 1e-12,
+                    "{model} {tier}: {premium} vs {standard}"
+                );
+                // Above the threshold no premium rate is documented, so the price is unknown.
+                assert!(at(272001, "default").is_some(), "{model}");
+                assert_eq!(at(272001, tier), None, "{model} {tier}");
+            }
+            assert_eq!(at(1000, "ultrafast"), None, "{model}");
+        }
     }
 
     // Plain GPT-5.6 alias has verified fast rates without substituting catalog model prices.

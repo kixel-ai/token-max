@@ -10,14 +10,14 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use token_max::controls::Env;
-use token_max::discovery::DiscoveryOptions;
-use token_max::model::{
+use token_max::DiscoveryOptions;
+use token_max::Env;
+use token_max::{
     Action, BackgroundCheck, BackgroundFeature, CheckResult, ContextKind, Harness, Report,
 };
-use token_max::prices::{PriceOptions, load_prices};
-use token_max::reader::{ScanOptions, scan};
-use token_max::replay::{AnalyzeOptions, analyze};
+use token_max::{AnalyzeOptions, analyze};
+use token_max::{PriceOptions, load_prices};
+use token_max::{ScanOptions, scan};
 
 const BIN: &str = env!("CARGO_BIN_EXE_token-max");
 
@@ -564,9 +564,13 @@ fn codex_context_and_output_keep_their_remote_controls() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
+    // Its session, task, turn and settings, then its first usage record.
+    let usage = &fixture[4];
     let mut records = vec![
         fixture[0].clone(),
         fixture[1].clone(),
+        fixture[2].clone(),
+        fixture[3].clone(),
         serde_json::json!({
             "type": "world_state", "timestamp": "2026-11-01T00:00:00Z",
             "payload": {"full": true, "state": {"tools": {"mcp__docs": "SYNTHETIC_SHIPPED_SCHEMA"}}}
@@ -579,9 +583,9 @@ fn codex_context_and_output_keep_their_remote_controls() {
             "type": "response_item", "timestamp": "2026-11-01T00:00:00Z",
             "payload": {"type": "function_call_output", "call_id": "read-1", "output": "SYNTHETIC_PRIVATE_OUTPUT"}
         }),
-        fixture[2].clone(),
+        usage.clone(),
     ];
-    let mut next = fixture[2].clone();
+    let mut next = usage.clone();
     next["timestamp"] = "2026-11-01T00:00:02Z".into();
     next["payload"]["response_id"] = "response-b".into();
     records.push(next.clone());
@@ -834,8 +838,8 @@ fn background_controls_and_estimates_keep_their_remote_history() {
         .find(|p| p.harness == Harness::Claude)
         .unwrap();
     assert_eq!(
-        claude.background_directories[home.join("workspace").to_str().unwrap()][2].minutes,
-        Some(7)
+        claude.background_directories[home.join("workspace").to_str().unwrap()][2].value,
+        Some(true)
     );
     assert_eq!(remote.scan.cache_context.prompts.len(), 2);
     assert_eq!(remote.scan.cache_context.requests.len(), 2);
@@ -1024,6 +1028,50 @@ fn any_failed_destination_fails_the_whole_report() {
         .unwrap();
     // SAFETY: signal 0 only checks whether the process exists.
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+}
+
+#[test]
+fn a_destination_that_strays_from_the_protocol_fails_the_report() {
+    let hosts = Hosts::new();
+    // Destinations have no sed, so the shell replaces the report line with `action`'s.
+    let report = |action: &str| {
+        format!(
+            r#" | while IFS= read -r line; do case "$line" in '{{"report":'*) {action} ;; *) printf '%s\n' "$line" ;; esac; done"#
+        )
+    };
+    // Each runs this build there and then changes what it sends.
+    for (host, tamper, expected) in [
+        (
+            "window",
+            report(r#"printf '{"report":{"since":1,%s\n' "${line#*\"since\":*,}""#),
+            "window: token-max scanned a different window than requested",
+        ),
+        (
+            "kind",
+            report(r#"echo '{"wrote":{"written":[]}}'"#),
+            "kind: token-max sent a different result than requested",
+        ),
+        (
+            "trailing",
+            "; echo '{}'".to_string(),
+            "trailing: invalid SSH audit stream at line ",
+        ),
+        (
+            "failing",
+            "; exit 3".to_string(),
+            "failing: token-max failed after sending its result (exit 3)",
+        ),
+    ] {
+        hosts.host(host);
+        hosts.fake(host, &format!("'{BIN}' \"$@\"{tamper}"));
+        let (status, stdout, stderr) = hosts.run(&["--ssh", host]);
+        assert_eq!(status, 2, "{host}: {stderr}");
+        assert_eq!(stdout, "", "{host}");
+        assert!(
+            stderr.starts_with(&format!("token-max: {expected}")),
+            "{host}: {stderr}"
+        );
+    }
 }
 
 #[test]

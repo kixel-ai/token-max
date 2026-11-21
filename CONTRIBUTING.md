@@ -2,7 +2,8 @@
 
 PRs into `main` land by squash through GitHub's merge queue, which tests
 each entry against the current `main` with the required `Check` job
-(`nix develop --command just check`, plus the macOS and Windows tests). A
+(`just check` in the Nix dev shell, plus the macOS and Windows tests, or
+only `quest check` when nothing outside `quest/` and the agent docs changed). A
 branch only behind `main` needs no merge; merge `main` only when the PR
 conflicts or the queue refuses its head.
 

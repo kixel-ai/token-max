@@ -8,12 +8,19 @@ use sha2::{Digest, Sha256};
 use crate::model::{Id, Location, Millis};
 
 /// An error whose message is safe for terminal and JSON diagnostics.
-#[derive(Clone, Debug, PartialEq, thiserror::Error)]
-#[error("{message}")]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ScanError {
     pub message: String,
     pub location: Option<Location>,
 }
+
+impl std::fmt::Display for ScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ScanError {}
 
 impl ScanError {
     /// An error without a source location.
@@ -39,11 +46,6 @@ pub fn object(value: &Value) -> &Map<String, Value> {
         Value::Object(map) => map,
         _ => EMPTY.get_or_init(Map::new),
     }
-}
-
-/// Look up a key, treating anything but an object as empty.
-pub fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
-    object(value).get(key).unwrap_or(&Value::Null)
 }
 
 /// Retain only metadata identifiers, never free-form strings.
@@ -73,16 +75,21 @@ pub fn digest(value: &str) -> Id {
 
 /// Opaque identifiers prevent accidentally exposing content put in an ID field.
 pub fn identity(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push(char::from_digit((byte >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((byte & 15) as u32, 16).unwrap());
+    hex(&Sha256::digest(value.as_bytes()))
+}
+
+/// Lowercase hexadecimal, two digits a byte.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String");
     }
     out
 }
 
-const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+/// The largest integer an f64 holds exactly, 2^53 - 1.
+pub const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Preserve absent counts as unknown and reject corrupt counts.
 pub fn count(value: Option<&Value>) -> Result<Option<i64>, ScanError> {
@@ -91,20 +98,31 @@ pub fn count(value: Option<&Value>) -> Result<Option<i64>, ScanError> {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Number(n)) => {
             if let Some(v) = n.as_u64() {
-                return if v as f64 <= MAX_SAFE_INTEGER {
+                return if v <= MAX_SAFE_INTEGER as u64 {
                     Ok(Some(v as i64))
                 } else {
                     Err(invalid())
                 };
             }
             match n.as_f64() {
-                Some(f) if f >= 0.0 && f.fract() == 0.0 && f <= MAX_SAFE_INTEGER => {
+                Some(f) if f >= 0.0 && f.fract() == 0.0 && f <= MAX_SAFE_INTEGER as f64 => {
                     Ok(Some(f as i64))
                 }
                 _ => Err(invalid()),
             }
         }
         Some(_) => Err(invalid()),
+    }
+}
+
+/// Whether an optional JSON member is set: not absent, null, false, zero or an empty string.
+pub fn truthy(value: Option<&Value>) -> bool {
+    match value {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_some_and(|f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(_) | Value::Object(_)) => true,
     }
 }
 
@@ -130,7 +148,7 @@ pub fn parse_instant(text: &str) -> Option<Millis> {
         return Some(ts.as_millisecond());
     }
     let civil = text.parse::<jiff::civil::DateTime>().ok()?;
-    let zoned = civil.to_zoned(jiff::tz::TimeZone::system()).ok()?;
+    let zoned = civil.to_zoned_datetime(jiff::tz::TimeZone::system()).ok()?;
     Some(zoned.timestamp().as_millisecond())
 }
 

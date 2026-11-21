@@ -100,8 +100,8 @@ shared history stay unknown. Historical spend is never assigned to all aliases.
 
 OpenAI input includes cached reads and writes; output includes reasoning. On
 GPT-5.6 and later GPT families, recorded writes replace ordinary input at total
-rates of 1.25x for 30m and 2.5x for Responses-only 12h. Missing write counters stay
-unknown. An unsplit recorded write count uses an explicit default-30m assumption;
+rates of 1.25x for 30m and 2.5x for Responses-only 12h. Missing write counters, or a split
+that names only one lifetime, stay unknown. An unsplit recorded write count uses an explicit default-30m assumption;
 12h attribution is unknown, not derived from the catalog's single write field.
 Earlier GPT models have no additional write charge. ChatGPT credits charge no
 separate cache write ([Codex pricing](https://learn.chatgpt.com/docs/pricing),
@@ -120,7 +120,7 @@ one-hour writes derive the documented 2x ordinary-input rate. US inference uses
 the documented 1.1x multiplier. Supported fast Opus rates use the documented 2x
 factor across the full context window; other speed/tier combinations remain
 unknown. Absent geography and the older `not_available` sentinel use the labelled
-global API-equivalent assumption, without claiming an observed region. Server web search adds its public per-search fee, priced only on the Anthropic provider. Web fetch has no extra
+global API-equivalent assumption, without claiming an observed region. Server web search adds its public per-search fee on the Anthropic provider; elsewhere the fee is unknown, so the request is unpriced. Web fetch has no extra
 fee. Code-execution charges remain unknown without runtime, tool version, and
 free-allowance evidence. Client-side calls add no separate server-tool charge.
 These rules and Haiku 5.5's 100,000-input threshold are from
@@ -573,8 +573,8 @@ Neither harness has a native mechanism for capped idle pings.
 
 ## Shared component measurements
 
-`Scan.exposure` adds historical component revisions, request views, invocation
-evidence, and client/version/window visibility. Components retain Unicode
+`Scan.exposure` adds historical component revisions, request views, and invocation
+evidence. Components retain Unicode
 character counts, opaque identities and fingerprints, source locations, one
 owner (`skills` or `context`), and a server/namespace attribution key, or a plugin key where the record explicitly
 identifies it. A listed skill, a tool definition and a Codex namespace also
@@ -879,15 +879,15 @@ skill is not proof of successful execution. A textual mention or command wrapper
 needs a known historical catalog entry to count as a skill request; otherwise it
 remains a weak reference. Meta user-role attachments are excluded from mention
 inference. Codex user aliases without a shared message identity are matched by
-their corresponding equal-text occurrence, with that identity basis disclosed. Observed nested completions establish
+their corresponding equal-text occurrence. Observed nested completions establish
 positive evidence, never complete nested visibility. Corrupt pre-window exposure metadata invalidates subsequent candidate state and
 adds a coverage issue, preserving the reader's existing billing-window semantics.
 Calibration
 estimates outside the request's measured input support stay unpriced.
 
 No supported client/version
-currently guarantees complete typed-skill or nested-call visibility, so
-exposure evidence alone never proves nonuse. Context verdicts instead rest on
+currently guarantees complete typed-skill or nested-call visibility, so the
+exposure scan never marks a component unused by itself. Context verdicts rest on
 the calls each transcript records: Claude records every tool, MCP and Skill
 call, subagents' included, so a piece carried from the window's start with none
 is unused. Codex catalog skills and pieces first sent mid-window stay advisory

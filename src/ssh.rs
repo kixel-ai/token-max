@@ -285,7 +285,8 @@ fn spawn(
     std::os::unix::process::CommandExt::process_group(&mut ssh, 0);
     // Windows' CREATE_NEW_PROCESS_GROUP, which also ignores Ctrl-C in the new group.
     #[cfg(windows)]
-    std::os::windows::process::CommandExt::creation_flags(&mut ssh, 0x0000_0200);
+    // WIP
+
     let mut children = children();
     if children.cancelled {
         return Err(ScanError::new("cancelled; no report produced"));

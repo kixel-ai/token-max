@@ -93,7 +93,7 @@ jobs:
         # Clippy runs only on Linux, so this catches code another platform leaves unused.
         env:
           RUSTFLAGS: -D warnings
-        run: cargo +stable test --locked --test ssh_windows
+        run: for ($i = 0; $i -lt 20; $i++) { cargo +stable test --locked --test ssh_windows; if ($LASTEXITCODE) { exit 1 } }
 
   check:
     name: Check

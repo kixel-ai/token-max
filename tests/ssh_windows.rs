@@ -24,7 +24,9 @@ mod windows {
 
     use serde_json::Value;
     use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
+    };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
@@ -85,6 +87,7 @@ mod windows {
             std::process::id().to_string(),
         )
         .unwrap();
+        record_interrupts(root.join(format!("{host}.interrupted")));
         kill_with_this_process();
         // As a file, so no Windows command line stands between the command and `sh`.
         let script = root.join(format!("scripts/{}.sh", std::process::id()));
@@ -103,6 +106,20 @@ mod windows {
             .status()
             .unwrap();
         status.code().unwrap_or(1)
+    }
+
+    /// Create `file` on any Ctrl-C or Ctrl-Break that reaches this process, before it dies of it
+    /// as OpenSSH does.
+    fn record_interrupts(file: PathBuf) {
+        static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        unsafe extern "system" fn handler(_: u32) -> i32 {
+            let _ = std::fs::write(FILE.get().unwrap(), "");
+            // Not handled, so the default handler exits this process.
+            0
+        }
+        FILE.set(file).unwrap();
+        // SAFETY: the handler only writes a file this test owns.
+        assert_ne!(unsafe { SetConsoleCtrlHandler(Some(handler), 1) }, 0);
     }
 
     /// Put this process, and so every process it starts, in a job that is killed once this one
@@ -402,6 +419,8 @@ mod windows {
         assert_eq!(output.status.code(), Some(2), "{stderr}");
         assert_eq!(output.stdout, b"");
         assert!(stderr.contains("cancelled"), "{stderr}");
+        // As on Unix, only token-max hears the terminal, and it stops each `ssh` itself.
+        assert!(!hosts.root.join("slow.interrupted").exists());
         for file in ["slow.ssh", "ready"] {
             let pid = std::fs::read_to_string(hosts.root.join(file)).unwrap();
             let pid: u32 = pid.trim().parse().unwrap();

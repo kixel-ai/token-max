@@ -1047,10 +1047,10 @@ struct Card<'a> {
     rows: Vec<(&'a str, String)>,
 }
 
-/// A prompt: its question, and whether it offers to go one change at a time.
+/// A prompt: its question, and whether it offers to split a group into its changes.
 struct Prompt {
     text: String,
-    each: bool,
+    split: bool,
 }
 
 impl Style {
@@ -1108,15 +1108,15 @@ impl Style {
     }
 
     /// A question, bold, then its answers, dim.
-    fn prompt(&self, question: &str, each: bool) -> Prompt {
-        let options = if each {
-            "[y]es, [n]o, [o]ne by one, [q]uit"
+    fn prompt(&self, question: &str, split: bool) -> Prompt {
+        let options = if split {
+            "[y]es, [n]o, [s]plit, [q]uit"
         } else {
             "[y]es, [n]o, [q]uit"
         };
         Prompt {
             text: self.ask(question, options),
-            each,
+            split,
         }
     }
 
@@ -1563,9 +1563,6 @@ fn writable(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|m| m.is_dir() || !m.permissions().readonly())
 }
 
-/// A change saving less than this every 30 days is offered with the others of its group.
-const SMALL_USD: f64 = 5.0;
-
 /// A question saving less than this every 30 days in total is not asked.
 const ASKED_USD: f64 = 1.0;
 
@@ -1792,8 +1789,8 @@ enum Answer {
     Yes,
     No,
     Quit,
-    /// Go through a batch one change at a time.
-    Each,
+    /// Split a group, asking about each of its changes.
+    Split,
 }
 
 /// Ask `prompt` until it gets an answer it takes; end of input is a quit.
@@ -1814,7 +1811,7 @@ fn answer(
             "y" | "yes" => return Ok(Answer::Yes),
             "n" | "no" => return Ok(Answer::No),
             "q" | "quit" => return Ok(Answer::Quit),
-            "o" | "one by one" if prompt.each => return Ok(Answer::Each),
+            "s" | "split" if prompt.split => return Ok(Answer::Split),
             _ => {}
         }
     }
@@ -2343,8 +2340,8 @@ impl Question<'_> {
     }
 
     /// A group as the walk offers it, its counter `counter`: what its kind of feature is,
-    /// then every member's name. Each member says what it does when the person goes
-    /// through them one at a time.
+    /// then every member's name. Each member says what it does when the person splits
+    /// the group.
     fn card(&self, counter: &str, host: Option<&str>, style: &Style) -> String {
         let first = &self.members[0].offer.fix;
         let group = first.group.as_ref().expect("only groups share a question");
@@ -2494,7 +2491,7 @@ impl Walk<'_, '_> {
     }
 
     /// A host's last question: remove the configuration of MCP servers that are off already,
-    /// all at once or one at a time; whether the walk goes on.
+    /// all at once or, split, one at a time; whether the walk goes on.
     fn ask_cleanup(
         &mut self,
         host: usize,
@@ -2555,7 +2552,7 @@ impl Walk<'_, '_> {
         write!(output, "\n{text}")?;
         let prompt = style.prompt(&format!("Remove all {size}?"), true);
         match answer(&prompt, input, output)? {
-            Answer::Each => {
+            Answer::Split => {
                 for (i, (_, entry)) in cleanup.iter().enumerate() {
                     let name = format!("MCP server {}", entry.server);
                     let text = card(
@@ -2585,31 +2582,28 @@ impl Walk<'_, '_> {
 }
 
 /// Walk through each host's changes, biggest saving first across hosts, and return what the
-/// person accepted on each, in the order of `hosts`. Changes saving under $5/mo each are
-/// offered in groups of one host's changes of one kind and reason, and a group saving under
-/// $1/mo in total is not asked. A yes to turning a never-used MCP server off is followed by
-/// an offer to remove its configuration, and each host's last question offers to remove the
-/// servers that are off already. Nothing is read or written here; end of input is a quit,
-/// which leaves the rest unaccepted.
+/// person accepted on each, in the order of `hosts`. Features are offered in groups of one
+/// host's changes of one kind and reason, which the person can split to answer each, and a
+/// question saving under $1/mo in total is not asked. A yes to turning a never-used MCP
+/// server off is followed by an offer to remove its configuration, and each host's last
+/// question offers to remove the servers that are off already. Nothing is read or written
+/// here; end of input is a quit, which leaves the rest unaccepted.
 pub fn ask(
     hosts: &[Walking<'_>],
     style: &Style,
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<Vec<Selection>> {
-    // A change saving $5/mo or more is asked alone; a smaller one joins the others of its
-    // host, kind and reason, measured apart from unmeasured.
+    // A feature's change joins the others of its host, kind and reason, whatever it saves,
+    // measured apart from unmeasured; the person can split a group to answer each.
     let mut questions: Vec<Question> = vec![];
     for (host, walking) in hosts.iter().enumerate() {
         for (index, offer) in walking.offers.offers.iter().enumerate() {
             let fix = &offer.fix;
-            let small = |f: &Fix| f.group.is_some() && f.saving.is_none_or(|usd| usd < SMALL_USD);
             let joins = |q: &Question| {
                 let first = &q.members[0];
                 let first_fix = &first.offer.fix;
                 first.host == host
-                    && small(fix)
-                    && small(first_fix)
                     && first_fix.value == fix.value
                     && first_fix.saving.is_some() == fix.saving.is_some()
                     && first_fix
@@ -2700,7 +2694,7 @@ pub fn ask(
         let size = question.members.len();
         let prompt = style.prompt(&format!("Accept all {size}?"), true);
         match answer(&prompt, input, output)? {
-            Answer::Each => {
+            Answer::Split => {
                 for (i, member) in question.members.iter().enumerate() {
                     if !going {
                         walk.choose(member, false);
@@ -4135,32 +4129,35 @@ mod tests {
                 member("L", None, Reason::Unused, unused),
             ]
         };
-        let (plan, printed) = walk(fixes(), &w, "y\nn\ny\ny\nn\no\ny\nn\n");
+        // Split the measured group, declining B, and the unmeasured one, accepting K.
+        let (plan, printed) = walk(fixes(), &w, "y\ns\nn\ny\ny\ny\nn\ns\ny\nn\n");
         let heads: Vec<&str> = printed
             .lines()
             .filter_map(|l| l.strip_prefix("  ").filter(|l| l.starts_with('[')))
             .collect();
-        // A change of $5/mo or more stands alone even in a group, the groups rank by their
-        // sum, and the unmeasured come last, grouped apart from the measured.
+        // A change of $5/mo or more joins its group too, the groups rank by their sum, and
+        // the unmeasured come last, grouped apart from the measured.
         assert_eq!(
             heads,
             [
-                "[1/6] A  saves $50/mo  50%",
-                "[2/6] B  saves $6/mo  6%",
-                "[3/6] Never-used skills  saves $4.50/mo  5%",
-                "[4/6] M  saves $2/mo  2%",
-                "[5/6] U  saving not measured",
-                "[6/6] Never-used skills  savings not measured",
-                "[6/6, 1/2] K  saving not measured",
-                "[6/6, 2/2] L  saving not measured",
+                "[1/5] A  saves $50/mo  50%",
+                "[2/5] Never-used skills  saves $11/mo  11%",
+                "[2/5, 1/3] B  saves $6/mo  6%",
+                "[2/5, 2/3] S  saves $3/mo  3%",
+                "[2/5, 3/3] T  saves $1.50/mo  2%",
+                "[3/5] M  saves $2/mo  2%",
+                "[4/5] U  saving not measured",
+                "[5/5] Never-used skills  savings not measured",
+                "[5/5, 1/2] K  saving not measured",
+                "[5/5, 2/2] L  saving not measured",
             ]
         );
-        assert!(printed.contains("\n  6 questions about 8 changes, biggest saving first.\n"));
+        assert!(printed.contains("\n  5 questions about 8 changes, biggest saving first.\n"));
         assert!(printed.contains(
-            "\n  [3/6] Never-used skills  saves $4.50/mo  5%\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  s, t.\n  Accept all 2? [y]es, [n]o, [o]ne by one, [q]uit: "
+            "\n  [2/5] Never-used skills  saves $11/mo  11%\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  b, s, t.\n  Accept all 3? [y]es, [n]o, [s]plit, [q]uit: "
         ), "{printed}");
         assert!(printed.contains(
-            "\n  [6/6] Never-used skills  savings not measured\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
+            "\n  [5/5] Never-used skills  savings not measured\n        on -> off  Recommended\n        What   Skills are packaged instructions the model can load when a task calls for one; each is listed by name and description in every request.\n        Which  k, l.\n"
         ), "{printed}");
         assert!(printed.ends_with(
             "\n  2 more changes in groups saving under $1/mo were not asked; they're in the list below.\n"
@@ -4191,8 +4188,8 @@ mod tests {
             "Accepted: about $57/mo, 57% of this host's spend, plus 1 change whose saving was not measured; overlapping changes may save less."
         );
         // A quit at a group leaves it and the rest unaccepted.
-        let (plan, printed) = walk(fixes(), &w, "n\nn\nq\n");
-        assert!(!printed.contains("[4/6]"));
+        let (plan, printed) = walk(fixes(), &w, "n\nq\n");
+        assert!(!printed.contains("[3/5]"));
         for name in ["S", "T", "M", "K"] {
             assert_eq!(choice(&plan, name), &Choice::Declined, "{name}");
         }
@@ -4653,8 +4650,17 @@ mod tests {
         };
         let fixes = || {
             vec![
-                // $5/mo or more, so asked alone, and its removal too.
-                server("A", 6.0, &settings, vec![Definition::Entry(a.clone())]),
+                // Offered for another reason, so asked alone, and its removal too.
+                Fix {
+                    group: Some(Group {
+                        reason: Reason::Costly,
+                        label: "MCP servers over $1 per use".into(),
+                        member: "a".into(),
+                        kind: ContextKind::McpServer,
+                        location: None,
+                    }),
+                    ..server("A", 6.0, &settings, vec![Definition::Entry(a.clone())])
+                },
                 server(
                     "B",
                     2.0,
@@ -4983,13 +4989,13 @@ mod tests {
         };
         let (after, printed) = run("y\n");
         assert!(
-            printed.ends_with("  Remove all 3? [y]es, [n]o, [o]ne by one, [q]uit: "),
+            printed.ends_with("  Remove all 3? [y]es, [n]o, [s]plit, [q]uit: "),
             "{printed}"
         );
         assert_eq!(servers(&after), ["on"]);
         assert_eq!(run("n\n").0, text);
-        // One by one asks each server alone, numbered within the batch.
-        let (after, printed) = run("o\nn\ny\nn\n");
+        // A split asks each server alone, numbered within the batch.
+        let (after, printed) = run("s\nn\ny\nn\n");
         let sep = std::path::MAIN_SEPARATOR;
         assert!(printed.contains(&format!(
             "\n  [1/1, 2/3] MCP server b  saves nothing\n             off -> removed  Worth considering\n             Where  [mcp_servers.b] in ~{sep}.codex{sep}config.toml\n  Remove it? [y]es, [n]o, [q]uit: "
@@ -4997,7 +5003,7 @@ mod tests {
         assert_eq!(printed.matches("Remove it?").count(), 3, "{printed}");
         assert_eq!(servers(&after), ["a", "c", "on"]);
         // A quit asks nothing more and keeps the removals already accepted.
-        let (after, printed) = run("o\ny\nq\n");
+        let (after, printed) = run("s\ny\nq\n");
         assert!(!printed.contains("3/3"), "{printed}");
         assert_eq!(servers(&after), ["b", "c", "on"]);
     }

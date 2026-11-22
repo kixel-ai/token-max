@@ -2933,6 +2933,8 @@ pub struct SubagentCost {
     pub native: bool,
     /// Whether every run was a Claude fork, which always runs on the main model.
     pub fork: bool,
+    /// Whether every run was Claude's built-in agent of its type, not an agent file of its name.
+    pub built_in: bool,
     /// Subagent transcripts of this type in the window.
     pub runs: u64,
     pub requests: u64,

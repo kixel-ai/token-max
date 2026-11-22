@@ -130,14 +130,13 @@ impl Unreadable {
         self.named(name, false)
     }
 
-    /// Whether the lines hold every token of `name`, folding case when `fold` is set.
+    /// Whether the lines hold every token of `name`, folding case when `fold` is set. A
+    /// name with no ASCII token, such as `记忆`, can't be searched for, so any line could
+    /// hold it.
     fn named(&self, name: &str, fold: bool) -> bool {
-        let mut parts = name
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        name.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
             .filter(|p| !p.is_empty())
-            .peekable();
-        parts.peek().is_some()
-            && parts.all(|p| {
+            .all(|p| {
                 if fold {
                     self.names.contains(&skill_key(p))
                 } else {
@@ -378,6 +377,10 @@ mod tests {
         assert!(!memory(
             r#"{"name":"Read","input":{"file_path":"/repo/MEMORY.md"}}"#
         ));
+        // A directory with no ASCII token can't be searched for, so any line could name it.
+        let lines = seen(&[r#"{"name":"Write","input":{"file_path":"/repo/记忆/n.md"}}"#]);
+        assert!(lines.names_every("记忆"));
+        assert!(!lines.names_every("notes-记忆"));
     }
 
     #[test]

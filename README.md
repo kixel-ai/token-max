@@ -113,17 +113,19 @@ token-max doctor --help
 | Auto-compact window | Whether a different window would have cost less, summaries included |
 | Idle compaction | Whether compacting sessions you walked away from paid for itself |
 | Tools, skills and MCP servers | What each cost to send with every request, and how often it was used |
-| Instruction files | What each CLAUDE.md or AGENTS.md cost, and what each 100 lines of it cost per month; a warning past the provider's size guidance |
-| Fast mode | What the premium cost; worth considering off when it cost anything |
-| Main-session effort | What each model and effort cost, with no verdict; a warning citing the provider's guidance past `high` |
-| Auto memory | What loading, reading and writing it cost, and how often it was read or written, judged like a skill |
+| Instruction files | What each CLAUDE.md or AGENTS.md cost, and what shortening it would save |
+| Fast mode | What the premium cost |
+| Main-session effort | What each model and effort cost |
+| Auto memory | What loading, reading and writing it cost, and how often it was read or written |
 | Prompt suggestions, recaps, check-ins | What each background feature cost, where it can be estimated |
 | Bash timeout cap | Whether long foreground waits let the cache expire |
 | Keepalive pings | Whether pinging idle sessions would beat the cache misses |
-| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model; a warning citing Anthropic's model guide when Explore ran off Haiku |
-| Fable weekly use | Each week's Fable spend; a warning citing Anthropic's rule that, on Max and Ultra plans, Fable can use up to half the weekly limit |
+| Subagent types | What each cost, which model and effort it ran on, and the same tokens on the cheapest current model |
+| Fable weekly use | Each week's Fable spend |
 
-See the [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#reading-the-report)
+Provider guidance the transcripts can't price, such as Claude Code's advice to
+keep a CLAUDE.md under 200 lines, appears as a cited warning after the lines,
+never as a verdict. See the [reference](https://github.com/kixel-ai/token-max/blob/main/docs/reference.md#reading-the-report)
 for how to read each line, and its sections for each check.
 
 ## More

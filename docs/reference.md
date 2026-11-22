@@ -293,7 +293,8 @@ What the providers document, checked 2026-11-14:
 
 Where a provider documents a rule that API prices alone don't show, the line's
 evidence under `--details` states it before the setting that changes it, and
-the list ends with the source:
+the list ends with the source. Fable weekly use is the exception: its rule is
+a [warning](#warnings), shown when the window holds a Fable request:
 
 | Line | On a plan |
 | --- | --- |
@@ -619,7 +620,8 @@ inventing per-app costs or a settings patch.
 Each instruction file Claude Code or Codex loads gets a line with what it cost
 over the window, its latest recorded length, and what each 100 lines of it cost
 per 30 days, which is what shortening it by that much saves, assuming the rest
-of the work is unchanged. Each request's cost of the file is spread over its own
+of the work is unchanged. A file under 100 lines gives what all its lines cost
+instead, so the figure never exceeds the file. Each request's cost of the file is spread over its own
 revision's lines, so a file edited during the window prices a line at every
 revision it sent. What a line of instructions is worth is not recorded, so the
 line gives no verdict and `doctor` offers no change.
@@ -1204,7 +1206,8 @@ files do not explain the recorded model, for example after a file changed.
 When Claude's built-in Explore ran off Haiku, a warning gives what it cost,
 the same tokens on the cheapest model, and the tip from Anthropic's
 [model guide](https://claude.dev/blog/which-claude-model-should-you-build-with/):
-a user agent named `Explore` with `model: haiku`. Other types get no warning:
+a user agent named `Explore` with `model: haiku`. A run of an agent file
+named `Explore`, which replaces the built-in, gets none. Other types get no warning:
 the guide splits subagents by whether they search or edit, which the
 transcripts don't record.
 See [subagent models](semantics.md#subagent-models).
